@@ -4571,30 +4571,62 @@ def test_the_module_headers_segdir_name_split_matches_the_names_the_code_builds(
 
     assert per_inv and determ, "the AST scan found nothing -- it has stopped testing anything"
 
-    header = src.split('"""', 2)[2].split("import argparse")[0]
-    assert "#697" in header, "the module header block moved; this test reads the wrong span"
+    # Parse the DELIMITED roster, not the whole header. Presence-anywhere-in-the-block was
+    # the previous shape and it was vacuous twice over: the bot deleted the header's
+    # `.codex_job.*.json` entry and the test still passed, because the retention paragraph
+    # above the roster names the same file in prose. Only these two lines are the contract.
+    body = src.split("# ROSTER-BEGIN", 1)
+    assert len(body) == 2, "the ROSTER-BEGIN marker is gone from codex_job.py's header"
+    roster = body[1].split("# ROSTER-END", 1)
+    assert len(roster) == 2, "the ROSTER-END marker is gone from codex_job.py's header"
+    roster = roster[0]
 
-    for pattern in sorted(per_inv | determ):
-        prefix = pattern.split("%")[0]              # ".codex_job."
-        suffix = pattern.rsplit("%s", 1)[-1]        # ".tmp" / ".json" / ".lock" / ""
-        assert prefix in header, (
-            "%s is built into segdir but the module header's split never mentions %s. "
-            "Classify it by the rule the header states (does the name carry self.inv?), "
-            "do not just append it." % (pattern, prefix))
-        assert suffix in header, (
-            "%s is built into segdir; %s appears in the header but this name's %s form "
-            "does not, so the split cannot be distinguishing it from its siblings."
-            % (pattern, prefix, suffix or "(bare)"))
+    declared = {}
+    for group, key in (("PER-INVOCATION:", "inv"), ("DETERMINISTIC:", "det")):
+        assert group in roster, "the roster lost its %s line" % group
+        chunk = roster.split(group, 1)[1].split("PER-INVOCATION:")[0]
+        chunk = chunk.split("DETERMINISTIC:")[0]
+        declared[key] = set(re.findall(r"\.[A-Za-z_]+[.*][^\s]*", chunk.replace("#", " ")))
+    assert not (declared["inv"] & declared["det"]), (
+        "a name is declared in BOTH roster groups: %s"
+        % sorted(declared["inv"] & declared["det"]))
+
+    # ONE canonical token per pattern, matched whole. Searching `prefix` and `suffix`
+    # independently is what the first version did, and it was VACUOUS: `.codex_job.` is
+    # supplied by the lock and .tmp entries and `.json` by unrelated names, so deleting the
+    # header's `.codex_job.*.json` entry still passed. The bot reproduced exactly that.
+    def canonical(pattern):
+        prefix = pattern.split("%")[0]                    # ".codex_job."
+        tail = pattern.rsplit("%", 1)[-1]                 # "s.json" / "s" / "s.tmp"
+        suffix = tail[1:] if tail[:1] in ("s", "d") else tail
+        return prefix + "*" + suffix                      # ".codex_job.*.json"
+
+    built_inv = {canonical(p) for p in per_inv}
+    built_det = {canonical(p) for p in determ}
+    assert not (built_inv & built_det), (
+        "two constructed names share a canonical token, so one could mask the other: %s"
+        % sorted(built_inv & built_det))
+
+    # EQUALITY, not containment, and per GROUP -- so a deleted entry, an added name, and a
+    # MISCLASSIFIED one each fail, which containment-anywhere could not distinguish.
+    assert declared["inv"] == built_inv, (
+        "roster PER-INVOCATION line disagrees with the names this file builds with "
+        "self.inv.\n  only in roster: %s\n  only in code:   %s"
+        % (sorted(declared["inv"] - built_inv), sorted(built_inv - declared["inv"])))
+    assert declared["det"] == built_det, (
+        "roster DETERMINISTIC line disagrees with the names this file builds without "
+        "self.inv.\n  only in roster: %s\n  only in code:   %s"
+        % (sorted(declared["det"] - built_det), sorted(built_det - declared["det"])))
 
     # Both COUNTS are pinned, so a new name cannot slip in under an existing prefix. The
     # per-invocation one is load-bearing: the header's nonce-publication sentence says
     # "every one of the six per-invocation names above".
-    assert len(per_inv) == 6, (
+    assert len(built_inv) == 6, (
         "the header says the nonce reaches six per-invocation names; the code now builds "
-        "%d: %s" % (len(per_inv), sorted(per_inv)))
-    assert len(determ) == 5, (
+        "%d: %s" % (len(built_inv), sorted(built_inv)))
+    assert len(built_det) == 5, (
         "the header's deterministic side lists five names; the code now builds %d: %s"
-        % (len(determ), sorted(determ)))
+        % (len(built_det), sorted(built_det)))
 
 
 def test_a_pending_that_cannot_be_snapshotted_is_recoverable(tmp_path, monkeypatch):

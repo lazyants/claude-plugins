@@ -87,30 +87,43 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 # segments/ skip them outright (#428 made those scans skip the whole dot namespace rather
 # than test a suffix). That is the whole of what the term guarantees.
 #
-# It does NOT promise this-invocation cleanup. Several of these entries are DURABLE ON
-# PURPOSE and no invocation removes them: the .codex_job.<seg>.lock lease is a never-
-# unlinked sentinel (see 3. above -- the kernel releases the flock, the file stays), the
-# terminal joblog and the .codex_failed.* sentinel are records meant to outlive the run,
-# .att_pending.* exists precisely to be consumed by a LATER invocation (#213), and
-# .att_superseded.* is a preserved copy kept for hand recovery (#429). Only the disposable
-# scratch -- self.attempt once it is not promoted, the .pub.*/.codex_job.*.tmp/
-# .prev_review_tmp.* temporaries and the .codex_ledger_payload.* payload -- is removed by
-# this invocation, and then by EXACT path, never a wildcard. Which group an entry is in is
-# stated where it is built; do not read a blanket lifetime into the shared prefix.
+# It does NOT promise this-invocation cleanup. Several of these entries OUTLIVE THE
+# INVOCATION THAT CREATED THEM -- which is not the same as surviving forever, and each has
+# its own retention rule rather than a shared one:
+#   - .codex_job.*.lock  -- never unlinked by anything (see 3. above: the kernel releases
+#     the flock, the file stays);
+#   - .codex_job.*.json  -- the joblog is REPLACED in place by each terminal
+#     _write_joblog(), so it persists as a slot while its contents are per-run;
+#   - .codex_failed.*    -- a failure record left for the operator;
+#   - .att_pending.*     -- deliberately consumed by a LATER invocation (#213), which
+#     promotes it with os.replace() or clears it via _silent_remove();
+#   - .att_superseded.*  -- a preserved copy kept for hand recovery (#429).
+# Only the disposable scratch -- self.attempt once it is not promoted, the .pub.*.tmp /
+# .codex_job.*.tmp / .prev_review_tmp.*.json temporaries and the .codex_ledger_payload.*
+# payload -- is removed by the invocation that created it, and then by EXACT path, never a
+# wildcard. Which group an entry is in is stated where it is built; do not read a blanket
+# lifetime into the shared prefix, in either direction.
 #
 # The namespace splits in two and the split is load-bearing -- it is the very distinction
 # #665 turns on, so do not let "private staging slot" blur it. The RULE decides, not this
 # list: a name is PER-INVOCATION iff it interpolates self.inv, and DETERMINISTIC otherwise
 # (keyed on seg/ext/disp/label alone, so it PERSISTS ACROSS RUNS and is trivially
-# derivable). Classify anything added later by that rule rather than by membership here --
-# and a test derives both sets from this file's own AST and fails if they drift.
-#   - PER-INVOCATION, six names, and this side is EXACT because the next paragraph depends
-#     on it: .att.*, .att_superseded.*, .prev_review_tmp.*, .codex_ledger_payload.*,
-#     .pub.*.tmp (created BEFORE the .att.* rename it feeds) and .codex_job.*.tmp;
-#   - DETERMINISTIC, five: .att_pending.* -- the deferred slot itself, and the one that
-#     matters here -- plus the joblog .codex_job.<seg>.json, the lease
-#     .codex_job.<seg>.lock, the .codex_failed.<seg>.<disp> sentinel and the
-#     .prev_review.<seg>.r<label>.json archive.
+# derivable). Classify anything added later by that rule rather than by membership here.
+#
+# The roster below is MACHINE-CHECKED: codex_job_driver.test.py derives both sets from this
+# file's own AST and requires them to equal these two lines exactly -- not to appear
+# somewhere in this block, which prose elsewhere in the header would satisfy on its own.
+# Hence the delimiters and the one canonical spelling per name, `<prefix>*<suffix>`. Edit
+# the lines, never the markers; a name added to the file and not to its line fails there.
+# ROSTER-BEGIN
+#   PER-INVOCATION: .att.*.json .att_superseded.* .prev_review_tmp.*.json
+#                   .codex_ledger_payload.*.json .pub.*.tmp .codex_job.*.tmp
+#   DETERMINISTIC:  .att_pending.*.json .codex_job.*.json .codex_job.*.lock
+#                   .codex_failed.* .prev_review.*.json
+# ROSTER-END
+# The per-invocation side is the one the nonce paragraph above depends on; .att_pending.*
+# .json is the deferred slot #665 turns on, .pub.*.tmp is created BEFORE the .att.*.json
+# rename it feeds, and .codex_job.*.json is the joblog rather than the .tmp beside it.
 # "Two runs cannot collide" is true of the first group ONLY. Saying it of .att_pending.*
 # would assert, of the exact artifact #665 exists to stop gating directly, the property the
 # rest of this header denies.
@@ -1211,9 +1224,13 @@ class CodexJob:
             self.segdir, ".codex_ledger_payload.%s.%s.json" % (self.seg, self.inv))
         try:
             # O_EXCL|O_NOFOLLOW|O_NONBLOCK, not a plain open(..., "w"): this file is
-            # created inside segments/, a directory the codex process this driver launches
-            # holds write access over, and a straggler turn can outlive poll()'s
-            # best-effort cancel (see finalize()'s own comment). A plain truncating open
+            # created inside segments/, a directory this driver does not own exclusively --
+            # anything that can write it can plant a name here, and the module header states
+            # who that is and who it is not. (#697 corrected this sentence: it used to name
+            # the codex process THIS driver launches, which the #409 sandbox is the one
+            # actor to exclude. The justification never depended on that actor -- it is any
+            # directory writer -- but the wrong version was quoted downstream as if it
+            # established one.) A plain truncating open
             # would FOLLOW a symlink planted at this exact name, and would BLOCK
             # indefinitely on a FIFO -- before _gate()'s timeout starts, so the bound
             # below would not cover it, in a method whose entire contract is that it
@@ -1777,9 +1794,9 @@ class CodexJob:
         #
         # WHO could write it: the module header's property, which this slot inherits -- and
         # NOT a roster, which is what stood here until #697 and was wrong three times over.
-        # (_record_translate_rejected()'s own comment names one actor for its
-        # O_EXCL|O_NOFOLLOW; over-caution is free there and this is not a licence to repeat
-        # the claim as fact.) The snapshot is therefore weaker than "an artifact no one else
+        # (_record_translate_rejected()'s O_EXCL|O_NOFOLLOW is justified against the same
+        # property, since #697 corrected that comment too; the file states one actor model,
+        # in one place.) The snapshot is therefore weaker than "an artifact no one else
         # can touch"; what it actually buys is stated below.
         #
         # Re-checking the slot after the fact closes nothing -- neither a type re-check
