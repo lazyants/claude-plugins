@@ -384,6 +384,48 @@ def _strip_omission_lines(text, line_patterns):
 # ---------------------------------------------------------------------------
 
 
+def _load_json_artifact(path, label):
+    """Read and parse ONE operator-authored JSON artifact, or raise
+    ConservationError. `label` names it in every diagnostic, so both callers
+    keep their own wording without keeping their own copy of the policy.
+
+    #277 -- this load boundary catches the CLASS, not one member of it,
+    following validate_assembled.py's own load_json (its R8-1 comment carries
+    the full reasoning). `UnicodeError`, not `UnicodeDecodeError`: read_text()
+    encodes the FILENAME before it opens anything, so a path carrying a lone
+    surrogate -- which `profile.schema.json` admits as a non-empty string and
+    PyYAML round-trips -- raises UnicodeEncodeError on the same line that
+    decoding the CONTENT raises UnicodeDecodeError. Naming one of the two
+    siblings was exactly this defect one level down, which is why the path is
+    reported with !r: repr escapes every surrogate, so the diagnostic cannot
+    fail the same way on its way to stderr. UnicodeDecodeError and
+    json.JSONDecodeError are BOTH ValueError subclasses, and json.loads() can additionally raise a BARE
+    ValueError (an integer literal past sys.get_int_max_str_digits()) or a
+    RecursionError (deeply nested JSON -- a RuntimeError subclass) that no
+    narrower name covers. Both artifacts are operator-authored, so every one
+    of those is reachable from a hand-prepared file; uncaught, they escaped
+    main() as a raw traceback at Python's DEFAULT exit 1 -- the code SKILL.md
+    assigns to "the hand-wrap dropped content", turning a re-encode-your-file
+    problem into a your-wrap-is-broken diagnosis. Deliberately still NOT a
+    blanket `except Exception`: a genuine bug in this script must stay a loud
+    traceback rather than a clean exit 2.
+
+    It is ONE function rather than the same three arms written twice, because
+    the defect it closes IS a policy stated at one site and missed at the
+    other -- a second copy is the shape that reopens it."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ConservationError(f"could not read {label} {path!r}: {exc}")
+    try:
+        doc = json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        raise ConservationError(f"{label} {path} is not valid JSON: {exc}")
+    if not isinstance(doc, dict):
+        raise ConservationError(f"{label} {path} must be a JSON object")
+    return doc
+
+
 def load_allowed_omissions(path):
     """Returns (line_patterns: list[re.Pattern], ranges: list[(start, end)]).
     `ranges` are CHARACTER (code point) offsets, the same coordinate system
@@ -394,28 +436,38 @@ def load_allowed_omissions(path):
     must be provenance-covered."""
     if path is None:
         return [], []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConservationError(f"could not read allowed-omissions file {path}: {exc}")
-    try:
-        doc = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ConservationError(f"allowed-omissions file {path} is not valid JSON: {exc}")
-    if not isinstance(doc, dict):
-        raise ConservationError(f"allowed-omissions file {path} must be a JSON object")
+    doc = _load_json_artifact(path, "allowed-omissions file")
 
     raw_patterns = doc.get("line_patterns", [])
     if not isinstance(raw_patterns, list) or not all(isinstance(x, str) for x in raw_patterns):
         raise ConservationError(
             f"allowed-omissions file {path}: 'line_patterns' must be an array of strings"
         )
-    try:
-        patterns = [re.compile(p) for p in raw_patterns]
-    except re.error as exc:
-        raise ConservationError(
-            f"allowed-omissions file {path}: invalid regex in 'line_patterns': {exc}"
-        )
+    # #277 -- `except Exception`, deliberately, with a try body of exactly one
+    # call (the append stays outside it), mirroring final_audit.py's own
+    # re.compile boundary. re.compile does NOT raise a single family: measured
+    # on 3.14, a malformed pattern raises re.error, an oversized repetition
+    # count OverflowError, and a deeply nested group RecursionError -- and
+    # which types a given interpreter raises is not a contract any version
+    # pins, while CI tracks a moving 3.14 series. Enumerating them means the
+    # NEXT unlisted type escapes main() as a traceback at exit 1, which is the
+    # very defect this closes. The invariant worth holding is the one the
+    # sibling states: an uncompilable operator-authored pattern is REPORTED on
+    # the documented exit-2 path, never fatal-by-traceback.
+    patterns = []
+    for i, raw in enumerate(raw_patterns):
+        try:
+            compiled = re.compile(raw)
+        except Exception as exc:
+            # The INDEX, not the pattern: every sibling per-element diagnostic
+            # in these two loaders names its position (`ranges[i]`, `spans[i]`),
+            # and echoing the pattern back is unbounded -- a legal entry can be
+            # thousands of characters wide.
+            raise ConservationError(
+                f"allowed-omissions file {path}: line_patterns[{i}] is not a "
+                f"valid regex ({type(exc).__name__}: {exc})"
+            )
+        patterns.append(compiled)
 
     raw_ranges = doc.get("ranges", [])
     if not isinstance(raw_ranges, list):
@@ -472,16 +524,7 @@ def load_provenance(path, baseline_len):
     already-decoded baseline `str` for the same reason. Hand-rolled shape
     validation -- see module docstring on why there is no dedicated
     schema.json for this artifact."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConservationError(f"could not read provenance map {path}: {exc}")
-    try:
-        doc = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ConservationError(f"provenance map {path} is not valid JSON: {exc}")
-    if not isinstance(doc, dict):
-        raise ConservationError(f"provenance map {path} must be a JSON object")
+    doc = _load_json_artifact(path, "provenance map")
 
     raw_spans = doc.get("spans")
     if not isinstance(raw_spans, list) or not raw_spans:
@@ -496,6 +539,29 @@ def load_provenance(path, baseline_len):
         if not isinstance(block_id, str) or not block_id:
             raise ConservationError(
                 f"provenance map {path}: spans[{i}].block_id must be a non-empty string"
+            )
+        # #277 -- a block_id is the only string out of these three artifacts
+        # that reaches the wrapper's stdout JSON WITHOUT having passed a strict
+        # UTF-8 decode first (a defect `detail` carries baseline excerpts, but
+        # the baseline was decoded strictly above, so it cannot hold a
+        # surrogate). json.loads() accepts a lone surrogate escape
+        # (`"\ud800"`) that no UTF-8 stream can carry: a dangling one reaches
+        # the defects list, and json.dumps(..., ensure_ascii=False) at the end
+        # of run_wrapper_conservation() then raises UnicodeEncodeError on the
+        # way to stdout -- past every handler above, out through main(),
+        # traceback at exit 1. Rejected HERE rather than by wrapping the
+        # emission: the emission is this script's own output and a failure
+        # there should stay loud; an unencodable id is input. Reported with
+        # !r, whose escaping covers every surrogate (measured: all 2048 are
+        # unencodable, none of their reprs is), so the diagnostic itself
+        # cannot hit the same wall on the way to stderr -- not because repr()
+        # is ASCII, which it is not for e.g. "\u00e9\ud800".
+        try:
+            block_id.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ConservationError(
+                f"provenance map {path}: spans[{i}].block_id is not UTF-8 "
+                f"encodable ({exc}): {block_id!r}"
             )
         if (
             not isinstance(start, int) or isinstance(start, bool)
@@ -742,10 +808,18 @@ def run_wrapper_conservation(manifest):
         else None
     )
 
+    # #277 -- UnicodeError, not just OSError: the baseline is the one
+    # artifact an operator preserves by hand from some OTHER pre-wrap form
+    # (SKILL.md's own example is hand-split `pdftotext -layout` output), and
+    # this script reads it as UTF-8 without saying so anywhere the operator
+    # sees. A cp1255 or UTF-16 file here is an ordinary encoding slip, not an
+    # adversarial input.
     try:
         baseline_text = baseline_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConservationError(f"could not read conservation baseline {baseline_path}: {exc}")
+    except (OSError, UnicodeError) as exc:
+        raise ConservationError(
+            f"could not read conservation baseline {baseline_path!r}: {exc}"
+        )
 
     line_patterns, omit_ranges = load_allowed_omissions(omissions_path)
 
