@@ -1227,13 +1227,24 @@ def _escape_block_id(block_id: str) -> str:
     documented consumer of these lines is a later LLM turn as well as a human.
     Quoting keeps injected prose visibly inside a field.
 
+    A delimiter only contains what cannot reproduce it, so the quote itself is
+    escaped HERE rather than in ``_escape_evidence``: an id holding ``"`` would
+    otherwise close the field it was meant to sit inside and the rest of it
+    would read as diagnostic prose. ``\\`` is already escaped one level down,
+    so a literal ``\\u0022`` in an id renders as ``\\u005Cu0022`` and cannot
+    forge the escape. The visual-order samples do not go through here because
+    they are not delimited, so #489's shipped wording is untouched.
+
     What this deliberately does NOT do is restrict what an id may CONTAIN.
     Narrowing the schema would reject manifests this gate accepts today, from
     custom extractors nobody here has seen; that is a separate decision from
     printing safely."""
     clipped = block_id[:_EVIDENCE_ID_CHARS]
     marker = "..." if len(block_id) > _EVIDENCE_ID_CHARS else ""
-    return f'"{_escape_evidence(clipped)}{marker}"'
+    body = "".join(
+        "\\u0022" if ch == '"' else _escape_char(ch) for ch in clipped
+    )
+    return f'"{body}{marker}"'
 
 
 def run_advisory_scans(manifest: dict):
