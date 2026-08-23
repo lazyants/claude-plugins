@@ -497,6 +497,12 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         # exact-key contract for the same reason the keys above are -- a
         # consumer must be able to trust the key is always present.
         "claims",
+        # #545: the gate THIS invocation admitted each id under, beside the
+        # durable record `claims` reports. Always-present for the same reason:
+        # segment_dispatch_driver.py fatals on its absence rather than
+        # defaulting, which is only sound if the selector emits it on every
+        # success path, claim or no claim.
+        "claims_admitted_via",
     }
     assert payload["success"] is True
     assert payload["durable_root"] == str(root)
