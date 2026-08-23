@@ -444,6 +444,10 @@ async function agent(promptText, opts) {
     effort: opts.effort || null,
     agentType: opts.agentType || null,
     hasSchema: !!opts.schema,
+    // #607 -- the rendered prompt text. Every assertion in THIS file reads
+    // only labels and counts; fix_scope_gate.test.py needs the text, to
+    // check what a blocked-ledger note actually tells the operator.
+    prompt: promptText,
   });
 
   if (label.indexOf("ledger:") === 0) {

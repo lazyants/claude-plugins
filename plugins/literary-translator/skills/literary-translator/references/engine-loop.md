@@ -68,8 +68,33 @@ path that KEEPS the direct `codex:codex-rescue` call — it is out of #198's sco
   fidelity, word-sense/realia) AND literary quality (register, idiom, seams,
   rhythm) in ONE pass — never two separate reviewers.
 - **Claude (the orchestrating session) ONLY applies fixes — or refuses one it cannot
-  substantiate (#532).** It never originates translated content and never grades its own
-  output; refusing a reviewer's finding is neither of those. The exact call shape
+  substantiate (#532) — to exactly ONE file, and is checked afterwards (#607).**
+  It never originates translated content and never grades its own
+  output; refusing a reviewer's finding is neither of those. Since 1.52.0 the
+  prompt also names its single write target, `segments/<seg>.draft.json`, and
+  refuses on that ground alone any finding whose remedy needs another file —
+  editing a gate script so it accepts a draft is never a fix. The instruction
+  is prose to a model, so it is not the whole answer: immediately after the
+  fix call returns and **before its reply is inspected at all**, `runRound`
+  runs `fix_scope_audit.py` from `{{PLUGIN_ROOT}}` and halts the segment if
+  any file Step 0a copied into the durable root no longer matches the plugin
+  bytes it came from. The placement is load-bearing — after the
+  falsy/`DRAFT_MISSING` branch instead, a turn could mutate the copies and
+  then return the sentinel to leave unaudited. What it does NOT cover (files
+  with no plugin twin, confinement of the turn itself, the driver's own
+  `needs_fix` handoff) is enumerated in `SKILL.md`'s #582/#607 paragraph and
+  must not be overstated here.
+
+  Three snapshot-based designs were tried first and each was unsound: an
+  enumerated allowlist of "frozen" paths kept omitting members (silent
+  under-coverage), and a whole-root sweep minus an exclusion list produced
+  guaranteed false REDs — the `codex_job.py` hygiene joblog, and
+  `scripts/__pycache__`, which the interpreter writes whenever a durable
+  script imports a durable sibling — while ALSO hiding
+  `runs/<id>/input.digest`. Comparing against the install tree needs no
+  baseline, no exclusion list and no digest formula; do not reintroduce one.
+
+  The exact call shape
   that mechanically enforces this, pinned down once and referenced everywhere
   else this step is mentioned:
 

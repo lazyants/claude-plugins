@@ -167,12 +167,15 @@ engine:
     # Calibration (1.16.1/#348): a WAIT is no longer ONE agent call. The agent's Bash tool clamps any single
     # call at 600 s, so each of W5's two waits is spent as up to 8 bounded chunks plus one authoritative
     # non-polling re-check -- WAIT_CALLS = 9. Worst case is therefore
-    # 1 + N*(8 + 2*WAIT_CALLS + max_fix_rounds*(6 + WAIT_CALLS)) = 1 + N*86 at the shipped max_fix_rounds:4,
-    # up from the pre-#348 1 + N*38. READ THE CONSEQUENCE BEFORE SIZING A BATCH: the shipped 10000 admits
-    # at most 116 segments (1 + 116*86 = 9977); 117 would need 10063 and the run would refuse to start.
-    # Raised from 3500 (#409 step 2), which admitted only 40 segments (1 + 40*86 = 3441) -- i.e. an ordinary
-    # book batch sat just under the ceiling, where before #348 the same batch carried ~2000 calls of margin
-    # (1 + 40*38 = 1521). The knob is deliberately EXCLUDED from agent_config_hash (cache_key.py's
+    # 1 + N*(8 + 2*WAIT_CALLS + max_fix_rounds*(8 + WAIT_CALLS)) = 1 + N*94 at the shipped max_fix_rounds:4.
+    # The normal-round term is 8 because 1.52.0 (#607) added the fix-scope audit AND the one retry a
+    # CONTINUING round may spend on it; it was 6 (per-segment 86) between #348 and #607, and 1 + N*38 before
+    # #348. READ THE CONSEQUENCE BEFORE SIZING A BATCH: at 94 the shipped 10000 admits at most 106 segments
+    # (1 + 106*94 = 9965); 107 would need 10059 and the run would refuse to start. That is down from 116 at
+    # the pre-#607 per-segment 86 (1 + 116*86 = 9977). Raised to 10000 from 3500 (#409 step 2), which at
+    # today's 94 would admit only 37 (1 + 37*94 = 3479) and admitted 40 at 86 (1 + 40*86 = 3441) -- i.e. an
+    # ordinary book batch sat just under that ceiling, where before #348 the same batch carried ~2000 calls
+    # of margin (1 + 40*38 = 1521). The knob is deliberately EXCLUDED from agent_config_hash (cache_key.py's
     # compute_agent_config_hash whitelists exactly effort/max_fix_rounds/model, with a dedicated negative
     # test in ledger_composite_key.test.py), so changing it invalidates NO converged segment. It is a
     # SUBST_FIELDS member, so it does need one fresh RUN_ID -- a re-dispatch, never a re-translate.
@@ -263,10 +266,10 @@ engine:
     # case, so the shipped default of 400 admits 66 segments (66*6 = 396).
     # NOTE, so the two knobs are not mistaken for one envelope: they do NOT bind at the same batch size, and
     # WHICH ONE binds first depends on both shipped values, not fixed. #409 step 2 raised batch_agent_cap's
-    # shipped default from 3500 (admitted 40 segments) to 10000 (admits 116, see above) without touching this
-    # knob -- so THIS cap now binds FIRST at every shipped setting (its own 400 default admits 66 segments,
-    # well below batch_agent_cap's 116), the reverse of the pre-#409-step-2 relationship. This cap is
-    # therefore no longer redundant with batch_agent_cap above for an ordinary book in the 67-116 segment
+    # shipped default from 3500 to 10000 without touching this knob -- so THIS cap binds FIRST at every
+    # shipped setting (its own 400 default admits 66 segments, below batch_agent_cap's 106 since #607, and
+    # below the 116 it admitted before), the reverse of the pre-#409-step-2 relationship. This cap is
+    # therefore no longer redundant with batch_agent_cap above for an ordinary book in the 67-106 segment
     # range: it is the gate that actually refuses first. Splitting a batch that's too large into
     # smaller ones is the operator's call, not automated in v1 (same policy as batch_agent_cap).
 

@@ -308,7 +308,7 @@ def instantiate() -> str:
         ("{{MODEL}}", ""),
         # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. This file
         # exercises sentinel/glue-character containment, not the opt-in.
-        ("{{PLUGIN_ROOT}}", json.dumps("")),
+        ("{{PLUGIN_ROOT}}", json.dumps("/fixture/plugin/literary-translator")),
     ):
         text = text.replace(token, value)
     assert "{{" not in text, "fixture instantiation left an unresolved token"

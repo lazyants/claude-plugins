@@ -78,7 +78,7 @@ _SUBSTITUTIONS = {
     "{{MODEL}}": "",
     # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. fixPrompt's
     # self-check text is unaffected by the opt-in; only needs to resolve.
-    "{{PLUGIN_ROOT}}": json.dumps(""),
+    "{{PLUGIN_ROOT}}": json.dumps("/fixture/plugin/literary-translator"),
 }
 
 

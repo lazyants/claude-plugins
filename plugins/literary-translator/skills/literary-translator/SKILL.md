@@ -241,12 +241,12 @@ same for `smoke_test.report_path` (skipped when null).
 
 Copies (unconditional overwrite, safe since these files are never
 hand-edited): every file in `assets/scripts/*.py` (except
-`profile_validate.py`, `validate_extraction.py`, and `glossary_preflight.py`
-— three files, EACH excluded for its own distinct reason, never a shared one
-(a fourth exclusion, `scaffold_setup.py`, follows below in a wholly separate
-category — it is not a bundle member at all, never mind never-copied-for-its-
-own-reason like these three; do not read "three" here as this paragraph's
-total exclusion count):
+`profile_validate.py`, `validate_extraction.py`, `glossary_preflight.py`, and
+`fix_scope_audit.py` — four files, EACH excluded for its own distinct reason,
+never a shared one (a further exclusion, `scaffold_setup.py`, follows below in
+a wholly separate category — it is not a bundle member at all, never mind
+never-copied-for-its-own-reason like these four; do not read "four" here as
+this paragraph's total exclusion count):
   - `profile_validate.py` runs *before* Step 0a exists to copy anything — Step 0
     reads and validates `profile.yml` first, so there is no durable-root copy of
     this script yet, and there never will be one for that specific invocation.
@@ -255,6 +255,14 @@ total exclusion count):
     `extract.py`'s self-check region by hash against the plugin's own shipped
     value, which only works if the checker itself is never a durable, hand-reachable
     copy (see `references/false-green-gate.md`).
+  - `fix_scope_audit.py` (1.52.0, #607) is kept plugin-only for the same shape
+    of reason as `validate_extraction.py`, one step further out: it is the
+    check that asks whether this durable root's copied files still match the
+    plugin they came from. A durable copy of it would sit inside the very tree
+    it audits, reachable by the same W5 fix turn it is checking, and would
+    then be able to report on itself. Because there is no durable copy, W5's
+    own preflight REFUSES to start when `{{PLUGIN_ROOT}}` is unsubstituted —
+    there is no weaker fallback to degrade to.
   - `glossary_preflight.py` would be actively harmful copied, not merely redundant:
     a durable copy's own `__file__`-relative schema lookup would land on the
     *durable* schemas as its "plugin" side too, comparing durable-vs-durable — a
@@ -2230,9 +2238,57 @@ the copies).
 
 The durable root holding one project's data, and a human reading the
 deliverable, limit the expected blast radius of the DELIVERABLE — they do not
-bound the fix turn's filesystem write reach, and nothing here does. Closing
-that properly means constraining that turn's write surface: tracked
-separately, and out of scope for a documentation change.
+bound the fix turn's filesystem write reach.
+
+**What 1.52.0 (#607) did about it, and what it deliberately did not.** Two
+halves shipped. `fixPrompt` now tells that turn it has exactly ONE write
+target, `segments/<seg>.draft.json`, and that a finding whose remedy would
+require editing any other file is refused on that ground alone — a gate
+script edited so that it accepts a draft is never a fix. And after every
+dispatched fix call, before its reply is even inspected, W5 runs
+`fix_scope_audit.py` from `{{PLUGIN_ROOT}}`: a **copy-fidelity check** that
+every file Step 0a copied into this durable root (`scripts/`, `schemas/`,
+`languages/`, the three workflow templates) still equals the plugin bytes it
+came from, plus the two `runs/` bundle markers, whose expected values are
+derivable from the same plugin tree. That closes the specific sentence two
+paragraphs above — `plugin_bundle_hash` never re-hashed the copies; this
+does.
+
+It is a copy-fidelity check and NOT a write audit, and the difference is the
+whole residual:
+
+- Files with **no plugin twin** are not covered — `canon.json`,
+  `canon_senses.json`, `manifest.json`, the segpacks, the ledger, and the
+  one-time template seeds an operator then hand-edits (`style_bible.md`,
+  `extract.py`, the `*_TASK.md` files). Most of those are translation
+  CONTENT. One that is not is `runs/<id>/.resume_gate_ack`, a per-run
+  authorization with no derivable authority: it is gate state, it is
+  uncovered, and it is named here rather than left implicit.
+- It cannot **confine** the turn. That turn is a plain Claude agent holding
+  the operator's own permissions, and the Workflow `agent()` API offers no
+  filesystem confinement. A party able to alter the PLUGIN tree — including
+  the auditor itself — can make the check report clean while durable
+  divergence remains; a later plugin refresh repairs the auditor but does not
+  retroactively reveal that divergence. What the check changes is that a
+  tamper must now cover a second tree.
+- A **driver-mediated** fix turn is not audited at all.
+  `segment_dispatch_driver.py` returns the rendered fix prompt as `needs_fix`
+  for an external Claude turn and truncates this template before every
+  top-level preflight, so no audit call site fires on that route. Bracketing
+  it needs a digest handed out at `needs_fix` and required back on the next
+  invocation; that is tracked separately and is not in 1.52.0.
+
+**Halt contract.** A mismatch records a terminal `blocked` fragment with
+reason `fix-scope-violation`; two consecutive failures of the audit relay
+record `fix-scope-unverified`. Both classify `human_escalation`. Neither is
+recoverable on its own, deliberately: leaving the segment `in_progress` would
+let the next batch run over exactly the state the gate could not verify.
+Clearing one costs that segment a re-translation — name it under
+`--only-segs`, and for a previously converged segment add
+`--allow-retranslate-converged`. And a mismatch is **not by itself proof of
+tampering**: a plugin upgraded mid-project gives the identical signal, and
+the one remedy serves both readings — re-run Step 0a's copy pass, then re-run
+the segment.
 
 **Optional dispatch path — `segment_dispatch_driver.py` (#409).** Everything
 above (`mass-translate-wf.template.js` instantiation, `pipeline()`, the

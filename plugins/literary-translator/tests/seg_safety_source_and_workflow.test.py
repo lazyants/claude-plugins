@@ -381,7 +381,11 @@ def instantiate_mass_translate(*, batch_agent_cap: int, max_codex_jobs_per_batch
     # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. This file's
     # charter is seg-id shell-injection safety, not the opt-in; the
     # SEG-guard tests below never read this value, only need it to resolve.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(""))
+    # #607 -- a non-empty plugin root is now REQUIRED: the fix-scope audit
+    # runs only from the plugin install tree, so the W5 template refuses to
+    # start without one. This fixture used to substitute the empty value as
+    # the documented "redirect opt-out"; that opt-out no longer exists.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps("/fixture/plugin/literary-translator"))
     assert "{{" not in text
     return text
 

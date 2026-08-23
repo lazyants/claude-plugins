@@ -1206,7 +1206,12 @@ FIXTURE_VERSE_POLICY = "Render every verse literally, line by line."
 FIXTURE_COMPANION_PATH = "/opt/codex/1.0.10/codex-companion.mjs"
 FIXTURE_EFFORT = "high"
 FIXTURE_MODEL = ""
-FIXTURE_PLUGIN_ROOT = ""
+# #607 -- was "" ("not opted into the redirect"). The W5 template now REFUSES
+# to start without a plugin root, because the fix-scope audit runs only from
+# the plugin install tree, so every fixture that executes the workflow needs a
+# real value. Tests that specifically exercise the opt-out/absent-redirect
+# shape pass plugin_root="" explicitly at their own call site.
+FIXTURE_PLUGIN_ROOT = "/fixture/plugin/literary-translator"
 
 
 def instantiate(*, max_fix_rounds: int, batch_agent_cap: int = 100000,
@@ -1287,6 +1292,11 @@ async function agent(promptText, opts) {
   if (label === "review-read:" + SEG + ":r2") return CLEAN_REVIEW;
   if (label === "artifact-check:" + SEG + ":r1" || label === "artifact-check:" + SEG + ":r2") return { match: true };
   if (label === "fix:" + SEG + ":r1") return "FIXED " + SEG;
+  // #607 -- the fix-scope audit relay. This file is about the fix prompt's
+  // TEXT (the claimed dispatch_token must survive byte for byte), never about
+  // the audit's verdict, so a clean pass is the right constant; the mismatch
+  // and relay-failure branches belong to fix_scope_gate.test.py.
+  if (label === "fix-scope:" + SEG + ":r1") return { ok: true, n_checked: 79 };
   if (label === "draft-probe:" + SEG) return { present: true };
   throw new Error("mock agent(): unrecognized label " + JSON.stringify(label));
 }
@@ -1374,9 +1384,25 @@ def test_default_path_has_no_deterministic_draft_token_recheck_after_a_fix(tmp_p
 
     labels = [c["label"] for c in out["calls"]]
     fix_idx = labels.index("fix:" + seg + ":r1")
-    assert labels[fix_idx + 1] == "review-dispatch:" + seg + ":r2", (
-        f"the call immediately after the fix must be the next round's "
-        f"review dispatch, with nothing in between; got: {labels}"
+    # #607 inserted ONE call here, and this assertion was widened rather than
+    # loosened. The docstring above forbids fixing a RED by relaxing the
+    # check, so the question it poses was answered instead: does the new call
+    # retire codex_job.py's chokepoint? It does not. The fix-scope audit runs
+    # `fix_scope_audit.py`, which compares the durable root's PLUGIN-INSTALLED
+    # copies against the plugin install tree. It never runs
+    # `draft_ready.py --expect-token`, never reads the draft's dispatch_token,
+    # and renders no verdict on whether a claimed draft is valid or present --
+    # which is the thing D9 says must stay codex_job.py's alone. The two
+    # assertions that encode the actual protection (no `wait:` re-poll, and
+    # the token-carrying prompt line pinned byte for byte above) are
+    # unchanged and still pass.
+    assert labels[fix_idx + 1] == "fix-scope:" + seg + ":r1", (
+        f"#607: the fix-scope audit must be the FIRST thing after the fix -- "
+        f"before the reply is even inspected; got: {labels}"
+    )
+    assert labels[fix_idx + 2] == "review-dispatch:" + seg + ":r2", (
+        f"the next round's review dispatch must follow the audit, with "
+        f"nothing else in between; got: {labels}"
     )
     assert "wait:" + seg not in labels[fix_idx + 1:], (
         "the draft's own wait poll -- the only site that ever runs "

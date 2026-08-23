@@ -801,7 +801,7 @@ def _instantiate_and_slice_js(durable_root_str):
         # file's charter is the draft_path/review_path invariant, not the
         # #412 dispatch opt-in, so the empty value reproduces the pre-#412
         # dispatch shape it was written against; it only needs to resolve.
-        "{{PLUGIN_ROOT}}": json.dumps(""),
+        "{{PLUGIN_ROOT}}": json.dumps("/fixture/plugin/literary-translator"),
     }
     for token, value in substitutions.items():
         head = head.replace(token, value)

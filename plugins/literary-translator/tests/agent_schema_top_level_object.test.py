@@ -252,6 +252,10 @@ CONST_TEMPLATE_OWNER = {
 EXPECTED_MASS_TRANSLATE_SCHEMA_IDENTIFIERS = {
     "REVIEW_SCHEMA", "REVIEW_ARTIFACT_SCHEMA", "LEDGER_WRITE_SCHEMA", "LEDGER_MERGE_SCHEMA",
     "DRAFT_PROBE_SCHEMA",
+    # #607 -- the fix-scope audit's relay return. Like DRAFT_PROBE_SCHEMA it is
+    # a mechanical relay's shape, not a judgment: the script decides and the
+    # turn repeats its JSON line.
+    "FIX_SCOPE_SCHEMA",
 }
 EXPECTED_GLOSSARY_SCHEMA_IDENTIFIERS = {"CANON_VERIFY_SCHEMA"}
 

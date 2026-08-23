@@ -83,7 +83,12 @@ FIXTURE_EFFORT = "xhigh"
 FIXTURE_MODEL = ""
 # #412 -- empty string = not opted into the --plugin-root redirect (the
 # mass template's own documented sentinel, mirroring FIXTURE_MODEL above).
-FIXTURE_PLUGIN_ROOT = ""
+# #607 -- was "" ("not opted into the redirect"). The W5 template now REFUSES
+# to start without a plugin root, because the fix-scope audit runs only from
+# the plugin install tree, so every fixture that executes the workflow needs a
+# real value. Tests that specifically exercise the opt-out/absent-redirect
+# shape pass plugin_root="" explicitly at their own call site.
+FIXTURE_PLUGIN_ROOT = "/fixture/plugin/literary-translator"
 
 
 def instantiate(*, max_fix_rounds: int, batch_agent_cap: int, max_codex_jobs_per_batch: int = 100000,
@@ -107,10 +112,12 @@ def instantiate(*, max_fix_rounds: int, batch_agent_cap: int, max_codex_jobs_per
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
     text = text.replace("{{EFFORT}}", effort)
     text = text.replace("{{MODEL}}", model)
-    # #412 -- PLUGIN_ROOT: same json.dumps JS string literal contract as
+    # #412/#607 -- PLUGIN_ROOT: same json.dumps JS string literal contract as
     # CODEX_COMPANION_PATH_JSON above (token sits OUTSIDE quotes in
-    # `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`); empty is the documented
-    # "not opted into the redirect" sentinel.
+    # `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`). Empty used to be the documented
+    # "not opted into the redirect" sentinel; since #607 it is a REFUSAL --
+    # the fix-scope audit has no trusted copy to run without a plugin root --
+    # so this fixture's default is a real path.
     text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
@@ -201,6 +208,11 @@ async function agent(promptText, opts) {
   if (label.indexOf("review-read:") === 0) return { clean: true, coverage_ok: true, findings: [], draft_sha1: "a" };
   if (label.indexOf("artifact-check:") === 0) return { match: true };
   if (label.indexOf("fix:") === 0) return "FIXED " + seg;
+  // #607 -- the fix-scope audit relay. This file's fixtures are about prompt
+  // TEXT and branch reachability, never about the audit's own verdict, so a
+  // clean pass is the right constant here; batch_size_estimator.test.py and
+  // fix_scope_gate.test.py own the mismatch and relay-failure paths.
+  if (label.indexOf("fix-scope:") === 0) return { ok: true, n_checked: 79 };
   if (label.indexOf("draft-probe:") === 0) return { present: true };
   throw new Error("mock agent(): unrecognized label " + label);
 }
@@ -331,10 +343,12 @@ def test_drive_prompt_launches_detached_codex_job(tmp_path, drive_label, launch_
     # engine.model is unset by default (FIXTURE_MODEL == "") -- no --model
     # flag on the launch line at all.
     assert "--model" not in launch
-    # #412 -- engine's plugin_root redirect is unset by default
-    # (FIXTURE_PLUGIN_ROOT == "") -- no --plugin-root flag on the launch
-    # line at all (the pre-#412 dispatch shape).
-    assert "--plugin-root" not in launch
+    # #412/#607 -- FIXTURE_PLUGIN_ROOT is now a real path, because #607 makes
+    # an empty plugin root refuse the batch outright. So the launch line
+    # carries the flag; the "omits it when empty" shape it used to assert is
+    # no longer reachable through this template at all (see
+    # test_empty_plugin_root_refuses_the_batch below).
+    assert "--plugin-root '" + FIXTURE_PLUGIN_ROOT + "'" in launch
 
     # the task-file path carries the runtime DISP.
     assert f'TASKFILE="{FIXTURE_DURABLE_ROOT}/segments/.codex_task.{kind}.seg01.$DISP"' in prompt
@@ -452,21 +466,32 @@ def test_drive_prompt_launch_carries_plugin_root_when_opted_in(tmp_path, drive_l
     assert "--plugin-root '/opt/claude/plugins/literary-translator'" in launch
 
 
-@pytest.mark.parametrize(
-    "drive_label,launch_needle",
-    [("translate:seg01", "codex_job.py --kind translate"),
-     ("review-dispatch:seg01:r1", "codex_job.py --kind review")],
-)
-def test_drive_prompt_launch_omits_plugin_root_when_not_opted_in(tmp_path, drive_label, launch_needle):
-    """#412 -- positive control paired with the opted-in case above: an
-    empty plugin_root (not opted into the redirect, the pre-#412 dispatch
-    shape) produces NO --plugin-root flag at all on either codex_job.py
-    launch line."""
+def test_empty_plugin_root_refuses_the_batch(tmp_path):
+    """#607 -- replaces test_drive_prompt_launch_omits_plugin_root_when_not_
+    opted_in, whose premise this release removed.
+
+    That test asserted the #412 positive control: an empty plugin_root ("not
+    opted into the redirect") produced NO --plugin-root flag on either
+    codex_job.py launch. The assertion was true and is now UNREACHABLE
+    through this template -- with no plugin root there is no trusted copy of
+    fix_scope_audit.py to run, so the batch refuses before any dispatch
+    happens and no launch line is ever built. Asserting the old shape would
+    mean asserting over a prompt the run never produces.
+
+    The template's PLUGIN_ROOT_ARG still has its empty branch, which is now
+    dead in THIS template; it is left in place because the same constant
+    shape is shared with the sibling workflow templates, which are unchanged.
+    """
     res = run(tmp_path=tmp_path, segs=["seg01"], plugin_root="")
     assert res["ok"], res["stderr"]
-    prompt = res["out"]["promptByLabel"][drive_label]
-    launch = [ln for ln in prompt.splitlines() if launch_needle in ln][0]
-    assert "--plugin-root" not in launch
+    result = res["out"]["result"]
+    assert result["reason"] == "fix-scope-plugin-root-missing"
+    assert result["converged"] == []
+    assert result["failed"] == []
+    assert res["out"]["promptByLabel"] == {}, (
+        "the batch must refuse BEFORE any agent call -- an unaudited fix turn "
+        "is exactly what this refusal exists to prevent"
+    )
 
 
 @pytest.mark.parametrize(
