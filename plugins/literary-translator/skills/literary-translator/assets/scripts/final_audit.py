@@ -224,7 +224,7 @@ import stat
 import subprocess
 import sys
 import unicodedata
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
@@ -1031,6 +1031,11 @@ def warn_forbidden_patterns(seg, compiled):
 # docstring on the WARN/hard split.
 # ---------------------------------------------------------------------------
 
+# One value carrying everything the lane resolved once for the whole run.
+TermCheck = namedtuple(
+    "TermCheck", "terms apparatus_policy verse_mode verse_sources"
+)
+
 # The verse fields that actually reach the reader. Kept as a constant because
 # three shipped consumers agree on it and this check must not drift from them.
 DELIVERED_VERSE_FIELDS = ("rendered", "literal_gloss")
@@ -1040,7 +1045,20 @@ DELIVERED_VERSE_FIELDS = ("rendered", "literal_gloss")
 # reader ever sees. The disclosed cost of that choice is the converse -- a term
 # split by inline markup (`pre<em>sident</em>`) is a miss -- which only reaches
 # a segpack block carrying `source_html` and no `plain_text`.
-_HTML_TAG_RE = re.compile(r"<[^>]*>")
+#
+# `[^<>]`, NOT `[^>]`, and that one character is the whole difference between
+# linear and QUADRATIC on malformed input. With `[^>]*`, every `<` in a run
+# scans to end-of-string looking for a terminator, fails, and the search
+# restarts at the next `<`: measured on this machine, 120 000 consecutive `<`
+# with no `>` takes 5.18s, against 0.001s here. A draft or segpack is
+# LLM-written and hand-editable, and a stall in an advisory lane blocks W7
+# before it prints the two HARD verdicts -- so the pathological case is the one
+# that matters, not the well-formed one. Excluding `<` from the body also means
+# an unterminated `<` can no longer swallow the following tag. On real markup
+# the two spellings are identical, which is exactly why the cheap fix is
+# available. (`validate_draft._TAG_RE` spells it `<[^>]+>` and carries the same
+# quadratic; that is pre-existing and not this change's to fix.)
+_HTML_TAG_RE = re.compile(r"<[^<>]*>")
 
 
 def _fold_term_text(text):
@@ -1151,7 +1169,7 @@ def _carrier_source_text(block):
     return ""
 
 
-def term_carriers(segpack, draft, apparatus_policy, verse_mode, verse_sources):
+def term_carriers(segpack, draft, term_check):
     """The (label, source_text, target_text) triples WARN 6 compares for one
     segment -- see this section's header for which carriers qualify and why.
 
@@ -1204,7 +1222,7 @@ def term_carriers(segpack, draft, apparatus_policy, verse_mode, verse_sources):
         add(f"blocks[{block_id!r}]", _carrier_source_text(block),
             draft_blocks.get(block_id))
 
-    if apparatus_policy != "preserve_source":
+    if term_check.apparatus_policy != "preserve_source":
         for footnote in _as_sequence(segpack.get("footnotes")):
             if not isinstance(footnote, dict):
                 continue
@@ -1216,29 +1234,52 @@ def term_carriers(segpack, draft, apparatus_policy, verse_mode, verse_sources):
                 source_text if isinstance(source_text, str) else "",
                 draft_footnotes.get(str(number)))
 
-    if verse_mode != "skip":
+    if term_check.verse_mode != "skip":
         for verse in segpack_verses:
             vid = verse.get("vid")
             if not isinstance(vid, str):
                 continue
-            source_text = verse_sources.get(vid)
+            source_text = term_check.verse_sources.get(vid)
             if source_text is None:
                 continue
             rendered_verse = draft_verses.get(vid)
             if not isinstance(rendered_verse, dict):
                 continue
-            add(f"verses[{vid!r}]", source_text, " ".join(
-                rendered_verse[field]
-                for field in DELIVERED_VERSE_FIELDS
-                if isinstance(rendered_verse.get(field), str)
-            ))
+            delivered = (rendered_verse.get(field) for field in DELIVERED_VERSE_FIELDS)
+            add(f"verses[{vid!r}]", source_text,
+                " ".join(text for text in delivered if isinstance(text, str)))
 
     return carriers
 
 
-def warn_term_drift(seg, terms, apparatus_policy, verse_mode, verse_sources):
-    warns = []
+def build_term_check(profile):
+    """Everything WARN 6 needs for a whole run, resolved ONCE.
+
+    One value rather than four loose arguments, matching how every sibling
+    hands its per-run configuration to the loop (`stopwords_lower`,
+    `compiled_patterns`). The two policy fields come from `vd.ProfileConfig`,
+    which is this plugin's sole authority on them -- never re-derived here.
+    Constructing it cannot newly fail: `hard_check_coverage()` already built one
+    from this same parsed mapping, far above, and would have exited then.
+
+    `manifest.json` is read only when something is actually pinned, and an
+    unreadable one leaves the verse lane empty rather than aborting the audit --
+    the completeness gate below owns that fatal, and owns it identically whether
+    or not this lane looked first."""
+    terms = declared_terms(profile)
     if not terms:
+        return TermCheck((), None, None, {})
+    policy = vd.ProfileConfig(profile)
+    verse_sources = {}
+    manifest, manifest_err = load_json(MANIFEST_PATH, "manifest.json")
+    if not manifest_err and isinstance(manifest, dict):
+        verse_sources = verse_source_index(manifest)
+    return TermCheck(terms, policy.apparatus_policy, policy.verse_mode, verse_sources)
+
+
+def warn_term_drift(seg, term_check):
+    warns = []
+    if not term_check.terms:
         return warns
     draft, err = load_json(draft_path(seg), f"draft {seg}")
     if err or not isinstance(draft, dict):
@@ -1247,12 +1288,10 @@ def warn_term_drift(seg, terms, apparatus_policy, verse_mode, verse_sources):
     if err or not isinstance(segpack, dict):
         return warns  # already reported as a coverage hard failure
 
-    for label, source_text, target_text in term_carriers(
-        segpack, draft, apparatus_policy, verse_mode, verse_sources
-    ):
+    for label, source_text, target_text in term_carriers(segpack, draft, term_check):
         folded_source = _fold_term_text(source_text)
         folded_target = _fold_term_text(target_text)
-        for source_form, target_form, folded_form, folded_pin in terms:
+        for source_form, target_form, folded_form, folded_pin in term_check.terms:
             if folded_form not in folded_source:
                 continue
             if folded_pin in folded_target:
@@ -2112,37 +2151,17 @@ def main():
     )
     warn_details.extend(pattern_decl_warns)
 
-    # #199. Both policies are read from the SAME profile, because both decide
-    # the same thing: whether a carrier is TRANSLATED at all. A missing or
-    # malformed block simply resolves to None, which excludes nothing -- the
-    # fail-open direction is right for an advisory lane, and Step 0 refuses a
-    # profile that lacks either field anyway.
-    terms = declared_terms(operator_profile)
-    footnotes_config = operator_profile.get("footnotes")
-    apparatus_policy = (
-        footnotes_config.get("apparatus_policy")
-        if isinstance(footnotes_config, dict) else None
-    )
-    verse_config = operator_profile.get("verse_policy")
-    verse_mode = verse_config.get("mode") if isinstance(verse_config, dict) else None
-    # The verse SOURCE text lives in manifest.json, not in any segpack. Read
-    # once, and only when something is actually pinned; an unreadable manifest
-    # leaves the verse lane silent rather than aborting the audit, exactly as an
-    # unreadable draft does (build_frontback_coverage() below owns the fatal).
-    verse_sources = {}
-    if terms:
-        manifest, manifest_err = load_json(MANIFEST_PATH, "manifest.json")
-        if not manifest_err and isinstance(manifest, dict):
-            verse_sources = verse_source_index(manifest)
+    # #199. One value, resolved once -- see build_term_check() for what it
+    # reads and why the two policy fields come from vd.ProfileConfig rather
+    # than being re-derived here.
+    term_check = build_term_check(operator_profile)
 
     for seg in sorted(converged):
         warn_details.extend(warn_link_graph(seg))
         warn_details.extend(warn_foreign_remainder(seg, stopwords_lower))
         warn_details.extend(warn_verse_structure(seg))
         warn_details.extend(warn_forbidden_patterns(seg, compiled_patterns))
-        warn_details.extend(warn_term_drift(
-            seg, terms, apparatus_policy, verse_mode, verse_sources
-        ))
+        warn_details.extend(warn_term_drift(seg, term_check))
 
     warnings_count = len(warn_details)
 
@@ -2238,7 +2257,7 @@ def main():
     # empty declaration reads as a clean term-consistency pass. Naming the
     # number checked is what makes the two distinguishable at a glance.
     print(
-        f"\nTERM CONSISTENCY: {len(terms)} declared term(s) checked over "
+        f"\nTERM CONSISTENCY: {len(term_check.terms)} declared term(s) checked over "
         f"{len(converged)} converged segment(s)",
         file=sys.stderr,
     )

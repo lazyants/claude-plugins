@@ -121,6 +121,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import unicodedata
 from pathlib import Path
 
@@ -2551,8 +2552,7 @@ def _term_lines(proc):
     so its presence proves the lane reached the end of that pass, and the
     traceback check catches a death anywhere earlier."""
     assert "Traceback" not in proc.stderr, proc.stderr
-    marker = [ln for ln in proc.stderr.splitlines() if ln.startswith("TERM CONSISTENCY:")]
-    assert len(marker) == 1, proc.stderr
+    _term_count_line(proc)   # asserts exactly one; one place knows the prefix
     return [ln for ln in proc.stderr.splitlines() if "TERM-DRIFT" in ln]
 
 
@@ -2645,6 +2645,12 @@ def test_declared_term_reports_the_footnote_a_correct_body_would_mask(tmp_path):
             f"{CHAIRMAN_RU}м следственной "
             f"палаты."
         ),
+    )
+    # The ordinary prose-only book: no `verse` key in the manifest at all, so
+    # the verse index is empty. Blocks and footnotes must still compare -- an
+    # empty index is a missing SOURCE for verses, never a switched-off lane.
+    assert "verse" not in json.loads(
+        (root / "manifest.json").read_text(encoding="utf-8")
     )
     proc = run_final_audit(root)
     summary = parse_summary(proc)
@@ -2804,18 +2810,21 @@ VERSE_STORE_WITH_OFFICE = [
 ]
 
 
-def _verse_root(tmp_path, verse_a=None, **kwargs):
+def _verse_root(tmp_path, verse_a=None, segpack=None,
+               verse_store=None, **kwargs):
     """A root whose verse vA's SOURCE carries the office. `verse_a` is the
     draft's own `verses["vA"]` object, so a case can control exactly which
-    fields carry the pin."""
+    fields carry the pin; `segpack` and `verse_store` override the two inputs
+    the verse lane reads, the same shape `_office_root` already has."""
     root = make_durable_root(
         tmp_path, seg_ids=("seg01", PAD_SEG), terms=PRESIDENT_PIN,
-        verse_store=VERSE_STORE_WITH_OFFICE, **kwargs
+        verse_store=VERSE_STORE_WITH_OFFICE if verse_store is None else verse_store,
+        **kwargs
     )
     draft = clean_draft()
     if verse_a is not None:
         draft["verses"]["vA"] = verse_a
-    add_converged_segment(root, "seg01", clean_segpack(), draft)
+    add_converged_segment(root, "seg01", segpack or clean_segpack(), draft)
     return root
 
 
@@ -2883,16 +2892,10 @@ def test_a_standalone_verse_block_is_not_compared_as_prose(tmp_path):
     segpack = clean_segpack(
         vblockA_source=f"<p>Le {PRESIDENT_FR} passe en robe rouge<br/>Deuxieme ligne</p>"
     )
-    root = make_durable_root(
-        tmp_path, seg_ids=("seg01", PAD_SEG), terms=PRESIDENT_PIN,
-        verse_store=VERSE_STORE_WITH_OFFICE,
-    )
-    draft = clean_draft()
-    draft["verses"]["vA"] = {
+    root = _verse_root(tmp_path, segpack=segpack, verse_a={
         "rendered": f"{PRESIDENT_RU} проходит в красной мантии\nВторая строка",
         "literal_gloss": "Дословно: глава палаты идёт в красном одеянии",
-    }
-    add_converged_segment(root, "seg01", segpack, draft)
+    })
     proc = run_final_audit(root)
     assert _term_lines(proc) == [], proc.stderr
 
@@ -2937,16 +2940,10 @@ def test_a_duplicate_manifest_vid_is_dropped_rather_than_mis_attributed(tmp_path
             "sha1": "1" * 40,
         },
     ]
-    root = make_durable_root(
-        tmp_path, seg_ids=("seg01", PAD_SEG), terms=PRESIDENT_PIN,
-        verse_store=duplicated,
-    )
-    draft = clean_draft()
-    draft["verses"]["vA"] = {
+    root = _verse_root(tmp_path, verse_store=duplicated, verse_a={
         "rendered": f"{CHAIRMAN_RU} проходит в красной мантии\nВторая строка",
         "literal_gloss": "Дословно: глава палаты идёт в красном одеянии",
-    }
-    add_converged_segment(root, "seg01", clean_segpack(), draft)
+    })
     proc = run_final_audit(root)
     assert _term_lines(proc) == [], proc.stderr
 
@@ -3024,36 +3021,29 @@ def test_an_unreadable_manifest_never_makes_the_term_lane_raise(tmp_path):
     assert "is not valid JSON" in proc.stderr
 
 
-def test_a_manifest_with_no_verse_block_leaves_the_other_carriers_working(tmp_path):
-    """The ordinary prose-only book: manifest.json carries no `verse` key at
-    all, so the verse index is empty. Blocks and footnotes must still compare --
-    an empty index is a missing SOURCE for verses, never a switched-off lane."""
-    root = _office_root(
-        tmp_path,
-        footnote_target=f"{CHAIRMAN_RU}м следственной палаты.",
-    )
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    assert "verse" not in manifest
-    proc = run_final_audit(root)
-    lines = _term_lines(proc)
-    assert len(lines) == 1, proc.stderr
-    assert "footnotes['1']" in lines[0]
-
-
 # --- corrupt-but-valid-JSON durable data ------------------------------------
 #
 # A traceback out of this lane is the WORST outcome available to it: main()
 # prints the two HARD verdicts and the summary JSON only after every WARN check
 # has run, so an advisory crash destroys the report on exactly the broken book
-# that most needs one. These drive the shapes a hand-edit produces -- valid
-# JSON, wrong nested type -- straight through the shipped script.
+# that most needs one.
+#
+# The SEGPACK side of the same class is deliberately NOT tested, and that is a
+# measurement rather than an omission: a segpack whose `footnotes` is a mapping,
+# or whose verse `parent_block` is unhashable, never reaches any WARN check --
+# hard check 1 calls `validate_draft.validate()` first and dies on the identical
+# input at validate_draft.py:563 and :622. That is pre-existing and out of
+# scope. The `isinstance` guards in `term_carriers()` are kept anyway; they cost
+# three calls, and "a lane that never raises" should not depend on which OTHER
+# check happens to run before it.
 
 
 def test_a_corrupt_manifest_verse_block_does_not_crash_the_lane(tmp_path):
-    """`manifest.json`'s `verse` key as a LIST. `x or {}` does not catch this --
-    a non-empty list is truthy and reaches a `.get()` that raises -- and the
-    manifest is not jsonschema-validated at runtime, so nothing upstream
-    refuses it."""
+    """`manifest.json`'s `verse` key as a LIST -- the one shape in this class
+    that IS reachable, because the lane reads the manifest before the
+    completeness gate that would otherwise report the corruption, and the
+    manifest is not jsonschema-validated at runtime. `x or {}` does not catch
+    it: a non-empty list is truthy and reaches a `.get()` that raises."""
     root = _office_root(tmp_path, footnote_target=f"{CHAIRMAN_RU}м палаты.")
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     manifest["verse"] = ["wrong"]
@@ -3066,14 +3056,31 @@ def test_a_corrupt_manifest_verse_block_does_not_crash_the_lane(tmp_path):
     assert "footnotes['1']" in lines[0]
 
 
-# The SEGPACK side of the same class is deliberately NOT tested, and this is a
-# measurement rather than an omission. A segpack whose `footnotes` is a mapping,
-# or whose verse `parent_block` is unhashable, never reaches any WARN check:
-# hard check 1 calls `validate_draft.validate()` first, which dies on the same
-# input at validate_draft.py:563 and :622 respectively. That is pre-existing and
-# out of this change's scope. The type guards in `term_carriers()` are kept
-# anyway -- they cost three `isinstance` calls -- because "a lane that never
-# raises" should not depend on which OTHER check happens to run before it.
+def test_the_html_projection_is_linear_on_malformed_markup():
+    """A run of `<` with no terminator must not take quadratic time.
+
+    `<[^>]*>` restarts a full end-of-string scan at every opener: measured on
+    this machine, 120 000 consecutive `<` cost 5.18s against 0.001s for
+    `<[^<>]*>`. A segpack is LLM-written and hand-editable, and a stall in an
+    ADVISORY lane blocks W7 before it prints the two HARD verdicts.
+
+    Asserted on the shipped function directly rather than through a subprocess,
+    and with a budget two orders of magnitude above the fixed version's cost, so
+    the case is decided by the regex's complexity class and not by how loaded
+    this machine happens to be. The two spellings produce IDENTICAL output on
+    real markup, which is why no behavioural assertion can stand in for this
+    one -- pinned here alongside the timing so a future edit cannot satisfy the
+    budget by changing what the projection returns."""
+    fa = load_final_audit_module()
+    block = {"source_html": "<" * 120000}
+    start = time.monotonic()
+    fa._carrier_source_text(block)
+    elapsed = time.monotonic() - start
+    assert elapsed < 2.0, f"de-tagging 120k unterminated '<' took {elapsed:.2f}s"
+
+    assert fa._carrier_source_text(
+        {"source_html": '<p title="x">Le <em>president</em></p>'}
+    ) == " Le  president  "
 
 
 if __name__ == "__main__":

@@ -651,14 +651,14 @@
               "source_form": {
                 "description": "The source-language term to look for in a carrier's own source text. Deliberately no id and no message field: unlike a forbidden_patterns regex, this string is readable on its own and is echoed verbatim in the WARN line, so a separate identifier would name what is already named.",
                 "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
+                "pattern": "\\S",
+                "maxLength": 200
               },
               "target_form": {
                 "description": "The frozen target-language rendering, or the INVARIANT part of it (a stem) when the target language inflects by suffix. A carrier translating source_form without containing this string is what WARN 6 reports.",
                 "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
+                "pattern": "\\S",
+                "maxLength": 200
               }
             }
           }
