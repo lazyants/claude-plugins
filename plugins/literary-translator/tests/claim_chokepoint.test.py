@@ -854,9 +854,10 @@ def test_a_normal_claim_record_is_written_byte_identically_after_the_encode_move
 
 
 # --------------------------------------------------------------------------- #
-# D8's CROSS-RUN half at the DEFAULT chokepoint. codex_job.py is launched
-# directly by mass-translate-wf.template.js, so this guard -- not the optional
-# dispatch driver's -- is the one on the shipped path. It had the identical
+# D8's CROSS-RUN half at the codex_job.py chokepoint. codex_job.py is launched
+# directly by mass-translate-wf.template.js (W5's fallback launcher since
+# #516), so this guard -- not the segment dispatch driver's -- is the one on
+# that path. It had the identical
 # self-namespace defect: _claim_state() built runs/<self.run_id>/.claimed.<seg>
 # and CLAIM_ABSENT permitted the translate.
 # --------------------------------------------------------------------------- #

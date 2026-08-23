@@ -1455,7 +1455,7 @@ def test_fix_prompt_actual_rendered_text_preserves_the_claimed_token_byte_for_by
 def test_default_path_has_no_deterministic_draft_token_recheck_after_a_fix(tmp_path):
     """Characterization test (PLAN.md D9 and the Tests entry "D9's default-
     path shape"): pins the actual protection GAP the byte-for-byte prompt
-    line above is compensating for. On the DEFAULT template path there is
+    line above is compensating for. On the fallback template path there is
     exactly one code site that ever runs `draft_ready.py --expect-token`
     (translateAcceptCmd, the translate wait poll) and it never runs again
     after a fix round -- `runRound` goes straight from `callFix()` to the

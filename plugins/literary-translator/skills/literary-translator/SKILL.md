@@ -2609,8 +2609,13 @@ automates the hand-off. The default W5 loop is therefore: launch the driver →
 read its printed JSON → perform ONE Claude fix turn per `needs_fix` segment
 using the prompt that JSON carries → re-launch the driver, which re-derives
 each segment's state from durable disk facts (`derive_next_action()`) and
-picks up at the next review round → repeat until the summary shows no
-`needs_fix` left → run the batch-final completeness check below. When a
+picks up at the next review round → repeat until the summary reports
+neither `needs_fix` NOR `failed` → run the batch-final completeness check
+below. "No `needs_fix`" alone is not the completion condition: a segment
+whose translate or review FAILED produces no fix prompt to act on, and the
+driver still exits successfully carrying it in `summary.failed`. A batch
+holding a failure is unfinished, and that id belongs in no completeness
+claim. When a
 segment's review comes back not-clean, the driver stops at that segment and
 returns `outcome: "needs_fix"` — the round label, the findings, and the exact
 rendered fix prompt — then moves on/exits without fixing it (applying
@@ -2663,18 +2668,23 @@ python3 {durable_root}/scripts/ledger_merge.py \
     --expected-segs SEG1,SEG2,... --run-token RUN_ID
 ```
 
-Both values come out of the driver's own printed JSON: `run_id`, and the ids
-it dispatched (`segs`). Two things follow from what the flags actually check.
-**Name only ids you are claiming CONVERGED.** A `needs_fix` or `failed` id
-already has an `in_progress` fragment, so it satisfies the completeness half
-silently and is then SKIPPED by the token re-assertion (which runs only for a
-`converged` entry) — naming it buys nothing and makes an incomplete batch
-read as a verified one. **Name only ids dispatched under THAT `run_id`.** The
-re-assertion reconstructs `<run_token>:<seg>` per id, so ids stamped by an
-earlier run fail it. Across `needs_fix` re-invocations that means the union
-of `segs` from every invocation reporting the SAME `run_id`; an invocation
-that printed a different `run_id` (`resume: false`) began a new batch, and
-the list starts over with it.
+Both values come out of the driver's own printed JSON: `run_id`, and its
+`summary.converged` ids. Two things follow from what the flags actually
+check. **Name the CONVERGED ids, not every id you dispatched.** The
+token/sha re-assertion runs ONLY for an entry the merge materializes as
+`converged`; for anything else it is skipped, while the completeness half is
+satisfied by whatever fragment happens to exist — so a `needs_fix` or
+`failed` id in the list can make an unfinished batch read as verified. The
+skip is not guaranteed either, and that is the second reason not to reach
+for `segs`: a unit stale on draft drift alone is still materialized
+`converged`, so a same-run re-review of one leaves the older fragment in
+place and the re-assertion RUNS and refuses on the sha. **Name only ids
+converged under THAT `run_id`.** The re-assertion reconstructs
+`<run_token>:<seg>` per id, so an id stamped by an earlier run fails it.
+Across `needs_fix` re-invocations that means the union of what those
+invocations reported converged under the SAME `run_id`; an invocation that
+printed a different `run_id` (`resume: false`) began a new batch, and the
+list starts over with it.
 
 **When the finding is WRONG (#461) — rejecting a verdict instead of
 applying it.** Since #532 the fix turn refuses a finding it cannot substantiate

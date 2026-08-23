@@ -92,6 +92,11 @@ def test_w5_discloses_what_the_default_path_does_not_carry():
     assert "What the default path does NOT carry" in w5
     assert "a driver-mediated fix turn is outside it entirely" in w5
     assert "(2) The batch-final completeness merge" in w5
+    # The heading and the numbered label are markers: flipping the claim
+    # under them from "does NOT" to "does" leaves both in place. The
+    # substantive sentence is what these two pin.
+    assert "Nothing afterwards checks that only `segments/<seg>.draft.json`" in w5
+    assert "it does NOT perform the batch-final" in w5
 
 
 def test_the_fix_turn_is_a_step_of_the_default_loop():
@@ -111,12 +116,15 @@ def test_the_batch_final_completeness_check_is_a_step_not_an_extra():
     assert "Last step of the batch, and it is the caller's" in w5
     assert "--expected-segs SEG1,SEG2,... --run-token RUN_ID" in w5
     assert "a driver run is not complete when the driver exits" in w5
+    # The completion condition is BOTH empty, not just needs_fix: a failed
+    # segment yields no fix prompt and the driver still exits successfully.
+    assert "neither `needs_fix` NOR `failed`" in w5
     # Both misuse directions, each verified against ledger_merge.py's own
     # semantics: a non-converged id is SKIPPED by the token re-assertion
     # (which runs only for a `converged` entry), and an id stamped by an
     # earlier run fails the reconstructed `<run_token>:<seg>` comparison.
-    assert "Name only ids you are claiming CONVERGED" in w5
-    assert "Name only ids dispatched under THAT `run_id`" in w5
+    assert "Name the CONVERGED ids, not every id you dispatched" in w5
+    assert "Name only ids converged under THAT `run_id`" in w5
 
 
 def test_the_retired_designations_are_gone():
@@ -127,11 +135,11 @@ def test_the_retired_designations_are_gone():
     # for a designation.
     w5 = _w5_section()
     for retired in (
-        "Optional dispatch path",
+        "Optional dispatch path — `segment_dispatch_driver.py`",
         "remains W5's DEFAULT dispatch mechanism",
         "is an ALTERNATIVE, not a replacement",
         "Switching W5 over to it by default is deferred to a later step",
-        "use it only if you deliberately choose to",
+        "use it only if you deliberately choose to, and never against the same",
         "The driver cannot perform the fix step, and nothing today automates",
     ):
         assert retired not in w5, (

@@ -1035,7 +1035,7 @@ def claim_refusal_for_translate(ctx: "DispatchContext", seg: str) -> "str | None
     Placed BEFORE process_segment()'s own `write_ledger(..., {"status":
     "in_progress"})` translate-branch write (never after), so a refusal
     here loses neither the draft bytes nor the ledger fragment -- unlike
-    the default template path's own chokepoint, whose own residual
+    the fallback template path's own chokepoint, whose own residual
     section states plainly that recordLedgerCall() already ran by the
     time codex_job.py's refusal could fire.
 
