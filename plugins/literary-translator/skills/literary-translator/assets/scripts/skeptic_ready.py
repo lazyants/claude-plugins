@@ -205,6 +205,46 @@ import unicodedata
 from collections import Counter
 from pathlib import Path
 
+# Importing a sibling module writes scripts/__pycache__/*.pyc. Several
+# entrypoints here promise not to write anything (cache_key.py) or promise ZERO
+# filesystem writes in dry-run (backfill_resume_gate_ack.py), so the whole set
+# opts out uniformly rather than case by case.
+sys.dont_write_bytecode = True
+
+
+# --- the shared one-line JSON serialiser (#369) -----------------------------
+# Loaded by EXACT PATH, never `import json_stdout`. A bare sibling import
+# resolves through the global sys.modules cache regardless of which staged copy
+# the CALLER intended, so one process that stages several durable roots would
+# bind the FIRST root's copy for all of them. exec_module() opens this file's
+# own sibling or raises -- the loud failure the staging discipline depends on,
+# and it needs no cache eviction to get there. `Path(__file__).absolute()`
+# rather than `.resolve()`: the unresolved form is what lets a caller's own
+# no-follow symlink logic still see the path it was handed.
+import importlib.util as _importlib_util
+
+_JSON_STDOUT_PATH = Path(__file__).absolute().parent / "json_stdout.py"
+try:
+    _json_stdout_spec = _importlib_util.spec_from_file_location(
+        "json_stdout", _JSON_STDOUT_PATH
+    )
+    if _json_stdout_spec is None or _json_stdout_spec.loader is None:
+        raise ImportError(f"no loader for {_JSON_STDOUT_PATH}")
+    _json_stdout = _importlib_util.module_from_spec(_json_stdout_spec)
+    # OSError, not ImportError alone: spec_from_file_location() happily builds a
+    # spec for a file that is not there, and it is exec_module() that raises
+    # FileNotFoundError when it opens the source.
+    _json_stdout_spec.loader.exec_module(_json_stdout)
+except (ImportError, OSError) as _json_stdout_exc:  # pragma: no cover - staging error path
+    sys.exit(
+        f"skeptic_ready.py: cannot load json_stdout.py from {_JSON_STDOUT_PATH} "
+        f"({_json_stdout_exc}).\n"
+        "json_stdout.py must be installed alongside skeptic_ready.py under "
+        "${durable_root}/scripts/ -- Step 0a's copy pass places it there."
+    )
+
+dumps_line = _json_stdout.dumps_line
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPT_DIR.parent
 SCHEMAS_DIR_DEFAULT = DURABLE_ROOT / "schemas"
@@ -485,75 +525,35 @@ def _atomic_write_json(path: Path, doc) -> None:
     tmp_path.replace(path)  # atomic on the same filesystem
 
 
-# CPython's str.splitlines() boundary set -- the SAME 10-member candidate
-# list render_obsidian.py's _MENTIONS_LINE_BREAK_CHARS and skeptic_report.py's
-# _LINE_BREAK_CHARS restate, stable across Python versions (nothing outside
-# this list is ever a splitlines() boundary, so nothing outside it can ever
-# need the escape below). Built entirely from chr()/\xXX escapes for
-# codepoints <= 0xFF plus chr() calls for U+2028/U+2029 -- never a \uXXXX
-# string-literal escape or a pasted glyph, both of which have silently
-# degraded before (see the unicode-boundary-text-authoring project skill).
-_SPLITLINES_BOUNDARY_CANDIDATES = "\n\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029)
-
-_BACKSLASH = chr(92)  # a literal backslash inside a string literal risks being
-# parsed back into the very character this module must instead emit as
-# PLAIN escaped text -- chr(92) sidesteps that ambiguity entirely.
-
-
-def _compute_line_separator_escapes() -> dict:
-    """DERIVES (round 5, F1/HIGH -- does not hand-list) which of
-    ``_SPLITLINES_BOUNDARY_CANDIDATES`` ``json.dumps(..., ensure_ascii=
-    False)`` actually leaves RAW: every codepoint < 0x20 (``\\n \\r \\v \\f
-    \\x1c \\x1d \\x1e``) is ALREADY backslash-escaped by ``json.dumps``
-    itself, unconditionally, regardless of ``ensure_ascii`` -- only the
-    candidates >= 0x20 (U+0085 NEL, U+2028, U+2029) survive it raw and need
-    an escape from THIS function. A hand-typed two-member dict here
-    (U+2028/U+2029 only) is exactly how round 5's F1 happened: it silently
-    missed NEL, which ``str.splitlines()`` also treats as a boundary. This
-    computation is the cheap equivalent of a full 0x0-0x10FFFF brute-force
-    scan (which tests/skeptic_ready.test.py actually runs, mirroring the
-    round-5 security lane's own scan, to PROVE the reduced candidate set
-    above is complete) -- filtering 10 known candidates by the real
-    predicate, rather than trusting either a fixed count or a fixed list of
-    which ones need it. If a future Python version ever changed which
-    codepoints ``json.dumps`` escapes, this recomputes correctly; a hand-
-    listed dict would not."""
-    escapes = {}
-    for ch in _SPLITLINES_BOUNDARY_CANDIDATES:
-        if ch in json.dumps(ch, ensure_ascii=False):
-            escapes[ch] = _BACKSLASH + "u" + format(ord(ch), "04x")
-    return escapes
-
-
-_LINE_SEPARATOR_ESCAPES = _compute_line_separator_escapes()
+# The one-line JSON serialiser used to live HERE, in full: 1.16.2 fixed #369's
+# class inside this file alone, so this file owned the boundary-candidate list,
+# the derivation of which candidates json.dumps(ensure_ascii=False) leaves raw,
+# and the escape itself. #369 closed the same class at the other 47 stdout
+# sites in this directory, and a second copy of a security-relevant routine is
+# how the two drift -- so json_stdout.py now owns all three and this file
+# delegates. The names below stay exactly as they were: they are this module's
+# published surface for tests/skeptic_ready.test.py, whose 0x0-0x10FFFF
+# brute-force completeness scan is the proof that the shared candidate set is
+# complete and must keep pointing at whatever this module actually uses.
+_LINE_SEPARATOR_ESCAPES = _json_stdout.LINE_SEPARATOR_ESCAPES
 
 
 def _json_dumps_line(obj) -> str:
     """``json.dumps(obj, ensure_ascii=False)``, but also escaping every
-    ``str.splitlines()`` boundary character ``json.dumps(ensure_ascii=
-    False)`` leaves raw (see ``_compute_line_separator_escapes``'s own
-    docstring for the derivation and why round 5 found a hand-typed
-    two-member set here incomplete -- currently U+0085 NEL, U+2028 LINE
-    SEPARATOR, and U+2029 PARAGRAPH SEPARATOR, per ``_LINE_SEPARATOR_
-    ESCAPES``, never re-hand-listed here). JSON permits a literal line/
-    paragraph/NEL separator inside a string, unlike a raw control character
-    below 0x20, which ``json.dumps`` always backslash-escapes regardless of
-    ``ensure_ascii``. Left raw, a ``source_form`` or rationale carrying ANY
-    of these turns ONE JSON line into what ``str.splitlines()`` reads as
-    TWO (or more) physical lines, while ``str.split("\\n")`` still sees one
-    -- exactly the accept-sentinel shape the wait poll's line-oriented
-    grammar reads for. The JS sentinel parser only ever splits on ``\\n``
-    and is immune; the exposure is a reading LLM agent (skeptic/codex)
-    downstream of this CLI's stdout -- unfiled: #360 covers this file's
-    unbounded diagnostic VOLUME (message length / list count), a distinct
-    exposure from a boundary character forging an extra line. A
-    ``\\uXXXX`` escape round-trips through every JSON parser identically to
-    the raw character, so this is a small, behavior-preserving change:
-    only the on-the-wire bytes differ, never the decoded value."""
-    text = json.dumps(obj, ensure_ascii=False)
-    for raw, escaped in _LINE_SEPARATOR_ESCAPES.items():
-        text = text.replace(raw, escaped)
-    return text
+    ``str.splitlines()`` boundary character it leaves raw -- U+0085 NEL,
+    U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR. Delegates to
+    ``json_stdout.dumps_line``; see that module for the derivation and for
+    why a hand-typed set was found incomplete.
+
+    Left raw, a ``source_form`` or rationale carrying any of these turns ONE
+    JSON line into what ``str.splitlines()`` reads as TWO, while
+    ``str.split("\\n")`` still sees one -- exactly the accept-sentinel shape
+    the wait poll's line-oriented grammar reads for. The JS sentinel parser
+    only ever splits on ``\\n`` and is immune; the exposure is a reading LLM
+    agent (skeptic/codex) downstream of this CLI's stdout. #360 covers this
+    file's unbounded diagnostic VOLUME, a distinct exposure from a boundary
+    character forging an extra line."""
+    return dumps_line(obj)
 
 
 def _load_schema_document(schema_path: Path) -> dict:

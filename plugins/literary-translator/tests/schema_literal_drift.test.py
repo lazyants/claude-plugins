@@ -339,6 +339,11 @@ def _build_durable_root(tmp_path: Path) -> Path:
     scripts_dir = durable_root / "scripts"
     scripts_dir.mkdir()
     (scripts_dir / "cache_key.py").write_bytes(CACHE_KEY_SCRIPT.read_bytes())
+    # json_stdout.py (#369): cache_key.py loads it by exact path from beside
+    # itself, so a durable scripts/ without it exits before doing any work.
+    (scripts_dir / "json_stdout.py").write_bytes(
+        (CACHE_KEY_SCRIPT.parent / "json_stdout.py").read_bytes()
+    )
     (scripts_dir / "bootstrap_names.py").write_text("# stub bootstrap_names\n", encoding="utf-8")
     (scripts_dir / "segpack.py").write_text("# stub segpack\n", encoding="utf-8")
 

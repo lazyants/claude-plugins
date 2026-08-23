@@ -247,6 +247,9 @@ def make_segpack_root(tmp_path) -> Path:
     shutil.copy2(SEGPACK_SCRIPT, scripts_dir / "segpack.py")
     shutil.copy2(BOOTSTRAP_NAMES_SCRIPT, scripts_dir / "bootstrap_names.py")
     shutil.copy2(CANON_SENSES_SCRIPT, scripts_dir / "canon_senses.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CANON_SENSES_SCRIPT.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     return root
 
 
@@ -405,6 +408,9 @@ def make_all_mode_root(tmp_path, unsafe_seg: str) -> Path:
     shutil.copy2(SEGPACK_SCRIPT, scripts_dir / "segpack.py")
     shutil.copy2(BOOTSTRAP_NAMES_SCRIPT, scripts_dir / "bootstrap_names.py")
     shutil.copy2(CANON_SENSES_SCRIPT, scripts_dir / "canon_senses.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CANON_SENSES_SCRIPT.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     languages_dir = root / "languages"
     languages_dir.mkdir()

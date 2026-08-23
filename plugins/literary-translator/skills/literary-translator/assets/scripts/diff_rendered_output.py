@@ -141,6 +141,46 @@ import tempfile
 from itertools import zip_longest
 from pathlib import Path
 
+# Importing a sibling module writes scripts/__pycache__/*.pyc. Several
+# entrypoints here promise not to write anything (cache_key.py) or promise ZERO
+# filesystem writes in dry-run (backfill_resume_gate_ack.py), so the whole set
+# opts out uniformly rather than case by case.
+sys.dont_write_bytecode = True
+
+
+# --- the shared one-line JSON serialiser (#369) -----------------------------
+# Loaded by EXACT PATH, never `import json_stdout`. A bare sibling import
+# resolves through the global sys.modules cache regardless of which staged copy
+# the CALLER intended, so one process that stages several durable roots would
+# bind the FIRST root's copy for all of them. exec_module() opens this file's
+# own sibling or raises -- the loud failure the staging discipline depends on,
+# and it needs no cache eviction to get there. `Path(__file__).absolute()`
+# rather than `.resolve()`: the unresolved form is what lets a caller's own
+# no-follow symlink logic still see the path it was handed.
+import importlib.util as _importlib_util
+
+_JSON_STDOUT_PATH = Path(__file__).absolute().parent / "json_stdout.py"
+try:
+    _json_stdout_spec = _importlib_util.spec_from_file_location(
+        "json_stdout", _JSON_STDOUT_PATH
+    )
+    if _json_stdout_spec is None or _json_stdout_spec.loader is None:
+        raise ImportError(f"no loader for {_JSON_STDOUT_PATH}")
+    _json_stdout = _importlib_util.module_from_spec(_json_stdout_spec)
+    # OSError, not ImportError alone: spec_from_file_location() happily builds a
+    # spec for a file that is not there, and it is exec_module() that raises
+    # FileNotFoundError when it opens the source.
+    _json_stdout_spec.loader.exec_module(_json_stdout)
+except (ImportError, OSError) as _json_stdout_exc:  # pragma: no cover - staging error path
+    sys.exit(
+        f"diff_rendered_output.py: cannot load json_stdout.py from {_JSON_STDOUT_PATH} "
+        f"({_json_stdout_exc}).\n"
+        "json_stdout.py must be installed alongside diff_rendered_output.py under "
+        "${durable_root}/scripts/ -- Step 0a's copy pass places it there."
+    )
+
+dumps_line = _json_stdout.dumps_line
+
 # ---------------------------------------------------------------------------
 # Self-anchoring: this script always lives at {durable_root}/scripts/<name>.py.
 # It never assumes cwd == durable_root, and never takes a --durable-root flag.
@@ -400,7 +440,7 @@ def emit(exit_code, reason, extra=None):
     payload = {"reason": reason}
     if extra:
         payload.update(extra)
-    print(json.dumps(payload, ensure_ascii=False))
+    print(dumps_line(payload))
     return exit_code
 
 
@@ -468,7 +508,7 @@ def main(argv=None):
     try:
         return _run(args)
     except Exception as exc:  # pragma: no cover -- defensive catch-all
-        print(json.dumps({"success": False, "error": f"unexpected error: {exc}"}, ensure_ascii=False))
+        print(dumps_line({"success": False, "error": f"unexpected error: {exc}"}))
         return 1
 
 
@@ -487,11 +527,11 @@ def _run(args):
         try:
             candidate_dir = resolve_default_candidate_dir()
         except SystemExit as exc:
-            print(json.dumps({
+            print(dumps_line({
                 "success": False,
                 "reason": "profile_precondition",
                 "error": f"profile.yml failed to load/validate via cache_key.load_profile (exit {exc.code})",
-            }, ensure_ascii=False))
+            }))
             return 2
         except output_resolve.OutputResolveError as exc:
             # output.destination reached through a symlinked path component

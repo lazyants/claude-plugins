@@ -241,6 +241,9 @@ def make_root(tmp_path, output_target="obsidian", entries=None, block_text=None,
         )
     for src in sources:
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     schemas_dir = root / "schemas"
     schemas_dir.mkdir()
     shutil.copy2(LINK_GROUPS_SCHEMA_SRC, schemas_dir / LINK_GROUPS_SCHEMA_SRC.name)

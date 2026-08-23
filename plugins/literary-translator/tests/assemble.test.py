@@ -306,6 +306,9 @@ def make_root(
         CACHE_KEY_SRC,
     ):
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     profile = default_profile(
         verse_mode=verse_mode, output_target=output_target, custom_renderer_path=custom_renderer_path,
@@ -1930,6 +1933,9 @@ def test_profile_precondition_emits_one_json_line_on_missing_ownership_marker(tm
         CACHE_KEY_SRC,
     ):
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     # Deliberately NO profile.yml, NO .literary-translator-root.json marker.
     # cache_key.py IS copied (#492): this test is about a missing OWNERSHIP
     # MARKER, and leaving assemble.py's newest sibling import unsatisfied
@@ -2052,6 +2058,9 @@ def test_dependency_precondition_emits_one_json_line_when_validate_draft_exits_a
     scripts_dir.mkdir(parents=True)
     for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC):
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "validate_draft.py").write_text(
         "import sys\n"
         "print('ERROR: poisoned validate_draft.py dependency preflight', file=sys.stderr)\n"

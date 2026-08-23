@@ -158,6 +158,9 @@ def make_durable_root(tmp_path):
     scripts_dir.mkdir(parents=True)
     shutil.copy2(SELECT_SCRIPT_SRC, scripts_dir / "select_segments.py")
     shutil.copy2(LEDGER_MERGE_SRC, scripts_dir / "ledger_merge.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(LEDGER_MERGE_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     schemas_dir = root / "schemas"
@@ -1395,6 +1398,10 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "select_segments.py"
     shutil.copy2(SELECT_SCRIPT_SRC, orphan_script)
+    # json_stdout.py (#369): this fixture stages ONE script on purpose, and
+    # the property under test needs it to START -- without its sibling it
+    # would exit on the missing helper instead, which is a different test.
+    shutil.copy2(SELECT_SCRIPT_SRC.parent / "json_stdout.py", orphan_script.parent / "json_stdout.py")
 
     proc = run_select_from(orphan_script, "--allow-empty")
 
@@ -1463,6 +1470,9 @@ def make_trusted_plugin_root(tmp_path, name="trusted_plugin_install"):
     plugin_scripts_dir = plugin_root / "assets" / "scripts"
     plugin_scripts_dir.mkdir(parents=True)
     shutil.copy2(LEDGER_MERGE_SRC, plugin_scripts_dir / "ledger_merge.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(LEDGER_MERGE_SRC.parent / "json_stdout.py", plugin_scripts_dir / "json_stdout.py")
     (plugin_scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
     return plugin_root
 
@@ -1625,6 +1635,10 @@ def test_durable_root_and_plugin_root_are_independently_resolved(tmp_path):
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "select_segments.py"
     shutil.copy2(SELECT_SCRIPT_SRC, orphan_script)
+    # json_stdout.py (#369): this fixture stages ONE script on purpose, and
+    # the property under test needs it to START -- without its sibling it
+    # would exit on the missing helper instead, which is a different test.
+    shutil.copy2(SELECT_SCRIPT_SRC.parent / "json_stdout.py", orphan_script.parent / "json_stdout.py")
 
     proc = run_select_from(
         orphan_script,

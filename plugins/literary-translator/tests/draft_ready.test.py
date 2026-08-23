@@ -49,6 +49,9 @@ def make_durable_root(tmp_path, name="durable_root"):
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(SCRIPT_SRC, scripts_dir / "draft_ready.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPT_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "segments").mkdir()
     return root
 

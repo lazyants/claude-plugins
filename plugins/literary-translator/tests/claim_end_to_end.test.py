@@ -268,6 +268,9 @@ def make_durable_root(tmp_path, profile=None):
         ("claim_record.py", CLAIM_RECORD_SRC),
     ):
         shutil.copy2(src, scripts_dir / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     shutil.copytree(SCHEMAS_SRC, root / "schemas")
@@ -1013,6 +1016,9 @@ def make_driver_root(tmp_path, seg):
     scripts_dir = root / "scripts"
     shutil.copy2(SEGMENT_DISPATCH_DRIVER_SRC, scripts_dir / "segment_dispatch_driver.py")
     shutil.copy2(RESUME_SETUP_SRC, scripts_dir / "resume_setup.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(RESUME_SETUP_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "resolve_codex_companion.py").write_text(
         FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
     (scripts_dir / "codex_job.py").write_text(FAKE_CODEX_JOB_PY, encoding="utf-8")

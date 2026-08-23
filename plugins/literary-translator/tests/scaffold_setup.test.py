@@ -103,6 +103,10 @@ EXPECTED_ORCHESTRATION_BUNDLE_MEMBERS = (
     # AND select_segments.py imports it (transitive-import invisibility).
     "claim_record.py",
     "draft_ready.py",
+    # #369: the THIRD double registration, same transitive-import reason --
+    # ledger_merge.py and select_segments.py load it here, six plugin members
+    # load it there.
+    "json_stdout.py",
     "ledger_merge.py",
     "language_smoke_report.py",
     # #446: registered in BOTH bundles as well -- it owns the dispatch gate
@@ -899,10 +903,11 @@ def test_verify_detects_orchestration_drift(tmp_path):
 
 
 def test_verify_reports_every_drifted_member(tmp_path):
-    """Every offender in ONE run, not the first -- and claim_record.py, the
-    member deliberately registered in BOTH tuples, named EXACTLY once. That
-    single count is what pins the dedup: reporting it twice would present one
-    drifted file as two."""
+    """Every offender in ONE run, not the first -- and claim_record.py, one of
+    the THREE members deliberately registered in BOTH tuples (select_segments.py
+    since #446 and json_stdout.py since #369 are the others), named EXACTLY once.
+    That single count is what pins the dedup: reporting it twice would present
+    one drifted file as two."""
     root, plugin_copy = _drift_ready_pair(tmp_path)
     # One member from each tuple plus the one registered in BOTH: an
     # implementation that aggregated the plugin tuple but reported only the

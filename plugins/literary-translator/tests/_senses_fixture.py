@@ -78,6 +78,9 @@ def stage_consumer(root: Path, name: str) -> Path:
     consumer_dst = scripts_dir / name
     shutil.copy2(consumer_src, consumer_dst)
     shutil.copy2(CANON_SENSES_SCRIPT, scripts_dir / "canon_senses.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CANON_SENSES_SCRIPT.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     shutil.copy2(CANON_SENSES_SCHEMA, schemas_dir / "canon-senses.schema.json")
     return consumer_dst
 

@@ -83,6 +83,9 @@ def make_root(tmp_path, v1_scope: str = "segment_drafts_and_audit") -> Path:
     scripts_dir.mkdir(parents=True)
     for src in (VALIDATE_ASSEMBLED_SRC, VALIDATE_DRAFT_SRC):
         _copy(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every routed script above loads it by exact
+    # path from its own directory and sys.exit()s if the sibling is absent.
+    _copy(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     profile = {"output": {"v1_scope": v1_scope}}
     (root / "profile.yml").write_text(yaml.safe_dump(profile), encoding="utf-8")

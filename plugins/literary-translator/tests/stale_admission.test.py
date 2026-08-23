@@ -191,6 +191,9 @@ def make_durable_root(tmp_path):
         ("claim_record.py", CLAIM_RECORD_SRC),
     ):
         shutil.copy2(src, scripts_dir / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     shutil.copytree(SCHEMAS_SRC, root / "schemas")
@@ -1002,6 +1005,9 @@ def make_driver_fixture_root(tmp_path):
     shutil.copy2(RESUME_SETUP_SRC, scripts_dir / "resume_setup.py")
     shutil.copy2(LEDGER_UPDATE_SRC, scripts_dir / "ledger_update.py")
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRAFT_SHA1_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
     (scripts_dir / "resolve_codex_companion.py").write_text(FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
     (scripts_dir / "draft_ready.py").write_text(FAKE_DRIVER_DRAFT_READY_PY, encoding="utf-8")

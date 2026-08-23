@@ -290,6 +290,9 @@ def stage_fixture(tmp_path: Path, mentions_enabled: bool, label: str) -> Path:
     scripts_dir.mkdir(parents=True)
     for name in _REQUIRED_SCRIPTS:
         shutil.copy2(SCRIPTS_SRC_DIR / name, scripts_dir / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     # canon_senses.py/profile_validate.py/validate_extraction.py's own
     # loaders self-anchor their schema lookups to `${their_own_root}/
@@ -562,6 +565,9 @@ def test_staged_profile_is_schema_valid(tmp_path, monkeypatch):
     # assemble/render/gate pipeline _REQUIRED_SCRIPTS stages -- copied
     # ad hoc here, the one test that needs it.
     shutil.copy2(SCRIPTS_SRC_DIR / "profile_validate.py", root / "scripts" / "profile_validate.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", root / "scripts" / "json_stdout.py")
     monkeypatch.setenv("LT_PROFILE_VALIDATE_ALLOW_TMP_ROOT", "1")
     proc = subprocess.run(
         [sys.executable, str(root / "scripts" / "profile_validate.py"), "--profile", str(root / "profile.yml")],

@@ -187,6 +187,9 @@ def make_durable_root(tmp_path, name="durable_root"):
         ("reject_review.py", REJECT_REVIEW_SRC),
     ):
         shutil.copy2(src, scripts_dir / script_name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     shutil.copytree(SCHEMAS_SRC, root / "schemas")
@@ -1602,6 +1605,9 @@ def stage_pre_write_sync_point(root):
 def stage_post_write_sync_point(root):
     scripts = root / "scripts"
     shutil.copy2(CLAIM_RECORD_SRC, scripts / "claim_record_real.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CLAIM_RECORD_SRC.parent / "json_stdout.py", scripts / "json_stdout.py")
     (scripts / "claim_record.py").write_text(SYNC_CLAIM_RECORD_PY, encoding="utf-8")
 
 

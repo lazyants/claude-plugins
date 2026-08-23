@@ -133,6 +133,9 @@ def make_durable_root(tmp_path) -> Path:
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(CACHE_KEY_SRC, scripts_dir / "cache_key.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CACHE_KEY_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     import yaml
 
@@ -287,6 +290,9 @@ def _stage_all_bundle_members(scripts_dir: Path) -> None:
             shutil.copy2(TEMPLATES_SRC_DIR / name, scripts_dir / name)
         else:
             shutil.copy2(SCRIPTS_SRC_DIR / name, scripts_dir / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
 
 
 def test_canon_senses_py_byte_edit_changes_bundle_hash_only_when_registered(tmp_path):
@@ -371,6 +377,9 @@ def make_select_segments_root(tmp_path) -> Path:
     scripts_dir.mkdir(parents=True)
     shutil.copy2(SELECT_SEGMENTS_SRC, scripts_dir / "select_segments.py")
     shutil.copy2(LEDGER_MERGE_SRC, scripts_dir / "ledger_merge.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(LEDGER_MERGE_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     schemas_dir = root / "schemas"

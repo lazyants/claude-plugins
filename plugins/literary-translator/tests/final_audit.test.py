@@ -257,6 +257,9 @@ def make_durable_root(
     scripts_dir.mkdir(parents=True)
     for name in SCRIPTS_TO_COPY:
         shutil.copy2(SCRIPTS_SRC_DIR / name, scripts_dir / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     # cache_key.py's derivation_bundle_hash hashes this file's raw bytes
     # alongside bootstrap_names.py -- content is irrelevant, only needs to
     # exist (segpack.py itself is never imported by anything in this chain).
@@ -1969,6 +1972,9 @@ def make_trusted_plugin_root(tmp_path, name="trusted_plugin_install") -> Path:
     plugin_scripts_dir.mkdir(parents=True)
     for name_ in ("select_segments.py", "ledger_merge.py", "cache_key.py"):
         shutil.copy2(SCRIPTS_SRC_DIR / name_, plugin_scripts_dir / name_)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", plugin_scripts_dir / "json_stdout.py")
     return plugin_root
 
 

@@ -171,6 +171,11 @@ def _make_durable_root(tmp_path) -> Path:
     for src in sorted(TEMPLATES_SRC_DIR.glob("*.template.js")):
         shutil.copy2(src, scripts_dir / src.name)
         staged += 1
+    # json_stdout.py (#369) needs no line of its own here: this fixture stages
+    # by GLOB over assets/scripts/*.py, exactly as Step 0a does, so the helper
+    # is already among the files copied above -- and it is a PLUGIN_BUNDLE_
+    # MEMBERS entry, so it must be, or the recomputed hash would not match the
+    # marker scaffold_setup.py writes.
 
     # Silent-zero guard: a glob that matched nothing stages a tree that looks
     # exactly like a correctly staged one right up until every hash below

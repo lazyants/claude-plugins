@@ -161,6 +161,9 @@ def make_cache_key_root(tmp_path) -> Path:
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(CACHE_KEY_SCRIPT, scripts_dir / "cache_key.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CACHE_KEY_SCRIPT.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     return root
 
 
@@ -172,6 +175,9 @@ def make_ledger_update_root(tmp_path) -> Path:
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(LEDGER_UPDATE_SCRIPT, scripts_dir / "ledger_update.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(LEDGER_UPDATE_SCRIPT.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     return root
 
 

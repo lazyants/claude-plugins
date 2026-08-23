@@ -56,6 +56,9 @@ def make_root(tmp_path) -> Path:
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(DIFF_SRC, scripts_dir / "diff_rendered_output.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DIFF_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "out").mkdir()
     return root
 
@@ -443,6 +446,12 @@ def _make_root_for_default_candidate_dir(tmp_path, *, poison_cache_key=False) ->
     scripts_dir.mkdir(parents=True)
     shutil.copy2(DIFF_SRC, scripts_dir / "diff_rendered_output.py")
     shutil.copy2(SCRIPTS_SRC_DIR / "output_resolve.py", scripts_dir / "output_resolve.py")
+    # json_stdout.py (#369): staged on BOTH branches, deliberately. The poisoned
+    # branch is about cache_key.py sys.exit()ing at import, and diff_rendered_
+    # output.py itself loads json_stdout.py before it ever reaches that -- so a
+    # helper staged only in the else branch would make the poisoned case fail
+    # for the wrong reason and prove nothing about the preflight under test.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     if poison_cache_key:
         (scripts_dir / "cache_key.py").write_text(
             "import sys\n"
@@ -614,6 +623,9 @@ def test_parent_out_dir_symlink_is_refused_before_baseline_dir_is_created(tmp_pa
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(DIFF_SRC, scripts_dir / "diff_rendered_output.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DIFF_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     external_dir = tmp_path / "external_out_dir"
     external_dir.mkdir()
@@ -794,6 +806,9 @@ def _make_root_for_destination(tmp_path, destination: str) -> Path:
     shutil.copy2(DIFF_SRC, scripts_dir / "diff_rendered_output.py")
     shutil.copy2(SCRIPTS_SRC_DIR / "output_resolve.py", scripts_dir / "output_resolve.py")
     shutil.copy2(SCRIPTS_SRC_DIR / "cache_key.py", scripts_dir / "cache_key.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     profile_path = root / "profile.yml"
     profile_path.write_text(f"output:\n  destination: {destination!r}\n", encoding="utf-8")
     (root / ".literary-translator-root.json").write_text(

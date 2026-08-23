@@ -111,6 +111,9 @@ def make_project(tmp_path) -> Path:
     scripts_dir = root / "scripts"
     for name in STAGED_SCRIPTS:
         shutil.copy2(SCRIPTS_SRC / name, scripts_dir / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     schemas_dir = root / "schemas"
     for name in CANON_SCHEMA_FILES:

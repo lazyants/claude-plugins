@@ -102,11 +102,51 @@ import sys
 import unicodedata
 from pathlib import Path
 
-# Importing the three siblings below would otherwise leave
-# ${durable_root}/scripts/__pycache__/*.pyc behind -- files this script's own
-# contract says it never writes. Set before the imports, which is the only
-# point where it still has any effect.
+# Importing a sibling module writes scripts/__pycache__/*.pyc. Several
+# entrypoints here promise not to write anything (cache_key.py) or promise ZERO
+# filesystem writes in dry-run (backfill_resume_gate_ack.py), so the whole set
+# opts out uniformly rather than case by case.
 sys.dont_write_bytecode = True
+
+
+# --- the shared one-line JSON serialiser (#369) -----------------------------
+# Loaded by EXACT PATH, never `import json_stdout`. A bare sibling import
+# resolves through the global sys.modules cache regardless of which staged copy
+# the CALLER intended, so one process that stages several durable roots would
+# bind the FIRST root's copy for all of them. exec_module() opens this file's
+# own sibling or raises -- the loud failure the staging discipline depends on,
+# and it needs no cache eviction to get there. `Path(__file__).absolute()`
+# rather than `.resolve()`: the unresolved form is what lets a caller's own
+# no-follow symlink logic still see the path it was handed.
+import importlib.util as _importlib_util
+
+_JSON_STDOUT_PATH = Path(__file__).absolute().parent / "json_stdout.py"
+try:
+    _json_stdout_spec = _importlib_util.spec_from_file_location(
+        "json_stdout", _JSON_STDOUT_PATH
+    )
+    if _json_stdout_spec is None or _json_stdout_spec.loader is None:
+        raise ImportError(f"no loader for {_JSON_STDOUT_PATH}")
+    _json_stdout = _importlib_util.module_from_spec(_json_stdout_spec)
+    # OSError, not ImportError alone: spec_from_file_location() happily builds a
+    # spec for a file that is not there, and it is exec_module() that raises
+    # FileNotFoundError when it opens the source.
+    _json_stdout_spec.loader.exec_module(_json_stdout)
+except (ImportError, OSError) as _json_stdout_exc:  # pragma: no cover - staging error path
+    sys.exit(
+        f"verbatim_census.py: cannot load json_stdout.py from {_JSON_STDOUT_PATH} "
+        f"({_json_stdout_exc}).\n"
+        "json_stdout.py must be installed alongside verbatim_census.py under "
+        "${durable_root}/scripts/ -- Step 0a's copy pass places it there."
+    )
+
+dumps_line = _json_stdout.dumps_line
+
+# The three siblings below would otherwise leave ${durable_root}/scripts/
+# __pycache__/*.pyc behind -- files this script's own contract says it never
+# writes. `sys.dont_write_bytecode` is already set at the top of this module for
+# the json_stdout.py load (#369), which is earlier than these imports and so
+# covers them too; a second assignment here would be a no-op.
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPT_DIR.parent
@@ -588,7 +628,7 @@ def main(argv=None):
         # locale) raises UnicodeEncodeError here. Outside, that surfaced as
         # exit 1 -- the one status this script promises never to use for an
         # environment failure.
-        rendered = json.dumps(payload, ensure_ascii=False)
+        rendered = dumps_line(payload)
         print(rendered)
         sys.stdout.flush()
     except CensusError as exc:

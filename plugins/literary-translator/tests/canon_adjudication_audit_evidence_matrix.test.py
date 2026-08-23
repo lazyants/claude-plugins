@@ -72,6 +72,9 @@ def make_durable_root(tmp_path):
     scripts_dir = root / "scripts"
     for dep in _EXTRA_DEP_SCRIPTS:
         shutil.copy2(SCRIPTS_SRC_DIR / dep, scripts_dir / dep)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     shutil.copytree(LANGUAGES_SRC_DIR, root / "languages")
     return root
 

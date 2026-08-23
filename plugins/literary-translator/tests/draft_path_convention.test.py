@@ -215,6 +215,9 @@ def make_validate_draft_root(tmp_path):
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(VALIDATE_DRAFT_SRC, scripts_dir / "validate_draft.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(VALIDATE_DRAFT_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "segments").mkdir()
 
     profile_path = root / "profile.yml"
@@ -305,6 +308,9 @@ def make_draft_ready_root(tmp_path):
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(DRAFT_READY_SRC, scripts_dir / "draft_ready.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRAFT_READY_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "segments").mkdir()
     return root
 
@@ -382,6 +388,9 @@ def make_ledger_update_root(tmp_path):
     # ground-truth draft_sha1 value from the real script (real_draft_sha1()
     # below) instead of reimplementing that canonicalization here.
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRAFT_SHA1_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     shutil.copy2(SCHEMAS_SRC_DIR / "ledger-record-base.schema.json", schemas_dir / "ledger-record-base.schema.json")
     shutil.copy2(SCHEMAS_SRC_DIR / "ledger-fragment.schema.json", schemas_dir / "ledger-fragment.schema.json")
     (root / "segments").mkdir()
@@ -542,6 +551,9 @@ def make_final_audit_scripts_dir(tmp_path):
     shutil.copy2(FINAL_AUDIT_SRC, scripts_dir / "final_audit.py")
     shutil.copy2(VALIDATE_DRAFT_SRC, scripts_dir / "validate_draft.py")
     shutil.copy2(BOOTSTRAP_NAMES_SRC, scripts_dir / "bootstrap_names.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(BOOTSTRAP_NAMES_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "segments").mkdir()
     return root, scripts_dir
 
@@ -618,6 +630,9 @@ def make_draft_sha1_root(tmp_path):
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRAFT_SHA1_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "segments").mkdir()
     return root
 
@@ -1062,6 +1077,9 @@ def make_review_artifact_check_root(tmp_path):
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(REVIEW_ARTIFACT_CHECK_SRC, scripts_dir / "review_artifact_check.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(REVIEW_ARTIFACT_CHECK_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "segments").mkdir()
     return root
 
@@ -1132,6 +1150,8 @@ def _make_module_probe_root(tmp_path, script_src):
     scripts_dir.mkdir(parents=True)
     for src in sorted(SCRIPTS_SRC_DIR.glob("*.py")):
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369) needs no line of its own here: the glob above is
+    # over every *.py in scripts/, and it copies the helper with the rest.
     (root / "segments").mkdir()
     return root, scripts_dir
 

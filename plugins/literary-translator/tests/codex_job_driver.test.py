@@ -2498,6 +2498,9 @@ def make_real_gate_root(tmp_path):
     schemas.mkdir()
     for name in REAL_GATE_SCRIPTS:
         shutil.copy2(SCRIPTS_DIR / name, scripts / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_DIR / "json_stdout.py", scripts / "json_stdout.py")
     shutil.copy2(SCHEMAS_SRC_DIR / "review.schema.json", schemas / "review.schema.json")
     return root
 

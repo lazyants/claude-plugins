@@ -180,6 +180,9 @@ def make_fixture_plugin(tmp_path, *, canon_entry_doc=None, canon_batch_doc=None,
         SCRIPT_PATH.parent / "bootstrap_names.py", scripts_dir / "bootstrap_names.py"
     )
     shutil.copy2(CANON_VALIDATE_PATH, scripts_dir / "canon_validate.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPT_PATH.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     write_json(
         schemas_dir / "canon-entry.schema.json",
         canon_entry_doc if canon_entry_doc is not None else load_json(CANON_ENTRY_SCHEMA_PATH),

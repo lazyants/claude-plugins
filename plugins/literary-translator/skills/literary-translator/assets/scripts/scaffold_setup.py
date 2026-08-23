@@ -104,8 +104,8 @@ SELF_PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 # tests/scaffold_setup.test.py::test_orchestration_members_pinned against a
 # silent desync of resume_setup.py's resume-integrity digest.
 #
-# TWO of the five below are registered in BOTH bundles, deliberately, and a
-# change to either moves two hashes at once. Kept HERE rather than inside the
+# THREE of the six below are registered in BOTH bundles, deliberately, and a
+# change to any one of them moves two hashes at once. Kept HERE rather than inside the
 # tuple so the justification survives a rewrite of the literal, and so a
 # reader meets it before the names -- a double registration is never to be
 # inferred from the list alone.
@@ -123,9 +123,18 @@ SELF_PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 # claim_record.py supplies only the predicate -- so the criterion that
 # registered claim_record.py had always applied to it too. Its exclusion was
 # a deferral, never a decision (see cache_key.py's own comment block).
+#
+# #369: json_stdout.py is the THIRD such double registration, for the identical
+# reason -- ledger_merge.py and select_segments.py, both orchestration members,
+# now load it, and it is also a PLUGIN_BUNDLE_MEMBERS entry because six plugin
+# members load it too. It is deliberately NOT a derivation member:
+# tests/schema_literal_drift.test.py forbids an orchestration/derivation
+# overlap outright, and the module never reaches
+# bootstrap_names.py's durable output either way.
 ORCHESTRATION_BUNDLE_MEMBERS = (
     "claim_record.py",
     "draft_ready.py",
+    "json_stdout.py",
     "ledger_merge.py",
     "language_smoke_report.py",
     "select_segments.py",
@@ -379,10 +388,13 @@ def run_verify(durable_root: Path, plugin_root: Path, scripts_dir: Path) -> int:
         ),
     )
 
-    # Deduped by member NAME, not by tuple: claim_record.py is deliberately
-    # registered in both bundles, and reporting it twice would misrepresent
-    # one offending file as two. The dedup is a REPORTING device only -- the
-    # hashes below are each computed over their own full tuple.
+    # Deduped by member NAME, not by tuple: the two tuples OVERLAP -- some
+    # members are deliberately registered in both bundles -- and reporting such
+    # a file twice would misrepresent one offender as two. WHICH names those are
+    # is stated once, beside ORCHESTRATION_BUNDLE_MEMBERS above, and deliberately
+    # not restated here: this list went stale twice as the tuples grew. The dedup
+    # is a REPORTING device only -- the hashes below are each computed over their
+    # own full tuple.
     checked = []
     seen = set()
     for _field, _marker_rel, members, _what in bundles:

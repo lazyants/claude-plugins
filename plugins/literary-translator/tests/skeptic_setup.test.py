@@ -156,6 +156,9 @@ def make_skeptic_root(tmp_path) -> Path:
                 CANON_SENSES_SRC, OCC_INDEX_SRC, EVIDENCE_VERIFY_SRC,
                 SUSPICION_SCAN_SRC, SKEPTIC_READY_SRC, SKEPTIC_REPORT_SRC):
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     schemas_dir = root / "schemas"
     schemas_dir.mkdir(parents=True)
@@ -1623,6 +1626,9 @@ def make_cache_key_fixture_root(tmp_path) -> Path:
     # plugin_bundle_hash which only reads a static marker file.
     shutil.copy2(BOOTSTRAP_NAMES_SRC, scripts_dir / "bootstrap_names.py")
     shutil.copy2(SEGPACK_SRC, scripts_dir / "segpack.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SEGPACK_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     write_json(root / ".literary-translator-root.json", {"owner_profile_path": "profile.yml"})
     (root / "profile.yml").write_text(MINIMAL_PROFILE_YAML, encoding="utf-8")
@@ -1687,6 +1693,9 @@ def test_landing_skeptic_scripts_leaves_segment_cache_key_byte_identical(tmp_pat
     # would diverge from `before`.
     shutil.copy2(SKEPTIC_SETUP_SRC, root / "scripts" / "skeptic_setup.py")
     shutil.copy2(SKEPTIC_CONSTANTS_SRC, root / "scripts" / "skeptic_constants.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SKEPTIC_CONSTANTS_SRC.parent / "json_stdout.py", root / "scripts" / "json_stdout.py")
     shutil.copy2(WORKLIST_SCHEMA_SRC, root / "schemas" / "suspicion-worklist.schema.json")
     shutil.copy2(ASSIGNMENT_SCHEMA_SRC, root / "schemas" / "skeptic-assignment.schema.json")
 

@@ -68,6 +68,8 @@ def build_durable_root(tmp_path: Path) -> Path:
             shutil.copy2(src, root / "scripts" / src.name)
     for name in WORKFLOW_TEMPLATES:
         shutil.copy2(ASSETS / "templates" / name, root / "scripts" / name)
+    # json_stdout.py (#369) needs no line of its own here: the glob over
+    # assets/scripts/*.py above already copied it, exactly as Step 0a does.
     for src in (ASSETS / "schemas").glob("*.json"):
         shutil.copy2(src, root / "schemas" / src.name)
     for src in (ASSETS / "languages").iterdir():
@@ -244,6 +246,9 @@ def test_refuses_when_run_from_inside_the_audited_root(tmp_path, root):
     fake_assets = root / "vendored" / "assets"
     (fake_assets / "scripts").mkdir(parents=True)
     shutil.copy2(AUDIT, fake_assets / "scripts" / "fix_scope_audit.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(AUDIT.parent / "json_stdout.py", fake_assets / "scripts" / "json_stdout.py")
     proc = subprocess.run(
         [sys.executable, str(fake_assets / "scripts" / "fix_scope_audit.py"),
          "--verify-copies", "--durable-root", str(root)],

@@ -18,9 +18,12 @@ PLUGIN_BUNDLE_MEMBERS (17), ORCHESTRATION_BUNDLE_MEMBERS (5),
 PRODUCER_CODE_CLOSURE (5), CACHE_KEY_FIELD_ORDER (15),
 select_segments.CACHE_KEY_FIELDS (15), and 1.34.0's "88 new tests" -- ALL SIX
 WERE CORRECT. Nothing wrong has reached a reader through this surface. Those
-figures are frozen here on purpose: #446 has since moved the tuple to 18, and
-the entries that state 17 are exactly the historical records the newest-entry
-boundary below exists to leave alone. A sweep would have added a six-to-thirty-four-row declaration set
+figures are frozen here on purpose: #446 moved the plugin tuple to 18 and #369
+moved it to 19 (17 scripts + two workflow templates) while taking the
+orchestration tuple from 5 to 6, and the entries that state 17 and 5 are exactly
+the historical records the newest-entry boundary below exists to leave alone --
+a figure in a shipped entry is a fact about that release, not a live assertion.
+A sweep would have added a six-to-thirty-four-row declaration set
 plus a model call to every release, permanently, to guard a defect with a measured
 ship rate of zero. So what is here is the half that closes the failure the issue
 actually names, and nothing else.

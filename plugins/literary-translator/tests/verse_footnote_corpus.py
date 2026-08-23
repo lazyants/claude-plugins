@@ -503,6 +503,9 @@ def make_validate_root(tmp_path: Path, label: str, profile: dict | None = None) 
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(SCRIPTS_DIR / "validate_draft.py", scripts_dir / "validate_draft.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "segments").mkdir()
 
     profile_path = root / "profile.yml"
@@ -565,6 +568,9 @@ def make_assemble_root(tmp_path: Path, label: str) -> Path:
     for name in ("assemble.py", "output_resolve.py", "render_obsidian.py", "validate_draft.py",
                  "cache_key.py"):
         shutil.copy2(SCRIPTS_DIR / name, scripts_dir / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "segments").mkdir()
     return root
 

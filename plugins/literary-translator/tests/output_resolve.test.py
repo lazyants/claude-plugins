@@ -319,6 +319,9 @@ def test_cli_profile_precondition_emits_one_json_line_on_missing_ownership_marke
     scripts_dir.mkdir(parents=True)
     shutil.copy2(OUTPUT_RESOLVE_SRC, scripts_dir / "output_resolve.py")
     shutil.copy2(VALIDATE_DRAFT_SRC, scripts_dir / "validate_draft.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(VALIDATE_DRAFT_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     # Deliberately NO profile.yml, NO .literary-translator-root.json marker.
 
     proc = subprocess.run(
@@ -352,6 +355,9 @@ def test_cli_dependency_precondition_emits_one_json_line_when_validate_draft_exi
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(OUTPUT_RESOLVE_SRC, scripts_dir / "output_resolve.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(OUTPUT_RESOLVE_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "validate_draft.py").write_text(
         "import sys\n"
         "print('ERROR: poisoned validate_draft.py dependency preflight', file=sys.stderr)\n"

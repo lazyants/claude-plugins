@@ -239,6 +239,9 @@ def make_durable_root(tmp_path) -> Path:
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(SCRIPT_SRC, scripts_dir / "cache_key.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPT_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     write_profile(root, default_profile())
     marker = {"owner_profile_path": str(root / "profile.yml")}
@@ -894,6 +897,9 @@ def test_durable_root_flag_redirects_away_from_self_anchored_location(tmp_path):
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "cache_key.py"
     shutil.copy2(SCRIPT_SRC, orphan_script)
+    # json_stdout.py (#369): cache_key.py loads it by exact path from its
+    # OWN directory, so the orphan location needs its own sibling copy.
+    shutil.copy2(SCRIPT_SRC.parent / "json_stdout.py", orphan_dir / "json_stdout.py")
 
     proc = run_cache_key_from(orphan_script, ["--seg", "seg01", "--durable-root", str(real_root)])
     assert proc.returncode == 0, (
@@ -921,6 +927,9 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "cache_key.py"
     shutil.copy2(SCRIPT_SRC, orphan_script)
+    # json_stdout.py (#369): cache_key.py loads it by exact path from its
+    # OWN directory, so the orphan location needs its own sibling copy.
+    shutil.copy2(SCRIPT_SRC.parent / "json_stdout.py", orphan_dir / "json_stdout.py")
 
     proc = run_cache_key_from(orphan_script, ["--seg", "seg01"])
     assert proc.returncode != 0
@@ -949,6 +958,9 @@ def test_durable_root_flag_works_with_single_field_form(tmp_path):
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "cache_key.py"
     shutil.copy2(SCRIPT_SRC, orphan_script)
+    # json_stdout.py (#369): cache_key.py loads it by exact path from its
+    # OWN directory, so the orphan location needs its own sibling copy.
+    shutil.copy2(SCRIPT_SRC.parent / "json_stdout.py", orphan_dir / "json_stdout.py")
 
     proc = run_cache_key_from(
         orphan_script, ["--field", "pipeline_version", "--durable-root", str(real_root)]
