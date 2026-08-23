@@ -67,6 +67,11 @@ SCRIPT_SRC = ASSETS_DIR / "scripts" / "ledger_update.py"
 SCHEMAS_SRC = ASSETS_DIR / "schemas"
 TEMPLATE_JS_PATH = ASSETS_DIR / "templates" / "mass-translate-wf.template.js"
 
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+from _js_source_projection import js_code_only  # noqa: E402
+
 assert SCRIPT_SRC.is_file(), f"ledger_update.py not found at {SCRIPT_SRC}"
 assert (SCHEMAS_SRC / "ledger-record-base.schema.json").is_file()
 assert (SCHEMAS_SRC / "ledger-fragment.schema.json").is_file()
@@ -360,39 +365,38 @@ def test_bare_integer_rounds_is_accepted_control(tmp_path):
 def _extract_js_function(source, signature_prefix):
     """Returns the full source text of a JS function/async-function
     declaration starting at `signature_prefix` (e.g. "function foo(" or
-    "async function foo("), through its matching closing brace. Tracks
-    single/double-quoted string state (with backslash-escape handling) and
-    skips `//` line comments, so braces inside string literals or comments
-    don't unbalance the count. Raises if the prefix isn't found or braces
-    never balance -- both are meant to fail the test loudly, not silently
-    degrade to a truncated/garbage extraction."""
-    idx = source.index(signature_prefix)
-    open_brace = source.index("{", idx)
+    "async function foo("), through its matching closing brace.
+
+    Both the LOCATE step (`signature_prefix`, the opening `{`) and the
+    brace-counting scan run over `js_code_only(source)` -- the #306/#289
+    offset-preserving projection with every comment, string literal,
+    template literal and regex literal blanked to spaces -- so a commented-
+    out or prose copy of the same declaration ahead of the real one can't
+    win, and a brace inside a string or comment can't unbalance the count.
+    The projection preserves every offset, so the match found in it is
+    sliced out of the RAW `source` for a verbatim result. Raises if the
+    prefix isn't found or braces never balance -- both are meant to fail the
+    test loudly, not silently degrade to a truncated/garbage extraction."""
+    code = js_code_only(source)
+    try:
+        idx = code.index(signature_prefix)
+    except ValueError:
+        raise ValueError(
+            f"{signature_prefix!r} not found in the template's CODE -- it "
+            "may exist only inside a comment or a prompt string, which is "
+            "exactly what this projection-anchored lookup refuses"
+        ) from None
+    open_brace = code.index("{", idx)
     depth = 0
     i = open_brace
-    in_str = None
-    escape = False
-    while i < len(source):
-        c = source[i]
-        if in_str:
-            if escape:
-                escape = False
-            elif c == "\\":
-                escape = True
-            elif c == in_str:
-                in_str = None
-        else:
-            if c in ("\"", "'"):
-                in_str = c
-            elif c == "/" and i + 1 < len(source) and source[i + 1] == "/":
-                i = source.index("\n", i)
-                continue
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    return source[idx:i + 1]
+    while i < len(code):
+        c = code[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return source[idx:i + 1]
         i += 1
     raise ValueError(f"unbalanced braces extracting {signature_prefix!r}")
 
@@ -401,9 +405,24 @@ def _extract_js_const(source, const_name):
     """Returns the full `const NAME = ...;` statement text for a single-line
     const declaration (the exact-key-set guard array literals below are all
     single-line) -- a lighter sibling of _extract_js_function for
-    declarations that aren't function bodies."""
-    idx = source.index(f"const {const_name} ")
-    end = source.index(";", idx)
+    declarations that aren't function bodies.
+
+    Both the LOCATE step and the terminating `;` are found in
+    `js_code_only(source)`, so a decoy comment ahead of the real declaration
+    can't win, and a `;` inside the declaration's own string literals (e.g.
+    an array entry like `"a;b"`) can't truncate the extraction early -- the
+    projection has already blanked those to spaces. The match is then
+    sliced out of the RAW `source`, so the result stays verbatim."""
+    code = js_code_only(source)
+    try:
+        idx = code.index(f"const {const_name} ")
+    except ValueError:
+        raise ValueError(
+            f"'const {const_name} ' not found in the template's CODE -- it "
+            "may exist only inside a comment or a prompt string, which is "
+            "exactly what this projection-anchored lookup refuses"
+        ) from None
+    end = code.index(";", idx)
     return source[idx:end + 1]
 
 
@@ -583,6 +602,81 @@ def test_js_side_accepts_genuine_matching_stdout(tmp_path):
     )
     assert js_result["ok"] is True
     assert js_result["raw"]["status"] == "in_progress"
+
+
+# ---------------------------------------------------------------------------
+# 8a. Decoy lock (#306): a prose/comment copy of a signature ahead of the
+#     real declaration, or a `;` inside the real declaration's own string
+#     literal, must not fool either extractor above. Mirrors
+#     ledger_confirmation_schema.test.py's
+#     test_extractors_ignore_a_commented_out_declaration, for THIS file's
+#     own extractors. Every mutation here is applied to a MUTATED COPY of
+#     the template text held in memory -- the shipped template on disk is
+#     never touched.
+# ---------------------------------------------------------------------------
+
+def test_extract_js_function_ignores_a_commented_out_decoy():
+    anchor = "async function recordLedgerCall("
+    assert anchor in _TEMPLATE_JS_SOURCE, (
+        f"non-vacuity: {anchor!r} must actually be present in the shipped "
+        "template before mutating it"
+    )
+    decoy = '// old: async function recordLedgerCall(raw) { return "DECOY"; }\n'
+    mutated = _TEMPLATE_JS_SOURCE.replace(anchor, decoy + anchor, 1)
+
+    extracted = _extract_js_function(mutated, anchor)
+
+    assert "ledger-write-mismatch" in extracted, (
+        "extraction returned the decoy instead of the real recordLedgerCall "
+        f"body: {extracted!r}"
+    )
+    assert "DECOY" not in extracted
+
+
+def test_extract_js_const_ignores_a_commented_out_decoy():
+    anchor = "const FAILURE_EVIDENCE_KEYS "
+    assert anchor in _TEMPLATE_JS_SOURCE, (
+        f"non-vacuity: {anchor!r} must actually be present in the shipped "
+        "template before mutating it"
+    )
+    decoy = '// historical: const FAILURE_EVIDENCE_KEYS = ["error"];\n'
+    mutated = _TEMPLATE_JS_SOURCE.replace(anchor, decoy + anchor, 1)
+
+    extracted = _extract_js_const(mutated, "FAILURE_EVIDENCE_KEYS")
+
+    assert "exit_code" in extracted, (
+        "extraction returned the decoy instead of the real "
+        f"FAILURE_EVIDENCE_KEYS statement: {extracted!r}"
+    )
+
+
+def test_extract_js_const_ignores_a_semicolon_inside_its_own_string_literal():
+    """The raw-scanning failure mode a comment decoy doesn't exercise: the
+    REAL statement widened so its array carries a `;` inside one of its own
+    string entries. A raw-`;`-terminated scan truncates mid-string, splicing
+    invalid JS -- a false RED, not a false GREEN. The projection blanks
+    string literals before the terminator search runs, so the `;` inside
+    the string is invisible to it."""
+    real = _extract_js_const(_TEMPLATE_JS_SOURCE, "FAILURE_EVIDENCE_KEYS")
+    assert real in _TEMPLATE_JS_SOURCE, (
+        "non-vacuity: the real FAILURE_EVIDENCE_KEYS statement must actually "
+        "be present in the shipped template before mutating it"
+    )
+    assert real.endswith('"stderr"];'), (
+        f"unexpected FAILURE_EVIDENCE_KEYS shape, update this test: {real!r}"
+    )
+    widened = real[:-len('"stderr"];')] + '"stderr", "a;b"];'
+    mutated = _TEMPLATE_JS_SOURCE.replace(real, widened, 1)
+
+    extracted = _extract_js_const(mutated, "FAILURE_EVIDENCE_KEYS")
+
+    assert "exit_code" in extracted, (
+        "extraction truncated mid-string at the `;` inside \"a;b\" instead "
+        f"of the statement's real terminating `;`: {extracted!r}"
+    )
+    assert extracted.endswith('"a;b"];'), (
+        f"extraction did not reach the statement's real end: {extracted!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

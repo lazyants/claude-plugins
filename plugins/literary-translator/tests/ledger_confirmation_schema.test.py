@@ -93,6 +93,16 @@ import jsonschema
 import jsonschema.exceptions
 import pytest
 
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+from _js_source_projection import (  # noqa: E402
+    from_declaration as _from_declaration,
+    js_code_only as _js_code_only,
+    line_of as _line_of,
+    line_text_at as _line_text_at,
+)
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 SCRIPTS_SRC_DIR = ASSETS_DIR / "scripts"
@@ -126,35 +136,11 @@ parse_js_object_literal = _drift.parse_js_object_literal
 _extract_const_object_literal_raw = _drift.extract_const_object_literal
 
 
-def _from_declaration(mass_translate_source: str, needle: str) -> str:
-    """`mass_translate_source` sliced to begin at `needle`'s first occurrence
-    in the CODE PROJECTION.
-
-    Every shared JS extractor this file reuses -- the drift module's
-    extract_const_object_literal, ledger_update.test.py's _extract_js_function
-    and _extract_js_const -- scans BALANCED and comment-aware, but LOCATES its
-    starting point with a bare index/search over raw source. A commented-out
-    or prose copy of the same declaration therefore wins:
-
-        // historical shape: const FAILURE_EVIDENCE_KEYS = ["error"];
-
-    made all three return the decoy. Handing them a source that already
-    starts at the real declaration fixes the location without touching their
-    scanning, and without a second vendored copy of any of them. The two
-    sibling files still carry the raw-locator weakness in their own uses --
-    reported, not fixed here, since they are not this file's to change."""
-    code = _js_code_only(mass_translate_source)
-    idx = code.find(needle)
-    assert idx != -1, (
-        f"the template's CODE declares no {needle!r} -- it may exist only "
-        "inside a comment or a prompt string, which is exactly what this "
-        "projection-anchored lookup exists to refuse"
-    )
-    return mass_translate_source[idx:]
-
-
 def extract_const_object_literal(mass_translate_source: str, const_name: str) -> str:
-    """Projection-anchored wrapper -- see _from_declaration()."""
+    """Projection-anchored wrapper -- see _from_declaration(). Kept, unlike
+    #306's unwrap of _extract_function_source/_extract_const_statement below:
+    this delegates to the drift module's OWN parser, which is not itself
+    projection-anchored, so the pre-slice here is still load-bearing."""
     return _extract_const_object_literal_raw(
         _from_declaration(mass_translate_source, f"const {const_name} "), const_name
     )
@@ -976,6 +962,9 @@ def _find_balanced_bracket_span(source: str, start: int) -> int:
 def extract_const_array_literal(source: str, const_name: str) -> str:
     # Projection-anchored for the same reason as extract_const_object_literal
     # above: a commented-out `const NAME = [...]` used to win this search.
+    # Kept, unlike #306's unwrap below: this delegates to
+    # _find_balanced_bracket_span, which is not itself projection-anchored,
+    # so the pre-slice here is still load-bearing.
     source = _from_declaration(source, f"const {const_name} ")
     m = re.search(r"const\s+" + re.escape(const_name) + r"\s*=\s*", source)
     if not m:
@@ -1112,242 +1101,6 @@ def _optional_fields_of(mass_translate_source: str, const_name: str) -> set:
         extract_const_object_literal(mass_translate_source, const_name)
     )
     return set(literal.get("properties", {})) - set(literal.get("required", []))
-
-
-def _line_of(source: str, offset: int) -> int:
-    return source.count("\n", 0, offset) + 1
-
-
-def _line_text_at(source: str, offset: int) -> str:
-    # Sliced between real "\n" boundaries rather than via str.splitlines(),
-    # which also splits on U+2028/U+0085 and would then disagree with
-    # _line_of()'s "\n"-only count on any template that ever carries one.
-    start = source.rfind("\n", 0, offset) + 1
-    end = source.find("\n", offset)
-    return source[start:end if end != -1 else len(source)].strip()
-
-
-# Keywords after which a `/` opens a regex literal rather than dividing --
-# they all end in a position where an EXPRESSION may begin.
-_REGEX_MAY_FOLLOW_KEYWORDS = frozenset({
-    "await", "case", "delete", "do", "else", "in", "instanceof", "new", "of",
-    "return", "typeof", "void", "yield",
-})
-
-
-def _regex_may_start_at(source: str, offset: int) -> bool:
-    """The standard JS `/`-is-a-regex-not-a-division disambiguation: a regex
-    literal may begin only where an expression may begin, so anything that
-    can close one is read as division, unless it is a keyword after which an
-    expression may follow.
-
-    What closes an expression, and why each entry is here: `)`, `]`, `}`; an
-    identifier or number; a closing string quote or template backtick (in
-    code context an opening one is impossible -- the scanner consumes a
-    literal whole, so a quote reached here is always the closing one); and a
-    postfix `++`/`--`, distinguished from binary `+`/`-` by the doubled
-    character. Every one of those was a demonstrated false-GREEN before it
-    was listed: `let z = "x" /KEYS.some(k => k in raw)/ 1;` read as a regex
-    literal and blanked a live presence test out of the projection.
-
-    Where the two readings are genuinely ambiguous the tie goes to division,
-    which consumes one character, over a regex, which could consume a line."""
-    j = offset - 1
-    while j >= 0 and source[j] in " \t\r\n":
-        j -= 1
-    if j < 0:
-        return True
-    c = source[j]
-    if c in ")]}\"'`":
-        return False
-    if c in "+-" and j > 0 and source[j - 1] == c:
-        return False  # postfix ++/--, not binary +/-
-    if c.isalnum() or c in "_$":
-        k = j
-        while k >= 0 and (source[k].isalnum() or source[k] in "_$"):
-            k -= 1
-        # A reserved word is a legal PROPERTY NAME, and `obj.new` is an
-        # ordinary member expression that ends an expression -- so a `/`
-        # after it divides. Verified against real node: with `foo = {new: 8}`,
-        # `foo.new / 2 / 2` evaluates to 2. Without this check the keyword
-        # list below fired on the property name and read the division as a
-        # regex start, blanking a live presence test out of the projection
-        # for 9 of the 10 reserved words in it.
-        dot = k
-        while dot >= 0 and source[dot] in " \t\r\n":
-            dot -= 1
-        if dot >= 0 and source[dot] == ".":
-            return False
-        return source[k + 1:j + 1] in _REGEX_MAY_FOLLOW_KEYWORDS
-    return True
-
-
-def _quoted_literal_end(source: str, start: int) -> int:
-    """Offset just past the closing quote of the `'`/`"` string at `start`. A
-    backslash escapes the next character, including a line continuation's
-    newline; a bare newline means the literal never closed."""
-    quote = source[start]
-    j = start + 1
-    n = len(source)
-    while j < n:
-        c = source[j]
-        if c == "\\":
-            j += 2
-            continue
-        if c == quote:
-            return j + 1
-        if c == "\n":
-            break
-        j += 1
-    raise AssertionError(
-        f"unterminated {quote} string literal at line {_line_of(source, start)}: "
-        f"{source[start:start + 60]!r}"
-    )
-
-
-def _template_chunk_end(source: str, start: int) -> tuple:
-    """Scan a run of template-literal TEXT from `start` to whichever comes
-    first, and report which: `(offset just past the closing backtick, False)`,
-    or `(offset of the `$` opening a `${...}` substitution, True)`. The
-    substitution's body is CODE again, so the caller resumes normal scanning
-    there and comes back here once the matching `}` closes it -- the template
-    really does interpolate (`Unsafe segment id ${JSON.stringify(s)}`), so
-    this cannot be simplified into "blank backtick to backtick"."""
-    j = start
-    n = len(source)
-    while j < n:
-        c = source[j]
-        if c == "\\":
-            j += 2
-            continue
-        if c == "$" and j + 1 < n and source[j + 1] == "{":
-            return j, True
-        if c == "`":
-            return j + 1, False
-        j += 1
-    raise AssertionError(
-        f"unterminated template literal at line {_line_of(source, start)}: "
-        f"{source[start:start + 60]!r}"
-    )
-
-
-def _regex_literal_end(source: str, start: int) -> int:
-    """Offset just past the closing `/` (plus flags) of the regex literal at
-    `start`. `[...]` character classes may contain an unescaped `/`."""
-    j = start + 1
-    n = len(source)
-    in_class = False
-    while j < n:
-        c = source[j]
-        if c == "\\":
-            j += 2
-            continue
-        if c == "\n":
-            break
-        if c == "[":
-            in_class = True
-        elif c == "]":
-            in_class = False
-        elif c == "/" and not in_class:
-            j += 1
-            while j < n and source[j].isalpha():  # trailing flags
-                j += 1
-            return j
-        j += 1
-    raise AssertionError(
-        f"unterminated regex literal at line {_line_of(source, start)}: "
-        f"{source[start:start + 60]!r}. A `/` that opens no regex is usually a "
-        "DIVISION that _regex_may_start_at() mistook for a regex start -- add "
-        "whatever closes the expression to its division list. This fails loudly "
-        "rather than blanking the rest of the line, which is the safe direction."
-    )
-
-
-def _js_code_only(source: str) -> str:
-    """`source` with every comment, string literal, template literal and
-    regex literal blanked to spaces -- newlines and every offset preserved,
-    so a match found in the result indexes straight back into the real file.
-
-    Deliberately NOT a second copy of review_prompt_schema_drift.test.py's
-    literal parser imported at the top of this file: that one is scoped to
-    the schema literals' restricted grammar (its token regex accepts only
-    `{}[]:,` punctuation and raises on anything else), so it cannot walk a
-    whole template. This is the complementary, cruder job -- decide per
-    character whether it is code, and blank everything that is not.
-
-    Pinned by test_js_code_only_shapes below, which is the direct test table
-    this had no equivalent of when it first shipped."""
-    out = list(source)
-    n = len(source)
-
-    def blank(start: int, stop: int) -> None:
-        for j in range(start, stop):
-            if out[j] != "\n":
-                out[j] = " "
-
-    def enter_template_text(start: int) -> int:
-        """Blank template-literal text from `start`, returning where code
-        resumes -- either past the closing backtick or past the `${` whose
-        body is code again (in which case the substitution is pushed)."""
-        nonlocal depth
-        end, is_substitution = _template_chunk_end(source, start)
-        if not is_substitution:
-            blank(start, end)
-            return end
-        blank(start, end + 2)
-        substitutions.append(depth)
-        depth += 1
-        return end + 2
-
-    depth = 0            # brace nesting, counted over CODE only
-    substitutions = []   # brace depth at which each open ${...} started
-    i = 0
-    while i < n:
-        c = source[i]
-        if c == "/" and source.startswith("//", i):
-            end = source.find("\n", i)
-            end = n if end == -1 else end
-        elif c == "/" and source.startswith("/*", i):
-            end = source.find("*/", i + 2)
-            if end == -1:
-                raise AssertionError(
-                    f"unterminated block comment at line {_line_of(source, i)}"
-                )
-            end += 2
-        elif c == "/" and _regex_may_start_at(source, i):
-            end = _regex_literal_end(source, i)
-        elif c in "\"'":
-            end = _quoted_literal_end(source, i)
-        elif c == "`":
-            blank(i, i + 1)
-            i = enter_template_text(i + 1)
-            continue
-        elif c == "{":
-            depth += 1
-            i += 1
-            continue
-        elif c == "}":
-            depth -= 1
-            if substitutions and depth == substitutions[-1]:
-                substitutions.pop()
-                # Blank the substitution-closing `}` too: its opening `${` was
-                # already blanked, so leaving this brace would put an
-                # unbalanced close into the projection that every depth-counting
-                # consumer (_call_argument_texts, _function_spans) would cross
-                # at depth 0 early. The substitution's INNER code is untouched
-                # and stays correctly positioned; only this one brace is blanked
-                # (ordinary code-block `}` must survive for depth counting).
-                blank(i, i + 1)
-                i = enter_template_text(i + 1)  # back into the literal's text
-            else:
-                i += 1
-            continue
-        else:
-            i += 1
-            continue
-        blank(i, end)
-        i = end
-    return "".join(out)
 
 
 def _in_operator_sites(mass_translate_source: str) -> list:
@@ -2438,21 +2191,19 @@ CONSUME_SITE_GUARDS = {
 
 
 def _extract_function_source(mass_translate_source: str, signature_prefix: str) -> str:
-    """ledger_update.test.py's brace-balanced function extractor, located via
-    the code projection -- see _from_declaration(). Its own scanning is
-    reused verbatim; only where it starts changes."""
-    return _extract_js_function(
-        _from_declaration(mass_translate_source, signature_prefix), signature_prefix
-    )
+    """ledger_update.test.py's brace-balanced function extractor. #306 made
+    that extractor anchor on the code projection ITSELF (see
+    _js_source_projection.py), so this wrapper no longer needs to pre-slice
+    the source with _from_declaration() -- it just calls through."""
+    return _extract_js_function(mass_translate_source, signature_prefix)
 
 
 def _extract_const_statement(mass_translate_source: str, const_name: str) -> str:
     """The same treatment for the single-line `const NAME = ...;` extractor.
-    That one terminates on the first raw `;`, so it was doubly exposed: a
-    decoy comment could both start it in the wrong place and end it there."""
-    return _extract_js_const(
-        _from_declaration(mass_translate_source, f"const {const_name} "), const_name
-    )
+    That one used to terminate on the first raw `;`, doubly exposed to a
+    decoy comment (wrong start AND wrong end); #306 anchors it on the
+    projection too, so no pre-slice is needed here either."""
+    return _extract_js_const(mass_translate_source, const_name)
 
 
 def _guard_harness_preamble(mass_translate_source: str) -> str:
