@@ -809,9 +809,8 @@ here, follow the linked doc:
   `runs/.driver.lock` covers a competing driver and
   `segments/.codex_job.<seg>.lock` covers a codex job in its promoting phase;
   **neither covers a fix turn**, which writes `segments/<seg>.draft.json`
-  directly — stated where `--from-stalled` discloses what it cannot prove
-  against (below), which is cited here for that fact alone and not for its own
-  race's outcome. Two things go wrong, and both are silent. A **lost update**:
+  directly — as the `--from-stalled` disclosure below states. That paragraph is
+  cited for that fact alone and not for its own race's outcome. Two things go wrong, and both are silent. A **lost update**:
   a fixer copies the token it read and rewrites the WHOLE draft, so two fixers
   off the same predecessor end with the later one's text, a finding the earlier
   one already applied simply gone, and the next review may not rediscover it
@@ -822,10 +821,12 @@ here, follow the linked doc:
   Obsidian vault having been reviewed by nobody, and `validate_assembled.py`
   checks the built NodeStream without consulting the ledger. Do not read the
   hash chain as a backstop for either: it rejects a late write it happens to
-  observe and proves nothing about quiescence. Inside ONE `pipeline()`
-  invocation this is already handled — #198's SEGS uniqueness guard gives each
-  segment one branch whose fix calls are serial — but nothing excludes a
-  SECOND invocation, concurrent or resumed, holding the same segment.
+  observe and proves nothing about quiescence. **This corollary, unlike the
+  spawn economics above, DOES bind the `pipeline()` path** — inside ONE
+  `pipeline()` invocation it is already handled, since #198's SEGS uniqueness
+  guard gives each segment one branch whose fix calls are serial, but nothing
+  excludes a SECOND invocation, concurrent or resumed, holding the same
+  segment.
 - **R9 — A style-contract edit applies FORWARD; a converged segment stays
   converged.** Appending a finding to `style_bible.md` mid-run does not
   invalidate work already reviewed under the previous contract, and must never

@@ -36,13 +36,10 @@ and only these properties may not silently vanish. Whitespace is normalised befo
 matching, because this document hard-wraps and a pin that breaks when a sentence
 rewraps is a pin nobody keeps.
 
-Each pin carries its clause's own SUBJECT and NEGATION, never a bare fragment.
-A review round demonstrated why: pinning `callFix()` alone stayed green after
-"It is not a statement about callFix()" became "It is explicitly a statement
-about callFix()", and pinning "SECOND invocation, concurrent or resumed" stayed
-green after "nothing excludes" became "the driver excludes" -- each inversion
-asserting exactly the false contract this file exists to keep out. A fragment
-pins a topic; only the whole clause pins the claim.
+Each pin carries its clause's own SUBJECT and NEGATION, never a bare fragment:
+a fragment pins a topic, only the whole clause pins the claim. Each assertion
+below carries the inversion that motivated its own pin -- which is the text a
+failing run actually prints.
 """
 import re
 from pathlib import Path
@@ -56,24 +53,51 @@ assert SKILL_MD.is_file(), f"SKILL.md not found at {SKILL_MD}"
 assert ENGINE_LOOP_MD.is_file(), f"engine-loop.md not found at {ENGINE_LOOP_MD}"
 
 
-def _r8_block() -> str:
-    """The R8 rule only -- so a phrase appearing anywhere else in this 100 KB
-    document cannot satisfy a pin about R8 -- with every whitespace run
-    collapsed, so hard-wrapping never breaks a pin."""
-    text = SKILL_MD.read_text(encoding="utf-8")
-    start = text.find("- **R8 — The fix turn is applied in-session")
-    assert start != -1, "the R8 rule heading was not found in SKILL.md"
-    end = text.find("- **R9 — ", start)
+def _delimited_block(path: Path, start_marker: str, end_marker: str, min_chars: int) -> str:
+    """The delimited passage only -- so a phrase appearing anywhere else in the
+    document cannot satisfy a pin about it -- with every whitespace run
+    collapsed, so hard-wrapping never breaks a pin.
+
+    Always delimited at the NEXT rule, never by a character window: measured,
+    R8 is 436 normalised characters in engine-loop.md, so a 700-char slice
+    would reach 264 characters into R9/R10 and the clauses could be deleted
+    from R8, restated under R9, and still pass.
+
+    `min_chars` is not decoration. If a marker moves, the slice collapses and
+    every pin over it would be checking almost nothing while still reporting a
+    clean run -- the exact shape of a check that passes because it ran over
+    nothing at all.
+    """
+    text = path.read_text(encoding="utf-8")
+    start = text.find(start_marker)
+    assert start != -1, f"{start_marker!r} was not found in {path.name}"
+    end = text.find(end_marker, start)
     assert end != -1 and end > start, (
-        "could not delimit the R8 rule (no R9 heading after it) -- the rule "
-        "index moved and these pins would be checking the wrong text"
+        f"could not delimit the block in {path.name}: no {end_marker!r} after "
+        f"{start_marker!r} -- the rule index moved and these pins would be "
+        f"checking the wrong text"
     )
-    block = text[start:end]
-    assert len(block) > 1500, (
-        f"the extracted R8 block is implausibly short ({len(block)} chars) -- "
-        "the delimiters moved and these pins would be checking almost nothing"
+    block = re.sub(r"\s+", " ", text[start:end])
+    assert len(block) >= min_chars, (
+        f"the extracted block from {path.name} is implausibly short "
+        f"({len(block)} chars, expected >= {min_chars}) -- the delimiters "
+        f"moved and these pins would be checking almost nothing"
     )
-    return re.sub(r"\s+", " ", block)
+    return block
+
+
+def _r8_block() -> str:
+    """R8 in SKILL.md, which carries the rule itself."""
+    return _delimited_block(
+        SKILL_MD, "- **R8 — The fix turn is applied in-session", "- **R9 — ", 1500
+    )
+
+
+def _r8_index_entry() -> str:
+    """R8's one-line entry in engine-loop.md's rule index. Measured at 438
+    normalised characters, so 300 is a floor a real entry clears and a
+    collapsed slice does not."""
+    return _delimited_block(ENGINE_LOOP_MD, "- **R8**", "- **R9**", 300)
 
 
 def test_r8_forbids_two_executors_holding_one_segment():
@@ -85,14 +109,18 @@ def test_r8_forbids_two_executors_holding_one_segment():
         "they never hold the same segment. Losing this clause leaves the "
         "authorization standing with nothing limiting what it authorizes"
     )
-    assert "Split the parcels by segment" in r8, (
-        "and it must say HOW -- an operator told 'do not collide' with no "
-        "partition rule is told nothing actionable"
-    )
-    assert "for as long as a round is open" in r8, (
-        "the split has a DURATION. A partition released when an executor "
-        "reports done, rather than when the round closes, is exactly the "
-        "window a still-live fixer races through"
+    assert (
+        "Split the parcels by segment and keep that split for as long as a "
+        "round is open" in r8
+    ), (
+        "and it must say HOW, with the duration attached to the split itself: "
+        "an operator told 'do not collide' with no partition rule is told "
+        "nothing actionable, and a partition released when an executor reports "
+        "done rather than when the round closes is exactly the window a "
+        "still-live fixer races through. Pinned as one clause because a bare "
+        "'for as long as a round is open' is the subject-less fragment this "
+        "file's own rule forbids -- it survives the duration being re-attached "
+        "to something else entirely"
     )
 
 
@@ -120,9 +148,9 @@ def test_r8_says_why_nothing_enforces_it():
     )
 
 
-def test_r8_carries_both_consequences_and_claims_no_backstop():
-    """Two shapes, not one. And no categorical claim about the hash chain --
-    two review rounds each falsified a different one."""
+def test_r8_carries_both_silent_consequences():
+    """Two shapes, not one -- a rewrite keeping only the first understates the
+    stakes by a category."""
     r8 = _r8_block()
     assert "lost update" in r8, (
         "consequence 1: the later whole-draft write erases a finding the "
@@ -143,6 +171,13 @@ def test_r8_carries_both_consequences_and_claims_no_backstop():
         "assemble.py hashes the draft when it loads the ledger and reopens "
         "the file afterwards to build the NodeStream"
     )
+
+
+def test_r8_does_not_claim_the_hash_chain_is_a_backstop():
+    """A different property from the two consequences above: the ABSENCE of a
+    false claim, which is the one a review round actually falsified. Split out
+    so a red run names which class broke."""
+    r8 = _r8_block()
     assert (
         "Do not read the hash chain as a backstop for either: it rejects a "
         "late write it happens to observe and proves nothing about quiescence."
@@ -202,18 +237,7 @@ def test_engine_loop_index_does_not_state_a_weaker_rule_than_r8():
     """The rule index is where a reader meets R8 first. An index line that
     carries the grant but not the constraint is the half-remembered version,
     shipped."""
-    index = re.sub(r"\s+", " ", ENGINE_LOOP_MD.read_text(encoding="utf-8"))
-    start = index.find("- **R8**")
-    assert start != -1, "the R8 index entry was not found in engine-loop.md"
-    end = index.find("- **R9**", start)
-    assert end != -1 and end > start, (
-        "could not delimit the R8 index entry (no R9 entry after it)"
-    )
-    # Delimited at R9, never a fixed character window: measured, R8 is 436
-    # normalised characters and a 700-char slice reaches 264 characters into
-    # R9/R10 -- so the clauses could be DELETED from R8, restated under R9,
-    # and every pin below would still pass.
-    entry = index[start:end]
+    entry = _r8_index_entry()
     assert "those two never hold the same segment" in entry, (
         "engine-loop.md's R8 line grants two executors, so it must carry the "
         "ownership constraint too -- a reader who stops at the index would "

@@ -33,8 +33,8 @@ so there is exactly one place each rule can go stale.
   never a spawn per round/segment/defect class, and **those two never hold the
   same segment** — nothing locks a fix turn — `SKILL.md`. R1 fixes WHO
   translates and reviews; R8 fixes who EDITS the draft afterwards, the step
-  codex structurally cannot perform. Its scope is the HAND-DRIVEN turn; the
-  `pipeline()` path's per-round `callFix()` is not what it governs.
+  codex structurally cannot perform. Its scope is the HAND-DRIVEN turn, not the
+  `pipeline()` path's per-round `callFix()`.
 - **R9** A style-contract edit applies forward; a converged segment stays
   converged, and no back-sweep is owed to a newly written rule — `SKILL.md`.
 - **R10** A previous volume is not an input: mechanics come from the plugin,
