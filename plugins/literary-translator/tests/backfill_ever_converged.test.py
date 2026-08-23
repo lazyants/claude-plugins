@@ -3285,6 +3285,28 @@ def test_an_oversized_body_is_refused_rather_than_judged_on_its_prefix(tmp_path)
     path.write_bytes(body + padding + b"X")
     assert backfill.read_sentinel_attribution(path) == "unattributed"
 
+    # The case the length check exists for, and the one a trailing-garbage
+    # fixture does NOT reach: a body that is one byte over the maximum and is
+    # still perfectly valid attributed JSON. The parse cannot refuse it -- only
+    # the length can -- so without the explicit overflow test the reader
+    # attributes a body no writer can emit. Built by padding INSIDE a JSON
+    # string so the result stays parseable at exactly CAP+1 bytes.
+    over = backfill.SENTINEL_BODY_MAX_BYTES + 1
+    stub = json.dumps({"marker": "ever_converged", "v": 1, "by": "ledger_update",
+                       "seg": "segO", "pad": ""}).encode("utf-8")
+    exact = json.dumps({"marker": "ever_converged", "v": 1, "by": "ledger_update",
+                        "seg": "segO", "pad": "p" * (over - len(stub))}).encode("utf-8")
+    assert len(exact) == over, len(exact)
+    assert json.loads(exact.decode("utf-8"))["by"] == "ledger_update", (
+        "precondition: the oversized body must be VALID JSON, or the parse "
+        "refuses it and the length check is never the thing under test"
+    )
+    path.write_bytes(exact)
+    assert backfill.read_sentinel_attribution(path) == "unattributed", (
+        "a body one byte past what any writer publishes was attributed to a "
+        "known writer on the strength of parsing cleanly"
+    )
+
 
 VERSION_CASES = [
     ("a real integer", 1, "ledger_update"),
