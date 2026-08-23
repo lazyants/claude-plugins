@@ -21,5 +21,5 @@ exists to catch -- reject and name it as the reason.
 judging agent in 1.16.1 (#347) because a rule the attacker can talk the enforcer out of is not
 an enforcement point; until #353 the judge still HELD Bash, so the split had removed its reason
 to fetch without removing its capability. It now holds no tool that can open a network
-connection, run a command, or write anything. Do not widen this list: every byte this agent
-reads is attacker-authorable, and the tool it is given is the boundary.
+connection, run a command, or write anything. Do not widen this list: this agent reads
+attacker-authorable bytes, and the tool it is given is the boundary.

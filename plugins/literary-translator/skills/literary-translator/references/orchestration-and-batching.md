@@ -887,7 +887,8 @@ pipeline(BATCHES, batchStep)
   **that snapshot** and reads only the single locally-generated metadata line the
   script prints. It never reads a retrieved body.
 - `citationJudgePrompt(batch, attempt)` (**1.16.1**) — Claude, `effort:'high'`,
-  no `agentType`, no schema, `live` only; returns
+  `agentType:'literary-translator:citation-judge'` since **#353**, no schema,
+  `live` only; returns
   `CITATIONS_OK`/`CITATIONS_REJECTED <index> ATTEMPT <n>`. It gates whether
   the batch counts as ready at all. It audits the approved snapshot and the
   fetched evidence bodies, and performs no retrieval of its own — it is given no

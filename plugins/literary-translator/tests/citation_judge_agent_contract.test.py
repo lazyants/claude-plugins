@@ -17,9 +17,21 @@ two files, and either one alone is inert:
   * ``agents/citation-judge.md`` -- the allowlist the harness enforces.
   * ``glossary-pass-wf.template.js`` -- the ``agentType`` that selects it.
 
-Rename or relax either half and the judge silently reverts to a default-toolset
-agent, with no other symptom: the pass still runs, still approves batches, and
-still reports a clean glossary run. So the pin is the PAIR, not either file.
+The three ways that pair can drift are not one failure, and only one of them is
+loud:
+
+  * the dispatch loses its ``agentType`` -- the judge silently runs with the
+    default toolset again. No other symptom: the pass still runs, still approves
+    batches, still reports a clean glossary run.
+  * the definition is relaxed -- the same agent is selected, now holding more
+    than it needs. Equally silent.
+  * the two names stop matching, or the file is deleted -- that one is
+    fail-closed at runtime (nothing resolves, no verdict, no approval), so it
+    would surface eventually; pinning it here just makes it surface at commit
+    time instead of mid-run.
+
+Two of the three are invisible in production, which is why the pin is the PAIR
+rather than either file.
 
 SCOPE, vs tests/glossary_citation_review.test.py. That file owns the OBSERVED
 dispatch -- it executes the real template under Node and reads back the
@@ -65,6 +77,16 @@ from _agent_definition import (  # noqa: E402
 # including one the harness gains next month.
 EXPECTED_JUDGE_TOOLS = ["Read"]
 
+# `tools` is not the only frontmatter key that decides what an agent may do --
+# `memory:`, for one, is a supported key that hands the agent a persistent store
+# this file audits nothing about. So pinning the tool allowlist alone fails OPEN
+# against every capability-bearing key nobody thought to enumerate: the shipped
+# definition widens, and a test that only reads `tools` stays green. The whole
+# KEY SET is therefore pinned too, for the same reason the allowlist is a
+# whole-set equality rather than a denylist. Adding a key here is a deliberate
+# act that has to be argued for, which is the point.
+EXPECTED_FRONTMATTER_KEYS = {"name", "description", "tools", "model"}
+
 
 def test_citation_judge_agent_definition_is_shipped():
     assert CITATION_JUDGE_AGENT.is_file(), (
@@ -82,8 +104,18 @@ def test_citation_judge_tool_allowlist_is_exactly_read():
     )
     assert tool_allowlist(fields) == EXPECTED_JUDGE_TOOLS, (
         f"the citation judge's tool allowlist must be exactly {EXPECTED_JUDGE_TOOLS}, "
-        f"got {tool_allowlist(fields)!r}. Every byte this agent reads is "
-        "attacker-authorable; the allowlist is the boundary."
+        f"got {tool_allowlist(fields)!r}. This agent reads attacker-authorable "
+        "bytes; the allowlist is the boundary."
+    )
+
+
+def test_citation_judge_frontmatter_key_set_is_exact():
+    fields = read_frontmatter(CITATION_JUDGE_AGENT)
+    assert set(fields) == EXPECTED_FRONTMATTER_KEYS, (
+        f"{CITATION_JUDGE_AGENT}'s frontmatter keys are {sorted(fields)}, expected "
+        f"{sorted(EXPECTED_FRONTMATTER_KEYS)}. A key this suite does not read is a "
+        "capability it does not check -- widen this set only together with an "
+        "assertion about what the new key grants."
     )
 
 
@@ -167,6 +199,55 @@ STALE_JUDGE_CLAIMS = (
     r"ordinary agent holding Bash",
     r"ordinary agent and still holds Bash",
 )
+
+
+# The call-shape documentation is a POSITIVE pin rather than another absence
+# one. "no `agentType`" is a legitimate and common sentence in these docs -- it
+# is true of the prepare call, the wait calls and the fix call -- so a pattern
+# forbidding it would go red on prose that is correct. What is checkable is the
+# opposite: the one bullet that describes the JUDGE's call shape must name the
+# agent the shipped template actually dispatches.
+JUDGE_CALL_SHAPE_DOC = (
+    PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "orchestration-and-batching.md"
+)
+
+
+def test_the_judges_documented_call_shape_names_its_agent_type():
+    text = JUDGE_CALL_SHAPE_DOC.read_text(encoding="utf-8")
+    # The bullet is bounded STRUCTURALLY -- from the marker to the next
+    # top-level list item or blank-line block -- rather than by a byte count.
+    # A fixed window is a ceiling on how much accurate prose the bullet may
+    # grow, which is a false RED waiting to happen: the sentence stays correct
+    # and the suite goes red anyway, and the cheapest way out of that is to
+    # weaken the pin.
+    bullet = re.search(
+        r"^- `citationJudgePrompt\(batch, attempt\)`.*?(?=\n- |\n\n)",
+        text,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert bullet is not None, (
+        f"{JUDGE_CALL_SHAPE_DOC} no longer carries a top-level list item "
+        "documenting citationJudgePrompt's call shape"
+    )
+    expected = citation_judge_agent_type()
+    item = bullet.group(0)
+    assert expected in item, (
+        f"{JUDGE_CALL_SHAPE_DOC}'s citationJudgePrompt bullet must name "
+        f"{expected!r} -- it described the judge as having no agentType until "
+        f"#353, and that sentence is now false:\n{item!r}"
+    )
+    # Naming the agent type somewhere in the bullet is not enough on its own:
+    # the bullet said BOTH things at once for one revision of this branch --
+    # "no `agentType`" in its opening call-shape clause and the real agent type
+    # further down -- and a presence-only pin reads that as correct. The absence
+    # half is scoped to THIS bullet on purpose; "no `agentType`" is a true and
+    # wanted sentence about the prepare, wait and fix calls elsewhere in the
+    # same file.
+    assert "no `agentType`" not in item, (
+        f"{JUDGE_CALL_SHAPE_DOC}'s citationJudgePrompt bullet still says the "
+        f"judge has no agentType, which contradicts the agent type it also "
+        f"names:\n{item!r}"
+    )
 
 
 def test_no_current_state_prose_still_claims_the_judge_holds_bash():

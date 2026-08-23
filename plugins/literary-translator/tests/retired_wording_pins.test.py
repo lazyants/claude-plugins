@@ -449,8 +449,17 @@ RETIRED = [
     (
         BASELINE_RELEASE, GLOSSARY_TEMPLATE,
         'lines.push("for i in $(seq 1 45); do "',
-        'lines.push("end=$((SECONDS + " + waitChunkSec(chunkIndex) + "))', 1,
-        "the EMITTED pre-#352 poll, glossary's copy",
+        'lines.push("Run EXACTLY ONE bash command. It does NOT poll and returns immediately:")', 1,
+        "the EMITTED pre-#352 poll, glossary's copy. The replacement is the "
+        "authoritative re-check's own command line, not the chunk poll's "
+        "`end=$((SECONDS ...))` -- both are #352's replacement for the single-shot "
+        "poll, but only this one lands in the SAME hunk that removes the needle, "
+        "and the hunk pairing is what this row has to survive. The two were in one "
+        "hunk until #353 edited the citation-review comment further down the file: "
+        "no line either side of the pair changed, but git re-attached the added "
+        "block to the neighbouring hunk, which is the added-line half of the "
+        "freshness caveat _diff_hunks() documents (its own wording only names the "
+        "reproduce-a-baseline-line way a hunk can split)",
     ),
     (
         BASELINE_RELEASE, GLOSSARY_TEMPLATE,
