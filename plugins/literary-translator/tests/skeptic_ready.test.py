@@ -2365,7 +2365,10 @@ def test_verify_merged_reports_a_tamper_that_leaves_manifest_unparseable(tmp_pat
         "the H1 tamper reason itself must survive into missing[]"
     )
     assert any(
-        "manifest.json" in m and ("not valid JSON" in m or "not found" in m or "could not be read" in m)
+        "manifest.json" in m and (
+            "not valid JSON" in m or "could not be parsed as JSON" in m
+            or "not found" in m or "could not be read" in m
+        )
         for m in result["missing"]
     ), "the parse failure that ended the run early must be reported too, not silently swallowed"
 
@@ -2398,7 +2401,7 @@ def test_main_prints_frozen_input_mismatch_for_an_unparseable_manifest(tmp_path,
 @pytest.mark.parametrize("kind,expected", [
     ("invalid_json", "is not valid JSON"),
     ("invalid_utf8", "is not valid JSON"),
-    ("deep_nesting", "is not valid JSON"),
+    ("deep_nesting", "could not be parsed as JSON"),
     ("deleted", "not found"),
     ("directory", "could not be read"),
 ])
@@ -2408,9 +2411,10 @@ def test_verify_merged_still_raises_on_a_broken_manifest_with_no_stamp(tmp_path,
     was -- a hard precondition failure, not a soft one. Pins that #268 did
     not turn every broken manifest into an advisory result.
 
-    Also pins the fallback reader itself: this is the ONE path where a
-    fresh `_read_json` still runs, and two of these five states used to
-    escape it RAW (a non-UTF-8 `UnicodeDecodeError`, a deeply nested
+    Also pins the fallback reader itself: this is the one manifest.json path
+    that still reaches a fresh `_read_json` after H1 (that function has
+    plenty of other callers), and two of these five states used to escape it
+    RAW (a non-UTF-8 `UnicodeDecodeError`, a deeply nested
     `RecursionError`). Raw means past the caller's `except
     SkepticReadyError` -- so with a canon/senses mismatch already standing,
     the run would still have lost `frozen_input_mismatch` on its way to
@@ -2458,6 +2462,51 @@ def test_verify_merged_keeps_a_standing_mismatch_when_the_unstamped_manifest_is_
     )
     assert result["verified"] is False
     assert any("canon.json" in m and "tamper" in m for m in result["missing"])
+
+
+def test_verify_merged_keeps_a_standing_mismatch_when_a_later_frozen_input_read_fails(tmp_path, monkeypatch):
+    """The same class one level up, inside frozen_input_check()'s own loop:
+    canon.json is stamped and tampered (row 1 records the mismatch), then
+    manifest.json's read raises (row 2). Letting that OSError out mid-loop
+    discarded every answer the loop had already collected, and discarded it
+    into main()'s catch-all -- the one payload with no frozen_input_mismatch
+    field. The read failure still ends the run; it just stops taking the
+    verdict with it.
+
+    test_verify_merged_still_raises_on_the_same_read_failure above pins the
+    OTHER half, unchanged: with NO mismatch standing the raw OSError still
+    propagates, because there is then nothing for the caller to lose."""
+    fx = _manifest_tamper_fixture(tmp_path)
+    canon_path = tmp_path / "canon.json"
+    write_json(canon_path, {"entries": {}})
+    aggregate = json.loads(fx["aggregate_path"].read_text(encoding="utf-8"))
+    aggregate["canon_sha256"] = suspicion_scan.compute_frozen_input_hash(canon_path)
+    write_json(fx["aggregate_path"], aggregate)
+    write_json(canon_path, {"entries": {"INJECTED": {}}})
+
+    real_read_frozen_input_snapshot = sr.read_frozen_input_snapshot
+
+    def _fail_on_manifest(path):
+        if Path(path) == fx["manifest_path"]:
+            raise OSError("simulated transient read failure")
+        return real_read_frozen_input_snapshot(path)
+
+    monkeypatch.setattr(sr, "read_frozen_input_snapshot", _fail_on_manifest)
+
+    result = sr.run_verify_merged(
+        fx["triage_path"], fx["aggregate_path"], fx["manifest_path"],
+        fx["particle_config"], languages_dir=fx["lang_dir"], canon_path=canon_path,
+    )
+    assert result["frozen_input_mismatch"] is True, (
+        "canon.json's tamper was recorded before manifest.json's read failed -- "
+        "the read failure must not carry that verdict out through a payload shape "
+        "that cannot express it"
+    )
+    assert result["verified"] is False
+    assert any("canon.json" in m and "tamper" in m for m in result["missing"])
+    assert any("manifest.json" in m and "could not be read" in m for m in result["missing"]), (
+        "the read failure that ended the run must be reported, not just survived"
+    )
 
 
 def test_verify_merged_parses_manifest_from_h1s_own_snapshot(tmp_path, monkeypatch):
@@ -2528,9 +2577,11 @@ def test_verify_merged_parses_manifest_from_h1s_own_snapshot(tmp_path, monkeypat
         "call must isolate what the PARSE saw"
     )
     assert after["verified"] is False
-    assert any("Jean" in m or "evidence" in m or "citation" in m for m in after["missing"]), (
-        f"the mutation must break this record's own citation, not merely some other "
-        f"check -- missing was {after['missing']!r}"
+    assert any("no longer byte-verifies" in m for m in after["missing"]), (
+        f"the mutation must break this record's own CITATION specifically -- a looser "
+        f"matcher would also accept a source_form binding or coercion-delta entry, "
+        f"neither of which proves the parsed manifest bytes were the mutated ones. "
+        f"missing was {after['missing']!r}"
     )
 
 

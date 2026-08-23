@@ -2093,7 +2093,12 @@ raises raw — because degrading a frozen input it still needs to parse (the
 and since #268 evidence re-authentication parses `manifest.json` off the
 same captured bytes) would silently empty that universe and let every
 ambiguous form sail through unflagged, exactly the fail-OPEN failure mode
-this release closes elsewhere. `--check-frozen-inputs` tolerates the same read error and
+this release closes elsewhere. One qualification, added by #268: a read
+error still ends that run, but if a tamper on a *different* frozen input has
+already been detected by then, the run reports that mismatch instead of
+dying with an exception the result shape cannot carry — the mode's answer to
+an unreadable input is unchanged, only its answer to "unreadable AND already
+tampered" is. `--check-frozen-inputs` tolerates the same read error and
 degrades instead, because it never parses anything downstream — it only
 ever answers "did a frozen input change," and raising there would trade its
 own documented "never crashes" contract for a check that buys nothing in
