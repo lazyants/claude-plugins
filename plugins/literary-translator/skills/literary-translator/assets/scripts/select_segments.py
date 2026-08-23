@@ -9,11 +9,14 @@ hardening layered on top of the source-proven historiettes-t3 engine loop.
 It has not yet been run at scale; treat it as a careful first design, not
 as something already proven surprise-free.
 
-STATUS: non-gating for convergence but gating for resume (folded into
-resume_setup.py's resume-integrity digest) -- covered by
-`orchestration_bundle_hash` (never `plugin_bundle_hash`), and never itself a
-member of the 15-field `cache_key` composite. It classifies; it never writes
-a ledger fragment.
+STATUS: gating for BOTH convergence and resume -- this script is covered by
+`plugin_bundle_hash` AND `orchestration_bundle_hash`, a dual registration it
+shares only with claim_record.py, so one edit to it moves two hashes. It owns
+the dispatch gate, which is the authority `plugin_bundle_hash` covers (#446);
+the orchestration marker is folded into resume_setup.py's resume-integrity
+digest, so the same edit also forces a fresh, no-resume run. It is never
+itself a member of the 15-field `cache_key` composite. It classifies; it
+never writes a ledger fragment.
 
 What it does (SKILL.md's W5 "Mass-translate" section, authoritative):
 
@@ -456,14 +459,14 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     scripts" convention, which is already false here (canon_validate.py and
     glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports
     cache_key.py). The real reason: ledger_update.py is a
-    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:100-107 records that that
+    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:102-109 records that that
     tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS
     INVISIBLE -- which is why canon_senses.py had to be registered
     explicitly once two members imported it. A shared module would put this
     predicate's bytes outside the hash meant to cover them, so WEAKENING
     this guard would no longer move plugin_bundle_hash, and every durable
     root scaffolded beforehand would go on trusting it: the exact
-    false-green cache_key.py:114-118 names. Consolidation stays possible --
+    false-green cache_key.py:116-120 names. Consolidation stays possible --
     it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the
     same commit.
 

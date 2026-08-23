@@ -34,8 +34,9 @@ So this file does exactly that -- for BOTH restatement families it names:
        separate bundle hashes -- exact membership" section (parsed
        programmatically, not hand-copied here),
      - the individual scripts' own self-declared membership comments
-       (`draft_ready.py`/`select_segments.py` both explicitly self-declare
-       "covered by orchestration_bundle_hash, never plugin_bundle_hash").
+       (`draft_ready.py` self-declares "covered by orchestration_bundle_hash,
+       never plugin_bundle_hash"; `select_segments.py` self-declares the DUAL
+       membership it has held since #446).
 
 Nothing here hand-types the 15-field list or either bundle list as a
 literal Python list of its own -- every expectation is derived from one
@@ -607,16 +608,20 @@ def test_orchestration_bundle_members_from_doc_match_the_tuple_that_owns_them(
         )
 
 
-@pytest.mark.parametrize(
-    "filename",
-    ["draft_ready.py", "select_segments.py"],
-)
-def test_self_declaring_orchestration_scripts_agree_with_the_doc(filename):
-    """draft_ready.py and select_segments.py each self-declare, in their own
-    docstrings, that they are covered by orchestration_bundle_hash and
-    explicitly NOT plugin_bundle_hash -- a fourth restatement site for this
-    same fact. Cross-check the self-declaration text against the doc-parsed
-    membership list, rather than trusting either site alone."""
+def test_draft_ready_self_declares_its_orchestration_only_membership():
+    """draft_ready.py self-declares, in its own docstring, that it is covered
+    by orchestration_bundle_hash and explicitly NOT plugin_bundle_hash -- a
+    fourth restatement site for this same fact. Cross-check the
+    self-declaration text against the doc-parsed membership list, rather than
+    trusting either site alone.
+
+    This was a two-script parametrize until #446, when select_segments.py
+    became a member of both bundles; the test below covers it instead. Note WHY
+    it could not simply stay: both assertions here are bare substring checks,
+    and both substrings are still present in a file declaring dual membership --
+    so leaving it in would have kept this test green while its own name and
+    docstring said the opposite."""
+    filename = "draft_ready.py"
     doc_text = _load_ledger_and_resumability_doc()
     orchestration_members = _extract_bundle_files(doc_text, "orchestration_bundle_hash")
     assert filename in orchestration_members
@@ -629,6 +634,38 @@ def test_self_declaring_orchestration_scripts_agree_with_the_doc(filename):
     assert "plugin_bundle_hash" in script_text, (
         f"{filename} no longer self-declares its EXCLUSION from "
         "plugin_bundle_hash in its own docstring/comments"
+    )
+
+
+def test_select_segments_self_declares_its_dual_membership(cache_key_module):
+    """#446. select_segments.py's own module docstring is the fifth
+    restatement site, and the only one a reader of that file ever meets. It
+    must state the membership the tuples actually hold.
+
+    Both halves are load-bearing, and the NEGATIVE half is what makes this
+    non-vacuous: a file declaring dual membership still contains the substring
+    `plugin_bundle_hash`, so a presence check alone would have passed on the
+    pre-#446 docstring word for word. What distinguishes the two readings is
+    the exclusion phrase, which must be GONE."""
+    doc_text = _load_ledger_and_resumability_doc()
+    orchestration_members = _extract_bundle_files(doc_text, "orchestration_bundle_hash")
+    assert "select_segments.py" in orchestration_members
+    assert "select_segments.py" in cache_key_module.PLUGIN_BUNDLE_MEMBERS, (
+        "select_segments.py is not a PLUGIN_BUNDLE_MEMBERS entry -- #446 "
+        "registered it, so either the tuple was reverted or this test is "
+        "running against a pre-#446 tree. The docstring assertions below "
+        "describe the state that registration is supposed to produce."
+    )
+
+    script_text = (SCRIPTS_DIR / "select_segments.py").read_text(encoding="utf-8")
+    assert "never `plugin_bundle_hash`" not in script_text, (
+        "select_segments.py still carries its pre-#446 exclusion phrase "
+        "'never `plugin_bundle_hash`', but it IS a PLUGIN_BUNDLE_MEMBERS entry"
+    )
+    assert "`plugin_bundle_hash` AND `orchestration_bundle_hash`" in script_text, (
+        "select_segments.py no longer self-declares the DUAL membership it "
+        "has held since #446 -- one edit to it moves two hashes, and its own "
+        "docstring is where a reader of this file learns that"
     )
 
 

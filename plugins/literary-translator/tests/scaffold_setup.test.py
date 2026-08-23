@@ -33,10 +33,11 @@ NOTE on the drift guards deliberately avoided here: this file NEVER names a
 canon_senses CONSUMER script (canon_validate.py / glossary_batch_plan.py /
 canon_adjudication_audit.py) as a literal in its own code -- the plugin
 members it stages are enumerated from ``cache_key.PLUGIN_BUNDLE_MEMBERS`` at
-runtime, and the two files it mutates by literal name (validate_draft.py, a
-plugin member; select_segments.py, an orchestration member) are both
-non-consumers -- so tests/senses_fixture_guard.test.py's whole-file
-consumer scan correctly skips it.
+runtime, and the three files it mutates by literal name (validate_draft.py, a
+plugin member only; draft_ready.py, an orchestration member only;
+select_segments.py, a member of BOTH since #446) are all non-consumers -- so
+tests/senses_fixture_guard.test.py's whole-file consumer scan correctly
+skips it.
 """
 import collections
 import hashlib
@@ -99,21 +100,24 @@ resume_setup = _load_module("resume_setup", RESUME_SETUP_SRC)
 PLUGIN_BUNDLE_MEMBERS = cache_key.PLUGIN_BUNDLE_MEMBERS
 EXPECTED_ORCHESTRATION_BUNDLE_MEMBERS = (
     # #438: registered in BOTH bundles -- it gates dispatch (plugin bundle)
-    # AND select_segments.py, an orchestration member that is deliberately
-    # not a plugin member, imports it (transitive-import invisibility).
+    # AND select_segments.py imports it (transitive-import invisibility).
     "claim_record.py",
     "draft_ready.py",
     "ledger_merge.py",
     "language_smoke_report.py",
+    # #446: registered in BOTH bundles as well -- it owns the dispatch gate
+    # itself, not merely the claim predicate.
     "select_segments.py",
 )
 
-# A plugin member that is NOT an orchestration member, and an orchestration
-# member that is NOT a plugin member -- used by the mutation test to prove
-# each marker reacts to its OWN bundle only. Both are non-consumer scripts
-# (see the module docstring's drift-guard note).
+# A plugin member that is NOT an orchestration member, an orchestration member
+# that is NOT a plugin member, and a member of BOTH -- used by the mutation
+# test to prove each marker reacts to its OWN bundle, and that a dual member
+# moves both. All three are non-consumer scripts (see the module docstring's
+# drift-guard note).
 PLUGIN_ONLY_MEMBER = "validate_draft.py"
-ORCHESTRATION_ONLY_MEMBER = "select_segments.py"
+ORCHESTRATION_ONLY_MEMBER = "draft_ready.py"
+DUAL_MEMBER = "select_segments.py"
 
 MARKER_REL = {
     "plugin": ("runs", ".plugin_bundle_hash"),
@@ -339,10 +343,16 @@ def test_scaffold_writes_orchestration_bundle_marker(tmp_path):
 
 
 def test_member_mutation_flips_right_marker(tmp_path):
-    """Each marker reacts to its OWN bundle only: mutating a plugin member
+    """Each marker reacts to its OWN bundle: mutating a plugin-only member
     flips plugin_bundle_hash and leaves orchestration_bundle_hash fixed;
-    mutating an orchestration member flips orchestration_bundle_hash and
-    leaves plugin_bundle_hash fixed."""
+    mutating an orchestration-only member flips orchestration_bundle_hash and
+    leaves plugin_bundle_hash fixed; and mutating a DUAL member flips both.
+
+    The third leg is #446's acceptance criterion, proven by running the
+    SHIPPED scaffold_setup.py over a real scaffolded root rather than by
+    recomputing either hash here. It is also the first coverage of the dual
+    case at all -- claim_record.py has been registered in both bundles since
+    #438 with nothing exercising that shape."""
     root = _make_scaffold_root(tmp_path)
     assert run_scaffold_setup(root).returncode == 0
     plugin_0 = _read_marker(root, "plugin").strip()
@@ -374,6 +384,21 @@ def test_member_mutation_flips_right_marker(tmp_path):
         "mutating an orchestration member must NOT flip plugin_bundle_hash"
     )
 
+    # Mutate a member of BOTH bundles (#446).
+    dual_member_path = root / "scripts" / DUAL_MEMBER
+    dual_member_path.write_bytes(dual_member_path.read_bytes() + b"\n# scaffold-test mutation\n")
+    assert run_scaffold_setup(root).returncode == 0
+    plugin_3 = _read_marker(root, "plugin").strip()
+    orchestration_3 = _read_marker(root, "orchestration").strip()
+    assert plugin_3 != plugin_2, (
+        f"{DUAL_MEMBER} is a PLUGIN_BUNDLE_MEMBERS entry, so mutating it must "
+        "flip plugin_bundle_hash"
+    )
+    assert orchestration_3 != orchestration_2, (
+        f"{DUAL_MEMBER} is an ORCHESTRATION_BUNDLE_MEMBERS entry, so mutating "
+        "it must flip orchestration_bundle_hash too -- one edit, two hashes"
+    )
+
 
 def test_scaffold_member_set_matches_cache_key(tmp_path):
     """Drift-catcher: the plugin set scaffold_setup.py hashes must be exactly
@@ -381,7 +406,7 @@ def test_scaffold_member_set_matches_cache_key(tmp_path):
     declares (a *.template.js -- the pair most at risk of being silently
     dropped from the scaffold's set) and confirming the scaffold-written
     marker still tracks the independent recompute over the canonical set. If
-    scaffold hashed a NARROWER set (e.g. the 12 *.py only), the marker would
+    scaffold hashed a NARROWER set (e.g. the *.py members only), the marker would
     NOT move when a template's bytes change, and this assertion would fail."""
     template_members = [m for m in PLUGIN_BUNDLE_MEMBERS if m.endswith(".template.js")]
     assert template_members, (
