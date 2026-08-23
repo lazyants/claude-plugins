@@ -38,3 +38,18 @@ Verified 2026-07-17. Even handed ABSOLUTE worktree paths in its prompt, a subage
 Verified 2026-07-19, LT 1.11.0 five-agent build. A teammate briefed with the absolute worktree prefix still ran several Bash/Read/Edit calls against the PRIMARY checkout — landing its whole deliverable as uncommitted changes on `main`. Nothing failed loudly: the edits applied cleanly, its own tests passed, and it reported success. It surfaced only because a SECOND teammate's import of the first one's new symbol did not resolve and it thought to check `git status` in both trees.
 
 Fix: (a) require each teammate to confirm its first written path back to you, not just receive it; (b) when one teammate reports a cross-owner symbol missing, check WHICH TREE before assuming it is unwritten; (c) recovery is `git diff > patch` + `git apply` in the worktree + `git checkout --` in primary — back it up FIRST (patch + raw copies) and verify the transplant by diff-line count against `origin/main` before discarding the primary copy.
+
+## `gh pr merge --delete-branch` from a worktree fails AFTER the merge already landed
+
+Run from a worktree whose repo has `main` checked out elsewhere, the command squash-merges on
+GitHub and only THEN dies locally:
+
+```
+failed to run git: fatal: 'main' is already used by worktree at '<primary>'
+```
+
+The remote merge is done; only the local switch-to-base and branch delete never ran. Treat the
+non-zero exit as a claim, not a result — confirm with
+`gh pr view <n> --json state,mergeCommit` and `gh api repos/<org>/<repo>/git/ref/heads/main`
+before re-running anything, then delete the merged remote branch explicitly with
+`gh api -X DELETE repos/<org>/<repo>/git/refs/heads/<branch>`.
