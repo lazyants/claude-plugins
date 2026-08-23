@@ -4421,8 +4421,11 @@ def run(args, dirs: dict) -> dict:
             f"mount error, fix that and rerun; if it is some other entry "
             f"entirely and you can establish the segment really did converge, "
             f"replace it with a regular file containing the single line "
-            f"'converged'; only if you can establish it did NOT converge is "
-            f"removing the entry the right move.",
+            f"'converged' -- that protects it, and backfill_ever_converged.py's "
+            f"census will report it as 'unattributed', because a hand-written "
+            f"marker carries none of the evidence a real convergence records in "
+            f"the marker's body; only if you can establish it did NOT converge "
+            f"is removing the entry the right move.",
             classification=classification,
             counts=counts,
             ids_by_category=ids_by_category,
