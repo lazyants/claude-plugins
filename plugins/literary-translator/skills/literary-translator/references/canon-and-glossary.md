@@ -61,6 +61,57 @@ Canon population is not "paste the whole book into context and ask for a glossar
    exists, whether a candidate is a title that needs unpacking, or whether it is
    not actually a proper name at all is an **accuracy** decision — therefore it
    must be codex, never Claude, exactly like translation/review.
+
+   **A machine-truncated candidate is never `accepted` (#383).** `bootstrap_names.py`
+   bounds a candidate's `name` and marks the cut with a trailing
+   ` [...truncated:<digest>]` marker, while occurrence lookup keys on the span's own
+   UNCAPPED text (`span_match_keys()` — deliberately, see its docstring). So a canon
+   entry whose `source_form` is that truncated spelling can never match an occurrence
+   of itself: it is **inert** — zero occurrences, zero evidence, absent from
+   `occurrence_targets`' output, and nothing anywhere reports "this entry is inert" as
+   such. It fails as a green run rather than a halt.
+   `glossary_TASK.template.md` therefore instructs the adjudicator to route
+   any marker-bearing candidate to `review_queue`. In practice the trigger is not
+   hostile input but source boilerplate: measured over a live French Gutenberg book,
+   the single marker-bearing candidate was a 232-character all-caps run of the
+   licence block, extracted with `likely_name: true`.
+
+   **The dispatch prompt itself is deliberately left un-caveated — TWO sentences of
+   it.** `glossary-pass-wf.template.js` still tells the adjudicator that `source_form`
+   is "the candidate's own `name` field, copied verbatim", and, in the same context
+   window, glosses the field as "`name` = the surface form as it appears in the source
+   text". The first is still true and is what the new bullet preserves; the second is
+   the one the new bullet now literally contradicts ("it is NOT always the surface form
+   as it stands in the source text"). Neither changes the outcome — the same prompt
+   orders the agent to read `glossary_TASK.md` **in full** first, so the rule reaches
+   it, and both roads end at copying the string verbatim. The reason to leave them is
+   cost: that file IS a `PLUGIN_BUNDLE_MEMBERS` entry, so editing its bytes moves
+   `plugin_bundle_hash` and re-stales every converged segment in every project. When a
+   future release moves that hash anyway, fix **both** sentences, not just the first.
+
+   **Operator note for an EXISTING durable root.** `glossary_TASK.md` is seeded once
+   and is never auto-overwritten, so a project scaffolded before this rule shipped
+   does not have it. This deliberately did **not** bump `PROMPT_CONTRACT_VERSION` to
+   force the migration: that constant is shared with `translate_TASK.md` and
+   `review_TASK.md`, which are `compute_prompt_hash` inputs, so bumping it would
+   re-stale every converged segment in every project — a cost far out of proportion
+   to this defect. To pick the rule up on a live root, copy the `source_form` and
+   `disposition` bullets from the current `glossary_TASK.template.md` into your
+   `glossary_TASK.md` by hand; nothing re-translates.
+
+   **Copying the bullets does not reach a glossary run that is already in flight.**
+   `glossary_TASK.md`'s bytes are not one of the resume digest's inputs (those are
+   listed in `references/orchestration-and-batching.md` under **The resume-integrity
+   gate and its digest inputs**), so a matching resume keeps each batch's
+   `out_{i}_attempt_0.json`, the precheck resume-skips it, and the merge takes what
+   the OLD prompt already marked `accepted`. Recover with the stale-cached-result
+   procedure in that same section — not restated here — plus the one step it does not
+   cover: delete the attempt-0 fragments you want re-adjudicated before re-invoking,
+   because here they are VALID and would otherwise be resume-skipped intact. They are
+   exactly `${durable_root}/glossary/runs/${RUN_ID}/out_{i}_attempt_0.json`, and only
+   those — leave `manifest_*`, `approved_*`, `evidence_*`, the run directory itself and
+   `canon.json` alone. A fresh run is the blunt alternative: correct, but it forfeits
+   every batch's resume saving.
 3. **Merge** with dedup + collision checks into the canonical `entries{}` map, plus
    a `review_queue` for low-confidence/disputed cases. Routing is driven by each
    batch item's own `disposition` field (`"accepted"` vs `"review_queue"`) — never

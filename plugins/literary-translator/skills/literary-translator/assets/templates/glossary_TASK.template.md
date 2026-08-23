@@ -86,6 +86,13 @@ For every candidate in the batch, in the same order, decide exactly one
 canon-batch item:
 
 - **`source_form`** -- the candidate's own `name` field, copied verbatim.
+  That field is length-bounded by the extractor, so it is NOT always the
+  surface form as it stands in the source text: a `name` ENDING in
+  ` [...truncated:` followed by 16 hexadecimal digits and `]` is a
+  machine-truncated spelling, cut at the bound with a digest appended so
+  two different over-long runs stay distinguishable. Still copy it
+  verbatim -- that exact string is this batch's own key -- but see the
+  truncation rule under `disposition`.
 - **`is_proper_name`** -- `false` when the candidate is not actually a
   proper name at all (a frequent common word, an interjection, a bare
   title, or a sentence-initial capitalization artifact). Such a candidate
@@ -94,7 +101,20 @@ canon-batch item:
   `"review_queue"` whenever it still needs a human's later attention -- a
   disputed transcription, several different real people sharing one
   surname, not enough context in this batch alone, a non-name candidate as
-  above, or the offline `SOURCE_UNAVAILABLE:` case below.
+  above, a machine-truncated `name` as below, or the offline
+  `SOURCE_UNAVAILABLE:` case below.
+  A candidate whose `name` carries the ` [...truncated:<16 hex digits>]`
+  marker described under `source_form` always gets
+  `disposition: "review_queue"`, never `"accepted"` -- whatever you can
+  make of the part you can see, and even when the visible part looks like
+  a perfectly resolvable name. Say in the `note` that the candidate's
+  name was machine-truncated, so a human can go and look at the real run
+  in the source. An over-long run is normally not a name at all (an
+  all-caps licence block, a running header, a dedication page, or OCR
+  damage that welded a paragraph into one token), and accepting one
+  freezes a spelling into `canon.json` that no occurrence of it can ever
+  match: the entry would sit there looking resolved while contributing
+  nothing to the book.
 - **`basis`** (accepted items only) -- exactly one of:
   - **`established`** -- a real, already-current target-language form
     exists for this name. Confirm it through an actual reference source
