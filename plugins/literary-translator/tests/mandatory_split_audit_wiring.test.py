@@ -3,7 +3,10 @@
 RFC #215, item 1e: the homonym-split evidence gate (category 5 of
 ``canon_adjudication_audit.py --check``) must be wired as a MANDATORY
 W-step, distinct from the categories-1-4 gate that stays an opt-in,
-Deliver-time (W7/W8) invocation of the same script.
+Deliver-time (W7/W8) invocation of the same script. Since #244 that opt-in
+covers categories 2-4 and category 1's identical-surface shape only: a
+category-1 surface-variant finding is never masked by ``--advisory`` and so
+halts this mandatory W-step too.
 
 This is a doc-structural test, not a behavioral one -- the audit script's
 own logic (categories, ``--advisory`` narrowing, ``--particle-config``
@@ -28,9 +31,11 @@ out). So this file greps the shipped docs directly and asserts:
      ``source.language.code``), and ``--advisory`` -- dropping any of the
      three would either silently skip the gate, break language-config
      threading (evidence verification cannot run without it), or
-     (dropping ``--advisory``) reintroduce Deliver-time-only categories-1-4
+     (dropping ``--advisory``) reintroduce Deliver-time-only categories-2-4
      blocking this early in the pipeline, none of which the contract calls
-     for here.
+     for here. Keeping ``--advisory`` does NOT make this invocation
+     non-blocking for category 1's surface-variant shape (#244), which it
+     cannot mask.
   3. The stale "not yet wired as a mandatory W-step" claim is gone from
      SKILL.md -- a regression guard against silently reverting the wiring
      while leaving the old opt-in-only prose in place.
@@ -175,7 +180,7 @@ def test_skill_md_mandatory_gate_command_carries_particle_config_and_advisory():
     assert ADVISORY_FLAG in joined, (
         "the mandatory gate's own invocation must pass --advisory -- "
         "otherwise it would also start hard-blocking on the still-opt-in "
-        "categories 1-4 this early in the pipeline, which the contract does "
+        "categories 2-4 this early in the pipeline, which the contract does "
         "not call for"
     )
 

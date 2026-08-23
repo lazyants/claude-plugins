@@ -1,6 +1,8 @@
 """tests/canon_adjudication_audit.test.py -- regression-lock suite for
-scripts/canon_adjudication_audit.py, the opt-in human-adjudication rollout
-gate ported from historiettes-t3's audit_human_adjudications.py (see that
+scripts/canon_adjudication_audit.py, the human-adjudication rollout
+gate ported from historiettes-t3's audit_human_adjudications.py -- opt-in for
+categories 2-4 and for category 1's identical-surface shape; ALWAYS enforced
+for category 1's surface-variant shape (#244) and for category 5 (see that
 script's own module docstring and SKILL.md's "Canon human-adjudication
 audit" section for the authoritative spec -- the frozen build plan's §1/§2
 are the source of truth this file asserts against).
@@ -67,7 +69,9 @@ directly rather than needing the script to print a hash anywhere.
      object; unreadable JSON): fatal exit 2.
  15. Orphaned adjudication record and orphaned stale cap override (cap no
      longer exceeded): informational, non-blocking.
- 16. --advisory suppresses blocking exit 1 but never masks fatal exit 2.
+ 16. --advisory suppresses blocking exit 1 for the maskable categories,
+     but never masks fatal exit 2 -- nor, since #244, a category-1
+     surface-variant finding (see case 244 at the end of this file).
  17. Scope filter: is_proper_name:false / basis:"not_a_name" excluded from
      Cats 1-3.
  18. --init --check together: exactly one stdout JSON line.
@@ -612,15 +616,43 @@ def test_cat1_record_count_rule_two_map_keys_same_field(tmp_path):
 # ===========================================================================
 
 
+def _assert_warning_states_both_postures(warning):
+    """The scope warning must carry the whole #244 contract, not a marker word.
+
+    Pinned as four independent facts because a marker-only assertion stayed
+    green when every sentence naming the shapes and their opposite postures was
+    deleted: the qualification to pipeline-written canon, both shape names, and
+    the two OPPOSITE postures. A warning that named only one shape, or named
+    both but claimed one posture for both, would be as misleading as the
+    sentence this replaced."""
+    for fragment in ("PIPELINE-WRITTEN", "SURFACE-VARIANT", "identical-surface"):
+        assert fragment in warning, (
+            f"scope warning must mention {fragment!r}: {warning}"
+        )
+    assert "never masked by --advisory" in warning, (
+        f"scope warning must state the surface-variant posture: {warning}"
+    )
+    assert "maskable" in warning.split("identical-surface", 1)[1], (
+        f"scope warning must state the OPPOSITE posture for the identical-"
+        f"surface shape, or it reads as one rule for both: {warning}"
+    )
+
+
 def test_cat1_scope_warning_present_when_canon_present(tmp_path):
-    """B14: category 1 (duplicate_source_form) can only ever detect a
-    NORMALIZATION-VARIANT duplicate, never a byte-identical one --
-    `canon_validate.py`'s own map-key-equals-source_form write pattern
-    structurally prevents two records from ever sharing an identical
-    surface. `compute_cat1_items` must emit an unconditional warning
-    stating this scope limit on every --check run where canon is present,
-    REGARDLESS of whether any duplicate group was actually found -- RED
-    today: no such warning is ever emitted."""
+    """B14: `compute_cat1_items` must emit an unconditional scope warning on
+    every --check run where canon is present, REGARDLESS of whether any
+    duplicate group was actually found.
+
+    #244 corrected what that warning SAYS. It used to assert the category could
+    detect a normalization variant but "never a genuine byte-identical one",
+    justified by `canon_validate.py`'s map-key-equals-source_form write
+    pattern. That justification only ever held for PIPELINE-WRITTEN canon:
+    `entries{}` map keys are schema-unconstrained and this script groups on
+    each record's `source_form` FIELD, so a hand-authored canon can hold an
+    identical-surface duplicate and the script does enumerate it -- as
+    test_cat1_record_count_rule_two_map_keys_same_field has always shown.
+    The warning must scope its claim to the pipeline and name the two shapes'
+    differing --advisory postures instead of denying the second shape."""
     root = make_durable_root(tmp_path)
     write_canon(root, [entry("Solo", "Solo")])  # zero cat1 items -- the warning must fire anyway
 
@@ -628,10 +660,15 @@ def test_cat1_scope_warning_present_when_canon_present(tmp_path):
     summary = parse_stdout(proc)
     assert_summary_schema_valid(summary)
     assert summary["totals"]["by_kind"]["duplicate_source_form"] == 0
-    assert any(
-        "byte-identical" in w and "duplicate_source_form" in w
-        for w in summary["warnings"]
-    ), f"expected an unconditional cat-1 scope warning, got: {summary['warnings']}"
+    scope_warnings = [w for w in summary["warnings"] if "duplicate_source_form" in w]
+    assert scope_warnings, (
+        f"expected an unconditional cat-1 scope warning, got: {summary['warnings']}"
+    )
+    warning = scope_warnings[0]
+    assert "never a genuine byte-identical one" not in warning, (
+        f"the warning must stop denying a shape the script enumerates: {warning}"
+    )
+    _assert_warning_states_both_postures(warning)
 
 
 def test_cat1_still_fires_on_normalization_variant(tmp_path):
@@ -2820,3 +2857,312 @@ if __name__ == "__main__":
     import pytest
 
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ===========================================================================
+# 244. Category 1's SURFACE-VARIANT shape is never masked by --advisory,
+#      while its IDENTICAL-SURFACE shape still is.
+#
+#      The two shapes are told apart by whether the grouped records carry one
+#      byte-identical `source_form`:
+#        * surface_variant   -- raw surfaces DIFFER (case / whitespace /
+#          NFC-vs-NFD / casefold). The only shape the pipeline can write, since
+#          canon_validate.py's `entries[source_form] = entry` forces
+#          map_key == source_form. BLOCKING under --advisory.
+#        * identical_surface -- raw surfaces are byte-identical under 2+ map
+#          keys. Reachable only from hand-authored/legacy canon, and it is the
+#          category's own "two people sharing a spelling?" question, which is
+#          legitimately answerable confirmed_ok. Still maskable.
+#
+#      Every fixture below pairs two entries sharing one N(source_form), so the
+#      single category-3 pair they would form is excluded (R2-1c, see case 8)
+#      and no category-2 item arises (each target has one distinct normalized
+#      source). Blocking_count is therefore exactly the category-1 item under
+#      test, with nothing else to confound the exit code.
+# ===========================================================================
+
+
+# Two entries whose raw source_forms DIFFER but share N(source_form).
+SV_RECORDS = [("Marie", "Marie", "Marie-A"), ("marie ", "marie ", "Marie-B")]
+# Two entries under DIFFERENT map keys carrying the SAME raw source_form.
+IS_RECORDS = [("Marie", "Marie", "Marie-A"), ("Marie__1", "Marie", "Marie-B")]
+
+
+def _write_surface_variant(root):
+    """canon.json holding one surface-variant category-1 group."""
+    return write_canon(root, [entry("Marie", "Marie-A"), entry("marie ", "Marie-B")])
+
+
+def _write_identical_surface(root):
+    """canon.json holding one identical-surface category-1 group.
+    write_canon's list branch auto-keys the raw-string collision as
+    "Marie"/"Marie__1" while both entries keep source_form == "Marie"."""
+    return write_canon(root, [entry("Marie", "Marie-A"), entry("Marie", "Marie-B")])
+
+
+def _assert_shape(summary):
+    assert_summary_schema_valid(summary)
+    assert summary["totals"]["by_kind"]["duplicate_source_form"] == 1
+    assert summary["totals"]["by_kind"]["existing_merge"] == 0, "fixture must not raise a cat2 item"
+    assert summary["totals"]["by_kind"]["candidate_missed_merge_pair"] == 0, (
+        "the pair shares N(source_form) and must be excluded from cat 3 (R2-1c)"
+    )
+
+
+# --- A. the shape x verdict-bucket matrix ----------------------------------
+#
+# Applied PER BUCKET in production, so each bucket is pinned for BOTH shapes.
+# Testing identical_surface only in missing_verdict would admit an
+# implementation that is shape-aware there and blanket-unmaskable in the other
+# two.
+
+@pytest.mark.parametrize("shape,writer,advisory_rc", [
+    ("surface_variant", _write_surface_variant, 1),
+    ("identical_surface", _write_identical_surface, 0),
+])
+def test_cat1_shape_matrix_missing_verdict(tmp_path, shape, writer, advisory_rc):
+    root = make_durable_root(tmp_path)
+    writer(root)
+    # No adjudications file at all -> the item lands in missing_verdict.
+    proc = run_audit(root, "--check", "--advisory")
+    summary = parse_stdout(proc)
+    _assert_shape(summary)
+    assert summary["totals"]["missing_verdict"] == 1
+    assert summary["gate_passed"] is False, "--advisory never changes gate_passed"
+    assert proc.returncode == advisory_rc, (
+        f"{shape} in missing_verdict under --advisory: expected exit {advisory_rc}. "
+        f"{proc.stdout}{proc.stderr}"
+    )
+
+
+@pytest.mark.parametrize("shape,writer,records,advisory_rc", [
+    ("surface_variant", _write_surface_variant, SV_RECORDS, 1),
+    ("identical_surface", _write_identical_surface, IS_RECORDS, 0),
+])
+def test_cat1_shape_matrix_adverse(tmp_path, shape, writer, records, advisory_rc):
+    root = make_durable_root(tmp_path)
+    writer(root)
+    write_adjudications(root, {
+        cat1_key(records): adjudication_record("duplicate_source_form", "adverse"),
+    })
+    proc = run_audit(root, "--check", "--advisory")
+    summary = parse_stdout(proc)
+    _assert_shape(summary)
+    assert summary["totals"]["adverse"] == 1, (
+        "the fixture's key must match the enumerated item, or this tests nothing"
+    )
+    assert proc.returncode == advisory_rc, (
+        f"{shape} in adverse under --advisory: expected exit {advisory_rc}. "
+        f"{proc.stdout}{proc.stderr}"
+    )
+
+
+@pytest.mark.parametrize("shape,writer,records,advisory_rc", [
+    ("surface_variant", _write_surface_variant, SV_RECORDS, 1),
+    ("identical_surface", _write_identical_surface, IS_RECORDS, 0),
+])
+def test_cat1_shape_matrix_invalid_verdict_class(tmp_path, shape, writer, records, advisory_rc):
+    root = make_durable_root(tmp_path)
+    writer(root)
+    write_adjudications(root, {
+        cat1_key(records): adjudication_record("duplicate_source_form", "probably_fine"),
+    })
+    proc = run_audit(root, "--check", "--advisory")
+    summary = parse_stdout(proc)
+    _assert_shape(summary)
+    assert summary["totals"]["invalid_verdict_class"] == 1
+    assert proc.returncode == advisory_rc, (
+        f"{shape} in invalid_verdict_class under --advisory: expected exit "
+        f"{advisory_rc}. {proc.stdout}{proc.stderr}"
+    )
+
+
+# --- B. one raw-difference axis at a time ----------------------------------
+#
+# "Marie"/"marie " varies case AND whitespace at once, so an implementation
+# that strips or casefolds before the byte comparison would still pass it.
+# Each axis is isolated. The NFC/NFD pair is authored with explicit escapes so
+# an editor cannot silently normalize the fixture into a no-op.
+
+NFC_ELIE = "\u00c9lie"        # U+00C9 LATIN CAPITAL LETTER E WITH ACUTE
+NFD_ELIE = "E\u0301lie"       # ASCII 'E' + U+0301 COMBINING ACUTE ACCENT
+# Authored as escapes, never as pasted literals: an editor or a normalizing
+# tool would silently fold the second into the first and leave a fixture that
+# tests nothing. Asserted rather than trusted.
+assert NFC_ELIE != NFD_ELIE and len(NFC_ELIE) == 4 and len(NFD_ELIE) == 5
+
+
+@pytest.mark.parametrize("axis,a,b", [
+    ("case-only", "Marie", "marie"),
+    ("whitespace-only", "Marie", "Marie "),
+    ("nfc-vs-nfd", NFC_ELIE, NFD_ELIE),
+    # casefold() maps 'ß' -> 'ss', so this pair is normalization-equal too. It
+    # is the accepted false positive: a German text could legitimately spell two
+    # different people this way, and the gate now makes that an explicit
+    # confirmed_ok rather than assuming the answer.
+    ("casefold-beyond-case", "Straße", "Strasse"),
+])
+def test_cat1_surface_variant_axes_are_never_masked(tmp_path, axis, a, b):
+    assert a != b, f"{axis}: fixture must differ byte-wise, or it tests the other shape"
+    assert N(a) == N(b), f"{axis}: fixture must share one N(source_form), or no cat1 group forms"
+
+    root = make_durable_root(tmp_path)
+    write_canon(root, [entry(a, "Target-A"), entry(b, "Target-B")])
+    proc = run_audit(root, "--check", "--advisory")
+    summary = parse_stdout(proc)
+    _assert_shape(summary)
+    assert proc.returncode == 1, (
+        f"{axis}: a surface-variant duplicate must never be masked by --advisory. "
+        f"{proc.stdout}{proc.stderr}"
+    )
+
+
+# --- C. the rest ------------------------------------------------------------
+
+
+def test_cat1_surface_variant_blocks_without_advisory_too(tmp_path):
+    """Guards a fix that flips the plain --check path while making the
+    advisory one block."""
+    root = make_durable_root(tmp_path)
+    _write_surface_variant(root)
+    proc = run_audit(root, "--check")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert parse_stdout(proc)["gate_passed"] is False
+
+
+def test_cat1_surface_variant_cleared_by_correcting_canon_without_adjudications(tmp_path):
+    """The intended remedy, and it needs NO canon_adjudications.json: an absent
+    file reads as empty sections, so correcting canon.json is available to a
+    project that never opted into the categories-1-4 gate."""
+    root = make_durable_root(tmp_path)
+    _write_surface_variant(root)
+    assert run_audit(root, "--check", "--advisory").returncode == 1
+
+    # Collapse the two records onto one surface.
+    write_canon(root, [entry("Marie", "Marie-A")])
+    assert not (root / "canon_adjudications.json").exists()
+    proc = run_audit(root, "--check", "--advisory")
+    summary = parse_stdout(proc)
+    assert summary["totals"]["by_kind"]["duplicate_source_form"] == 0
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_cat1_surface_variant_cleared_by_confirmed_ok_verdict(tmp_path):
+    """The other remedy: the two spellings really are two different people.
+    The escalation makes the QUESTION mandatory, it does not assert the answer."""
+    root = make_durable_root(tmp_path)
+    _write_surface_variant(root)
+    write_adjudications(root, {
+        cat1_key(SV_RECORDS): adjudication_record("duplicate_source_form", "confirmed_ok"),
+    })
+    proc = run_audit(root, "--check", "--advisory")
+    summary = parse_stdout(proc)
+    assert summary["totals"]["confirmed_ok"] == 1
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_advisory_still_masks_a_pure_category_2_finding(tmp_path):
+    """Pins that the escalation did NOT widen to the maskable categories."""
+    root = make_durable_root(tmp_path)
+    write_canon(root, [entry("Jean", "Zhan"), entry("Valjean", "Zhan")])
+    proc = run_audit(root, "--check", "--advisory")
+    summary = parse_stdout(proc)
+    assert summary["totals"]["by_kind"]["existing_merge"] == 1
+    assert summary["totals"]["by_kind"]["duplicate_source_form"] == 0
+    assert summary["blocking_count"] > 0 and summary["gate_passed"] is False
+    assert proc.returncode == 0, "a pure categories-2-4 finding stays maskable"
+
+
+def test_advisory_never_masks_a_fatal_even_with_a_surface_variant_present(tmp_path):
+    root = make_durable_root(tmp_path)
+    _write_surface_variant(root)
+    assert run_audit(root, "--check", "--advisory").returncode == 1
+
+    write_canon_raw(root, {
+        "entries": "not-an-object",
+        "review_queue": [],
+        "generation_hashes": DEFAULT_GENERATION_HASHES,
+    })
+    assert_fatal(run_audit(root, "--check", "--advisory"))
+
+
+def test_confirmed_ok_surface_variant_does_not_make_another_bucket_unmaskable(tmp_path):
+    """THE mixed state. A surface-variant item that is confirmed_ok sits in no
+    blocking bucket at all, so it must not drag an unrelated maskable finding
+    (here a category-4 undrained review_queue item) into the unmaskable set.
+
+    Kills the implementation that asks "does any surface-variant item exist
+    anywhere, and is blocking_count > 0?" instead of counting shape membership
+    inside each verdict bucket."""
+    root = make_durable_root(tmp_path)
+    write_canon(
+        root,
+        [entry("Marie", "Marie-A"), entry("marie ", "Marie-B")],
+        review_queue=[queued("Dubious")],
+    )
+    write_adjudications(root, {
+        cat1_key(SV_RECORDS): adjudication_record("duplicate_source_form", "confirmed_ok"),
+    })
+    proc = run_audit(root, "--check", "--advisory")
+    summary = parse_stdout(proc)
+    _assert_shape(summary)
+    assert summary["totals"]["confirmed_ok"] == 1
+    assert summary["totals"]["review_queue_unaccepted"] == 1
+    assert summary["blocking_count"] > 0 and summary["gate_passed"] is False, (
+        "the category-4 item must still be a blocking finding, or this proves nothing"
+    )
+    assert proc.returncode == 0, (
+        "a confirmed_ok surface-variant must not make the category-4 finding "
+        f"unmaskable. {proc.stdout}{proc.stderr}"
+    )
+
+
+def test_group_mixing_both_shapes_counts_as_surface_variant(tmp_path):
+    """Three records, two byte-identical plus one variant. The group carries a
+    surface-variant defect, so the whole group is unmaskable."""
+    root = make_durable_root(tmp_path)
+    write_canon(root, [
+        entry("Marie", "Marie-A"),
+        entry("Marie", "Marie-B"),
+        entry("marie ", "Marie-C"),
+    ])
+    proc = run_audit(root, "--check", "--advisory")
+    summary = parse_stdout(proc)
+    assert summary["totals"]["by_kind"]["duplicate_source_form"] == 1
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+
+
+def test_report_splits_the_two_shapes_on_a_mixed_population(tmp_path):
+    """A run holding ONE group of each shape. Asserted on a mixed population so
+    that an implementation reporting "surface-variant count == total category-1
+    count" fails here rather than passing a single-shape fixture."""
+    root = make_durable_root(tmp_path)
+    write_canon(root, [
+        # group 1 -- surface variant
+        entry("Marie", "Marie-A"), entry("marie ", "Marie-B"),
+        # group 2 -- identical surface, auto-keyed "Pierre"/"Pierre__3"
+        entry("Pierre", "Pierre-A"), entry("Pierre", "Pierre-B"),
+    ])
+    proc = run_audit(root, "--check", "--advisory")
+    summary = parse_stdout(proc)
+    assert summary["totals"]["by_kind"]["duplicate_source_form"] == 2
+    assert "1 surface-variant" in proc.stderr, proc.stderr
+    assert "1 identical-surface" in proc.stderr, proc.stderr
+    assert "categories 2-4" in proc.stderr, "the --advisory tail must name the maskable set"
+    assert proc.returncode == 1, "the surface-variant group still halts the run"
+
+
+def test_scope_warning_no_longer_denies_the_identical_surface_shape(tmp_path):
+    """The unconditional warning used to claim a byte-identical duplicate could
+    NEVER be detected -- which test_cat1_record_count_rule_two_map_keys_same_field
+    has always falsified. That justification only ever held for pipeline-written
+    canon."""
+    root = make_durable_root(tmp_path)
+    write_canon(root, [entry("Solo", "Solo-T")])
+    proc = run_audit(root, "--check")
+    assert "never a genuine byte-identical one" not in proc.stderr, (
+        "the warning must stop denying a shape the script does enumerate"
+    )
+    summary = parse_stdout(proc)
+    warning = next(w for w in summary["warnings"] if "duplicate_source_form" in w)
+    _assert_warning_states_both_postures(warning)

@@ -93,9 +93,13 @@ is the orchestration-level summary of what each stage hands to the next):
   same invocation as SKILL.md's opt-in categories-1-4 gate documented for
   Deliver (W7/W8) — this call always runs, and even under `--advisory` it
   still HALTS before W3a on any unverified, stale, or collapsed split when
-  `canon_senses.json` is non-empty; a project with an absent/empty sidecar
-  passes through as a no-op, reported as `homonym_split: NOT ENUMERATED`
-  rather than a bare `0`. See SKILL.md for the exact command and
+  `canon_senses.json` is non-empty, and on a category-1 **surface-variant**
+  duplicate `source_form` whether or not the project opted into that gate
+  (#244); a project with an absent/empty sidecar passes through as a no-op
+  **for the split checks**, reported as `homonym_split: NOT ENUMERATED`
+  rather than a bare `0` — the category-1 surface-variant halt above is
+  computed from `canon.json` and applies to such a project too. See
+  SKILL.md for the exact command and
   `canon-and-glossary.md`/`canon_adjudication_audit.py` for the
   evidence-verification mechanics.
 - **W3a Segpack generation** — `segpack.py` over every candidate segment in

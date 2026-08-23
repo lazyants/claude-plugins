@@ -30,7 +30,7 @@
         "pair_review_cap": { "type": "integer", "minimum": 0 },
         "advisory": {
           "type": "boolean",
-          "description": "True iff --advisory was given -- forces exit 0 for a categories-1-4 blocking finding even when gate_passed is false. NEVER forces exit 0 for homonym_split's own missing/stale verdict, collapsed_split, evidence_unverified, or canon_absent_with_senses (never affects gate_passed either way). Never affects a genuine fatal (fatal never reaches stdout at all)."
+          "description": "True iff --advisory was given -- forces exit 0 for a categories-2-4 blocking finding, and for a category-1 IDENTICAL-SURFACE one (all records in the group carry a byte-identical source_form under different entries{} map keys), even when gate_passed is false. NEVER forces exit 0 for a category-1 SURFACE-VARIANT finding (the group's raw source_form values differ; #244), homonym_split's own missing/stale verdict, collapsed_split, evidence_unverified, or canon_absent_with_senses (never affects gate_passed either way). Never affects a genuine fatal (fatal never reaches stdout at all)."
         },
         "totals": {
           "type": "object",

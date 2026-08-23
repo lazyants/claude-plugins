@@ -1738,8 +1738,11 @@ without looking at the schema's required
 `source_form`/`is_proper_name`/`basis`/`confidence` — so an unvalidated
 malformed row reaches the reviewer's authoritative map and then assembly. The
 opt-in Deliver-time `canon_adjudication_audit.py` does re-read the current
-canon and refuses some malformed rows, but it is optional and its check is
-narrower than this one; it is not a substitute. (`--verify-merged`
+canon and refuses some malformed rows, but its categories-1-4 gate is
+optional and its check is narrower than this one; it is not a substitute.
+Only its category-1 **surface-variant** finding runs unconditionally, via
+the mandatory pre-W3a invocation that `--advisory` cannot mask (#244), and
+that catches a duplicated name surface, not a malformed row. (`--verify-merged`
 is a different mode and cannot stand in for this one: it requires `--batch`
 fragments.)
 

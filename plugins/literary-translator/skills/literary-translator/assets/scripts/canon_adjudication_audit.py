@@ -59,18 +59,37 @@ scope filter or not.
      item, emitted REGARDLESS of whether the records' target forms agree --
      *the same source name (modulo case/whitespace/NFC) exists as 2+
      separate canon entries; same entity, or two people sharing a spelling?*
-     **SCOPE LIMIT (#205), stated plainly rather than silently: this
-     category can only ever detect a NORMALIZATION-VARIANT duplicate
-     (e.g. `'Nachman'` vs `'nachman '`), never a genuine byte-identical
-     one.** `canon_validate.py:810`'s own write pattern
+     **SCOPE LIMIT (#205), stated plainly rather than silently: on
+     PIPELINE-WRITTEN canon this category can only ever detect a
+     SURFACE-VARIANT duplicate (e.g. `'Nachman'` vs `'nachman '`), never a
+     byte-identical one.** `canon_validate.py`'s own write pattern
      (`entries[source_form] = new_entry`) makes `map_key == source_form` by
      construction, so two records sharing an IDENTICAL surface can never
-     coexist in `entries{}` in the first place -- there is nothing left
-     for N(source_form) grouping to catch beyond a normalization variant.
+     coexist in `entries{}` on that path. They CAN in a hand-authored or
+     legacy canon -- `entries{}` map keys are schema-unconstrained and this
+     script reads each record's `source_form` FIELD, never the map key --
+     and such a group IS enumerated here.
      `compute_cat1_items` emits an unconditional warning stating this scope
      limit on every `--check` run (never gated on whether any group was
      actually found), so an operator reading the summary is never left
      assuming broader coverage than the check actually has.
+     **TWO SHAPES, TWO `--advisory` POSTURES (#244).** A group whose records
+     do NOT all carry one byte-identical `source_form` -- the same surface
+     written two ways, under case / whitespace / NFC-vs-NFD / casefold --
+     is a `surface_variant` group: **BLOCKING and NEVER masked by
+     `--advisory`**, because it is the only category-1 shape the pipeline
+     can produce and the only invocation every project runs passes
+     `--advisory` (see `is_surface_variant`). A group whose records all
+     share one byte-identical `source_form` under 2+ different map keys is
+     an `identical_surface` group and stays maskable: it is unreachable
+     from the pipeline, and it is exactly the accuracy question this
+     category's own prompt asks -- *two people sharing a spelling?* -- which
+     is legitimately answerable `confirmed_ok`. The line drawn is
+     pipeline-reachable vs legacy-only, NOT objective-defect vs judgment
+     call: `normalize_form`'s `casefold()` collapses more than case, so a
+     legitimately-distinct pair (`'Straße'`/`'Strasse'`) is a
+     `surface_variant` too, and the escalation makes the QUESTION mandatory
+     rather than asserting the answer.
   2. `existing_merge` -- group proper-name entry records by
      N(canonical_target_form). Any group spanning 2+ DISTINCT normalized
      source forms is a required item -- *genuinely different source
@@ -288,9 +307,10 @@ pre-existing early-return's unconditional `gate_passed: true` for that
 case -- a split cannot be meaningfully reconciled against a canon that
 does not exist.
 
-`--advisory` still downgrades a categories 1-4 finding to a non-blocking
-warning (its original WARN-first escape hatch), but it NEVER masks
-`homonym_split`'s missing/stale verdict, `collapsed_split`,
+`--advisory` still downgrades a categories 2-4 finding -- and a category-1
+IDENTICAL-SURFACE finding -- to a non-blocking warning (its original
+WARN-first escape hatch), but it NEVER masks a category-1 SURFACE-VARIANT
+finding (#244), `homonym_split`'s missing/stale verdict, `collapsed_split`,
 `evidence_unverified`, or `canon_absent_with_senses` -- see OUTPUT / EXIT
 CODE below.
 
@@ -319,11 +339,12 @@ CLI
                             non-empty, unused (and optional) otherwise
   --pair-review-cap N       category-3 pair-count cap (default: 40)
   --advisory                report every finding but never exit 1 for a
-                            categories-1-4 blocking finding (WARN-first
+                            categories-2-4 blocking finding, or a
+                            category-1 IDENTICAL-SURFACE one (WARN-first
                             escape hatch); NEVER masks a genuine fatal exit
-                            2, and NEVER masks homonym_split's missing/
-                            stale verdict, collapsed_split,
-                            evidence_unverified, or
+                            2, a category-1 SURFACE-VARIANT finding (#244),
+                            nor homonym_split's missing/stale verdict,
+                            collapsed_split, evidence_unverified, or
                             canon_absent_with_senses when canon_senses.json
                             is non-empty
 
@@ -335,8 +356,10 @@ when --init is given without --check) -- all human-readable detail to
 stderr. Exit 0 = gate clean (or `--init`-only success), 1 = blocking
 findings (categories 1-4, `homonym_split`'s missing/stale verdict,
 `collapsed_split`, `evidence_unverified`, or `canon_absent_with_senses` --
-unless `--advisory`, which forces 0 for the categories-1-4 component only
-while still reporting fully), 2 = fatal (bad paths, structurally malformed
+unless `--advisory`, which forces 0 for the categories-2-4 component and
+category 1's identical-surface component only, never for a category-1
+surface-variant finding (#244), while still reporting fully), 2 = fatal
+(bad paths, structurally malformed
 canon/adjudications/canon_senses.json, enumeration-critical row
 malformation, a genuine key collision, a non-empty canon_senses.json with
 no resolvable --particle-config, or a usage error when neither --init nor
@@ -348,10 +371,14 @@ enumerated nothing and its `by_kind` zero is vacuous rather than
 enumerated-clean. Purely descriptive: it feeds neither blocking_count,
 gate_passed, nor the exit code.
 
-STATUS: categories 1-4 remain an OPT-IN rollout gate. Category 5 (the
-homonym-split evidence gate) is MANDATORY whenever a project has adjudicated
-splits -- see SKILL.md's W-step registration for the exact command and when
-it is wired to run unconditionally.
+STATUS: categories 2-4 -- and category 1's identical-surface shape -- remain
+an OPT-IN rollout gate. Category 5 (the homonym-split evidence gate) is
+MANDATORY whenever a project has adjudicated splits, and since #244 a
+category-1 SURFACE-VARIANT finding is likewise enforced on every project:
+`--advisory` cannot mask it, so the mandatory pre-W3a invocation halts on
+one whether or not the project opted into the rollout gate. See SKILL.md's
+W-step registration for the exact command and when it is wired to run
+unconditionally.
 """
 
 import argparse
@@ -744,21 +771,33 @@ def compute_cat1_items(records: list, key_to_identity: dict, warnings: list) -> 
     of target agreement (counts RECORDS, not distinct field values).
 
     #205 (Option A -- docstring honesty + an unconditional scope warning,
-    never a schema change): this category structurally CANNOT detect a
-    byte-identical duplicate source_form, only a normalization variant --
-    `canon_validate.py:810` writes `entries[source_form] = new_entry`, so
+    never a schema change): on PIPELINE-WRITTEN canon this category cannot
+    detect a byte-identical duplicate source_form, only a surface variant --
+    `canon_validate.py` writes `entries[source_form] = new_entry`, so
     `map_key == source_form` by construction and two records with an
-    identical surface can never coexist in `entries{}` to begin with. The
+    identical surface can never coexist in `entries{}` on that path. A
+    hand-authored/legacy canon under arbitrary map keys can, and IS
+    enumerated (the grouping reads each record's `source_form` FIELD). The
     warning below fires every `--check` run, unconditionally (never gated
     on whether a group was actually found), so an operator never assumes
-    this category's coverage is broader than it structurally can be."""
+    this category's coverage is broader than it structurally can be.
+
+    #244: the `records` rows this builds are
+    `[map_key, raw source_form, normalize_form(canonical_target_form)]`, and
+    `is_surface_variant` reads slot 1 of them to tell the two shapes apart
+    for the `--advisory` posture. Changing that row shape changes the gate;
+    the two must move together."""
     warnings.append(
-        "category 1 (duplicate_source_form) scope: it can only ever detect "
-        "a NORMALIZATION-VARIANT duplicate source_form (e.g. 'Nachman' vs "
-        "'nachman '), never a genuine byte-identical one -- canon.json's "
-        "own map-key-equals-source_form write pattern (canon_validate.py) "
-        "structurally prevents two entries{} records from ever sharing an "
-        "identical surface. This is a scope limit of the check, not a bug."
+        "category 1 (duplicate_source_form) scope: on PIPELINE-WRITTEN canon "
+        "it can only ever detect a SURFACE-VARIANT duplicate source_form "
+        "(e.g. 'Nachman' vs 'nachman '), because canon_validate.py's own "
+        "map-key-equals-source_form write pattern prevents two entries{} "
+        "records from sharing an identical surface. A hand-authored or legacy "
+        "canon under arbitrary map keys CAN hold an identical-surface "
+        "duplicate, and this category does enumerate it. The two shapes carry "
+        "different postures: a surface-variant group is BLOCKING and never "
+        "masked by --advisory (#244); an identical-surface group stays "
+        "maskable. This is a scope limit of the check, not a bug."
     )
     groups = group_by_normalized(records, "source_form")
     items = []
@@ -1102,14 +1141,53 @@ def crosscheck_regular_items(items: list, adjudications: dict) -> tuple:
     return counts, by_kind, buckets
 
 
-def _count_split_kind(items: list) -> int:
+def is_surface_variant(item: dict) -> bool:
+    """True iff `item` is a category-1 (KIND_DUP_SOURCE) required item whose
+    grouped records do NOT all carry one byte-identical `source_form` -- i.e.
+    the same source surface written two ways (case / whitespace / NFC-vs-NFD /
+    casefold), which is the ONLY category-1 shape the pipeline can produce.
+    See the module docstring's category-1 bullet for why the two shapes carry
+    different --advisory postures.
+
+    Reads slot 1 of each row of the item's `records` DISPLAY field, whose
+    shape is `[map_key, raw source_form, normalize_form(canonical_target_form)]`
+    as built in `compute_cat1_items`. That coupling is deliberate -- it needs no
+    new field, no identity component and therefore no key change, so every
+    already-recorded category-1 adjudication stays valid -- but it does mean
+    `compute_cat1_items` and this predicate must change together.
+
+    Total function: any non-category-1 item, or a malformed/absent `records`
+    field, returns False (such an item is simply never counted as this shape;
+    a malformed row cannot reach here, since enumeration-critical row
+    malformation is already fatal upstream)."""
+    if item.get("kind") != KIND_DUP_SOURCE:
+        return False
+    rows = item.get("records")
+    if not isinstance(rows, list):
+        return False
+    surfaces = {r[1] for r in rows if isinstance(r, (list, tuple)) and len(r) > 1}
+    return len(surfaces) > 1
+
+
+def _count_unmaskable(items: list) -> int:
     """Counts how many `items` (drawn from a crosscheck_regular_items bucket
-    such as missing_verdict/adverse/invalid_verdict_class) are KIND_SPLIT --
-    used to split the aggregate blocking count into its --advisory-maskable
-    (categories 1-3) and never-maskable (category 5, homonym_split) portions
-    (see run_check's exit-code computation and module docstring's OUTPUT /
-    EXIT CODE section)."""
-    return sum(1 for it in items if it["kind"] == KIND_SPLIT)
+    such as missing_verdict/adverse/invalid_verdict_class) are NEVER masked by
+    `--advisory` -- used to split the aggregate blocking count into its
+    maskable and never-maskable portions (see run_check's exit-code
+    computation and the module docstring's OUTPUT / EXIT CODE section).
+
+    Two things are never maskable here:
+      * KIND_SPLIT -- category 5's own missing/stale verdict;
+      * a KIND_DUP_SOURCE item that `is_surface_variant` (#244) -- the
+        pipeline-reachable half of category 1.
+
+    Everything else in these buckets (categories 2-3, and category 1's
+    identical-surface half, which only a hand-authored/legacy canon can
+    produce) stays maskable exactly as before."""
+    return sum(
+        1 for it in items
+        if it["kind"] == KIND_SPLIT or is_surface_variant(it)
+    )
 
 
 def crosscheck_cap(cap_note: Optional[dict], cap_overrides: dict, warnings: list) -> tuple:
@@ -1321,6 +1399,24 @@ def print_human_report(canon_path: Path, adjudications_path: Path, totals: dict,
         # operator already scans -- not as a note elsewhere in the report.
         if kind == KIND_SPLIT and not senses_enumerated:
             print(_not_enumerated_split_row(senses_path), file=sys.stderr)
+        elif kind == KIND_DUP_SOURCE and totals["by_kind"][kind]:
+            # #244: category 1's two shapes carry DIFFERENT --advisory postures, so a
+            # bare count cannot be read as halting or not. Split it in the row an
+            # operator already scans. Counted over every bucket (confirmed_ok included)
+            # so this is the whole category-1 population, not just its blocking share.
+            # is_surface_variant is False for every non-category-1 kind, so no other
+            # category can leak into this number.
+            variants = sum(
+                1 for items in buckets.values()
+                for it in items if is_surface_variant(it)
+            )
+            print(
+                f"  {kind}: {totals['by_kind'][kind]} "
+                f"({variants} surface-variant, never masked by --advisory while "
+                f"unresolved/adverse/invalid; "
+                f"{totals['by_kind'][kind] - variants} identical-surface, maskable)",
+                file=sys.stderr,
+            )
         else:
             print(f"  {kind}: {totals['by_kind'][kind]}", file=sys.stderr)
     print(f"  confirmed_ok:                 {totals['confirmed_ok']}", file=sys.stderr)
@@ -1349,7 +1445,11 @@ def print_human_report(canon_path: Path, adjudications_path: Path, totals: dict,
     )
     print(f"orphaned records (informational, non-blocking): {totals['orphaned_records']}", file=sys.stderr)
     print(file=sys.stderr)
-    tail = "  (--advisory: categories 1-4 only, never masks category 5/collapsed_split/evidence_unverified)" if advisory else ""
+    tail = (
+        "  (--advisory: categories 2-4 and category 1's identical-surface shape only; "
+        "never masks a category-1 surface-variant, category 5, collapsed_split or "
+        "evidence_unverified)"
+    ) if advisory else ""
     print(f"BLOCKING findings: {blocking_count}  gate_passed={gate_passed}{tail}", file=sys.stderr)
 
     if buckets["missing_verdict"]:
@@ -1589,19 +1689,22 @@ def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
     )
     gate_passed = blocking_count == 0
 
-    # --advisory masks ONLY the categories-1-4 portion of blocking_count (missing_verdict/
-    # adverse/invalid_verdict_class contributed by categories 1-3, cap_overrides_missing,
-    # review_queue_unaccepted) -- it NEVER masks homonym_split's (category 5's) own
-    # missing/stale verdict, collapsed_split, or evidence_unverified (module docstring
-    # OUTPUT / EXIT CODE). _count_split_kind isolates category 5's share of the three
-    # verdict buckets so the never-maskable portion can be computed without a second
-    # crosscheck pass.
-    split_verdict_blocking = (
-        _count_split_kind(buckets["missing_verdict"])
-        + _count_split_kind(buckets["adverse"])
-        + _count_split_kind(buckets["invalid_verdict_class"])
+    # --advisory masks the categories-2-4 portion of blocking_count (missing_verdict/
+    # adverse/invalid_verdict_class contributed by categories 2-3, cap_overrides_missing,
+    # review_queue_unaccepted) plus category 1's IDENTICAL-SURFACE half -- it NEVER masks
+    # homonym_split's (category 5's) own missing/stale verdict, collapsed_split,
+    # evidence_unverified, or category 1's SURFACE-VARIANT half (#244; module docstring
+    # OUTPUT / EXIT CODE). _count_unmaskable isolates the never-maskable share of the three
+    # verdict buckets so it can be computed without a second crosscheck pass. It is applied
+    # PER BUCKET, not once over a flattened set: a surface-variant item that is
+    # confirmed_ok sits in no blocking bucket at all and must not make an unrelated
+    # maskable finding in another bucket unmaskable.
+    unmaskable_verdict_blocking = (
+        _count_unmaskable(buckets["missing_verdict"])
+        + _count_unmaskable(buckets["adverse"])
+        + _count_unmaskable(buckets["invalid_verdict_class"])
     )
-    unmaskable_blocking_count = split_verdict_blocking + collapsed_split_count + evidence_unverified_count
+    unmaskable_blocking_count = unmaskable_verdict_blocking + collapsed_split_count + evidence_unverified_count
     if gate_passed:
         exit_code = 0
     elif unmaskable_blocking_count > 0:
@@ -1741,9 +1844,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--advisory", action="store_true",
-        help="Report every finding but never exit 1 for a categories-1-4 "
-             "blocking finding (WARN-first escape hatch). Never masks a "
-             "genuine fatal exit 2, and never masks homonym_split's "
+        help="Report every finding but never exit 1 for a categories-2-4 "
+             "blocking finding, or a category-1 identical-surface one "
+             "(WARN-first escape hatch). Never masks a "
+             "genuine fatal exit 2, never masks a category-1 surface-variant "
+             "finding, and never masks homonym_split's "
              "missing/stale verdict, collapsed_split, evidence_unverified, or "
              "canon_absent_with_senses when canon_senses.json is non-empty.",
     )
