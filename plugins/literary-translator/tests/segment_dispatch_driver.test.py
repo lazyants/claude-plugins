@@ -5461,9 +5461,11 @@ def _dna_write_ledger_fragment(root, seg="seg01", *, mtime, status="in_progress"
     filesystem mtime resolution.
 
     `note` is the #620 promotion evidence. Omitted, this writes the
-    PRE-dispatch fragment (no note), which is what that branch writes before
-    it launches codex_job.py and what every other write_ledger() site
-    produces. Passing driver_mod._translate_promotion_note(<the draft's own
+    PRE-dispatch fragment -- the note-less shape that branch writes before it
+    launches codex_job.py. (Do not read the default as "no other site writes
+    a note": converged-by-rejection and the #432/#461 reopen both carry one.
+    What is unique to the promotion note is its PREFIX and the draft hash
+    after it.) Passing driver_mod._translate_promotion_note(<the draft's own
     sha1>) writes the POST-promotion fragment -- the only shape
     _translate_redispatched_since() accepts. A test that means "a genuine
     retranslate happened and its output is still on disk" must pass the
@@ -5693,8 +5695,8 @@ def _dna_stage_post_fix_invalid_draft(root, driver_mod, *, round_label="final"):
     ("non_converged", {"reason": "cap"}),
 ])
 def test_derive_next_action_terminal_fragment_newer_than_review_does_not_retranslate(tmp_path, status, extra):
-    """#620, the reported defect. FOUR of process_segment()'s five
-    write_ledger() sites are not a translate dispatch, and a terminal one is
+    """#620, the reported defect. FIVE of process_segment()'s six
+    write_ledger() sites are not promotion evidence, and a terminal one is
     NECESSARILY newer than the review it records -- the cap is written after
     the very review it caps. Under the mtime-only test that made
     _translate_redispatched_since() return True for every finished segment,
@@ -5815,13 +5817,18 @@ def test_derive_next_action_promotion_note_naming_the_current_draft_still_retran
     exactly as before, never terminate. Without this the fix would deadlock
     a legitimate retry.
 
-    Reachable, not hypothetical: codex_job.py validates the candidate it
-    promotes with the PLUGIN tree's gate scripts (its _trusted_scripts_dir()
-    under --plugin-root), while derive_next_action() re-validates with the
-    DURABLE ROOT's copies. A durable root whose Step 0a copies are stale --
-    an ordinary post-upgrade state, and the divergence fix_scope_audit.py
-    exists to detect -- makes the two disagree, so a promoted draft really
-    can read invalid here."""
+    Reachable, not hypothetical -- but NOT for the reason it is tempting to
+    give. codex_job.py and this driver resolve their gate executables the
+    same way in both root modes (resolve_dirs() points every sibling script
+    at {plugin_root}/assets/scripts when --plugin-root is given, and
+    codex_job.py's _trusted_scripts_dir() resolves to the same place from the
+    same flag), so a stale durable-root validator does NOT make the two
+    disagree. What does: validate_draft.py checks the draft's block,
+    footnote and verse KEY SETS 1:1 against segments/segpack_{seg}.json. A
+    segpack regenerated between the promotion and the next derivation -- an
+    ordinary W3/W3a rerun, including the sanctioned --restamp-derivation
+    then segpack.py recovery -- makes an untouched, genuinely promoted draft
+    read invalid here."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     base = int(time.time()) - 3600

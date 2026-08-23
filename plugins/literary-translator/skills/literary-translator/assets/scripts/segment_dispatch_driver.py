@@ -4074,13 +4074,14 @@ def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path,
     defeated it):
 
     1. The fragment is NEWER than the review. Cheap first gate, unchanged.
-       Necessary and nowhere near sufficient: process_segment() has five
-       write_ledger() sites and FOUR of them are not a translate dispatch
-       (converged, converged-by-rejection, cap, and the #432/#461
-       reopen-capped in_progress write that precedes a REVIEW). The cap in
-       particular is written after the very review it caps, so it is
-       necessarily newer -- a capped segment an operator then hand-repaired
-       into an invalid state was silently re-translated over.
+       Necessary and nowhere near sufficient: process_segment() has SIX
+       write_ledger() sites and FIVE of them are not this evidence
+       (converged, converged-by-rejection, cap, the pre-dispatch in_progress
+       write, and the #432/#461 reopen-capped in_progress write that
+       precedes a REVIEW). The cap in particular is written after the very
+       review it caps, so it is necessarily newer -- a capped segment an
+       operator then hand-repaired into an invalid state was silently
+       re-translated over.
 
     2. status == "in_progress". Not sufficient EITHER, and narrowing to it
        alone would not have closed the defect: the reopen-capped write is
@@ -4134,8 +4135,21 @@ def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path,
     exactly the "evidence written before the outcome" defect described under
     conjunct 3, and it would have to route a machine-compared hash through an
     LLM agent's payload that recordLedgerCall() never verifies. The cost is
-    stated where it belongs, in the CHANGELOG: that segment halts, and the
-    halt persists until the draft is made valid again."""
+    real and is written down in references/ledger-and-resumability.md's own
+    site-0 entry: that segment halts, and the halt PERSISTS -- an
+    invalid_post_fix_draft writes nothing, so the fragment, the review and
+    the run identity are all unchanged and re-running with --only-segs
+    reproduces it. Making the draft structurally valid again, by repairing it
+    or by deleting it so the segment re-translates from scratch, is what
+    clears it, which is the action the halt exists to demand.
+
+    One residual this does NOT close, pre-existing and unchanged by #620:
+    derive_next_action() hashes the draft and process_segment() dispatches a
+    moment later, so a draft saved in between is still overwritten. That
+    window existed identically when this test was mtime-only; re-hashing
+    before the dispatch would only shrink it, never close it, and the
+    per-segment lease codex_job.py already holds is the mechanism that
+    covers the dispatch itself."""
     fragment_path = dirs["runs_dir"] / "ledger.d" / f"{seg}.json"
     try:
         fragment_mtime_ns = fragment_path.stat().st_mtime_ns
