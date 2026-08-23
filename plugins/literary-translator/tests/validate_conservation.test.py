@@ -1449,5 +1449,169 @@ def test_default_min_source_words_band_excludes_short_blocks(tmp_path):
     assert dist["n"] == 25
 
 
+# ===========================================================================
+# #277 -- an operator-authored artifact must reach the documented exit-2 path,
+# never escape main() as a raw traceback at Python's DEFAULT exit 1
+#
+# Why the exit CODE is the defect and not the traceback's ugliness: this
+# script's own docstring promises "2 = a usage/env precondition
+# (unreadable/malformed manifest, ledger, nodestream, baseline, provenance, or
+# allowed-omissions artifact)", and SKILL.md documents exit 1 for this gate as
+# a HARD content defect -- "the pipeline advances to W3 ONLY on exit 0". An
+# uncaught exception lands on 1, so a cp1255 baseline told the operator their
+# hand-wrap had dropped content when their file merely was not UTF-8.
+#
+# Every case below asserts THREE things, because exit-2-with-no-traceback is
+# also exactly what an EARLIER, unrelated failure prints (manifest.json loads
+# before the mode runs, profile.yml before any conservation artifact is
+# touched): the exit code, the absence of a traceback, and the boundary's OWN
+# diagnostic -- the last being the only one that proves the intended read was
+# reached at all.
+#
+# All three thresholds are MEASURED on the interpreter this suite runs, not
+# taken from a review: CI selects the moving '3.14' series, so none of them is
+# a pinned-version constant.
+# ===========================================================================
+
+# cp1255 (Windows Hebrew) is the realistic producer here, not an adversarial
+# choice: the baseline is the one artifact an operator preserves from some
+# other pre-wrap form, and a `pdftotext` dump of a legacy-encoded Hebrew
+# source is the walkthrough's own example.
+CP1255_TEXT = "שלום עולם, זהו טקסט הבסיס\n"
+
+# json.loads parses fine at 100_000 and raises RecursionError from ~200_000 on
+# this build; 300_000 is the same margin validate_assembled.test.py takes.
+DEEP_NEST_DEPTH = 300_000
+# An integer literal past sys.get_int_max_str_digits() raises a BARE
+# ValueError -- NOT json.JSONDecodeError, which is the escape the narrower
+# handler missed.
+BIG_INT_DIGITS = 5_000
+# re.compile raises RecursionError on a nested group from ~500 on this build;
+# 2_000 is a 4x margin. Which family it raises does not matter to the
+# assertion -- that is the point of the `except Exception` at that boundary.
+DEEP_GROUP_DEPTH = 2_000
+
+
+def _wrapper_fixture_green(root: Path) -> None:
+    """A complete wrapper-conservation project that exits 0 as written.
+
+    Every #277 test below corrupts exactly ONE artifact in it, so a failure
+    can only be attributable to that artifact's own boundary -- and
+    `test_277_base_fixture_is_green` pins that this base really is clean, so
+    none of them can pass by dying somewhere earlier."""
+    baseline, offsets = build_baseline([
+        ("head", "Chapter One\n"),
+        ("body", "This is the body of chapter one, telling a full story.\n"),
+    ])
+    write_baseline(root, baseline)
+    write_provenance(root, [
+        ("HEAD:seg01", *offsets["head"]),
+        ("PARA:seg01:0001", *offsets["body"]),
+    ])
+    write_allowed_omissions(root, line_patterns=[])
+    write_profile(root, conservation={
+        "baseline_path": "baseline.txt",
+        "provenance_path": "provenance_map.json",
+        "allowed_omissions_path": "allowed_omissions.json",
+    })
+    write_manifest(root, {
+        "HEAD:seg01": make_block("HEAD", "Chapter One"),
+        "PARA:seg01:0001": make_block(
+            "PARA", "This is the body of chapter one, telling a full story.", order_index=1
+        ),
+    }, [{"seg": "seg01", "kind": "body",
+         "block_ids": ["HEAD:seg01", "PARA:seg01:0001"], "word_count": 12}])
+
+
+def _assert_fatal_not_traceback(proc, needle: str) -> None:
+    assert proc.returncode == 2, (
+        f"expected the documented exit-2 fatal path, got {proc.returncode} "
+        f"(1 is the code SKILL.md assigns to 'the hand-wrap dropped content')\n"
+        f"stderr:\n{proc.stderr}"
+    )
+    assert "Traceback" not in proc.stderr, (
+        f"an operator-authored artifact must never surface as a raw Python "
+        f"traceback\nstderr:\n{proc.stderr}"
+    )
+    assert needle in proc.stderr, (
+        f"expected the boundary's own diagnostic {needle!r} -- without it this "
+        f"case may have died at an EARLIER gate and tested nothing\n"
+        f"stderr:\n{proc.stderr}"
+    )
+
+
+def test_277_base_fixture_is_green(tmp_path):
+    """The shared base exits 0, so every corruption test below is attributable
+    to the single artifact it breaks."""
+    root = make_root(tmp_path)
+    _wrapper_fixture_green(root)
+
+    proc = run_validate_conservation(root, "wrapper-conservation")
+    assert proc.returncode == 0, proc.stderr
+    assert parse_stdout_json(proc)["defects"] == []
+
+
+@pytest.mark.parametrize("artifact,needle", [
+    ("baseline.txt", "could not read conservation baseline"),
+    ("provenance_map.json", "could not read provenance map"),
+    ("allowed_omissions.json", "could not read allowed-omissions file"),
+])
+def test_277_non_utf8_artifact_exits_2(tmp_path, artifact, needle):
+    """UnicodeDecodeError is a ValueError, NOT an OSError -- so the read arms'
+    original `except OSError` never saw it and it escaped main()."""
+    root = make_root(tmp_path)
+    _wrapper_fixture_green(root)
+    (root / artifact).write_bytes(CP1255_TEXT.encode("cp1255"))
+
+    _assert_fatal_not_traceback(run_validate_conservation(root, "wrapper-conservation"), needle)
+
+
+@pytest.mark.parametrize("artifact,needle", [
+    ("provenance_map.json", "provenance map"),
+    ("allowed_omissions.json", "allowed-omissions file"),
+])
+@pytest.mark.parametrize("payload_kind", ["deep_nest", "oversized_int"])
+def test_277_unparseable_json_artifact_exits_2(tmp_path, artifact, needle, payload_kind):
+    """Neither payload raises json.JSONDecodeError: deeply nested JSON raises
+    RecursionError (a RuntimeError subclass) and an oversized integer literal
+    raises a BARE ValueError. Both artifacts are parameterized because pinning
+    only one leaves the other loader's arm free to be reverted."""
+    root = make_root(tmp_path)
+    _wrapper_fixture_green(root)
+    payload = (
+        "[" * DEEP_NEST_DEPTH + "]" * DEEP_NEST_DEPTH
+        if payload_kind == "deep_nest"
+        else '{"schema_version": ' + "9" * BIG_INT_DIGITS + "}"
+    )
+    (root / artifact).write_text(payload, encoding="utf-8")
+
+    proc = run_validate_conservation(root, "wrapper-conservation")
+    _assert_fatal_not_traceback(proc, "is not valid JSON")
+    # ...and it is THIS artifact's loader that reported it, not the sibling's.
+    assert needle in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("pattern,expected_family", [
+    ("a{" + "9" * 36 + "}", "OverflowError"),
+    ("(" * DEEP_GROUP_DEPTH + "a" + ")" * DEEP_GROUP_DEPTH, "RecursionError"),
+])
+def test_277_uncompilable_line_pattern_exits_2(tmp_path, pattern, expected_family):
+    """`re.compile` does not raise one family, and which one a given
+    interpreter picks is not a contract any version pins -- both of these are
+    legal JSON strings that pass the array-of-strings check and then raise
+    something that is NOT re.error. The handler is `except Exception` for that
+    reason, so these two cases pin the BEHAVIOUR (reported on the exit-2 path)
+    rather than a tuple's membership."""
+    root = make_root(tmp_path)
+    _wrapper_fixture_green(root)
+    write_allowed_omissions(root, line_patterns=[pattern])
+
+    proc = run_validate_conservation(root, "wrapper-conservation")
+    _assert_fatal_not_traceback(proc, "invalid regex in 'line_patterns'")
+    # The family is reported rather than swallowed, so a future interpreter
+    # changing it is visible in the failure output instead of silent.
+    assert expected_family in proc.stderr, proc.stderr
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
