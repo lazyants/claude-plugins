@@ -100,6 +100,33 @@ def run_preflight(durable_root: Path):
     return run_preflight_with_script(SCRIPT_PATH, durable_root)
 
 
+def shipped_truncated_name_refusal():
+    """The #383 refusal sentence, lifted VERBATIM out of the real shipped
+    glossary_TASK.template.md rather than hand-written here.
+
+    Hand-writing it would re-create the very drift step 6c exists to catch:
+    the sentence names the producer's digest width, so a fixture with the
+    number typed in would keep asserting the old width after the producer
+    moved, and every test seeding a "current" durable prompt would quietly
+    start seeding a stale one. Lifting it means these fixtures follow the
+    template automatically.
+    """
+    flat = " ".join(GLOSSARY_TASK_TEMPLATE_PATH.read_text(encoding="utf-8").split())
+    m = re.search(
+        r"A candidate whose `name` carries the .{0,60}?"
+        r'marker described under `source_form` always gets '
+        r'`disposition: "review_queue"`, never `"accepted"`',
+        flat,
+    )
+    assert m is not None, (
+        f"{GLOSSARY_TASK_TEMPLATE_PATH} no longer carries the #383 refusal "
+        f"sentence these fixtures seed -- if it was reworded, update "
+        f"glossary_preflight.py's TRUNCATED_NAME_REFUSAL_TEMPLATE and "
+        f"tests/glossary_truncated_name_rule.test.py's pin in the same commit."
+    )
+    return m.group(0)
+
+
 def make_fixture_plugin(tmp_path, *, canon_entry_doc=None, canon_batch_doc=None, glossary_task_text=None):
     """Builds an ISOLATED fixture "plugin install": a copy of the REAL
     glossary_preflight.py under `{fixture}/assets/scripts/`, with its OWN
@@ -124,6 +151,15 @@ def make_fixture_plugin(tmp_path, *, canon_entry_doc=None, canon_batch_doc=None,
     templates_dir.mkdir(parents=True)
 
     shutil.copy2(SCRIPT_PATH, scripts_dir / "glossary_preflight.py")
+    # Step 6c derives the #383 truncation marker from the PRODUCER, so the
+    # fixture install has to ship it too -- otherwise the lazy import's own
+    # packaging halt fires first and every test here stops exercising the
+    # axis it names. Copied from the real plugin (never stubbed): a stub
+    # would let this fixture and the shipped producer disagree about the
+    # marker, which is the exact drift step 6c exists to catch.
+    shutil.copy2(
+        SCRIPT_PATH.parent / "bootstrap_names.py", scripts_dir / "bootstrap_names.py"
+    )
     write_json(
         schemas_dir / "canon-entry.schema.json",
         canon_entry_doc if canon_entry_doc is not None else load_json(CANON_ENTRY_SCHEMA_PATH),
@@ -414,6 +450,107 @@ def test_plugin_template_without_the_prohibition_halts_as_a_packaging_bug(tmp_pa
     assert_halts(result, contains=("STYLE_BIBLE_PROHIBITION",))
 
 
+def test_durable_task_without_the_truncated_name_refusal_halts(tmp_path):
+    """#383 step 6c, and the shape the VERSION axis structurally cannot see:
+    `glossary_TASK.md` is seeded ONCE and never auto-overwritten, so a project
+    scaffolded before this rule shipped carries the same
+    PROMPT_CONTRACT_VERSION marker the plugin ships and passes every marker
+    comparison -- while telling the adjudicator nothing about the truncation
+    marker. Without this axis the rule would protect only NEWLY scaffolded
+    roots, which is not closing #383. Bumping the shared contract version
+    instead would re-stale every converged segment (it is one constant across
+    translate_TASK.md/review_TASK.md, both compute_prompt_hash inputs), so the
+    halt lives here, where it costs nothing.
+    """
+    root = make_current_durable_root(tmp_path)
+    current = (root / "glossary_TASK.md").read_text(encoding="utf-8")
+    marker = current.splitlines()[0]
+    assert "PROMPT_CONTRACT_VERSION" in marker, marker
+    # Keeps the current marker AND the #510 prohibition, so steps 6 and 6b are
+    # both satisfied and this test can only fail on the #383 content axis.
+    (root / "glossary_TASK.md").write_text(
+        marker
+        + "\n\n# a durable glossary task seeded before the #383 rule\n\n"
+        + 'A candidate may resolve with basis:"sense_translated".\n'
+        + "Write no other file. In particular never `style_bible.md`.\n"
+        + "- `source_form` -- the candidate's own `name` field, copied "
+        + "verbatim.\n",
+        encoding="utf-8",
+    )
+
+    result = run_preflight(root)
+    assert_halts(result, contains=("axis=prompt", "glossary_TASK.md", "UNCAPPED"))
+
+
+def test_durable_task_with_a_wrong_width_marker_halts(tmp_path):
+    """The false-pass the re-review reproduced. An earlier draft of step 6c
+    matched only the part of the sentence AFTER the marker shape, reasoning
+    that repeating the digest width would make a producer change a three-site
+    edit. That let a durable copy saying 12 hex digits certify clean while
+    `_capped_candidate_name()` still emitted 16 -- a prompt whose antecedent no
+    real candidate matches, so the refusal can never fire and the gate blesses
+    exactly the state it exists to stop.
+
+    The width is now DERIVED from the producer, so this fixture drifts the
+    durable copy alone and must halt. Note it changes BOTH marker descriptions,
+    which is what makes it a genuine antecedent drift rather than a typo in one
+    of two copies."""
+    root = make_current_durable_root(tmp_path)
+    current = (root / "glossary_TASK.md").read_text(encoding="utf-8")
+    drifted = current.replace("16 hex digits", "12 hex digits").replace(
+        "16 hexadecimal digits", "12 hexadecimal digits"
+    )
+    assert drifted != current, (
+        "fixture changed nothing -- the shipped marker descriptions no longer "
+        "spell the width this way, so this test is not exercising a drift"
+    )
+    (root / "glossary_TASK.md").write_text(drifted, encoding="utf-8")
+
+    result = run_preflight(root)
+    assert_halts(result, contains=("axis=prompt", "glossary_TASK.md"))
+
+
+def test_a_rewrapped_durable_task_carrying_the_truncated_name_refusal_passes(tmp_path):
+    """The other side of the #383 axis. The durable file is a hand-migratable
+    seed, so an operator who applies the bullets and re-wraps them to their own
+    width has complied -- a re-wrap is not a reword and must not halt them.
+    This is why the axis matches a whitespace-flattened copy."""
+    root = make_current_durable_root(tmp_path)
+    current = (root / "glossary_TASK.md").read_text(encoding="utf-8")
+    rewrapped = current.replace(
+        "marker described under `source_form` always gets",
+        "marker described\nunder `source_form`\nalways gets",
+    )
+    assert rewrapped != current, (
+        "fixture did not re-wrap anything -- the shipped sentence's line break "
+        "moved, so this test is no longer exercising a re-wrap"
+    )
+    (root / "glossary_TASK.md").write_text(rewrapped, encoding="utf-8")
+
+    assert_ok(run_preflight(root))
+
+
+def test_plugin_template_without_the_truncated_name_refusal_halts_as_a_packaging_bug(tmp_path):
+    """Strictness bias, same shape as the #510 sibling: if the SHIPPED template
+    loses the literal this axis matches, the axis must fail loud rather than
+    quietly stop checking. A deliberate reword updates the script constant and
+    tests/glossary_truncated_name_rule.test.py's pin in the same commit;
+    anything else is a damaged install."""
+    fixture = make_fixture_plugin(
+        tmp_path,
+        glossary_task_text=(
+            "<!-- PROMPT_CONTRACT_VERSION: 3 -->\n"
+            'A candidate may resolve with basis:"sense_translated".\n'
+            "Write no other file. In particular never `style_bible.md`.\n"
+            "This shipped template has lost the truncated-name refusal.\n"
+        ),
+    )
+    root = make_current_durable_root(tmp_path)
+
+    result = run_preflight_with_script(fixture, root)
+    assert_halts(result, contains=("TRUNCATED_NAME_REFUSAL",))
+
+
 def test_missing_durable_glossary_task_prompt_halts_with_prompt_axis(tmp_path):
     """Same axis, absent rather than merely stale -- guarded per the CLI
     contract ("guard this read too"), never a crash."""
@@ -560,10 +697,11 @@ def test_reformatted_durable_prompt_with_current_marker_passes(tmp_path):
         f"<!-- PROMPT_CONTRACT_VERSION: {current_marker} -->\n"
         f"<!-- a hand-migrated, differently-worded but up-to-date copy -->\n"
         # Carries the #510 prohibition because step 6b requires it of every
-        # durable copy; this case is about the VERSION axis, and a fixture
-        # missing the clause would fail on the content axis instead and stop
-        # exercising what it names.
-        f"Write no other file. In particular never `style_bible.md`.\n",
+        # durable copy, and the #383 refusal because step 6c does; this case is
+        # about the VERSION axis, and a fixture missing either clause would
+        # fail on a content axis instead and stop exercising what it names.
+        f"Write no other file. In particular never `style_bible.md`.\n"
+        f"{shipped_truncated_name_refusal()}.\n",
         encoding="utf-8",
     )
 
@@ -747,7 +885,8 @@ def test_durable_leading_marker_wins_over_later_conflicting_marker(tmp_path):
         f"<!-- rest of a hand-migrated but up-to-date file -->\n"
         # See the reformatted-copy case above: step 6b's content axis applies
         # to every durable copy, this case is about the marker.
-        f"Write no other file. In particular never `style_bible.md`.\n",
+        f"Write no other file. In particular never `style_bible.md`.\n"
+        f"{shipped_truncated_name_refusal()}.\n",
         encoding="utf-8",
     )
 

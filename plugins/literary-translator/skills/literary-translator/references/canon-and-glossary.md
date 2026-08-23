@@ -61,6 +61,86 @@ Canon population is not "paste the whole book into context and ask for a glossar
    exists, whether a candidate is a title that needs unpacking, or whether it is
    not actually a proper name at all is an **accuracy** decision — therefore it
    must be codex, never Claude, exactly like translation/review.
+
+   **A machine-truncated candidate is never `accepted` (#383).** `bootstrap_names.py`
+   bounds a candidate's `name` and marks the cut with a trailing
+   ` [...truncated:<digest>]` marker, while occurrence lookup keys on the span's own
+   UNCAPPED text (`span_match_keys()` — deliberately, see its docstring). So a canon
+   entry whose `source_form` is that truncated spelling can never match an occurrence
+   of itself: it is **inert** — zero occurrences, zero evidence, absent from
+   `occurrence_targets`' output, and nothing anywhere reports "this entry is inert" as
+   such. It fails as a green run rather than a halt.
+   `glossary_TASK.template.md` therefore instructs the adjudicator to route
+   any marker-bearing candidate to `review_queue`.
+
+   **Both halves are enforced.** `glossary_preflight.py` step 6c guarantees the
+   adjudicator is *told* the rule (it refuses to dispatch a durable prompt that lacks
+   it), and `canon_validate._enforce_no_truncated_accepted()` refuses the answer if it
+   comes back wrong — a marker-bearing item with `disposition: "accepted"` is rejected
+   on ALL THREE batch entry points: the `--check-batch` precheck, the
+   `--merge-batches` write, and the legacy single-fragment `--batch` merge. They no
+   longer each open-code the gate sequence; all three call one
+   `_validate_and_enforce_batch()`, so a fourth entry point cannot silently miss a
+   check. It can never reach `entries{}`. The same `source_form` as `review_queue` still
+   passes: that asymmetry is the remedy, and `glossary_batch_plan.py` then excludes a
+   queued form from every later batch.
+
+   `canon_validate.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this moves
+   `plugin_bundle_hash` — but that field is one of the three inside the #491
+   **machinery-only carve-out** (`assemble.py`'s `SAFE_STALE_CARVEOUT_FIELDS`,
+   alongside `schema_hash` and `derivation_bundle_hash`), the set whose whole meaning
+   is "can never change what the prose should say". A converged segment whose only
+   drift is this field is admitted exactly like `converged`, expressly so that a
+   plugin upgrade cannot strand a finished book. **Nothing re-translates.** What does
+   move is resume identity: the next run in a refreshed root is a fresh `RUN_ID` with
+   `resume: false`.
+
+   **The dispatch prompt says so too.** `glossary-pass-wf.template.js` builds the
+   per-batch prompt, and both of its sentences about `name` now carry the caveat: the
+   field gloss no longer claims `name` is simply "the surface form as it appears in
+   the source text", and the `source_form` instruction says the marker travels with
+   the string and points at `glossary_TASK.md` for what that means. An earlier draft
+   of this release left both alone to avoid moving `plugin_bundle_hash` — that
+   reasoning was doubly wrong: the release moves that hash anyway (`canon_validate.py`
+   is a bundle member), and the field is inside the machinery-only carve-out, so
+   moving it re-translates nothing.
+
+   In practice the trigger is not hostile input but source boilerplate: measured over a live French Gutenberg book,
+   the single marker-bearing candidate was a 232-character all-caps run of the
+   licence block, extracted with `likely_name: true`.
+
+   **Operator note for an EXISTING durable root — `glossary_preflight.py` HALTS you
+   until you migrate.** `glossary_TASK.md` is seeded once and is never
+   auto-overwritten, so a project scaffolded before this rule shipped does not have
+   it. Step 6c of the preflight refuses to dispatch a glossary pass whose durable
+   `glossary_TASK.md` lacks the refusal sentence, the same content-axis shape #510
+   uses — so the rule reaches existing roots, not only newly scaffolded ones. To
+   clear it, copy the `source_form` and `disposition` bullets from the current
+   `glossary_TASK.template.md` into your `glossary_TASK.md` by hand. Re-wrapping them
+   to your own line width is fine; the axis matches whitespace-flattened text.
+   Nothing re-translates: `glossary_preflight.py` is in neither bundle and
+   `glossary_TASK.md` is in no cache-key field.
+
+   This deliberately did **not** bump `PROMPT_CONTRACT_VERSION` to force the
+   migration, even though that would also have worked: the constant is shared with
+   `translate_TASK.md` and `review_TASK.md`, which are `compute_prompt_hash` inputs,
+   so bumping it would re-stale every converged segment in every project — a cost far
+   out of proportion to this defect. The preflight axis buys the same halt for
+   nothing.
+
+   **Copying the bullets does not reach a glossary run that is already in flight.**
+   `glossary_TASK.md`'s bytes are not one of the resume digest's inputs (those are
+   listed in `references/orchestration-and-batching.md` under **The resume-integrity
+   gate and its digest inputs**), so a matching resume keeps each batch's
+   `out_{i}_attempt_0.json`, the precheck resume-skips it, and the merge takes what
+   the OLD prompt already marked `accepted`. Recover with the stale-cached-result
+   procedure in that same section — not restated here — plus the one step it does not
+   cover: delete the attempt-0 fragments you want re-adjudicated before re-invoking,
+   because here they are VALID and would otherwise be resume-skipped intact. They are
+   exactly `${durable_root}/glossary/runs/${RUN_ID}/out_{i}_attempt_0.json`, and only
+   those — leave `manifest_*`, `approved_*`, `evidence_*`, the run directory itself and
+   `canon.json` alone. A fresh run is the blunt alternative: correct, but it forfeits
+   every batch's resume saving.
 3. **Merge** with dedup + collision checks into the canonical `entries{}` map, plus
    a `review_queue` for low-confidence/disputed cases. Routing is driven by each
    batch item's own `disposition` field (`"accepted"` vs `"review_queue"`) — never

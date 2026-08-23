@@ -1013,6 +1013,67 @@ def _uri_format_checker() -> "jsonschema.FormatChecker":
 # So: same reasons, same strings, two call sites. Change one, change the
 # other, and keep tests/canon_citation_refusal.test.py's table in step.
 
+# --- #383: a machine-truncated source_form may never be `accepted` ---------
+#
+# `bootstrap_names._capped_candidate_name()` bounds a candidate `name` and
+# marks the cut with a trailing " [...truncated:<16 lowercase hex>]", while
+# `bootstrap_names.span_match_keys()` keys every occurrence on the span's own
+# UNCAPPED text. So a canon entry whose `source_form` is that truncated
+# spelling can never match an occurrence of itself: it is INERT -- zero
+# occurrences, zero evidence, and a green run rather than a halt.
+#
+# `glossary_TASK.md` tells the adjudicator to queue such a candidate, and
+# `glossary_preflight.py` step 6c refuses to dispatch a durable prompt that
+# lacks that instruction. This is the fail-closed half: an instruction the
+# model overlooks is still caught here, on the fragment, before any of it can
+# reach entries{}.
+#
+# DELIBERATE DUPLICATION of bootstrap_names' marker shape, exactly like the
+# `validate_url` duplication documented above and for the first of its two
+# reasons: this gate runs on the offline path and must not grow an import edge
+# for a check that reads three constants. tests/canon_truncated_source_form.
+# test.py pins this regex against bootstrap_names' own, so the two copies
+# cannot silently drift -- by test, not by eye.
+CAPPED_NAME_MARKER_RE = re.compile(r" \[\.\.\.truncated:[0-9a-f]{16}\]$")
+
+
+def _enforce_no_truncated_accepted(batch: list) -> None:
+    """Refuse any item whose `source_form` carries the truncation marker while
+    `disposition` is "accepted", naming the offending items by index.
+
+    Only `accepted` is refused. A marker-bearing `review_queue` item is the
+    CORRECT outcome and must keep passing -- queueing it is what the prompt
+    rule asks for, and `glossary_batch_plan.py` then excludes that
+    `source_form` from every later batch. Refusing both would turn the
+    remedy into a dead end with nowhere for the candidate to go.
+    """
+    problems = []
+    for i, item in enumerate(batch):
+        if not isinstance(item, dict):
+            continue  # shape is Pass 1's job; never mask its error with ours
+        if item.get("disposition") != "accepted":
+            continue
+        source_form = item.get("source_form")
+        if not isinstance(source_form, str):
+            continue  # likewise Pass 1's
+        if CAPPED_NAME_MARKER_RE.search(source_form):
+            # The REMEDY leads, because `_indexed_item_label` bounds this
+            # string and a 200-character source_form pushes anything at the
+            # tail out of the message an operator actually reads.
+            problems.append(
+                f'{_indexed_item_label("batch", i, item)}: must be '
+                f'disposition:"review_queue", never "accepted" -- its '
+                f"source_form carries bootstrap_names.py's machine-truncation "
+                f"marker, so it can never match an occurrence of itself (see "
+                f"glossary_TASK.md)"
+            )
+    if problems:
+        raise CanonValidationError(
+            "batch would freeze an inert canon entry:\n  " + _joined_problems(problems),
+            offending=problems,
+        )
+
+
 CITATION_ALLOWED_SCHEMES = ("http", "https")
 
 # Schemes worth NAMING in a refusal, so the reason still says which kind of
@@ -2530,6 +2591,31 @@ def run_correct(
     }
 
 
+def _validate_and_enforce_batch(batch: list, registry: "Registry", research_mode: str) -> None:
+    """Every per-fragment gate, in the ONE order every batch path must run
+    them. THE single entry point -- `run_check_batch`, `run_merge_batches` and
+    the legacy `run_merge` all call this and nothing else.
+
+    It exists because they did NOT, and the divergence was invisible: the four
+    calls were open-coded three times, so #383's refusal was added to two of
+    them and the legacy `--batch PATH` path silently kept writing the forbidden
+    item into entries{}. Review caught it; nothing in the suite could, because
+    each path had its own tests and each passed. A fourth path added later
+    inherits every gate by construction rather than by whoever writes it
+    remembering all four.
+
+    Order is load-bearing and is documented at each step's own definition:
+    Pass 1 first, so a structurally broken item is reported as broken rather
+    than as something else; the citation-safety check before the offline
+    backstop, so an unsafe `source` is reported in BOTH research modes rather
+    than only in the one that would reject the item for another reason.
+    """
+    _validate_batch_items(batch, registry)
+    _enforce_no_truncated_accepted(batch)
+    _enforce_citation_source_safety(batch)
+    _enforce_offline_backstop(batch, research_mode)
+
+
 def run_merge(
     canon_path: Path,
     batch_path: str,
@@ -2550,9 +2636,7 @@ def run_merge(
     canon = _load_canon(canon_path)
     senses = _load_senses_or_raise(senses_path, allow_absent_senses)
 
-    _validate_batch_items(batch, registry)
-    _enforce_citation_source_safety(batch)
-    _enforce_offline_backstop(batch, research_mode)
+    _validate_and_enforce_batch(batch, registry, research_mode)
     merged = _merge_batch(canon, batch, senses)
 
     on_disk, restamped = _stamp_write_verify(
@@ -2607,13 +2691,7 @@ def run_check_batch(
         raw_bytes, batch = _load_batch_bytes(batch_path)
     else:
         batch = _load_batch(batch_path)
-    _validate_batch_items(batch, registry)
-    # After Pass 1 (so a structurally broken item is reported as broken rather
-    # than as an unsafe citation) but before the offline backstop: an unsafe
-    # `source` is unsafe in BOTH research modes, so it must not be reportable
-    # only in the mode that happens to reject the item for another reason.
-    _enforce_citation_source_safety(batch)
-    _enforce_offline_backstop(batch, research_mode)
+    _validate_and_enforce_batch(batch, registry, research_mode)
     if manifest_path is not None:
         expected_forms = _load_source_forms_manifest(manifest_path)
         _assert_exact_source_form_coverage(batch, expected_forms)
@@ -2658,9 +2736,7 @@ def run_merge_batches(
     threaded through to `_stamp_write_verify`."""
     batches = [_load_batch(p) for p in batch_paths]
     for batch in batches:
-        _validate_batch_items(batch, registry)
-        _enforce_citation_source_safety(batch)
-        _enforce_offline_backstop(batch, research_mode)
+        _validate_and_enforce_batch(batch, registry, research_mode)
 
     canon = _load_canon(canon_path)
     senses = _load_senses_or_raise(senses_path, allow_absent_senses)

@@ -189,6 +189,72 @@ SENSE_TRANSLATED = "sense_translated"
 # rather than a silently disabled axis.
 STYLE_BIBLE_PROHIBITION = "In particular never `style_bible.md`"
 
+# The #383 refusal, matched literally (step 6c) -- same contract and the same
+# by-eye sync duty as STYLE_BIBLE_PROHIBITION above, and pinned in the shipped
+# template by tests/glossary_truncated_name_rule.test.py.
+#
+# The WHOLE load-bearing sentence, marker shape included, and the shape is
+# DERIVED from the producer at run time rather than written out here. An
+# earlier draft matched only the part AFTER the shape, on the theory that
+# repeating the digest width would make a producer-side change a three-site
+# edit. That was wrong, and the review reproduced it: a durable copy whose
+# marker description said 12 hex digits while `_capped_candidate_name()` still
+# emitted 16 passed this axis and returned `{"preflight":"ok"}`. Such a prompt
+# describes an antecedent no real candidate matches, so the refusal can never
+# fire and the gate blesses exactly the state it exists to stop. Deriving the
+# shape closes that AND keeps the width a one-site fact: nothing here needs
+# editing when the producer's own constants move.
+TRUNCATED_NAME_REFUSAL_TEMPLATE = (
+    "A candidate whose `name` carries the `{prefix}<{width} hex digits>{suffix}` "
+    "marker described under `source_form` always gets "
+    "`disposition: \"review_queue\"`, never `\"accepted\"`"
+)
+
+
+def _truncated_name_refusal() -> str:
+    """`TRUNCATED_NAME_REFUSAL_TEMPLATE` filled in from a marker
+    `bootstrap_names._capped_candidate_name()` ACTUALLY emitted, so this gate
+    and the producer cannot disagree about the shape.
+
+    Imported lazily, inside the function: a module-level import of a sibling
+    script here once broke 81 tests (`canon_senses.py:25-35`), so the
+    established pattern is a lazy import with an actionable re-raise. READING
+    `bootstrap_names.py` is free -- the #193 dead end is about putting a shared
+    helper THERE, not about importing from it, and this file is in no bundle.
+    """
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import bootstrap_names
+    except ImportError as exc:
+        _halt(
+            f"glossary_preflight: could not import bootstrap_names.py from "
+            f"{SCRIPTS_DIR} ({exc}) -- this axis needs the producer's own "
+            f"truncation marker and must never be skipped silently; this is a "
+            f"literary-translator plugin install/packaging problem. Reinstall "
+            f"the plugin."
+        )
+    finally:
+        sys.path.remove(str(SCRIPTS_DIR))
+
+    over_cap = "A" * (bootstrap_names._MAX_CANDIDATE_NAME_CHARS + 50)
+    capped = bootstrap_names._capped_candidate_name(over_cap)
+    if capped == over_cap:
+        _halt(
+            "glossary_preflight: bootstrap_names._capped_candidate_name() did "
+            "not cap an over-cap exemplar, so this plugin's own truncation "
+            "marker cannot be derived and the #383 axis would be vacuous. This "
+            "is a literary-translator plugin install/packaging problem; "
+            "reinstall the plugin."
+        )
+    marker = capped[bootstrap_names._MAX_CANDIDATE_NAME_CHARS:]
+    prefix = bootstrap_names._CAPPED_NAME_MARKER_PREFIX
+    suffix = bootstrap_names._CAPPED_NAME_MARKER_SUFFIX
+    return TRUNCATED_NAME_REFUSAL_TEMPLATE.format(
+        prefix=prefix,
+        suffix=suffix,
+        width=len(marker) - len(prefix) - len(suffix),
+    )
+
 # Same marker syntax/regex as profile_validate.py's own
 # PROMPT_CONTRACT_MARKER_RE (kept in sync by eye -- this gate's own concern,
 # durable-vs-plugin staleness at glossary pre-dispatch, is deliberately
@@ -204,6 +270,9 @@ _SCRIPT_FILE = Path(__file__).resolve()
 ASSETS_DIR = _SCRIPT_FILE.parents[1]
 PLUGIN_SCHEMAS_DIR = ASSETS_DIR / "schemas"
 PLUGIN_GLOSSARY_TASK_TEMPLATE = ASSETS_DIR / "templates" / "glossary_TASK.template.md"
+# Step 6c derives the truncation marker from bootstrap_names.py, which lives
+# here; the import is lazy (see _truncated_name_refusal).
+SCRIPTS_DIR = ASSETS_DIR / "scripts"
 
 SCHEMA_FILENAMES = ("canon-entry.schema.json", "canon-batch.schema.json")
 
@@ -659,6 +728,56 @@ def main(argv=None) -> int:
             f"glossary_TASK.template.md word-sense paragraph (the one ending "
             f"'never this pass's') before retrying the glossary pass. It is in "
             f"no cache-key field, so the edit re-translates nothing."
+        )
+
+    # --- Step 6c: prompt axis, CONTENT (#383) --------------------------------
+    # Same shape as 6b, and for the same reason: glossary_TASK.md is seeded
+    # ONCE and never auto-overwritten, so a rule added to the shipped template
+    # reaches an already-scaffolded project only if something refuses to
+    # dispatch until it is applied. Bumping PROMPT_CONTRACT_VERSION would do
+    # that too, but that constant is shared with translate_TASK.md and
+    # review_TASK.md -- both compute_prompt_hash inputs -- so it would re-stale
+    # every converged segment in every project. This file is in neither
+    # PLUGIN_BUNDLE_MEMBERS nor DERIVATION_BUNDLE_MEMBERS, and the operator's
+    # edit is to glossary_TASK.md, which is in no cache-key field either, so
+    # this axis costs no re-translation anywhere.
+    truncated_name_refusal = _truncated_name_refusal()
+    if truncated_name_refusal not in _flatten(plugin_task_text):
+        _halt(
+            f"glossary_preflight: this plugin's own shipped "
+            f"{PLUGIN_GLOSSARY_TASK_TEMPLATE} no longer carries the literal "
+            f"{truncated_name_refusal!r} -- either the shipped refusal of a "
+            f"machine-truncated candidate name was reworded without updating "
+            f"this script's TRUNCATED_NAME_REFUSAL_TEMPLATE, or the plugin "
+            f"install is damaged. This axis is never skipped silently; fix the "
+            f"constant (and tests/glossary_truncated_name_rule.test.py's "
+            f"matching pin) or reinstall the plugin."
+        )
+    durable_task_text, err = _read_text_guarded(durable_root / "glossary_TASK.md")
+    if err is not None:
+        reason = err
+    elif truncated_name_refusal not in _flatten(durable_task_text):
+        reason = (
+            "it does not carry the refusal of a machine-truncated candidate "
+            "name that this plugin's own glossary_TASK.template.md ships"
+        )
+    else:
+        reason = None
+    if reason is not None:
+        _halt(
+            f"glossary_preflight: durable {durable_root / 'glossary_TASK.md'} "
+            f"is STALE, axis=prompt ({reason}) -- a copy seeded before this "
+            f"rule shipped still tells the glossary agent that a candidate's "
+            f"`name` is the surface form as it stands in the source. It is "
+            f"not: bootstrap_names.py bounds it and marks the cut, and "
+            f"occurrence lookup keys on the UNCAPPED text, so accepting a "
+            f"marked candidate freezes a canon entry that no occurrence of it "
+            f"can ever match -- zero occurrences, zero evidence, and a green "
+            f"run rather than a halt. glossary_TASK.md is NEVER "
+            f"auto-overwritten -- hand-apply this plugin's current "
+            f"glossary_TASK.template.md `source_form` and `disposition` "
+            f"bullets before retrying the glossary pass. They are in no "
+            f"cache-key field, so the edit re-translates nothing."
         )
 
     # --- Step 7: all clear ----------------------------------------------------
