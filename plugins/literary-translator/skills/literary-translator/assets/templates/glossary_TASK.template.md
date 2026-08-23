@@ -123,6 +123,25 @@ canon-batch item:
     claim can be made at all. Legal under `research_mode: offline` (it
     makes no citation claim -- see below).
   - **`not_a_name`** -- paired with `is_proper_name: false`.
+- **An affixed function word over a KNOWN bare form is never resolved
+  here.** Some source languages fuse a function word -- a preposition, an
+  article, a conjunction -- onto the word it governs, so a candidate can
+  arrive as a single token carrying both. When the bare form it appears to
+  carry is ALSO present -- anywhere in this run's own candidate manifest
+  (the union of every batch; your dispatch prompt names its exact path),
+  or already in `canon.json`'s `entries{}` -- then whether this candidate
+  is a name of its own or that same name under a function word is an
+  identity call, and this pass never makes one automatically. Never
+  resolve it by folding it into the bare name's entry, and never resolve
+  it as an entry of its own: both are that same automatic identity call,
+  and a canon that decides it one way for one name and the other way for
+  another is exactly the defect this rule prevents. Give it
+  `disposition: "review_queue"` with a `note` naming the bare form you
+  believe it carries. This holds even when that name is a nickname or
+  epithet with an obvious sense-rendering, so it takes precedence over the
+  nickname rule immediately below. When the bare form is NOT present
+  anywhere in this run, resolve the candidate on its own merits, like any
+  other.
 - **Nicknames, epithets, and aliases -- resolved independently, never
   inherited from a referent.** A salon nickname, epithet, sobriquet, or
   alias is its own surface form, never shorthand for its referent's
