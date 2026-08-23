@@ -1,0 +1,41 @@
+name: ai-cli-optout
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/ai-cli-optout/**'
+      - '.github/workflows/ai-cli-optout.yml'
+  pull_request:
+    paths:
+      - 'plugins/ai-cli-optout/**'
+      - '.github/workflows/ai-cli-optout.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The suite refuses to run without jq/curl (exit 2). Print them so a
+      # missing runtime is visible here rather than as a puzzling exit code.
+      - name: Toolchain
+        run: |
+          bash --version | head -1
+          jq --version
+          curl --version | head -1
+
+      - name: tests/run-all.sh
+        working-directory: plugins/ai-cli-optout
+        run: bash tests/run-all.sh

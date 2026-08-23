@@ -1,0 +1,41 @@
+name: db-guardrails
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/db-guardrails/**'
+      - '.github/workflows/db-guardrails.yml'
+  pull_request:
+    paths:
+      - 'plugins/db-guardrails/**'
+      - '.github/workflows/db-guardrails.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The hook under test dispatches on jq OR python3; the harness encodes its
+      # payloads with python3. Both are present here, so both branches are live.
+      - name: Toolchain
+        run: |
+          bash --version | head -1
+          python3 -V
+          jq --version
+
+      - name: tests/block-destructive-db.test.sh
+        working-directory: plugins/db-guardrails
+        run: bash tests/block-destructive-db.test.sh
