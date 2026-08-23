@@ -345,6 +345,20 @@ class CodexJob:
         # for poll() to later overwrite this with). See poll()/launch() for exactly
         # when each is set.
         self.error_detail = None
+        # #399: the gate that refused to ADOPT a pre-existing canonical (safe_adopt()),
+        # with that gate's own output. A DEDICATED field rather than error_detail, for
+        # two reasons that are both about the record staying true:
+        #   * error_detail is last-writer-wins and safe_adopt() runs FIRST -- every one
+        #     of _refuse_claimed_translate(), adopt_pending(), launch() and poll() can
+        #     still write it afterwards, so an adoption refusal parked there would be
+        #     destroyed on exactly the runs an operator is trying to diagnose;
+        #   * a refused adoption is not an error of THIS run. The run continues and can
+        #     finish ok -- and segment_dispatch_driver._codex_job_outcome() relays
+        #     error_detail into its `codex_dispatch_finished` journal entry
+        #     unconditionally, success included, so riding error_detail would label a
+        #     successful dispatch with an error text.
+        # Written once, by one method, and read by nothing in-process.
+        self.adopt_rejection = None
         # Set when a canonical-unreadable refusal (see _canonical_replaceable()) blocks a
         # promote. A DEDICATED flag, not inferred from self.reason: self.reason is
         # reassigned by whatever this run does NEXT (e.g. a later launch-failed), but
@@ -848,7 +862,7 @@ class CodexJob:
     # (reusing the #400 plumbing) instead.
     _GATE_OUTPUT_CAP = 4000  # chars; this text lands in the durable joblog, so it must stay bounded
 
-    def _capture_gate_rejection(self, gate_name, proc):
+    def _gate_rejection_text(self, gate_name, proc):
         """`proc` is the CompletedProcess of a gate call that just REJECTED
         (returncode != 0) -- never a None proc (a gate that could not even run
         has nothing to capture; _ok(None) is already False and the caller
@@ -856,17 +870,34 @@ class CodexJob:
         uniform about which stream carries the diagnostic text (see each
         script's own docstring), so both stdout and stderr are captured
         rather than guessing one. Truncated to _GATE_OUTPUT_CAP chars with an
-        explicit marker naming the exact bound -- never left unbounded."""
+        explicit marker naming the exact bound -- never left unbounded.
+
+        Returns the "<gate>: <output>" string, or None when the gate printed
+        NOTHING on either stream: there is no diagnostic to record, and a
+        caller must treat that as "nothing to say" rather than as a value.
+        Split out of _capture_gate_rejection() (#399) so safe_adopt() can put
+        the same text in its OWN field without touching error_detail."""
         out = getattr(proc, "stdout", None) or ""
         err = getattr(proc, "stderr", None) or ""
         combined = (out + (("\n" + err) if err else "")).strip()
         if not combined:
-            return
+            return None
         if len(combined) > self._GATE_OUTPUT_CAP:
             combined = combined[: self._GATE_OUTPUT_CAP] + (
                 "... [truncated at %d chars]" % self._GATE_OUTPUT_CAP
             )
-        self.error_detail = "%s: %s" % (gate_name, combined)
+        return "%s: %s" % (gate_name, combined)
+
+    def _capture_gate_rejection(self, gate_name, proc):
+        """Record a rejecting gate's own output in self.error_detail. A gate that
+        printed nothing leaves error_detail EXACTLY as it was -- never cleared:
+        this method can run after another stage already wrote a real diagnostic
+        there (adopt_pending() rejects a pending, run() launches fresh, and the
+        fresh attempt is then rejected by a silent gate), and overwriting that
+        with None would destroy the one record the operator has."""
+        detail = self._gate_rejection_text(gate_name, proc)
+        if detail is not None:
+            self.error_detail = detail
 
     def _validate_candidate(self, candidate, timeout_fn):
         """Kind-specific candidate-file gate against `candidate`; each gate call is bounded by a
@@ -1298,17 +1329,46 @@ class CodexJob:
             return False, None, None, None
         return True, state, detail, path
 
+    def _adoption_gates(self):
+        """The kind's ordered adoption gates as (script, passes --expect-token) pairs.
+        ONE definition shared by safe_adopt() (gating a pre-existing canonical) and
+        adopt_pending() (gating a deferred attempt). adopt_pending() spelled this list
+        out itself until #399 gave safe_adopt() the same shape; one definition rather
+        than two copies, because the two adoption paths must not be able to drift apart
+        on WHICH gates run, in WHAT order, or which one carries the token check. Order is load-bearing for translate -- the ready gate before the quality
+        gate -- and anything that is not a translate is gated as a review, exactly as
+        both call sites read when each spelled the list out itself."""
+        if self.kind == "translate":
+            return [("draft_ready.py", True), ("validate_draft.py", False)]
+        return [("review_ready.py", True)]
+
     def safe_adopt(self):
-        """A pre-existing valid same-token canonical -> adopt without relaunching."""
+        """A pre-existing valid same-token canonical -> adopt without relaunching.
+
+        #399: a gate that RAN and REFUSED the canonical has its own output recorded in
+        self.adopt_rejection before this returns False. That refusal is the whole reason
+        the run goes on to do something else with the segment -- refuse it as claimed,
+        adopt a deferred pending over it, or launch a fresh turn whose promote OVERWRITES
+        it -- and until now the only trace of it was the absence of `"adopted"` in the
+        reason. The operator who hand-applied review findings to segments/<seg>.draft.json
+        and re-invoked the driver could not learn why that draft was rejected without
+        re-running the whole translation, which is exactly the cost #399 filed.
+
+        A gate that could NOT run (proc is None: exhausted budget, timeout, spawn
+        failure) has nothing to capture -- _ok(None) is already False, and inventing a
+        rejection text for it would report a refusal that never happened."""
         if not os.path.exists(self.canonical):
             return False
-        if self.kind == "translate":
-            if not _ok(self._gate(["draft_ready.py", self.seg, "--expect-token", self.tok],
-                                  self.poll_timeout())):
+        for name, with_token in self._adoption_gates():
+            argv = [name, self.seg]
+            if with_token:
+                argv += ["--expect-token", self.tok]
+            proc = self._gate(argv, self.poll_timeout())
+            if not _ok(proc):
+                if proc is not None:
+                    self.adopt_rejection = self._gate_rejection_text(name, proc)
                 return False
-            return _ok(self._gate(["validate_draft.py", self.seg], self.poll_timeout()))
-        return _ok(self._gate(["review_ready.py", self.seg, "--expect-token", self.tok],
-                             self.poll_timeout()))
+        return True
 
     def adopt_pending(self):
         """#213: try to adopt a completed-but-unvalidated attempt DEFERRED by a prior run of the same
@@ -1336,9 +1396,7 @@ class CodexJob:
         if not self._is_regular(self.pending, self.poll_remaining):
             self._clear_nonregular(self.pending)
             return False
-        gates = ([("draft_ready.py", True), ("validate_draft.py", False)]
-                 if self.kind == "translate" else [("review_ready.py", True)])
-        for name, with_token in gates:
+        for name, with_token in self._adoption_gates():
             argv = [name, self.seg]
             if with_token:
                 argv += ["--expect-token", self.tok]
@@ -1595,17 +1653,22 @@ class CodexJob:
         # only durable place either ever lands. Previously `reason` (a gate-REJECTED attempt
         # reported no differently from a genuine timeout) and error_detail's two sources
         # (poll()'s companion errorMessage, launch()'s stderr) were computed and discarded.
+        # #399: `adopt_rejection` rides the same two carriers for the same reason -- it is
+        # the ONLY record that a pre-existing canonical was refused, and it is emitted
+        # whatever this run went on to do, including a run that finished ok.
         if self.holds_lock:
             self._write_joblog({
                 "jobId": self.jobId, "kind": self.kind, "seg": self.seg, "token": self.tok,
                 "disp": self.disp, "inv": self.inv, "status": "terminal", "ok": self.ok,
                 "timed_out": self.timed_out, "job_status": self.job_status, "adopted": self.adopted,
                 "reason": self.reason, "error_detail": self.error_detail,
+                "adopt_rejection": self.adopt_rejection,
             })
         line = {
             "ok": self.ok, "kind": self.kind, "seg": self.seg, "jobId": self.jobId,
             "job_status": self.job_status, "timed_out": self.timed_out,
             "adopted": self.adopted, "reason": self.reason, "error_detail": self.error_detail,
+            "adopt_rejection": self.adopt_rejection,
         }
         sys.stdout.write(json.dumps(line) + "\n")
         sys.stdout.flush()
