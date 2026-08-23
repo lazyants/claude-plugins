@@ -316,6 +316,16 @@ class CodexJob:
         self.joblog = os.path.join(self.segdir, ".codex_job.%s.json" % seg)
         self.fail_sentinel = os.path.join(self.segdir, ".codex_failed.%s.%s" % (seg, disp))
         self.final_prompt = None
+        # #398: "validate_draft.py ran on a TRANSLATE candidate and returned exit 1" -- its
+        # contract for "the candidate's own content is defective" (see that script's own Exit
+        # codes section). Initialized once and deliberately never reset: _validate_candidate()
+        # has exactly one caller (validate_attempt()), itself called once per run(), so a
+        # per-call reset would be choreography for a reuse nothing performs.
+        self.translate_content_rejected = False
+        # #398: best-effort outcome of the terminal ledger write, surfaced in the terminal
+        # joblog. None means "never attempted" -- the ordinary case for every job that did not
+        # end in a content rejection.
+        self.ledger_write = None
         # Per-invocation write-isolated sandbox (#409) -- set by _setup_sandbox(), never in
         # __init__ (creating it is real filesystem I/O, not pure state setup).
         self.sandbox_dir = None
@@ -434,7 +444,13 @@ class CodexJob:
     #     --durable-root FIRST (both were __file__-anchored at parents[1] with no root
     #     flag, so they would otherwise start looking for segments/ inside the plugin
     #     once resolved from there) -- landed, see _DURABLE_ROOT_CONTRACT_SCRIPTS below.
-    _DURABLE_ROOT_CONTRACT_SCRIPTS = frozenset({"review_ready.py", "draft_ready.py", "validate_draft.py"})
+    # #398 adds ledger_update.py: _record_translate_rejected() invokes it through the same
+    # _gate() path, and without membership here it would receive no --durable-root and
+    # self-anchor to its own installation tree (ledger_update.py's resolve_dirs()) -- writing
+    # the fragment under the PLUGIN root on any launch that passes --plugin-root, i.e. exactly
+    # the production shape. It has accepted --durable-root since #409.
+    _DURABLE_ROOT_CONTRACT_SCRIPTS = frozenset({"review_ready.py", "draft_ready.py",
+                                                "validate_draft.py", "ledger_update.py"})
 
     def _durable_root_args(self, script_name):
         """`--durable-root <resolved self.root>` for scripts confirmed under lane A's
@@ -899,6 +915,90 @@ class CodexJob:
         if detail is not None:
             self.error_detail = detail
 
+    # #398. A FIXED bound, never a remaining-budget function: by the time a content
+    # rejection is known, finalize_timeout() can legitimately be 0.0, and _run() SKIPS a
+    # subprocess whose timeout is non-positive -- silently turning a genuine rejection into
+    # no write at all. 60s is the same bound segment_dispatch_driver.py already uses for its
+    # own direct ledger_update.py calls.
+    #
+    # This DELIBERATELY overrides this class's internal ceiling. run() enters validation with
+    # only abs_remaining() > FINALIZE_TAIL, so in the worst case this write runs past the
+    # nominal absolute deadline and holds the per-segment flock until finalize() returns. That
+    # margin is taken from the 600s outer grace BOTH launchers allow (the driver's backstop and
+    # the template's own wait bound) -- it is margin, not a guarantee that the sandbox teardown,
+    # fail sentinel and joblog writes that follow always complete.
+    _LEDGER_WRITE_TIMEOUT_SEC = 60
+
+    def _record_translate_rejected(self):
+        """#398: write the TERMINAL ledger fragment for a translate candidate the content gate
+        rejected, so neither dispatch path auto-redispatches it unchanged.
+
+        Why HERE and not in either caller: this is the only component both dispatch paths
+        share. The Workflow template has no filesystem access at all and launches this script
+        with stdout discarded, and segment_dispatch_driver.py sees only the `reason` string,
+        which conflates a content rejection with a sandbox-publish failure, a non-regular
+        attempt file and a gate that could not run. The exit code this method acts on is
+        visible in exactly one place: here.
+
+        `blocked` is the project's existing "an operator must look at this" status --
+        select_segments.py maps it to human_escalation and drops it from the default dispatch
+        set, while --only-segs still reaches it, exactly as the workflow's own
+        blocked/draft-missing fragment is retried.
+
+        BEST EFFORT, and load-bearing that it stays so: this runs inside run(), whose outcome
+        (exit code, stdout line, reason) must not change because a bookkeeping write failed.
+        Every exception is caught here; nothing propagates. A failed write leaves the segment
+        in exactly its pre-#398 state -- recoverable, re-dispatched next run -- which is a
+        return to the old behaviour, never a new failure mode.
+
+        The payload file is dot-prefixed, so it sits inside the namespace every segments/ scan
+        already excludes and is inert if the unlink below never runs. NO `detail`/`error_detail`
+        key: ledger_update.py validates the payload against a schema derived with
+        additionalProperties:false over ledger-record-base.schema.json, which declares no such
+        field, and would REFUSE the write outright. The rejecting gate's own output is already
+        carried into the terminal joblog via self.error_detail."""
+        payload_path = os.path.join(
+            self.segdir, ".codex_ledger_payload.%s.%s.json" % (self.seg, self.inv))
+        try:
+            # O_EXCL|O_NOFOLLOW|O_NONBLOCK, not a plain open(..., "w"): this file is
+            # created inside segments/, a directory the codex process this driver launches
+            # holds write access over, and a straggler turn can outlive poll()'s
+            # best-effort cancel (see finalize()'s own comment). A plain truncating open
+            # would FOLLOW a symlink planted at this exact name, and would BLOCK
+            # indefinitely on a FIFO -- before _gate()'s timeout starts, so the bound
+            # below would not cover it, in a method whose entire contract is that it
+            # cannot disturb the job. The name already carries a fresh per-invocation
+            # random component, so O_EXCL cannot collide with this driver's own work.
+            fd = os.open(payload_path,
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"status": "blocked", "reason": "translate-rejected"}, fh)
+            proc = self._gate(["ledger_update.py", self.seg, "--payload-file", payload_path],
+                              self._LEDGER_WRITE_TIMEOUT_SEC)
+            if proc is None:
+                # A skip, a spawn failure, or a timeout expiry. ledger_update.py commits at an
+                # os.replace() and can still fail AFTER that, so neither this nor a non-zero
+                # exit proves the fragment was not written -- report it as unconfirmed rather
+                # than claiming a failure this process cannot establish.
+                self.ledger_write = "not-confirmed: ledger_update.py did not complete"
+            elif proc.returncode != 0:
+                # _gate_rejection_text() (#399), not a second combine of the same two
+                # streams: this plugin's scripts are not uniform about which stream carries
+                # the diagnostic, and ledger_update.py in particular prints its structured
+                # error to STDOUT while only a sentinel WARNING goes to stderr -- so a
+                # stderr-first read of it records the warning and drops the error. It
+                # returns None when the writer printed nothing at all.
+                self.ledger_write = ("not-confirmed: ledger_update.py exit %d: %s"
+                                     % (proc.returncode,
+                                        self._gate_rejection_text("ledger_update.py", proc) or ""))
+            else:
+                self.ledger_write = "ok"
+        except Exception as exc:  # noqa: BLE001 -- see this method's own docstring
+            self.ledger_write = ("failed: %r" % (exc,))[: self._GATE_OUTPUT_CAP]
+        finally:
+            _silent_remove(payload_path)
+
     def _validate_candidate(self, candidate, timeout_fn):
         """Kind-specific candidate-file gate against `candidate`; each gate call is bounded by a
         FRESH timeout_fn() (remaining budget re-read per call). Returns True iff every gate PASSED
@@ -917,6 +1017,14 @@ class CodexJob:
             if not _ok(proc):
                 if proc is not None:
                     self._capture_gate_rejection("validate_draft.py", proc)
+                    if proc.returncode == 1:
+                        # #398: exit 1 -- and ONLY exit 1 -- is validate_draft.py's verdict on
+                        # the CANDIDATE's own content, a condition re-running the identical
+                        # translation cannot clear. Exit 2 is usage/environment/source
+                        # availability (a missing segpack, an unreadable profile.yml, an
+                        # internal error), which must stay recoverable; so must a gate that
+                        # could not run at all, which is the proc-is-None branch above.
+                        self.translate_content_rejected = True
                 return False
             return True
         proc = self._gate(["review_ready.py", self.seg, "--expect-token", self.tok,
@@ -1657,13 +1765,22 @@ class CodexJob:
         # the ONLY record that a pre-existing canonical was refused, and it is emitted
         # whatever this run went on to do, including a run that finished ok.
         if self.holds_lock:
-            self._write_joblog({
+            joblog_record = {
                 "jobId": self.jobId, "kind": self.kind, "seg": self.seg, "token": self.tok,
                 "disp": self.disp, "inv": self.inv, "status": "terminal", "ok": self.ok,
                 "timed_out": self.timed_out, "job_status": self.job_status, "adopted": self.adopted,
                 "reason": self.reason, "error_detail": self.error_detail,
                 "adopt_rejection": self.adopt_rejection,
-            })
+            }
+            # #398: the ONE conditional key in this record -- present only when a terminal
+            # ledger write was actually attempted, so an ordinary job's joblog shape is
+            # unchanged (pinned by the negative table in codex_job_driver.test.py). Siblings
+            # `error_detail` and `adopt_rejection` are emitted unconditionally as None; the
+            # difference is deliberate. Best-effort observability either way --
+            # _write_joblog() returns silently on an I/O failure.
+            if self.ledger_write is not None:
+                joblog_record["ledger_write"] = self.ledger_write
+            self._write_joblog(joblog_record)
         line = {
             "ok": self.ok, "kind": self.kind, "seg": self.seg, "jobId": self.jobId,
             "job_status": self.job_status, "timed_out": self.timed_out,
@@ -1822,6 +1939,16 @@ class CodexJob:
                         return 0
                 else:
                     self.reason = "validate-failed"
+                    # The `kind` conjunct is defence in depth, not load-bearing: only the
+                    # translate branch of _validate_candidate() can set the flag.
+                    if self.kind == "translate" and self.translate_content_rejected:
+                        # #398: the reason string stays exactly as it shipped -- the driver
+                        # and every existing test read it unchanged. What is NEW is the
+                        # durable consequence: a content rejection now leaves a TERMINAL
+                        # ledger fragment, so select_segments.py stops calling the segment
+                        # recoverable and neither dispatch path pays for the same rejected
+                        # translation again.
+                        self._record_translate_rejected()
             elif self.job_status == "completed":       # NEW: completed but no budget to validate this run
                 self.reason = "deferred-completed" if self._defer_attempt() else "job-completed"
             elif self.timed_out:

@@ -127,6 +127,13 @@ try:
     d = json.load(open(path, encoding="utf-8"))
 except Exception as e:
     print("FAIL: %s" % e); sys.exit(1)
+# #398: the real validate_draft.py splits its non-zero exits -- 1 is a verdict on the
+# CANDIDATE's content, 2 is usage/environment/source-availability (a missing segpack, an
+# unreadable profile.yml, an internal error). codex_job.py acts terminally on 1 and ONLY on
+# 1, so this stub has to be able to say 2; before #398 it could only ever say 1, and a test
+# bed that cannot express the distinction cannot pin it.
+if isinstance(d, dict) and d.get("validator_env_fail"):
+    print("ERROR: simulated environment failure", file=sys.stderr); sys.exit(2)
 if not isinstance(d, dict) or not d.get("quality_ok"):
     print("[%s] FAIL (quality)" % a.seg); sys.exit(1)
 print("[%s] OK" % a.seg); sys.exit(0)
@@ -209,10 +216,13 @@ if sub == "task":
         m = re.search(r"(/\S+/attempt\.\S+\.json)", text)
         att = m.group(1) if m else None
 
-    def payload(good_tok=True, quality=True, schema=True):
+    def payload(good_tok=True, quality=True, schema=True, env_fail=False):
         if kind == "translate":
             return {"dispatch_token": tok if good_tok else tok + "_WRONG",
-                    "seg": seg, "structure_ok": True, "quality_ok": quality}
+                    "seg": seg, "structure_ok": True, "quality_ok": quality,
+                    # #398: passes draft_ready.py, then makes validate_draft.py exit 2
+                    # rather than 1 -- the environment side of the new boundary.
+                    "validator_env_fail": env_fail}
         return {"dispatch_token": tok if good_tok else tok + "_WRONG",
                 "schema_ok": schema, "draft_sha1": "deadbeef"}
 
@@ -237,7 +247,8 @@ if sub == "task":
         obj = {"valid": payload(True, True, True),
                "invalid_token": payload(False, True, True),
                "invalid_quality": payload(True, False, True),
-               "invalid_schema": payload(True, True, False)}.get(mode, payload())
+               "invalid_schema": payload(True, True, False),
+               "validator_env_failure": payload(True, True, True, env_fail=True)}.get(mode, payload())
         json.dump(obj, open(att, "w", encoding="utf-8"))
 
     if state.get("no_jobid"):
@@ -329,12 +340,45 @@ def build_root(tmp_path: Path):
     (scripts / "validate_draft.py").write_text(STUB_VALIDATE_DRAFT, encoding="utf-8")
     (scripts / "review_ready.py").write_text(STUB_REVIEW_READY, encoding="utf-8")
     (scripts / "draft_sha1.py").write_text(STUB_DRAFT_SHA1, encoding="utf-8")
+    stage_ledger_writer(root)
     companion = root / "codex-companion.mjs"
     companion.write_text("// fake\n", encoding="utf-8")
     fake_node = root / "fake_node.py"
     fake_node.write_text(FAKE_NODE, encoding="utf-8")
     _chmodx(fake_node)
     return root, str(companion), str(fake_node)
+
+
+# #398: the REAL ledger_update.py plus the two schemas it loads, staged into a fixture root
+# so codex_job.py's new terminal write goes through the shipped writer -- schema validation
+# included -- rather than a stub that would certify an invented payload shape. Staged into
+# EVERY build_root() fixture on purpose: a "no fragment was written" assertion is worthless
+# if it can pass merely because the writer was absent.
+LEDGER_WRITER_SRC = SCRIPTS_DIR / "ledger_update.py"
+LEDGER_SCHEMAS = ("ledger-record-base.schema.json", "ledger-fragment.schema.json")
+
+
+def stage_ledger_writer(root):
+    """Stage ledger_update.py + its schemas + runs/ under `root`, in the durable-root layout
+    (scripts/ + schemas/). The separate-roots test below does NOT reuse this: a plugin
+    installation uses assets/scripts + assets/schemas, a different shape, so it stages its
+    own."""
+    scripts_dir = root / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(LEDGER_WRITER_SRC, scripts_dir / "ledger_update.py")
+    schemas = root / "schemas"
+    schemas.mkdir(parents=True, exist_ok=True)
+    for name in LEDGER_SCHEMAS:
+        shutil.copy2(SCHEMAS_SRC_DIR / name, schemas / name)
+    (root / "runs").mkdir(parents=True, exist_ok=True)
+
+
+def fragment_path(root, seg):
+    return root / "runs" / "ledger.d" / ("%s.json" % seg)
+
+
+def read_fragment(root, seg):
+    return json.loads(fragment_path(root, seg).read_text(encoding="utf-8"))
 
 
 def base_state(seg, tok, kind, **kw):
@@ -3958,3 +4002,251 @@ def test_defer_superseded_name_carries_kind_and_seg(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# =========================================================================== #
+# #398 -- a gate-REJECTED translate must not be auto-redispatched forever.
+#
+# codex_job.py is the only component BOTH dispatch paths share: the Workflow
+# template has no filesystem access and launches this script with stdout
+# discarded, and segment_dispatch_driver.py sees only the `reason` string,
+# which collapses a content rejection, a sandbox-publish failure, a
+# non-regular attempt and a gate that could not run into one spelling. So the
+# terminal ledger write lives here, keyed on validate_draft.py's exit 1 -- its
+# contract for "the CANDIDATE's content is defective" -- and on nothing else.
+#
+# These tests are deliberately lopsided: ONE positive, and a table of
+# negatives. The expensive mistake is not failing to write the fragment; it is
+# writing it for a mechanical failure, which turns a transient hiccup into a
+# segment an operator must rescue by hand.
+# =========================================================================== #
+def test_content_gate_exit_1_writes_a_terminal_blocked_ledger_fragment(tmp_path):
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="invalid_quality",
+                                   status_seq=["completed"]))
+    line = parse_line(proc)
+    assert proc.returncode == 1 and line["ok"] is False
+
+    fragment = read_fragment(root, seg)
+    assert fragment["status"] == "blocked", fragment
+    assert fragment["reason"] == "translate-rejected", fragment
+    assert fragment["timestamp"]                       # written by the real ledger_update.py
+    # The payload carries no `detail`/`error_detail`: ledger_update.py validates against a
+    # schema derived with additionalProperties:false, so an extra key would have made this
+    # write FAIL rather than carry more information.
+    assert set(fragment) <= {"timestamp", "status", "reason"}, fragment
+
+    # The child's OWN report is unchanged -- the driver and every existing test still read
+    # `validate-failed`. What #398 adds is the durable consequence, not a new label.
+    jl = json.loads((root / "segments" / (".codex_job.%s.json" % seg)).read_text())
+    assert line["reason"] == "validate-failed"
+    assert jl["reason"] == "validate-failed"
+    assert jl["ledger_write"] == "ok"
+
+    # The scratch payload is cleaned up, and would have been inert anyway (dot-prefixed).
+    leftovers = list((root / "segments").glob(".codex_ledger_payload.*"))
+    assert leftovers == [], leftovers
+
+
+@pytest.mark.parametrize("label,kind,expected_reason,state_kw", [
+    # validate_draft.py RAN but reported usage/environment/source-availability, not a
+    # verdict on the candidate. This is the row that makes exit 1 a discriminator rather
+    # than "any non-zero".
+    ("validator_environment_failure", "translate", "validate-failed",
+     dict(attempt_mode="validator_env_failure", status_seq=["completed"])),
+    # draft_ready.py rejects first and returns before validate_draft.py runs at all.
+    ("draft_ready_rejection", "translate", "validate-failed",
+     dict(attempt_mode="invalid_token", status_seq=["completed"])),
+    # Nothing was produced to validate.
+    ("no_attempt_written", "translate", "validate-failed",
+     dict(attempt_mode="none", status_seq=["completed"])),
+    # A non-regular sandbox output: refused by the publish primitive, before any gate.
+    ("non_regular_attempt", "translate", "validate-failed",
+     dict(attempt_mode="symlink", status_seq=["completed"])),
+    # The job itself failed -- no candidate, no gate, nothing about content.
+    ("job_failed", "translate", "job-failed",
+     dict(attempt_mode="none", status_seq=["failed"])),
+    # The dispatch never launched.
+    ("launch_failed", "translate", "launch-failed",
+     dict(attempt_mode="none", task_returncode=1)),
+    # A rejected REVIEW candidate is explicitly out of scope: the fragment belongs to the
+    # translate stage, and blocking a segment over a review candidate would strand work
+    # that already has a good draft.
+    ("review_kind_rejection", "review", "validate-failed",
+     dict(attempt_mode="invalid_token", status_seq=["completed"])),
+])
+def test_no_ledger_fragment_for_any_non_content_failure(
+        tmp_path, label, kind, expected_reason, state_kw):
+    """The two-sided half of #398, and the one that would catch the tempting wrong
+    implementation: keying the write on `reason == "validate-failed"` instead of on the
+    content-gate flag. FIVE of these seven rows end with that reason -- every translate row
+    except job_failed and launch_failed, plus the review row -- so such an implementation
+    writes a fragment in five of them and goes red five times. The other two are not
+    exempt by accident: run() reports `job-failed` for a failed job and `launch-failed`
+    for a failed dispatch, so those rows guard a different mistake.
+
+    Each row also asserts the reason it actually reached, so a row cannot quietly pass by
+    failing EARLIER than its advertised path and never exercising it -- absence of a
+    fragment is not evidence when the run never got where the row says it went.
+
+    build_root() stages the REAL ledger_update.py and its schemas, so "no fragment" cannot
+    pass merely because the writer was missing."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, kind, "D1",
+                        base_state(seg, tok, kind, **state_kw))
+
+    assert parse_line(proc)["reason"] == expected_reason, (
+        f"{label}: this row must reach its advertised failure path"
+    )
+    assert not fragment_path(root, seg).exists(), (
+        f"{label}: a non-content failure must leave the segment recoverable, but a terminal "
+        f"blocked fragment was written"
+    )
+    # An ordinary job never attempted a write, so its joblog shape is unchanged -- the new
+    # key is present only when there is something to report.
+    jl = json.loads((root / "segments" / (".codex_job.%s.json" % seg)).read_text())
+    assert "ledger_write" not in jl, jl
+
+
+def test_a_gate_that_could_not_run_does_not_set_the_content_rejection_flag(tmp_path, monkeypatch):
+    """`proc is None` is _run()'s own no-budget / timeout / spawn-fail contract. It is NOT a
+    verdict, and it is the one shape the subprocess bed above cannot produce on demand."""
+    job = _mkjob(tmp_path, kind="translate")
+    _seed_sandbox(tmp_path, job)
+    monkeypatch.setattr(job, "_gate", _gate_none)
+
+    assert job.validate_attempt() is False
+    assert job.translate_content_rejected is False
+
+
+def test_validate_draft_exit_2_does_not_set_the_content_rejection_flag(tmp_path, monkeypatch):
+    """Directly at the boundary: the gate RAN, returned non-zero, and still must not be read
+    as a content verdict, because 2 is validate_draft.py's environment code."""
+    job = _mkjob(tmp_path, kind="translate")
+    _seed_sandbox(tmp_path, job)
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 2})
+    monkeypatch.setattr(job, "_gate", gate)
+
+    assert job.validate_attempt() is False
+    assert calls == ["draft_ready.py", "validate_draft.py"]
+    assert job.translate_content_rejected is False
+
+
+def test_validate_draft_exit_1_sets_the_content_rejection_flag(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    _seed_sandbox(tmp_path, job)
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 1})
+    monkeypatch.setattr(job, "_gate", gate)
+
+    assert job.validate_attempt() is False
+    assert job.translate_content_rejected is True
+
+
+def test_a_rejected_review_candidate_never_sets_the_content_rejection_flag(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="review")
+    _seed_sandbox(tmp_path, job)
+    gate, _calls = _gate_recorder({"review_ready.py": 1})
+    monkeypatch.setattr(job, "_gate", gate)
+
+    assert job.validate_attempt() is False
+    assert job.translate_content_rejected is False
+
+
+def test_ledger_write_uses_a_fixed_timeout_not_the_finalize_budget(tmp_path, monkeypatch):
+    """By the time a rejection is known, finalize_timeout() can legitimately be 0.0 -- and
+    _run() SKIPS a subprocess whose timeout is non-positive, which would turn a genuine
+    rejection into no write at all, silently. The write therefore carries its own fixed
+    bound. This asserts the VALUE reaching _gate(), not merely that a file appeared: a
+    remaining-budget implementation can still pass on a fast machine."""
+    job = _mkjob(tmp_path, kind="translate")
+    monkeypatch.setattr(job, "finalize_timeout", lambda: 0.0)
+    seen = []
+
+    def _gate(args, timeout):
+        seen.append((args[0], timeout))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(job, "_gate", _gate)
+    job._record_translate_rejected()
+
+    assert seen == [("ledger_update.py", codex_job.CodexJob._LEDGER_WRITE_TIMEOUT_SEC)]
+    assert job.ledger_write == "ok"
+
+
+def test_ledger_update_is_registered_for_durable_root_forwarding(tmp_path):
+    """Without this registration _gate() passes no --durable-root, and ledger_update.py
+    self-anchors to its own installation tree -- writing the fragment under the PLUGIN root
+    on exactly the launches production makes. The argv shape is asserted, not just the
+    membership, so a rename of the flag is caught too."""
+    job = _mkjob(tmp_path, kind="translate")
+    assert "ledger_update.py" in codex_job.CodexJob._DURABLE_ROOT_CONTRACT_SCRIPTS
+    assert job._durable_root_args("ledger_update.py") == ["--durable-root", job.root]
+
+
+def test_a_failing_ledger_write_does_not_change_the_job_outcome(tmp_path):
+    """The write is bookkeeping; the job's own report is the contract. A writer that exits
+    non-zero must leave exit code, stdout line and joblog reason byte-identical to the
+    successful case -- the segment simply stays in its pre-#398 recoverable state, which is
+    a return to the old behaviour, never a new failure mode."""
+    root, companion, node = build_root(tmp_path)
+    # STDOUT, matching ledger_update.py's own emit_failure(): a stub that failed on stderr
+    # would bake in the stream-preference mistake _gate_rejection_text() (#399) avoids.
+    (root / "scripts" / "ledger_update.py").write_text(
+        "#!/usr/bin/env python3\nimport sys\nprint('{\"success\": false, \"error\": \"boom\"}')"
+        "\nsys.exit(3)\n",
+        encoding="utf-8")
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="invalid_quality",
+                                   status_seq=["completed"]))
+    line = parse_line(proc)
+    assert proc.returncode == 1 and line["ok"] is False
+    assert line["reason"] == "validate-failed"
+
+    jl = json.loads((root / "segments" / (".codex_job.%s.json" % seg)).read_text())
+    assert jl["reason"] == "validate-failed"
+    # "not-confirmed", never "failed": ledger_update.py commits at an os.replace() and can
+    # still fail AFTER that, so a non-zero exit does not prove the fragment is absent.
+    assert jl["ledger_write"].startswith("not-confirmed:"), jl["ledger_write"]
+    # The writer's own structured error text is what lands there -- not the empty stderr a
+    # stderr-first harvest would have picked up.
+    assert "boom" in jl["ledger_write"], jl["ledger_write"]
+    assert not fragment_path(root, seg).exists()
+    assert list((root / "segments").glob(".codex_ledger_payload.*")) == []
+
+
+def test_fragment_lands_under_the_durable_root_not_the_plugin_root(tmp_path):
+    """The one end-to-end test with PHYSICALLY SEPARATE roots. Every other fixture in this
+    file stages the writer beside the data, so ledger_update.py's own self-anchoring lands
+    in the right place whether or not --durable-root was forwarded -- i.e. they would pass
+    with the registration removed. This one cannot."""
+    root, companion, node = build_root(tmp_path)
+    plugin_root = tmp_path / "plugin_install"
+    plugin_scripts = plugin_root / "assets" / "scripts"
+    plugin_scripts.mkdir(parents=True)
+    for name in ("draft_ready.py", "validate_draft.py", "review_ready.py", "draft_sha1.py"):
+        shutil.copy2(root / "scripts" / name, plugin_scripts / name)
+    # The writer and its schemas live under the PLUGIN root's own layout; the data root
+    # keeps only runs/, where the fragment must land.
+    shutil.copy2(LEDGER_WRITER_SRC, plugin_scripts / "ledger_update.py")
+    plugin_schemas = plugin_root / "assets" / "schemas"
+    plugin_schemas.mkdir(parents=True)
+    for name in LEDGER_SCHEMAS:
+        shutil.copy2(SCHEMAS_SRC_DIR / name, plugin_schemas / name)
+    (root / "scripts" / "ledger_update.py").unlink()
+
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="invalid_quality",
+                                   status_seq=["completed"]),
+                        extra_args=["--plugin-root", str(plugin_root)])
+    assert proc.returncode == 1
+
+    fragment = read_fragment(root, seg)
+    assert fragment["status"] == "blocked" and fragment["reason"] == "translate-rejected"
+    assert not (plugin_root / "runs").exists(), (
+        "the fragment must never land under the plugin installation tree"
+    )

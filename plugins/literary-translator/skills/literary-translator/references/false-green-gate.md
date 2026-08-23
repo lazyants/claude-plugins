@@ -126,6 +126,33 @@ pair:
    what `translate_all`/`preserve_source` get from checks 1–4, but a
    genuine check where before there was none.
 
+## Exit codes are a CONTRACT (#398)
+
+This gate's exit code is consumed as a VERDICT, not merely as pass/fail, so
+what lands on each code is load-bearing:
+
+- **0** -- the candidate passes every check.
+- **1** -- the CANDIDATE's own content is defective: any of the six checks,
+  the structural self-check below, a `SOURCE DEFECT` finding, or a
+  missing/malformed candidate draft. Every exit-1 condition is one that
+  re-running the identical translation cannot clear.
+- **2** -- usage, environment, or source availability: a malformed `seg`,
+  PyYAML absent, an unreadable/malformed ownership marker or `profile.yml`,
+  a missing or unreadable SEGPACK, and any otherwise-uncaught exception.
+
+`codex_job.py` reads exit 1 -- and only exit 1 -- as a permanent content
+rejection, and writes a TERMINAL `blocked`/`translate-rejected` ledger
+fragment on the strength of it, which takes the segment out of automatic
+re-dispatch on both dispatch paths. So widening what exits 1 terminally
+blocks segments whose real problem was mechanical, and narrowing it puts a
+permanently-failing segment back into an unbounded paid retry loop. A
+`SOURCE DEFECT` stays exit 1 deliberately: it is permanent until the source
+is repaired, which is the property that matters to that consumer.
+
+Existing consumers are unaffected by the split: `codex_job.py`'s gate helper
+tests `returncode == 0`, and `final_audit.py` calls `validate()` in process
+and never reads an exit code.
+
 ## Structural self-check against `draft.schema.json`
 
 `validate_draft.py` also runs a structural self-check of the draft file
