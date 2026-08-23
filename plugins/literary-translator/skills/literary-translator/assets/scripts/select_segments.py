@@ -4439,7 +4439,7 @@ def run(args, dirs: dict) -> dict:
         # working while a dangling one is the ENOENT this catches; `lstat`
         # would see the link itself and let the per-entry collapse survive;
         # `is_dir()` swallows every OSError into a bare False, the trap this
-        # file documents at _independent_lock_attempt() and refuses to reuse.
+        # file documents at scan_workflow_run_ids() and refuses to reuse.
         # A stat would answer the same question, but only as a fact about one
         # instant -- and this census needs an ANCHOR it can keep reading
         # through, which is the next paragraph.
