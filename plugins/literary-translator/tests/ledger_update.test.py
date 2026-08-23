@@ -360,6 +360,27 @@ def test_bare_integer_rounds_is_accepted_control(tmp_path):
 #    mismatch logic is exercised here as-is, and a rename/removal of any of
 #    the three functions below fails this file loudly at collection time
 #    rather than silently testing a stale copy.
+#
+#    #400: recordLedgerCall grew a SECOND dependency chain on top of the
+#    ledgerWriteSucceeded one below -- the detail-string plumbing
+#    (flattenDetail/replyDetail/relayedDetail/scriptErrorDetail, plus the
+#    DETAIL_CAP/DETAIL_BREAKS consts and the WRITE_FAILED_DEFAULT_DETAIL
+#    fallback) -- and this file's splice list did not grow with it: CI run
+#    32649913344 died with `ReferenceError: flattenDetail is not defined`,
+#    thrown before this section's own mismatch-logic assertions ever ran.
+#    Same lesson as the comment above the first chain: every name
+#    recordLedgerCall's body references, transitively, must be spliced in
+#    an order that actually loads, or the harness never reaches the code
+#    this section exists to test. `sourcedDetail` is deliberately NOT
+#    spliced -- recordLedgerCall never calls it (only scriptErrorDetail/
+#    relayedDetail/replyDetail do, and their own comments name what calls
+#    what) -- splicing an unreferenced function is not a correctness risk
+#    here, but it is a second copy of "what does recordLedgerCall need"
+#    with no way to tell it apart from a MISSING one until it drifts.
+#    test_record_ledger_call_dependency_chain_is_fully_spliced below is the
+#    guard against this recurring: it fails loudly, at collection AND at
+#    the specific call sites, if the extracted source ever references an
+#    identifier this harness does not define.
 # ---------------------------------------------------------------------------
 
 def _extract_js_function(source, signature_prefix):
@@ -468,15 +489,211 @@ FAILURE_EVIDENCE_KEYS_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "FAILURE_EVID
 LEDGER_WRITE_ALLOWED_KEYS_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "LEDGER_WRITE_ALLOWED_KEYS")
 LEDGER_WRITE_SUCCEEDED_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function ledgerWriteSucceeded(")
 
+# #400: the SECOND dependency chain, for the detail STRING recordLedgerCall
+# reports rather than the ledgerWriteSucceeded() shape check above. Splice
+# order is load-bearing here too: DETAIL_CAP/DETAIL_BREAKS are consts
+# flattenDetail() closes over: flattenDetail must precede replyDetail
+# (calls it) and relayedDetail (calls it); replyDetail must precede
+# scriptErrorDetail (calls it in its own falsy-reply branch); relayedDetail
+# must precede scriptErrorDetail (calls it first); WRITE_FAILED_DEFAULT_DETAIL
+# is a plain string constant with no dependency of its own but must still
+# precede its one caller, recordLedgerCall, which passes it to
+# scriptErrorDetail as the rejected-branch fallback. sourcedDetail is
+# deliberately NOT extracted: recordLedgerCall's own chain never calls it
+# (only getVerifiedReview and the translate/review dispatch sites do), and
+# splicing a name nothing here references would just be a second,
+# unenforced copy of "what recordLedgerCall needs" to drift out of sync.
+DETAIL_CAP_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "DETAIL_CAP")
+DETAIL_BREAKS_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "DETAIL_BREAKS")
+FLATTEN_DETAIL_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function flattenDetail(")
+REPLY_DETAIL_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function replyDetail(")
+RELAYED_DETAIL_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function relayedDetail(")
+WRITE_FAILED_DEFAULT_DETAIL_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "WRITE_FAILED_DEFAULT_DETAIL")
+SCRIPT_ERROR_DETAIL_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function scriptErrorDetail(")
+
+# ---------------------------------------------------------------------------
+# A REAL guard against the #400 CI break recurring (run 32649913344): every
+# declaration this file has EXTRACTED above (mirrors build_harness_js's own
+# splice list -- keep the two in sync) plus the three globals build_harness_js
+# stubs by hand (ROOT/PY/LEDGER_WRITE_SCHEMA/agent), versus every identifier
+# recordLedgerCall's body -- and each of the four #400 helper functions'
+# OWN bodies -- actually references. Not a hand-maintained list of "expected"
+# names: the candidate set is parsed mechanically out of the REAL extracted
+# source text, the same text the harness runs, so it moves automatically
+# when that source changes.
+#
+# Scope, and why it stops here rather than walking the whole call graph:
+# recordLedgerPrompt (spliced above, and itself referenced by
+# recordLedgerCall) has its own free variable, RUN_ID, that this harness has
+# NEVER stubbed -- a genuine, PRE-EXISTING gap, dead in every fixture in this
+# file (none set needsCacheKey, the one branch that reads it) and unrelated
+# to the #400 chain this guard exists to protect. Walking the full transitive
+# call graph from recordLedgerCall would trip over that gap on every run,
+# for a reason this guard has no way to distinguish from a real regression --
+# so it checks recordLedgerCall's own body plus the four #400 helpers' own
+# bodies (their combined depth already covers DETAIL_CAP/DETAIL_BREAKS,
+# three functions deep) and no further.
+def _own_declared_name(source_text):
+    m = re.match(r"\s*(?:async\s+function|function)\s+(\w+)", source_text)
+    if m:
+        return m.group(1)
+    m = re.match(r"\s*const\s+(\w+)\s", source_text)
+    assert m, f"extracted source does not start at a function/const declaration:\n{source_text[:120]}"
+    return m.group(1)
+
+
+def _strip_comments_and_strings(source_text):
+    """Blanks `//` line comments and quoted-string CONTENTS (single, double,
+    and backtick) out of source_text, character-scanned like
+    _extract_js_function's own string tracking above -- so a screaming-case
+    English word inside a comment (this file's own extracted #400 comment
+    reads "the EXPECTATION leads and the returned fragment_path trails",
+    which is exactly what surfaced this: EXPECTATION matched the
+    SCREAMING_SNAKE_CASE pattern below and was flagged as a missing splice
+    even though it never appears as code) or inside a quoted message string
+    can never be mistaken for a free identifier reference. A backtick
+    literal's `${...}` interpolation is the one exception -- that IS live
+    code, so scanning re-enters normal mode for it, tracking nested `{`/`}`
+    so a brace inside the expression doesn't end the interpolation early."""
+    out = []
+    i, n = 0, len(source_text)
+    while i < n:
+        c = source_text[i]
+        if c == "/" and i + 1 < n and source_text[i + 1] == "/":
+            j = source_text.find("\n", i)
+            if j == -1:
+                j = n
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if c in ("\"", "'"):
+            quote = c
+            out.append(" ")
+            i += 1
+            while i < n:
+                cc = source_text[i]
+                if cc == "\\" and i + 1 < n:
+                    out.append("  ")
+                    i += 2
+                    continue
+                out.append(" " if cc != "\n" else cc)
+                i += 1
+                if cc == quote:
+                    break
+            continue
+        if c == "`":
+            out.append(" ")
+            i += 1
+            while i < n:
+                cc = source_text[i]
+                if cc == "\\" and i + 1 < n:
+                    out.append("  ")
+                    i += 2
+                    continue
+                if cc == "`":
+                    out.append(" ")
+                    i += 1
+                    break
+                if cc == "$" and i + 1 < n and source_text[i + 1] == "{":
+                    out.append("${")
+                    i += 2
+                    depth = 1
+                    while i < n and depth > 0:
+                        ec = source_text[i]
+                        if ec == "{":
+                            depth += 1
+                        elif ec == "}":
+                            depth -= 1
+                            if depth == 0:
+                                out.append(ec)
+                                i += 1
+                                break
+                        out.append(ec)
+                        i += 1
+                    continue
+                out.append(" " if cc != "\n" else cc)
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _referenced_identifiers(source_text, own_name):
+    """Every identifier this source calls as a function (`name(`, never
+    `.name(` -- a method call targets a property, not a free identifier) or
+    bare-references in SCREAMING_SNAKE_CASE (this file's own naming
+    convention for every module-level const, per the names extracted
+    above) -- minus JS keywords and the declaration's own name. Scanned
+    against the COMMENT- and STRING-stripped text (see
+    _strip_comments_and_strings above), not the raw source, so prose in a
+    comment or a quoted message never counts as a reference."""
+    scanned = _strip_comments_and_strings(source_text)
+    call_shaped = set(re.findall(r"(?<!\.)\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\(", scanned))
+    screaming_const = set(re.findall(r"(?<!\.)\b([A-Z][A-Z0-9_]*)\b", scanned))
+    return (call_shaped | screaming_const) - _JS_KEYWORDS - {own_name}
+
+
+_JS_KEYWORDS = {
+    "if", "for", "while", "switch", "catch", "function", "return", "typeof",
+    "new", "in", "of", "await", "async", "else", "do", "throw", "instanceof",
+    "void", "delete", "yield", "let", "var", "const", "class", "extends",
+    "super", "this", "true", "false", "null",
+}
+_JS_BUILTINS = {
+    "String", "Object", "Array", "Map", "JSON", "console", "Math", "Error",
+    "Boolean", "Number", "RegExp", "process", "Promise", "Set", "Symbol",
+}
+
+# Mirrors build_harness_js's own splice list below -- every name it defines.
+_HARNESS_DEFINED_NAMES = {
+    _own_declared_name(src) for src in (
+        ENDS_WITH_SEG_JSON_SRC, RECORD_LEDGER_PROMPT_SRC,
+        IS_NON_EMPTY_STRING_SRC, IS_EMPTY_STRING_SRC, IS_ZERO_EXIT_CODE_SRC,
+        HAS_ONLY_KEYS_SRC, HAS_FAILURE_EVIDENCE_SRC, NO_FAILURE_EVIDENCE_SRC,
+        LEDGER_WRITE_SUCCESS_KEYS_SRC, FAILURE_EVIDENCE_KEYS_SRC,
+        LEDGER_WRITE_ALLOWED_KEYS_SRC, LEDGER_WRITE_SUCCEEDED_SRC,
+        DETAIL_CAP_SRC, DETAIL_BREAKS_SRC, FLATTEN_DETAIL_SRC,
+        REPLY_DETAIL_SRC, RELAYED_DETAIL_SRC, WRITE_FAILED_DEFAULT_DETAIL_SRC,
+        SCRIPT_ERROR_DETAIL_SRC,
+    )
+} | {"ROOT", "PY", "LEDGER_WRITE_SCHEMA", "agent"}
+
+_CHECKED_SRCS = {
+    "recordLedgerCall": RECORD_LEDGER_CALL_SRC,
+    "flattenDetail": FLATTEN_DETAIL_SRC,
+    "replyDetail": REPLY_DETAIL_SRC,
+    "relayedDetail": RELAYED_DETAIL_SRC,
+    "scriptErrorDetail": SCRIPT_ERROR_DETAIL_SRC,
+}
+
+_missing_by_fn = {
+    fn_name: sorted(_referenced_identifiers(src, fn_name) - _HARNESS_DEFINED_NAMES - _JS_BUILTINS)
+    for fn_name, src in _CHECKED_SRCS.items()
+}
+_missing_by_fn = {k: v for k, v in _missing_by_fn.items() if v}
+assert not _missing_by_fn, (
+    "recordLedgerCall's dependency chain references an identifier this "
+    "harness does not splice/stub -- the exact #400 CI break (run "
+    "32649913344, ReferenceError: flattenDetail is not defined). Missing, "
+    f"by function: {_missing_by_fn}. Add the extraction + splice it into "
+    "build_harness_js in an order that actually loads, or (if this fired "
+    "on a name that is genuinely already covered) widen _HARNESS_DEFINED_NAMES "
+    "or _JS_BUILTINS above -- never silence this by narrowing _CHECKED_SRCS."
+)
+
 
 def build_harness_js(tmp_path):
-    """Assembles a standalone node script around the three REAL, verbatim-
-    extracted functions above. Everything recordLedgerCall/recordLedgerPrompt
-    reference that lives OUTSIDE those three functions in the real template
-    (ROOT, PY, LEDGER_WRITE_SCHEMA, and the Workflow-tool-injected agent())
-    is stubbed here -- agent() returns whatever mocked/tampered stdout-claim
-    object this test wants ledger_update.py to have printed, passed in as
-    the script's first CLI argument."""
+    """Assembles a standalone node script around the REAL, verbatim-extracted
+    functions above -- recordLedgerCall/recordLedgerPrompt/endsWithSegJson,
+    ledgerWriteSucceeded's own dependency chain, and (#400) the detail-string
+    chain flattenDetail/replyDetail/relayedDetail/scriptErrorDetail depend
+    on. Everything recordLedgerCall/recordLedgerPrompt reference that lives
+    OUTSIDE those extracted declarations in the real template (ROOT, PY,
+    LEDGER_WRITE_SCHEMA, and the Workflow-tool-injected agent()) is stubbed
+    here -- agent() returns whatever mocked/tampered stdout-claim object this
+    test wants ledger_update.py to have printed, passed in as the script's
+    first CLI argument."""
     harness = tmp_path / "recordLedgerCall_harness.js"
     harness.write_text(
         "const ROOT = \"/fixture/durable_root\";\n"
@@ -503,6 +720,19 @@ def build_harness_js(tmp_path):
         + HAS_FAILURE_EVIDENCE_SRC + "\n"
         "\n"
         + LEDGER_WRITE_SUCCEEDED_SRC + "\n"
+        "\n"
+        + DETAIL_CAP_SRC + "\n"
+        + DETAIL_BREAKS_SRC + "\n"
+        "\n"
+        + FLATTEN_DETAIL_SRC + "\n"
+        "\n"
+        + REPLY_DETAIL_SRC + "\n"
+        "\n"
+        + RELAYED_DETAIL_SRC + "\n"
+        "\n"
+        + WRITE_FAILED_DEFAULT_DETAIL_SRC + "\n"
+        "\n"
+        + SCRIPT_ERROR_DETAIL_SRC + "\n"
         "\n"
         "const __MOCK_RAW__ = JSON.parse(process.argv[2]);\n"
         "async function agent(prompt, opts) { return __MOCK_RAW__; }\n"
@@ -551,6 +781,16 @@ def test_js_side_catches_mismatched_status(tmp_path):
 
     tampered = dict(genuine_raw)
     tampered["status"] = "converged"  # falsely claims a different status
+    # #400: the mismatch detail is flattenDetail()-capped at DETAIL_CAP (160)
+    # chars, so what this test inspects depends on what survives truncation.
+    # The GENUINE fragment_path is used deliberately -- it is rooted under
+    # pytest's own tmp_path, which is long and host-dependent (this Mac's
+    # /private/var/folders/... prefix alone runs past 100 chars), which makes
+    # this test the one place the cap is exercised against a realistically
+    # long path. It passes because the detail leads with the expectation and
+    # trails with the path: truncation eats the path's tail, never the
+    # "expected seg=... status=..." half. Substituting a short stand-in here
+    # would pass on every host while testing nothing about that ordering.
 
     js_result = run_record_ledger_call(
         tmp_path, tampered, seg, {"status": "in_progress"}

@@ -1793,7 +1793,14 @@ async function recordLedgerCall(seg, fields, label) {
       ok: false,
       failResult: {
         seg: seg, converged: false, reason: "ledger-write-mismatch",
-        detail: flattenDetail("fragment_path=" + raw.fragment_path + " status=" + raw.status + " but expected seg=" + seg + " status=" + fields.status),
+        // #400 -- the EXPECTATION leads and the returned fragment_path trails,
+        // because this string is now capped: fragment_path carries the
+        // operator's durable_root and can be long on its own, and with the old
+        // order a long root pushed "but expected seg=... status=..." -- the
+        // entire diagnostic -- past the cap and out of the message. Truncation
+        // now eats the tail of the path instead, which is the part a reader can
+        // most afford to lose.
+        detail: flattenDetail("expected seg=" + seg + " status=" + fields.status + " but got status=" + raw.status + " fragment_path=" + raw.fragment_path),
       },
     };
   }
@@ -1820,9 +1827,17 @@ async function callReviewDispatch(seg, roundLabel) {
   const raw = await agent(reviewDrivePrompt(seg, roundLabel), {
     effort: "low", phase: "ReviewFix", label: label,
   });
+  const disp = parseDisp(raw, seg);
   return {
-    disp: parseDisp(raw, seg),
-    dispatchDetail: raw ? null : sourcedDetail("review dispatch", raw),
+    disp: disp,
+    // Keyed on parseDisp REJECTING the reply, not on the reply being falsy.
+    // A dispatcher that answers with a truthy failure sentence -- the shape
+    // an outage actually produces, e.g. "could not launch the codex job:
+    // service unavailable" -- is rejected here exactly like a dead one, and
+    // it is the SHARED string across every segment in the batch. Keying on
+    // falsiness dropped it, leaving each segment its own per-segment PENDING
+    // wait text and no bucket at all: the very failure this exists to fix.
+    dispatchDetail: disp === "" ? sourcedDetail("review dispatch", raw) : null,
   };
 }
 
@@ -2356,11 +2371,13 @@ async function translateStage(seg) {
   const raw = await agent(translateDrivePrompt(seg), {
     effort: "low", phase: "Translate", label: "translate:" + seg,
   });
-  // #400 -- see callReviewDispatch: the parsed DISP alone cannot tell
-  // reviewFixLoop that this dispatch call died, so the detail travels with it.
+  // #400 -- see callReviewDispatch, including why this is keyed on parseDisp
+  // rejecting the reply rather than on the reply being falsy: the parsed DISP
+  // alone cannot tell reviewFixLoop that this dispatch did not take.
+  const disp = parseDisp(raw, seg);
   return {
-    disp: parseDisp(raw, seg),
-    dispatchDetail: raw ? null : sourcedDetail("translate dispatch", raw),
+    disp: disp,
+    dispatchDetail: disp === "" ? sourcedDetail("translate dispatch", raw) : null,
   };
 }
 

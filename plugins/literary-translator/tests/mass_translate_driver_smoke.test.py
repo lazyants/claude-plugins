@@ -1839,6 +1839,117 @@ def test_review_dispatch_null_alone_still_converges_when_wait_answers_ready(tmp_
     assert res["out"]["result"]["failed"] == []
 
 
+# The four tests above only exercise a NULL dispatch reply, which is one
+# instance of parseDisp() rejecting it, not the general case: a dispatcher
+# that answers a truthy, fully-formed failure SENTENCE -- what an actual
+# outage produces, and the MR bot's own reproduction for this fix -- is
+# rejected by parseDisp() identically, and unlike null it is the SAME string
+# on every segment. dispatchDetail is keyed on `disp === ""` (the reply
+# rejected) rather than on `raw` being falsy specifically so this case is
+# also caught; before the fix, `raw` here is truthy, so dispatchDetail stayed
+# null, each segment fell back to its own per-segment "PENDING <seg>" wait
+# text, and failureDetailTally came back empty on the exact outage this PR
+# exists to surface.
+DISPATCH_REJECTED_SHARED_DETAIL = "Dispatcher could not launch the codex job: service unavailable"
+
+
+def test_failure_detail_tally_buckets_a_shared_translate_dispatch_rejection(tmp_path):
+    """Two segments' TRANSLATE dispatcher both answer the same truthy,
+    unparseable failure sentence; both waits then answer their own
+    per-segment PENDING. Both rows must carry the SAME "translate dispatch:
+    ..." detail with their own waitDetail preserved, and the tally must
+    bucket them as one entry of 2 with the matching log line. RED before
+    this fix against a mutant reverting both dispatchDetail sites to
+    `raw ? null : sourcedDetail(...)` (the pre-fix `raw`-falsy keying):
+    observed red was an EMPTY failureDetailTally and two per-segment
+    "PENDING seg0N" details instead of the shared dispatch sentence -- the
+    exact operator-facing failure this fix closes, confirmed by running both
+    the fixed and the reverted template through this harness."""
+    overrides = {}
+    for seg in ("seg01", "seg02"):
+        overrides["translate:" + seg] = DISPATCH_REJECTED_SHARED_DETAIL
+        overrides["wait:" + seg] = "PENDING " + seg
+        overrides["wait-recheck:" + seg] = "PENDING " + seg
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    expected_detail = "translate dispatch: " + DISPATCH_REJECTED_SHARED_DETAIL
+    assert out["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "translate-timeout",
+            "detail": expected_detail, "waitDetail": "PENDING seg01",
+        },
+        {
+            "seg": "seg02", "converged": False, "reason": "translate-timeout",
+            "detail": expected_detail, "waitDetail": "PENDING seg02",
+        },
+    ]
+    assert out["result"]["failureDetailTally"] == [{"detail": expected_detail, "count": 2}]
+    assert f"Repeated failure detail (2/2 failed): {expected_detail}" in out["logLines"]
+
+
+def test_failure_detail_tally_buckets_a_shared_review_dispatch_rejection(tmp_path):
+    """Site C's twin of the test above -- same overrides and mutant shape,
+    applied at callReviewDispatch/getVerifiedReview."""
+    overrides = {}
+    for seg in ("seg01", "seg02"):
+        overrides["review-dispatch:" + seg + ":r1"] = DISPATCH_REJECTED_SHARED_DETAIL
+        overrides["review-wait:" + seg + ":r1"] = "PENDING " + seg
+        overrides["review-wait-recheck:" + seg + ":r1"] = "PENDING " + seg
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    expected_detail = "review dispatch: " + DISPATCH_REJECTED_SHARED_DETAIL
+    assert out["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1,
+            "detail": expected_detail, "waitDetail": "PENDING seg01",
+        },
+        {
+            "seg": "seg02", "converged": False, "reason": "review-timeout", "rounds": 1,
+            "detail": expected_detail, "waitDetail": "PENDING seg02",
+        },
+    ]
+    assert out["result"]["failureDetailTally"] == [{"detail": expected_detail, "count": 2}]
+    assert f"Repeated failure detail (2/2 failed): {expected_detail}" in out["logLines"]
+
+
+def test_translate_dispatch_rejected_reply_still_converges_when_wait_answers_ready(tmp_path):
+    """The counterexample that keeps the two tests above honest, mirroring
+    test_translate_dispatch_null_alone_still_converges_when_wait_answers_ready:
+    a truthy-but-unparseable dispatch reply, with the wait left at this
+    harness's own default READY, must still CONVERGE. A rejected DISP is
+    safe degradation -- the dispatch command launches the detached codex job
+    BEFORE relaying its own acknowledgement, so the launch can succeed while
+    only the ack comes back unparseable -- and must not become a timeout on
+    its own. Without this case, an implementation that widened the #400 fix
+    into short-circuiting to translate-timeout whenever dispatchDetail is
+    non-null (rather than merely recording it for a wait that actually times
+    out) would pass both tally tests above while breaking every healthy
+    dispatch whose acknowledgement merely came back garbled. RED against
+    exactly that mutant, wired in at reviewFixLoop's own wait entry right
+    after dispatchDetail is computed (an immediate return whenever it is
+    non-null, before the chunk loop ever runs): the segment reported
+    translate-timeout with converged: [] instead of converging."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"translate:seg01": DISPATCH_REJECTED_SHARED_DETAIL})
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}]
+    assert res["out"]["result"]["failed"] == []
+
+
+def test_review_dispatch_rejected_reply_still_converges_when_wait_answers_ready(tmp_path):
+    """Site C's twin of the test above -- same mutant shape (the immediate
+    return wired in at getVerifiedReview's own entry, right after the
+    dispatch call, whenever dispatch.dispatchDetail is non-null)."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"review-dispatch:seg01:r1": DISPATCH_REJECTED_SHARED_DETAIL},
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}]
+    assert res["out"]["result"]["failed"] == []
+
+
 def test_fix_call_failed_detail_is_the_fix_reply_when_probe_present_true(tmp_path):
     """The probe genuinely ran and answered present:true -- the detail must
     name the FIX call's own (flattened) reply, not the probe. RED before
