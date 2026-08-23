@@ -5452,7 +5452,8 @@ def test_derive_next_action_invalid_post_fix_draft_uses_the_plugin_root_scripts_
     )
 
 
-def _dna_write_ledger_fragment(root, seg="seg01", *, mtime, status="in_progress", note=None):
+def _dna_write_ledger_fragment(root, seg="seg01", *, mtime, status="in_progress", note=None,
+                               extra=None):
     """A minimal, realistic runs/ledger.d/{seg}.json fragment -- the same
     shape process_segment()'s own `if action["action"] == "translate":`
     branch causes ledger_update.py to write -- with its mtime pinned via
@@ -5476,6 +5477,8 @@ def _dna_write_ledger_fragment(root, seg="seg01", *, mtime, status="in_progress"
     fragment = {"timestamp": "irrelevant-to-this-fixture", "status": status}
     if note is not None:
         fragment["note"] = note
+    if extra:
+        fragment.update(extra)  # e.g. a terminal write's own rounds/reason
     fragment_path.write_text(json.dumps(fragment, ensure_ascii=False), encoding="utf-8")
     os.utime(fragment_path, (mtime, mtime))
     return fragment_path
@@ -5612,7 +5615,26 @@ def test_derive_next_action_invalid_post_retranslate_draft_with_a_same_run_revie
     exactly what a real retry produces, since the retry's own in_progress
     write happens strictly after the round-1 review it is retrying past
     -- rather than absent or dated before it (the fix scenario, covered
-    by the sibling test)."""
+    by the sibling test).
+
+    #620 makes this the POSITIVE CONTROL for the whole promotion-evidence
+    section below, which is why its fragment now carries the promotion note:
+    when the promoted draft is still the one on disk, the segment must keep
+    retrying exactly as before, never terminate. Without that, the fix would
+    deadlock a legitimate retry.
+
+    NO reachability claim is made for the surrounding scenario, and two
+    attempts at one were written here and then refuted -- a stale durable-root
+    validator (false: resolve_dirs() and codex_job.py's
+    _trusted_scripts_dir() resolve to the same place in both root modes) and
+    an ordinary W3/W3a regeneration (false: a regeneration reproducing the
+    same block/footnote/verse keys leaves the draft valid; only one that
+    CHANGES a compared key set would not). What remains is narrow and is not
+    enumerated here, because guessing at it a third time is how the first two
+    wrong sentences got written. What this test pins is the helper's positive
+    direction as a CONTRACT -- 1.43.0's shipped behaviour must survive a later
+    narrowing of the reader -- which is worth a test whatever the frequency
+    is."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
 
@@ -5670,7 +5692,7 @@ def test_derive_next_action_invalid_post_retranslate_draft_with_a_same_run_revie
 # ---------------------------------------------------------------------------
 
 
-def _dna_stage_post_fix_invalid_draft(root, driver_mod, *, round_label="final"):
+def _dna_stage_post_fix_invalid_draft(root, driver_mod):
     """The shared shape every reader case below needs: a matching same-run
     review whose recorded draft_sha1 is the PRE-edit draft's, a draft the
     operator has since hand-edited (new bytes, dispatch_token preserved), and
@@ -5680,7 +5702,7 @@ def _dna_stage_post_fix_invalid_draft(root, driver_mod, *, round_label="final"):
     base = int(time.time()) - 3600
     _dna_write_draft(root, driver_mod)
     reviewed_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
-    _dna_write_review(root, driver_mod, round_label=round_label, clean=False, coverage_ok=True,
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
                        draft_sha1=reviewed_sha1,
                        findings=[{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}])
     os.utime(root / "segments" / "seg01.review.json", (base + 10, base + 10))
@@ -5711,14 +5733,8 @@ def test_derive_next_action_terminal_fragment_newer_than_review_does_not_retrans
     driver_mod, ctx = _dna_setup(root)
     base, _ = _dna_stage_post_fix_invalid_draft(root, driver_mod)
 
-    ledger_dir = root / "runs" / "ledger.d"
-    ledger_dir.mkdir(parents=True, exist_ok=True)
-    fragment_path = ledger_dir / "seg01.json"
-    fragment_path.write_text(
-        json.dumps({"timestamp": "2026-01-01T00:00:00Z", "status": status, **extra}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    os.utime(fragment_path, (base + 20, base + 20))  # newer than the review
+    # newer than the review, which is the whole precondition
+    _dna_write_ledger_fragment(root, mtime=base + 20, status=status, extra=extra)
 
     assert driver_mod.derive_next_action("seg01", ctx) == {"action": "invalid_post_fix_draft"}, (
         "a terminal fragment is not evidence of a translate dispatch, however new it is"
@@ -5813,59 +5829,6 @@ def test_derive_next_action_correct_promotion_note_on_a_terminal_status_does_not
     )
 
     assert driver_mod.derive_next_action("seg01", ctx) == {"action": "invalid_post_fix_draft"}
-
-
-def test_derive_next_action_promotion_note_naming_the_current_draft_still_retranslates(tmp_path):
-    """REGRESSION GUARD (passes with or without the fix, by design). The
-    control case for the three above: when the promoted draft is STILL the
-    one on disk -- a genuine same-run retranslate whose own output came back
-    invalid, nothing hand-edited since -- the segment must keep retrying
-    exactly as before, never terminate. Without this the fix would deadlock
-    a legitimate retry.
-
-    NO reachability claim is made for the surrounding scenario, and two
-    attempts at one were written here and then refuted -- a stale durable-root
-    validator (false: resolve_dirs() and codex_job.py's
-    _trusted_scripts_dir() resolve to the same place in both root modes) and
-    an ordinary W3/W3a regeneration (false: a regeneration that reproduces
-    the same block/footnote/verse keys leaves the draft valid; only one that
-    CHANGES a compared key set would not). What remains is narrow and is not
-    enumerated here, because guessing at it a third time is how the first two
-    wrong sentences got written.
-
-    That does not make this test optional. It pins the helper's positive
-    direction as a CONTRACT: the shipped behaviour 1.43.0 added -- a genuine
-    same-run retranslate is retried, not terminated -- must survive, so a
-    later edit that narrows the reader cannot silently convert every
-    retranslate into a halt. The fixture reaches the branch by placing seg01
-    in the fixture's invalid-draft list rather than by driving a real
-    validator, which is how every other reader case in this file works and is
-    why this proves the contract rather than the frequency."""
-    root = phase2_project(tmp_path, n=1)
-    driver_mod, ctx = _dna_setup(root)
-    base = int(time.time()) - 3600
-    pre_review_draft = _dna_write_draft(root, driver_mod)
-    pre_review_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
-    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True,
-                       draft_sha1=pre_review_sha1,
-                       findings=[{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}])
-    os.utime(root / "segments" / "seg01.review.json", (base + 10, base + 10))
-
-    retranslated = dict(pre_review_draft, blocks={"p1": "hola RETRANSLATED FROM SCRATCH"})
-    (root / "segments" / "seg01.draft.json").write_text(
-        json.dumps(retranslated, ensure_ascii=False), encoding="utf-8"
-    )
-    retranslated_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
-    assert retranslated_sha1 != pre_review_sha1
-    _dna_write_ledger_fragment(
-        root, mtime=base + 20,
-        note=driver_mod._translate_promotion_note(retranslated_sha1),
-    )
-    write_invalid_validate_draft_segs(root, ["seg01"])
-
-    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "translate"}
-
-
 def _dna_promoting_translate(root, driver_mod, *, text):
     """A run_one_codex_job stand-in that models a REAL promotion: for a
     translate it replaces the canonical draft with gate-valid content
@@ -5930,10 +5893,9 @@ def test_process_segment_stamps_the_promoted_drafts_hash_after_a_real_translate(
     assert promoted_sha1 != pre_sha1, "setup check: the fake translate must move the draft"
     fragment = _dna_read_fragment(root)
     assert fragment["status"] == "in_progress"
+    # Equality against the PROMOTED hash is the whole assertion: pre_sha1 is a
+    # different 40-hex string, so it cannot occur in prefix + promoted_sha1.
     assert fragment["note"] == driver_mod._translate_promotion_note(promoted_sha1), fragment
-    assert pre_sha1 not in fragment["note"], (
-        "the evidence must name the draft the translate PRODUCED, not the one it replaced"
-    )
 
 
 @pytest.mark.parametrize("outcome_overrides,why", [
@@ -5945,12 +5907,12 @@ def test_process_segment_stamps_the_promoted_drafts_hash_after_a_real_translate(
 def test_process_segment_writes_no_promotion_evidence_without_a_promotion(tmp_path, monkeypatch,
                                                                           outcome_overrides, why):
     """REGRESSION GUARDS (pass with or without the fix, by design). They pin
-    that the second write is genuinely gated on codex_job.py's own
-    `promoted` -- `ok and not adopted`, since finalize() sets
-    ok = promoted or adopted. Evidence written for either of these would be
-    evidence over a draft no translate produced, which is precisely why the
-    stamp is not folded into the in_progress write that PRECEDES the
-    dispatch."""
+    that the second write is genuinely gated on a real promotion -- see the
+    writer's own comment in process_segment()'s translate branch for why
+    `ok and not adopted` is exactly that. Evidence written for either of
+    these would be evidence over a draft no translate produced, which is
+    precisely why the stamp is not folded into the in_progress write that
+    PRECEDES the dispatch."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)

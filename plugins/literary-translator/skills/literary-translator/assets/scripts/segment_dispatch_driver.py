@@ -4034,23 +4034,51 @@ def _matched_review_round_label(review_obj, run_id: str, seg: str, max_fix_round
     return None
 
 
-# The ledger note the translate branch stamps AFTER codex_job.py promotes a
-# draft, and the only thing _translate_redispatched_since() below accepts as
-# proof that the draft currently on disk came out of a translate. BOTH halves
-# are behaviour, not prose: the prefix is compared byte for byte, and the sha1
-# that follows it is compared against a freshly computed hash of the current
-# draft. Rewording either is a behaviour change, not a copy edit. Written at
-# exactly one site (process_segment()'s translate branch) and never by the
-# workflow template -- see the helper's own docstring for why not.
-TRANSLATE_PROMOTION_NOTE_PREFIX = (
-    "translate promoted by segment_dispatch_driver.py (#620); promoted draft sha1: "
-)
-
-
 def _translate_promotion_note(draft_sha1: str) -> str:
-    """The full note text for a promoted draft's ledger fragment. One
-    function so the writer and the reader below cannot drift apart."""
-    return TRANSLATE_PROMOTION_NOTE_PREFIX + draft_sha1
+    """The ledger note the translate branch stamps AFTER codex_job.py promotes
+    a draft, and the only thing _translate_redispatched_since() below accepts
+    as proof that the draft currently on disk came out of a translate.
+
+    This whole string is BEHAVIOUR, not prose: the reader compares a
+    fragment's note against this function's return value for EQUALITY, so
+    rewording the literal is a behaviour change, not a copy edit. One function
+    rather than a constant plus a concatenation at each end, so the writer and
+    the reader cannot drift apart. Written at exactly one site
+    (process_segment()'s translate branch) and never by the workflow template
+    -- see the reader's own docstring for why not."""
+    return "translate promoted by segment_dispatch_driver.py (#620); promoted draft sha1: " + draft_sha1
+
+
+def _in_progress_fragment_since(dirs: dict, seg: str, review_path: Path) -> "dict | None":
+    """runs/ledger.d/{seg}.json parsed, iff it is strictly newer than
+    `review_path` AND records status "in_progress" -- otherwise None.
+
+    Exactly the part the two helpers below agree on: one physical fact read
+    off one file. They diverge on what MORE they demand of it, and that
+    divergence is deliberate and documented in each one's own docstring --
+    sharing this reader is not a step toward collapsing them into one
+    predicate, which both docstrings explicitly refuse. If RAW #1's other
+    formulation ("the last in_progress write is newer than the review") ever
+    lands in the sibling, this base splits again.
+
+    Every doubt -- missing, unreadable, unparseable, not an object, equal or
+    older mtime, any other status -- returns None, which both callers map to
+    False."""
+    fragment_path = dirs["runs_dir"] / "ledger.d" / f"{seg}.json"
+    try:
+        fragment_mtime_ns = fragment_path.stat().st_mtime_ns
+        review_mtime_ns = review_path.stat().st_mtime_ns
+    except OSError:
+        return None
+    if fragment_mtime_ns <= review_mtime_ns:
+        return None
+    try:
+        fragment = json.loads(fragment_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(fragment, dict) or fragment.get("status") != "in_progress":
+        return None
+    return fragment
 
 
 def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path,
@@ -4092,17 +4120,18 @@ def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path,
        already carries one, and an absence test would silently re-break the
        day any other in_progress write grows one.
 
-    3. The note is TRANSLATE_PROMOTION_NOTE_PREFIX followed by exactly
-       `current_sha1`. Two distinct properties in one comparison. The prefix
-       says a translate promoted a draft: it is stamped only AFTER
-       run_one_codex_job() returns and only when codex_job.py reports a
-       genuine promotion, never before the dispatch -- a fragment written
-       before the job proves intent, and a driver killed between the two, a
-       failed launch, or an adopt-without-launch would all leave "evidence"
-       over an untouched draft. And the sha1 says the promoted draft is the
-       one still on disk: a constant marker would say "a translate ran" while
-       the operator's later hand repair sat in the file, and re-translating
-       over that repair is the exact harm this function exists to prevent.
+    3. The note equals _translate_promotion_note(current_sha1) -- one
+       equality over the whole string, never a prefix test. Two distinct
+       properties ride it. That such a note exists at all says a translate
+       promoted a draft, because it is stamped only after codex_job.py
+       reports a genuine promotion and never before the dispatch (the
+       writer's own comment in process_segment()'s translate branch
+       enumerates the three states a pre-dispatch stamp would falsely cover).
+       That the hash in it is the CURRENT draft's says the promoted draft is
+       the one still on disk: a constant marker would say "a translate ran"
+       while the operator's later hand repair sat in the file, and
+       re-translating over that repair is the exact harm this function exists
+       to prevent.
 
     `current_sha1` is passed in rather than recomputed: derive_next_action()
     has already computed it for its own draft_sha1 comparison, so the two
@@ -4134,14 +4163,10 @@ def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path,
     proves a launch, never a promotion -- so a stamp there would reintroduce
     exactly the "evidence written before the outcome" defect described under
     conjunct 3, and it would have to route a machine-compared hash through an
-    LLM agent's payload that recordLedgerCall() never verifies. The cost is
-    real and is written down in references/ledger-and-resumability.md's own
-    site-0 entry: that segment halts, and the halt PERSISTS -- an
-    invalid_post_fix_draft writes nothing, so the fragment, the review and
-    the run identity are all unchanged and re-running with --only-segs
-    reproduces it. Making the draft structurally valid again, by repairing it
-    or by deleting it so the segment re-translates from scratch, is what
-    clears it, which is the action the halt exists to demand.
+    LLM agent's payload that recordLedgerCall() never verifies. That segment
+    therefore halts, and the halt PERSISTS rather than clearing on a retry --
+    the full recovery is in references/ledger-and-resumability.md's site-0
+    entry, which is the one place an operator looks.
 
     One residual this does NOT close, pre-existing and unchanged by #620:
     derive_next_action() hashes the draft and process_segment() dispatches a
@@ -4150,22 +4175,11 @@ def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path,
     before the dispatch would only shrink it, never close it, and the
     per-segment lease codex_job.py already holds is the mechanism that
     covers the dispatch itself."""
-    fragment_path = dirs["runs_dir"] / "ledger.d" / f"{seg}.json"
-    try:
-        fragment_mtime_ns = fragment_path.stat().st_mtime_ns
-        review_mtime_ns = review_path.stat().st_mtime_ns
-    except OSError:
-        return False
-    if fragment_mtime_ns <= review_mtime_ns:
-        return False
-    try:
-        fragment = json.loads(fragment_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return False
-    if not isinstance(fragment, dict) or fragment.get("status") != "in_progress":
-        return False
-    note = fragment.get("note")
-    return isinstance(note, str) and note == _translate_promotion_note(current_sha1)
+    fragment = _in_progress_fragment_since(dirs, seg, review_path)
+    # No isinstance() guard on the note: _translate_promotion_note() returns a
+    # str, and nothing json.loads() can produce compares equal to a str except
+    # a str -- an absent note is None, which is simply unequal.
+    return fragment is not None and fragment.get("note") == _translate_promotion_note(current_sha1)
 
 
 def _translate_in_progress_since(dirs: dict, seg: str, review_path: Path) -> bool:
@@ -4258,19 +4272,7 @@ def _translate_in_progress_since(dirs: dict, seg: str, review_path: Path) -> boo
     Never write or compare against "stale" here -- that is the
     MATERIALIZED ledger's sixth value (ledger.schema.json), which
     ledger_update.py never writes to a fragment at all."""
-    fragment_path = dirs["runs_dir"] / "ledger.d" / f"{seg}.json"
-    try:
-        fragment_mtime_ns = fragment_path.stat().st_mtime_ns
-        review_mtime_ns = review_path.stat().st_mtime_ns
-    except OSError:
-        return False
-    if fragment_mtime_ns <= review_mtime_ns:
-        return False
-    try:
-        fragment = json.loads(fragment_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return False
-    return isinstance(fragment, dict) and fragment.get("status") == "in_progress"
+    return _in_progress_fragment_since(dirs, seg, review_path) is not None
 
 
 def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
@@ -5756,6 +5758,22 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               "recoverable" default retries
                                               this segment next invocation.
       outcome="failed", reason=
+        "promotion-hash-failed"           -- #620: the translate itself
+                                              SUCCEEDED and promoted a draft,
+                                              but hashing that draft to stamp
+                                              the promotion evidence raised.
+                                              No second ledger write happens,
+                                              so no evidence is recorded
+                                              rather than evidence naming a
+                                              hash this driver could not
+                                              compute; the promoted draft and
+                                              the recoverable in_progress
+                                              fragment both stay on disk.
+                                              `detail`, not `error_detail` --
+                                              this is the driver's own
+                                              failure, not a codex_job.py
+                                              relay.
+      outcome="failed", reason=
         "unexpected-error:<TYPE>"         -- ANY exception raised anywhere
                                               in this iteration's own body
                                               (codex round-3 BLOCKER,
@@ -6294,18 +6312,29 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 # after the operator has edited that draft, so the hash is
                 # what makes the evidence describe the file currently on disk.
                 # Hashing failure means NO evidence rather than wrong
-                # evidence -- this invocation simply records none, and the
-                # next one derives conservatively from whatever is then on
-                # disk.
-                if not result.get("adopted"):
+                # evidence: this invocation records none and returns failed,
+                # leaving the promoted draft and the recoverable in_progress
+                # fragment on disk for the next invocation to derive from.
+                #
+                # result["adopted"], not .get(): every parseable outcome
+                # carries the key (see _codex_job_outcome() and
+                # run_one_codex_job()'s except fallback), and .get()'s None
+                # default is FALSY, i.e. it would stamp -- the permissive
+                # direction on the one flag that can authorize discarding a
+                # draft. A KeyError becomes unexpected-error, which is the
+                # halt, matching this function's own "every doubt stops"
+                # policy.
+                if not result["adopted"]:
                     try:
                         promoted_sha1 = current_draft_sha1(
                             seg, ctx.dirs["durable_root"] / "segments", ctx.dirs["scripts_dir"]
                         )
                     except DriverError as exc:
+                        # reason + detail, NOT stage + error_detail: that shape
+                        # is reserved for codex_job.py's OWN verbatim reported
+                        # values (#398), and this is the driver's own failure.
                         return {"seg": seg, "converged": False, "outcome": "failed",
-                                "stage": "translate", "reason": "promotion-hash-failed",
-                                "error_detail": str(exc)}
+                                "reason": "promotion-hash-failed", "detail": str(exc)}
                     rec = write_ledger(
                         ctx.dirs, seg,
                         {"status": "in_progress",
