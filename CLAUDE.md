@@ -41,6 +41,13 @@ Each workflow is path-filtered to its own plugin plus its own file, so a PR touc
 runs one suite; `workflow_dispatch` runs any of them by hand. Superseded runs on the same ref are
 cancelled, so only the newest commit's run gates anything.
 
+One exception, and the rule behind it: `enduser-handbook.yml` also lists the root `README.md` and
+`CHANGELOG.md`, because `reference-assets.test.sh` reads both directly and pins release copy in
+them. **A path filter must cover every file the suite READS, not only the directory it lives in** —
+otherwise a PR editing just that file merges with the suite never scheduled, which is exactly the
+hole that "CI replaces the local run" is supposed to close. No other suite reaches outside its own
+plugin directory (literary-translator's changelog tests read `PLUGIN_ROOT/CHANGELOG.md`, its own).
+
 Runtime versions are pinned to mirror this machine (Python 3.14, Node 22) — a CI result is then
 directly comparable to what a local run would have produced, which is the point of not running one.
 

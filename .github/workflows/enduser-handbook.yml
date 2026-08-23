@@ -6,10 +6,22 @@ on:
     paths:
       - 'plugins/enduser-handbook/**'
       - '.github/workflows/enduser-handbook.yml'
+      # reference-assets.test.sh reads the ROOT README.md and CHANGELOG.md
+      # ($PLUGIN_DIR/../../), including release-copy regression gates. Without
+      # these two entries a PR editing either root document alone breaks those
+      # assertions and merges with this suite never scheduled.
+      - 'README.md'
+      - 'CHANGELOG.md'
   pull_request:
     paths:
       - 'plugins/enduser-handbook/**'
       - '.github/workflows/enduser-handbook.yml'
+      # reference-assets.test.sh reads the ROOT README.md and CHANGELOG.md
+      # ($PLUGIN_DIR/../../), including release-copy regression gates. Without
+      # these two entries a PR editing either root document alone breaks those
+      # assertions and merges with this suite never scheduled.
+      - 'README.md'
+      - 'CHANGELOG.md'
   workflow_dispatch:
 
 permissions:
