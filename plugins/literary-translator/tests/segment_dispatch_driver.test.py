@@ -2494,12 +2494,51 @@ def test_attempt_cancel_orphan_never_invokes_node_against_a_symlinked_companion_
 
 TEMPLATES_SRC_DIR = ASSETS_DIR / "templates"
 CACHE_KEY_MODULE = _load_module(CACHE_KEY_SRC, "cache_key_for_bundle_test")
-ORCHESTRATION_BUNDLE_MEMBERS = (
-    "draft_ready.py",
-    "ledger_merge.py",
-    "language_smoke_report.py",
-    "select_segments.py",
-)
+
+
+def _declared_orchestration_members():
+    """scaffold_setup.py's ORCHESTRATION_BUNDLE_MEMBERS, read from the SOURCE
+    rather than retyped here. A hand-typed copy of a membership list does not
+    detect drift, it freezes it -- this file's copy had frozen four names while
+    claim_record.py joined the tuple in 1.21.0, so the "both bundle hashes"
+    the mutation test below claims to compute was only ever four fifths of the
+    orchestration one. What this file must keep independent is the HASHING,
+    which _independent_bundle_hash still recomputes with plain hashlib.
+
+    Reading the source rather than importing, and taking EVERY binding rather
+    than the first, both follow orchestration_hash_resume_gating.test.py's
+    `orchestration_bundle_members` fixture, which returns the same declared-order
+    tuple for the same reasons: scaffold_setup.py imports cache_key at module
+    scope and is not importable from here, and stopping at the first assignment
+    would let a later rebind or `+=` leave this returning a literal the shipped
+    module no longer holds, with every assertion below still passing. Any shape
+    that is not exactly one plain tuple literal fails loudly at collection
+    instead of yielding a quietly wrong membership."""
+    import ast
+
+    tree = ast.parse((SCRIPTS_SRC_DIR / "scaffold_setup.py").read_text(encoding="utf-8"))
+    bindings = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AugAssign))
+        and any(
+            isinstance(t, ast.Name) and t.id == "ORCHESTRATION_BUNDLE_MEMBERS"
+            for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        )
+    ]
+    assert len(bindings) == 1, (
+        f"ORCHESTRATION_BUNDLE_MEMBERS is bound {len(bindings)} times in "
+        f"scaffold_setup.py -- reading a literal is only equivalent to reading "
+        f"the shipped value while there is exactly one binding."
+    )
+    node = bindings[0]
+    assert isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple), (
+        "ORCHESTRATION_BUNDLE_MEMBERS is no longer a plain tuple literal"
+    )
+    return tuple(ast.literal_eval(node.value))
+
+
+ORCHESTRATION_BUNDLE_MEMBERS = _declared_orchestration_members()
 
 
 def _bundle_member_source(name):
