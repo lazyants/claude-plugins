@@ -496,6 +496,26 @@ def _claim_note(run_id, seg, durable_root, current_token):
     if state == claim_record.CLAIM_PRESENT:
         profile = payload.get("profile") if isinstance(payload, dict) else None
         claimed_at = payload.get("claimed_at") if isinstance(payload, dict) else None
+        # #453: the FACTS every verdict below opens with are built ONCE, here
+        # and in the two blocks further down, rather than respelled in each
+        # return. Nine returns repeated the first sentence verbatim, eight the
+        # second and four the third; what they legitimately differ in is what
+        # they CONCLUDE, never the evidence they open with, and a verdict that
+        # drifted on the evidence would send an operator to the wrong record.
+        # Punctuation that never varies IS part of the string: the opening
+        # " -- " here, and the opening ", " of foreign_claim_facts below.
+        # What stays branch-owned is the JOINER BETWEEN these strings --
+        # ", and " on most verdicts, ", but " on SUPERSEDED, ": " on LOST --
+        # because folding that in would need a helper taking the conjunction
+        # as an argument: a nested def, which draft_ready.py,
+        # select_segments.py, claim_record.py and ledger_update.py contain
+        # none of (other scripts in this directory do), or a module-level one
+        # taking eight parameters. Plain locals need neither.
+        this_claim_facts = (
+            f" -- a claim record for run {run_id!r} IS present for "
+            f"this segment (profile={profile!r}, "
+            f"claimed_at={claimed_at!r})"
+        )
         actual_run_id = _claim_run_id(current_token)
         if actual_run_id is not None and actual_run_id != run_id:
             # FOREIGN-shaped: the draft's current token names some OTHER
@@ -504,14 +524,15 @@ def _claim_note(run_id, seg, durable_root, current_token):
             # this clause may say what happened, the same way this run's
             # own record was looked up above. See this function's own
             # docstring for the three reachable sub-outcomes.
+            foreign_token_facts = (
+                f"the draft's CURRENT dispatch_token now names a DIFFERENT "
+                f"run, {actual_run_id!r}"
+            )
             problem = claim_record.validate_run_id(actual_run_id)
             if problem is not None:
                 return (
-                    f" -- a claim record for run {run_id!r} IS present for "
-                    f"this segment (profile={profile!r}, "
-                    f"claimed_at={claimed_at!r}), and the draft's CURRENT "
-                    f"dispatch_token now names a DIFFERENT run, "
-                    f"{actual_run_id!r} -- but that name is not usable as a "
+                    f"{this_claim_facts}, and {foreign_token_facts}"
+                    f" -- but that name is not usable as a "
                     f"run id ({problem}), so no claim record could be "
                     f"looked up for it and which run actually owns {seg!r} "
                     f"now could not be determined. Do not assume either "
@@ -525,11 +546,8 @@ def _claim_note(run_id, seg, durable_root, current_token):
                 foreign_state, foreign_payload, foreign_detail = claim_record.read_claim_record(foreign_path)
             except Exception as exc:
                 return (
-                    f" -- a claim record for run {run_id!r} IS present for "
-                    f"this segment (profile={profile!r}, "
-                    f"claimed_at={claimed_at!r}), and the draft's CURRENT "
-                    f"dispatch_token now names a DIFFERENT run, "
-                    f"{actual_run_id!r} -- but that run's own claim record "
+                    f"{this_claim_facts}, and {foreign_token_facts}"
+                    f" -- but that run's own claim record "
                     f"could not even be looked up ({exc!r}), so which run "
                     f"actually owns {seg!r} now could not be determined. "
                     f"Treated as UNDETERMINED, never assumed either claimed "
@@ -539,6 +557,10 @@ def _claim_note(run_id, seg, durable_root, current_token):
             if foreign_state == claim_record.CLAIM_PRESENT:
                 f_profile = foreign_payload.get("profile") if isinstance(foreign_payload, dict) else None
                 f_claimed_at = foreign_payload.get("claimed_at") if isinstance(foreign_payload, dict) else None
+                foreign_claim_facts = (
+                    f", which itself holds a live claim record for {seg!r} "
+                    f"(profile={f_profile!r}, claimed_at={f_claimed_at!r})"
+                )
                 # #438 round 6: T holding a live record is no longer a
                 # single verdict -- see this function's own docstring for
                 # the four-way split. this_instant/foreign_instant mirror
@@ -568,12 +590,9 @@ def _claim_note(run_id, seg, durable_root, current_token):
                         else f"{actual_run_id!r}'s claim record's claimed_at ({f_claimed_at!r})"
                     )
                     return (
-                        f" -- a claim record for run {run_id!r} IS present for this "
-                        f"segment (profile={profile!r}, claimed_at={claimed_at!r}), "
-                        f"and the draft's CURRENT dispatch_token now names a "
-                        f"DIFFERENT run, {actual_run_id!r}, which itself holds a live "
-                        f"claim record for {seg!r} (profile={f_profile!r}, "
-                        f"claimed_at={f_claimed_at!r}) -- but {unparseable_side} does not "
+                        f"{this_claim_facts}, and {foreign_token_facts}"
+                        f"{foreign_claim_facts}"
+                        f" -- but {unparseable_side} does not "
                         f"parse as a timestamp, so which claim is later could not be "
                         f"established. The selector's own guard refuses whenever it "
                         f"cannot show this run's own claim is provably the later one "
@@ -587,13 +606,9 @@ def _claim_note(run_id, seg, durable_root, current_token):
                     # stale relative to it, not the other way around --
                     # do not call this run's record superseded.
                     return (
-                        f" -- a claim record for run {run_id!r} IS present for "
-                        f"this segment (profile={profile!r}, "
-                        f"claimed_at={claimed_at!r}), and the draft's CURRENT "
-                        f"dispatch_token now names a DIFFERENT run, "
-                        f"{actual_run_id!r}, which itself holds a live claim "
-                        f"record for {seg!r} (profile={f_profile!r}, "
-                        f"claimed_at={f_claimed_at!r}) -- but THIS run's own "
+                        f"{this_claim_facts}, and {foreign_token_facts}"
+                        f"{foreign_claim_facts}"
+                        f" -- but THIS run's own "
                         f"claim is the LATER of the two. {actual_run_id!r}'s "
                         f"token is stale relative to this run's own claim, "
                         f"most likely because this run claimed {seg!r} and "
@@ -621,13 +636,9 @@ def _claim_note(run_id, seg, durable_root, current_token):
                     # the wording was unchanged sent a reader looking for a
                     # caution that is no longer there.)
                     return (
-                        f" -- a claim record for run {run_id!r} IS present for "
-                        f"this segment (profile={profile!r}, "
-                        f"claimed_at={claimed_at!r}), but the draft's CURRENT "
-                        f"dispatch_token now names a DIFFERENT run, "
-                        f"{actual_run_id!r}, which itself holds a live claim "
-                        f"record for {seg!r} (profile={f_profile!r}, "
-                        f"claimed_at={f_claimed_at!r}): that run has since "
+                        f"{this_claim_facts}, but {foreign_token_facts}"
+                        f"{foreign_claim_facts}"
+                        f": that run has since "
                         f"claimed this segment, and this run's own record above "
                         f"is a SUPERSEDED authorization -- nothing was "
                         f"overwritten or dropped; the segment was claimed out "
@@ -654,13 +665,9 @@ def _claim_note(run_id, seg, durable_root, current_token):
                 # claimed_at can never change and waiting cannot break
                 # the tie -- do not advise a retry here.
                 return (
-                    f" -- a claim record for run {run_id!r} IS present for "
-                    f"this segment (profile={profile!r}, "
-                    f"claimed_at={claimed_at!r}), and the draft's CURRENT "
-                    f"dispatch_token now names a DIFFERENT run, "
-                    f"{actual_run_id!r}, which itself holds a live claim "
-                    f"record for {seg!r} (profile={f_profile!r}, "
-                    f"claimed_at={f_claimed_at!r}) -- the two records carry "
+                    f"{this_claim_facts}, and {foreign_token_facts}"
+                    f"{foreign_claim_facts}"
+                    f" -- the two records carry "
                     f"the IDENTICAL claimed_at, a TIE neither side provably "
                     f"wins. The selector's own guard refuses a tie the same "
                     f"safe direction as an older claim, and that refusal is "
@@ -674,11 +681,8 @@ def _claim_note(run_id, seg, durable_root, current_token):
                 )
             if foreign_state == claim_record.CLAIM_ABSENT:
                 return (
-                    f" -- a claim record for run {run_id!r} IS present for "
-                    f"this segment (profile={profile!r}, "
-                    f"claimed_at={claimed_at!r}), and the draft's CURRENT "
-                    f"dispatch_token now names a DIFFERENT run, "
-                    f"{actual_run_id!r} -- but {actual_run_id!r} holds NO "
+                    f"{this_claim_facts}, and {foreign_token_facts}"
+                    f" -- but {actual_run_id!r} holds NO "
                     f"claim record for {seg!r}: nobody currently holds this "
                     f"segment, so despite the foreign-looking token this is "
                     f"closer to the LOST case than to a legitimate foreign "
@@ -694,10 +698,7 @@ def _claim_note(run_id, seg, durable_root, current_token):
             # CLAIM_AMBIGUOUS -- T's own record exists but could not be read.
             f_detail = f" ({foreign_detail})" if foreign_detail else ""
             return (
-                f" -- a claim record for run {run_id!r} IS present for this "
-                f"segment (profile={profile!r}, claimed_at={claimed_at!r}), "
-                f"and the draft's CURRENT dispatch_token now names a "
-                f"DIFFERENT run, {actual_run_id!r} -- but "
+                f"{this_claim_facts}, and {foreign_token_facts} -- but "
                 f"{actual_run_id!r}'s own claim record is "
                 f"unreadable{f_detail}, so which run actually owns {seg!r} "
                 f"now could not be determined. Do not assume either record "
@@ -706,8 +707,7 @@ def _claim_note(run_id, seg, durable_root, current_token):
                 f"ownership by hand before reclaiming it."
             )
         return (
-            f" -- a claim record for run {run_id!r} IS present for this "
-            f"segment (profile={profile!r}, claimed_at={claimed_at!r}): the "
+            f"{this_claim_facts}: the "
             f"claim was LOST, not merely absent -- something after the "
             f"claim (most likely a fix round) overwrote or dropped the "
             f"draft's dispatch_token instead of preserving it byte for "
