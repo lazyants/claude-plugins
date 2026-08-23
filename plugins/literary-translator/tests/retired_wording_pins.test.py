@@ -344,9 +344,16 @@ def _diff_hunks(path: Path, baseline: str, end: str | None = None) -> list[tuple
     it can only add MORE lines to a hunk's pools, never remove the pairing
     that already held -- but it CAN, in principle, sweep a genuinely
     cross-hunk pair elsewhere in the row set into the same merged hunk and
-    mask that defect on the next run. Splitting an existing hunk the opposite
-    way would require an edit that reproduces the BASELINE line verbatim at
-    that exact position, which an unrelated edit essentially never does. Net:
+    mask that defect on the next run. The opposite direction -- SPLITTING a
+    pair that used to share a hunk -- was once described here as needing an
+    edit that reproduces the BASELINE line verbatim at that position, which an
+    unrelated edit essentially never does. That is wrong, and twice measured:
+    an unrelated edit ELSEWHERE in the same file can make git re-attach an
+    already-added block to a NEIGHBOURING hunk, splitting a pair whose own
+    lines nobody touched (#353 did it to the glossary row, #370 to the skeptic
+    one). So a passing row CAN be broken by an edit that goes nowhere near it;
+    the remedy is the one the failure message states -- re-derive the
+    replacement from the hunk that actually removes the needle. Net:
     a result from this function is only as fresh as the last full re-run
     against a quiescent tree, exactly like every other check in this file --
     not a NEW risk this function invents, but the existing one, now able to
@@ -456,10 +463,19 @@ RETIRED = [
     (
         BASELINE_RELEASE, SKEPTIC_TEMPLATE,
         'lines.push("for i in $(seq 1 45); do "',
-        'lines.push("end=$((SECONDS + " + waitChunkSec(chunkIndex) + "))', 1,
+        'lines.push("Run EXACTLY ONE bash command. It does NOT poll and returns immediately:")', 1,
         "the EMITTED pre-#352 poll: 45 iterations x 20 s == 900 s in a single bash "
         "call, against a measured 600 s clamp. Narrowed to the lines.push() form "
-        "because the surviving comments narrate the old poll on purpose (trap 2)",
+        "because the surviving comments narrate the old poll on purpose (trap 2). "
+        "The replacement is the authoritative re-check's own command line, not the "
+        "chunk poll's `end=$((SECONDS ...))` -- both are #352's replacement for the "
+        "single-shot poll, but only this one lands in the SAME hunk that removes "
+        "the needle. It was the chunk-poll literal until #370 added a startup guard "
+        "near the top of this template: no line either side of the pair changed, and "
+        "git re-attached the added block to the neighbouring hunk. That is the SECOND "
+        "instance of the split this file's GLOSSARY twin already records, and the "
+        "reason _diff_hunks()'s caveat now names an added block moving between "
+        "adjacent hunks rather than only a reproduced baseline line",
     ),
     (
         BASELINE_RELEASE, SKEPTIC_TEMPLATE,

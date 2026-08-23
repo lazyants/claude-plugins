@@ -110,6 +110,34 @@ const RUN_ID = "{{RUN_ID}}"
 const RUN_DIR = ROOT + "/skeptic/runs/" + RUN_ID
 const BATCH_AGENT_CAP = {{BATCH_AGENT_CAP}}
 
+// #370 -- defense-in-depth, mirroring mass-translate-wf.template.js's
+// EFFORT_RE/MODEL_RE guards: PARTICLE_CONFIG is schema-validated at Step 0
+// (profile.schema.json's source.language.particle_config) but re-checked
+// HERE, at the sink, so a mis-substituted or hand-edited value fails LOUDLY
+// at instantiation rather than reaching a shell splice -- checkCommand()
+// below and the --verify-merged call both emit it space-separated after
+// --particle-config, unquoted.
+//
+// This is deliberately STRICTER than the schema pattern in the FIRST
+// CHARACTER ONLY: the schema's own ^[A-Za-z0-9_.-]+\.json$ admits a leading
+// dash, this one does not. A leading-dash filename is not universally
+// unusable -- `--particle-config=-x.json` would still parse -- but it is
+// unusable in the space-separated form both builders below actually emit,
+// which is the only form in scope: argparse reads a leading `-` as the
+// start of a new flag and exits with "argument --particle-config: expected
+// one argument".
+//
+// Why a throw is worth it: a value the CLI cannot carry otherwise fails at
+// the first --validate-fragment precheck, which the workflow reads as
+// ABSENT rather than malformed, so dispatch repeats the same broken
+// self-check and the wait re-runs it across the whole 900 s budget, per
+// batch.
+const PARTICLE_CONFIG_RE = /^[A-Za-z0-9_.][A-Za-z0-9_.-]*\.json$/
+if (!PARTICLE_CONFIG_RE.test(PARTICLE_CONFIG)) {
+  throw new Error("Unsafe source.language.particle_config " + JSON.stringify(PARTICLE_CONFIG) +
+    ": must be a bare .json filename matching ^[A-Za-z0-9_.][A-Za-z0-9_.-]*\\.json$ (no leading dash, no path separator)")
+}
+
 // ---------------------------------------------------------------------------
 // #352 -- the batch wait's budget is SPENT ACROSS SEVERAL AGENT CALLS, not
 // one. The same defect #348 fixed in mass-translate-wf.template.js, ported

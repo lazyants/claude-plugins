@@ -335,6 +335,27 @@ if (new Set(CITATION_TYPE_LIST).size !== CITATION_TYPE_LIST.length) {
 }
 
 // ---------------------------------------------------------------------------
+// #370 -- Defense-in-depth, mirroring mass-translate-wf.template.js's
+// EFFORT_RE/MODEL_RE: RESEARCH_MODE is already schema-validated at Step 0
+// (profile.schema.json's glossary.research_mode enum), but is re-checked
+// HERE, at the sink, so a mis-substituted or hand-edited value fails LOUDLY
+// at instantiation instead of reaching a shell splice. The allowlist below
+// is kept identical to that schema enum.
+//
+// Worth a throw because RESEARCH_MODE reaches THREE shell command builders
+// (the --research-mode splice below, and the two cmdParts arrays further
+// down) and, before any of them, silently selects whether the pre-merge
+// citation review runs at all. A bad value's failure otherwise surfaces
+// only at the first --check-batch, then burns the full 900s wait budget
+// plus the retry ladder, per batch.
+// ---------------------------------------------------------------------------
+const RESEARCH_MODE_RE = /^(live|offline)$/
+if (!RESEARCH_MODE_RE.test(RESEARCH_MODE)) {
+  throw new Error("Unsafe glossary.research_mode " + JSON.stringify(RESEARCH_MODE) +
+    ": must be one of live|offline")
+}
+
+// ---------------------------------------------------------------------------
 // Pre-merge citation review (1.16.0). Under research_mode:live the dispatch
 // call above is allowed to claim basis:"established" -- and that claim carries
 // a `source` URL the agent produced itself. canon_validate.py --check-batch
@@ -577,13 +598,9 @@ if (estimatedCalls > BATCH_AGENT_CAP) {
 // batches' fragment paths onto the same file, or escape into an injected
 // shell command. Checked BEFORE any write or dispatch: a bad/duplicate
 // index throws here, so nothing is ever dispatched against it. Mirrors
-// mass-translate-wf.template.js's own SEG_ID_RE index guard -- not that
-// file's WHOLE guard discipline, which this template does not match: mass-
-// translate ALSO re-validates the other profile-sourced values it splices
-// into a shell command (EFFORT_RE/MODEL_RE, guarding EFFORT/MODEL) before
-// they reach a command line. RESEARCH_MODE below has no such startup guard
-// before checkBatchCmd() splices it in unquoted -- operator-authored, not an
-// attacker channel, but not the parity this comment used to claim either.
+// mass-translate-wf.template.js's own SEG_ID_RE index guard. Not full parity
+// with that file: DURABLE_ROOT and RUN_ID below still reach their shell
+// splices with no equivalent check (RESEARCH_MODE has its own guard, above).
 // ---------------------------------------------------------------------------
 const seenBatchIndices = new Set()
 for (let i = 0; i < BATCHES.length; i++) {
