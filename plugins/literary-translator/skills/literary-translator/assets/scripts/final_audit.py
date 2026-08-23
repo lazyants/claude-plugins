@@ -814,7 +814,7 @@ def forbidden_patterns(profile):
 
 
 def compile_forbidden_patterns(decls):
-    """(compiled, warns) -- compiled is a list of (id, regex, message).
+    """(compiled, warns) -- compiled is a list of (rule_id, regex, message).
 
     ONE rejection is reported: a pattern that does not compile. profile.yml is
     schema-valid by the time a run starts, so a well-formed declaration whose
@@ -829,12 +829,14 @@ def compile_forbidden_patterns(decls):
     compiled = []
     warns = []
     for index, decl in enumerate(decls):
-        rule_id = decl.get("id")
+        declared_id = decl.get("id")
         pattern = decl.get("pattern")
         message = decl.get("message")
-        label = rule_id if isinstance(rule_id, str) and rule_id else f"#{index}"
         if not isinstance(pattern, str) or not pattern:
             continue
+        # Named only once the declaration has survived the reject above, so
+        # the loop reads in the order it decides things.
+        rule_id = declared_id if isinstance(declared_id, str) and declared_id else f"#{index}"
         if not isinstance(message, str) or not message:
             message = "(declaration carries no message)"
         try:
@@ -853,16 +855,16 @@ def compile_forbidden_patterns(decls):
             # invariant is the one worth holding: an uncompilable pattern is
             # REPORTED, never fatal.
             warns.append(
-                f"STYLE-PATTERN {label}: pattern {pattern!r} does not "
+                f"STYLE-PATTERN {rule_id}: pattern {pattern!r} does not "
                 f"compile ({type(exc).__name__}: {exc}) -- rule NOT enforced "
                 f"this run -- MANUAL"
             )
             continue
-        compiled.append((label, regex, message))
+        compiled.append((rule_id, regex, message))
     return compiled, warns
 
 
-def _string_leaves(node, path):
+def _string_leaves(node, label):
     """Yields (path_label, string) for every string leaf under `node`.
 
     An explicit stack, NOT recursion: `json.loads` decodes container nesting
@@ -882,8 +884,13 @@ def _string_leaves(node, path):
     whitespace still collapse to the same label once the emitted line is
     normalized; that is an ambiguous advisory string, and warnings gate
     nothing."""
-    stack = [(node, path)]
+    stack = [(node, label)]
     while stack:
+        # LIFO, so a draft's leaves are reported in REVERSE insertion order --
+        # unlike warn_verse_structure (dict order) and warn_link_graph
+        # (sorted). Accepted deliberately rather than overlooked: every fix
+        # costs code to buy ordering that nothing reads, since warnings gate
+        # nothing and the one test comparing paths sorts them first.
         current, label = stack.pop()
         if isinstance(current, str):
             yield label, current
@@ -928,7 +935,6 @@ def warn_forbidden_patterns(seg, compiled):
                     f"(hits={len(matches)}) :: {snippet!r} -- MANUAL"
                 ))
     return warns
-
 
 
 # ---------------------------------------------------------------------------
