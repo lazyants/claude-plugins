@@ -4393,24 +4393,12 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
             # be told apart from one that converged on a numbered round.
             # reviewed_sha1/reviewed_token/reviewed_digest travel with this
             # decision exactly as they do with cap_reached and
-            # converged_by_rejection below, so
-            # _terminal_write_still_binds_what_was_reviewed() can ask, at
-            # write time, whether the verdict this convergence was decided
-            # from is still the one on disk -- against what THIS function
-            # parsed, never a re-read that would accept a substitute on its
-            # own terms.
-            #
-            # What the digest ADDS here is narrower than on the cap fork, and
-            # saying so is the point. This path's PROVENANCE half is already
-            # re-checked one layer down: ledger_update.py's
-            # enrich_converged_fields() independently re-reads review.json and
-            # refuses the convergence write on a draft_sha1 or dispatch_token
-            # prefix mismatch. What it does NOT read is the verdict -- no
-            # `clean`, no `coverage_ok`, no findings, no digest -- so a
-            # NON-CLEAN review substituted at the SAME deterministic
-            # same-round token over the SAME unread draft was, until this
-            # digest, indistinguishable from the clean one that was actually
-            # attested. That single window is what these fields close.
+            # converged_by_rejection below, and the digest is taken from the
+            # review_obj THIS function parsed -- a re-read here would accept a
+            # substitute on its own terms. WHAT the triple buys on this
+            # particular fork, which is narrower than on the cap fork, is
+            # argued once where the check is actually made: see
+            # process_segment()'s already_converged branch.
             return {
                 "action": "already_converged",
                 "round_label": matched_round_label,
@@ -5959,25 +5947,14 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 # this one. The residual for a caller that is not this driver
                 # therefore stands, unclosed and stated.
                 #
-                # Refusing writes NOTHING. On the ordinary path that recovers by
-                # itself: the surviving fragment is absent or the in_progress one
-                # a prior invocation left, both of which select_segments.py
-                # admits by default, so the next invocation re-derives from the
-                # review that is actually on disk. It is NOT unconditional --
-                # nothing here constrains the fragment, so a segment force-
-                # included by --only-segs while carrying a `blocked` or
-                # `non_converged` fragment keeps it, and clearing that needs the
-                # same explicit override that selected it.
+                # What a refusal leaves behind, and the one case that does not
+                # clear itself, are stated in this function's own return
+                # contract above under converge-write-review-moved rather than
+                # a second time here.
                 bind_failure = _terminal_write_still_binds_what_was_reviewed(
                     seg, ctx, action, what="convergence"
                 )
                 if bind_failure is not None:
-                    # Same reason string as the rejection convergence above, not
-                    # a third one: it is the same KIND of write refused for the
-                    # same reason, with the same remedy (look at the review and
-                    # record that are actually there). The detail names which
-                    # bound fact moved; a separate string would imply a different
-                    # remedy where there is none.
                     return {"seg": seg, "converged": False, "outcome": "failed",
                             "reason": "converge-write-review-moved", "detail": bind_failure}
                 rounds = _ledger_rounds_value(action["round_label"], ctx.translate_cfg["max_fix_rounds"])

@@ -4200,7 +4200,7 @@ def test_already_converged_binding_fields_describe_the_review_this_call_parsed(t
     )
 
 
-def test_the_convergence_handler_refuses_and_writes_nothing_when_the_binding_check_fails(tmp_path):
+def test_the_ordinary_convergence_handler_refuses_and_writes_nothing_when_the_binding_check_fails(tmp_path):
     """#622. That the ORDINARY already_converged handler CALLS the binding
     check -- which the derive_next_action() tests above cannot show, since
     they stop at the action.
@@ -4257,6 +4257,15 @@ def test_the_convergence_handler_refuses_and_writes_nothing_when_the_binding_che
     assert not (root / "runs" / "ledger.d" / "seg01.json").exists(), (
         "a refused terminal write must write NOTHING -- not a converged fragment, "
         "not a partial one"
+    )
+    assert not (root / "segments" / ".ever_converged.seg01").exists(), (
+        "and no ever-converged sentinel either: ledger_update.py raises it as part "
+        "of recording convergence, and a segment carrying one is refused re-selection "
+        "-- a refusal that left it behind would be worse than the write it refused"
+    )
+    assert _dna_dispatch_count(root) == 0, (
+        "nothing may be dispatched on a refusal either -- the segment is left for "
+        "the next invocation to re-derive, not re-reviewed from inside the refusal"
     )
 
 
@@ -4329,6 +4338,14 @@ def test_a_non_clean_review_substituted_under_the_same_token_and_sha1_cannot_con
     assert not (root / "runs" / "ledger.d" / "seg01.json").exists(), (
         "a segment whose clean verdict was replaced by a non-clean one must not "
         "be recorded converged"
+    )
+    assert not (root / "segments" / ".ever_converged.seg01").exists(), (
+        "nor carry the ever-converged sentinel, which is what would make it "
+        "un-reselectable afterwards"
+    )
+    assert _dna_dispatch_count(root) == 0, (
+        "and nothing is dispatched: the substitute is judged on the NEXT "
+        "invocation, from disk, not from inside this refusal"
     )
 
 
