@@ -65,7 +65,12 @@ FAKE_NODE_FAIL = "import sys\nsys.stderr.write('boom')\nsys.exit(1)\n"
 FAKE_NODE_HANG = "import time\ntime.sleep(30)\n"
 
 
-def run_resolver(root: Path, glob_pat: str, node: str, timeout_sec: int = 3):
+# #430: the default is deliberately generous. Every success-path caller here needs the
+# fake node to WIN this race, so the bound only has to be far above a node spawn on a
+# loaded machine -- it proves nothing by being tight, and a tight one turns ordinary
+# CI load into a red that reads exactly like a resolver regression. The hang test
+# passes its own small timeout_sec, so the finite-timeout property stays pinned.
+def run_resolver(root: Path, glob_pat: str, node: str, timeout_sec: int = 15):
     return subprocess.run(
         [sys.executable, str(RESOLVER_SRC), "--durable-root", str(root),
          "--search-glob", glob_pat, "--node", node, "--timeout-sec", str(timeout_sec)],
