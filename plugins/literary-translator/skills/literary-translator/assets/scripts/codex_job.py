@@ -82,32 +82,44 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 """
 
 # ---- "private staging slot": what the term means in this file (#697) --------
-# Used throughout for the dot-prefixed entries this driver writes into segdir. It is a
-# LIFECYCLE property and nothing more:
-#   - DOT-PREFIXED, so both dispatch scans over segments/ skip it outright (#428 made them
-#     skip the whole dot namespace rather than test a suffix);
-#   - owned by this invocation's own cleanup, removed by EXACT path and never a wildcard.
+# Used throughout for the dot-prefixed entries this driver writes into segdir. Exactly ONE
+# property is shared by all of them: they are DOT-PREFIXED, so both dispatch scans over
+# segments/ skip them outright (#428 made those scans skip the whole dot namespace rather
+# than test a suffix). That is the whole of what the term guarantees.
+#
+# It does NOT promise this-invocation cleanup. Several of these entries are DURABLE ON
+# PURPOSE and no invocation removes them: the .codex_job.<seg>.lock lease is a never-
+# unlinked sentinel (see 3. above -- the kernel releases the flock, the file stays), the
+# terminal joblog and the .codex_failed.* sentinel are records meant to outlive the run,
+# .att_pending.* exists precisely to be consumed by a LATER invocation (#213), and
+# .att_superseded.* is a preserved copy kept for hand recovery (#429). Only the disposable
+# scratch -- self.attempt once it is not promoted, the .pub.*/.codex_job.*.tmp/
+# .prev_review_tmp.* temporaries and the .codex_ledger_payload.* payload -- is removed by
+# this invocation, and then by EXACT path, never a wildcard. Which group an entry is in is
+# stated where it is built; do not read a blanket lifetime into the shared prefix.
 #
 # The namespace splits in two and the split is load-bearing -- it is the very distinction
-# #665 turns on, so do not let "private staging slot" blur it:
-#   - PER-INVOCATION (the name carries self.inv, so two runs of one seg cannot collide):
-#     .att.*, .att_superseded.*, .prev_review_tmp.*, .codex_ledger_payload.*, .pub.*.tmp,
-#     .codex_job.*.tmp;
-#   - DETERMINISTIC (keyed on seg/ext/disp alone, so the name PERSISTS ACROSS RUNS and is
-#     trivially derivable): .att_pending.* -- the deferred slot itself -- plus the joblog
-#     .codex_job.<seg>.json, the lease .codex_job.<seg>.lock and the .codex_failed.* fail
-#     sentinel.
+# #665 turns on, so do not let "private staging slot" blur it. The RULE decides, not this
+# list: a name is PER-INVOCATION iff it interpolates self.inv, and DETERMINISTIC otherwise
+# (keyed on seg/ext/disp/label alone, so it PERSISTS ACROSS RUNS and is trivially
+# derivable). Classify anything added later by that rule rather than by membership here --
+# and a test derives both sets from this file's own AST and fails if they drift.
+#   - PER-INVOCATION, six names, and this side is EXACT because the next paragraph depends
+#     on it: .att.*, .att_superseded.*, .prev_review_tmp.*, .codex_ledger_payload.*,
+#     .pub.*.tmp (created BEFORE the .att.* rename it feeds) and .codex_job.*.tmp;
+#   - DETERMINISTIC, five: .att_pending.* -- the deferred slot itself, and the one that
+#     matters here -- plus the joblog .codex_job.<seg>.json, the lease
+#     .codex_job.<seg>.lock, the .codex_failed.<seg>.<disp> sentinel and the
+#     .prev_review.<seg>.r<label>.json archive.
 # "Two runs cannot collide" is true of the first group ONLY. Saying it of .att_pending.*
 # would assert, of the exact artifact #665 exists to stop gating directly, the property the
 # rest of this header denies.
 #
 # It does NOT mean secret, unguessable or unwritable, and no decision in this file may rest
 # on reading it that way. self.inv is os.urandom(8).hex() (see __init__), and THIS DRIVER
-# publishes that nonce into segdir itself, in up to six per-invocation filenames --
-# .att.*, .att_superseded.*, .prev_review_tmp.*, .codex_ledger_payload.*, .pub.*.tmp
-# (created BEFORE the .att.* rename it feeds) and .codex_job.*.tmp -- and in plaintext
-# inside the joblog's own JSON body, whose `inv` field both the launched and the terminal
-# record carry. Not every run creates all six; one is enough.
+# publishes that nonce into segdir itself, in every one of the six per-invocation names
+# above, and in plaintext inside the joblog's own JSON body, whose `inv` field both the
+# launched and the terminal record carry. Not every run creates all six; one is enough.
 #
 # So the property that actually holds is: anything that can LIST segments/ can discover the
 # name, and anything that can WRITE segments/ can overwrite it. Those are two separate

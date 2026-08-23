@@ -35,11 +35,13 @@ launched with, matching codex-companion's own workspaceRoot-keyed job store) rat
 passing vacuously regardless of which cwd the driver happens to send.
 """
 
+import ast
 import errno
 import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import stat
@@ -4533,6 +4535,66 @@ def test_a_write_to_the_gated_snapshot_still_decides_a_terminal_verdict(tmp_path
         "#697 closed? Then this known-limit test has done its job and should be replaced "
         "by one asserting the write is refused instead."
     )
+
+
+def test_the_module_headers_segdir_name_split_matches_the_names_the_code_builds():
+    """#697: the header's per-invocation/deterministic split is CHECKED, not trusted.
+
+    That header replaced a roster of ACTORS with a property, precisely because a roster
+    goes stale -- three review rounds each found a writer the old one had missed. It then
+    introduced a roster of NAMES, which has the same failure mode, and did go stale in
+    review: `.prev_review.<seg>.r<label>.json` was missing from the deterministic side.
+
+    So the rule is enforced rather than restated. A name is PER-INVOCATION iff it
+    interpolates `self.inv`; deterministic otherwise. This derives both sets from the AST
+    of codex_job.py itself and requires the header to agree, so adding a dot-prefixed
+    segdir name without classifying it fails here instead of silently making the header
+    false. The per-invocation side must be EXACT: the header's nonce-publication claim
+    ("in every one of the six per-invocation names above") depends on it."""
+    src = Path(codex_job.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    filename_re = re.compile(r"^\.[a-z_]+\.")
+    per_inv, determ = set(), set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod)
+                and isinstance(node.left, ast.Constant)
+                and isinstance(node.left.value, str)
+                and filename_re.match(node.left.value)):
+            continue
+        # Key on the FULL pattern, never a stem: `.codex_job.` alone is the prefix of three
+        # different names, one per-invocation (`.codex_job.%s.%s.tmp`) and two deterministic
+        # (`.codex_job.%s.json`, `.codex_job.%s.lock`), so a stem-keyed set reports them as
+        # one name built both ways.
+        pattern = node.left.value
+        (per_inv if "self.inv" in ast.unparse(node.right) else determ).add(pattern)
+
+    assert per_inv and determ, "the AST scan found nothing -- it has stopped testing anything"
+
+    header = src.split('"""', 2)[2].split("import argparse")[0]
+    assert "#697" in header, "the module header block moved; this test reads the wrong span"
+
+    for pattern in sorted(per_inv | determ):
+        prefix = pattern.split("%")[0]              # ".codex_job."
+        suffix = pattern.rsplit("%s", 1)[-1]        # ".tmp" / ".json" / ".lock" / ""
+        assert prefix in header, (
+            "%s is built into segdir but the module header's split never mentions %s. "
+            "Classify it by the rule the header states (does the name carry self.inv?), "
+            "do not just append it." % (pattern, prefix))
+        assert suffix in header, (
+            "%s is built into segdir; %s appears in the header but this name's %s form "
+            "does not, so the split cannot be distinguishing it from its siblings."
+            % (pattern, prefix, suffix or "(bare)"))
+
+    # Both COUNTS are pinned, so a new name cannot slip in under an existing prefix. The
+    # per-invocation one is load-bearing: the header's nonce-publication sentence says
+    # "every one of the six per-invocation names above".
+    assert len(per_inv) == 6, (
+        "the header says the nonce reaches six per-invocation names; the code now builds "
+        "%d: %s" % (len(per_inv), sorted(per_inv)))
+    assert len(determ) == 5, (
+        "the header's deterministic side lists five names; the code now builds %d: %s"
+        % (len(determ), sorted(determ)))
 
 
 def test_a_pending_that_cannot_be_snapshotted_is_recoverable(tmp_path, monkeypatch):
