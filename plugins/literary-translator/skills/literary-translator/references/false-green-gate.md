@@ -258,8 +258,12 @@ closes that hole two ways (for `gutenberg_epub`/`plain_text`; see below for
    (or, under `body_refs_only`, body-ref-marker well-formedness/uniqueness —
    branching on `footnotes.apparatus_policy` exactly as the extractor does),
    frontback inventory, verse-placeholder uniqueness/mounting, verse
-   plain-text non-emptiness, the per-segment word cap, and the full
-   verse-count reconciliation. Any failure is FATAL. A green manifest a
+   plain-text non-emptiness, the per-segment word cap, the full
+   verse-count reconciliation, and — as of #397 — that no content unit is
+   empty for the translator (`no_untranslatable_empty_blocks` for blocks a
+   segment cites, `no_empty_footnote_definitions` for footnote definitions
+   under a footnote-carrying `apparatus_policy`). Any failure is FATAL. A
+   green manifest a
    tampered extractor produced still fails here, because this gate never trusts
    the extractor's self-report — it recomputes each invariant from the
    manifest itself.

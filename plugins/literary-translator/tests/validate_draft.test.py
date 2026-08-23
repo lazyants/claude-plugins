@@ -30,6 +30,7 @@ A clean baseline fixture (and a body_refs_only clean companion) proves the
 harness itself is sound, isolating each injected defect as the SOLE cause of
 its fixture's failure.
 """
+import importlib.util
 import json
 import re
 import shutil
@@ -1373,6 +1374,176 @@ def test_durable_root_flag_uses_the_redirected_profiles_own_settings(tmp_path):
         f"stderr={result.stderr!r}"
     )
     assert "body_ref marker" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# #397 -- CHARACTERIZATION, not a regression lock for new behaviour.
+#
+# This test is GREEN both before and after validate_extraction.py gained its
+# two empty-content checks, and it is deliberately NOT counted as
+# red-before-green evidence for them: everything it asserts is already
+# implemented here. Its job is to make the PREMISE those two W2 checks rest on
+# breakable on purpose.
+#
+# The premise: for a content unit that carries no text for the translator, the
+# FAITHFUL draft -- the one that leaves it empty, because there is nothing to
+# translate -- can never converge. The segment converges only on a draft that
+# invents text the source does not have, which is why refusing the unit at
+# extraction is strictly better than discovering it after a paid translation
+# job. Two distinct branches produce that outcome, and they do NOT agree on
+# what "empty" means:
+#
+#   * a segment BLOCK with falsy plain_text and a non-blank source_html --
+#     _block_source_text() falls back to the markup, so src_text is truthy and
+#     the empty draft block is reported `[bid] empty translation`. A
+#     WHITESPACE-only plain_text is truthy and returned verbatim, so that
+#     block's empty draft DOES converge; the third assertion below pins
+#     exactly that boundary, which is why the W2 check tests falsiness
+#     rather than `.strip()`.
+#   * a FOOTNOTE definition with no text -- source_text is taken from
+#     `plain_text` ONLY (no source_html fallback anywhere on that path) and the
+#     blank-translation test is unconditional, so whitespace does not rescue it.
+#
+# Unlike every other fixture in this file, the segpack here is NOT hand-authored
+# -- it is produced by the REAL segpack.build_pack() from a manifest, so the
+# test also proves the manifest->segpack pass-through the W2 checks assume.
+# If a future change makes either unit's faithful draft convergeable, this goes
+# red and the two W2 checks must be re-justified rather than silently kept.
+# ---------------------------------------------------------------------------
+
+_SCRIPTS_DIR = SCRIPT_SRC.parent
+_SEGPACK_SCRIPT = _SCRIPTS_DIR / "segpack.py"
+_LANGUAGES_DIR = _SCRIPTS_DIR.parent / "languages"
+
+
+def _load_segpack_module():
+    """Mirrors the loader every other segpack suite uses: segpack.py imports
+    bootstrap_names, so its own directory must be on sys.path while it loads."""
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "segpack_under_test_397", _SEGPACK_SCRIPT
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(_SCRIPTS_DIR))
+
+
+def _empty_content_manifest():
+    """One body segment carrying three prose blocks: one with real text, one
+    whose plain_text is "" with a structural <hr> as source_html, and one whose
+    plain_text is whitespace-only with the same markup. Footnote 1's definition
+    block carries no text at all."""
+    def _blk(bid, order, plain, html=None):
+        b = {
+            "id": bid, "type": "PARA", "seg": "seg01", "order_index": order,
+            "source_file": "body.xhtml", "plain_text": plain,
+            "sha1": "0" * 40,
+        }
+        if html is not None:
+            b["source_html"] = html
+        if bid == "PARA:seg01:0001":
+            # keep build_pack's recorded-vs-sentinel cross-check quiet: this is
+            # a fidelity detail of the fixture, not part of what is asserted.
+            b["fnrefs"] = [1]
+        return b
+
+    return {
+        "blocks": {
+            "PARA:seg01:0001": _blk(
+                "PARA:seg01:0001", 0, "Real prose ⟦FNREF_1⟧.", "<p>Real prose.</p>"
+            ),
+            "PARA:seg01:0002": _blk(
+                "PARA:seg01:0002", 1, "", '<hr class="c30 p4"/>'
+            ),
+            "PARA:seg01:0003": _blk(
+                "PARA:seg01:0003", 2, "   ", '<hr class="c30 p4"/>'
+            ),
+            "Footnote_1": {
+                "id": "Footnote_1", "type": "FN", "seg": None, "order_index": 3,
+                "source_file": "notes.xhtml", "plain_text": "",
+                "source_html": "<p></p>", "sha1": "0" * 40,
+            },
+        },
+        "segments": [{
+            "seg": "seg01", "kind": "body",
+            "block_ids": ["PARA:seg01:0001", "PARA:seg01:0002", "PARA:seg01:0003"],
+            "word_count": 3, "n_para": 3, "n_verse": 0, "n_quote": 0,
+            "source_files": ["body.xhtml"],
+        }],
+        "footnotes": [{
+            "n": 1, "anchor_block": "PARA:seg01:0001", "anchor_seg": "seg01",
+            "def_block": "Footnote_1",
+        }],
+        "verse": {
+            "store": [], "n_nodes": 0, "n_block": 0, "n_embedded": 0,
+            "by_context": {"body": 0, "footnote": 0, "frontback": 0},
+        },
+        "frontback": [],
+        "spine": [{"pos": 0, "file": "body.xhtml", "klass": "body"}],
+        "source_inputs": ["book.epub"],
+        "generation_hashes": {
+            "source_extraction_hash": "a" * 40, "source_input_hash": "b" * 40,
+        },
+    }
+
+
+def test_faithful_draft_of_empty_content_units_cannot_converge(tmp_path):
+    segpack_mod = _load_segpack_module()
+    lang_config = segpack_mod.load_language_config("fr.json", _LANGUAGES_DIR)
+    canon = {
+        "entries": {},
+        "generation_hashes": {
+            "particle_config_hash": "c" * 40, "derivation_bundle_hash": "d" * 40,
+        },
+    }
+
+    pack = segpack_mod.build_pack(
+        "seg01", _empty_content_manifest(), canon, lang_config, "translate_all"
+    )
+
+    # The pass-through the W2 checks assume: the manifest's own text and markup
+    # reach the segpack verbatim, and the footnote's source_text comes from
+    # plain_text with no source_html fallback.
+    by_id = {b["id"]: b for b in pack["blocks"]}
+    assert by_id["PARA:seg01:0002"]["plain_text"] == ""
+    assert by_id["PARA:seg01:0002"]["source_html"] == '<hr class="c30 p4"/>'
+    assert by_id["PARA:seg01:0003"]["plain_text"] == "   "
+    assert pack["footnotes"] == [{"n": 1, "source_text": ""}]
+
+    # The most faithful draft possible: every block that HAS text is translated,
+    # every block that has none is left empty, and the footnote with no source
+    # text gets no invented text either.
+    draft = {
+        "seg": "seg01",
+        "blocks": {
+            "PARA:seg01:0001": "Vraie prose ⟦FNREF_1⟧.",
+            "PARA:seg01:0002": "",
+            "PARA:seg01:0003": "",
+        },
+        "footnotes": {"1": ""},
+        "verses": {},
+        "names": [],
+        "notes": [],
+    }
+
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", pack, draft)
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    out = result.stdout + result.stderr
+    # The block whose markup is non-blank cannot be satisfied faithfully...
+    assert "[PARA:seg01:0002] empty translation" in out, out
+    # ...nor can the footnote whose definition carries no text...
+    assert "[FN:1] empty translation" in out, out
+    # ...while the WHITESPACE-only block is accepted, because
+    # _block_source_text returns the truthy "   " verbatim and never consults
+    # source_html. This is the boundary the W2 block check must not cross.
+    assert "[PARA:seg01:0003] empty translation" not in out, out
 
 
 if __name__ == "__main__":

@@ -378,7 +378,10 @@ def run_derivable_checks(manifest: dict, apparatus_policy: str, max_segment_word
     straight from ``manifest.json`` -- ignoring any result the extractor may
     have embedded. Returns a list of (name, ok, detail) tuples; collects ALL
     failures (never raises for a failed check). Semantics mirror
-    extract.py.template's run_self_checks exactly for the derivable subset.
+    extract.py.template's run_self_checks exactly for the derivable subset --
+    plus the GATE-ONLY checks that have no counterpart in that suite at all
+    (#210's two heading checks, and #397's two empty-block checks), which are
+    re-derived here because the manifest is the only place they are visible.
 
     Raises KeyError/TypeError only if the manifest is so structurally malformed
     that an invariant cannot even be evaluated -- main() converts that into a
@@ -622,6 +625,124 @@ def run_derivable_checks(manifest: dict, apparatus_policy: str, max_segment_word
             f"{undeclared_level_keys}"
         ) if undeclared_level_keys else "",
     )
+
+    # 14. #397: a content unit that reaches a draft but carries no text for the
+    #     translator makes its segment converge ONLY on an invented-text draft:
+    #     the faithful (empty) draft is rejected forever, and nothing said so
+    #     until the paid translation job had already run. TWO checks, because
+    #     two different branches of validate_draft.py judge the two populations
+    #     and they do NOT agree on what "empty" means. Both are gate-only: the
+    #     extractor's own self-check region has no counterpart for either.
+    #
+    # 14a. Segment blocks. segpack.py copies source_html/plain_text verbatim for
+    #      every id in a segment's block_ids, so manifest block -> segpack block
+    #      is 1:1. validate_draft._block_source_text() then prefers plain_text
+    #      and falls back to source_html, and the empty-translation branch fires
+    #      only when the draft block is blank AND that fallback is truthy.
+    #
+    #      The test is FALSY plain_text, deliberately NOT `.strip()`-empty:
+    #      _block_source_text tests `if pt:`, so a whitespace-only plain_text is
+    #      TRUTHY, is returned verbatim, and leaves src_text.strip() empty --
+    #      the guard does not fire and that block CONVERGES today. A
+    #      `.strip()`-based test here would be a false RED on it. (The shipped
+    #      extractor cannot emit whitespace-only text anyway: normalize_text
+    #      collapses it. This matters for a custom extractor.)
+    #
+    #      A block that is the parent of EXACTLY ONE non-embedded verse is
+    #      exempt: validate_draft requires that block's draft value to equal the
+    #      verse placeholder and `continue`s before ever reaching the
+    #      empty-translation branch, so it converges with no text of its own.
+    #      Exactly one, not "any": a parent claimed by SEVERAL non-embedded
+    #      verses is reported as a SOURCE DEFECT and deliberately kept OUT of
+    #      that placeholder map, so it does fall through and must stay checked.
+    #      The exemption is derived from verse.store, never from the literal
+    #      type name "VERSE" -- manifest.schema.json states block `type` is
+    #      deliberately not a fixed enum, so a name-keyed test would be blind on
+    #      exactly the adapters most likely to emit a junk block.
+    #
+    #      No `fnrefs` guard, though #397's text proposes one: the shipped
+    #      serializer derives fnrefs FROM the normalized text, so falsy
+    #      plain_text implies fnrefs == [] and the guard is vacuous; and where a
+    #      custom extractor records fnrefs independently, the block still has a
+    #      truthy source_html and so is still refused downstream -- the guard
+    #      would open a hole, not close one.
+    seg_block_ids = list(dict.fromkeys(
+        bid for s in segments for bid in s["block_ids"]
+    ))
+
+    nonembedded_claim_count = {}
+    for e in verse_store:
+        if e.get("mount") == "embedded":
+            continue
+        parent = e.get("parent_block")
+        if parent:
+            nonembedded_claim_count[parent] = nonembedded_claim_count.get(parent, 0) + 1
+
+    empty_seg_blocks = [
+        bid for bid in seg_block_ids
+        if bid in blocks
+        and nonembedded_claim_count.get(bid, 0) != 1
+        and not blocks[bid].get("plain_text")
+        and (blocks[bid].get("source_html") or "").strip()
+    ]
+    chk(
+        "no_untranslatable_empty_blocks",
+        not empty_seg_blocks,
+        (
+            f"segment blocks with empty plain_text but non-empty source_html "
+            f"(validate_draft reports the faithful empty draft block as an "
+            f"empty translation, so the segment converges only if the "
+            f"translator invents text the source does not have): "
+            f"{empty_seg_blocks[:5]} (n={len(empty_seg_blocks)}) -- adapt "
+            f"extract.py so a purely structural node is not emitted as a "
+            f"content block, then re-extract"
+        ) if empty_seg_blocks else f"n_segment_blocks={len(seg_block_ids)}",
+    )
+
+    # 14b. Footnote definitions. A definition block is in NO segment's
+    #      block_ids; segpack.py discovers it through the segment's footnote
+    #      references and emits {"n": n, "source_text": def_block["plain_text"]}
+    #      -- plain_text ONLY, with no source_html fallback. validate_draft then
+    #      refuses a blank footnote TRANSLATION unconditionally, with no test of
+    #      the source at all, so here whitespace-only IS fatal (`.strip()`) and
+    #      no source_html conjunct applies. That asymmetry against 14a is the
+    #      consumer's, not a slip.
+    #
+    #      There is deliberately NO reachability filter. build_pack() does not
+    #      read anchor_block at all -- it seeds from segment blocks' recorded
+    #      fnrefs[] plus FNREF sentinels found in their TEXT, then grows a
+    #      frontier over embedded-verse parents and def-blocks. Re-deriving
+    #      that traversal here would be a second implementation free to drift
+    #      from the first, and this gate cannot import segpack.py (it needs
+    #      canon/profile inputs the gate does not have). Two attempts at a
+    #      reachability model -- an anchor_block-in-a-segment test, then an
+    #      anchor_block-seeded transitive closure -- were both false GREENs;
+    #      refusing every empty definition makes the class impossible instead.
+    #
+    #      The over-catch is knowing and bounded: a definition that no segpack
+    #      would carry is refused too. The operator's remedy is the same either
+    #      way -- do not emit a definition with no text. Under omit_apparatus
+    #      and body_refs_only nothing is refused at all, because the extractor
+    #      builds no footnote table and segpack carries no footnote text.
+    if apparatus_policy in ("translate_all", "preserve_source"):
+        empty_fn_defs = [
+            f["n"] for f in footnotes
+            if f.get("def_block")
+            and f["def_block"] in blocks
+            and not (blocks[f["def_block"]].get("plain_text") or "").strip()
+        ]
+        chk(
+            "no_empty_footnote_definitions",
+            not empty_fn_defs,
+            (
+                f"footnotes whose definition block carries no text (validate_draft "
+                f"refuses a blank footnote translation unconditionally, so the "
+                f"segment converges only if the translator invents a note the "
+                f"source does not have): {empty_fn_defs[:5]} (n={len(empty_fn_defs)}) "
+                f"-- adapt extract.py so an empty definition is not emitted, then "
+                f"re-extract"
+            ) if empty_fn_defs else f"n_footnotes={len(footnotes)}",
+        )
 
     return results
 
