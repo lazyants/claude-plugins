@@ -144,7 +144,12 @@ def make_skeptic_root(tmp_path) -> Path:
     skeptic_report.py/skeptic-pass-wf.template.js -- skeptic_setup.py only
     ever reads the latter three's RAW BYTES for its own closure hash, never
     imports/executes them), the two real schemas, one particle-config
-    language file, and trivial canon.json/manifest.json."""
+    language file, and trivial canon.json/manifest.json.
+
+    Every one of those lands FLAT under scripts/, the workflow template
+    included -- the shape Step 0a's copy pass actually produces. A real
+    durable root has no templates/ directory at all
+    (test_fixture_stages_no_durable_templates_dir below pins that)."""
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
@@ -159,9 +164,14 @@ def make_skeptic_root(tmp_path) -> Path:
     for src in (WORKLIST_SCHEMA_SRC, ASSIGNMENT_SCHEMA_SRC):
         shutil.copy2(src, schemas_dir / src.name)
 
-    templates_dir = root / "templates"
-    templates_dir.mkdir(parents=True)
-    shutil.copy2(SKEPTIC_TEMPLATE_SRC, templates_dir / SKEPTIC_TEMPLATE_SRC.name)
+    # #666: the template goes FLAT into scripts/, beside the .py gates --
+    # the placement Step 0a actually produces. This fixture used to hand-build
+    # a root/"templates" directory instead; no scaffold has ever produced one,
+    # and staging it here is what kept the suite green over a resolution path
+    # no real project could take. Deliberately the same staging
+    # tests/fix_scope_audit.test.py's build_durable_root() already performs
+    # for all three WORKFLOW_TEMPLATES.
+    shutil.copy2(SKEPTIC_TEMPLATE_SRC, scripts_dir / SKEPTIC_TEMPLATE_SRC.name)
 
     languages_dir = root / "languages"
     languages_dir.mkdir(parents=True)
@@ -171,6 +181,91 @@ def make_skeptic_root(tmp_path) -> Path:
     write_json(root / "manifest.json", {"blocks": {}})
 
     return root
+
+
+# ---------------------------------------------------------------------------
+# #666: where the skeptic workflow template lives in a durable root
+# ---------------------------------------------------------------------------
+# skeptic_setup.py used to resolve it at ${durable_root}/templates/, which Step
+# 0a creates for nobody, so the pass raised "skeptic template not found" on
+# every real root. The suite stayed green only because make_skeptic_root()
+# hand-built that directory -- the fixture WAS the defect. Relocating the
+# fixture alone would leave nothing stopping a future edit from re-introducing
+# the wrong path, so the placement is pinned from two directions.
+
+
+def _load_fix_scope_audit():
+    """fix_scope_audit.py is plugin-path-only (it is in its own NEVER_COPIED),
+    so it is loaded from the plugin tree, never from a durable fixture."""
+    return _load_module(
+        "fix_scope_audit_for_placement_pin", SCRIPTS_DIR / "fix_scope_audit.py", SCRIPTS_DIR
+    )
+
+
+def test_step_0a_maps_the_skeptic_template_flat_into_scripts():
+    """The SHIPPED Step-0a copy mapping puts skeptic-pass-wf.template.js at
+    scripts/<name>, not templates/<name>.
+
+    The expected value is written out as a literal here rather than derived
+    from the thing under test -- the same reason tests/fix_scope_audit.test.py
+    restates NEVER_COPIED instead of importing it. Deriving it would make the
+    assertion agree with compared_pairs() however wrong compared_pairs() got,
+    which is precisely the co-drift that let the original defect ship."""
+    pairs = _load_fix_scope_audit().compared_pairs()
+    matches = [rel for src, rel in pairs if src.name == SKEPTIC_TEMPLATE_SRC.name]
+    assert len(matches) == 1, (
+        f"expected exactly one Step-0a copy pair for {SKEPTIC_TEMPLATE_SRC.name}, "
+        f"got {len(matches)}: {matches!r} -- a zero here is an enumeration "
+        f"failure (WORKFLOW_TEMPLATES no longer names the skeptic template), "
+        f"not a clean result"
+    )
+    assert matches[0] == Path("scripts") / SKEPTIC_TEMPLATE_SRC.name, (
+        f"Step 0a maps {SKEPTIC_TEMPLATE_SRC.name} to {matches[0]}, not to "
+        f"scripts/{SKEPTIC_TEMPLATE_SRC.name}. If that placement genuinely "
+        f"moved, skeptic_setup.SKEPTIC_TEMPLATE_PATH must move with it."
+    )
+
+
+def test_skeptic_setup_resolves_the_template_where_step_0a_writes_it(tmp_path):
+    """skeptic_setup.py's own resolved path equals the durable path the Step-0a
+    mapping above declares -- checked on a module loaded from a durable fixture,
+    so SCRIPT_DIR is a real deployed scripts/ and not this checkout.
+
+    This is the second direction. The literal assertion above cannot catch
+    skeptic_setup.py drifting away from a correct mapping; this one cannot
+    catch the mapping itself being wrong. Neither failure survives both."""
+    root = make_skeptic_root(tmp_path)
+    scripts_dir = root / "scripts"
+    mod = _load_module(
+        "skeptic_setup_for_template_path_test", scripts_dir / "skeptic_setup.py", scripts_dir
+    )
+
+    pairs = _load_fix_scope_audit().compared_pairs()
+    expected_rel = next(rel for src, rel in pairs if src.name == SKEPTIC_TEMPLATE_SRC.name)
+
+    assert mod.SKEPTIC_TEMPLATE_PATH == root / expected_rel, (
+        f"skeptic_setup.py resolves its template at {mod.SKEPTIC_TEMPLATE_PATH}, "
+        f"but Step 0a writes it to {root / expected_rel}"
+    )
+    # Not redundant with the equality: it is what makes the pin about a file
+    # that is really THERE, rather than about two paths agreeing on an absence.
+    assert mod.SKEPTIC_TEMPLATE_PATH.is_file(), (
+        f"{mod.SKEPTIC_TEMPLATE_PATH} is not a file in a Step-0a-shaped root -- "
+        f"this is the #666 failure mode, where run() raises 'skeptic template "
+        f"not found' on a root that is correctly scaffolded"
+    )
+
+
+def test_fixture_stages_no_durable_templates_dir(tmp_path):
+    """A real durable root has no templates/ directory, so the fixture must not
+    grow one back. Without this, a future edit could restore the hand-built
+    directory and quietly re-hide the defect the two tests above pin."""
+    root = make_skeptic_root(tmp_path)
+    assert not (root / "templates").exists(), (
+        "make_skeptic_root() created a templates/ directory. No scaffold "
+        "produces one -- see #666; staging the workflow template there is what "
+        "kept the suite green over a path no real project can take."
+    )
 
 
 def compute_expected_producer_digest(root: Path, scan_params: dict,
