@@ -362,6 +362,21 @@ def _read_bytes_guarded(path: Path):
         return None, f"unreadable ({type(exc).__name__})"
 
 
+def _resolve_guarded(path: Path):
+    """(resolved_path, None) on success, (None, reason) on any resolution
+    failure. `Path.resolve()` is NOT uniformly non-raising across the
+    interpreters this plugin runs on: measured, a self-referential symlink
+    raises `RuntimeError: Symlink loop` on 3.10/3.11/3.12 and resolves
+    silently on 3.13/3.14. An uncaught raise here would exit 1 with a
+    traceback, breaking this module's contract that EVERY fatal preflight
+    state exits 2 with one actionable line -- on exactly the interpreters
+    where the operator is least likely to be told why."""
+    try:
+        return path.resolve(), None
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, f"unresolvable ({type(exc).__name__})"
+
+
 def _reject_duplicate_keys(pairs):
     """`object_pairs_hook` for `json.loads`: builds the object from `pairs`
     but RAISES `ValueError` on a DUPLICATE key anywhere in the document.
@@ -845,6 +860,19 @@ def main(argv=None) -> int:
                 f"reinstall the plugin."
             )
         durable_path = durable_scripts_dir / filename
+        # Read the durable side BEFORE the self-comparison below: this reader
+        # halts cleanly on a durable copy that is missing, unreadable, or a
+        # broken/looping symlink, so resolve() below only ever runs on two
+        # paths the OS has just resolved to real regular files.
+        durable_bytes, err = _read_bytes_guarded(durable_path)
+        if err is not None:
+            _halt(
+                f"glossary_preflight: durable {durable_path} is unusable, "
+                f"axis=script ({err}) -- the glossary pass executes the DURABLE "
+                f"copy of this script, so it must exist and be readable. Re-run "
+                f"Step 0a's copy pass against this durable_root before retrying "
+                f"the glossary pass."
+            )
         # A byte-comparison whose two sides can be the SAME FILE is the one
         # failure this axis cannot survive: it passes vacuously, forever, and
         # looks identical to a healthy root. It is reachable exactly one way --
@@ -855,7 +883,24 @@ def main(argv=None) -> int:
         # module docstring says why, but nothing in CODE enforced it. Compared
         # after resolve() so a symlinked durable copy of the plugin's own file
         # is caught too, not just an identical pathname.
-        if plugin_path.resolve() == durable_path.resolve():
+        resolved_plugin, err = _resolve_guarded(plugin_path)
+        if err is not None:
+            _halt(
+                f"glossary_preflight: could not resolve this plugin's OWN "
+                f"shipped {plugin_path} ({err}) -- this is a "
+                f"literary-translator plugin install/packaging problem, not a "
+                f"durable_root staleness issue; reinstall the plugin."
+            )
+        resolved_durable, err = _resolve_guarded(durable_path)
+        if err is not None:
+            _halt(
+                f"glossary_preflight: durable {durable_path} is unusable, "
+                f"axis=script ({err}) -- the glossary pass executes the DURABLE "
+                f"copy of this script, so it must exist and be readable. Re-run "
+                f"Step 0a's copy pass against this durable_root before retrying "
+                f"the glossary pass."
+            )
+        if resolved_plugin == resolved_durable:
             _halt(
                 f"glossary_preflight: refusing to compare {durable_path} "
                 f"against itself, axis=script -- both sides resolved to the "
@@ -864,15 +909,6 @@ def main(argv=None) -> int:
                 f"Step 0a's copy-exclusion list and self-anchors relative to "
                 f"its own location); running the durable copy compares the "
                 f"durable tree against itself."
-            )
-        durable_bytes, err = _read_bytes_guarded(durable_path)
-        if err is not None:
-            _halt(
-                f"glossary_preflight: durable {durable_path} is unusable, "
-                f"axis=script ({err}) -- the glossary pass executes the DURABLE "
-                f"copy of this script, so it must exist and be readable. Re-run "
-                f"Step 0a's copy pass against this durable_root before retrying "
-                f"the glossary pass."
             )
         if durable_bytes != plugin_bytes:
             _halt(

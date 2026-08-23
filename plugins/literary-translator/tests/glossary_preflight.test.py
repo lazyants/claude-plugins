@@ -1487,5 +1487,36 @@ def test_script_axis_refuses_to_compare_a_file_against_itself(tmp_path):
     assert proc.stdout == ""
 
 
+def test_durable_canon_validate_as_a_symlink_loop_halts_cleanly(tmp_path):
+    """An unusable durable copy must reach the operator as this module's
+    contract promises -- exit 2 with one actionable line -- not as a traceback.
+
+    `Path.resolve()` is not uniformly non-raising across the interpreters this
+    plugin runs on: measured, a self-referential symlink raises
+    `RuntimeError: Symlink loop` on 3.10/3.11/3.12 and resolves silently on
+    3.13/3.14. So the self-comparison's resolve() could exit 1 with a traceback
+    on exactly the older interpreters, while this suite -- running on 3.14 --
+    saw a clean halt and reported nothing. The fix reads the durable side
+    first (a loop is `not isfile` on EVERY version) and guards both resolves;
+    this test pins the contract rather than the version, so it is green on all
+    of them and would have been red on three of them before the fix."""
+    root = make_current_durable_root(tmp_path)
+    durable_script = root / "scripts" / "canon_validate.py"
+    durable_script.unlink()
+    durable_script.symlink_to(durable_script)
+
+    proc = run_preflight(root)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "axis=script" in proc.stderr
+    assert "Step 0a" in proc.stderr, proc.stderr
+    assert proc.stdout == "", "a halting preflight must print no ok line"
+    assert len(proc.stderr.strip().splitlines()) == 1, (
+        "the contract is ONE actionable line; a multi-line spill is how a "
+        "traceback would slip back in unnoticed"
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
