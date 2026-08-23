@@ -1391,6 +1391,45 @@ def test_every_codex_dispatch_prompt_opens_with_the_background_routing_line(sour
 
     for builder in sorted(codex_builders):
         body = extract_function_body(source, builder)
+
+        # UNCONDITIONAL, not merely first. "The first push is --background" is
+        # satisfied by `if (!rejectionReason) lines.push("--background")`, and
+        # that mutation is invisible to every other pin in this change: the
+        # glossary e2e harness runs offline, which returns before the citation
+        # ladder, so no emitted-prompt assertion ever sees a retry dispatch --
+        # exactly the dispatch a rejection-driven redispatch would send without
+        # the routing line. Requiring the push to be the first STATEMENT after
+        # `const lines = []`, with only comments and blank lines between,
+        # forbids the guard structurally instead of hoping a run reaches it.
+        # EXACTLY ONE declaration, because the anchor below is textual and the
+        # extraction helper slices a function without brace-depth analysis. A
+        # second `const lines = []` anywhere in the slice -- a nested closure,
+        # or the same two lines inside a `/* ... */` block, which this line
+        # filter does not understand -- would let the anchor land on the decoy
+        # while the builder's own push stays guarded. Measured: both shapes pass
+        # every other assertion here. One declaration removes the ambiguity
+        # instead of teaching this test to parse JavaScript.
+        assert body.count("const lines = []") == 1, (
+            f"{label}: {builder}() must hold exactly ONE `const lines = []`; the "
+            f"routing-push anchor below is textual, so a second one makes it "
+            f"ambiguous which array the pin is talking about (#109)"
+        )
+        after_decl = body.split("const lines = []", 1)
+        assert len(after_decl) == 2, (
+            f"{label}: {builder}() no longer opens with `const lines = []`, so this "
+            f"pin can no longer say where the routing push sits (#109)"
+        )
+        statements = [
+            ln.strip() for ln in after_decl[1].splitlines()
+            if ln.strip() and not ln.strip().startswith("//")
+        ]
+        assert statements and statements[0] == BACKGROUND_ROUTING_PUSH, (
+            f"{label}: {builder}() must push the routing control UNCONDITIONALLY, as "
+            f"the first statement after `const lines = []` -- a guarded push would "
+            f"leave a retry or a mode-specific dispatch running foreground (#109). "
+            f"First statement is instead: {statements[0] if statements else '<none>'}"
+        )
+
         pushes = _FIRST_PUSH_RE.findall(body)
         assert pushes, f"{label}: {builder}() pushes no prompt lines at all"
         assert pushes[0].strip() == BACKGROUND_ROUTING_PUSH, (
