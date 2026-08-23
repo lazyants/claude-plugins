@@ -192,42 +192,36 @@ def _local_dict_len(filename, funcname, varname):
     raise AssertionError(f"{funcname} is no longer defined in {filename}")
 
 
-# Rewritten for 1.57.0 (#545/#549 -- which gate admitted a re-claimed unit) per
-# the maintenance contract above. This rotation inherited an already-empty list
-# -- 1.55.0's rotation (#512) inherited it empty and retired nothing -- and
-# left it empty: the 1.57.0 entry states no figure this file could re-derive.
-# Its numbers -- three capped units on the fr->ru volume; 35 claims across two
-# runs on the he->en one, of which 13 were misreported (nine plus four) and 22
-# were correctly reported -- are field observations from outside this tree,
-# recorded in #545 and #549, and the entry names them as observations for that
-# reason. The 13/22 split is the ped-ant correction to an earlier draft that
-# said none of the 35 was admitted as from-converged; #549's own body records
-# the per-run flag counts it is derived from.
-# Stated in the past tense about what this rotation did to what it inherited,
-# never in the present tense about what the base holds, because the latter
-# expires on the next rebase and nothing here can catch it (see the sibling
-# citation guard's note for the measured instances). `_files_defining`,
-# `_local_dict_len`, `_tuple_len` and `_test_function_count` are kept unused, as
-# earlier releases kept them, for the next entry that cites their class.
+# Rewritten for 1.58.0 (#433 -- a footnote anchor lost inside a verse fails the
+# build), per the maintenance contract above. This rotation inherited an empty
+# list and declared ONE row; it retired nothing, because there was nothing to
+# retire. Phrased in the past tense about what THIS rotation did, per the
+# sibling citation guard's note: a note phrased in the present tense about what
+# the base holds expires on the next rebase and nothing here can catch it.
 #
-# Unlike its predecessor -- 1.52.0 (#530), whose entry stated no
-# figure this file's tokenizer could see -- this entry states three real ones.
-# Each was examined, and none can carry an honest derivation:
+# The declared row is the size of the suite that owns the new check, which
+# `_test_function_count` re-derives by AST from the shipped file. The entry's
+# other real quantities are spelled as WORDS and so are invisible to `_TOKEN`;
+# a row whose phrase holds no numeral fails this file's own
+# one-numeral-per-phrase check. That is the whole reason "seven of them added
+# here" carries no row -- it IS derivable from this repo, by the same helper
+# the declared row uses, and only its spelling hides it. The other two,
+# "twenty verses" and "seventy-eight verse-store entries", could not be
+# declared however they were phrased: they were measured over operator-owned
+# durable roots that are NOT in this repository, which the entry says in its
+# own prose, so no derivation here could reach them. The
+# remaining numerals are version and issue numbers and the release date, none
+# of which is a measurement.
 #
-#   * "11 characters, 10 distinct" is a census of the PRE-EDIT tree. The point
-#     of the release is that the current tree measures zero, so a derivation
-#     run against it would return 0 and contradict correct prose. A figure
-#     about the base a release moved off is not re-derivable here by
-#     construction, and pinning it to a commit hash hardcodes an answer.
-#   * "177 entries" is a canon count in an operator-owned durable root outside
-#     this repository, which nothing here can reach.
-#   * The entry's remaining numerals are version and issue numbers, not
-#     measurements.
-#
-# `_files_defining`, `_local_dict_len`, `_tuple_len` and `_test_function_count`
-# stay unused, as earlier releases kept them, for the next entry citing their
-# class.
-FIGURES = []
+# `_files_defining`, `_local_dict_len` and `_tuple_len` stay unused, as earlier
+# releases kept them, for the next entry citing their class.
+FIGURES = [
+    Figure(
+        "defines 72 test functions",
+        72,
+        lambda: _test_function_count("assemble.test.py"),
+    ),
+]
 
 
 def _newest_entry():
