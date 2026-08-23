@@ -526,17 +526,22 @@ def load_provenance(path, baseline_len):
             raise ConservationError(
                 f"provenance map {path}: spans[{i}].block_id must be a non-empty string"
             )
-        # #277 -- a block_id is the only operator-authored STRING from these
-        # artifacts that this script writes back out, and json.loads() accepts
-        # a lone surrogate escape (`"\ud800"`) that no UTF-8 stream can carry.
-        # A dangling one reaches the defects list, and json.dumps(...,
-        # ensure_ascii=False) at the end of run_wrapper_conservation() then
-        # raises UnicodeEncodeError on the way to stdout -- past every handler
-        # above, out through main(), traceback at exit 1. Rejected HERE rather
-        # than by wrapping the emission: the emission is this script's own
-        # output and a failure there should stay loud; an unencodable id is
-        # input. Reported with !r, which is ASCII-safe, so the diagnostic
-        # itself cannot hit the same wall on the way to stderr.
+        # #277 -- a block_id is the only string out of these three artifacts
+        # that reaches the wrapper's stdout JSON WITHOUT having passed a strict
+        # UTF-8 decode first (a defect `detail` carries baseline excerpts, but
+        # the baseline was decoded strictly above, so it cannot hold a
+        # surrogate). json.loads() accepts a lone surrogate escape
+        # (`"\ud800"`) that no UTF-8 stream can carry: a dangling one reaches
+        # the defects list, and json.dumps(..., ensure_ascii=False) at the end
+        # of run_wrapper_conservation() then raises UnicodeEncodeError on the
+        # way to stdout -- past every handler above, out through main(),
+        # traceback at exit 1. Rejected HERE rather than by wrapping the
+        # emission: the emission is this script's own output and a failure
+        # there should stay loud; an unencodable id is input. Reported with
+        # !r, whose escaping covers every surrogate (measured: all 2048 are
+        # unencodable, none of their reprs is), so the diagnostic itself
+        # cannot hit the same wall on the way to stderr -- not because repr()
+        # is ASCII, which it is not for e.g. "\u00e9\ud800".
         try:
             block_id.encode("utf-8")
         except UnicodeEncodeError as exc:

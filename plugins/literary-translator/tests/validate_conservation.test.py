@@ -1473,10 +1473,11 @@ def test_default_min_source_words_band_excludes_short_blocks(tmp_path):
 # a pinned-version constant.
 # ===========================================================================
 
-# cp1255 (Windows Hebrew) is the realistic producer here, not an adversarial
-# choice: the baseline is the one artifact an operator preserves from some
-# other pre-wrap form, and a `pdftotext` dump of a legacy-encoded Hebrew
-# source is the walkthrough's own example.
+# cp1255 (Windows Hebrew) is a realistic encoding slip here, not an
+# adversarial choice: the baseline is the one artifact an operator preserves
+# by hand from some other pre-wrap form -- SKILL.md's walkthrough exemplifies
+# hand-split `pdftotext -layout` output -- and this script reads it as UTF-8
+# without saying so anywhere the operator sees.
 CP1255_TEXT = "שלום עולם, זהו טקסט הבסיס\n"
 
 # json.loads parses fine at 100_000 and raises RecursionError from ~200_000 on
