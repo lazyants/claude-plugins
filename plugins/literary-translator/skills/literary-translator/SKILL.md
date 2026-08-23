@@ -1966,8 +1966,12 @@ is called. It:
    - **`stale`** — materialized status `converged` but either a cache-key
      field mismatches OR draft sha1 no longer matches
      `reviewed_draft_sha1` — needs a fresh translate/review/fix pass
-     (fragment's old fields fully replaced, never merged forward) — unless
-     the mismatch is caused specifically by
+     (fragment's old fields fully replaced, never merged forward), though
+     W7 and W9 ship a unit whose every moved field is machinery-only
+     without that pass (#491, conditions in
+     `references/assembly-and-output.md`; the bundle-hash section of
+     `references/ledger-and-resumability.md` says why a `converged` count
+     falls at every release) — unless the mismatch is caused specifically by
      `particle_config_hash`/`source_extraction_hash`/`source_input_hash`/
      `derivation_bundle_hash` and the segpack hasn't been regenerated since
      (see `blocked_needs_regeneration` below). Records which trigger fired

@@ -717,6 +717,28 @@ determinism: scripts/templates for `plugin_bundle_hash`, and scripts for
 `orchestration_bundle_hash`, computed by Step 0a at the moment it copies
 scripts into `${durable_root}/scripts/`.
 
+**A `converged` count is bundle-relative.** Every plugin release moves
+`plugin_bundle_hash`, so the Step 0a refresh that installs it flips the whole
+converged corpus to `stale` at once, with no draft byte touched and no prose
+needing a recheck. The ledger's `converged` tally therefore FALLS as releases
+land while the translation itself never regresses — measured on one live book
+as 4 → 2 → 1 across three releases in three days, and as 75 `stale` / 0
+`converged` on another (#482) — because what it counts is "converged under the
+CURRENT bundle", not how much of the book has been reviewed. Since 1.25.0
+(#491) that population blocks nothing it used to: the always-on machinery-only
+carve-out lets `assemble.py` and `final_audit.py` treat such a record like
+`converged` (its exact conditions — machinery-only moved fields, an
+`.ever_converged.<seg>` sentinel that is not absent, and the unrelaxed
+draft-sha1 match — live in `references/assembly-and-output.md`), and
+`final_audit.py` prints `stale_previously_converged=` beside its completeness
+counts. That pair — the completeness verdict and its carve-out count — is what
+answers "is this book done"; the raw `converged` tally is not, and neither is a
+count of `.ever_converged` sentinels (those are backfilled history, see
+`SKILL.md`'s `backfill_ever_converged.py` step). `select_segments.py`'s
+classification report does not split the bucket either — its
+`counts`/`ids_by_category` are keyed by the six flat categories — so on that
+surface the distinction lives in each entry's own `mismatched_fields`.
+
 `resumeFromRunId` is explicitly scoped to continuing the same interrupted
 batch run. It is never the same mechanism as the ledger-driven
 skip-if-cached/resume classification, which is re-derived from fragments,
@@ -1072,7 +1094,9 @@ For context, `select_segments.py`'s full classification set (see also
 `SKILL.md` W5) is: `reusable` (converged, every cache-key field matches,
 draft sha1 still matches `reviewed_draft_sha1` — skip), `stale` (converged
 but a cache-key field mismatches or the draft sha1 no longer matches —
-needs a fresh pass; records which trigger fired in a `stale_reason`
+needs a fresh pass, though a `stale` whose every moved field is
+machinery-only ships without one (see the bundle-hash section above);
+records which trigger fired in a `stale_reason`
 sub-field: `cache_key_mismatch` and/or `draft_sha1_mismatch`; a
 `draft_sha1_mismatch`-triggered stale is never reclassified as
 `blocked_needs_regeneration`, because that gate is only for the four
