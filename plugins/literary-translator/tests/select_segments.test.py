@@ -2090,19 +2090,27 @@ def test_absent_sentinel_on_a_not_started_unit_still_dispatches(tmp_path):
         "WITH the sentinel already present -- deleting that sentinel by any "
         "of #442's mechanisms then leaves NEITHER witness, and `in_progress` "
         "is not in WAS_CONVERGED_STATUSES, so this gate cannot see it at all. "
-        "Closing it needs sentinel PROVENANCE the marker does not carry "
-        "(#443) -- a SELECTOR-level closure. A #621 driver-only remedy (a "
-        "dispatch-time participant) will NOT flip this xfail: it can stop a "
-        "translate without changing what this direct selector test observes, "
-        "so a driver-level debt test belongs with #621, not here."
+        "This reason string previously named #443 as the closure. That was "
+        "WRONG and #443 proved it: its content-bearing marker SHIPPED "
+        "(f7399f2) and this test still xfails, because provenance describes a "
+        "marker that EXISTS and a deleted one has nothing left to describe. "
+        "What flips it is a SELECTOR-level second durable witness that "
+        "survives the marker's deletion -- the convergence record committed "
+        "together with the marker instead of in two directories with two "
+        "durability stories, or an append-only convergence journal -- and "
+        "that is still open on #442 itself. A #621 driver-only remedy (a "
+        "dispatch-time participant) will NOT flip this xfail either: it can "
+        "stop a translate without changing what this direct selector test "
+        "observes, so a driver-level debt test belongs with #621, not here."
     ),
 )
 def test_an_interrupted_convergence_with_no_sentinel_is_still_dispatched(tmp_path):
     """Asserts the DESIRED refusal, not current behaviour, so a surviving
     green here would silently endorse a real loss of converged work as a
-    contract, and a strict XPASS the moment #443 (or any successor that
-    gives this gate a witness) lands forces whoever closes it to come back
-    here.
+    contract, and a strict XPASS the moment any change gives this gate a
+    witness for the case forces whoever lands it to come back here. Note
+    #443 already came and went WITHOUT flipping it -- see the xfail reason
+    above for why a content-bearing marker is not the witness this needs.
 
     Reachability, stated so nobody has to re-derive it: this needs NO prior
     re-dispatch at all. `enrich_converged_fields()` raises the sentinel
@@ -2116,7 +2124,9 @@ def test_an_interrupted_convergence_with_no_sentinel_is_still_dispatched(tmp_pat
 
     assert proc.returncode != 0, (
         "DESIRED: an in_progress unit with no sentinel should refuse too, "
-        "once a selector-level closure (#443) gives this gate a witness for it"
+        "once a selector-level witness that survives the marker's deletion "
+        "lands (#442's remaining scope -- NOT #443, whose content-bearing "
+        "marker shipped without flipping this)"
     )
 
 
