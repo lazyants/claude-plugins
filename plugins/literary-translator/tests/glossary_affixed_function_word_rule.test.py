@@ -123,9 +123,22 @@ TASK_PINS = {
         "with a `note` naming the bare form you believe it carries",
     "precedence over the nickname rule":
         "takes precedence over the nickname rule immediately below",
-    "the bare-absent ELSE branch":
-        "When the bare form is NOT present anywhere in this run, resolve the "
+    # The canon half of the IF. It had no pin at all, and ped-ant proved the
+    # gap by deleting this branch from both surfaces with all tests still
+    # green. It is the half that carries the resumed-run case: a bare form in
+    # `entries{}` is EXCLUDED from the run's candidates by
+    # glossary_batch_plan.py, so the manifest can never show it.
+    "canon.json is the other half of the presence test":
+        "or already in `canon.json`'s `entries{}`",
+    # Two-sided deliberately. A one-sided ELSE ("not present anywhere in this
+    # run") CONTRADICTED the canon branch on exactly the population that
+    # branch exists for, and no assertion could see it.
+    "the bare-absent ELSE branch negates BOTH halves":
+        "present in NEITHER place -- not anywhere in this run's candidate "
+        "manifest AND not in `canon.json`'s `entries{}` -- do you resolve the "
         "candidate on its own merits",
+    "manifest-absence alone does not license resolving":
+        "Absence from the manifest alone is never enough",
 }
 
 # Same rule, as the DISPATCH PROMPT renders it. Most of these literals happen to
@@ -153,9 +166,14 @@ RENDERED_PINS = {
     # which survives the clause's deletion. Measured on that exact mutation.
     "precedence over the nickname rule":
         "so it takes precedence over the NICKNAMES rule below",
-    "the bare-absent ELSE branch":
-        "When the bare form is NOT present anywhere in this run, resolve the "
+    "canon.json is the other half of the presence test":
+        "or already in canon.json's entries{} --",
+    "the bare-absent ELSE branch negates BOTH halves":
+        "present in NEITHER place -- not anywhere in this run's candidate "
+        "manifest AND not in canon.json's entries{} -- do you resolve the "
         "candidate on its own merits",
+    "manifest-absence alone does not license resolving":
+        "Absence from the manifest alone is never enough",
 }
 
 # Pinned separately from RENDERED_PINS because it is the clause round 3 found
@@ -386,9 +404,10 @@ def test_carve_out_scan_catches_an_appended_exception_and_spares_the_real_prose(
     # branch; neither may trip the scan, or this file is a false RED generator.
     _assert_no_carve_out(
         _flat(prohibition + ". This holds even when that name is a nickname or "
-              "epithet with an obvious sense-rendering. When the bare form is "
-              "NOT present anywhere in this run, resolve the candidate on its "
-              "own merits, like any other."),
+              "epithet with an obvious sense-rendering. Only when the bare "
+              "form is present in NEITHER place -- not anywhere in this run's "
+              "candidate manifest AND not in canon.json's entries{} -- do you "
+              "resolve the candidate on its own merits, like any other."),
         prohibition, surface="synthetic",
     )
 

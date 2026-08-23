@@ -139,9 +139,13 @@ canon-batch item:
   `disposition: "review_queue"` with a `note` naming the bare form you
   believe it carries. This holds even when that name is a nickname or
   epithet with an obvious sense-rendering, so it takes precedence over the
-  nickname rule immediately below. When the bare form is NOT present
-  anywhere in this run, resolve the candidate on its own merits, like any
-  other.
+  nickname rule immediately below. Only when the bare form is present in
+  NEITHER place -- not anywhere in this run's candidate manifest AND not in
+  `canon.json`'s `entries{}` -- do you resolve the candidate on its own
+  merits, like any other. Absence from the manifest alone is never enough:
+  a bare form already frozen in `entries{}` is EXCLUDED from this run's
+  candidates precisely because it is frozen, so the canon is the only place
+  its presence can still show.
 - **Nicknames, epithets, and aliases -- resolved independently, never
   inherited from a referent.** A salon nickname, epithet, sobriquet, or
   alias is its own surface form, never shorthand for its referent's
