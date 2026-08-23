@@ -1,8 +1,9 @@
 """tests/claim_chokepoint.test.py -- #438 D8 regression lock: codex_job.py's OWN
 chokepoint refusal for a translate launch against a CLAIMED segment.
 
-Why this file exists (D8, PLAN.md): the default W5 dispatch path
-(`mass-translate-wf.template.js`) has NO claim-aware guard of its own --
+Why this file exists (D8, PLAN.md): the `mass-translate-wf.template.js`
+dispatch path (W5's fallback launcher since #516) has NO claim-aware guard of
+its own --
 `translateStage` is nine flagless lines that unconditionally invoke
 `codex_job.py --kind translate`. So the refusal that keeps a claimed segment
 from ever being re-translated has to live HERE, inside codex_job.py itself.
@@ -905,7 +906,7 @@ def test_default_chokepoint_refuses_a_translate_over_a_draft_another_run_owns(tm
 
     assert refuse is True, (
         "run B must not translate over a draft run A holds a live claim on -- "
-        "this is the DEFAULT dispatch path, not the optional driver's"
+        "this is the template dispatch path, not the segment driver's"
     )
     assert "RUN-A" in (detail or ""), f"the refusal must name the owner: {detail!r}"
     assert "#438 D8" in (detail or ""), detail

@@ -267,8 +267,9 @@ per-dispatch `DISP` nonce travels only via the drive agent's `DISPATCHED <seg>
 <DISP>` return line, never a file.)
 
 **Wait bound.** The driver bounds itself to `abs_ceiling = deadline + 150 s`
-(`CODEX_DEADLINE_SEC=2700` poll window + `CODEX_FINALIZE_BUDGET_SEC=150`), and the
-Workflow's own poll adds `CODEX_WAIT_GRACE_SEC=600`, so the total W5
+(`CODEX_DEADLINE_SEC=2700` poll window + `CODEX_FINALIZE_BUDGET_SEC=150`), and
+on the `pipeline()` fallback path the Workflow's own poll adds
+`CODEX_WAIT_GRACE_SEC=600`, so the total W5
 translate/review wait is bounded at `2700 + 150 + 600 = 3450 s` of polling plus one
 final finite on-disk gate check — never an unbounded hang (the #198 failure mode).
 

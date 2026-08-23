@@ -5379,8 +5379,9 @@ def _terminal_write_still_binds_what_was_reviewed(
     Why the pair alone was not enough, kept because it is the argument the
     widening rests on. It is not the flock: `runs/.driver.lock` excludes
     another DRIVER, while codex_job.py never acquires it -- it takes only
-    its own per-segment `.codex_job.<seg>.lock` -- and the default workflow
-    launches codex_job.py DETACHED, independently of any driver. And it is
+    its own per-segment `.codex_job.<seg>.lock` -- and the fallback workflow
+    template path launches codex_job.py DETACHED, independently of any
+    driver. And it is
     not the sha half, because the draft need not change for the verdict to.
 
     Reachability, kept at its real width so the fix is read neither as

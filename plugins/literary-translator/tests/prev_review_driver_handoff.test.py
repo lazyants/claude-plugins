@@ -1,4 +1,4 @@
-"""tests/prev_review_driver_handoff.test.py -- #541: the OPTIONAL local driver's
+"""tests/prev_review_driver_handoff.test.py -- #541: the local driver's
 `needs_fix` handoff carries the same predecessor instruction the Workflow
 template's own fix step does.
 

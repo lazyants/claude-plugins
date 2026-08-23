@@ -470,7 +470,7 @@ def _claim_fresh_digest(digest_path: Path, input_digest: str) -> None:
     (`if not (dirs["runs_dir"] / candidate).exists(): return candidate, ...`)
     and creates nothing, so two concurrent resume_setup.py invocations
     against the SAME durable_root (e.g. a kind="mass" and a kind="glossary"
-    call -- exactly the shape SKILL.md's own "Optional dispatch path"
+    call -- exactly the shape SKILL.md's own "Default dispatch path"
     section already warns is unguarded) can both observe the same
     not-yet-taken candidate before EITHER creates anything, and both land
     here with the SAME `digest_path`. The pre-existing `if

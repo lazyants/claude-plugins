@@ -1812,8 +1812,8 @@ def test_resume_from_run_ids_computes_domain_exactly_once_regardless_of_candidat
 # own directory/digest creation -- never one atomic step. Two concurrent
 # resume_setup.py invocations against the SAME durable_root (e.g. one
 # kind="mass", one kind="glossary" -- exactly the shape SKILL.md's own
-# "Optional dispatch path" section warns is unguarded: "never against the
-# same durable_root as a concurrent pipeline() run -- nothing in either path
+# "Default dispatch path" section warns is unguarded: "never run the two
+# against the same durable_root concurrently -- nothing in either path
 # guards against that") can both observe "this candidate id is not yet
 # taken" before EITHER creates anything. codex flagged this mechanism from
 # source without demonstrating it. This section demonstrates it directly,
