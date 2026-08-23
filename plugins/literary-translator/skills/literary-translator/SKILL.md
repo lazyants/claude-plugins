@@ -2056,12 +2056,28 @@ PATH` (this driver's own sibling-script resolution — data root vs. install
 root, same split as every other #409 script — also threaded through to
 `select_segments.py`'s identical flags), `--only-segs SEG1,SEG2,...`/
 `--allow-retranslate-converged`/`--allow-empty` (forwarded verbatim to
-`select_segments.py`'s own flags of the same name, above),
-`--max-concurrent-codex-jobs N` (default 40), `--node BIN`. Exit 0 means the
-per-segment loop ran to completion — NOT that every segment converged; read
-the printed JSON's `summary.failed`/`summary.needs_fix`. Exit 1 means a gate
-refused before any dispatch (lock contention, the Step 1 re-translate gate,
-the volume cap). Exit 2 is a usage/environment error.
+`select_segments.py`'s own flags of the same name, above), `--from-cap`/
+`--from-converged`/`--from-stalled SEG1,SEG2,...` (also forwarded verbatim to
+`select_segments.py`'s own claim-ADMISSION flags of the same name — single-
+phase and durable-writing, a claim record plus a re-stamped draft
+`dispatch_token`, never a blanket authorization: only the ids named),
+`--resume-from-run-id RUN_ID` (#458: names WHICH prior run this invocation
+should resume, instead of the newest digest-matching candidate
+`resume_setup.py` would otherwise be offered — it never bypasses that
+script's own digest comparison, only which candidate reaches it. Refuses
+exit 1 when the named run's directory or its `input.digest` is missing or
+the wrong kind, when its recorded digest does not match this invocation, or
+when a selected segment's own draft is stamped for a different run (not reachable for a segment an admission just claimed — `select_segments.py` re-stamps an admitted draft to this run before the gate runs, which is what admission IS; and a token naming no recognizable owner is not "different"); exit 2
+for an unsafe id or a filesystem state this script cannot establish. Left
+unpinned, the only change is that a fresh mint now prints one stderr line
+naming the new RUN_ID and how many eligible candidates were offered — in
+the driver's own log file for the documented detached launch above, at the
+terminal for a foreground run), `--max-concurrent-codex-jobs N` (default
+40), `--node BIN`. Exit 0 means the per-segment loop ran to completion —
+NOT that every segment converged; read the printed JSON's
+`summary.failed`/`summary.needs_fix`. Exit 1 means a gate refused before any
+dispatch (lock contention, the Step 1 re-translate gate, the volume cap, a
+`--resume-from-run-id` refusal). Exit 2 is a usage/environment error.
 
 **The driver does not refresh `runs/ledger.json`.** Its only ledger write is
 the per-segment fragment at `runs/ledger.d/<seg>.json`; `ledger.json` itself

@@ -2429,6 +2429,669 @@ def test_resumable_run_id_candidates_excludes_a_glossary_sibling_directly(tmp_pa
     )
 
 
+# ===========================================================================
+# #458 -- --resume-from-run-id pins WHICH candidate is offered to
+# resume_setup.py's own digest authority; it never bypasses that
+# authority's own comparison. See resolve_run_id()'s own "#458." comment
+# block and refuse_pinned_run_over_foreign_drafts()'s docstring for the
+# full design this pins.
+# ===========================================================================
+
+
+def _two_identical_digest_runs(driver_mod, dirs, translate_cfg):
+    """Two REAL run directories, minted by two REAL, back-to-back
+    resume_setup.py invocations against an otherwise-unchanged project --
+    never a hand-forged digest (a forged one would prove nothing about the
+    real resolution path). Each call sends a payload with no
+    `resume_from_run_ids` field at all (the same shape resolve_run_id()
+    builds for a first-ever run), so resume_setup.py's own resolve_run()
+    always mints fresh (resume_setup.py:814-822); since nothing about the
+    project changed between the two calls, compute_input_digest() returns
+    the IDENTICAL value both times (resume_setup.py:803). Returns
+    (older_id, newer_id) -- asserts newer_id sorts after older_id, matching
+    _resumable_run_id_candidates()'s own "lexicographic == chronological"
+    invariant, and asserts the two digest FILES actually match, so a test
+    built on this helper is proven to be exercising a real collision."""
+    script = dirs["resume_setup_script"]
+    payload = {
+        "kind": "mass",
+        "args": {},
+        "subst": {
+            "research_mode": translate_cfg["research_mode"],
+            "verse_policy": translate_cfg["verse_policy"],
+            "source_lang": translate_cfg["source_lang"],
+            "target_lang": translate_cfg["target_lang"],
+            "max_fix_rounds": translate_cfg["max_fix_rounds"],
+            "batch_agent_cap": translate_cfg["batch_agent_cap"],
+            "max_codex_jobs_per_batch": translate_cfg["max_codex_jobs_per_batch"],
+            "effort": translate_cfg["effort"],
+            "citation_content_types": translate_cfg["citation_content_types"],
+        },
+        "plugin_root": "",
+    }
+    older = driver_mod._call_resume_setup(script, payload, dirs, None, None)
+    assert older.get("resume") is False, older
+    newer = driver_mod._call_resume_setup(script, payload, dirs, None, None)
+    assert newer.get("resume") is False, newer
+    older_id, newer_id = older["effectiveRunId"], newer["effectiveRunId"]
+    assert newer_id > older_id, (older_id, newer_id)
+    older_digest = (dirs["runs_dir"] / older_id / "input.digest").read_text(encoding="utf-8")
+    newer_digest = (dirs["runs_dir"] / newer_id / "input.digest").read_text(encoding="utf-8")
+    assert older_digest == newer_digest, (
+        "setup check: both real runs must carry the identical digest, or neither test "
+        "built on this helper proves anything about a digest collision"
+    )
+    return older_id, newer_id
+
+
+def test_pinned_id_is_offered_verbatim_and_the_scan_is_not_consulted(tmp_path, monkeypatch):
+    """A NEWER, digest-matching candidate exists on disk, yet a pin to the
+    OLDER one still resolves to the OLDER -- proven on the SENT PAYLOAD, not
+    just the returned id: the scan agreeing with the pin by coincidence
+    would look identical to the scan being irrelevant. Spies on the real
+    subprocess.run the same way
+    test_resolve_run_id_resumes_via_a_plural_candidate_that_is_not_the_newest
+    already does, never a fake sibling."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+    older_id, newer_id = _two_identical_digest_runs(driver_mod, dirs, translate_cfg)
+
+    resume_setup_calls = []
+    real_subprocess_run = driver_mod.subprocess.run
+
+    def _observing_run(cmd, *args, **kwargs):
+        if len(cmd) > 1 and str(cmd[1]).endswith("resume_setup.py"):
+            payload_file = cmd[cmd.index("--payload-file") + 1]
+            resume_setup_calls.append(json.loads(Path(payload_file).read_text(encoding="utf-8")))
+        return real_subprocess_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(driver_mod.subprocess, "run", _observing_run)
+
+    result = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+        pinned_run_id=older_id,
+    )
+
+    assert result["effectiveRunId"] == older_id, result
+    assert result.get("resume") is True, result
+    assert len(resume_setup_calls) == 1, resume_setup_calls
+    assert resume_setup_calls[0].get("resume_from_run_ids") == [older_id], (
+        f"the pin must be the ONLY candidate offered -- the newer, also-matching "
+        f"{newer_id!r} must never enter the payload: {resume_setup_calls[0]}"
+    )
+
+
+def test_pinning_the_older_of_two_identical_digest_runs_resumes_it(tmp_path):
+    """The issue's OWN property (#458): with two run dirs carrying an
+    IDENTICAL digest, pinning the OLDER one resumes it, where the unpinned
+    call -- exactly as before this change -- always resolves the newer one.
+    Without the pin, the older run is permanently unreachable."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+    older_id, newer_id = _two_identical_digest_runs(driver_mod, dirs, translate_cfg)
+
+    unpinned = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    assert unpinned["effectiveRunId"] == newer_id, unpinned
+    assert unpinned.get("resume") is True, unpinned
+
+    pinned = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+        pinned_run_id=older_id,
+    )
+    assert pinned["effectiveRunId"] == older_id, pinned
+    assert pinned.get("resume") is True, pinned
+
+
+def test_pinned_run_id_with_no_input_digest_refuses_exit_1_naming_the_path(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    pinned_id = "20260101T000000Z"
+    (root / "runs" / pinned_id).mkdir()
+
+    proc = run_driver(root, "--resume-from-run-id", pinned_id, timeout=60)
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    expected_path = str(root / "runs" / pinned_id / "input.digest")
+    assert expected_path in payload["error"], payload
+    assert payload.get("pinned_run_id") == pinned_id, payload
+
+
+def test_pinned_run_id_that_is_not_a_directory_refuses_exit_1(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    pinned_id = "20260101T000000Z"
+    (root / "runs" / pinned_id).write_text("not a directory\n", encoding="utf-8")
+
+    proc = run_driver(root, "--resume-from-run-id", pinned_id, timeout=60)
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "is not a run directory" in payload["error"], payload
+    assert payload.get("pinned_run_id") == pinned_id, payload
+
+
+def test_unsafe_pinned_run_id_refuses_exit_2_before_any_path_is_built(tmp_path):
+    """Same fail-fast shape --only-segs/--from-* already get: refused by
+    run()'s own local validate_run_id() call, before the project lock is
+    ever acquired -- proven, not just asserted, the same way
+    test_only_segs_bad_id_refused_locally_before_select_segments_ever_runs
+    proves it for --only-segs."""
+    root = not_started_project(tmp_path, n=1)
+
+    proc = run_driver(root, "--resume-from-run-id", "../escape")
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "--resume-from-run-id" in payload["error"], payload
+    assert not (root / "runs" / ".driver.lock").exists(), (
+        "an id this script refuses to spell must be rejected before the project lock "
+        "is ever acquired"
+    )
+
+
+def test_pinned_digest_mismatch_refuses_exit_1_naming_both_ids(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+
+    first = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    assert first.get("resume") is False, first
+    true_digest = (root / "runs" / first["effectiveRunId"] / "input.digest").read_text(
+        encoding="utf-8"
+    ).strip()
+    wrong_digest = ("0" if true_digest[0] != "0" else "1") + true_digest[1:]
+    assert wrong_digest != true_digest
+
+    mismatched_id = "20200101T000000Z"
+    (root / "runs" / mismatched_id).mkdir()
+    (root / "runs" / mismatched_id / "input.digest").write_text(wrong_digest + "\n", encoding="utf-8")
+
+    with pytest.raises(driver_mod.DriverError) as exc_info:
+        driver_mod.resolve_run_id(
+            dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+            pinned_run_id=mismatched_id,
+        )
+
+    exc = exc_info.value
+    assert exc.exit_code == 1, exc.exit_code
+    assert exc.extra.get("pinned_run_id") == mismatched_id, exc.extra
+    assert isinstance(exc.extra.get("minted_run_id"), str) and exc.extra["minted_run_id"], exc.extra
+    assert exc.extra.get("offered_candidate_count") == 1, exc.extra
+    # resume_setup.py's own "never overwrite the old run's digest" contract:
+    # the pinned run's own digest file must be untouched by the mismatch.
+    assert (root / "runs" / mismatched_id / "input.digest").read_text(
+        encoding="utf-8"
+    ).strip() == wrong_digest
+
+
+def test_unpinned_mint_warns_naming_the_fresh_id_and_the_offered_candidate_count(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+
+    probe = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    assert probe.get("resume") is False, probe
+    true_digest = (root / "runs" / probe["effectiveRunId"] / "input.digest").read_text(
+        encoding="utf-8"
+    ).strip()
+    # Remove the probe's own run dir -- left in place it would itself be a
+    # genuinely matching candidate on the real run below, resuming instead
+    # of minting, which is not what this test needs to observe.
+    shutil.rmtree(root / "runs" / probe["effectiveRunId"])
+
+    stale_id = "20200101T000000Z"
+    wrong_digest = ("0" if true_digest[0] != "0" else "1") + true_digest[1:]
+    (root / "runs" / stale_id).mkdir()
+    (root / "runs" / stale_id / "input.digest").write_text(wrong_digest + "\n", encoding="utf-8")
+
+    proc = run_driver(root, timeout=60)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["resume"] is False, payload
+    fresh_id = payload["run_id"]
+    warning_lines = [ln for ln in proc.stderr.splitlines() if "segment_dispatch_driver.py: warning:" in ln]
+    assert len(warning_lines) == 1, proc.stderr
+    assert fresh_id in warning_lines[0], warning_lines[0]
+    assert "1 eligible resume candidate(s) were offered" in warning_lines[0], warning_lines[0]
+
+
+def test_unpinned_mint_warns_even_when_zero_candidates_were_offered(tmp_path):
+    """Replaces an earlier, VACUOUS test that asserted the ABSENCE of a
+    warning line: resolve_run_id() prints nothing at all before Change 2,
+    so that assertion was already green before the change landed and could
+    never have been watched RED. Zero offered does NOT mean 'first-ever
+    run' (the scan also returns [] after dropping entries it could not
+    accept) -- the count, not its absence, is what tells the two cases
+    apart, so it must be emitted here too."""
+    root = phase2_project(tmp_path, n=1)
+
+    proc = run_driver(root, timeout=60)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["resume"] is False, payload
+    warning_lines = [ln for ln in proc.stderr.splitlines() if "segment_dispatch_driver.py: warning:" in ln]
+    assert len(warning_lines) == 1, proc.stderr
+    assert "0 eligible resume candidate(s) were offered" in warning_lines[0], warning_lines[0]
+
+
+def test_resume_from_run_id_flag_reaches_resolve_run_id_from_both_call_sites(tmp_path, monkeypatch):
+    """#458 Change 1's last wiring point: BOTH resolve_run_id() call sites in
+    run() -- the claim path, before select_segments.py; the ordinary path,
+    after it -- must forward --resume-from-run-id. A pinned id that never
+    exists on disk refuses before any dispatch either way, so this only
+    needs proof the flag REACHED resolve_run_id(), not a successful run."""
+    pinned = "20200101T000000Z"
+
+    def _spy_calls(root):
+        driver_mod = _load_fixture_driver(root)
+        calls = []
+        real_resolve_run_id = driver_mod.resolve_run_id
+
+        def _spy(*args, **kwargs):
+            calls.append(kwargs.get("pinned_run_id"))
+            return real_resolve_run_id(*args, **kwargs)
+
+        monkeypatch.setattr(driver_mod, "resolve_run_id", _spy)
+        return driver_mod, calls
+
+    # Claim path.
+    claim_root = from_cap_project(tmp_path, name="claim_root")
+    claim_driver_mod, claim_calls = _spy_calls(claim_root)
+    claim_driver_mod.main([
+        "--only-segs", "seg01", "--from-cap", "seg01", "--resume-from-run-id", pinned,
+    ])
+    assert claim_calls == [pinned], claim_calls
+
+    # Ordinary path -- also needs resume_setup.py staged (resolve_run_id()
+    # refuses on ANY missing sibling script before ever looking at the pin),
+    # so phase2_project(), not the lighter not_started_project().
+    ordinary_root = phase2_project(tmp_path, n=1, name="ordinary_root")
+    ordinary_driver_mod, ordinary_calls = _spy_calls(ordinary_root)
+    ordinary_driver_mod.main(["--resume-from-run-id", pinned])
+    assert ordinary_calls == [pinned], ordinary_calls
+
+
+def test_a_refused_pin_on_the_ordinary_path_dispatches_nothing_and_writes_no_claim_or_draft(tmp_path):
+    """Change 1's durable-state accounting for the ORDINARY path: unlike the
+    claim path, select_segments.py has ALREADY run (and rewritten
+    runs/ledger.json) by the time an ordinary-path pin refuses -- but the
+    refusal must still leave no claim record, no draft dispatch_token
+    write, and no codex dispatch, proven with the same argv-log the
+    claim-path tests already use, never inferred from a clean exit."""
+    root = phase2_project(tmp_path, n=1)
+    pinned = "20200101T000000Z"  # never created on disk
+
+    proc = run_driver(root, "--resume-from-run-id", pinned, timeout=60)
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert payload.get("pinned_run_id") == pinned, payload
+    assert not (root / "segments" / "seg01.draft.json").exists(), (
+        "a refused pin must never write a draft dispatch_token"
+    )
+    assert not list((root / "runs").glob("*/.claimed.*")), "a refused pin must leave no claim record"
+    assert read_argv_log(root) == [], "a refused pin must dispatch no codex job"
+    assert (root / "runs" / "ledger.json").is_file(), (
+        "select_segments.py already ran on the ordinary path before this refusal -- the "
+        "ledger rewrite is a disclosed cost, not something this refusal undoes"
+    )
+
+
+def test_pinned_run_id_with_a_non_utf8_digest_is_exit_2_with_context(tmp_path):
+    """ped-ant #618, second round. The readability probe's handler must catch
+    UnicodeDecodeError as well as OSError: it is a ValueError, so an
+    OSError-only handler lets a corrupt digest escape resolve_run_id() as a
+    BARE exception, which main()'s generic catch-all turns into an
+    "unexpected error" payload with no `pinned_run_id` -- dropping the exact
+    operator context the probe was added to preserve, while still exiting 2
+    and therefore looking correct from the exit code alone.
+
+    Not sidestepped by reading BYTES instead: decodability is part of what
+    must be established here, because resume_setup.py reads this same file
+    with read_text(), so a digest this probe could not decode would fail
+    there and come back as the exit-1 misclassification instead."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+
+    pinned = "20260101T000000Z"
+    run_dir = root / "runs" / pinned
+    run_dir.mkdir(parents=True)
+    digest = run_dir / "input.digest"
+    digest.write_bytes(b"\xff\xfe\xfd")
+    # Fixture precondition, via the real call: readable as bytes, NOT
+    # decodable as UTF-8 -- so a bytes-only probe would pass it through.
+    assert digest.read_bytes() == b"\xff\xfe\xfd"
+    with pytest.raises(UnicodeDecodeError):
+        digest.read_text(encoding="utf-8")
+
+    with pytest.raises(driver_mod.DriverError) as excinfo:
+        driver_mod.resolve_run_id(
+            dirs,
+            translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
+            plugin_root_str=None,
+            durable_root_str=None,
+            pinned_run_id=pinned,
+        )
+    assert excinfo.value.exit_code == 2, excinfo.value.exit_code
+    assert "could not be read" in str(excinfo.value), str(excinfo.value)
+    assert excinfo.value.extra.get("pinned_run_id") == pinned, (
+        "the refusal must keep naming what the operator asked for -- losing it "
+        f"is the defect this test exists for: {excinfo.value.extra}"
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a chmod-000 file regardless")
+def test_pinned_run_id_with_an_unreadable_digest_is_exit_2_not_exit_1(tmp_path):
+    """ped-ant #618. An existing but UNREADABLE input.digest is an
+    INDETERMINATE environment, not an established refusal: _definitive_stat()
+    proves only that it is a regular file, so without the readability probe
+    the failure happened inside resume_setup.py's own read_text(), came back
+    as `success: false`, and _call_resume_setup() reported it as exit 1 --
+    the classification this release's own contract reserves for a gate
+    refusing on a state it established. It also dropped `pinned_run_id`, so
+    the one datum naming what the operator asked for went missing from the
+    refusal payload."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+
+    pinned = "20260101T000000Z"
+    run_dir = root / "runs" / pinned
+    run_dir.mkdir(parents=True)
+    digest = run_dir / "input.digest"
+    digest.write_text("whatever\n", encoding="utf-8")
+    digest.chmod(0o000)
+    # Fixture precondition, via the real syscalls: it IS a regular file (so
+    # every stat-based gate above passes) and it is NOT readable.
+    assert digest.is_file()
+    with pytest.raises(PermissionError):
+        digest.read_text(encoding="utf-8")
+
+    try:
+        with pytest.raises(driver_mod.DriverError) as excinfo:
+            driver_mod.resolve_run_id(
+                dirs,
+                translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
+                plugin_root_str=None,
+                durable_root_str=None,
+                pinned_run_id=pinned,
+            )
+    finally:
+        digest.chmod(0o600)
+
+    assert excinfo.value.exit_code == 2, (
+        f"an unreadable digest is an environment error, not an established gate "
+        f"refusal -- got exit {excinfo.value.exit_code}"
+    )
+    assert "could not be read" in str(excinfo.value), str(excinfo.value)
+    assert excinfo.value.extra.get("pinned_run_id") == pinned, excinfo.value.extra
+
+
+def test_resolve_run_id_re_refuses_an_unsafe_pin_reached_directly(tmp_path):
+    """resolve_run_id() validates the pinned id ITSELF, not only because
+    run() happens to have validated it first. Unreachable through the CLI
+    today -- run() refuses the same value earlier, before the driver lock --
+    so this test calls resolve_run_id() directly, which is exactly the
+    second caller the guard exists for. Without it the value would go
+    straight into `dirs["runs_dir"] / pinned_run_id` two statements later.
+    """
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+
+    with pytest.raises(driver_mod.DriverError) as excinfo:
+        driver_mod.resolve_run_id(
+            dirs,
+            translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
+            plugin_root_str=None,
+            durable_root_str=None,
+            pinned_run_id="../escape",
+        )
+    assert excinfo.value.exit_code == 2, excinfo.value.exit_code
+    assert "unsafe pinned run id" in str(excinfo.value), str(excinfo.value)
+    assert not (root / "runs" / "../escape").exists()
+
+
+def test_pinned_run_id_indeterminate_stat_is_exit_2_not_exit_1(tmp_path):
+    """An INDETERMINATE filesystem state under a pin (EACCES, not "does not
+    exist") is an ENVIRONMENT error, exit 2 -- distinct from the
+    ESTABLISHED-absence refusals above (exit 1). _definitive_stat() raises
+    via fatal() itself the moment os.stat cannot answer at all; simulated
+    here by removing search permission on runs/ itself, so
+    os.stat(runs/<pinned_id>) raises PermissionError rather than
+    FileNotFoundError -- same idiom as
+    test_resolve_dirs_refuses_when_a_candidate_cannot_be_looked_up_at_all."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+    pinned_id = "20200101T000000Z"
+    (root / "runs" / pinned_id).mkdir()
+    (root / "runs" / pinned_id / "input.digest").write_text("irrelevant\n", encoding="utf-8")
+
+    runs_dir = root / "runs"
+    runs_dir.chmod(0o000)
+    try:
+        if os.access(str(runs_dir), os.X_OK):  # root -- the chmod bought nothing
+            pytest.skip("cannot make a directory unsearchable as this user")
+        with pytest.raises(driver_mod.DriverError) as exc_info:
+            driver_mod.resolve_run_id(
+                dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+                pinned_run_id=pinned_id,
+            )
+    finally:
+        runs_dir.chmod(0o755)
+
+    assert exc_info.value.exit_code == 2, exc_info.value.exit_code
+
+
+def test_pinned_run_refuses_before_dispatch_when_a_selected_segment_draft_belongs_to_another_run(
+    tmp_path, monkeypatch, capsys
+):
+    """#458 Change 1b, the MAJOR codex admitted and this plan answers with a
+    pre-dispatch gate: pinning a run whose digest genuinely matches must
+    still refuse -- before a single segment is dispatched -- when a
+    SELECTED segment's draft is stamped for a DIFFERENT run. Proven with a
+    spy on dispatch_codex_job() itself, never inferred from a clean exit,
+    per this file's own idiom for proving 'nothing was dispatched'."""
+    root = phase2_project(tmp_path, n=2)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+
+    first = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    assert first.get("resume") is False, first
+    pinned_run_id = first["effectiveRunId"]
+
+    foreign_run_id = "20200101T000000Z"
+    # #409 Step 3 requires a digest for ANY run id carrying dispatch
+    # evidence (a draft's dispatch_token, here) -- same requirement
+    # from_cap_project() already satisfies for its own source_run_dir.
+    foreign_run_dir = root / "runs" / foreign_run_id
+    foreign_run_dir.mkdir(parents=True, exist_ok=True)
+    (foreign_run_dir / "input.digest").write_text("stub-foreign-run-digest\n", encoding="utf-8")
+    (root / "segments" / "seg01.draft.json").write_text(
+        json.dumps({
+            "seg": "seg01", "blocks": {"p1": "hola"},
+            "dispatch_token": f"{foreign_run_id}:seg01",
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    dispatch_calls = []
+
+    def _stub_dispatch_codex_job(*args, **kwargs):
+        dispatch_calls.append((args, kwargs))
+        return {"exit_code": 0, "stdout": "{}", "stderr": ""}
+
+    monkeypatch.setattr(driver_mod, "dispatch_codex_job", _stub_dispatch_codex_job)
+
+    exit_code = driver_mod.main(["--resume-from-run-id", pinned_run_id])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1, captured.out
+    assert dispatch_calls == [], "no codex job may be dispatched once the pin gate refuses"
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+    assert payload["success"] is False
+    assert "seg01" in payload["error"], payload
+    assert payload.get("pinned_run_id") == pinned_run_id, payload
+
+
+def test_unpinned_foreign_token_draft_dispatches_normally_unchanged(tmp_path):
+    """Change 1b is PINNED-ONLY (acceptance criterion 4): the identical
+    foreign-token-draft fixture must behave EXACTLY as it did before this
+    release when no pin is given -- the draft is silently overwritten by a
+    fresh translate dispatch, same as any pre-#458 invocation. The control
+    direction for the test above, pinning acceptance criterion 4 against
+    Change 1b leaking onto the default path."""
+    root = phase2_project(tmp_path, n=1)
+    foreign_run_id = "20200101T000000Z"
+    foreign_run_dir = root / "runs" / foreign_run_id
+    foreign_run_dir.mkdir(parents=True, exist_ok=True)
+    (foreign_run_dir / "input.digest").write_text("stub-foreign-run-digest\n", encoding="utf-8")
+    (root / "segments" / "seg01.draft.json").write_text(
+        json.dumps({
+            "seg": "seg01", "blocks": {"p1": "hola vieja"},
+            "dispatch_token": f"{foreign_run_id}:seg01",
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    proc = run_driver(root, timeout=60)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True, payload
+    assert payload["summary"]["converged"] == ["seg01"], payload
+    draft = json.loads((root / "segments" / "seg01.draft.json").read_text(encoding="utf-8"))
+    assert draft["dispatch_token"] != f"{foreign_run_id}:seg01", (
+        "unpinned, a foreign-token draft is retranslated (overwritten) exactly as before -- "
+        f"the dispatch_token must now name THIS run, not the stale foreign one: {draft}"
+    )
+
+
+def test_pinned_run_id_matching_the_drafts_own_owner_dispatches_normally(tmp_path):
+    """The missing control test (codex code-review MINOR): a draft ALREADY
+    stamped for the SAME run this invocation pins is not foreign to it -- the
+    gate must compare `owner != run_id`, never merely `owner is not None`. A
+    mutation dropping the `!= run_id` half (refusing on ANY established
+    owner, even the pin's own) survives every other test in this file and
+    would falsely refuse the operator's own in-progress draft; this is the
+    test built to kill exactly that mutation."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+
+    first = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    assert first.get("resume") is False, first
+    pinned_run_id = first["effectiveRunId"]
+
+    (root / "segments" / "seg01.draft.json").write_text(
+        json.dumps({
+            "seg": "seg01", "blocks": {"p1": "hola"},
+            "dispatch_token": driver_mod.translate_dispatch_token(pinned_run_id, "seg01"),
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    proc = run_driver(root, "--resume-from-run-id", pinned_run_id, timeout=60)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True, payload
+    assert "foreign_drafts" not in payload, payload
+    kinds = [entry["kind"] for entry in read_argv_log(root)]
+    assert kinds == ["review"], (
+        "a draft already owned by the pinned run must be RE-REVIEWED (it is not foreign), "
+        f"never blocked by the gate or retranslated -- got dispatches: {kinds}"
+    )
+
+
+@pytest.mark.parametrize("malformed_token", ["RUN-A", "20200101T000000Z:", "../escape:seg01"])
+def test_draft_token_owner_and_pin_gate_ignore_a_malformed_dispatch_token(tmp_path, malformed_token):
+    """#458 codex code-review MAJOR: draft_token_owner() must draw the EXACT
+    same line claim_record.py's own draft_owner_run_id() draws -- a token
+    with no colon, an empty seg half, or an unsafe run-id half names NO
+    owner any other reader in this plugin would recognize either, so the pin
+    gate must not refuse over one; it is a NEWLY ADMITTED case a fix that
+    NARROWS a check must pin.
+
+    Unit-level on purpose, not a full CLI run: verified by hand (not
+    assumed) that a full run_driver() invocation with each of these exact
+    malformed shapes trips select_segments.py's own, UNRELATED evidence
+    gates first -- "RUN-A"/"20200101T000000Z:" (both parse to NO run id,
+    same as here) hit D9's lost-token/claim-record-ambiguity path
+    (claim_record.py), and "../escape:seg01" hits the Step 3
+    unsafe_run_ids evidence-scan refusal (select_segments.py) -- neither
+    has anything to do with #458's pin gate, and both would refuse the
+    invocation for reasons this test is not about, making a CLI-level
+    assertion about draft_token_owner()'s OWN contract impossible to
+    isolate. Calling draft_token_owner()/refuse_pinned_run_over_foreign_drafts()
+    directly tests exactly the function code review flagged.
+
+    Mutation to kill: drop the `validate_run_id(run_id) is not None` guard,
+    or restore the old `split(':', 1)[0]` parse -- watch this go RED."""
+    root = make_durable_root(tmp_path)
+    driver_mod = _load_fixture_driver(root)
+    segments_dir = root / "segments"
+    (segments_dir / "seg01.draft.json").write_text(
+        json.dumps({"seg": "seg01", "blocks": {"p1": "vieja"}, "dispatch_token": malformed_token}),
+        encoding="utf-8",
+    )
+
+    assert driver_mod.draft_token_owner("seg01", segments_dir) is None, (
+        f"{malformed_token!r} names no owner any other reader in this plugin recognizes either"
+    )
+    # Must not raise: "no owner established" is "no contradiction found",
+    # never a foreign draft for the pin gate to refuse over.
+    driver_mod.refuse_pinned_run_over_foreign_drafts(["seg01"], "20260101T000000Z", segments_dir)
+
+
+def test_draft_token_owner_and_pin_gate_ignore_a_non_utf8_draft(tmp_path):
+    """#458 codex code-review MINOR: read_text(encoding='utf-8') raises
+    UnicodeDecodeError (a ValueError, NOT an OSError) on a draft that is not
+    valid UTF-8 -- uncaught, that would escape draft_token_owner() into
+    run()'s generic exception handler and abort the WHOLE pinned invocation
+    with exit 2, on every OTHER selected segment's behalf too.
+
+    Unit-level, same reason as the malformed-token test above: isolating
+    this function's own contract from select_segments.py's unrelated gates
+    needs a direct call, not a full CLI run.
+
+    Mutation to kill: remove UnicodeDecodeError from the except tuple,
+    watch this raise instead of returning None."""
+    root = make_durable_root(tmp_path)
+    driver_mod = _load_fixture_driver(root)
+    segments_dir = root / "segments"
+    (segments_dir / "seg01.draft.json").write_bytes(b"\xff\xfe not utf8")
+
+    assert driver_mod.draft_token_owner("seg01", segments_dir) is None
+    driver_mod.refuse_pinned_run_over_foreign_drafts(["seg01"], "20260101T000000Z", segments_dir)
+
+
 def test_dedupe_segs_is_order_preserving_first_occurrence_wins():
     deduped, dupes = DRIVER._dedupe_segs(["seg02", "seg01", "seg02", "seg03", "seg01"])
     assert deduped == ["seg02", "seg01", "seg03"]

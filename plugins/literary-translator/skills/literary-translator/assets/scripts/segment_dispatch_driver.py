@@ -352,6 +352,25 @@ ordinary dispatch (no `--from-stalled` id) never sends it.
 own -- see `build_arg_parser()`'s own help text for the concurrency
 default's justification.
 
+`--resume-from-run-id RUN_ID` (#458) is this driver's own too, and it
+changes only WHICH prior run is offered to `resume_setup.py` -- never
+whether resuming is safe, which stays that script's sole decision. It
+exists because resolution is otherwise newest-match-wins over a list this
+driver builds itself, so a prior run sharing a digest with a newer one
+cannot be named at all, and an invocation matching no candidate mints a
+fresh RUN_ID and claims every selected segment under it. Under a pin the
+driver refuses (exit 1) rather than dispatching under a run the operator
+did not name: when `runs/RUN_ID` is not a directory or carries no regular
+`input.digest`, when the pinned run's digest does not match this
+invocation, and when a SELECTED segment's draft is stamped for a
+different run (`refuse_pinned_run_over_foreign_drafts()`). An unsafe id,
+or a filesystem state this script could not establish, is exit 2 instead.
+When the flag is ABSENT nothing above applies and resolution is unchanged
+in every respect but one: an unpinned invocation that mints a fresh
+RUN_ID now says so on stderr, with the number of ELIGIBLE candidates that
+were offered (a number no other artifact carries -- `"resume": false`
+itself already reaches both the printed JSON and the journal).
+
 Exit 0 = every gate passed and the per-segment loop ran to completion
 (a completion that reports EVERY segment converged, needs_fix, or failed
 in its own `results`/`summary` -- exit 0 does NOT itself mean every
@@ -2462,7 +2481,8 @@ def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path) -> list:
 
 
 def resolve_run_id(dirs: dict, *, translate_cfg: dict,
-                    plugin_root_str, durable_root_str) -> dict:
+                    plugin_root_str, durable_root_str,
+                    pinned_run_id: "str | None" = None) -> dict:
     """Builds the exact payload shape resume_setup.py's own module docstring
     documents for a kind="mass" caller (kind, args, subst, plugin_root,
     resume_from_run_ids), writes it to a scratch file, and invokes
@@ -2554,13 +2574,159 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
         },
         "plugin_root": plugin_root_str or "",
     }
+    if pinned_run_id is not None:
+        # Verified HERE, not only in run(), even though run() already
+        # refuses an unsafe pin before this function is reachable. Same
+        # reasoning _call_resume_setup()'s own docstring gives for
+        # re-verifying the script it executes: a guard that holds because
+        # of the call graph rather than because of where it is written is
+        # a guard waiting for a second caller that never gets it, and this
+        # value goes on to build runs/<ID> two statements below. run()'s
+        # check stays -- it fails FAST, before the driver lock and before
+        # any subprocess; this one makes the property true by inspection of
+        # this function alone. (Raised as a deliberate non-finding by the
+        # closing security pass, and folded in because this file already
+        # argues the position against itself.)
+        problem = validate_run_id(pinned_run_id)
+        if problem is not None:
+            fatal(f"resolve_run_id(): unsafe pinned run id: {problem}", exit_code=2)
+        # #458. The pin replaces the SCAN, never the digest comparison:
+        # resume_setup.py still decides whether resuming this id is safe,
+        # and still mints a fresh id when it is not. What the operator gets
+        # is the ability to say WHICH prior run this invocation is about --
+        # without it the newest matching candidate always wins
+        # (resume_setup.py's first-match-wins loop over the order given),
+        # so a run sharing a digest with a newer one is unreachable by
+        # construction rather than by configuration.
+        #
+        # _definitive_stat() rather than Path.is_dir()/is_file() for the
+        # same reason the scan uses it (see _resumable_run_id_candidates()'s
+        # own round-5 docstring): those swallow EACCES/EIO/ELOOP and answer
+        # False, which here would report a perfectly good pinned run as
+        # absent. The two outcomes are filed differently on purpose --
+        # ESTABLISHED absence is a gate refusing (exit 1), an
+        # INDETERMINATE state is an environment error (exit 2, raised by
+        # _definitive_stat() itself).
+        run_dir = dirs["runs_dir"] / pinned_run_id
+        run_dir_stat = _definitive_stat(
+            run_dir,
+            refusal=f"could not establish whether the pinned run directory {run_dir} exists",
+        )
+        if run_dir_stat is None or not stat.S_ISDIR(run_dir_stat.st_mode):
+            fatal(
+                f"--resume-from-run-id {pinned_run_id!r}: {run_dir} is not a run directory, "
+                f"so there is no prior run to resume from. Nothing was dispatched.",
+                exit_code=1,
+                pinned_run_id=pinned_run_id,
+            )
+        digest_path = run_dir / "input.digest"
+        digest_stat = _definitive_stat(
+            digest_path,
+            refusal=f"could not establish whether the pinned run {pinned_run_id} carries an input.digest marker",
+        )
+        if digest_stat is None or not stat.S_ISREG(digest_stat.st_mode):
+            fatal(
+                f"--resume-from-run-id {pinned_run_id!r}: {digest_path} is missing or is not a "
+                f"regular file, so the pinned run records no digest to compare this invocation "
+                f"against. Nothing was dispatched.",
+                exit_code=1,
+                pinned_run_id=pinned_run_id,
+            )
+        # ped-ant #618: _definitive_stat() establishes only that this is a
+        # REGULAR FILE, never that it can be READ. An existing but unreadable
+        # digest (chmod 000, a restored root with wrong ownership) therefore
+        # passed every gate above and failed inside resume_setup.py's own
+        # read_text(), whose catch-all comes back as `success: false` and is
+        # converted by _call_resume_setup() into exit 1 -- reporting an
+        # ENVIRONMENTAL incident as an established gate refusal, in the exact
+        # contract this release introduced, and dropping `pinned_run_id` from
+        # the payload on the way. Establish readability here instead, where
+        # the pin is what makes the file load-bearing.
+        #
+        # UnicodeDecodeError is caught alongside OSError, and it is NOT
+        # redundant: it is a ValueError, so an OSError-only handler lets a
+        # corrupt (non-UTF-8) digest escape as a bare exception into main()'s
+        # generic catch-all, which emits "unexpected error" and drops
+        # `pinned_run_id` -- the exact operator context this probe exists to
+        # preserve. Caught here rather than sidestepped by reading BYTES,
+        # because decodability is part of what must be established:
+        # resume_setup.py reads this same file with read_text(), so a digest
+        # this probe could not decode would fail there instead and come back
+        # as the exit-1 misclassification above. (ped-ant #618, second round.)
+        #
+        # The bytes are DISCARDED, deliberately. This is a readability probe,
+        # not a digest comparison: resume_setup.py remains the sole authority
+        # on whether the recorded digest matches, and comparing it here would
+        # be a second, drifting implementation of the one decision this whole
+        # flag is built to leave with that script. Do not "optimize" this into
+        # a comparison.
+        try:
+            digest_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            fatal(
+                f"--resume-from-run-id {pinned_run_id!r}: {digest_path} exists but could not be "
+                f"read ({exc}), so whether the pinned run can be resumed is UNKNOWN rather than "
+                f"refused. Nothing was dispatched.",
+                exit_code=2,
+                pinned_run_id=pinned_run_id,
+            )
+        payload["resume_from_run_ids"] = [pinned_run_id]
+        result = _call_resume_setup(script, payload, dirs, durable_root_str, plugin_root_str)
+        if not result.get("resume"):
+            # The operator named a run. resume_setup.py answered that this
+            # invocation's inputs do not match it, and (having been offered
+            # no other candidate) minted a fresh id. PROCEEDING under that
+            # fresh id is precisely the measured #458 harm -- every named
+            # segment claimed under a run nobody asked for -- and it is
+            # worse here than on the unpinned path, because here the
+            # operator made an explicit statement this outcome contradicts.
+            # The fresh runs/<id>/ directory resume_setup.py just wrote is
+            # left behind; that orphan is the same cost every claim-path
+            # refusal already pays (see run()'s own note).
+            minted = result.get("effectiveRunId")
+            fatal(
+                f"--resume-from-run-id {pinned_run_id!r}: this invocation's input digest does "
+                f"NOT match that run's own recorded digest, so it cannot be resumed. "
+                f"resume_setup.py minted a fresh RUN_ID {minted!r} instead; refusing to dispatch "
+                f"under a run you did not ask for. Nothing was dispatched. If the inputs really "
+                f"did change, re-run without --resume-from-run-id to accept the fresh run.",
+                exit_code=1,
+                pinned_run_id=pinned_run_id,
+                minted_run_id=minted,
+                offered_candidate_count=1,
+            )
+        return result
+
     candidates = _resumable_run_id_candidates(dirs["runs_dir"], dirs["durable_root"])
     if candidates:
         # Omitted entirely (never an empty list) when there are none --
         # resume_setup.py's own module docstring: "Omitting both fields is
         # a genuinely-first-ever-run signal, exactly as before."
         payload["resume_from_run_ids"] = candidates
-    return _call_resume_setup(script, payload, dirs, durable_root_str, plugin_root_str)
+    result = _call_resume_setup(script, payload, dirs, durable_root_str, plugin_root_str)
+    if not result.get("resume"):
+        # #458. `"resume": false` already reaches the printed JSON (run()'s
+        # own result payload) and the journal, so this line is not what
+        # makes the mint visible -- it is what makes it READABLE, and it
+        # carries the one datum neither artifact holds: how many candidates
+        # were actually offered.
+        #
+        # Emitted on EVERY unpinned mint, including a zero-candidate one.
+        # Zero offered does NOT mean "first-ever run": the scan also returns
+        # [] after DROPPING entries it could not accept (wrong name shape,
+        # no input.digest, a glossary sibling), so a project with prior runs
+        # on disk can reach zero. The wording below therefore claims only
+        # what the count actually proves.
+        print(
+            f"segment_dispatch_driver.py: warning: none of the eligible candidates offered "
+            f"matched this invocation's input digest -- minted a FRESH RUN_ID "
+            f"{result.get('effectiveRunId')}. "
+            f"{len(candidates)} eligible resume candidate(s) were offered; entries filtered out "
+            f"before offering (wrong name shape, no input.digest, glossary siblings) are not "
+            f"counted, so this is not a count of directories under runs/.",
+            file=sys.stderr,
+        )
+    return result
 
 
 def _call_resume_setup(script: Path, payload: dict, dirs: dict, durable_root_str, plugin_root_str) -> dict:
@@ -3268,6 +3434,126 @@ def fresh_disp() -> str:
 
 def translate_dispatch_token(run_id: str, seg: str) -> str:
     return f"{run_id}:{seg}"
+
+
+def draft_token_owner(seg: str, segments_dir: Path) -> "str | None":
+    """#458. The RUN_ID that `seg`'s draft on disk is stamped for, or None
+    when there is no draft, it cannot be read or parsed, or its
+    `dispatch_token` names no owner.
+
+    The PARSE is byte-for-byte claim_record.py's own `draft_owner_run_id()`
+    -- which is itself byte-for-byte select_segments.py's `draft_run_id()`
+    and draft_ready.py's `_claim_run_id()`, duplicated per this project's
+    "no shared lib between self-contained scripts" convention. Do not
+    "simplify" it back to `split(":", 1)[0]`: that returns a TRUTHY owner
+    for `"RUN-A"` and `"RUN-A:"`, which all three peers reject, and a guard
+    disagreeing with the three components that decide ownership everywhere
+    else is worse than no guard -- here it would refuse a pinned invocation
+    over a draft that, to every other reader in this plugin, names nobody.
+    (codex code-review round 1, MAJOR: the first cut of this function did
+    exactly that, and also accepted `"../escape:seg01"` as an owner.)
+    `partition`, not `rsplit`: a seg id may itself contain a colon
+    (`FRONTBACK:errata_02`), so only the FIRST separator delimits the run id.
+
+    The owner is additionally required to be a SAFE run id by this file's own
+    validate_run_id() -- the same allowlist every other run id here passes
+    before it is compared or spliced. An unsafe prefix is not an owner this
+    function will report; it is a draft whose ownership cannot be
+    established.
+
+    None means "no owner this function can establish", NEVER "unowned" --
+    every caller must treat it as "no contradiction found", not as
+    permission. That asymmetry is the whole safety property: the gate below
+    refuses only on a token it positively parsed into a DIFFERENT, valid
+    run, so a read failure can never manufacture a refusal, and
+    (deliberately) can never manufacture an approval either, because the
+    pre-existing `draft_ready.py --expect-token` gate downstream still sees
+    the draft."""
+    draft_path = segments_dir / f"{seg}.draft.json"
+    try:
+        obj = json.loads(draft_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        # codex code-review round 1, MINOR: read_text() raises
+        # UnicodeDecodeError -- a ValueError, NOT an OSError -- on a draft
+        # that is not valid UTF-8. Uncaught it escaped to run()'s generic
+        # handler and aborted the whole pinned invocation with exit 2,
+        # contradicting this function's own "None on a read failure"
+        # contract in the one direction that costs the operator every
+        # OTHER selected segment.
+        return None
+    if not isinstance(obj, dict):
+        return None
+    token = obj.get("dispatch_token")
+    if not isinstance(token, str):
+        return None
+    run_id, sep, rest = token.partition(":")
+    if not sep or not run_id or not rest:
+        return None
+    if validate_run_id(run_id) is not None:
+        return None
+    return run_id
+
+
+def refuse_pinned_run_over_foreign_drafts(segs: list, run_id: str, segments_dir: Path) -> None:
+    """#458 (codex plan round 3, MAJOR). Under a pin ONLY, refuse the whole
+    invocation when any SELECTED segment's draft is stamped for a different
+    run -- before a single segment is dispatched.
+
+    The branch this closes is pre-existing and was reachable long before the
+    pin: derive_next_action() gates the draft with `draft_ready.py
+    --expect-token translate_dispatch_token(run_id, seg)`, and a token
+    naming another run fails that gate and falls through to
+    `{"action": "translate"}`, overwriting the draft and exiting 0.
+    claim_record.py permits a foreign token when no claim record exists, so
+    nothing downstream stops it either.
+
+    What --resume-from-run-id adds is a SECOND route into it, and that route
+    is the flag's own headline use case: #458's scenario is a batch split
+    across two run namespaces, so the operator pins the older run to reach
+    its stranded segments and every OTHER selected segment -- the ones
+    stamped for the newer run -- is silently retranslated. Shipping the pin
+    without this gate would mean the fix for "work claimed under the wrong
+    run" destroys work under the wrong run.
+
+    ONE EXCEPTION, and it is not a hole (codex code-review round 1, MINOR):
+    on a `--from-cap`/`--from-converged`/`--from-stalled` invocation, Step 1
+    has ALREADY re-stamped every ADMITTED draft's dispatch_token to this run
+    (select_segments.py's D4/D9 write) by the time this gate runs, so an
+    admitted draft can never look foreign here. That is the claim's whole
+    purpose -- admission is the authorized transfer of a draft between runs
+    -- and it is stated rather than left for a reader to discover: what this
+    gate protects on a claim invocation is the segments the claim did NOT
+    admit.
+
+    Deliberately PINNED-ONLY. The unpinned path keeps today's behaviour
+    byte for byte: a pin is a declared statement about which run this
+    invocation belongs to, so a draft belonging to another run contradicts
+    something the operator actually said. Unpinned there is no such
+    statement, and changing that path is out of this issue's scope.
+
+    Refuses the WHOLE invocation rather than skipping the offending
+    segments: a gate that refuses before the loop cannot half-dispatch, and
+    silently dropping ids from a set the operator named is the failure mode
+    this file spends most of its refusals avoiding."""
+    foreign = []
+    for seg in segs:
+        owner = draft_token_owner(seg, segments_dir)
+        if owner is not None and owner != run_id:
+            foreign.append((seg, owner))
+    if not foreign:
+        return
+    detail = ", ".join(f"{seg} (stamped for {owner})" for seg, owner in foreign)
+    fatal(
+        f"--resume-from-run-id {run_id!r}: {len(foreign)} selected segment(s) carry a draft "
+        f"stamped for a DIFFERENT run: {detail}. Dispatching them under {run_id!r} would "
+        f"retranslate those drafts and discard whatever they hold, because a draft whose "
+        f"dispatch_token names another run fails this driver's own token gate and falls through "
+        f"to translate. Nothing was dispatched. Name only the ids that belong to this run with "
+        f"--only-segs, or re-run without --resume-from-run-id.",
+        exit_code=1,
+        pinned_run_id=run_id,
+        foreign_drafts=[{"seg": seg, "run_id": owner} for seg, owner in foreign],
+    )
 
 
 def review_dispatch_token(run_id: str, seg: str, round_label: str) -> str:
@@ -5726,6 +6012,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--resume-from-run-id",
+        default=None,
+        metavar="RUN_ID",
+        help=(
+            "#458: resolve this invocation's resume-integrity RUN_ID against "
+            "RUN_ID ALONE, instead of against every candidate "
+            "_resumable_run_id_candidates() would discover. Pins WHICH "
+            "candidate is offered; it does NOT bypass the digest comparison "
+            "-- resume_setup.py remains the sole authority on whether "
+            "resuming is safe, exactly as when this flag is absent. Without "
+            "it the newest digest-matching run always wins, so a prior run "
+            "sharing a digest with a newer one cannot be reached at all, and "
+            "an invocation whose payload matches NO candidate silently mints "
+            "a fresh RUN_ID and claims every named segment under it. "
+            "Refusals under a pin: exit 1 when runs/RUN_ID is not a "
+            "directory or carries no regular input.digest (an established "
+            "state, so a gate refusal), when the pinned run's digest does "
+            "NOT match this invocation (refused rather than minting a fresh "
+            "id nobody asked for), or when a SELECTED segment's draft is "
+            "stamped for a different run (scope with --only-segs -- the pin "
+            "does not adopt another run's drafts); exit 2 for an unsafe id "
+            "or a filesystem state this script could not establish."
+        ),
+    )
+    parser.add_argument(
         "--durable-root",
         default=None,
         metavar="PATH",
@@ -5806,6 +6117,15 @@ def run(args, dirs: dict) -> dict:
                 if problem is not None:
                     fatal(f"{flag_name}: unsafe segment id: {problem}", exit_code=2)
 
+    # #458: same fail-fast shape, before the pinned id is ever used to build
+    # runs/<ID> or handed to resume_setup.py. exit 2 -- an id this script
+    # refuses to spell is a USAGE error, not a gate refusing an established
+    # state (see this file's own exit-code contract in the module docstring).
+    if args.resume_from_run_id is not None:
+        problem = validate_run_id(args.resume_from_run_id)
+        if problem is not None:
+            fatal(f"--resume-from-run-id: {problem}", exit_code=2)
+
     lock_fd = acquire_driver_lock(durable_root, session_id=session_id)
     append_journal(durable_root, session_id, {"type": "driver_started", "pid": os.getpid()})
     try:
@@ -5871,6 +6191,7 @@ def run(args, dirs: dict) -> dict:
             run_result = resolve_run_id(
                 dirs, translate_cfg=translate_cfg,
                 plugin_root_str=args.plugin_root, durable_root_str=args.durable_root,
+                pinned_run_id=args.resume_from_run_id,
             )
             run_id = accepted_run_id(run_result)
             append_journal(
@@ -5994,6 +6315,7 @@ def run(args, dirs: dict) -> dict:
             run_result = resolve_run_id(
                 dirs, translate_cfg=translate_cfg,
                 plugin_root_str=args.plugin_root, durable_root_str=args.durable_root,
+                pinned_run_id=args.resume_from_run_id,
             )
             run_id = accepted_run_id(run_result)
             append_journal(
@@ -6002,6 +6324,15 @@ def run(args, dirs: dict) -> dict:
                     "type": "run_id_resolved", "run_id": run_id,
                     "resume": run_result.get("resume"), "before_selection": False,
                 },
+            )
+
+        # #458. Placed here on purpose: run_id is final for BOTH paths by
+        # now (the claim path resolved it before the selector, the ordinary
+        # path just above), `segs` is the final selected set, and nothing
+        # has been dispatched yet.
+        if args.resume_from_run_id is not None:
+            refuse_pinned_run_over_foreign_drafts(
+                segs, run_id, durable_root / "segments",
             )
 
         companion_path = resolve_companion_path(dirs, node_bin=args.node)
