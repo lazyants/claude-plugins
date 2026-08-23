@@ -1873,8 +1873,9 @@ def test_gate_fires_even_though_the_ledger_status_is_no_longer_converged(tmp_pat
 #
 # The bug these cover: the two halves of the sentinel contract disagreed about
 # the same path. The reader used `Path.exists()`, which FOLLOWS symlinks (a
-# dangling link reads as absent) and, since Python 3.13, swallows every OSError
-# and returns False (EACCES/ESTALE read as absent). The writer used
+# dangling link reads as absent) and, from Python 3.14, swallows every OSError
+# and returns False (EACCES/ESTALE read as absent; below 3.14 the same call
+# re-raises instead, which that reader handled no better). The writer used
 # `os.open(O_CREAT|O_EXCL)`, which raises EEXIST for ANY existing entry --
 # dangling symlink and directory included -- and treated that as "already
 # marked". So a segment could be recorded as converged while the dispatch gate
@@ -1988,10 +1989,25 @@ def test_a_non_enoent_lstat_error_is_ambiguous_not_absent(tmp_path):
     with a mode-000 parent directory, the same shape a stale NFS handle or a
     permissions accident produces.
 
-    Since Python 3.13 `Path.exists()` swallows every OSError and returns
-    False, so the pre-fix reader called such a segment 'never converged' and
-    dispatched it. That divergence is asserted here directly, on one and the
-    same path, rather than described.
+    `Path.exists()` -- what the pre-fix reader called -- cannot answer this
+    lookup correctly on ANY supported interpreter, and the two ways it fails
+    are version-dependent: from Python 3.14 it swallows every OSError and
+    returns False, so the pre-fix reader called such a segment 'never
+    converged' and dispatched it; on 3.10-3.13 it re-raises instead, which
+    that same reader did not handle either. Measured on one and the same
+    mode-000 path as a non-root uid: 3.10.21, 3.11.15, 3.12.14 and 3.13.15
+    all raise EACCES out of `exists()`; 3.14.7 answers False. (The shipped
+    predicate's own docstring still dates that to 3.13, identically in all
+    five SENTINEL_SCRIPTS copies, and three further sites repeat it. The
+    byte-for-byte pin means correcting one means correcting all five, and
+    one of the five is a PLUGIN_BUNDLE_MEMBERS entry -- so the correction
+    moves plugin_bundle_hash and is parked on issue #679, not made here.)
+
+    The divergence from the shipped predicate is asserted here directly, on
+    one and the same path, rather than described -- in the form every
+    supported interpreter shares, because pinning the 3.14 spelling of it
+    unconditionally is what made this test red on every version below it
+    (issue #467).
 
     DELIBERATELY at the predicate level, not end-to-end, and that is not the
     awkwardness being dodged -- it is the only way this arm can prove
@@ -2007,7 +2023,7 @@ def test_a_non_enoent_lstat_error_is_ambiguous_not_absent(tmp_path):
     Fails on the unfixed code at the `classify_ever_converged_sentinel`
     lookup itself (AttributeError -- the fail-closed predicate does not
     exist), and the `exists()` assertion below documents what the code did
-    instead: reported absent."""
+    instead: reported absent on 3.14+, crashed below it."""
     import os as _os
 
     reader = _load_script_module("select_segments.py")
@@ -2018,11 +2034,28 @@ def test_a_non_enoent_lstat_error_is_ambiguous_not_absent(tmp_path):
 
     _os.chmod(locked, 0o000)
     try:
-        assert not sentinel.exists(), (
-            "precondition: Path.exists() must report False for this EACCES "
-            "lookup on this interpreter, or the test is not exercising the "
-            "reported bug (on 3.8-3.12 exists() re-raised instead)"
+        # Fixture precondition, via the real syscall -- and it is the very
+        # call the shipped predicate makes (`path.lstat()`, the no-`dir_fd`
+        # branch). Measured raising EACCES on 3.10.21, 3.11.15, 3.12.14,
+        # 3.13.15 and 3.14.7 alike; that invariance, not anything about
+        # `exists()`, is what this test's correctness rests on.
+        with pytest.raises(PermissionError):
+            sentinel.lstat()
+
+        # The pre-fix reader's `Path.exists()` on that same path, captured
+        # rather than asserted straight, so that BOTH of its outcomes are
+        # admitted (the version rule is in the docstring) instead of one of
+        # them being pinned -- which is what made this test interpreter-bound.
+        try:
+            exists_said = sentinel.exists()
+        except OSError:
+            exists_said = "raised"
+        assert exists_said in (False, "raised"), (
+            "precondition: Path.exists() must not answer 'present' for this "
+            "EACCES lookup, or the test is not exercising the reported bug "
+            f"-- got {exists_said!r}"
         )
+
         state, detail = reader.classify_ever_converged_sentinel(sentinel)
     finally:
         _os.chmod(locked, 0o755)
