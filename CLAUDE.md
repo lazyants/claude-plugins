@@ -69,9 +69,14 @@ directly comparable to what a local run would have produced, which is the point 
 - The pytest step also passes `--durations=25`, so every run reports where its time went instead
   of leaving the question to be re-investigated by hand.
 
-**Acceptance for any change to how the suite is invoked:** the counters must stay
-`6310 passed, 3 skipped, 2 xfailed`. A parallel or sharded run that collects fewer is not faster,
-it is quieter.
+**Acceptance for any change to how the suite is invoked:** `passed + skipped + xfailed` must
+equal what `pytest --collect-only -q` reports on the same tree. A parallel or sharded run that
+collects fewer is not faster, it is quieter.
+
+Do **not** pin an absolute total here. A `pull_request` run builds a fresh merge ref against
+whatever `main` is at dispatch, and sibling releases land constantly — three LT releases landed
+during the hour this CI was written, moving the total 6310 → 6361 with no test change of ours.
+An absolute number turns that into a false alarm; the collected-vs-executed identity does not.
 
 ## Repo conventions
 
