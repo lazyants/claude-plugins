@@ -1408,6 +1408,156 @@ def test_adopt_pending_captures_rejecting_gate_output(tmp_path, monkeypatch):
     assert not os.path.exists(job.pending)   # still discarded, per #213's existing contract
 
 
+# --------------------------------------------------------------------------- #
+# #399, second half: safe_adopt() -- the gate that refuses a PRE-EXISTING
+# canonical -- records its own output in job.adopt_rejection, a field nothing
+# else in the run may overwrite. Not error_detail: safe_adopt() runs first and
+# four later stages write error_detail, and a refused adoption is not an error
+# of a run that goes on to finish ok.
+# --------------------------------------------------------------------------- #
+def test_safe_adopt_translate_ready_gate_rejection_captured(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.canonical).write_text("{}", encoding="utf-8")
+    assert job.adopt_rejection is None   # precondition
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (1, "", "[c001] token mismatch: expected RUN:c001"),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.safe_adopt() is False
+    assert job.adopt_rejection == "draft_ready.py: [c001] token mismatch: expected RUN:c001"
+    assert calls == ["draft_ready.py"]       # quality gate not reached
+    assert job.error_detail is None, (
+        "an adoption refusal must NOT ride error_detail -- that field belongs to the "
+        "stages that run after this one"
+    )
+
+
+def test_safe_adopt_translate_quality_gate_rejection_captured(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.canonical).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (0, "", ""),
+        "validate_draft.py": (1, "[seg66] FAIL (1 defects):\n   - [PARA:seg66:0100] empty translation", ""),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.safe_adopt() is False
+    assert job.adopt_rejection == (
+        "validate_draft.py: [seg66] FAIL (1 defects):\n   - [PARA:seg66:0100] empty translation"
+    )
+    assert calls == ["draft_ready.py", "validate_draft.py"]
+    assert job.error_detail is None
+
+
+def test_safe_adopt_review_gate_rejection_captured(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="review")
+    Path(job.canonical).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder_with_output({
+        "review_ready.py": (1, "[c001] review is stale: draft_sha1 mismatch", ""),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.safe_adopt() is False
+    assert job.adopt_rejection == "review_ready.py: [c001] review is stale: draft_sha1 mismatch"
+    assert calls == ["review_ready.py"]
+
+
+def test_safe_adopt_pass_never_captures_despite_loud_gates(tmp_path, monkeypatch):
+    """The PASSING gates here print conspicuously on both streams. An
+    implementation that captured unconditionally would be invisible to a test
+    whose passing gates print nothing (the older helper's default), so the
+    noise is what makes this a real mutation check."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.canonical).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (0, "[c001] OK: token matches", "warning: 2 notes[] entries"),
+        "validate_draft.py": (0, "[c001] OK (0 defects)", "checked 41 blocks"),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.safe_adopt() is True
+    assert calls == ["draft_ready.py", "validate_draft.py"]
+    assert job.adopt_rejection is None, "a PASSING gate's output must never be captured"
+    assert job.error_detail is None
+
+
+def test_safe_adopt_absent_canonical_captures_nothing(tmp_path, monkeypatch):
+    """No canonical is the ORDINARY first-translation path, not a refusal: no gate
+    runs, so there is no gate output to attribute and nothing to diagnose. (This
+    test deliberately does NOT create the canonical the others do.)"""
+    job = _mkjob(tmp_path, kind="translate")
+    gate, calls = _gate_recorder_with_output({})
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.safe_adopt() is False
+    assert calls == []
+    assert job.adopt_rejection is None
+
+
+def test_safe_adopt_unrunnable_gate_captures_nothing(tmp_path, monkeypatch):
+    """A gate that could not RUN at all (_gate -> None: exhausted budget, timeout,
+    spawn failure) refuses the adoption like any other failure, but there is no
+    output to record -- and inventing one would report a refusal that never
+    happened."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.canonical).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(job, "_gate", _gate_none)   # the file's own could-not-run stub
+    assert job.safe_adopt() is False
+    assert job.adopt_rejection is None
+
+
+def test_safe_adopt_rejection_is_truncated_with_explicit_bound_marker(tmp_path, monkeypatch):
+    """The adoption refusal lands in the durable joblog, so it is bounded by the
+    same _GATE_OUTPUT_CAP as every other captured gate output."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.canonical).write_text("{}", encoding="utf-8")
+    long_output = "X" * (job._GATE_OUTPUT_CAP + 500)
+    gate, calls = _gate_recorder_with_output({"draft_ready.py": (1, long_output, "")})
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.safe_adopt() is False
+    assert job.adopt_rejection is not None
+    assert ("... [truncated at %d chars]" % job._GATE_OUTPUT_CAP) in job.adopt_rejection
+    assert long_output not in job.adopt_rejection
+
+
+def test_capture_gate_rejection_empty_output_never_clears_an_existing_detail(tmp_path):
+    """A gate that printed NOTHING leaves error_detail exactly as it was. The
+    compound path is real: adopt_pending() captures a rejected pending's output,
+    run() launches fresh, and the fresh attempt is then rejected by a SILENT gate
+    -- clearing here would destroy the one diagnostic the operator has, and the
+    empty-output test above cannot see it (it starts from None)."""
+    job = _mkjob(tmp_path)
+    job.error_detail = "validate_draft.py: [c001] FAIL: dangling FNREF_2"
+    job._capture_gate_rejection("draft_ready.py", SimpleNamespace(
+        returncode=1, stdout="", stderr=""))
+    assert job.error_detail == "validate_draft.py: [c001] FAIL: dangling FNREF_2"
+
+
+def test_run_adopt_rejection_survives_a_later_launch_failure_into_the_joblog(tmp_path, monkeypatch):
+    """END-TO-END: the captured refusal must reach the DURABLE terminal joblog --
+    the only record that survives the detached `nohup ... >/dev/null` launch --
+    and must still be there after a later stage has written its OWN diagnostic
+    into error_detail. safe_adopt() runs for real here; only hygiene() and the
+    launch subprocess are stubbed."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    Path(job.canonical).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (1, "[c001] token mismatch: expected RUN:c001", ""),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    # Real launch(), stubbed subprocess: this is what actually sets error_detail
+    # (a bare `launch -> False` patch would leave it None and prove nothing).
+    monkeypatch.setattr(job, "_run", lambda argv, timeout: SimpleNamespace(
+        returncode=1, stdout="", stderr="companion: usage limit reached"))
+    assert job.run() == 1
+    assert job.reason == "launch-failed"
+    assert job.error_detail == "companion: usage limit reached"   # the LATER stage wrote this
+    rec = json.loads(Path(job.joblog).read_text(encoding="utf-8"))
+    assert rec["status"] == "terminal"
+    assert rec["error_detail"] == "companion: usage limit reached"
+    assert rec["adopt_rejection"] == "draft_ready.py: [c001] token mismatch: expected RUN:c001", (
+        "the adoption refusal must survive every later stage and reach the durable "
+        f"joblog, got {rec.get('adopt_rejection')!r}"
+    )
+
+
 def test_validate_attempt_review_uses_review_ready(tmp_path, monkeypatch):
     job = _mkjob(tmp_path, kind="review")
     _seed_sandbox(tmp_path, job)
