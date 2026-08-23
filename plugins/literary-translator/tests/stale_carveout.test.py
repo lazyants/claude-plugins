@@ -61,6 +61,9 @@ SCHEMAS_SRC_DIR = ASSETS_DIR / "schemas"
 
 LEDGER_MERGE_SRC = SCRIPTS_SRC_DIR / "ledger_merge.py"
 ASSEMBLE_SRC = SCRIPTS_SRC_DIR / "assemble.py"
+# #492: assemble.py imports cache_key.py as a third sibling and recomputes
+# every content-affecting field from the live root.
+CACHE_KEY_REAL_SRC = SCRIPTS_SRC_DIR / "cache_key.py"
 OUTPUT_RESOLVE_SRC = SCRIPTS_SRC_DIR / "output_resolve.py"
 RENDER_OBSIDIAN_SRC = SCRIPTS_SRC_DIR / "render_obsidian.py"
 VALIDATE_DRAFT_SRC = SCRIPTS_SRC_DIR / "validate_draft.py"
@@ -518,9 +521,72 @@ def default_profile():
     }
 
 
+PARTICLE_CONFIG_NAME = "fr_test.json"
+
+
+def _write_cache_key_inputs(root: Path, scripts_dir: Path) -> None:
+    """#492: the durable-root files cache_key.py's own field computers read.
+    assemble.py now recomputes every content-affecting cache-key field from
+    the live root and refuses on a mismatch, so this fixture must carry real
+    inputs and a real stored key. Restated from tests/final_audit.test.py's
+    make_durable_root() rather than imported -- house convention is one
+    self-contained file per test module. Only style_bible.md's two
+    STYLE_CONTRACT markers are load-bearing; `runs/.plugin_bundle_hash` is the
+    marker Step 0a writes and cache_key.py reads back rather than re-hashing
+    the bundle."""
+    # Fill a gap, never clobber: whichever of these the caller already staged
+    # as the REAL module wins. cache_key.py only needs the paths to exist and
+    # to hash stably, so deferring to a real copy serves both purposes -- and a
+    # placeholder written over a real dependency fails far from its cause
+    # (verified on assemble_link_groups_wiring.test.py, whose #497 cases need
+    # bootstrap_names.extract_candidate_spans).
+    for _name, _body in (("bootstrap_names.py", b"# bootstrap_names.py fixture\n"),
+                         ("segpack.py", b"# segpack.py fixture\n")):
+        if not (scripts_dir / _name).exists():
+            (scripts_dir / _name).write_bytes(_body)
+    (root / "style_bible.md").write_bytes(
+        b"# Style Bible\n\n<!-- STYLE_CONTRACT_BEGIN -->\n"
+        b"Formal register, Oxford comma.\n<!-- STYLE_CONTRACT_END -->\n"
+    )
+    (root / "translate_TASK.md").write_bytes(b"TRANSLATE TASK PROMPT v1\n")
+    (root / "review_TASK.md").write_bytes(b"REVIEW TASK PROMPT v1\n")
+    (root / "extract.py").write_bytes(b"# extract.py fixture v1\n")
+    (root / "a.txt").write_bytes(b"Ceci est un texte source de test.\n")
+    languages_dir = root / "languages"
+    languages_dir.mkdir(exist_ok=True)
+    (languages_dir / PARTICLE_CONFIG_NAME).write_text(
+        json.dumps({"PARTICLES": ["de"], "STOPWORDS": ["le"], "has_elision": False,
+                    "ELISION_RE": None}),
+        encoding="utf-8",
+    )
+    (root / "schemas").mkdir(exist_ok=True)
+    for _name in ("draft.schema.json", "review.schema.json", "segpack.schema.json"):
+        (root / "schemas" / _name).write_bytes(b"{}\n")
+    runs_dir = root / "runs"
+    runs_dir.mkdir(exist_ok=True)
+    (runs_dir / ".plugin_bundle_hash").write_text(
+        "test-plugin-bundle-marker-v1\n", encoding="utf-8"
+    )
+
+
+def real_cache_key(root: Path, seg: str) -> dict:
+    """The segment's REAL 15-field cache key, from the SHIPPED cache_key.py run
+    against this fixture root -- never hand-typed, so it cannot drift from what
+    assemble.py recomputes at run time."""
+    proc = subprocess.run(
+        [sys.executable, str(root / "scripts" / "cache_key.py"), "--seg", seg],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"fixture setup: cache_key.py --seg {seg} failed:\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    return json.loads(proc.stdout)
+
+
 def make_root(tmp_path) -> Path:
     """A bare durable_root for assemble.py: real copies of assemble.py + its
-    three sibling scripts, profile.yml + ownership marker, an empty
+    four sibling scripts, profile.yml + ownership marker, an empty
     canon.json. Manifest/segpack/draft/ledger content is written per-test
     by the helpers below (mirrors tests/assemble.test.py's own make_root(),
     trimmed to this file's fixed defaults -- no test here varies verse
@@ -528,7 +594,8 @@ def make_root(tmp_path) -> Path:
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
-    for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC):
+    for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
+                CACHE_KEY_REAL_SRC):
         shutil.copy2(src, scripts_dir / src.name)
 
     profile = default_profile()
@@ -543,6 +610,8 @@ def make_root(tmp_path) -> Path:
     )
     (root / "segments").mkdir()
     (root / "runs").mkdir()
+    # #492: last, so it can reuse the runs/ dir just created above.
+    _write_cache_key_inputs(root, scripts_dir)
     return root
 
 
@@ -643,7 +712,11 @@ def converged_ledger_record(root, seg, reviewed_draft_sha1_override=None) -> dic
         "timestamp": "2026-01-01T00:00:00+00:00",
         "status": "converged",
         "rounds": 1,
-        "cache_key": DUMMY_CACHE_KEY,
+        # #492: a REAL key -- this record is manifest-required, so assembly
+        # recomputes and compares its content-affecting fields. The two
+        # DUMMY_CACHE_KEY uses that remain below are both OUT-OF-MANIFEST
+        # entries, which the live check never reaches by design.
+        "cache_key": real_cache_key(root, seg),
         "n_blocks": 1,
         "n_footnotes": 0,
         "n_verses": 0,
@@ -1216,9 +1289,36 @@ def plant_probe_stub(root: Path, script_name: str) -> "tuple[Path, Path]":
     all, independent of what assemble.py does with its return code."""
     marker_path = root / "runs" / f".probe_invoked.{Path(script_name).stem}"
     stub_path = root / "scripts" / script_name
-    stub_path.write_text(
-        PROBE_STUB_TEMPLATE.format(marker_name=marker_path.name), encoding="utf-8"
-    )
+    if script_name == "cache_key.py":
+        # #492: assemble.py now IMPORTS cache_key.py as a sibling, so a stub
+        # that replaces the module's contents would break the import rather
+        # than probe for a subprocess -- and the invariant this test pins
+        # (assembly shells out to nothing) is exactly as true as before, and
+        # exactly as worth pinning. So the probe here is the REAL module with
+        # a marker write injected into its __main__ guard: importable in every
+        # respect, and still recording any invocation as a child process, with
+        # main()'s own behaviour left intact so a shell-out that inspects the
+        # child's output is not perturbed either.
+        real_source = CACHE_KEY_REAL_SRC.read_text(encoding="utf-8")
+        guard = 'if __name__ == "__main__":\n    sys.exit(main())'
+        assert guard in real_source, (
+            "cache_key.py's __main__ guard is not the shape this probe injects "
+            "into -- re-derive it before trusting this test"
+        )
+        stub_path.write_text(
+            real_source.replace(
+                guard,
+                'if __name__ == "__main__":\n'
+                f'    Path(__file__).resolve().parent.parent.joinpath("runs", "{marker_path.name}")'
+                '.write_text("invoked", encoding="utf-8")\n'
+                "    sys.exit(main())",
+            ),
+            encoding="utf-8",
+        )
+    else:
+        stub_path.write_text(
+            PROBE_STUB_TEMPLATE.format(marker_name=marker_path.name), encoding="utf-8"
+        )
     stub_path.chmod(stub_path.stat().st_mode | 0o111)
     return stub_path, marker_path
 
@@ -1285,8 +1385,14 @@ def test_assembly_gains_no_write_and_no_subprocess(tmp_path):
         # marker, or its absence below would be vacuously green regardless
         # of whether assembly ever invokes it -- the stub would be broken,
         # not the thing under test.
+        # cache_key.py's probe IS the real module (#492), so its sanity run
+        # needs the arguments the real CLI requires; select_segments.py's is a
+        # bare stub and takes none.
+        sanity_argv = [sys.executable, str(stub_path)]
+        if script_name == "cache_key.py":
+            sanity_argv += ["--seg", "seg01"]
         sanity = subprocess.run(
-            [sys.executable, str(stub_path)], capture_output=True, text=True, timeout=10
+            sanity_argv, capture_output=True, text=True, timeout=10
         )
         assert sanity.returncode == 0 and marker_path.is_file(), (
             f"probe stub {script_name} failed its own sanity check:\n"
@@ -1744,6 +1850,12 @@ def test_malformed_manifest_with_a_converged_segment_present_still_malformed_man
     WRONG reason (an earlier raise, not assert_project_complete()'s own),
     so it must be read alongside the two cases above, not in isolation."""
     root = make_root(tmp_path)
+    # The scaffold is written first and then DELIBERATELY overwritten with the
+    # malformed manifest below: since #492 the converged record's stored
+    # cache_key is computed for real, which needs a well-formed manifest and a
+    # segpack to exist at fixture-build time. What the test asserts is
+    # unchanged -- assembly still sees only the malformed manifest.
+    write_book_scaffold(root, ["seg01"])
     write_segment_draft(root, "seg01")
     write_ledger_segments(root, {"seg01": converged_ledger_record(root, "seg01")})
     _write_manifest_segments(root, [])  # malformed: empty segments array

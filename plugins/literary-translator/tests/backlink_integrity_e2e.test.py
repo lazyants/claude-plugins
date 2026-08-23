@@ -56,6 +56,7 @@ import yaml
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_SRC_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
+TEMPLATES_SRC_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
 SCHEMAS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "schemas"
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "backlink_e2e"
 
@@ -69,6 +70,9 @@ _REQUIRED_SCRIPTS = (
     "assemble.py", "output_resolve.py", "render_obsidian.py", "validate_draft.py",
     "occurrence_targets.py", "validate_backlinks.py", "bootstrap_names.py",
     "occ_index.py", "canon_senses.py",
+    # #492: assemble.py imports cache_key.py as a sibling and
+    # recomputes every content-affecting field from the live root.
+    "cache_key.py", "segpack.py",
 )
 
 
@@ -122,23 +126,11 @@ case_spec = _load_module("backlink_e2e_case_spec", FIXTURE_DIR / "case_spec.py")
 # tests/assemble.test.py (see module docstring), extended with canon_map.
 # ---------------------------------------------------------------------------
 
-DUMMY_CACHE_KEY = {
-    "input_sha1": "a" * 40,
-    "style_contract_hash": "b" * 40,
-    "used_terms_hash": "c" * 40,
-    "pipeline_version": "v1",
-    "schema_hash": "d" * 40,
-    "prompt_hash": "e" * 40,
-    "agent_config_hash": "f" * 40,
-    "profile_semantics_hash": "0" * 40,
-    "particle_config_hash": "1" * 40,
-    "source_extraction_hash": "2" * 40,
-    "source_input_hash": "3" * 40,
-    "derivation_bundle_hash": "4" * 40,
-    "verse_map_hash": "5" * 40,
-    "note_map_hash": "6" * 40,
-    "plugin_bundle_hash": "7" * 40,
-}
+# #492 retired the hand-written DUMMY_CACHE_KEY: assembly now recomputes
+# every content-affecting cache-key field from the live durable_root, so a
+# fabricated stored key is a guaranteed refusal rather than an inert
+# schema-shaped placeholder. real_cache_key() below produces the genuine one
+# by running the shipped cache_key.py.
 
 
 def write_manifest(root, blocks, segments, footnotes=None, verse_store=None, frontback=None):
@@ -220,6 +212,53 @@ def write_draft(root, seg, blocks, footnotes=None, verses=None, names=None, note
     return draft_bytes
 
 
+def _write_cache_key_inputs(root: Path) -> None:
+    """#492: the durable-root files cache_key.py's own field computers read
+    that this fixture did not need before. Its languages/, schemas/ and
+    canon.json are already staged by the caller; these are the remainder.
+    Only style_bible.md's two STYLE_CONTRACT markers are load-bearing;
+    `runs/.plugin_bundle_hash` is the marker Step 0a writes and cache_key.py
+    reads back rather than re-hashing the bundle."""
+    (root / "style_bible.md").write_bytes(
+        b"# Style Bible\n\n<!-- STYLE_CONTRACT_BEGIN -->\n"
+        b"Formal register, Oxford comma.\n<!-- STYLE_CONTRACT_END -->\n"
+    )
+    # The contract-version marker line is COPIED from each shipped template's
+    # own first line rather than hardcoded here: this root is also fed to
+    # profile_validate.py (test_staged_profile_is_schema_valid), which rejects
+    # a missing or stale marker, and a literal "3"/"2" here would go stale the
+    # next time either contract version is bumped.
+    for _name, _template in (
+        ("translate_TASK.md", "translate_TASK.template.md"),
+        ("review_TASK.md", "review_TASK.template.md"),
+        ("extract.py", "extract.py.template"),
+    ):
+        _marker = (TEMPLATES_SRC_DIR / _template).read_text(
+            encoding="utf-8"
+        ).splitlines()[0]
+        (root / _name).write_text(f"{_marker}\nfixture body\n", encoding="utf-8")
+    # manifest.source_inputs names this file relatively (see write_manifest).
+    (root / "source.txt").write_bytes(b"Ceci est un texte source de test.\n")
+    (root / "runs" / ".plugin_bundle_hash").write_text(
+        "test-plugin-bundle-marker-v1\n", encoding="utf-8"
+    )
+
+
+def real_cache_key(root: Path, seg: str) -> dict:
+    """The segment's REAL 15-field cache key, from the SHIPPED cache_key.py run
+    against this fixture root -- never hand-typed, so it cannot drift from what
+    assemble.py recomputes at run time."""
+    proc = subprocess.run(
+        [sys.executable, str(root / "scripts" / "cache_key.py"), "--seg", seg],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"fixture setup: cache_key.py --seg {seg} failed:\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    return json.loads(proc.stdout)
+
+
 def write_ledger(root, converged_segs) -> None:
     segments = {}
     for seg in converged_segs:
@@ -229,7 +268,7 @@ def write_ledger(root, converged_segs) -> None:
             "timestamp": "2026-01-01T00:00:00+00:00",
             "status": "converged",
             "rounds": 1,
-            "cache_key": DUMMY_CACHE_KEY,
+            "cache_key": real_cache_key(root, seg),
             "n_blocks": 1,
             "n_footnotes": 0,
             "n_verses": 0,
@@ -292,6 +331,7 @@ def stage_fixture(tmp_path: Path, mentions_enabled: bool, label: str) -> Path:
 
     (root / "segments").mkdir()
     (root / "runs").mkdir()
+    _write_cache_key_inputs(root)
     for seg, pack_kwargs in case_spec.SEGPACKS.items():
         write_segpack(root, seg, **pack_kwargs)
     for seg, draft_kwargs in case_spec.DRAFTS.items():

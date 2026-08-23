@@ -794,6 +794,18 @@ here, follow the linked doc:
   global `style_contract_hash` cannot distinguish that from an addition, and
   that is exactly why this is an operator decision rather than a default.
   Undeclared — or declared `false` — every gate behaves as it always did.
+  **Since #492 the flip no longer needs a merge to have run since the edit —
+  in the direction that ships.**
+  It used to: the `converged → stale` reclassification is written by
+  `ledger_merge.py`, so an edit landing after the last merge left every record
+  saying `converged`, and running W9 without an intervening W7 assembled a book
+  whose prose no reviewer had judged under the current contract — silently, as
+  a successful run. W9 now re-derives the content-affecting cache-key fields
+  from the live root and compares them itself, so the same edit reaches the
+  same verdict on either ordering: refused without the declaration, admitted
+  and named with it (sentinel condition included). The reverse is untouched: a
+  record the ledger already calls `stale` still needs a merge before it can
+  ship, whatever the live bytes now say.
   The timing constraint is narrower than it was written here: it is NOT that
   the block only bites "after the last segment converges". **Every** unit that
   converged before the edit is flipped and blocked, whenever the edit lands;
@@ -3222,6 +3234,15 @@ carve-outs (the #491 machinery-only one and, when
 from the same merged ledger rather than trusting the summary. When either
 admits a unit, both name it — `stale_contract_admitted` in W7's summary,
 `contract_stale_admitted` in `assemble.py`'s, and a stderr block in each.
+One asymmetry since #492, and it is deliberate: W9 ALSO admits a contract-only
+drift it detects itself, by comparing the live inputs against each shipped
+record (same declaration, same sentinel condition). Such a unit is still
+`converged` in the merged ledger, so W7's summary — which reads that snapshot —
+has nothing to name yet. W9's list is therefore the authority on what THIS run
+shipped unjudged against the current contract, and may legitimately exceed
+W7's; re-running W7 after the merge brings the two back into step. The same
+holds for `validate_assembled.py` and `validate_conservation.py`, which derive
+their own lists from that snapshot too.
 Keep the declaration stable across the whole W7→W9 chain; toggling it between
 steps is the only way a normal run can make the two gates disagree about the
 same book. (They read the moved-field list from different authorities -- W7

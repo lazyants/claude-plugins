@@ -181,6 +181,38 @@ in `manifest.json`.
    decision the operator made, not one the tool inferred. The whole run is
    additionally gated on W7's `final-audit-summary.project_complete: true`
    (see Path 1 above) before assembly starts at all.
+2a. **Confirm the ledger snapshot against the LIVE inputs (#492).** Everything
+   in step 2 reads `runs/ledger.json` — the snapshot the last `ledger_merge.py`
+   run produced — so on its own it cannot see a content input edited since that
+   merge. Immediately after the completeness gate, `assemble.py` re-derives the
+   twelve content-affecting cache-key fields from the durable root by calling
+   `cache_key.py`'s own field computers, and compares them to every SHIPPED
+   record's stored `cache_key`. A moved field refuses with
+   `reason: stale_live_inputs`, naming each segment and each field, and tells
+   the operator to re-run the merge. The invariant is ONE-DIRECTIONAL, and
+   deliberately so: a record the snapshot still calls `converged` can no longer
+   ship on a merge that predates the edit. The pipeline does normally run W7
+   before W9, but nothing enforced the ordering, and getting it wrong produced
+   a finished-looking book rather than a halt. The reverse direction is NOT
+   rehabilitated and is not meant to be: a record the snapshot already calls
+   `stale` is refused by the completeness gate in step 2 before this check ever
+   runs, even where the live inputs have since reverted to the reviewed key.
+   That refusal is fail-closed and its remedy is one command (re-run W7);
+   re-deciding a reverted key here would make assembly a second admission
+   authority over a verdict `ledger_merge.py` owns, which is exactly the design
+   #492's own body records as tried and rejected.
+   Three things bound it. The machinery-only trio above is EXCLUDED — the check
+   is exactly the complement of that carve-out, so a plugin upgrade still
+   cannot strand a finished book. Only
+   segments the CURRENT manifest requires are checked, so a retained
+   out-of-manifest entry cannot newly block an assemblable book. And carve-out
+   (b) applies here identically, sentinel condition included: under the
+   declaration, a live drift whose only moved field is `style_contract_hash`
+   and whose `.ever_converged.<seg>` sentinel is not absent is admitted and
+   joins the same `contract_stale_admitted` list — which, being observed at
+   assembly time, may therefore name units that W7's own ledger-derived list
+   (and `validate_assembled.py`'s, and `validate_conservation.py`'s) does not
+   yet contain. It adds no write, no persisted artifact and no subprocess.
 3. For each block: translated text comes from `segments/{seg}.draft.json`;
    its manifest type and `source_html` presence decide `medium`
    (`html`|`plain`). A block whose `type` is `HEAD`, **or is listed in the

@@ -104,6 +104,11 @@ RENDER_OBSIDIAN_SRC = SCRIPTS_SRC_DIR / "render_obsidian.py"
 # assemble.py imports validate_draft.py as a sibling (profile loading, via
 # vd.load_profile()) -- must be copied alongside it in every fixture root.
 VALIDATE_DRAFT_SRC = SCRIPTS_SRC_DIR / "validate_draft.py"
+# #492: a third sibling import -- assemble.py re-derives every shipped
+# record's content-affecting cache-key fields from the LIVE durable_root and
+# compares them to the stored ones, so cache_key.py must be in every fixture
+# root too, and the fixture's stored key must be a REAL one.
+CACHE_KEY_SRC = SCRIPTS_SRC_DIR / "cache_key.py"
 
 assert ASSEMBLE_SRC.is_file(), (
     f"assemble.py not found at {ASSEMBLE_SRC} -- Phase 0 (contract §4-§7) "
@@ -112,33 +117,92 @@ assert ASSEMBLE_SRC.is_file(), (
 assert OUTPUT_RESOLVE_SRC.is_file(), f"output_resolve.py not found at {OUTPUT_RESOLVE_SRC}"
 assert RENDER_OBSIDIAN_SRC.is_file(), f"render_obsidian.py not found at {RENDER_OBSIDIAN_SRC}"
 assert VALIDATE_DRAFT_SRC.is_file(), f"validate_draft.py not found at {VALIDATE_DRAFT_SRC}"
+assert CACHE_KEY_SRC.is_file(), f"cache_key.py not found at {CACHE_KEY_SRC}"
 
 FN_PH_1 = "⟦FNREF_1⟧"
 FN_PH_2 = "⟦FNREF_2⟧"
 V_PH_A = "⟦VERSE_vA_abc12345⟧"
 
-# All 15 cache_key fields (see cache_key.py's own CACHE_KEY_FIELD_ORDER) --
-# assemble.py's own gate only reads status/reviewed_draft_sha1 per the
-# contract, but a ledger.schema.json-shaped fixture keeps this file honest
-# in case assemble.py (or a future jsonschema hardening pass) validates the
-# whole record.
-DUMMY_CACHE_KEY = {
-    "input_sha1": "a" * 40,
-    "style_contract_hash": "b" * 40,
-    "used_terms_hash": "c" * 40,
-    "pipeline_version": "v1",
-    "schema_hash": "d" * 40,
-    "prompt_hash": "e" * 40,
-    "agent_config_hash": "f" * 40,
-    "profile_semantics_hash": "0" * 40,
-    "particle_config_hash": "1" * 40,
-    "source_extraction_hash": "2" * 40,
-    "source_input_hash": "3" * 40,
-    "derivation_bundle_hash": "4" * 40,
-    "verse_map_hash": "5" * 40,
-    "note_map_hash": "6" * 40,
-    "plugin_bundle_hash": "7" * 40,
-}
+# #492 retired the hand-written DUMMY_CACHE_KEY that used to live here. The
+# comment it carried -- "assemble.py's own gate only reads
+# status/reviewed_draft_sha1 per the contract" -- stopped being true: assembly
+# now recomputes every content-affecting field from the live durable_root and
+# refuses on a mismatch, so a fabricated stored key is no longer an inert
+# schema-shaped placeholder, it is a guaranteed refusal. write_ledger() below
+# computes the REAL key by invoking the shipped cache_key.py, exactly as
+# tests/final_audit.test.py's own add_converged_segment() has always done.
+
+
+def _write_cache_key_inputs(root: Path, scripts_dir: Path) -> None:
+    """The durable-root files cache_key.py's own field computers read, which
+    this fixture never needed before #492. Restated from
+    tests/final_audit.test.py's make_durable_root() rather than imported --
+    house convention is one self-contained file per test module.
+
+    Content is irrelevant everywhere except style_bible.md, whose two
+    STYLE_CONTRACT markers compute_style_contract_hash() requires exactly
+    once each. `runs/.plugin_bundle_hash` is the marker Step 0a writes in a
+    real project and cache_key.py reads back rather than re-hashing the
+    bundle -- so a test that wants plugin_bundle_hash to MOVE rewrites this
+    file, not a bundle script's bytes."""
+    # Fill a gap, never clobber: whichever of these the caller already staged
+    # as the REAL module wins. cache_key.py only needs the paths to exist and
+    # to hash stably, so deferring to a real copy serves both purposes -- and a
+    # placeholder written over a real dependency fails far from its cause
+    # (verified on assemble_link_groups_wiring.test.py, whose #497 cases need
+    # bootstrap_names.extract_candidate_spans).
+    for _name, _body in (("bootstrap_names.py", b"# bootstrap_names.py fixture\n"),
+                         ("segpack.py", b"# segpack.py fixture\n")):
+        if not (scripts_dir / _name).exists():
+            (scripts_dir / _name).write_bytes(_body)
+    (root / "style_bible.md").write_bytes(
+        b"# Style Bible\n\n<!-- STYLE_CONTRACT_BEGIN -->\n"
+        b"Formal register, Oxford comma.\n<!-- STYLE_CONTRACT_END -->\n"
+    )
+    (root / "translate_TASK.md").write_bytes(b"TRANSLATE TASK PROMPT v1\n")
+    (root / "review_TASK.md").write_bytes(b"REVIEW TASK PROMPT v1\n")
+    (root / "extract.py").write_bytes(b"# extract.py fixture v1\n")
+    # manifest.source_inputs names this file relatively (see write_manifest).
+    (root / "source.txt").write_bytes(b"Ceci est un texte source de test.\n")
+    languages_dir = root / "languages"
+    languages_dir.mkdir(exist_ok=True)
+    (languages_dir / "fr_test.json").write_text(
+        json.dumps(
+            {
+                "PARTICLES": ["de", "du", "des"],
+                "STOPWORDS": ["le", "la", "les"],
+                "has_elision": False,
+                "ELISION_RE": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "schemas").mkdir(exist_ok=True)
+    for name in ("draft.schema.json", "review.schema.json", "segpack.schema.json"):
+        (root / "schemas" / name).write_bytes(b"{}\n")
+    runs_dir = root / "runs"
+    runs_dir.mkdir(exist_ok=True)
+    (runs_dir / ".plugin_bundle_hash").write_text(
+        "test-plugin-bundle-marker-v1\n", encoding="utf-8"
+    )
+
+
+def real_cache_key(root: Path, seg: str) -> dict:
+    """The segment's REAL 15-field cache key, produced by running the SHIPPED
+    cache_key.py against this fixture root -- never hand-typed, so it cannot
+    drift from what assemble.py recomputes at run time. Requires the segpack
+    and the durable-root inputs above to already be on disk."""
+    proc = subprocess.run(
+        [sys.executable, str(root / "scripts" / "cache_key.py"), "--seg", seg],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"fixture setup: cache_key.py --seg {seg} failed:\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    return json.loads(proc.stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +287,7 @@ def make_root(
     tmp_path, verse_mode="full_rhymed_plus_literal", output_target="obsidian", custom_renderer_path=None,
     mentions_enabled: "bool | None" = False,
 ) -> Path:
-    """A bare durable_root: real copies of assemble.py + its two sibling
+    """A bare durable_root: real copies of assemble.py + its four sibling
     scripts, profile.yml + ownership marker, an empty canon.json. Manifest /
     segpack / draft / ledger content is written per-test by the helpers
     below -- this mirrors final_audit.test.py's split between a bare
@@ -238,7 +302,10 @@ def make_root(
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
-    for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC):
+    for src in (
+        ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
+        CACHE_KEY_SRC,
+    ):
         shutil.copy2(src, scripts_dir / src.name)
 
     profile = default_profile(
@@ -265,6 +332,8 @@ def make_root(
 
     (root / "segments").mkdir()
     (root / "runs").mkdir()
+    # #492: last, so it can reuse the runs/ dir just created above.
+    _write_cache_key_inputs(root, scripts_dir)
     return root
 
 
@@ -367,11 +436,18 @@ def write_draft(root, seg, blocks, footnotes=None, verses=None, names=None, note
 
 
 def write_ledger(root, entries: dict) -> None:
-    """entries: seg -> {"status": ..., "reviewed_draft_sha1_override": optional}.
+    """entries: seg -> {"status": ..., "reviewed_draft_sha1_override": optional,
+    "cache_key_override": optional}.
     reviewed_draft_sha1 auto-computed from the on-disk draft -- via the same
     canonical draft_content_sha1() algorithm the real ledger_update.py/
     assemble.py use, NOT a raw-bytes hash of the file -- unless a literal
-    override is supplied (used to simulate a post-review hand-edit)."""
+    override is supplied (used to simulate a post-review hand-edit).
+
+    #492: `cache_key` is likewise computed for real, by running the shipped
+    cache_key.py against this root, because assembly now compares every
+    content-affecting field against a fresh recomputation. `cache_key_override`
+    exists for the tests that deliberately simulate a stale or malformed
+    stored key."""
     segments = {}
     for seg, cfg in entries.items():
         record = {
@@ -384,7 +460,7 @@ def write_ledger(root, entries: dict) -> None:
             sha1 = cfg.get("reviewed_draft_sha1_override") or draft_content_sha1_of(draft_doc)
             record.update(
                 rounds=1,
-                cache_key=DUMMY_CACHE_KEY,
+                cache_key=cfg.get("cache_key_override") or real_cache_key(root, seg),
                 n_blocks=1,
                 n_footnotes=0,
                 n_verses=0,
@@ -1850,9 +1926,16 @@ def test_profile_precondition_emits_one_json_line_on_missing_ownership_marker(tm
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
-    for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC):
+    for src in (
+        ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
+        CACHE_KEY_SRC,
+    ):
         shutil.copy2(src, scripts_dir / src.name)
     # Deliberately NO profile.yml, NO .literary-translator-root.json marker.
+    # cache_key.py IS copied (#492): this test is about a missing OWNERSHIP
+    # MARKER, and leaving assemble.py's newest sibling import unsatisfied
+    # would make it exit on `dependency_precondition` instead, testing the
+    # wrong precondition.
 
     result = run_assemble(root)
     assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"

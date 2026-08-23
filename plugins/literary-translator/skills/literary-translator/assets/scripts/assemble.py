@@ -175,8 +175,9 @@ def _dependency_precondition_fatal(error: str) -> NoReturn:
     sys.exit(2)
 
 
-# validate_draft.py (profile loading) and output_resolve.py (Step 0d
-# adapter resolution) live next to this script -- import them directly
+# validate_draft.py (profile loading), output_resolve.py (Step 0d adapter
+# resolution) and cache_key.py (#492's live cache-key recomputation, imported
+# a little further down) live next to this script -- import them directly
 # (never reimplemented), matching this plugin's own established
 # `import validate_draft as vd` sibling-import pattern.
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -217,6 +218,20 @@ except SystemExit:  # pragma: no cover -- defensive: output_resolve.py is
         "halted during its own module-level dependency preflight (see "
         "stderr for the specific reason)"
     )
+try:
+    import cache_key as ck
+except ImportError as exc:  # pragma: no cover -- defensive, should be unreachable
+    _dependency_precondition_fatal(
+        f"could not import cache_key.py from {SCRIPTS_DIR}: {exc}"
+    )
+# #492: deliberately NO `except SystemExit` arm here, unlike the two above.
+# cache_key.py's PyYAML import is try/except-guarded (cache_key.py:64-67) and
+# merely assigns `yaml = None`; its require_yaml() fail() fires later, from
+# load_profile() -- which assert_live_inputs_match_ledger() calls inside a
+# SystemExit handler of its own. So this module CANNOT exit during the import
+# statement, and a handler here would be dead code claiming otherwise.
+# Assembly already hard-requires PyYAML through the validate_draft import
+# above, so this adds no dependency.
 
 
 class AssembleError(Exception):
@@ -393,6 +408,25 @@ SAFE_STALE_CARVEOUT_FIELDS = frozenset(
 # ---------------------------------------------------------------------------
 
 CONTRACT_ONLY_STALE_FIELD = "style_contract_hash"
+
+# ---------------------------------------------------------------------------
+# #492: the fields assembly re-derives from the LIVE durable_root and compares
+# to each shipped record's stored cache_key, so its verdict stops depending on
+# whether ledger_merge.py happened to run since the last content edit.
+#
+# DERIVED from cache_key.py's own CACHE_KEY_FIELD_ORDER minus the
+# machinery-only allowlist above -- never a fifth hand-written field list. A
+# future 16th cache-key field is live-checked automatically, which is the
+# fail-closed direction: a field nobody classified yet blocks rather than
+# ships. The three carved-out fields are excluded for exactly the reason
+# SAFE_STALE_CARVEOUT_FIELDS exists -- they cannot change what the prose
+# should say -- so this check adds no machinery-only refusal and cannot
+# re-strand a book a plugin upgrade already made deliverable.
+# ---------------------------------------------------------------------------
+
+LIVE_CHECKED_CACHE_KEY_FIELDS = tuple(
+    f for f in ck.CACHE_KEY_FIELD_ORDER if f not in SAFE_STALE_CARVEOUT_FIELDS
+)
 
 
 def admit_contract_only_stale(profile: dict) -> bool:
@@ -1063,6 +1097,190 @@ def assert_project_complete(manifest: dict, converged: dict, refusals: dict) -> 
             f"before the book can be assembled. Run the pipeline to "
             f"convergence for the remaining segment(s), then re-run assembly.",
         )
+
+
+def _live_cache_key_fields(profile: dict, seg: str, globals_cache: dict) -> dict:
+    """The live value of every LIVE_CHECKED_CACHE_KEY_FIELDS entry for `seg`,
+    computed by calling cache_key.py's OWN field computers -- never a
+    reimplementation of them, and never a re-derivation of which categories
+    are eligible (the two dead ends #492's own body records: a parallel
+    classifier that mis-decided a reverted key, and a `--classify-only`
+    selector run that would have added a WRITE to assembly).
+
+    `globals_cache` memoises the global fields across segments: they are pure
+    functions of profile + durable_root, so computing them once per run rather
+    than once per segment is what keeps this whole check at 0.2s for an
+    81-segment book instead of 81x that.
+
+    Every exception a computer can raise -- including the SystemExit
+    cache_key.py's own fail() raises (cache_key.py:212), which is how a
+    missing style_bible.md, an absent particle config and an unresolvable
+    manifest source input all surface -- is converted by the caller into an
+    AssembleError naming the segment and the field. "Cannot confirm this
+    input" must never read as "this input is unchanged". (A PyYAML-less
+    environment is NOT in that list: it halts this script far earlier, during
+    the module-level `import validate_draft`, whose own preflight sys.exits
+    inside the import statement.)"""
+    live = {}
+    segpack = None
+    for field in LIVE_CHECKED_CACHE_KEY_FIELDS:
+        if field in ck.PER_SEGMENT_FIELDS:
+            if segpack is None:
+                segpack = ck.load_segpack(DURABLE_ROOT, seg)
+            live[field] = ck.PER_SEGMENT_FIELD_FUNCS[field](DURABLE_ROOT, segpack)
+        else:
+            if field not in globals_cache:
+                globals_cache[field] = ck.GLOBAL_FIELD_FUNCS[field](
+                    profile, DURABLE_ROOT
+                )
+            live[field] = globals_cache[field]
+    return live
+
+
+def _uncomputable_live_inputs(seg: str, detail: str) -> "AssembleError":
+    """THE refusal for "a live cache-key input could not be computed", built
+    in one place. Both raising arms below reach it: two spellings of one
+    message are two things that can drift apart."""
+    return AssembleError(
+        f"could not recompute segment {seg!r}'s live cache-key inputs "
+        f"({detail}) -- cannot confirm the book is being assembled from the "
+        f"inputs it was reviewed against",
+        reason="stale_live_inputs",
+    )
+
+
+def assert_live_inputs_match_ledger(
+    converged: dict, manifest_seg_ids: "set[str]", admit_contract_only: bool = False
+) -> "tuple[list, int]":
+    """#492: refuse to assemble a book whose content-affecting cache-key
+    inputs have MOVED since runs/ledger.json was materialized.
+
+    Returns `(contract_admitted_live, compared_pairs)`.
+
+    Every other gate in this script reads the ledger SNAPSHOT the last
+    `ledger_merge.py` produced: `status`, `stale_mismatched_fields`, the
+    stored `cache_key`. That snapshot ages. An operator who edits the
+    STYLE_CONTRACT block of `style_bible.md` -- a correct, deliberate,
+    R9-sanctioned edit that any consistency pass produces -- and then runs
+    assembly WITHOUT re-running the merge gets a book built from records that
+    still say `converged`, because nothing between the edit and the book ever
+    recomputed anything. The draft sha1 guard in load_converged_segments()
+    does not see it either: the drafts genuinely did not change; the standard
+    they were reviewed against did. The pipeline does normally run W7 before
+    W9, so the intended flow never hit this -- but nothing ENFORCED the
+    ordering, and the failure was a green run, not a halt.
+
+    This closes it by re-deriving the live values and comparing, so
+    assembly's verdict is the same on both orderings. It is a READ: no
+    write, no new persisted artifact, no new schema, no new flag, no
+    reimplementation of `classify_converged_segment()`.
+
+    SCOPED TO `manifest_seg_ids`, not to `converged`. runs/ledger.json retains
+    historical entries for segments the CURRENT manifest no longer contains
+    (see ledger_merge.py's own module docstring), and `converged` may hold
+    such an entry through its unscoped status=="converged" branch. Assembly
+    never ships one, and recomputing per-segment fields for a retained entry
+    whose segpack is long gone would abort a book over a segment it does not
+    contain -- precisely the invariant #491's round-2 hardening restored for
+    the carve-out branch. Callable only AFTER assert_project_complete(),
+    which guarantees both that the manifest is well-formed and that every
+    manifest id is present in `converged`, so the lookup below cannot
+    KeyError.
+
+    THE CONTRACT-ONLY ARM (#533/R9) mirrors the merged path exactly, and the
+    sentinel conjunct is load-bearing rather than decorative. When the
+    declaration is present and `style_contract_hash` is the ONLY moved field,
+    the record is admitted -- but only when its `.ever_converged.<seg>`
+    sentinel is not SENTINEL_ABSENT, which is condition 4 of
+    _stale_carveout_refusal_reason() and the documented contract in
+    references/assembly-and-output.md. Without it the two orderings would
+    disagree on a REACHABLE population: a project that converged before
+    sentinels existed has status=="converged" records and no sentinels
+    (backfill_ever_converged.py exists for exactly that), so the same edit
+    would assemble without a merge and be refused with one. AMBIGUOUS carves
+    out like PRESENT here for the same reason it does there -- reading an
+    unreadable dotfile as "absent" would declare a finished book
+    undeliverable.
+
+    FAIL-CLOSED throughout: a missing or non-dict stored `cache_key` refuses
+    (it cannot be read as "nothing moved"), and any failure to compute a live
+    value refuses naming the segment and field. Every drifting segment is
+    collected before raising, so one refusal names the whole repair job
+    rather than its first item."""
+    try:
+        profile = ck.load_profile(DURABLE_ROOT)
+    except SystemExit as exc:
+        # ck.load_profile()'s own fail() -- a missing ownership marker, an
+        # unresolvable owner_profile_path, or (only here) PyYAML absent. Not
+        # expected: main() has already loaded the profile through vd by this
+        # point. Converted anyway, because an escaping SystemExit would leave
+        # this script's one-JSON-line contract unhonoured.
+        raise AssembleError(
+            f"could not load profile.yml to recompute the live cache-key "
+            f"inputs (cache_key.py halted: {_system_exit_detail(exc)})",
+            reason="stale_live_inputs",
+        )
+    globals_cache: dict = {}
+    contract_admitted_live = []
+    drifted = {}
+    compared_pairs = 0
+
+    for seg in sorted(manifest_seg_ids):
+        record = converged[seg]
+        stored = record.get("cache_key")
+        if not isinstance(stored, dict):
+            raise AssembleError(
+                f"segment {seg!r} has no usable cache_key in runs/ledger.json "
+                f"(missing, or not an object) -- cannot confirm its content "
+                f"inputs are unchanged since the ledger was materialized; "
+                f"re-run scripts/ledger_merge.py before assembling",
+                reason="stale_live_inputs",
+            )
+        try:
+            live = _live_cache_key_fields(profile, seg, globals_cache)
+        except SystemExit as exc:
+            # cache_key.py's own fail() path -- it has already written its
+            # specific "ERROR: ..." line to stderr; the detail adds which
+            # segment was being checked when it fired.
+            raise _uncomputable_live_inputs(
+                seg, f"cache_key.py halted: {_system_exit_detail(exc)}"
+            )
+        except (OSError, KeyError, TypeError, json.JSONDecodeError, ValueError) as exc:
+            raise _uncomputable_live_inputs(seg, f"{type(exc).__name__}: {exc}")
+        moved = [f for f in LIVE_CHECKED_CACHE_KEY_FIELDS if stored.get(f) != live[f]]
+        # Counted from what was ACTUALLY compared, never from
+        # len(LIVE_CHECKED_CACHE_KEY_FIELDS) -- that would be a constant, so a
+        # field loop that ran zero times would still produce the total the
+        # test asserts, which is precisely the vacuous green this counter
+        # exists to make impossible.
+        compared_pairs += len(live)
+        if not moved:
+            continue
+        if admit_contract_only and set(moved) == {CONTRACT_ONLY_STALE_FIELD}:
+            state, _detail = classify_ever_converged_sentinel(ever_converged_path(seg))
+            if state != SENTINEL_ABSENT:
+                contract_admitted_live.append(seg)
+                continue
+        drifted[seg] = moved
+
+    if drifted:
+        detail = "; ".join(
+            f"{seg} ({', '.join(fields)})" for seg, fields in sorted(drifted.items())
+        )
+        raise AssembleError(
+            f"refusing to assemble: {len(drifted)} segment(s) have "
+            f"content-affecting cache-key inputs that have MOVED since "
+            f"runs/ledger.json was materialized -- {detail}. The ledger still "
+            f"reports them as reviewed, but the inputs they were reviewed "
+            f"against are not the ones on disk now, so this book would ship "
+            f"prose no reviewer judged under the current standard. Re-run "
+            f"scripts/ledger_merge.py to re-classify them, then bring the "
+            f"affected segments back to converged (or, for a style-contract "
+            f"edit you accept, declare validation.admit_contract_only_stale "
+            f"in profile.yml -- see R9).",
+            reason="stale_live_inputs",
+        )
+    return sorted(contract_admitted_live), compared_pairs
 
 
 # ---------------------------------------------------------------------------
@@ -2323,6 +2541,30 @@ def main() -> int:
             )
 
         assert_project_complete(manifest, converged, refusals)
+
+        # #492. Deliberately AFTER the completeness gate, not before it: an
+        # incomplete project must keep getting its own project_incomplete
+        # diagnostic first (it is the coarser precondition, and the one the
+        # operator can act on), and it then pays no recompute at all. Nothing
+        # is assembled between the two calls, so the ordering costs no
+        # safety. assert_project_complete() having passed is also what lets
+        # the check index `converged[seg]` for every manifest id.
+        # `manifest_seg_ids` (not a second _manifest_segment_ids() call): once
+        # assert_project_complete() has passed, the non-raising extraction
+        # above and its strict sibling return the SAME set -- the only case
+        # they differ in is the malformed manifest that gate has just refused.
+        live_contract_admitted, _compared_pairs = assert_live_inputs_match_ledger(
+            converged, manifest_seg_ids, contract_admission
+        )
+        if live_contract_admitted:
+            # One population, one list: to the operator these are the same
+            # thing the #533 disclosure below already describes -- "assembled
+            # without a review against the current style contract" -- and
+            # splitting them across two keys would make the operator read two
+            # lists to answer one question.
+            contract_admitted = sorted(
+                set(contract_admitted) | set(live_contract_admitted)
+            )
 
         if contract_admitted:
             # #533. Printed HERE -- after the completeness gate has passed and
