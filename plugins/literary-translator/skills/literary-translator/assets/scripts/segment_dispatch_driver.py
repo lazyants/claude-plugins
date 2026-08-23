@@ -83,8 +83,12 @@ That redirect is NOT a progress log, and no flag makes it one. Stdout
 carries exactly ONE JSON line, printed on `main()`'s terminal path once
 the run is over (see the exit-code paragraph at the end of this
 docstring); this script emits no per-segment progress on stdout at all,
-by design, so for the whole run that file holds nothing but the stderr
-warnings below. The live progress and liveness channel is the append-only
+by design, so for the whole run that file holds nothing but what this
+script writes to STDERR: the warnings below, and select_segments.py's own
+stderr relayed verbatim (_relay_selector_stderr(), #551 -- which is how the
+Step 1 gate's disclosures reach an operator on this path at all, including
+its routine requested/emitted line). The live progress and liveness
+channel is the append-only
 journal (Property 5 below) at `runs/<SESSION_ID>/driver_journal.jsonl`,
 flushed and fsynced per entry and opening with a `driver_started` entry
 carrying this process's pid -- where that `<SESSION_ID>` is the one this
@@ -1524,6 +1528,43 @@ def load_engine_config(durable_root: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _relay_selector_stderr(captured: "str | bytes | None") -> None:
+    """#551: relay select_segments.py's OWN stderr to this driver's stderr.
+
+    That stream is the only channel two unusual-but-correct admissions
+    disclose themselves on -- the D9 lost-token recovery and #537's
+    `--from-cap` over a PRESENT `.ever_converged` sentinel (select_segments.
+    py's own post-publication disclosures). Both are deliberately reporting-
+    only: neither is a claim-record field, because one describes the record
+    that authorized it and the other describes HOW this invocation reached
+    the admission. That reasoning is sound for the record and does not
+    extend to "therefore nowhere" -- and this driver, which captures the
+    selector's output, is the documented path for a real run, so without
+    this relay the disclosure reaches no terminal and no log.
+
+    Relayed VERBATIM, with no second prefix: every one of the selector's
+    stderr sites already opens with `select_segments.py: `, so the lines
+    name their own author. Whole-block, not line-by-line, so the selector's
+    own ordering (requested/emitted and #530 first, then the per-segment
+    D9/#537 disclosures printed after each record and token are published)
+    survives intact.
+
+    `captured` may be BYTES, not str. subprocess hands back raw bytes on the
+    TimeoutExpired path even under `text=True` (measured, CPython 3.14.7),
+    and `str(exc)` for that exception names only the command and the
+    timeout -- so a naive relay of it would print `b'select_segments.py:
+    ...'`. Decoded here rather than at each call site, with `errors=
+    "replace"` because a disclosure mangled by one bad byte is still worth
+    more than a driver that raises while reporting one.
+    """
+    if not captured:
+        return
+    if isinstance(captured, bytes):
+        captured = captured.decode("utf-8", errors="replace")
+    if captured.strip():
+        print(captured.rstrip("\n"), file=sys.stderr)
+
+
 def run_select_segments(
     dirs: dict,
     *,
@@ -1690,14 +1731,30 @@ def run_select_segments(
             cwd=str(dirs["durable_root"]),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        # TimeoutExpired carries whatever the child had already written;
+        # OSError is a SPAWN failure and carries no such attribute at all
+        # (no child ran, so there is nothing to relay) -- hence getattr
+        # rather than a second except clause.
+        _relay_selector_stderr(getattr(exc, "stderr", None))
         fatal(f"could not run select_segments.py: {exc}", exit_code=2)
+
+    # BEFORE the decode, not after: this driver's own fatal() raises
+    # DriverError, and main() serializes that as JSON on STDOUT -- so a
+    # selector that disclosed an admission and then printed malformed stdout
+    # would deliver the disclosure only as a repr inside a JSON string on
+    # the other stream. Relaying first makes the placement uniform across
+    # success, selector refusal and decode failure, and is why the decode
+    # fatal below no longer embeds `stderr` itself: it would be the second
+    # copy, in the redirected run log, of a line already printed above.
+    _relay_selector_stderr(proc.stderr)
 
     try:
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError:
         fatal(
             "select_segments.py did not print valid JSON on stdout "
-            f"(exit {proc.returncode}): stdout={proc.stdout!r} stderr={proc.stderr!r}",
+            f"(exit {proc.returncode}): stdout={proc.stdout!r} "
+            "(its stderr, if any, was relayed to this driver's own stderr)",
             exit_code=2,
         )
     if not isinstance(payload, dict):
@@ -6620,10 +6677,14 @@ def run(args, dirs: dict) -> dict:
             # --only-segs selected nothing, and what is still outstanding is
             # what turns the refusal into a next action). Forwarded here
             # rather than left in the child's payload because this driver
-            # runs the selector with capture_output=True: its stdout is
-            # parsed and its stderr, disclosure included, is discarded, so
-            # WITHOUT this the one refusal the field was added for would show
-            # the operator nothing on the driver path -- the main path.
+            # runs the selector with capture_output=True, so its stdout is
+            # what this driver reads. The field is what makes the remainder
+            # DURABLE -- it is journaled here, where a stderr line never
+            # could be. The operator-facing copy of the same fact is the
+            # selector's own stderr line, which #551 now relays verbatim
+            # (_relay_selector_stderr(), above); this driver deliberately
+            # does NOT re-print it, or the run log would carry the same
+            # sentence twice under two different prefixes.
             #
             # Conditional on the key being a list, not on the refusal kind:
             # every OTHER post-selection refusal is about specific named
@@ -6645,14 +6706,6 @@ def run(args, dirs: dict) -> dict:
                     **refusal_extra,
                 },
             )
-            if refusal_outstanding:
-                print(
-                    f"segment_dispatch_driver.py: {len(refusal_outstanding)} eligible "
-                    f"unit(s) are outstanding and NOT in this dispatch: "
-                    f"{', '.join(refusal_outstanding)}. Dispatching a subset is "
-                    f"legitimate; this line is the record that the remainder exists.",
-                    file=sys.stderr,
-                )
             fatal(
                 f"Step 1 gate refused: {select_result.get('error')}",
                 exit_code=1,
@@ -6736,21 +6789,16 @@ def run(args, dirs: dict) -> dict:
                 "eligible_not_dispatched": eligible_not_dispatched,
             },
         )
-        # Printed only when non-empty, and worded as a DISCLOSURE, not a
-        # warning: measured over both live books' driver journals, 61 of 97
-        # real rounds dispatched a strict subset of the eligible set, so a
-        # subset is the NORM and an alarm on it would be tuned out along with
-        # the ids that are the actual signal. stderr rather than stdout because
-        # this driver's stdout carries exactly ONE line at exit, while its
-        # stderr is the only channel that reaches the redirected run log live.
-        if eligible_not_dispatched:
-            print(
-                f"segment_dispatch_driver.py: {len(eligible_not_dispatched)} eligible "
-                f"unit(s) are outstanding and NOT in this dispatch: "
-                f"{', '.join(eligible_not_dispatched)}. Dispatching a subset is "
-                f"legitimate; this line is the record that the remainder exists.",
-                file=sys.stderr,
-            )
+        # The operator-facing half of this disclosure is NOT re-printed here.
+        # select_segments.py prints its own one-line version before it emits
+        # either payload that carries the field, and #551 relays that stream
+        # verbatim onto this driver's stderr -- which is the channel that
+        # reaches the redirected run log live, since this driver's stdout
+        # carries exactly ONE line at exit. A driver-side copy would put the
+        # same sentence in that log twice under two different prefixes, and
+        # the ids -- which are what distinguish a deliberate batch from a
+        # forgotten unit -- are read less, not more, when doubled. What this
+        # driver owns is the DURABLE copy in the journal entry above.
 
         engine_cfg = load_engine_config(durable_root)
         volume_refusal = check_volume_cap(

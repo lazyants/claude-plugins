@@ -585,17 +585,22 @@ _DRIVER_DISCLOSURE_MARK = "eligible unit(s) are outstanding and NOT in this disp
 
 
 def _driver_disclosure_lines(stderr: str) -> list:
-    """Every #530 disclosure line the DRIVER printed.
+    """Every #530 disclosure line on the DRIVER's stderr, whoever printed it.
 
     A list rather than `in stderr`: the contract is exactly ONE line for a
     non-empty remainder and NONE for an empty one, and `in` cannot tell one
     line from two.
+
+    Deliberately NOT filtered by prefix (#551). Since the relay landed, the
+    line reaching the operator is select_segments.py's own, forwarded
+    verbatim -- and the driver's former re-print of the same sentence under
+    its own `segment_dispatch_driver.py: ` prefix was deleted precisely so
+    the run log would not carry it twice. A prefix filter would count only
+    one of the two and report "exactly one" for a re-introduced duplicate,
+    which is the regression this helper now exists to catch. So it matches
+    on the MARK alone and the exactly-one assertions do the work.
     """
-    return [
-        line
-        for line in stderr.splitlines()
-        if line.startswith("segment_dispatch_driver.py: ") and _DRIVER_DISCLOSURE_MARK in line
-    ]
+    return [line for line in stderr.splitlines() if _DRIVER_DISCLOSURE_MARK in line]
 
 
 def test_step1_journal_and_stderr_report_the_units_left_out_of_only_segs(tmp_path):
@@ -631,7 +636,10 @@ def test_step1_journal_and_stderr_report_the_units_left_out_of_only_segs(tmp_pat
 def test_no_driver_disclosure_when_the_whole_eligible_set_is_dispatched(tmp_path):
     """#530, NEGATIVE REGRESSION -- green before the change by construction,
     since no such line existed. It earns its keep through its mutation alone:
-    make the driver's print unconditional and this goes red.
+    make the conditional print unconditional and this goes red. Since #551
+    that print is select_segments.py's own (this driver no longer keeps a
+    copy), so the mutation is performed there -- on the selector's own
+    `if eligible_not_dispatched:` -- and reaches here through the relay.
 
     Measured over both live books' driver journals, 61 of 97 real rounds
     dispatched a strict subset, so the line must stay silent on the other 36
@@ -658,11 +666,12 @@ def test_a_refused_empty_selection_still_reports_what_is_outstanding(tmp_path):
     carries the remainder on -- and on the driver path it would otherwise be
     thrown away twice over.
 
-    `run_select_segments()` runs the selector with `capture_output=True`, so
-    the selector's own stderr disclosure never reaches this operator, and the
-    refusal handler used to journal only `error`. Without the forwarding this
-    test pins, the single case the field was added for would show a driver
-    operator nothing at all.
+    `run_select_segments()` runs the selector with `capture_output=True` and
+    the refusal handler used to journal only `error`, so the remainder was
+    lost on both channels at once. The JSON field this test pins is the
+    DURABLE half; the live half is the selector's own stderr line, which
+    #551 now relays verbatim (this driver no longer prints a second copy of
+    its own -- see _driver_disclosure_lines()).
 
     The fixture names only an id that is ineligible for dispatch, which is
     exactly how an operator reaches this refusal by accident: seg01 has
@@ -705,6 +714,245 @@ def test_a_refused_empty_selection_still_reports_what_is_outstanding(tmp_path):
     assert "2 eligible unit(s)" in lines[0], lines[0]
     assert "seg02" in lines[0] and "seg03" in lines[0], lines[0]
     assert read_argv_log(root) == [], "a refusal must dispatch nothing"
+
+
+# ---------------------------------------------------------------------------
+# #551 -- select_segments.py's stderr disclosures on the DRIVER path.
+#
+# The selector discloses two unusual-but-correct admissions on stderr and
+# nowhere else: the D9 lost-token recovery, and #537's --from-cap over a
+# PRESENT .ever_converged sentinel. Neither is a claim-record field, by
+# deliberate design in that script. This driver captured that stream and
+# dropped it on every successful decode, so on the documented path for a
+# real run both disclosures reached nobody -- a compensating control that
+# existed only on paper. run_select_segments() now relays the stream
+# verbatim onto this driver's own stderr, which is what the launch recipe's
+# `> runs/driver.<SESSION_ID>.log 2>&1` redirect actually captures.
+# ---------------------------------------------------------------------------
+
+_SENTINEL_DISCLOSURE_MARK = ".ever_converged sentinel is present"
+_D9_DISCLOSURE_MARK = "D9 lost-token recovery"
+
+
+def test_the_537_sentinel_disclosure_reaches_the_operator_through_the_driver(tmp_path):
+    """#551, through the REAL select_segments.py and this driver's own CLI.
+
+    RED before the relay: the selector prints this line, the driver captured
+    it with capture_output=True and returned only the parsed payload, so a
+    driver operator admitting a capped-AND-sentinel-bearing unit saw nothing
+    at all -- and the fact is deliberately absent from the claim record too,
+    so there was no second place to find it.
+
+    The fixture is from_cap_project()'s P2 population with the sentinel
+    ADDED: that intersection (converged once, went stale, re-entered the loop
+    and exhausted its rounds) is exactly the population #537 opened
+    --from-cap to, and 1.27.0 measured it at 12 of 12 capped units on one
+    live book.
+
+    Asserted on the DRIVER's stderr, and asserted ABSENT from its stdout: the
+    driver's stdout carries one JSON line at exit, and a `repr` of the
+    selector's stderr embedded in an error string there would satisfy neither
+    "verbatim" nor "one copy".
+    """
+    root = from_cap_project(tmp_path)
+    mark_ever_converged(root, "seg01")
+    assert (root / "segments" / ".ever_converged.seg01").is_file(), (
+        "precondition: this test is about a capped unit that CARRIES a sentinel"
+    )
+
+    proc = run_driver(root, "--only-segs", "seg01", "--from-cap", "seg01", timeout=60)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["claims"] == {"seg01": "from-cap"}, (
+        "precondition: the sentinel-bearing capped unit must still be ADMITTED -- "
+        f"a refusal here would make the disclosure assertion vacuous: {payload}"
+    )
+
+    lines = [ln for ln in proc.stderr.splitlines() if _SENTINEL_DISCLOSURE_MARK in ln]
+    assert len(lines) == 1, f"expected exactly one disclosure line; stderr={proc.stderr!r}"
+    assert lines[0].startswith("select_segments.py: "), (
+        f"relayed VERBATIM, keeping the child's own prefix: {lines[0]!r}"
+    )
+    assert "seg01" in lines[0] and "RE-REVIEW only" in lines[0], lines[0]
+    assert _SENTINEL_DISCLOSURE_MARK not in proc.stdout, (
+        f"the disclosure belongs on stderr, not folded into the exit payload: {proc.stdout!r}"
+    )
+
+
+def test_the_d9_lost_token_disclosure_reaches_the_operator_through_the_driver(tmp_path, capsys):
+    """#551 for the SECOND disclosure the issue names, driven through
+    run_select_segments() directly rather than the CLI.
+
+    Directly, because D9 requires two invocations of the SAME run id under
+    the SAME profile (select_segments.py refuses a recovery across a profile
+    change), and a CLI-level fixture would have to make resume_setup.py mint
+    and then re-resolve one id -- testing that script's resume identity, not
+    this relay. run_select_segments() takes run_id/run_resume explicitly, so
+    the two-invocation recipe claim_selector.test.py already pins for the
+    selector is reachable here with a FIXED id and nothing simulated.
+
+    RED before the relay for the same reason as the #537 test above.
+    """
+    root = from_cap_project(tmp_path)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    run_id = "20260801T120000Z"
+    assert run_id != CLAIM_SOURCE_RUN_ID, "the claim runs under a FRESH id, not the draft's own"
+
+    first = driver_mod.run_select_segments(
+        dirs, only_segs="seg01", from_cap="seg01", run_id=run_id, run_resume="false",
+    )
+    assert first.get("success") is True, first
+    assert first["claims"].get("seg01"), first
+    record_before = (root / "runs" / run_id / ".claimed.seg01").read_bytes()
+
+    draft_path = root / "segments" / "seg01.draft.json"
+    doc = json.loads(draft_path.read_text(encoding="utf-8"))
+    doc.pop("dispatch_token", None)
+    draft_path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    assert "dispatch_token" not in json.loads(draft_path.read_text(encoding="utf-8"))
+
+    # A real second invocation reaches this point only after resume_setup.py
+    # ran again and matched this id's existing digest -- select_segments.py
+    # refuses `--run-resume true` outright when runs/<ID>/input.digest is
+    # absent, and that gate is not this test's subject. Same simulation
+    # claim_selector.test.py's own lost-token recipe uses.
+    (root / "runs" / run_id / "input.digest").write_text(
+        json.dumps({"digest": f"stub-{run_id}"}), encoding="utf-8"
+    )
+
+    # Everything the first invocation relayed is dropped here, so the
+    # assertion below cannot be satisfied by that call's own output.
+    capsys.readouterr()
+
+    second = driver_mod.run_select_segments(
+        dirs, only_segs="seg01", from_cap="seg01", run_id=run_id, run_resume="true",
+    )
+    assert second.get("success") is True, second
+    assert second["claims"].get("seg01"), second
+    restamped = json.loads(draft_path.read_text(encoding="utf-8"))
+    assert restamped["dispatch_token"] == f"{run_id}:seg01", (
+        "precondition: the recovery must actually have re-stamped the draft"
+    )
+    assert (root / "runs" / run_id / ".claimed.seg01").read_bytes() == record_before, (
+        "precondition: a recovery re-establishes a token, it does not rewrite the record"
+    )
+
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.err.splitlines() if _D9_DISCLOSURE_MARK in ln]
+    assert len(lines) == 1, f"expected exactly one D9 disclosure; stderr={captured.err!r}"
+    assert lines[0].startswith("select_segments.py: "), lines[0]
+    assert "seg01" in lines[0], lines[0]
+
+
+_SELECT_SEGMENTS_DISCLOSING_THEN_BABBLING = (
+    "#!/usr/bin/env python3\n"
+    "import sys\n"
+    'sys.stderr.write("select_segments.py: seg01 admitted via the D9 lost-token '
+    'recovery -- stub\\n")\n'
+    'sys.stdout.write("this is not JSON\\n")\n'
+    "sys.exit(0)\n"
+)
+
+
+def test_a_selector_that_disclosed_then_printed_garbage_still_reports_the_disclosure(tmp_path):
+    """#551, the path the relay's PLACEMENT turns on.
+
+    This driver's own fatal() raises DriverError, and main() serializes that
+    as JSON on STDOUT. So a relay installed after `json.loads()` would leave
+    a selector that disclosed an admission and then printed malformed stdout
+    delivering that disclosure only as a `repr` inside a JSON string on the
+    other stream -- neither verbatim nor on the channel the run log reads
+    live. Relaying BEFORE the decode is what this pins.
+
+    Counted across stdout AND stderr together: the decode fatal used to embed
+    `stderr={proc.stderr!r}` itself, and re-adding it would put the sentence
+    in the redirected log twice while a stderr-only count still read one.
+    """
+    root = phase2_project(tmp_path, n=1)
+    (root / "scripts" / "select_segments.py").write_text(
+        _SELECT_SEGMENTS_DISCLOSING_THEN_BABBLING, encoding="utf-8"
+    )
+
+    proc = run_driver(root, timeout=60)
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "did not print valid JSON" in payload["error"], payload
+
+    stderr_lines = [ln for ln in proc.stderr.splitlines() if _D9_DISCLOSURE_MARK in ln]
+    assert len(stderr_lines) == 1, f"stderr={proc.stderr!r}"
+    assert stderr_lines[0].startswith("select_segments.py: "), stderr_lines[0]
+    assert _D9_DISCLOSURE_MARK not in proc.stdout, (
+        f"one copy in the run log, not two: stdout={proc.stdout!r}"
+    )
+
+
+def test_a_selector_timeout_still_reports_what_the_child_had_already_disclosed(
+    tmp_path, capsys, monkeypatch,
+):
+    """#551 on the timeout path, and the reason the relay helper decodes
+    bytes at all.
+
+    subprocess hands back RAW BYTES on TimeoutExpired even under text=True
+    (measured, CPython 3.14.7), and str(exc) names only the command and the
+    timeout -- so relaying the attribute unchanged would print
+    `b'select_segments.py: ...'` and relaying str(exc) would print nothing.
+    Materially reachable: the selector publishes each claim record and its
+    token and THEN prints that segment's disclosure, all inside one
+    per-segment loop, so a run that exceeds the 300s ceiling mid-loop leaves
+    records on disk whose disclosure would otherwise be lost.
+    """
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=["select_segments.py"], timeout=300,
+            output=b"", stderr=b"select_segments.py: seg01 admitted via the D9 lost-token recovery\n",
+        )
+
+    monkeypatch.setattr(driver_mod.subprocess, "run", _timeout)
+    with pytest.raises(driver_mod.DriverError) as excinfo:
+        driver_mod.run_select_segments(dirs)
+
+    assert "could not run select_segments.py" in str(excinfo.value)
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.err.splitlines() if _D9_DISCLOSURE_MARK in ln]
+    assert len(lines) == 1, f"exactly one copy, on this path too: {captured.err!r}"
+    assert lines[0] == "select_segments.py: seg01 admitted via the D9 lost-token recovery", (
+        f"relayed verbatim and DECODED, not repr'd into the log: {lines[0]!r}"
+    )
+    # The other stream the redirected run log captures. TimeoutExpired's own
+    # str() never contains stderr, so embedding it in the fatal would be a
+    # second copy of a line already relayed -- and a stderr-only count above
+    # would not see it.
+    assert _D9_DISCLOSURE_MARK not in str(excinfo.value), str(excinfo.value)
+
+
+def test_a_selector_that_never_spawned_relays_nothing_and_still_fatals(
+    tmp_path, capsys, monkeypatch,
+):
+    """#551's companion path: OSError is a SPAWN failure, so no child ran and
+    there is nothing to relay. getattr() must not turn that into an
+    AttributeError on the way to the fatal the operator actually needs.
+    """
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+
+    def _boom(*args, **kwargs):
+        raise OSError("no such executable")
+
+    monkeypatch.setattr(driver_mod.subprocess, "run", _boom)
+    with pytest.raises(driver_mod.DriverError) as excinfo:
+        driver_mod.run_select_segments(dirs)
+
+    assert "could not run select_segments.py" in str(excinfo.value)
+    assert capsys.readouterr().err == "", "no child ran, so there is nothing to relay"
 
 
 _SELECT_SEGMENTS_WITHOUT_THE_FIELD = (
@@ -2193,7 +2441,16 @@ def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_sibling(tmp_path
     """Negative control, and backward-compat proof in one: the SAME
     poisoned durable-root select_segments.py, invoked WITHOUT
     --plugin-root, genuinely runs and fails -- proving the positive test's
-    success above is attributable to --plugin-root specifically."""
+    success above is attributable to --plugin-root specifically.
+
+    The proof that the poisoned sibling RAN moved streams in #551. It is
+    written by that stub to stderr, and this driver's decode-failure fatal
+    used to copy the child's whole stderr into its exit payload; now the
+    stream is RELAYED to the driver's own stderr instead, because embedding
+    it as well would put the same bytes in the redirected run log twice.
+    What survives in the payload is the invocation-level evidence -- the
+    child's exit code, which the stub sets to a value nothing else uses.
+    """
     root = not_started_project(tmp_path, n=1)
     poison_durable_root_select_segments(root)
 
@@ -2202,7 +2459,13 @@ def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_sibling(tmp_path
     assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     payload = parse_stdout(proc)
     assert payload["success"] is False
-    assert "TAMPERED_SELECT_SEGMENTS_MUST_NEVER_RUN" in payload["error"]
+    assert "TAMPERED_SELECT_SEGMENTS_MUST_NEVER_RUN" in proc.stderr, (
+        f"the poisoned sibling must be seen to have RUN: stderr={proc.stderr!r}"
+    )
+    assert "did not print valid JSON" in payload["error"], payload
+    assert "(exit 97)" in payload["error"], (
+        f"the stub's own exit code is what still identifies it in the payload: {payload}"
+    )
 
 
 def test_plugin_root_redirects_which_codex_job_py_would_be_popened(tmp_path):
