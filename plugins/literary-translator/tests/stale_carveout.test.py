@@ -534,8 +534,16 @@ def _write_cache_key_inputs(root: Path, scripts_dir: Path) -> None:
     STYLE_CONTRACT markers are load-bearing; `runs/.plugin_bundle_hash` is the
     marker Step 0a writes and cache_key.py reads back rather than re-hashing
     the bundle."""
-    (scripts_dir / "bootstrap_names.py").write_bytes(b"# bootstrap_names.py fixture\n")
-    (scripts_dir / "segpack.py").write_bytes(b"# segpack.py fixture\n")
+    # Fill a gap, never clobber: whichever of these the caller already staged
+    # as the REAL module wins. cache_key.py only needs the paths to exist and
+    # to hash stably, so deferring to a real copy serves both purposes -- and a
+    # placeholder written over a real dependency fails far from its cause
+    # (verified on assemble_link_groups_wiring.test.py, whose #497 cases need
+    # bootstrap_names.extract_candidate_spans).
+    for _name, _body in (("bootstrap_names.py", b"# bootstrap_names.py fixture\n"),
+                         ("segpack.py", b"# segpack.py fixture\n")):
+        if not (scripts_dir / _name).exists():
+            (scripts_dir / _name).write_bytes(_body)
     (root / "style_bible.md").write_bytes(
         b"# Style Bible\n\n<!-- STYLE_CONTRACT_BEGIN -->\n"
         b"Formal register, Oxford comma.\n<!-- STYLE_CONTRACT_END -->\n"

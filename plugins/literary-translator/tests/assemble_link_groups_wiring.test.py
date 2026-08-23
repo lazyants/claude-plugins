@@ -151,32 +151,42 @@ def _write_cache_key_inputs(root: Path, scripts_dir: Path) -> None:
     self-contained file per test module. Only style_bible.md's two
     STYLE_CONTRACT markers are load-bearing; `runs/.plugin_bundle_hash` is the
     marker Step 0a writes and cache_key.py reads back rather than re-hashing
-    the bundle."""
-    (scripts_dir / "bootstrap_names.py").write_bytes(b"# bootstrap_names.py fixture\n")
-    (scripts_dir / "segpack.py").write_bytes(b"# segpack.py fixture\n")
-    (root / "style_bible.md").write_bytes(
+    the bundle.
+
+    Every write here FILLS A GAP and never clobbers: `mentions=True` stages the
+    REAL `bootstrap_names.py` (#497 needs its `extract_candidate_spans`) and a
+    `languages/he_test.json` carrying `name_inventory`, and both are also names
+    this helper would otherwise supply as placeholders. cache_key.py only needs
+    the paths to EXIST and to hash stably, so deferring to whatever is already
+    there is correct for both purposes."""
+    def _fill(path: Path, data: bytes) -> None:
+        if not path.exists():
+            path.write_bytes(data)
+
+    _fill(scripts_dir / "bootstrap_names.py", b"# bootstrap_names.py fixture\n")
+    _fill(scripts_dir / "segpack.py", b"# segpack.py fixture\n")
+    _fill(
+        root / "style_bible.md",
         b"# Style Bible\n\n<!-- STYLE_CONTRACT_BEGIN -->\n"
-        b"Formal register, Oxford comma.\n<!-- STYLE_CONTRACT_END -->\n"
+        b"Formal register, Oxford comma.\n<!-- STYLE_CONTRACT_END -->\n",
     )
-    (root / "translate_TASK.md").write_bytes(b"TRANSLATE TASK PROMPT v1\n")
-    (root / "review_TASK.md").write_bytes(b"REVIEW TASK PROMPT v1\n")
-    (root / "extract.py").write_bytes(b"# extract.py fixture v1\n")
-    (root / SOURCE_INPUT_NAME).write_bytes(b"Ceci est un texte source de test.\n")
+    _fill(root / "translate_TASK.md", b"TRANSLATE TASK PROMPT v1\n")
+    _fill(root / "review_TASK.md", b"REVIEW TASK PROMPT v1\n")
+    _fill(root / "extract.py", b"# extract.py fixture v1\n")
+    _fill(root / SOURCE_INPUT_NAME, b"Ceci est un texte source de test.\n")
     languages_dir = root / "languages"
     languages_dir.mkdir(exist_ok=True)
-    (languages_dir / PARTICLE_CONFIG_NAME).write_text(
+    _fill(
+        languages_dir / PARTICLE_CONFIG_NAME,
         json.dumps({"PARTICLES": ["de"], "STOPWORDS": ["le"], "has_elision": False,
-                    "ELISION_RE": None}),
-        encoding="utf-8",
+                    "ELISION_RE": None}).encode("utf-8"),
     )
     (root / "schemas").mkdir(exist_ok=True)
     for _name in ("draft.schema.json", "review.schema.json", "segpack.schema.json"):
-        (root / "schemas" / _name).write_bytes(b"{}\n")
+        _fill(root / "schemas" / _name, b"{}\n")
     runs_dir = root / "runs"
     runs_dir.mkdir(exist_ok=True)
-    (runs_dir / ".plugin_bundle_hash").write_text(
-        "test-plugin-bundle-marker-v1\n", encoding="utf-8"
-    )
+    _fill(runs_dir / ".plugin_bundle_hash", b"test-plugin-bundle-marker-v1\n")
 
 
 def real_cache_key(root: Path, seg: str) -> dict:
