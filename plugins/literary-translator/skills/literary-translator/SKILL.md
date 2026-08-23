@@ -1147,6 +1147,51 @@ region-hash pin above is format-conditional):
   book had already been translated. See
   `references/source-format-adapters/custom.md` for the full walkthrough.
 
+### Heading-level outline — the disclosure this gate prints (#233)
+
+The gate also prints, on stdout, one **`NOTE heading_level_outline:`**
+line whenever this book's segments cite at least one heading tier -- the
+set `U` of `manifest.blocks[*].type` values named by any segment's
+`block_ids` and also present in `heading_types ∪ {"HEAD"}` -- e.g. `NOTE
+heading_level_outline: 3 heading tier(s) cited: "HEAD"=1 (declared),
+"PEREK"=2 (default), "SIMAN"=3 (declared)`. Each cited tier is reported
+with the level `assemble.py` will actually resolve for it (its
+`heading_levels[type]` entry, or level 2 when the type is absent from
+that map) and whether that level is `declared` or fell back to the
+`default`. When two or more tiers are cited AND at least one of them is
+`default`, the gate also prints a **`WARN heading_level_outline:`** line
+on stderr and counts it in the final `(N ADVISORY)` status. Both lines
+are REPORT-ONLY, exactly like the two advisories above: they touch
+neither `derivable_ok` nor `region_ok`, so this disclosure can neither
+refuse an ingestion nor rescue a failing one.
+
+It exists because nothing downstream re-derives a heading's level from
+anything but this same map -- `assemble.py` resolves each block's
+markdown heading level the identical way this NOTE does, so a tier this
+book cites but never declares in `heading_levels` renders at level 2
+with no further signal anywhere in the pipeline. A book citing a single
+tier never warns, and neither does a book where every cited tier is
+`declared` -- including two tiers deliberately declared at the same
+level: there is nothing ambiguous to flag in either case. The WARN fires
+only once a book cites two or more tiers and at least one is taking its
+level by default, because that is the one shape where a forgotten
+declaration and a genuinely flat two-level outline look identical from
+here.
+
+**The disclosure is a SCREEN, not a verdict.** Adjudicate it the same
+way as the advisories above: read the tiers the WARN names against the
+markdown outline you actually intend for this book, then either declare
+a level in `heading_levels` for every tier this book renders (a level of
+2 states the default in writing, rather than leaving it implicit), or
+leave it as-is and carry on -- nothing here changes whether this gate
+passes.
+
+**The residual.** A flattened or mis-nested outline still exits `0`.
+This is a disclosure, not a gate: nothing in a schema-valid manifest
+separates "the operator deliberately took the default" from "the
+operator forgot this tier", so a hard check here would refuse legal
+books. #233 stays open; this ships the disclosure only.
+
 Then, immediately after `validate_extraction.py` passes, run the
 **wrapper-conservation gate (#196)** — a normal bundle-copied durable-root
 script (unlike `validate_extraction.py` above), so run the durable copy:

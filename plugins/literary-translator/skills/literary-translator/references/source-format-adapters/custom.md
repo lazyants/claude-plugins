@@ -344,6 +344,15 @@ rendered output, and `render_obsidian.py`'s own clamp for what happens if
 a level ever reaches the renderer malformed regardless (belt-and-braces,
 not expected from a schema-valid manifest).
 
+W2 now discloses the resolved outline for you rather than leaving it
+implicit: `validate_extraction.py` prints a `NOTE
+heading_level_outline:` line naming every cited tier's resolved level
+and whether it was `declared` or `default`, whether `heading_levels` is
+present, absent, or partial. It additionally warns, but only when this
+book cites two or more tiers AND at least one of them took its level by
+default — a single cited tier, or a map that declares every cited tier,
+stays silent. This is report-only; see `SKILL.md`'s W2 Extract (#233).
+
 ## `footnotes.apparatus_policy` for `custom`
 
 Detection is entirely co-designed — there is no `footnotes` enum for
