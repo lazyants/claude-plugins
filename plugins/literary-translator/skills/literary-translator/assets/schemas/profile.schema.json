@@ -738,7 +738,7 @@
                 "folders": {
                   "type": "object",
                   "additionalProperties": { "type": "string" },
-                  "description": "Optional category -> folder catalog (e.g. {\"person\": \"people\", \"place\": \"places\"}) for the obsidian adapter's vault/<folder>/ note placement -- OPEN, per-project vocabulary (no enum): a category absent from this map routes to an 'other' folder, never a hard failure. See references/output-target-adapters/obsidian.md for documented preset examples."
+                  "description": "Optional category -> folder catalog (e.g. {\"person\": \"people\", \"place\": \"places\"}) for the obsidian adapter's vault/<folder>/ note placement -- OPEN, per-project vocabulary (no enum): a category absent from this map routes to an 'other' folder, never a hard failure. See references/output-target-adapters/obsidian.md for documented preset examples. The shipped glossary pass never asks for 'category', so a catalog declared here routes nothing until entries actually carry one -- see canon-entry.schema.json's own 'category' field before writing any gate or report that assumes the field is populated."
                 },
                 "mentions_section": {
                   "type": "object",

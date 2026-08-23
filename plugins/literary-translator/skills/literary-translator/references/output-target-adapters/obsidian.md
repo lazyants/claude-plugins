@@ -525,6 +525,15 @@ output:
         # absent-or-blank category always routes to "other"
 ```
 
+**The shipped glossary pass never asks for `category`** — `glossary_TASK.template.md` neither
+requests the field nor illustrates it — so a catalog declared here routes only those entries that
+actually carry one, and entries without it land in `vault/other/`. An entry acquires the field when
+this project's own adapted glossary prompt asks for it, when an agent volunteers the optional field,
+when an operator supplies it in a batch, or when `canon_validate.py --correct` adds it. Declaring
+the catalog does not populate anything, so do not write a canon completeness gate that assumes the
+field is populated — on a canon built with the unmodified prompt, such a gate can never pass and its
+failure says nothing about the canon.
+
 ## Security: only mapped folder VALUES ever reach a filesystem path
 
 `category` itself is used **exclusively as a dict-lookup key** into

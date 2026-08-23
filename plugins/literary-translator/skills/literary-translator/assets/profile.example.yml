@@ -418,6 +418,10 @@ output:
         # hardcoded schema enum (see references/output-target-adapters/obsidian.md for preset examples
         # to copy from). A category absent from this map (or left {} entirely, as here) routes to an
         # "other" folder -- never a hard failure.
+        # The shipped glossary pass never asks for `category`, so a catalog declared here routes only
+        # entries that already carry one, and everything else lands in "other". Read
+        # canon-entry.schema.json's own `category` field before writing any gate that assumes the
+        # field is populated; to populate it, ask for it in this project's own glossary prompt.
       mentions_section:
         enabled: true
           # ON BY DEFAULT (an absent mentions_section block, or an absent/null enabled key, all resolve
