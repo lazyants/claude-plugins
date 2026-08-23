@@ -2343,16 +2343,12 @@ def test_forbidden_patterns_never_gate_a_complete_project(tmp_path):
     assert clean.returncode == 0, clean.stderr
     assert parse_summary(clean)["project_complete"] is True
 
-    # Every declaration shape that produces a WARN gets a row: a shape-specific
-    # gate (`if any("not a mapping" in w ...): hard_failures += 1`) would
-    # otherwise slip through a table that only carried the generic ones.
+    # Both shapes that reach the WARN lane: a hit, and an uncompilable pattern.
+    # Malformed DECLARATION shapes are not in this table because they are not
+    # this script's to report -- profile.schema.json refuses them at Step 0.
     for name, patterns in (
         ("hit", [{"id": "note-marker", "pattern": "note", "message": "marker left in"}]),
         ("broken", [{"id": "broken", "pattern": "(unclosed", "message": "never mind"}]),
-        ("not-a-list", {"id": "no-dash", "pattern": "note", "message": "dropped dash"}),
-        ("not-a-mapping", ["a bare string where a mapping belongs"]),
-        ("no-pattern", [{"id": "patternless", "message": "no pattern at all"}]),
-        ("no-id", [{"pattern": "note", "message": "no id at all"}]),
     ):
         root = make_durable_root(tmp_path / name, seg_ids=("seg01",), forbidden_patterns=patterns)
         add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
@@ -2364,71 +2360,6 @@ def test_forbidden_patterns_never_gate_a_complete_project(tmp_path):
         assert summary["hard_failures"] == 0, (name, proc.stderr)
         assert summary["project_complete"] is True, (name, proc.stderr)
         assert proc.returncode == 0, (name, proc.returncode, proc.stderr)
-
-
-def test_forbidden_patterns_malformed_container_is_reported_not_silent(tmp_path):
-    """The false green this feature exists to remove, one layer up from a bad
-    pattern. W7 reads profile.yml through a loader that never re-runs the
-    schema, so a hand edit made after Step 0 arrives unvalidated -- and
-    dropping the list dash turns the block into a MAPPING carrying a perfectly
-    usable triple. Reading that as 'declared nothing' would report a clean run
-    for a ban the operator believes is enforced."""
-    draft = clean_draft(p1_text=f"A line with FORBIDDEN text in it {FN_PH}.")
-    root = make_durable_root(
-        tmp_path,
-        seg_ids=("seg01", PAD_SEG),
-        forbidden_patterns={"id": "no-dash", "pattern": "FORBIDDEN", "message": "dropped dash"},
-    )
-    add_converged_segment(root, "seg01", clean_segpack(), draft)
-    proc = run_final_audit(root)
-    lines = _style_lines(proc)
-    assert len(lines) == 1, proc.stderr
-    assert "not a list of declarations" in lines[0]
-    assert "NO rule was enforced" in lines[0]
-
-
-def test_forbidden_patterns_non_mapping_entry_is_reported_not_dropped(tmp_path):
-    """Same class, per ITEM: a scalar in the list is named rather than
-    silently filtered, and its siblings still run."""
-    draft = clean_draft(p1_text=f"A line with FORBIDDEN text in it {FN_PH}.")
-    root = make_durable_root(
-        tmp_path,
-        seg_ids=("seg01", PAD_SEG),
-        forbidden_patterns=[
-            "a bare string where a mapping belongs",
-            {"id": "no-placeholder", "pattern": "FORBIDDEN", "message": "placeholder left in"},
-        ],
-    )
-    add_converged_segment(root, "seg01", clean_segpack(), draft)
-    proc = run_final_audit(root)
-    dropped = [ln for ln in _style_lines(proc) if "not a mapping" in ln]
-    assert len(dropped) == 1, proc.stderr
-    assert "#0" in dropped[0], dropped[0]
-    assert len([ln for ln in _style_lines(proc) if "no-placeholder" in ln]) == 1
-
-
-def test_forbidden_patterns_missing_id_or_message_warns_but_still_enforces(tmp_path):
-    """`id` and `message` are schema-required, and a hand edit after Step 0
-    arrives unvalidated. Missing either is REPORTED -- but the ban keeps
-    working: refusing the declaration would answer a labelling defect by
-    switching the operator's rule off, which is the worse failure."""
-    draft = clean_draft(p1_text=f"A line with FORBIDDEN text in it {FN_PH}.")
-    root = make_durable_root(
-        tmp_path,
-        seg_ids=("seg01", PAD_SEG),
-        forbidden_patterns=[{"pattern": "FORBIDDEN"}],
-    )
-    add_converged_segment(root, "seg01", clean_segpack(), draft)
-    proc = run_final_audit(root)
-    lines = _style_lines(proc)
-    missing = [ln for ln in lines if "is missing" in ln]
-    assert len(missing) == 1, proc.stderr
-    assert "'id'" in missing[0] and "'message'" in missing[0], missing[0]
-    assert "IS still enforced" in missing[0], missing[0]
-    # The rule fired anyway, under the positional placeholder label.
-    hits = [ln for ln in lines if "hits=" in ln]
-    assert len(hits) == 1, proc.stderr
-    assert "STYLE-PATTERN #0 in blocks['p1']" in hits[0], hits[0]
 
 
 def test_forbidden_patterns_many_hits_collapse_to_one_line(tmp_path):
@@ -2456,7 +2387,9 @@ def test_forbidden_patterns_zero_width_pattern_terminates_and_counts(tmp_path):
     # "abcd". Deliberately NOT a match-everywhere pattern: that would make the
     # expected count len(text)+1, which coincides with the wrong shortcut "a
     # zero-width pattern hits once per position", so an implementation using
-    # that shortcut would pass. Two is reachable only by actually walking.
+    # that shortcut would pass. This fixture kills that shortcut specifically;
+    # it does not uniquely prove non-overlapping semantics, which an
+    # every-position probe would also satisfy here.
     body = "abcd"
     draft = clean_draft(p1_text=body)
     draft["footnotes"] = {}

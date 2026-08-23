@@ -330,7 +330,9 @@ validation:
     # will. Write the pattern against the draft, not against the rendered book.
     #
     # A pattern that fails to compile is reported as its own WARN naming the id -- never silently
-    # skipped, so a rule you thought was enforced can never read as a clean run. There is no
+    # skipped, so a rule you thought was enforced can never read as a clean run. That is the only
+    # rejection W7 makes: everything about SHAPE -- a missing field, an unknown key, a bad id, a
+    # dropped list dash -- is refused earlier, by profile_validate.py at Step 0. There is no
     # LIST-LENGTH cap and no execution-cost bound on a pattern: profile.yml is yours, on the same
     # trust footing as the scripts themselves. Individual fields ARE capped, and Step 0 refuses a
     # violation: `pattern` and `message` at 200 characters each, `id` at 64.

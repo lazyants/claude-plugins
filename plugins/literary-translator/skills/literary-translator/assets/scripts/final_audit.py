@@ -781,94 +781,60 @@ SCANNED_DRAFT_SECTIONS = ("blocks", "footnotes", "verses")
 
 
 def forbidden_patterns(profile):
-    """Reads profile.yml's `validation.forbidden_patterns` (#520) RAW -- the
-    value as written, or `None` when the key is absent.
+    """profile.yml's `validation.forbidden_patterns` (#520) as a list of
+    declaration mappings, or `[]` when the project declares none.
 
-    Deliberately no shape coercion here. This reader is downstream of an
-    operator who may have edited profile.yml since Step 0 validated it (W7
-    reaches the profile through `vd.load_profile()`, which only
-    `yaml.safe_load`s and never re-runs the schema), and the shapes a hand
-    edit produces are not exotic. Dropping a list dash turns
+    Anything that is not a list of mappings reads as no declaration, and that
+    is deliberate rather than lenient: **profile.schema.json is the gate for
+    SHAPE, and it is the only one.** It refuses a null, a mapping where a list
+    belongs, a scalar list item, an unknown property, a missing field and an
+    id that is not a slug -- every one of them, at Step 0, before a run starts.
+    Re-deciding any of that here would be a second, hand-written copy of a
+    gate that already exists, and three review rounds spent finding a
+    different shape each copy had missed. What this reader owes is not to
+    crash on a shape Step 0 would have refused.
 
-        forbidden_patterns:
-          - id: no-forbidden
+    That leaves exactly one gap, and it is shared, not special: an operator who
+    edits profile.yml AFTER Step 0 is not re-validated, because W7 reaches the
+    file through `vd.load_profile()`, which only `yaml.safe_load`s. No other
+    field defends against that either -- not `untranslated_sentinel`, not
+    `admit_contract_only_stale` -- so defending this one alone would be
+    inconsistent machinery, not extra safety.
 
-    into a MAPPING carrying a perfectly usable triple. Coercing that to `[]`
-    here would make an intended ban read as a clean run -- the precise false
-    green this whole check exists to remove. So the malformed shape is
-    carried to compile_forbidden_patterns(), which reports it exactly as it
-    reports an uncompilable pattern.
-
-    The ONE compatibility case is the sub-key being ABSENT -- every project
-    predating this field. A missing `validation` object is not a real state to
-    support: `ProfileConfig` already requires `validation.untranslated_sentinel`
-    and this same run consumed it in hard_check_coverage() long before any WARN
-    runs. The defensive `or {}` buys robustness, not a supported shape."""
+    What a schema genuinely CANNOT decide is whether a well-formed pattern
+    string compiles. That check has no other home, and it is the one
+    compile_forbidden_patterns() keeps."""
     validation = (profile or {}).get("validation")
     if not isinstance(validation, dict):
-        return None
-    return validation.get("forbidden_patterns")
+        return []
+    decls = validation.get("forbidden_patterns")
+    if not isinstance(decls, list):
+        return []
+    return [d for d in decls if isinstance(d, dict)]
 
 
-def compile_forbidden_patterns(raw):
+def compile_forbidden_patterns(decls):
     """(compiled, warns) -- compiled is a list of (id, regex, message).
 
-    Every rejection is REPORTED and none is fatal. A malformed container, a
-    non-mapping entry, a missing field and an uncompilable pattern are four
-    shapes of the same operator mistake, and the alternative to warning about
-    each (raise, or skip quietly) either takes down an advisory lane over a
-    typo or reports a clean audit for a rule that was never enforced.
+    ONE rejection is reported: a pattern that does not compile. profile.yml is
+    schema-valid by the time a run starts, so a well-formed declaration whose
+    regex is nonetheless broken is the only failure no earlier gate can catch
+    -- a JSON Schema can check that `pattern` is a string of the right length,
+    never that `re` accepts it. Reporting it matters because the alternative
+    is a run that reads exactly as it would if the rule had held: a rule the
+    operator believes is enforced, silently enforcing nothing.
 
-    `raw` is the value exactly as profile.yml carries it; `None` means the key
-    is absent, which is the one shape that is silent."""
+    A declaration is skipped without comment only when it carries no usable
+    pattern to compile, which Step 0 already refuses."""
     compiled = []
     warns = []
-    if raw is None:
-        return compiled, warns
-    if not isinstance(raw, list):
-        return compiled, [
-            f"STYLE-PATTERN validation.forbidden_patterns is a "
-            f"{type(raw).__name__}, not a list of declarations -- NO rule was "
-            f"enforced this run (a dropped list dash produces exactly this) "
-            f"-- MANUAL"
-        ]
-    for index, decl in enumerate(raw):
-        if not isinstance(decl, dict):
-            warns.append(
-                f"STYLE-PATTERN #{index}: declaration is a "
-                f"{type(decl).__name__}, not a mapping -- rule NOT enforced "
-                f"this run -- MANUAL"
-            )
-            continue
+    for index, decl in enumerate(decls):
         rule_id = decl.get("id")
         pattern = decl.get("pattern")
         message = decl.get("message")
         label = rule_id if isinstance(rule_id, str) and rule_id else f"#{index}"
         if not isinstance(pattern, str) or not pattern:
-            warns.append(
-                f"STYLE-PATTERN {label}: declaration has no usable 'pattern' "
-                f"-- rule NOT enforced this run -- MANUAL"
-            )
             continue
-        # `id` and `message` are schema-required too, and a hand edit made
-        # after Step 0 reaches here unvalidated. Missing either one is
-        # REPORTED -- but the pattern is still compiled and still enforced.
-        # Refusing the declaration instead would answer a labelling defect by
-        # switching the operator's ban off, turning something cosmetic into an
-        # unenforced rule: strictly the worse failure, and the one this check
-        # exists to prevent. So the fallbacks below stay, and the operator is
-        # told they are in use.
-        missing = [
-            field
-            for field, value in (("id", rule_id), ("message", message))
-            if not isinstance(value, str) or not value
-        ]
-        if missing:
-            warns.append(
-                f"STYLE-PATTERN {label}: declaration is missing "
-                f"{' and '.join(repr(f) for f in missing)} -- the rule IS "
-                f"still enforced, under a placeholder -- MANUAL"
-            )
         if not isinstance(message, str) or not message:
             message = "(declaration carries no message)"
         try:
@@ -884,7 +850,7 @@ def compile_forbidden_patterns(raw):
             # version pins. Enumerating them means the NEXT unlisted type turns
             # an advisory lane into a traceback that blocks delivery, which is
             # exactly the failure this whole check exists to avoid. The
-            # invariant is the one worth holding: a bad declaration is
+            # invariant is the one worth holding: an uncompilable pattern is
             # REPORTED, never fatal.
             warns.append(
                 f"STYLE-PATTERN {label}: pattern {pattern!r} does not "
