@@ -170,8 +170,8 @@ the live plugin tree on demand. Residual: that verify runs once per
 session, so an update landing mid-session, after it runs, stays masked until
 the next session's own verify. Prose enforcement is a weaker guarantee than a
 code gate, and it was chosen for a maintenance reason rather than an
-impossibility one: the check has to fire ahead of MANY entry points -- every
-script that redirects a bundle member's resolution with `--plugin-root` --
+impossibility one: the check has to fire ahead of MANY entry points — every
+script that redirects a bundle member's resolution with `--plugin-root` —
 and most of those are themselves bundle members, so wiring the call into them
 would move the very hash the check protects and re-stale every converged
 segment (#482). Not all of them: `final_audit.py` is excluded from both

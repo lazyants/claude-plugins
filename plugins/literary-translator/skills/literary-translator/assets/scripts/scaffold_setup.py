@@ -317,9 +317,15 @@ def regular_file_problem(path: Path):
 
 
 def read_marker(durable_root: Path, marker_rel, what: str) -> str:
-    """The marker's recorded value, `.strip()`ed exactly as cache_key.py's
-    compute_plugin_bundle_hash and resume_setup.py's compute_input_digest
-    read it -- never a second parsing convention."""
+    """The marker's recorded value, `.strip()`ed and strictly decoded exactly
+    as cache_key.py's compute_plugin_bundle_hash and resume_setup.py's
+    compute_input_digest read it -- never a second parsing convention.
+
+    Its shape is NOT checked here: run_verify()'s first pass has already
+    refused a marker that is not a plain file, alongside the members, so that
+    one run names every offender. What remains -- unreadable, or present but
+    empty -- aborts on the spot rather than aggregating, because it is a
+    different question ("has Step 0a run at all?") than "which files drifted"."""
     path = durable_root.joinpath(*marker_rel)
     try:
         raw = path.read_bytes()
@@ -377,20 +383,47 @@ def run_verify(durable_root: Path, plugin_root: Path, scripts_dir: Path) -> int:
                 seen.add(name)
                 checked.append(name)
 
+    # The two SOURCE DIRECTORIES in the checked tree get the same treatment
+    # ${durable_root}/scripts/ already gets from main(). Without it the byte
+    # comparison can be made self-referential: point a plugin root whose
+    # assets/scripts is a symlink INTO the durable tree at a tampered durable
+    # root and every member compares equal to itself, so a tampered state
+    # verifies clean. Reproduced before this guard existed. is_dir() follows
+    # symlinks, which is exactly why it cannot stand alone here.
+    for subpath in (LIVE_SCRIPTS_SUBPATH, LIVE_TEMPLATES_SUBPATH):
+        source_dir = plugin_root.joinpath(*subpath)
+        if source_dir.is_symlink() or not source_dir.is_dir():
+            fail(
+                f"refusing to verify: {source_dir} is not a real directory in "
+                "the checked plugin tree, so a byte comparison against it "
+                "would not be a comparison against that tree "
+                "(reason=plugin_source_dir_not_real)"
+            )
+
     shape = []
     for name in checked:
         for label, path in (
-            ("durable", durable_root / "scripts" / name),
+            ("durable", scripts_dir / name),
             ("plugin", live_member_path(plugin_root, name)),
         ):
             problem = regular_file_problem(path)
             if problem is not None:
                 shape.append(f"{name}: {label} copy is {problem} ({path})")
+    # The MARKERS get the same predicate. atomic_write_text refuses to publish
+    # over a marker NAME that is a symlink, but read_marker would follow one:
+    # the runs/ guard covers the directory, not the leaf, so without this a
+    # marker symlinked anywhere would be believed.
+    for field, marker_rel, _members, _what in bundles:
+        marker_path = durable_root.joinpath(*marker_rel)
+        problem = regular_file_problem(marker_path)
+        if problem is not None:
+            shape.append(f"{field}: marker is {problem} ({marker_path})")
     if shape:
         fail(
-            "refusing to verify: a bundle member is not a plain file in both "
-            "trees, so neither the recomputed hash nor a byte comparison "
-            "would mean what it claims (reason=member_not_regular)\n  - "
+            "refusing to verify: a bundle member or marker is not a plain "
+            "file where it must be, so neither the recomputed hash nor a byte "
+            "comparison would mean what it claims "
+            "(reason=member_not_regular)\n  - "
             + "\n  - ".join(shape)
         )
 
@@ -414,12 +447,11 @@ def run_verify(durable_root: Path, plugin_root: Path, scripts_dir: Path) -> int:
             "(reason=marker_stale)\n  - " + "\n  - ".join(stale)
         )
 
-    drift = [
-        f"{name}: durable copy differs from {live_member_path(plugin_root, name)}"
-        for name in checked
-        if (durable_root / "scripts" / name).read_bytes()
-        != live_member_path(plugin_root, name).read_bytes()
-    ]
+    drift = []
+    for name in checked:
+        live = live_member_path(plugin_root, name)
+        if (scripts_dir / name).read_bytes() != live.read_bytes():
+            drift.append(f"{name}: durable copy differs from {live}")
     if drift:
         fail(
             f"refusing: the live install at {plugin_root} no longer holds the "
@@ -497,7 +529,7 @@ def main(argv=None) -> int:
         # against ITS runtime cwd -- so "pass the same string" is not by
         # itself enough to bind the verified tree to the executed one.
         plugin_root = Path(args.plugin_root).resolve()
-        if not (plugin_root / "assets" / "scripts").is_dir():
+        if not plugin_root.joinpath(*LIVE_SCRIPTS_SUBPATH).is_dir():
             fail(
                 f"--plugin-root {args.plugin_root} does not resolve to a "
                 f"directory containing assets/scripts/ (resolved: {plugin_root})"
@@ -541,7 +573,7 @@ def main(argv=None) -> int:
         # is the guard that actually closes the race against a swap that
         # happens AFTER this check.
         fail(
-            f"refusing to write bundle-hash markers: {runs_dir} is a "
+            f"refusing to trust the bundle-hash markers: {runs_dir} is a "
             "symlink, not a real directory (reason=runs_dir_is_symlink)"
         )
 
@@ -568,7 +600,23 @@ def main(argv=None) -> int:
         # unreadable member -- correct when a marker is about to be written,
         # but it would pre-empt run_verify()'s whole job of naming EVERY
         # offending member in one run.
-        return run_verify(durable_root, plugin_root, scripts_dir)
+        #
+        # The before/after identity bracket still closes around it. run_verify
+        # reads scripts_dir MORE than the write path does -- both bundle
+        # hashes, plus a byte read per member for the drift leg -- so leaving
+        # the bracket to the write path alone would leave the ABA
+        # directory-swap window widest open in the mode that reads most. Its
+        # refusals exit non-zero from inside, so this only ever guards the
+        # GREEN path, which is precisely where a masked swap turns into a
+        # false pass.
+        verify_status = run_verify(durable_root, plugin_root, scripts_dir)
+        if dir_identity_or_none(scripts_dir) != before_scripts_identity:
+            fail(
+                f"refusing to trust the verification: {scripts_dir} changed "
+                "identity while its members were being read "
+                "(reason=scripts_dir_swapped)"
+            )
+        return verify_status
 
     plugin_bundle_hash = compute_bundle_hash(
         durable_root, cache_key.PLUGIN_BUNDLE_MEMBERS, "a plugin-bundle member"
