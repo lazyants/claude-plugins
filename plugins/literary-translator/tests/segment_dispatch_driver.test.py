@@ -488,6 +488,21 @@ if __name__ == "__main__":
 """
 
 
+def _write_claimed_draft(driver_mod, root, seg, run_id):
+    """The draft an earlier run left behind for a segment this invocation
+    re-claims: byte-shape identical to what FAKE_CODEX_JOB_PHASE2_PY writes
+    on a translate, and stamped with THIS run's own dispatch token so
+    draft_ready.py's token gate passes and derive_next_action() routes to
+    "review" rather than "translate"."""
+    draft = {
+        "seg": seg, "blocks": {"p1": "hola"},
+        "dispatch_token": driver_mod.translate_dispatch_token(run_id, seg),
+    }
+    (root / "segments" / (seg + ".draft.json")).write_text(
+        json.dumps(draft), encoding="utf-8"
+    )
+
+
 def write_codex_scenario(root, mapping):
     (root / "test_fixture_codex_scenario.json").write_text(json.dumps(mapping, ensure_ascii=False), encoding="utf-8")
 
@@ -1222,6 +1237,13 @@ def test_an_ordinary_dispatch_creates_no_run_dir_when_the_gate_refuses(tmp_path)
 # preflight for this SAME knob exactly: CODEX_JOBS_PER_SEG = max_fix_rounds
 # + 2, estimated = N * CODEX_JOBS_PER_SEG, refuse iff estimated > cap
 # (strictly greater -- estimated == cap must NOT trip the gate).
+#
+# That template equality is the n_claimed == 0 contract, and only that one.
+# #514: an id this invocation admitted a CLAIM for costs max_fix_rounds + 1
+# here, because claim_capability_refusal_for_translate() makes its translate
+# job undispatchable, and the template has no such population at all. Every
+# assertion in this section that omits the keyword is therefore asserting
+# the unclaimed contract; the claimed one is asserted separately below.
 # ===========================================================================
 
 
@@ -1255,6 +1277,82 @@ def test_check_volume_cap_matches_the_shipped_default_cap_boundary():
     refusal = DRIVER.check_volume_cap(67, 4, 400)
     assert refusal is not None
     assert refusal["estimatedCodexJobs"] == 402
+
+
+def test_codex_jobs_per_claimed_segment_formula():
+    """#514. One less than its sibling at every input: the reviews alone."""
+    assert DRIVER.codex_jobs_per_claimed_segment(1) == 2
+    assert DRIVER.codex_jobs_per_claimed_segment(3) == 4
+    assert DRIVER.codex_jobs_per_claimed_segment(4) == 5
+    for mfr in (1, 2, 3, 4, 9):
+        assert (
+            DRIVER.codex_jobs_per_claimed_segment(mfr) == DRIVER.codex_jobs_per_segment(mfr) - 1
+        ), "the whole difference is the one translate job the claim guard refuses"
+
+
+def test_estimate_codex_jobs_charges_the_two_populations_separately():
+    """#514. A mixed batch is the sum of the two, not the pessimistic
+    product -- and a mixed batch is reachable: select_segments.py's own
+    --from-stalled guard documents that "a mixed invocation also carrying
+    --from-cap or --from-converged ids stays legal"."""
+    # Nothing claimed -- byte-identical to the pre-#514 arithmetic.
+    assert DRIVER.estimate_codex_jobs(10, 0, 4) == 60
+    # Everything claimed.
+    assert DRIVER.estimate_codex_jobs(10, 10, 4) == 50
+    # Mixed: 6 unclaimed at 6 + 4 claimed at 5.
+    assert DRIVER.estimate_codex_jobs(10, 4, 4) == 56
+    # The degenerate ends, so the arithmetic is pinned at both edges.
+    assert DRIVER.estimate_codex_jobs(0, 0, 4) == 0
+    assert DRIVER.estimate_codex_jobs(1, 1, 1) == 2
+
+
+def test_check_volume_cap_admits_the_measured_from_converged_batch():
+    """#514's own repro, the reason this release exists: 80 ids admitted
+    under --from-converged at the shipped max_fix_rounds: 4 and the shipped
+    max_codex_jobs_per_batch: 400. 80*6 = 480 was refused; the reachable
+    count is 80*5 = 400, which is EXACTLY the cap and must be admitted
+    (the gate is '>', never '>=')."""
+    assert DRIVER.check_volume_cap(80, 4, 400, n_claimed=80) is None
+    # The same batch with nothing claimed is still refused, unchanged --
+    # this release weakens the gate for exactly one population and no other.
+    refusal = DRIVER.check_volume_cap(80, 4, 400)
+    assert refusal is not None
+    assert refusal["estimatedCodexJobs"] == 480
+
+
+def test_check_volume_cap_still_refuses_a_claimed_batch_that_genuinely_does_not_fit():
+    """Two-sided, so the fix cannot be a blanket weakening: one id past the
+    claimed boundary must still refuse, and by the claimed arithmetic (the
+    admitted side of this boundary is the test directly above).
+
+    The message assertions live here rather than in a test of their own,
+    matching test_check_volume_cap_boundary_is_strictly_greater_than's own
+    shape: the refusal #514 measured named a need (480) that divided by no
+    per-segment figure the operator could look up, so when part of the batch
+    is claimed the message has to say so or the number is unaccountable."""
+    refusal = DRIVER.check_volume_cap(81, 4, 400, n_claimed=81)
+    assert refusal is not None
+    assert refusal["estimatedCodexJobs"] == 405
+    assert refusal["reason"] == "batch-too-large-codex-jobs"
+    assert "estimatedCodexJobs=405" in refusal["message"]
+    assert "81 segment(s)" in refusal["message"]
+    assert "81 of them admitted under a re-review claim" in refusal["message"]
+    assert "spends no translate job" in refusal["message"]
+    assert "max_fix_rounds=4" in refusal["message"]
+
+
+def test_check_volume_cap_message_is_unchanged_when_nothing_is_claimed():
+    """The plain path still produces mass-translate-wf.template.js's own
+    message byte for byte -- the clause above is additive and conditional,
+    never a rewrite of the shared text. Restated in full here rather than
+    asserted as substrings: a substring set cannot catch an insertion."""
+    refusal = DRIVER.check_volume_cap(11, 2, 40)
+    assert refusal["message"] == (
+        "Batch too large: this batch needs estimatedCodexJobs=44 for 11 segment(s) at "
+        "max_fix_rounds=2, over the effective engine.max_codex_jobs_per_batch limit of "
+        "40. Raise it in profile.yml under engine: to allow a larger batch."
+    )
+    assert "claim" not in refusal["message"]
 
 
 def test_volume_cap_refuses_end_to_end(tmp_path):
@@ -2519,13 +2617,14 @@ def _load_fixture_driver(root):
     return _load_module(root / "scripts" / "segment_dispatch_driver.py", "segment_dispatch_driver_fixture")
 
 
-def _fixture_ctx(root, run_id, translate_cfg=None):
+def _fixture_ctx(root, run_id, translate_cfg=None, claims=None):
     driver_mod = _load_fixture_driver(root)
     dirs = driver_mod.resolve_dirs(None)
     ctx = driver_mod.DispatchContext(
         dirs=dirs, run_id=run_id, translate_cfg=translate_cfg or dict(_FIXTURE_TRANSLATE_CFG),
         companion_path=FIXTURE_COMPANION_PATH, durable_root_str=None, plugin_root_str=None,
         node_bin="node", session_id="test-session",
+        **({"claims": claims} if claims is not None else {}),
     )
     return driver_mod, ctx
 
@@ -5994,6 +6093,99 @@ def test_a_persistently_fabricated_loc_terminates_correctly_at_the_max_fix_round
     assert len(review_dispatches) == 2, (
         f"expected exactly one retry (2 review dispatches total) even at this boundary -- "
         f"got {len(review_dispatches)}: {review_dispatches}"
+    )
+
+
+def test_a_claimed_segments_loop_is_bounded_by_the_claimed_per_segment_count(tmp_path):
+    """#514. The charge and the bound have to move together.
+
+    `check_volume_cap()` charges a claimed id `max_fix_rounds + 1`, because
+    `claim_capability_refusal_for_translate()` makes its translate
+    undispatchable. If `process_segment()` still handed that segment the
+    UNCLAIMED budget, the batch would be charged one job less while still
+    being permitted the same dispatches -- widening the gap between the
+    preflight number and reachable spend from one job per segment to two.
+    The schema calls that knob a WORST-CASE preflight cap, so a two-job gap
+    is an overrun of the operator's configured bound rather than the
+    one-job floor #440 already documented. Both codex and the MR reviewer
+    caught it independently on the first draft of this release.
+
+    Driven through the same clean-but-stale mechanism the sibling test
+    below uses, because it is the only path with no bound of its own: the
+    review always records a `draft_sha1` that can never match, so
+    `derive_next_action()` re-dispatches a same-label review on every
+    iteration until the loop's own cap stops it. The dispatch COUNT is
+    therefore a direct read-out of `max_iterations`."""
+    root = phase2_project(tmp_path, n=1)
+    write_codex_scenario(root, {
+        "review:seg01": {"review_clean": True, "review_draft_sha1": "0" * 40},
+    })
+    driver_mod, ctx = _fixture_ctx(
+        root, "20260101T000000Z",
+        translate_cfg=dict(_FIXTURE_TRANSLATE_CFG, max_fix_rounds=2),
+        claims={"seg01": "from-converged"},
+    )
+    # A claimed segment is one an earlier run already drafted -- without a
+    # draft on disk derive_next_action() returns "translate" on the very
+    # first iteration and the #450 guard ends the segment there, which
+    # would measure the refusal rather than the loop bound. Same shape the
+    # fake codex_job.py writes for a translate.
+    _write_claimed_draft(driver_mod, root, "seg01", ctx.run_id)
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result["outcome"] == "failed", result
+    assert result["reason"] == "loop-exhausted-without-terminal-state", result
+
+    argv_log = (root / "test_fixture_argv_log.jsonl").read_text(encoding="utf-8").splitlines()
+    dispatches = [json.loads(ln) for ln in argv_log]
+    assert all(d["kind"] == "review" for d in dispatches), (
+        f"a claimed segment must never dispatch a translate: {dispatches}"
+    )
+    # codex_jobs_per_claimed_segment(2) + 1 = 4 iterations, each dispatching
+    # one review. The unclaimed budget would have permitted 5 -- that is the
+    # whole difference this test exists to pin.
+    assert len(dispatches) == 4, (
+        f"expected the CLAIMED budget (codex_jobs_per_claimed_segment(2) + 1 = 4), "
+        f"not the unclaimed 5 -- got {len(dispatches)}: {dispatches}"
+    )
+
+
+def test_a_claimed_persistently_fabricated_loc_still_classifies_at_the_max_fix_rounds_one_boundary(tmp_path):
+    """The two-sided half of the test above: the claimed budget is smaller,
+    and it must still be ENOUGH. At the schema's minimum `max_fix_rounds`
+    of 1 a claimed segment gets `codex_jobs_per_claimed_segment(1) + 1 = 3`
+    iterations -- review r1, the one permitted fabricated-loc retry, and
+    the iteration that re-reads and classifies it. That is exactly the
+    headroom the unclaimed budget of 4 gives the same sequence with a
+    translate in front of it, so the reason must still come back as the
+    specific `review-fabricated-loc` rather than the generic backstop --
+    the identical boundary the sibling unclaimed test above pins, which is
+    where the reserved `+1` iteration earns its keep."""
+    root = phase2_project(tmp_path, n=1)
+    write_codex_scenario(root, {
+        "review:seg01": {
+            "review_clean": False,
+            "review_findings": [{"loc": "TASK", "severity": "major", "issue": "x", "suggest": "y"}],
+        },
+    })
+    driver_mod, ctx = _fixture_ctx(
+        root, "20260101T000000Z",
+        translate_cfg=dict(_FIXTURE_TRANSLATE_CFG, max_fix_rounds=1),
+        claims={"seg01": "from-converged"},
+    )
+    _write_claimed_draft(driver_mod, root, "seg01", ctx.run_id)
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result == {"seg": "seg01", "converged": False, "outcome": "failed",
+                       "reason": "review-fabricated-loc"}, result
+
+    argv_log = (root / "test_fixture_argv_log.jsonl").read_text(encoding="utf-8").splitlines()
+    review_dispatches = [json.loads(ln) for ln in argv_log if json.loads(ln)["kind"] == "review"]
+    assert len(review_dispatches) == 2, (
+        f"exactly one retry (2 review dispatches) at this boundary, on the claimed "
+        f"budget too -- got {len(review_dispatches)}: {review_dispatches}"
     )
 
 

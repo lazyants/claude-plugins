@@ -61,12 +61,15 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.57.0 (#545/#549 -- which gate admitted a re-claimed unit) per
-# the maintenance contract above. This rotation inherited an already-empty map
-# and left it empty: the 1.57.0 entry cites files and functions by name and
-# declares no `name.ext:NNN` line citation, so there was nothing to anchor and
-# nothing to retire. The rotation before it, for 1.55.0 (#512 -- the glossary
-# rule's worked examples), likewise inherited an empty map and left it empty.
+# Rewritten for 1.59.0 (#514 -- the volume cap charged a claimed id a translate
+# job the claim guard refuses) per the maintenance contract above. This rotation
+# inherited 1.57.0's own empty map (which had inherited it empty in turn)
+# and left it empty: the 1.59.0 entry cites code by FUNCTION name throughout and
+# carries no `file.ext:NNN` citation for this map to anchor. That was a
+# deliberate choice while writing the entry, not an omission -- a line number is
+# correct when written and silently false the moment anything is inserted above
+# it, which is the drift this map exists to catch and which a function name does
+# not have.
 #
 # Phrase every future note this way -- in the PAST tense, about what this
 # rotation did to what it inherited, never in the present tense about what the

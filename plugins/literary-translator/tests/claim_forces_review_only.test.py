@@ -1088,6 +1088,78 @@ def test_a_real_selector_claim_reaches_process_segment_through_the_real_run_wiri
     )
 
 
+def test_a_real_selector_claimed_batch_at_exactly_the_claimed_cap_is_not_refused(tmp_path):
+    """#514, through the REAL run() wiring rather than the pure helper.
+
+    The defect this asserts against was measured in the field, not
+    imagined: `check_volume_cap()` was called with `len(segs)` alone, so it
+    charged every admitted id one translate job -- including the ids in
+    `claims`, for which `claim_capability_refusal_for_translate()` refuses
+    a translate unconditionally. On a live book 80 ids admitted under
+    --from-converged at max_fix_rounds: 4 were computed as 480 against the
+    shipped cap of 400 when the reachable count was 400 (exactly the cap),
+    and the batch was refused with a message telling the operator to raise
+    a limit that did not need raising.
+
+    Scaled to this fixture's own profile, which uses max_fix_rounds: 2:
+    one claimed id costs 3 (the two numbered reviews plus the mandatory
+    final one), and the pre-#514 arithmetic charged 4. The cap is set to
+    exactly 3 below, so the OLD code refuses this batch and the corrected
+    code admits it -- and the boundary is `>` on both, so 3 == 3 must pass.
+
+    Deliberately asserted through run() and its own journal rather than by
+    calling check_volume_cap() directly: the keyword this release adds
+    defaults to 0, i.e. to the old pessimistic arithmetic, so a helper-only
+    test would stay green against a run() that never passes it. The wiring
+    is the thing that can silently not happen -- exactly the reasoning the
+    two wiring tests below this one were added under."""
+    seg = "seg01"
+    root = wiring_make_driver_root(tmp_path, seg)
+    # One claimed id at this fixture's max_fix_rounds: 2 -- 3 reachable
+    # codex jobs, 4 under the pre-#514 charge.
+    (root / "profile.yml").write_text(
+        WIRING_PROFILE_YAML.replace(
+            "  max_codex_jobs_per_batch: 400\n", "  max_codex_jobs_per_batch: 3\n"
+        ),
+        encoding="utf-8",
+    )
+    driver_mod = _load_module(
+        root / "scripts" / "segment_dispatch_driver.py", "segment_dispatch_driver_volume_cap_e2e"
+    )
+
+    args = driver_mod.build_arg_parser().parse_args(["--only-segs", seg, "--from-cap", seg])
+    dirs = driver_mod.resolve_dirs(None)
+
+    result = driver_mod.run(args, dirs)
+
+    assert result.get("reason") != "batch-too-large-codex-jobs", (
+        f"a claimed batch whose reachable cost is EXACTLY the cap must be admitted: {result}"
+    )
+    assert result["claims"] == {seg: "from-cap"}, (
+        f"setup check: the REAL selector must have actually admitted the claim, or this "
+        f"proves nothing about the claimed population's arithmetic -- got: {result}"
+    )
+
+    events = [
+        json.loads(line)
+        for journal in (root / "runs").glob("*/driver_journal.jsonl")
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    volume_events = [e for e in events if e.get("type", "").startswith("volume_check_")]
+    assert len(volume_events) == 1, (
+        f"exactly one volume-gate event must be journalled per invocation: {volume_events}"
+    )
+    passed = volume_events[0]
+    assert passed["type"] == "volume_check_passed", passed
+    assert passed["estimatedCodexJobs"] == 3, (
+        f"one claimed id at max_fix_rounds=2 costs the two numbered reviews plus the "
+        f"mandatory final one, and no translate job: {passed}"
+    )
+    assert passed["claimedSegs"] == 1, passed
+    assert passed["codexJobsCap"] == 3, passed
+
+
 def test_a_real_selector_from_stalled_claim_reaches_process_segment_through_the_real_run_wiring(tmp_path):
     """#455's sibling of the --from-cap wiring test immediately above --
     same reasoning, same corruption wrapper, same three-assertion shape.
