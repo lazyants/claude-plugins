@@ -1929,22 +1929,22 @@ def test_e2e_precheck_and_wait_are_told_to_do_nothing_beyond_their_own_check(tmp
 # Round-8 sweep item 2 (own-ranked list): the dispatch prompt's own STOP
 # instruction over skeptic_ready.py --validate-fragment's self-check loop.
 #
-# WHY THIS ONE RANKS ABOVE EVERYTHING BELOW IT. Unlike glossary's --check-
-# batch (confirmed, in the round-8 sweep, structurally incapable of writing
-# without --approve-to), skeptic_ready.py --validate-fragment is NOT read-
-# only by the script's own design: a successful run REWRITES the fragment in
-# place (dropping unverified propose_split referents, coercing a record to
-# insufficient_window). Grepped skeptic_ready.py for any lock file, mutation
-# marker, or double-invocation guard -- pattern `idempoten|already.normalized
-# |lock` across the whole script -- and found none. So a second invocation
-# over an already-normalized fragment silently corrupts that fragment's own
-# record of how many citations were originally offered, with no error
-# signal anywhere, and this prompt sentence is the ONLY thing that tells the
-# dispatch agent's self-check retry loop to stop calling it once it has
-# succeeded once. This corroborates a fact already on record before this
-# round (skeptic_ready.py --validate-fragment's non-idempotence was
-# previously measured but never had a test asserting the mitigating prompt
-# clause survives).
+# WHY IT IS STILL PINNED, AND WHY ITS SEVERITY ARGUMENT NO LONGER HOLDS.
+# skeptic_ready.py --validate-fragment is NOT read-only by the script's own
+# design: a successful run REWRITES the fragment in place (dropping unverified
+# propose_split referents, coercing a record to insufficient_window). When this
+# pin was written that rewrite was also NON-IDEMPOTENT, so a second invocation
+# over an already-normalized fragment silently corrupted the fragment's own
+# record of how many citations were originally offered, and this one prompt
+# sentence was the only thing standing between the dispatch agent's self-check
+# retry loop and that corruption. #368 removed the corruption itself:
+# `evidence_coverage.cited` is now monotone, so re-running the command
+# reproduces the previous values rather than recounting a pruned list. The
+# sentence stays pinned as ECONOMY -- an extra invocation spends an agent call
+# from the run's bounded budget -- not as a data-integrity defence. The
+# companion clause that stated the old rationale ("it is not idempotent") was
+# deleted with the defect rather than re-pointed at the new one: pinning prose
+# that is no longer load-bearing would only duplicate this pin.
 #
 # PRESENCE-ONLY, and there is no stronger form available here. The
 # glossary/skeptic VERIFY pins above can go structural because the
@@ -1963,14 +1963,12 @@ SKEPTIC_DISPATCH_STOP_AT_FIRST_SUCCESS_CLAUSE = (
     "STOP at the FIRST \"success\": true and do not run the command again "
     "after that"
 )
-SKEPTIC_DISPATCH_NOT_IDEMPOTENT_CLAUSE = "it is not idempotent"
 
 
 def test_e2e_dispatch_prompt_forbids_rerunning_the_self_check_after_success(tmp_path):
-    """See the module-level comment just above this test for the full
-    severity argument (no script-level lock exists; this sentence is the
-    sole defence against silent data corruption) and for why this pin
-    cannot be made behavioural with this harness."""
+    """See the module-level comment just above this test for what this pin is
+    for since #368 (an agent-budget instruction, no longer a data-integrity
+    defence) and for why it cannot be made behavioural with this harness."""
     durable_root = str(tmp_path)
     lang_dir = tmp_path / "languages"
     particle_config = write_particle_config(lang_dir)
@@ -2006,11 +2004,6 @@ def test_e2e_dispatch_prompt_forbids_rerunning_the_self_check_after_success(tmp_
         "the dispatch prompt must tell codex to stop re-running the self-"
         "check once it has already succeeded once; prompt was:\n"
         f"{dispatch_prompt}"
-    )
-    assert SKEPTIC_DISPATCH_NOT_IDEMPOTENT_CLAUSE in dispatch_prompt, (
-        "the dispatch prompt must also state WHY -- that a second "
-        "invocation over an already-normalized fragment is destructive, not "
-        f"merely wasteful; prompt was:\n{dispatch_prompt}"
     )
 
 

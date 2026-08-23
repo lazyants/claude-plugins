@@ -309,25 +309,25 @@ const SENSES_PATH = ROOT + "/canon_senses.json"
 // --canon (and, as of #243, --senses-path too, see verifyMergedPrompt()
 // below).
 //
-// NOT read-only, and NOT idempotent -- see batchPrecheckPrompt()'s comment for
-// the measured behaviour. Every site that splices this command must therefore
-// run it exactly ONCE per decision, never in a loop that keeps calling it after
-// it has already succeeded.
+// NOT read-only: it rewrites the fragment in place. It IS idempotent as of
+// #368 -- see batchPrecheckPrompt()'s comment for what that fixed;
+// skeptic_ready.py's _coerce_record() docstring records what it still does not
+// cover (an agent editing the fragment between two validations, a downgrade
+// dropping the field outright, and the printed JSON's own `coerced` count). Every site that splices this command should therefore
+// run it once per decision, never in a loop that keeps calling it after it has
+// already succeeded: an extra invocation is a wasted agent call against a
+// bounded per-run budget, no longer a lost fact.
 //
-// THAT DISCIPLINE IS CONDITIONED ON THE AGENT'S REPLY, not on whether this
-// command itself wrote -- an undocumented residual #352's chunked wait
-// creates. A chunk's poll can genuinely exit 0 -- writing the normalized
-// fragment -- while the CHUNK'S OWN REPLY still resolves to "pending" (a null
-// or tool-killed reply, or the batch-index prefix collision waitChunkVerdict()
-// documents); when that happens, the NEXT chunk, or the authoritative
-// re-check if it was the last one, splices this SAME command again over a
-// fragment that already validated -- exactly the non-idempotent,
-// information-destroying re-run batchPrecheckPrompt() documents. Before #352
-// one wait was one reply, so there was no "next chunk" for an ambiguous reply
-// to fall through to. Not fixed here -- the fail-safe direction (keep polling
-// on an ambiguous reply) is worth more than the evidence-coverage precision it
-// can occasionally cost -- but it is real, and unstated everywhere else this
-// command's "exactly once" rule is repeated.
+// That is why #352's chunked wait no longer carries a correctness residual. A
+// chunk's poll can genuinely exit 0 -- writing the normalized fragment --
+// while the CHUNK'S OWN REPLY still resolves to "pending" (a null or
+// tool-killed reply, or the batch-index prefix collision waitChunkVerdict()
+// documents); when that happens, the NEXT chunk, or the authoritative re-check
+// if it was the last one, splices this SAME command again over a fragment that
+// already validated. Before #368 that re-run destroyed the fragment's own
+// record of how many citations were originally offered, which made the
+// fail-safe direction (keep polling on an ambiguous reply) a genuine trade
+// against evidence-coverage precision. It is now purely a spent call.
 function checkCommand(batch) {
   return PY + " " + ROOT + "/scripts/skeptic_ready.py --validate-fragment " + fragmentPath(batch.index) +
     " --particle-config " + PARTICLE_CONFIG +
@@ -353,31 +353,35 @@ function checkCommand(batch) {
 // once fewer than 2 verified referents remain (skeptic_ready.py's own
 // _coerce_record() docstring is the source of record for this split).
 //
-// THAT NORMALIZATION IS NOT IDEMPOTENT. It is never "always safe, never destructive"
-// to re-run, whatever an earlier version of this comment claimed. Re-running
-// --validate-fragment on an ALREADY-normalized fragment destroys the
-// partial-evidence fact: skeptic_ready.py's _coerce_record() recomputes
-// `evidence_coverage.cited` from the referent list it is handed
-// (skeptic_ready.py:650), which on the second invocation is the ALREADY-PRUNED
-// list -- so a record that honestly said "3 citations offered, 2 verified"
-// silently becomes "2 offered, 2 verified", and the fact that a citation was
-// ever rejected is gone. Nothing signals the loss: the run's own `coerced`
-// count only ever counts VERDICT changes (skeptic_ready.py:740-741), and the
-// verdict does not change on that second pass, so it stays 0.
+// THAT NORMALIZATION IS IDEMPOTENT AS OF #368, and it was not before.
+// Re-running --validate-fragment on an ALREADY-normalized fragment used to
+// destroy the partial-evidence fact: skeptic_ready.py's _coerce_record()
+// recomputed `evidence_coverage.cited` from the referent list it was handed,
+// which on the second invocation is the ALREADY-PRUNED list -- so a record
+// that honestly said "3 citations offered, 2 verified" silently became "2
+// offered, 2 verified", and the fact that a citation was ever rejected was
+// gone. Nothing signalled the loss either: the run's own `coerced` count only
+// ever counts VERDICT changes, and the verdict does not move on that second
+// pass, so it stayed 0. `cited` is now the MAXIMUM of the value already on the
+// record and the current referent count, so the second invocation reproduces
+// the first's values instead of recounting the pruned list.
 //
-// Fixing that non-idempotence is OUT of scope for #352, and it is NOT filed --
-// as of 1.16.2 no issue tracks it.
-// The practical consequence for THIS file is the discipline stated on
-// checkCommand() above and enforced at the wait site below: every splice of
-// the ACCEPT command runs it exactly once per decision, and a READY verdict
-// ends the wait immediately rather than spending another chunk on a fragment
-// that already validated.
+// Fixing that non-idempotence was OUT of scope for #352; #368 filed it and fixed it.
+// The pre-1.16.2 wording here called re-running "always safe, never destructive"
+// -- false when written, and removed for it in 1.16.2; what makes a re-run safe
+// now is the monotone rule, not the assertion. Safe is still not free: each
+// extra invocation spends an agent call from a bounded per-run budget and
+// rewrites the file. So the discipline stated on checkCommand() above and
+// enforced at the wait site below stands, as ECONOMY rather than correctness --
+// every splice of the ACCEPT command runs it once per decision, and a READY
+// verdict ends the wait immediately rather than spending another chunk on a
+// fragment that already validated.
 function batchPrecheckPrompt(batch) {
   const checkCmd = checkCommand(batch)
   const lines = []
   lines.push("A prior run of skeptic-pass batch " + batch.index + " may already have written a valid fragment to disk. Check ONCE whether it is already present and valid: run exactly this one bash command (a single invocation, NOT a polling loop):")
   lines.push(checkCmd)
-  lines.push("That command is not read-only: it also normalizes the fragment in place -- an adverse or propose_rescope record whose single citation fails to re-verify is downgraded to insufficient_window; a propose_split's unverified referents are instead dropped one at a time from its referent list, and the record itself only downgrades to insufficient_window once fewer than 2 verified referents remain. It never fabricates a record and never drops a whole record. Run it EXACTLY ONCE and act on that one exit code: it is NOT idempotent, so a second invocation over an already-normalized fragment quietly rewrites that fragment's own record of how many citations were originally offered, and nothing in its output reports having done so.")
+  lines.push("That command is not read-only: it also normalizes the fragment in place -- an adverse or propose_rescope record whose single citation fails to re-verify is downgraded to insufficient_window; a propose_split's unverified referents are instead dropped one at a time from its referent list, and the record itself only downgrades to insufficient_window once fewer than 2 verified referents remain. It never fabricates a record and never drops a whole record. Run it ONCE and act on that one exit code: it is idempotent, so a second invocation is harmless, but it is also a wasted call against this run's bounded agent budget and there is nothing to learn from it.")
   lines.push("If that command exits successfully (exit code 0), the fragment is already complete and valid -- return exactly the line: PRESENT " + batch.index)
   lines.push("If it exits non-zero for ANY reason (the file is missing, is not valid JSON, or fails its shape/token/coverage checks), return exactly the line: ABSENT " + batch.index)
   lines.push("Do nothing else -- do not create, dispatch, or resolve any entity yourself; this is purely a read-only-in-intent presence check.")
@@ -408,7 +412,7 @@ function batchDispatchPrompt(batch) {
   lines.push(JSON.stringify(batch.assignments, null, 1))
   lines.push("Write this exact JSON object, to " + outPath + " ATOMICALLY: write it first to a fresh temp file in the SAME directory (for example a dot-prefixed name alongside the target, holding your own process id), then rename that temp file into place at exactly " + outPath + " -- so a partially-written file is never visible at that path. Shape: {\"schema_version\": 1, \"run_id\": \"" + RUN_ID + "\", \"records\": [ ... ]}, with EXACTLY one record per entity listed above, in the SAME order, each shaped { assignment_id (copied verbatim from that entity), source_form (copied verbatim), verdict, rationale (a short human-readable reason), and evidence/referents exactly as the verdict rules above require }. A plain JSON object, no markdown code fence, no comment, nothing else in the file.")
   lines.push("Then self-check by running this command and reading its one line of JSON output: " + checkCmd)
-  lines.push("This command schema-validates your fragment and rejects it outright (naming every offending item) if its shape, its assignment_id/source_form pairing, or its coverage of this batch's assigned entities is wrong -- fix each one named and re-run the command until it prints a line with \"success\": true. A rejected run changes nothing on disk, so retrying after a rejection is safe; STOP at the FIRST \"success\": true and do not run the command again after that, because the successful run is the one that rewrites your fragment and running it a second time over the already-rewritten file loses information (it is not idempotent).")
+  lines.push("This command schema-validates your fragment and rejects it outright (naming every offending item) if its shape, its assignment_id/source_form pairing, or its coverage of this batch's assigned entities is wrong -- fix each one named and re-run the command until it prints a line with \"success\": true. A rejected run changes nothing on disk, so retrying after a rejection is safe; STOP at the FIRST \"success\": true and do not run the command again after that, because the successful run is the one that rewrites your fragment and every further run is a wasted call that tells you nothing new.")
   lines.push("What that successful run rewrites: it independently re-authenticates every citation you gave -- an adverse or propose_rescope record whose one citation does not check out is downgraded to insufficient_window; a propose_split's referents that do not check out are instead dropped one at a time from its referent list, downgrading the whole record only once fewer than 2 verified referents remain -- writing the result back in place. A \"success\": true result with a nonzero \"coerced\" count just means some of your citations were not verifiable; this is a normal, safe, and expected outcome, never something you need to fix or re-litigate.")
   lines.push("Once you see \"success\": true, return exactly the line: FRAGMENT " + batch.index)
   return lines.join("\n")
@@ -464,8 +468,8 @@ function batchWaitChunkPrompt(batch, chunkIndex) {
 //
 // Runs at most ONCE per batch, and only on the path where no chunk returned
 // READY -- so the normal path's count of write-capable --validate-fragment
-// invocations is unchanged by #352 (see batchPrecheckPrompt()'s comment on why
-// that count matters).
+// invocations is unchanged by #352 (see batchPrecheckPrompt()'s comment: since
+// #368 that count is an agent-budget question, not a correctness one).
 function batchWaitRecheckPrompt(batch) {
   const checkCmd = checkCommand(batch)
   const lines = []
@@ -728,11 +732,11 @@ async function batchStep(batch) {
   // The break is conditioned on the VERDICT, never on the loop index: with
   // waitChunkVerdict()'s two verdicts, "not pending" is exactly READY, so a
   // READY from ANY chunk -- the first, the last, or one in between -- ends the
-  // wait immediately, with no later chunk and no re-check. That is a
-  // correctness requirement, not a saved call: each of those would re-run the
-  // write-capable, NON-idempotent --validate-fragment over a fragment that has
-  // already validated (see batchPrecheckPrompt()'s comment for what that
-  // destroys).
+  // wait immediately, with no later chunk and no re-check. Since #368 that is an
+  // economy requirement rather than a correctness one: each of those would
+  // re-run the write-capable --validate-fragment over a fragment that has
+  // already validated, spending an agent call from a bounded budget to re-ask
+  // an answered question (see batchPrecheckPrompt()'s comment).
   let verdict = "pending"
   for (let chunk = 1; chunk <= WAIT_CHUNKS; chunk++) {
     const chunkReply = await agent(batchWaitChunkPrompt(batch, chunk), {

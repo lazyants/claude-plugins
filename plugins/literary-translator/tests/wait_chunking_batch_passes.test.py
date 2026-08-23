@@ -1196,8 +1196,9 @@ def test_a_ready_chunk_stops_the_wait_at_every_chunk_index(target, tmp_path):
     on the VERDICT -- which reads as equivalent and is not. A batch whose
     fragment validated in the LAST chunk would then run the re-check anyway,
     spending an extra agent call on the NORMAL path to re-ask a question already
-    answered -- and, worse here than in W5, that call re-runs a WRITE-CAPABLE,
-    non-idempotent gate over a fragment that has already validated.
+    answered -- and that call re-runs a WRITE-CAPABLE gate over a fragment that
+    has already validated. That gate is idempotent since #368, so the cost is
+    the wasted call against a bounded per-run budget, not a lost fact.
 
     WAIT_CALLS IS A CEILING, NOT A COST, and this is where that is proved. A
     wait costs ONE call when chunk 1 answers READY, two when chunk 2 does, and
@@ -1223,9 +1224,8 @@ def test_a_ready_chunk_stops_the_wait_at_every_chunk_index(target, tmp_path):
         assert target.recheck_label not in labels(out), (
             f"{target.name}: a READY at chunk {k} still triggered the authoritative "
             f"re-check. On the normal path that spends an extra agent call to "
-            f"re-ask an answered question, and re-runs a write-capable, "
-            f"non-idempotent gate over a fragment that already validated; "
-            f"calls={labels(out)}"
+            f"re-ask an answered question, and re-runs a write-capable gate over "
+            f"a fragment that already validated; calls={labels(out)}"
         )
         # The COST of this wait, stated as a number: k calls, no more.
         spent = len([lbl for lbl in labels(out)
