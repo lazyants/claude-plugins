@@ -840,6 +840,25 @@ function batchDispatchPrompt(batch, attempt, rejectionReason) {
   const candidatesJson = JSON.stringify(batch.candidates, null, 1)
   const outPath = fragmentPath(batch.index, attempt)
   const lines = []
+  // #109 -- THE ROUTING CONTROL, and it must stay the FIRST rendered line.
+  // The codex:codex-rescue agent this prompt is dispatched to is a thin
+  // forwarder around one `codex-companion.mjs task` call, and it picks
+  // foreground or background BY ITS OWN HEURISTIC unless the request states
+  // one. Foreground runs the codex turn IN-PROCESS inside that forwarder's
+  // single Bash call, so the awaited dispatch below blocks for the whole turn
+  // and the turn dies with the call when the harness reaches its per-call cap:
+  // no fragment, the batch's whole WAIT_BOUND_SEC spent, and batchStep()
+  // returning glossary-pass-null.
+  // Background enqueues a session-detached worker and returns, which is the
+  // shape every comment in this file already ASSUMES (see the snapshot-order
+  // comment's "the codex job outlives the awaited call", and the wait chunk
+  // prompt telling its poller the batch "is working in the background").
+  // Stating it here is what makes that assumption a request rather than a
+  // guess. A bare token and nothing else, deliberately: the forwarder strips
+  // routing flags from the task text it passes on, and any accompanying
+  // "return immediately" prose would be the one part a surviving copy could
+  // read as an instruction to codex itself.
+  lines.push("--background")
   lines.push("Effort: " + EFFORT + ". Canon-and-glossary pass (codex-glossary-pass) for a " + SOURCE_LANG + " -> " + TARGET_LANG + " literary translation project, batch " + batch.index + ".")
   lines.push("Read in full, in this order: " + ROOT + "/glossary_TASK.md (the canonicalization rules and the exact per-item output contract) and " + ROOT + "/canon.json (the entries already frozen there). Never re-decide or override any source_form already present in canon.json's own entries{} -- this batch resolves only the new candidates listed below, which were already filtered against the current canon.json before you were dispatched.")
   lines.push("research_mode = " + RESEARCH_MODE + ". If it is \"offline\": basis:\"established\" is forbidden outright for every candidate in this batch, with no exception -- use basis:\"transliterated\" when the fixed practical-transcription rule in style_bible.md (section C-translit) is enough on its own, use basis:\"sense_translated\" instead when the candidate is a speaking name with a clean sense-rendering (see the speaking-name rule below -- legal under offline too, since it makes no citation claim at all), or set disposition:\"review_queue\" instead, with a note that starts with the literal prefix \"SOURCE_UNAVAILABLE:\". If it is \"live\": basis:\"established\" is allowed, but only together with a real, citable reference source URL -- never a fabricated one.")
@@ -1025,7 +1044,10 @@ function batchWaitRecheckPrompt(batch, attempt) {
 // read, copies the validated bytes to approvedPath(); its second command fetches
 // from THAT snapshot; and the judge audits the same snapshot. The reverse order
 // does not work and must not be "simplified" back into: the batch dispatch is
-// agentType:"codex:codex-rescue", the codex job outlives the awaited call (that
+// agentType:"codex:codex-rescue" and REQUESTS background execution in its
+// prompt's first line (#109, see batchDispatchPrompt() -- without that
+// request a foreground choice makes the sentence below false), so the codex
+// job outlives the awaited call (that
 // is why the WAIT_BOUND_SEC wait exists at all -- spent since 1.16.2 across
 // WAIT_CHUNKS chunks plus one authoritative re-check rather than in a single
 // call), and its own prompt instructs an

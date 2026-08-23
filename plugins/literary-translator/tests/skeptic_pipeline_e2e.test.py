@@ -2006,6 +2006,23 @@ def test_e2e_dispatch_prompt_forbids_rerunning_the_self_check_after_success(tmp_
         f"{dispatch_prompt}"
     )
 
+    # #109 -- the background routing control, asserted on the prompt this run
+    # EMITTED rather than on the source that builds it.
+    # tests/bounded_poll_present.test.py pins this line by shape, in the
+    # template SOURCE, for every codex dispatch this plugin ships -- a claim
+    # about text. This one closes the gap to the wire, so a refactor keeping
+    # the push but no longer RENDERING it first fails here. The dispatch prompt
+    # is already captured above, so this rides an existing run rather than
+    # paying for another.
+    first_line = dispatch_prompt.split("\n")[0]
+    assert first_line == "--background", (
+        "the codex dispatch prompt's FIRST rendered line must be the bare "
+        "routing control --background, so the codex:codex-rescue forwarder is "
+        "given an explicit choice instead of picking foreground by its own "
+        "heuristic and running the codex turn inside its single Bash call "
+        "(#109). First line was instead: " + repr(first_line)
+    )
+
 
 # ---------------------------------------------------------------------------
 # Round 6 -- parity pin for the dispatch-write identity guard.

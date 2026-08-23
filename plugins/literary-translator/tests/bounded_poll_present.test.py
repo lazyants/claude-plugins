@@ -84,12 +84,18 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
 MASS_TRANSLATE_SRC = TEMPLATES_DIR / "mass-translate-wf.template.js"
 GLOSSARY_SRC = TEMPLATES_DIR / "glossary-pass-wf.template.js"
+# #109 -- skeptic joins this file for the codex-dispatch sweep at its foot, and
+# for nothing else here: the routing pin is a property of EVERY codex dispatch
+# this plugin ships, and a sweep that silently omits a template is the shape
+# that lets one lose the line while the sweep stays green.
+SKEPTIC_SRC = TEMPLATES_DIR / "skeptic-pass-wf.template.js"
 
-for _p in (MASS_TRANSLATE_SRC, GLOSSARY_SRC):
+for _p in (MASS_TRANSLATE_SRC, GLOSSARY_SRC, SKEPTIC_SRC):
     assert _p.is_file(), f"expected plugin template not found: {_p}"
 
 MASS_TRANSLATE_SOURCE = MASS_TRANSLATE_SRC.read_text(encoding="utf-8")
 GLOSSARY_SOURCE = GLOSSARY_SRC.read_text(encoding="utf-8")
+SKEPTIC_SOURCE = SKEPTIC_SRC.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -1311,9 +1317,111 @@ def test_glossary_codex_dispatch_set_is_exactly_batch_dispatch():
     )
 
 
+# ---------------------------------------------------------------------------
+# #109 -- THE BACKGROUND ROUTING PIN, swept across every template this plugin
+# ships.
+#
+# The dispatch is an awaited agent() call and the Workflow agent() API offers
+# no timeout, so what bounds it is not a cap but WHAT THE AWAITED CALL COSTS.
+# The codex:codex-rescue forwarder runs one `codex-companion.mjs task` call and
+# chooses foreground or background by its own heuristic unless the request
+# names one; foreground runs the codex turn inside that single Bash call, so
+# the await blocks for the whole turn and the turn dies with the call at the
+# harness's per-call cap. Background enqueues a detached worker and returns.
+# Both dispatching templates' bounded waits, and the comments that say the
+# codex job outlives the awaited call, are written for the second shape only.
+#
+# Asserted as the builder's FIRST STATEMENT, not merely as present somewhere: a
+# forwarder reads a routing control at the head of the request, and "present
+# anywhere" would be satisfied by a mention buried a hundred lines into a
+# prompt, or by a comment. Each case asserts its template's EXACT dispatch set
+# before looping over it: `find_all_agent_calls` recognises one syntactic shape
+# -- `agent(someBuilder(...), { ... })` -- so a dispatch rewritten to pass its
+# prompt or its options through a variable would simply not be found, and a
+# loop over the findings would then assert nothing at all while still
+# reporting green.
+#
+# The rendered counterpart -- the same line asserted on the prompt a real run
+# actually emits, taken from the e2e harnesses' own promptByLabel capture --
+# lives in glossary_pipeline_e2e.test.py and skeptic_pipeline_e2e.test.py.
+# This one is the by-shape sweep; those prove the string reaches the wire.
+# ---------------------------------------------------------------------------
+
+BACKGROUND_ROUTING_PUSH = 'lines.push("--background")'
+
+CODEX_DISPATCH_POPULATION = [
+    (MASS_TRANSLATE_SOURCE, "mass-translate-wf.template.js", set()),
+    (GLOSSARY_SOURCE, "glossary-pass-wf.template.js", {"batchDispatchPrompt"}),
+    (SKEPTIC_SOURCE, "skeptic-pass-wf.template.js", {"batchDispatchPrompt"}),
+]
+
+
+@pytest.mark.parametrize(
+    "source,label,expected",
+    CODEX_DISPATCH_POPULATION,
+    ids=[label for _s, label, _e in CODEX_DISPATCH_POPULATION],
+)
+def test_every_codex_dispatch_prompt_opens_with_the_background_routing_line(source, label, expected):
+    calls = find_all_agent_calls(source)
+    codex_builders = {name for name, opts in calls if is_codex_dispatch(opts)}
+    assert codex_builders == expected, (
+        f"{label}: the codex-agentType dispatch set moved -- this sweep's "
+        f"population is asserted, never discovered, so that an unrecognised "
+        f"dispatch fails here instead of dropping out silently. Expected "
+        f"{expected or 'no codex dispatch'}, got {codex_builders}"
+    )
+
+    for builder in sorted(codex_builders):
+        body = extract_function_body(source, builder)
+
+        # UNCONDITIONAL, not merely first. "The first push is --background" is
+        # satisfied by `if (!rejectionReason) lines.push("--background")`, and a
+        # guard like that hides from an emitted-prompt assertion entirely: that
+        # kind of pin only ever sees the dispatches a run actually reaches, so a
+        # retry-only or mode-only path stays unwatched. Requiring the push to be
+        # the first STATEMENT after `const lines = []`, with only comments and
+        # blank lines between, forbids the guard structurally instead of hoping
+        # a run reaches it.
+        # EXACTLY ONE declaration, because the anchor below is textual and the
+        # extraction helper slices a function without brace-depth analysis. A
+        # second `const lines = []` anywhere in the slice -- a nested closure,
+        # or the same two lines inside a `/* ... */` block, which this line
+        # filter does not understand -- would let the anchor land on the decoy
+        # while the builder's own push stays guarded. Measured: both shapes pass
+        # every other assertion here. One declaration removes the ambiguity
+        # instead of teaching this test to parse JavaScript.
+        assert body.count("const lines = []") == 1, (
+            f"{label}: {builder}() must hold exactly ONE `const lines = []`; the "
+            f"routing-push anchor below is textual, so a second one makes it "
+            f"ambiguous which array the pin is talking about (#109)"
+        )
+        after_decl = body.split("const lines = []", 1)[1]
+        statements = [
+            ln.strip() for ln in after_decl.splitlines()
+            if ln.strip() and not ln.strip().startswith("//")
+        ]
+        assert statements and statements[0] == BACKGROUND_ROUTING_PUSH, (
+            f"{label}: {builder}() must push the routing control UNCONDITIONALLY, as "
+            f"the first statement after `const lines = []`, so the codex:codex-rescue "
+            f"forwarder is given an explicit routing control instead of choosing "
+            f"foreground by its own heuristic -- a guarded push would leave a retry or "
+            f"a mode-specific dispatch running foreground (#109). First statement is "
+            f"instead: {statements[0] if statements else '<none>'}"
+        )
+        assert 'lines.join("\\n")' in body, (
+            f"{label}: {builder}() must still render by joining `lines`, or the "
+            f"first-statement assertion above stops being a claim about the first "
+            f"rendered line"
+        )
+
+
 @pytest.mark.parametrize(
     "source,label",
-    [(MASS_TRANSLATE_SOURCE, "mass-translate-wf.template.js"), (GLOSSARY_SOURCE, "glossary-pass-wf.template.js")],
+    [
+        (MASS_TRANSLATE_SOURCE, "mass-translate-wf.template.js"),
+        (GLOSSARY_SOURCE, "glossary-pass-wf.template.js"),
+        (SKEPTIC_SOURCE, "skeptic-pass-wf.template.js"),
+    ],
 )
 def test_every_codex_dispatch_in_file_is_schema_less(source, label):
     calls = find_all_agent_calls(source)

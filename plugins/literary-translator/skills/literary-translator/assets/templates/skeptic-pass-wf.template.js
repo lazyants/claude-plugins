@@ -428,6 +428,15 @@ function batchDispatchPrompt(batch) {
   const outPath = fragmentPath(batch.index)
   const checkCmd = checkCommand(batch)
   const lines = []
+  // #109 -- THE ROUTING CONTROL, and it must stay the FIRST rendered line.
+  // The codex:codex-rescue forwarder this prompt is dispatched to chooses
+  // foreground or background by its own heuristic unless the request states
+  // one, and a foreground choice runs the codex turn inside that forwarder's
+  // single Bash call -- so the awaited dispatch below would block for the
+  // whole turn and die with the call. The WAIT step below is written for the
+  // other shape: a detached job that outlives the awaited call. Stating the
+  // routing here is what makes that a request rather than a guess.
+  lines.push("--background")
   lines.push("Effort: high. Skeptic pass (codex-skeptic-pass, RFC #215 Phase 2) for a " + SOURCE_LANG + " literary translation project's canon, batch " + batch.index + ".")
   lines.push("You are the ADVERSARY, not the author. Every entity below was already accepted into this project's canon.json by an EARLIER, blind (source-text-unaware) pass. Your ONLY job here is to try to find a concrete reason that earlier acceptance was wrong, using ONLY the actual source-text windows given below for each entity. You may NEVER confirm an entity is correctly identified -- there is no verdict available to you that means \"confirmed\"; your output schema accepts only adverse, propose_split, propose_rescope, or insufficient_window. When in genuine doubt, insufficient_window is always the safe, correct answer -- never strain for a split or an adverse finding you cannot back with an exact, real quote.")
   lines.push("Verdict rules, applied independently to EACH entity below:")
