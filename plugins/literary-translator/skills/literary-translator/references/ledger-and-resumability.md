@@ -907,9 +907,23 @@ on-disk fragment is never rewritten). Flags: `--expected-from-manifest
 `segments[]`) or `--expected-segs seg05,seg06,...` (explicit partial-batch
 list) — either enables the missing-fragment completeness check; without
 either, it still materializes `ledger.json` but skips the completeness
-check. **1.2.0:** the completeness check itself now also requires the
-current run's token (threaded through the same invocation) to perform the
-per-segment token/sha re-check above.
+check. **#463: it never reports a fragment directory it could not READ as
+empty, and never publishes an empty ledger over a populated one.** A
+`runs/ledger.d/` that is absent (ENOENT, or the name is a plain file) is
+still the ordinary "nothing written yet" and still merges to an empty
+ledger; any other error listing it — a permissions change, a vanished
+mount — now fails the merge instead of being read as emptiness. Separately
+and whatever the cause, a merge that would take a populated `ledger.json`
+to ZERO segments refuses, as does one that produced zero segments while
+the existing `ledger.json` cannot be read or parsed at all. No flag
+overrides this: a deliberate reset is performed by deleting
+`runs/ledger.json` first, which is an operator act rather than something
+an accident can do. The refusal happens before the atomic replace, so a
+refused merge leaves the existing ledger byte-for-byte intact.
+
+**1.2.0:** the completeness check itself now also requires the current run's
+token (threaded through the same invocation) to perform the per-segment
+token/sha re-check above.
 
 ## The `recordLedgerPrompt` call sites
 
