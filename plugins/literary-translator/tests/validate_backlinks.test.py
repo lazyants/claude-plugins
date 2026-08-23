@@ -890,7 +890,9 @@ def test_unresolved_homonym_is_not_a_coverage_warning(tmp_path):
     write_nodestream(root, [])
     set_aggregate(root, {
         "eligible_by_source_form": {},
-        "unresolved_homonyms": {"Split": {"count": 2, "segs": ["seg02", "seg01"]}},
+        "unresolved_homonyms": {
+            "Split": {"count": 2, "segs": ["seg02", "seg01"], "reason": "is_split"},
+        },
     })
 
     proc = run_gate(root)
@@ -898,7 +900,41 @@ def test_unresolved_homonym_is_not_a_coverage_warning(tmp_path):
     report = report_of(proc)
     assert report["mentions_coverage"] == {"status": "enabled", "checked_entities": 0, "missing": []}
     assert report["warnings"] == 0
-    assert report["unresolved_homonyms"] == [{"source_form": "Split", "count": 2, "segs": ["seg01", "seg02"]}]
+    assert report["unresolved_homonyms"] == [
+        {"source_form": "Split", "count": 2, "segs": ["seg01", "seg02"], "reason": "is_split"}
+    ]
+
+
+def test_unresolved_homonym_row_carries_the_reason_that_distinguishes_it(tmp_path):
+    """#497: a credited non-primary member of a ruled fold group is a RESOLVED
+    routing decision -- its occurrences are indexed under the group's primary --
+    while `is_split` and `fold_match_key_collision` are open questions the
+    operator is being asked to answer. `reason` is the only field that tells
+    them apart in this report, and it was dropped before #497."""
+    root = make_root(tmp_path)
+    write_canon(root, {})
+    write_nodestream(root, [])
+    set_aggregate(root, {
+        "eligible_by_source_form": {},
+        "unresolved_homonyms": {
+            "Credited": {
+                "count": 1,
+                "segs": ["seg01"],
+                "reason": "fold_group_credited_to_link_group_primary",
+            },
+            "Colliding": {"count": 1, "segs": ["seg01"], "reason": "fold_match_key_collision"},
+        },
+    })
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert report["warnings"] == 0
+    by_form = {row["source_form"]: row["reason"] for row in report["unresolved_homonyms"]}
+    assert by_form == {
+        "Credited": "fold_group_credited_to_link_group_primary",
+        "Colliding": "fold_match_key_collision",
+    }
 
 
 def test_inline_advisory_reports_thin_coverage_but_stays_exit_neutral(tmp_path):

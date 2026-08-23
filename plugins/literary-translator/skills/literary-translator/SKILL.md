@@ -3255,6 +3255,28 @@ takes effect it does change the rendered links, so `diff_rendered_output.py`
 MISMATCHES (exit `1`) until the baseline is deliberately re-accepted with
 `--accept-baseline --force-accept-baseline`.
 
+**A group also decides who owns the `## Mentions` occurrences (#497).** The
+same fold key that makes `בְּרֶׁסְּלֶׁב` and `בְּרַסְּלֶׁב` one match also makes
+them a COLLISION for the source-anchored index: before #497 every member of
+such a group had its occurrences withheld outright, so those notes carried no
+`## Mentions` section at all and `validate_backlinks.py` reported
+`warnings: 0` — coverage is measured over the eligible universe those forms
+had just been removed from, so the loss was invisible to the gate. Measured on
+the delivered he→en volume: **27 canon forms, 2 390 occurrence records, zero
+Mentions lines**. With a `canon_link_groups.json` ruling covering the group,
+those occurrences are credited to the group's **primary**, whose note carries
+the whole index; the other members report
+`reason: "fold_group_credited_to_link_group_primary"` in the gate's
+`unresolved_homonyms` rows — a resolved routing decision, told apart there from
+a genuine `fold_match_key_collision` or `is_split`, both of which are still
+asking you for an answer. All-or-nothing: it applies only when EVERY form
+sharing that fold key — canon entries AND `canon_senses.json` split-only
+forms — is an index-eligible canon entry inside one group with one primary and
+no member carries a split. `output.target: obsidian` only, since that is the
+only target the sidecar projection is attached under. An in-flight W9r registry
+run must restart when a group is adopted (`person_registry.py` binds the whole
+NodeStream into `registry_input.json`'s digest).
+
 **W9r Person registry — OPT-IN, and opt-in means the operator runs it**
 (1.34.0, #550). For a book translated *for genealogy* rather than for the
 translation, `scripts/person_registry.py` consolidates what the pipeline

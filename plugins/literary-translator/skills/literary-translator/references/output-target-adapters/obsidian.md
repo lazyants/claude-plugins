@@ -415,10 +415,53 @@ that primary's note instead of being de-linked. Four deliberate limits:
 3. **A group plus an outsider still de-links**, and so does a group
    containing a `sense_translated` owner: the anti-flood invariant (#138)
    and the misattribution rule (#207) both outrank a routing preference.
-4. **It is not an entity layer.** `canon.json` stays a 1:1 name dictionary;
-   every member keeps its own entity note, frontmatter, and source-anchored
-   `## Mentions` appendix — which remains the authoritative, collapse-free
-   occurrence index per form.
+4. **It is not an entity layer.** `canon.json` stays a 1:1 name dictionary,
+   and every member keeps its own entity note and frontmatter.
+
+### What a group does to the `## Mentions` appendix (1.58.0+, #497)
+
+The three limits above are about inline links. A group has a second effect,
+and until #497 this section claimed it had none: **when a group's members
+collide on a `#238/#241` fold key, the group's occurrences are credited to
+its primary**, so the primary's `## Mentions` appendix is the collapse-free
+index for that referent and the other members' notes carry no appendix.
+
+Read that against what it replaced, not against an ideal: before #497 a fold
+collision withheld the occurrences of EVERY member, so none of those notes had
+an appendix at all. On the live he→en volume that was 27 canon forms and 2 390
+occurrence records, with `validate_backlinks.py` reporting `warnings: 0` —
+the loss was invisible to the gate, because coverage is measured over the
+eligible universe those forms had just been removed from.
+
+The crediting is deliberately all-or-nothing on the whole fold key. It applies
+only when **every** form sharing that fold key — across canon entries AND
+`canon_senses.json` split-only forms — is an index-eligible canon entry inside
+one group with one primary, and no member carries a homonym split. A
+split-only form on the key, an `is_proper_name: false` entry on the key, a
+partial group, two primaries, or a primary outside the group all leave the
+whole group withheld with `reason: "fold_match_key_collision"`, exactly as
+before.
+
+`validate_backlinks.py`'s `unresolved_homonyms` rows carry `reason`, which is
+how a credited non-primary member (`fold_group_credited_to_link_group_primary`
+— a resolved routing decision) is told apart from a genuine collision or a
+homonym split, both of which are still asking you for an answer.
+
+Two limits worth knowing before you rely on this:
+
+- It is `output.target: obsidian` only. The sidecar projection is attached to
+  the NodeStream under that target alone, so an `epub`/`custom` project's fold
+  groups stay withheld — including in `person_registry.py`'s W9r counts.
+- Where a group's members carry DISTINCT single-owner `canonical_target_form`s
+  they each keep their own inline link (limit 1: a single-owner target is
+  untouched), so a non-primary note remains reachable while holding no
+  appendix. For the case the sidecar exists for — one shared, de-linked
+  target — the note the links reach IS the one that holds the appendix.
+- Adopting a group on a delivered book re-renders it: accept the new baseline
+  with `diff_rendered_output.py --accept-baseline --force-accept-baseline`,
+  and note that an in-flight W9r registry run must restart, since
+  `person_registry.py` binds the whole NodeStream into `registry_input.json`'s
+  digest.
 
 **A script never decides membership.** `note` is required and non-blank for
 exactly that reason: the file records a call, it does not make one (the

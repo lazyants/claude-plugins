@@ -128,13 +128,20 @@ def make_claim(vid, rendered="", literal_gloss="", placeholder=None):
     }
 
 
-def make_nodestream(nodes=None, footnotes=None):
-    return {
+def make_nodestream(nodes=None, footnotes=None, link_groups=None):
+    """`link_groups` (#497) mirrors what `assemble._attach_link_groups`
+    projects onto the persisted NodeStream: the VALIDATED `{member: primary}`
+    map, attached only when a `canon_link_groups.json` sidecar exists. Absent
+    by default, exactly like a project without one."""
+    nodestream = {
         "book": {"seg_order": [], "title": None},
         "nodes": nodes or [],
         "footnotes": footnotes or [],
         "meta": {},
     }
+    if link_groups is not None:
+        nodestream["link_groups"] = link_groups
+    return nodestream
 
 
 def make_canon(entries):
@@ -814,3 +821,237 @@ def test_major1_collision_takes_precedence_over_is_split():
 
     result = ot.build(manifest, canon, split_senses(space_form), lang, nodestream)
     assert result["unresolved_homonyms"][space_form]["reason"] == "fold_match_key_collision"
+
+
+# ---------------------------------------------------------------------------
+# #497 -- a fold-key collision carrying a COMPLETE canon_link_groups.json
+# ruling is not an identity ambiguity: the project already answered "are these
+# one referent?". Its occurrences are credited to the ruling's PRIMARY, and its
+# other members report reason "fold_group_credited_to_link_group_primary"
+# instead of being withheld. Every group WITHOUT a complete ruling still
+# collides exactly as before -- the tests below pin both directions, because
+# this change RELAXES a check.
+#
+# `SPACED`/`MAQAF` are the same pair the MAJOR 1 tests above use, so the
+# newly-admitted case and the still-refused case differ in the ruling alone.
+# ---------------------------------------------------------------------------
+
+SPACED = "משה לייב"
+MAQAF = "משה־לייב"
+COLLIDING_TEXT = "ראה משה־לייב אתמול."
+
+
+def _collision_fixture(link_groups=None, canon_extra=None, senses=None):
+    """One physical occurrence that BOTH SPACED and MAQAF retrieve through the
+    shared #238/#241 fold key -- the whole point of the pair."""
+    lang = make_lang(name_inventory=[SPACED])
+    manifest = make_manifest(blocks={"b1": make_block(COLLIDING_TEXT, seg="seg01")})
+    nodestream = make_nodestream(nodes=[make_node("b1", "seg01")], link_groups=link_groups)
+    entries = {SPACED: make_entry(), MAQAF: make_entry()}
+    entries.update(canon_extra or {})
+    return manifest, make_canon(entries), (senses or EMPTY_SENSES), lang, nodestream
+
+
+def test_lt497_complete_ruling_credits_the_group_to_its_primary():
+    """NEWLY ADMITTED. A group covering the whole fold-key group, with SPACED
+    as primary: SPACED alone becomes eligible and holds the records; MAQAF is
+    reported as credited to it, carrying the same count/segs so the diagnostic
+    still says how many occurrences exist and where."""
+    result = ot.build(*_collision_fixture(link_groups={SPACED: SPACED, MAQAF: SPACED}))
+
+    assert SPACED in result["eligible_by_source_form"]
+    assert len(result["eligible_by_source_form"][SPACED]) == 1
+    assert result["eligible_by_source_form"][SPACED][0]["seg"] == "seg01"
+
+    # The non-primary member is NOT double-filed into eligibility...
+    assert MAQAF not in result["eligible_by_source_form"]
+    # ...and NOT reported as an open collision either.
+    assert result["unresolved_homonyms"][MAQAF] == {
+        "count": 1,
+        "segs": ["seg01"],
+        "reason": "fold_group_credited_to_link_group_primary",
+    }
+    assert SPACED not in result["unresolved_homonyms"]
+
+
+def test_lt497_a_credited_group_does_not_warn_about_a_collision(capsys):
+    """A ruled group is not an open question, so it must not warn like one --
+    the WARN names a resolution route the operator has already taken."""
+    ot.build(*_collision_fixture(link_groups={SPACED: SPACED, MAQAF: SPACED}))
+    assert "fold_match_key_collision" not in capsys.readouterr().err
+
+
+def test_lt497_the_primary_may_be_either_member():
+    """Nothing privileges the first-declared form -- the ruling decides."""
+    result = ot.build(*_collision_fixture(link_groups={SPACED: MAQAF, MAQAF: MAQAF}))
+    assert MAQAF in result["eligible_by_source_form"]
+    assert SPACED not in result["eligible_by_source_form"]
+    assert (
+        result["unresolved_homonyms"][SPACED]["reason"]
+        == "fold_group_credited_to_link_group_primary"
+    )
+
+
+def test_lt497_no_sidecar_still_collides():
+    """STILL REFUSED. #497's own Zion/tziyun case: two forms differing only in
+    pointing, no ruling recorded anywhere -- both stay withheld."""
+    result = ot.build(*_collision_fixture(link_groups=None))
+    assert result["eligible_by_source_form"] == {}
+    assert result["unresolved_homonyms"][SPACED]["reason"] == "fold_match_key_collision"
+    assert result["unresolved_homonyms"][MAQAF]["reason"] == "fold_match_key_collision"
+
+
+def test_lt497_a_partial_ruling_still_collides():
+    """STILL REFUSED. A group covering only ONE member is not a ruling about
+    the group -- fail-closed, mirroring the renderer's own EVERY-owner rule."""
+    result = ot.build(*_collision_fixture(link_groups={SPACED: SPACED}))
+    assert result["eligible_by_source_form"] == {}
+    assert result["unresolved_homonyms"][SPACED]["reason"] == "fold_match_key_collision"
+    assert result["unresolved_homonyms"][MAQAF]["reason"] == "fold_match_key_collision"
+
+
+def test_lt497_two_primaries_in_one_fold_group_still_collides():
+    """STILL REFUSED. Both members are mapped, but to DIFFERENT referents --
+    which is a statement that they are two people, not one."""
+    result = ot.build(*_collision_fixture(link_groups={SPACED: SPACED, MAQAF: MAQAF}))
+    assert result["eligible_by_source_form"] == {}
+    assert result["unresolved_homonyms"][SPACED]["reason"] == "fold_match_key_collision"
+    assert result["unresolved_homonyms"][MAQAF]["reason"] == "fold_match_key_collision"
+
+
+def test_lt497_a_primary_outside_the_fold_group_still_collides():
+    """STILL REFUSED. The primary is a legal canon entry and a legal group
+    member, but it does not share this fold key -- so it never retrieves these
+    records and must not be credited with them."""
+    outsider = "אברהם"
+    result = ot.build(
+        *_collision_fixture(
+            link_groups={SPACED: outsider, MAQAF: outsider, outsider: outsider},
+            canon_extra={outsider: make_entry(canonical_target_form="Avraham")},
+        )
+    )
+    assert SPACED not in result["eligible_by_source_form"]
+    assert MAQAF not in result["eligible_by_source_form"]
+    assert result["unresolved_homonyms"][SPACED]["reason"] == "fold_match_key_collision"
+    assert result["unresolved_homonyms"][MAQAF]["reason"] == "fold_match_key_collision"
+
+
+def test_lt497_a_split_member_still_collides():
+    """STILL REFUSED (codex round 1). A complete ruling says "one referent";
+    a canon_senses split says "this form has >= 2 senses". Nothing
+    cross-validates the two, and honouring the ruling would publish the split
+    member's sense-ambiguous occurrences under the primary's note as if
+    unambiguous."""
+    result = ot.build(
+        *_collision_fixture(
+            link_groups={SPACED: SPACED, MAQAF: SPACED}, senses=split_senses(MAQAF)
+        )
+    )
+    assert result["eligible_by_source_form"] == {}
+    assert result["unresolved_homonyms"][SPACED]["reason"] == "fold_match_key_collision"
+    assert result["unresolved_homonyms"][MAQAF]["reason"] == "fold_match_key_collision"
+
+
+def test_lt497_a_split_only_competitor_on_the_fold_key_still_collides():
+    """STILL REFUSED (codex round 2). A split-only canon_senses form is
+    deliberately ABSENT from canon['entries'], so it is invisible to the
+    eligible fold group AND can never be a link-group member (the loader
+    requires every member to be a canon key). It still occupies the fold key
+    and still contributes physical occurrences, so a members-only test would
+    credit ITS occurrences to the primary. The closure rule refuses the group
+    instead."""
+    result = ot.build(
+        *_collision_fixture(
+            link_groups={SPACED: SPACED, MAQAF: SPACED},
+            senses=split_senses("משה-לייב"),
+        )
+    )
+    assert result["eligible_by_source_form"] == {}
+    assert result["unresolved_homonyms"][SPACED]["reason"] == "fold_match_key_collision"
+    assert result["unresolved_homonyms"][MAQAF]["reason"] == "fold_match_key_collision"
+
+
+def test_lt497_an_unmapped_ineligible_competitor_on_the_fold_key_still_collides():
+    """STILL REFUSED. An index-INELIGIBLE canon entry (is_proper_name: false)
+    on the same fold key is outside the eligible group, so the ruling does not
+    cover every form that can contribute an occurrence."""
+    result = ot.build(
+        *_collision_fixture(
+            link_groups={SPACED: SPACED, MAQAF: SPACED},
+            canon_extra={"משה-לייב": make_entry(is_proper_name=False)},
+        )
+    )
+    assert result["eligible_by_source_form"] == {}
+    assert result["unresolved_homonyms"][SPACED]["reason"] == "fold_match_key_collision"
+    assert result["unresolved_homonyms"][MAQAF]["reason"] == "fold_match_key_collision"
+
+
+def test_lt497_a_MAPPED_ineligible_competitor_on_the_fold_key_still_collides():
+    """STILL REFUSED (codex round 3 BLOCKER). The sidecar's loader checks canon
+    membership and disjointness, never index eligibility -- so an
+    `is_proper_name: false` entry CAN legally be a group member. A predicate
+    that only required every competitor to be MAPPED would admit this group and
+    publish a not-a-name term's occurrences under a name. Closure is what
+    refuses it: the competitor set is not the eligible group."""
+    ineligible = "משה-לייב"
+    result = ot.build(
+        *_collision_fixture(
+            link_groups={SPACED: SPACED, MAQAF: SPACED, ineligible: SPACED},
+            canon_extra={ineligible: make_entry(is_proper_name=False)},
+        )
+    )
+    assert result["eligible_by_source_form"] == {}
+    assert result["unresolved_homonyms"][SPACED]["reason"] == "fold_match_key_collision"
+    assert result["unresolved_homonyms"][MAQAF]["reason"] == "fold_match_key_collision"
+
+
+@pytest.mark.parametrize("link_groups", [
+    "not-a-dict",
+    [SPACED, MAQAF],
+    {SPACED: None, MAQAF: None},
+    {SPACED: SPACED, MAQAF: 7},
+])
+def test_lt497_a_malformed_map_is_rejected_whole_and_never_raises(link_groups):
+    """A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected
+    WHOLE, not filtered to its well-formed pairs -- a surviving subset could
+    still satisfy the exemption, which is the decision a malformed map has not
+    earned. Non-raising: Contract 3, and validate_backlinks.py:1264 turns any
+    exception out of build() into a hard gate FATAL."""
+    result = ot.build(*_collision_fixture(link_groups=link_groups))
+    assert result["eligible_by_source_form"] == {}
+    assert result["unresolved_homonyms"][SPACED]["reason"] == "fold_match_key_collision"
+
+
+def test_lt497_a_malformed_map_is_not_filtered_down_to_its_valid_pairs():
+    """The discriminating case for "rejected WHOLE": here the well-formed
+    pairs ALONE would satisfy the exemption, so a map that merely dropped its
+    bad entries would credit the group off a structure the renderer never
+    validated. The map is refused entire and the group collides.
+
+    Without this case the whole-vs-partial rejection is unobservable: in every
+    other malformed shape the surviving subset is an incomplete ruling, which
+    conjunct 2 rejects anyway."""
+    result = ot.build(
+        *_collision_fixture(
+            link_groups={SPACED: SPACED, MAQAF: SPACED, "junk": 7},
+        )
+    )
+    assert result["eligible_by_source_form"] == {}
+    assert result["unresolved_homonyms"][SPACED]["reason"] == "fold_match_key_collision"
+    assert result["unresolved_homonyms"][MAQAF]["reason"] == "fold_match_key_collision"
+
+
+def test_lt497_a_group_over_non_colliding_forms_changes_nothing():
+    """Control: a ruling about two forms that never shared a fold key neither
+    grants nor withholds anything -- the exemption is scoped to collisions."""
+    manifest = make_manifest(blocks={"b1": make_block("Ivan and Pyotr spoke.", seg="seg01")})
+    nodestream = make_nodestream(
+        nodes=[make_node("b1", "seg01")], link_groups={"Ivan": "Ivan", "Pyotr": "Ivan"}
+    )
+    canon = make_canon({"Ivan": make_entry(), "Pyotr": make_entry()})
+
+    result = ot.build(manifest, canon, EMPTY_SENSES, PLAIN_LANG, nodestream)
+
+    assert "Ivan" in result["eligible_by_source_form"]
+    assert "Pyotr" in result["eligible_by_source_form"]
+    assert result["unresolved_homonyms"] == {}

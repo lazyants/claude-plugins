@@ -33,9 +33,18 @@ deliberately does NOT do:
    matchable and no prose is newly rewritten (#587's demonym hazard is out
    of reach by construction).
 3. It is NOT an entity/coreference layer. ``canon.json`` stays a 1:1 name
-   dictionary; every member keeps its own entity note, its own frontmatter
-   and its own source-anchored ``## Mentions`` appendix -- which remains the
-   authoritative, collapse-free occurrence index for each form.
+   dictionary and every member keeps its own entity note and its own
+   frontmatter. What it does NOT promise, and did claim before #497, is that
+   every member also keeps its own ``## Mentions`` appendix. Where a group's
+   members collide on a ``#238/#241`` fold key -- the normal case in a
+   pointed-script corpus, and the only case where the appendix was ever at
+   stake -- the group's occurrences are credited to the group's PRIMARY, so
+   the primary's appendix is the collapse-free index for the referent and the
+   other members' notes carry none. Before #497 NONE of them did: a fold
+   collision withheld every member's occurrences outright
+   (``occurrence_targets.py``, "The third resolution route"). Outside a fold
+   collision nothing changes -- each form indexes its own occurrences as it
+   always has.
 4. It never makes the identity call itself. THE IRON RULE: scripts surface
    candidates and enforce schemas, they never decide "are these two forms
    the same entity". This file is where a call made upstream (an operator,

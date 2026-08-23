@@ -51,10 +51,16 @@ OUTPUT_RESOLVE_SRC = SCRIPTS_SRC_DIR / "output_resolve.py"
 RENDER_OBSIDIAN_SRC = SCRIPTS_SRC_DIR / "render_obsidian.py"
 VALIDATE_DRAFT_SRC = SCRIPTS_SRC_DIR / "validate_draft.py"
 CANON_LINK_GROUPS_SRC = SCRIPTS_SRC_DIR / "canon_link_groups.py"
+# #497: only needed when the Mentions appendix is ON -- assemble.py imports
+# occurrence_targets.py lazily, and it in turn imports these two.
+MENTIONS_SRCS = tuple(
+    SCRIPTS_SRC_DIR / name
+    for name in ("occurrence_targets.py", "bootstrap_names.py", "canon_senses.py")
+)
 LINK_GROUPS_SCHEMA_SRC = SCHEMAS_SRC_DIR / "canon-link-groups.schema.json"
 
 for _src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
-             CANON_LINK_GROUPS_SRC, LINK_GROUPS_SCHEMA_SRC):
+             CANON_LINK_GROUPS_SRC, LINK_GROUPS_SCHEMA_SRC, *MENTIONS_SRCS):
     assert _src.is_file(), f"fixture source not found: {_src}"
 
 DUMMY_CACHE_KEY = {
@@ -76,7 +82,7 @@ SHARED_TARGET = "Moyshe-Leyb"
 # Fixture builders
 # ---------------------------------------------------------------------------
 
-def _profile(root: Path, output_target="obsidian"):
+def _profile(root: Path, output_target="obsidian", mentions=False):
     return {
         "profile_version": 1,
         "project": {"title": "Test Book", "durable_root": str(root),
@@ -111,7 +117,7 @@ def _profile(root: Path, output_target="obsidian"):
             "adapter_config": {
                 # Explicitly OFF -- #588's own delivered vault had it off, and
                 # collision de-linking is decoupled from this flag (#206/#207).
-                "obsidian": {"folders": {}, "mentions_section": {"enabled": False}},
+                "obsidian": {"folders": {}, "mentions_section": {"enabled": mentions}},
                 "epub": None, "custom": None,
             },
         },
@@ -134,17 +140,37 @@ def _draft_content_sha1(doc: dict) -> str:
 
 
 def make_root(tmp_path, output_target="obsidian", entries=None, block_text=None,
-              with_loader=True) -> Path:
+              with_loader=True, mentions=False, source_text=None) -> Path:
     """A minimal one-segment, one-block converged book, with the two colliding
     canon entries in place. `with_loader=False` omits canon_link_groups.py
     from scripts/ entirely, which is how the no-new-dependency claim is
-    proven rather than asserted."""
+    proven rather than asserted.
+
+    `mentions=True` (#497) turns the `## Mentions` appendix on, which is what
+    makes `assemble.py` call `occurrence_targets.build()` at all -- it also
+    stages that module's own imports and a `languages/` config, since the
+    occurrence engine's spans are configuration-dependent. `source_text`
+    overrides the manifest block's SOURCE-side `plain_text`, which is the text
+    the engine scans (the draft's `block_text` is the TARGET side)."""
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     sources = [ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC]
     if with_loader:
         sources.append(CANON_LINK_GROUPS_SRC)
+    if mentions:
+        sources.extend(MENTIONS_SRCS)
+        languages_dir = root / "languages"
+        languages_dir.mkdir()
+        (languages_dir / "he_test.json").write_text(
+            # `name_inventory` is what makes an uncased script's names
+            # findable at all -- Hebrew has no capitalization for the matcher
+            # to key on, so without it the engine finds nothing and BOTH
+            # assertions below would pass for the wrong reason.
+            json.dumps({"PARTICLES": [], "STOPWORDS": [], "has_elision": False,
+                        "ELISION_RE": None, "name_inventory": [SPACED]}),
+            encoding="utf-8",
+        )
     for src in sources:
         shutil.copy2(src, scripts_dir / src.name)
     schemas_dir = root / "schemas"
@@ -152,7 +178,8 @@ def make_root(tmp_path, output_target="obsidian", entries=None, block_text=None,
     shutil.copy2(LINK_GROUPS_SCHEMA_SRC, schemas_dir / LINK_GROUPS_SCHEMA_SRC.name)
 
     (root / "profile.yml").write_text(
-        yaml.safe_dump(_profile(root, output_target), sort_keys=False), encoding="utf-8"
+        yaml.safe_dump(_profile(root, output_target, mentions), sort_keys=False),
+        encoding="utf-8",
     )
     (root / ".literary-translator-root.json").write_text(
         json.dumps({"owner_profile_path": str(root / "profile.yml")}), encoding="utf-8"
@@ -175,7 +202,7 @@ def make_root(tmp_path, output_target="obsidian", entries=None, block_text=None,
         block_text = f"{SHARED_TARGET} spoke. Later {SHARED_TARGET} left."
     manifest = {
         "blocks": {"p1": {"id": "p1", "type": "PARA", "seg": "seg01", "order_index": 0,
-                          "plain_text": "source text",
+                          "plain_text": source_text or "source text",
                           "sha1": hashlib.sha1(b"p1").hexdigest(),
                           "source_file": "source.txt"}},
         "spine": [{"pos": 0, "file": "source.txt", "klass": "body"}],
@@ -189,7 +216,8 @@ def make_root(tmp_path, output_target="obsidian", entries=None, block_text=None,
 
     segpack = {
         "seg": "seg01", "title": "seg01", "kind": "body", "word_count": 10,
-        "blocks": [{"id": "p1", "order_index": 0, "plain_text": "source text"}],
+        "blocks": [{"id": "p1", "order_index": 0,
+                     "plain_text": source_text or "source text"}],
         "footnotes": [], "verses": [], "names": [], "canon_names": [], "new_names": [],
         "generation_hashes": {"source_extraction_hash": "x", "source_input_hash": "y",
                                "particle_config_hash": "x", "derivation_bundle_hash": "y"},
@@ -385,6 +413,50 @@ def test_a_non_obsidian_target_never_reads_the_sidecar(tmp_path):
     # sidecar's, and that no link_groups key was ever attached.
     assert "canon_link_groups" not in proc.stdout
     assert "link_groups" not in read_nodestream(root)
+
+
+# ---------------------------------------------------------------------------
+# #497 -- the ORDERING leg. occurrence_targets.build() reads the link-group map
+# off nodestream["link_groups"], so _attach_link_groups has to run BEFORE
+# _attach_mentions. Nothing in either function says so; only this end-to-end
+# assertion does, and it is the regression a future reorder would trip.
+# ---------------------------------------------------------------------------
+
+SOURCE_WITH_OCCURRENCE = f"ראה {MAQAF} אתמול."
+
+
+def test_lt497_a_ruled_fold_group_is_credited_to_its_primary_end_to_end(tmp_path):
+    """With the appendix ON and a valid one-referent ruling, the PERSISTED
+    mentions map carries the primary alone -- not both members, and not
+    neither. Both halves matter: `SPACED in mentions` is what fails if the
+    attach order is wrong (the map would not be there yet), and `MAQAF not in
+    mentions` is what fails if the group were credited to every member."""
+    root = make_root(tmp_path, mentions=True, source_text=SOURCE_WITH_OCCURRENCE)
+    write_sidecar(root, ONE_GROUP_DOC)
+
+    proc = run_assemble(root)
+    assert proc.returncode == 0, proc.stderr
+
+    nodestream = read_nodestream(root)
+    assert nodestream["link_groups"] == {SPACED: SPACED, MAQAF: SPACED}
+    mentions = nodestream["mentions"]
+    assert SPACED in mentions and mentions[SPACED], mentions
+    assert MAQAF not in mentions, mentions
+    assert [rec["seg"] for rec in mentions[SPACED]] == ["seg01"]
+
+
+def test_lt497_without_the_sidecar_the_same_book_credits_neither_member(tmp_path):
+    """The control that keeps the test above from passing for the wrong
+    reason: identical book, no ruling -- the fold collision withholds both, so
+    the persisted mentions map is empty."""
+    root = make_root(tmp_path, mentions=True, source_text=SOURCE_WITH_OCCURRENCE)
+
+    proc = run_assemble(root)
+    assert proc.returncode == 0, proc.stderr
+
+    nodestream = read_nodestream(root)
+    assert "link_groups" not in nodestream
+    assert nodestream["mentions"] == {}
 
 
 if __name__ == "__main__":

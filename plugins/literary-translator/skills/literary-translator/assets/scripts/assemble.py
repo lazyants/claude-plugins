@@ -2353,6 +2353,23 @@ def main() -> int:
 
         nodestream, anchor_map = build_nodestream(profile, manifest, converged)
 
+        # #588: link groups gate on the TARGET alone, not on the Mentions
+        # flag -- collision de-linking, which is what a group modifies, is
+        # itself decoupled from that flag (#206/#207). Attached here, next
+        # to the mentions data and for the same reason: before persistence,
+        # before the adapter.
+        #
+        # #497: attached BEFORE _attach_mentions, which is the whole reason
+        # this block moved above it. occurrence_targets.build() now reads
+        # nodestream["link_groups"] to decide whether a fold-key collision
+        # carries a complete one-referent ruling, so the map has to be on the
+        # nodestream by the time _attach_mentions calls it. Ordering only --
+        # _effective_mentions_enabled already requires output.target ==
+        # "obsidian", so neither block's own gate changes, and a project
+        # without a sidecar is untouched either way.
+        if ((profile or {}).get("output") or {}).get("target") == "obsidian":
+            _attach_link_groups(nodestream, canon)
+
         # D1 (lt-appendix-backlink-integrity, ON BY DEFAULT for
         # output.target: obsidian -- see _effective_mentions_enabled):
         # attach the source-anchored Mentions data BEFORE nodestream.json
@@ -2362,14 +2379,6 @@ def main() -> int:
         # touches no new dependency, byte-identical to 1.7.0.
         if _effective_mentions_enabled(profile):
             _attach_mentions(nodestream, profile, manifest, canon)
-
-        # #588: link groups gate on the TARGET alone, not on the Mentions
-        # flag -- collision de-linking, which is what a group modifies, is
-        # itself decoupled from that flag (#206/#207). Attached here, next
-        # to the mentions data and for the same reason: before persistence,
-        # before the adapter.
-        if ((profile or {}).get("output") or {}).get("target") == "obsidian":
-            _attach_link_groups(nodestream, canon)
 
         if ASSEMBLED_DIR.parent.is_symlink():
             # The vector isn't just `.assembled/` itself -- its PARENT

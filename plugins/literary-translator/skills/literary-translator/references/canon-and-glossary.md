@@ -1305,9 +1305,17 @@ recorded so the renderer can act on it:
 
 `scripts/canon_link_groups.py` is the one runtime-validating loader
 (`load_link_groups(path, entries) -> {member: primary}`); the full renderer
-semantics — what a group does and, more importantly, the four things it
+semantics — what a group does and, more importantly, the things it
 deliberately does not do — live in
 `references/output-target-adapters/obsidian.md`.
+
+Since 1.58.0 (#497) a group has a **second** effect, documented in the same
+place: when its members collide on a `#238/#241` fold key, that key's
+source-anchored `## Mentions` occurrences are credited to the group's
+**primary**. Before it, a fold collision withheld every member's occurrences —
+27 canon forms and 2 390 records on the live he→en volume, with the coverage
+gate reporting zero warnings. The crediting is all-or-nothing over the whole
+fold key and never touches a form outside a collision.
 
 **Why this is a sidecar and not a canon field.** `cache_key.compute_used_terms_hash`
 hashes the WHOLE referenced canon ENTRY object, so adding any field to
