@@ -4133,13 +4133,21 @@ def test_already_converged_binding_fields_describe_the_review_this_call_parsed(t
     inside a single derivation and a re-reading implementation would return
     the identical values.
 
-    The seam is real, not injected: current_draft_sha1() is called after
-    review.json has been parsed and before the clean branch returns, so
-    wrapping it substitutes the artifact at a point inside the derivation
-    that a re-read would land after. An implementation that re-read the file
-    while building the action would report the SUBSTITUTE's digest and fail
-    the two assertions below; the shipped one reports the clean object it
-    actually judged.
+    The seam is the driver's own, not injected: current_draft_sha1() is
+    called after review.json has been parsed and after `clean`/`coverage_ok`
+    are read from it, but before the clean branch builds its return. An
+    implementation that re-read the file WHILE BUILDING THE ACTION would
+    therefore report the SUBSTITUTE's digest and fail the two assertions
+    below; the shipped one reports the clean object it actually judged.
+
+    Scope of that, stated rather than implied: this pins the return-time
+    re-read, which is the shape a refactor of the return actually takes. It
+    does NOT reach a re-read placed between the verdict extraction and the
+    current_draft_sha1() call -- a substitution landing in that narrower
+    window would be observed by this test as the clean object and pass. No
+    such read exists today, and closing it would mean seaming the file read
+    itself rather than a driver function, which is more test machinery than
+    a hypothetical window is worth.
 
     Nothing about this is exotic at the trust boundary: a same-round review
     carries the same deterministic dispatch_token and, over an unmoved draft,
