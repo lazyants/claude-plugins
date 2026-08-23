@@ -369,6 +369,69 @@ marker-survival check (see `../false-green-gate.md`) has something to
 verify. Under `omit_apparatus`, nothing is recorded and nothing is checked —
 there is genuinely nothing to check either way.
 
+### An extractor-invented `⟦…⟧` token is literal prose, not a fidelity token
+
+A co-designed extractor may mint bracket tokens of its own beyond the two this
+plugin defines. `historiettes-t1`'s footnote-continuation label
+`⟦FNCONT_8A⟧` is the shipped example: it sits inside a footnote's own
+`source_text`, and it is the extractor's private notation, not something the
+plugin issued.
+
+Such a token is **not** a placeholder as far as this plugin is concerned, and
+that is a decision rather than an oversight. `validate_draft.py`'s
+`placeholders()` counts a `⟦…⟧` span only when it is a `⟦FNREF_N⟧`
+anchor or one of *this* segpack's own declared verse `placeholder` strings;
+`verbatim_census.py`'s `mask_placeholders()` applies the identical rule. Every
+other bracketed span is left alone deliberately, so a translation that
+legitimately renders a bracketed run of ordinary source prose — `⟦variant⟧`
+— is not falsely rejected as a lost machine token.
+
+Three consequences to design around.
+
+- **It is never misparsed, and it is never ignored.** `FNREF_RE` is
+  `⟦FNREF_(\d+)⟧`, so a letter-suffixed label cannot match it and no consumer's
+  `int(n)` is ever handed one (#437). The footnote such a token sits *inside*
+  keeps its own ordinary integer `n` and its own body `⟦FNREF_N⟧` anchor, so
+  no dangling-reference or orphan-footnote calculation changes. But
+  `final_audit.py`'s `warn_link_graph()` sorts every `⟦…⟧` span into footnote
+  refs, known verse placeholders and a remainder, and reports the remainder as
+  `LINK-GRAPH unrecognized sentinel … -- MANUAL` — one warning per distinct
+  token per converged segment, on every audit, for as long as the notation
+  exists.
+- **At W9 assembly the outcome depends on *where* the token sits, and neither
+  outcome is benign.** `assemble.py`'s sentinel scanning is fatal on an
+  unrecognized token in a block's text (`_scan_and_validate_sentinels()`) and
+  likewise in a verse's `rendered`/`literal_gloss` content
+  (`_scan_verse_content_fnrefs()`) — two separate branches, both raising
+  `AssembleError: unrecognized sentinel`, both ending the run — in translated
+  body prose your own token fails the build rather than merely drawing the
+  warning above. Inside a footnote *definition* it is the opposite: that text
+  is registered as
+  `ANY_SENTINEL_RE.sub("", text_for_n)`, so every bracketed span is stripped
+  with no prior check that the plugin recognizes it — your
+  token is silently deleted from the assembled book. `historiettes-t1`'s
+  `FNCONT` labels sit in `footnotes[n].source_text` and so land in this second
+  case, which is one reason that project assembles its own EPUB rather than
+  using this path.
+- **A DROPPED token, by contrast, is reported by nothing that names it.**
+  Everything above fires only when the token is PRESENT. If a translation
+  silently loses it, no warning, error or audit line reports the loss *as* a lost
+  token, because `placeholders()` never admitted it as something obliged to
+  come back. (A collateral effect may still trip a generic check — a block that
+  ends up empty is caught as an empty block, not as a missing marker.) There is
+  no declaration hook for an extractor-invented token today.
+  `body_ref_markers[]` is a `blocks[]` field read only under `body_refs_only`.
+  The verse `placeholder` route is genuinely verse-only: it carries verse
+  bijection, `parent_block`, `mount` and `n_line` obligations and verse
+  rendering with it — and a placeholder embedded in a footnote definition is
+  marked referenced but stripped-not-rendered, so it too never reaches the
+  assembled book.
+
+None of this makes a private token unusable, and none of it is a gap for this
+plugin to close: the fidelity guarantee for an extractor's own notation is
+that project's to build. `historiettes-t1` gates its `FNCONT`
+labels in its own parity gate, outside this plugin.
+
 ## What to look for in the source, before co-designing
 
 `custom` has no detection algorithm to hand you, but the questions the other
