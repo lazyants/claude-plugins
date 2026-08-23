@@ -20,11 +20,17 @@ the ordering, and the failure was a green run, not a halt.
 `assert_live_inputs_match_ledger()` re-derives the twelve content-affecting
 cache-key fields from the live durable_root, using `cache_key.py`'s OWN field
 computers, and compares them to each shipped record's stored `cache_key`. The
-invariant, stated once: **assembly's verdict does not depend on whether
-`ledger_merge.py` happened to run since the last content edit.**
+invariant, stated once and ONE-DIRECTIONAL on purpose: **a record the snapshot
+still calls `converged` can no longer ship on a `ledger_merge.py` run that
+predates the content edit.** The reverse is NOT pinned here and is not
+implemented: a record the snapshot already calls `stale` is refused by
+`assert_project_complete()` before this check runs, even where the live inputs
+have since reverted to the reviewed key. That refusal is fail-closed and one
+`ledger_merge.py` run from resolved; re-deciding a reverted key inside assembly
+is the design #492's own body records as tried and rejected.
 
-Both directions are pinned, because a guard that only ever refuses is as wrong
-as one that never does:
+Both OUTCOMES are pinned -- refusing and assembling -- because a guard that only
+ever refuses is as wrong as one that never does:
 
   - a moved content field REFUSES (`stale_live_inputs`), naming segment and
     field -- for a global input (style contract) and a per-segment one (canon
