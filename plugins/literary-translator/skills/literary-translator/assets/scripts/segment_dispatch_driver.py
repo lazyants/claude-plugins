@@ -4034,6 +4034,18 @@ def _matched_review_round_label(review_obj, run_id: str, seg: str, max_fix_round
     return None
 
 
+# The fixed head of every promotion note. It exists ONLY so that
+# _carried_promotion_note() can recognise the SHAPE of evidence it must not
+# erase without re-hashing the draft. NOTHING may accept a note on a prefix
+# match: _translate_redispatched_since() compares the whole string, because
+# the part this constant leaves out -- the draft's own hash -- is the entire
+# point of the note. If you find yourself reaching for .startswith() in a
+# reader, that is the bug.
+_TRANSLATE_PROMOTION_NOTE_PREFIX = (
+    "translate promoted by segment_dispatch_driver.py (#620); promoted draft sha1: "
+)
+
+
 def _translate_promotion_note(draft_sha1: str) -> str:
     """The ledger note the translate branch stamps AFTER codex_job.py promotes
     a draft, and the only thing _translate_redispatched_since() below accepts
@@ -4041,12 +4053,52 @@ def _translate_promotion_note(draft_sha1: str) -> str:
 
     This whole string is BEHAVIOUR, not prose: the reader compares a
     fragment's note against this function's return value for EQUALITY, so
-    rewording the literal is a behaviour change, not a copy edit. One function
-    rather than a constant plus a concatenation at each end, so the writer and
-    the reader cannot drift apart. Written at exactly one site
-    (process_segment()'s translate branch) and never by the workflow template
-    -- see the reader's own docstring for why not."""
-    return "translate promoted by segment_dispatch_driver.py (#620); promoted draft sha1: " + draft_sha1
+    rewording the literal is a behaviour change, not a copy edit. One builder
+    rather than a concatenation at each end, so the writer and the reader
+    cannot drift apart. Written at exactly two sites, both in
+    process_segment()'s translate branch -- the stamp after a promotion, and
+    the carry-forward in the pre-dispatch write that would otherwise erase it
+    -- and never by the workflow template; see the reader's own docstring for
+    why not."""
+    return _TRANSLATE_PROMOTION_NOTE_PREFIX + draft_sha1
+
+
+def _carried_promotion_note(dirs: dict, seg: str) -> "str | None":
+    """The promotion note ALREADY standing in runs/ledger.d/{seg}.json, so
+    process_segment()'s pre-dispatch in_progress write can re-state it rather
+    than erase it -- otherwise one transient translate failure destroys the
+    evidence and turns the very case this marker exists to keep retriable
+    into the permanent invalid_post_fix_draft halt.
+
+    Why re-stating is safe, and cannot manufacture evidence: the note is
+    returned VERBATIM and nothing between this read and that write touches
+    the canonical draft, so `note == _translate_promotion_note(<current
+    draft's sha1>)` holds afterwards exactly when it held before. A note left
+    over from a draft that has since moved keeps failing the reader's
+    equality test on its own -- carrying it forward does not make it true,
+    and the reader, not this function, is what decides.
+
+    Deliberately NOT mtime-relative: this is asked at the write site, where
+    the reader's `newer than the review` conjunct is not in scope and will be
+    re-evaluated against the fresh fragment anyway. It is status-relative,
+    matching the reader: only an in_progress fragment ever legitimately
+    carries this prefix.
+
+    Every doubt -- missing, unreadable, unparseable, not an object, any other
+    status, absent or non-string note, or a note of some other shape (the
+    #432/#461 reopen note, a rejection note) -- returns None, which leaves
+    the pre-dispatch write exactly as note-less as it was before #620."""
+    fragment_path = dirs["runs_dir"] / "ledger.d" / f"{seg}.json"
+    try:
+        fragment = json.loads(fragment_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(fragment, dict) or fragment.get("status") != "in_progress":
+        return None
+    note = fragment.get("note")
+    if isinstance(note, str) and note.startswith(_TRANSLATE_PROMOTION_NOTE_PREFIX):
+        return note
+    return None
 
 
 def _in_progress_fragment_since(dirs: dict, seg: str, review_path: Path) -> "dict | None":
@@ -4103,13 +4155,16 @@ def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path,
 
     1. The fragment is NEWER than the review. Cheap first gate, unchanged.
        Necessary and nowhere near sufficient: process_segment() has SIX
-       write_ledger() sites and FIVE of them are not this evidence
-       (converged, converged-by-rejection, cap, the pre-dispatch in_progress
-       write, and the #432/#461 reopen-capped in_progress write that
-       precedes a REVIEW). The cap in particular is written after the very
-       review it caps, so it is necessarily newer -- a capped segment an
-       operator then hand-repaired into an invalid state was silently
-       re-translated over.
+       write_ledger() sites and only ONE of them ORIGINATES this evidence.
+       Four cannot carry it at all (converged, converged-by-rejection, cap,
+       and the #432/#461 reopen-capped in_progress write that precedes a
+       REVIEW), and the sixth -- the pre-dispatch in_progress write -- only
+       ever RE-STATES a note already on disk, verbatim, via
+       _carried_promotion_note(); it can preserve a match but never mint
+       one. The cap in particular is written after the very review it caps,
+       so it is necessarily newer -- a capped segment an operator then
+       hand-repaired into an invalid state was silently re-translated
+       over.
 
     2. status == "in_progress". Not sufficient EITHER, and narrowing to it
        alone would not have closed the defect: the reopen-capped write is
@@ -6273,8 +6328,24 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                     return {"seg": seg, "converged": False, "outcome": "failed",
                             "reason": "claimed-segment-translate-refused",
                             "detail": claim_refusal}
+                # #620: this write replaces the fragment WHOLESALE, so writing
+                # a bare {"status": "in_progress"} here erases any promotion
+                # note already standing. That is not cosmetic: the one path
+                # that reaches this branch WITH such a note standing is the
+                # positive exception the note exists to serve -- a promoted
+                # draft that reads invalid, being legitimately re-translated
+                # -- and if run_one_codex_job() below then fails transiently,
+                # the draft is untouched while the evidence naming it is gone,
+                # so the NEXT derivation halts at invalid_post_fix_draft and
+                # stays there. Re-state it instead; see
+                # _carried_promotion_note() for why re-stating can only
+                # preserve a match, never create one.
+                in_progress_fields = {"status": "in_progress"}
+                carried_note = _carried_promotion_note(ctx.dirs, seg)
+                if carried_note is not None:
+                    in_progress_fields["note"] = carried_note
                 rec = write_ledger(
-                    ctx.dirs, seg, {"status": "in_progress"},
+                    ctx.dirs, seg, in_progress_fields,
                     durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
                 )
                 if not rec.get("success"):

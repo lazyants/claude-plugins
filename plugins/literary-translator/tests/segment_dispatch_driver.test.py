@@ -5829,6 +5829,12 @@ def test_derive_next_action_correct_promotion_note_on_a_terminal_status_does_not
     )
 
     assert driver_mod.derive_next_action("seg01", ctx) == {"action": "invalid_post_fix_draft"}
+# parametrize() is evaluated at import time, before any driver module is
+# loaded, so a case that needs _translate_promotion_note() names this
+# sentinel and builds the real note inside the test body.
+_TEST_PROMOTION_NOTE_SENTINEL = object()
+
+
 def _dna_promoting_translate(root, driver_mod, *, text):
     """A run_one_codex_job stand-in that models a REAL promotion: for a
     translate it replaces the canonical draft with gate-valid content
@@ -5932,6 +5938,97 @@ def test_process_segment_writes_no_promotion_evidence_without_a_promotion(tmp_pa
     assert fragment["status"] == "in_progress", fragment
     assert "note" not in fragment, (
         f"no promotion evidence may be written for {why} -- got {fragment}"
+    )
+
+
+def test_process_segment_keeps_promotion_evidence_across_a_failed_retry(tmp_path, monkeypatch):
+    """The transition, end to end, that the pre-dispatch write used to
+    destroy: matched evidence -> "translate" -> a TRANSIENT dispatch failure
+    -> the next derivation.
+
+    process_segment()'s pre-dispatch write replaces the fragment wholesale.
+    Written note-less it erased the very note that had just authorized this
+    translate, and since a failed run_one_codex_job() returns with no further
+    write, the draft was left untouched while the evidence naming it was
+    gone. The next invocation then read a note-less fragment and returned the
+    TERMINAL invalid_post_fix_draft -- so one transient timeout converted a
+    machine-produced invalid draft into the permanent manual-repair halt that
+    this marker exists to tell apart from it, and nothing short of repairing
+    or deleting the draft cleared it.
+
+    Both ends are the shipped code: the fragment read back is what the real
+    ledger_update.py persisted, and the second assertion is the real
+    derive_next_action() reading it."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    base, current_sha1 = _dna_stage_post_fix_invalid_draft(root, driver_mod)
+    note = driver_mod._translate_promotion_note(current_sha1)
+    _dna_write_ledger_fragment(root, mtime=base + 20, note=note)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "translate"}, (
+        "setup check: the staged evidence must authorize the retranslate this case is about"
+    )
+
+    def _transient_failure(ctx_arg, *, kind, seg, round_label=None):
+        assert kind == "translate", f"the loop must not get past the failed translate: {kind}"
+        return {"kind": kind, "seg": seg, "round_label": None, "disp": "d",
+                "ok": False, "reason": "translate-timeout",
+                "error_detail": "transient: no draft was produced",
+                "job_status": "failed", "adopted": False}
+
+    monkeypatch.setattr(driver_mod, "run_one_codex_job", _transient_failure)
+    result = driver_mod.process_segment("seg01", ctx)
+    assert result["outcome"] == "failed" and result["reason"] == "translate-timeout", result
+
+    assert driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts") == current_sha1, (
+        "setup check: a failed translate must leave the draft it was going to replace alone"
+    )
+    fragment = _dna_read_fragment(root)
+    assert fragment["status"] == "in_progress" and fragment.get("note") == note, (
+        f"the pre-dispatch write must re-state the evidence, not erase it -- got {fragment}"
+    )
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "translate"}, (
+        "a transient failure must not convert a retriable invalid translate output "
+        "into the terminal manual-repair halt"
+    )
+
+
+@pytest.mark.parametrize("status,note,why", [
+    ("in_progress", None, "a fragment with no note at all"),
+    ("in_progress", "reopening a capped segment for one more review round",
+     "a note of some other shape -- the #432/#461 reopen write's"),
+    ("converged", _TEST_PROMOTION_NOTE_SENTINEL,
+     "a promotion-shaped note on a status no promotion writer emits"),
+])
+def test_process_segment_carries_forward_nothing_but_promotion_evidence(tmp_path, monkeypatch,
+                                                                        status, note, why):
+    """The carry-forward is not "keep whatever note was there". It re-states
+    exactly one shape, off exactly one status; everything else leaves the
+    pre-dispatch write as note-less as it was before #620. Without this the
+    reopen note -- the one other note an in_progress fragment legitimately
+    carries -- would be copied into a translate's own fragment, where it
+    describes nothing that happened."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    current_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    if note is _TEST_PROMOTION_NOTE_SENTINEL:
+        note = driver_mod._translate_promotion_note(current_sha1)
+    write_invalid_validate_draft_segs(root, ["seg01"])  # so the first action is "translate"
+    _dna_write_ledger_fragment(root, mtime=int(time.time()) - 60, status=status, note=note,
+                               extra={"rounds": 3} if status == "converged" else None)
+
+    def _transient_failure(ctx_arg, *, kind, seg, round_label=None):
+        return {"kind": kind, "seg": seg, "round_label": None, "disp": "d",
+                "ok": False, "reason": "translate-timeout", "error_detail": "no draft produced",
+                "job_status": "failed", "adopted": False}
+
+    monkeypatch.setattr(driver_mod, "run_one_codex_job", _transient_failure)
+    driver_mod.process_segment("seg01", ctx)
+
+    fragment = _dna_read_fragment(root)
+    assert fragment["status"] == "in_progress", fragment
+    assert "note" not in fragment, (
+        f"{why} must not be carried into the translate's own fragment -- got {fragment}"
     )
 
 
