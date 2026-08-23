@@ -192,6 +192,53 @@ def _local_dict_len(filename, funcname, varname):
     raise AssertionError(f"{funcname} is no longer defined in {filename}")
 
 
+# Rewritten for 1.67.0 (#520), per the maintenance contract above. The rotation
+# this replaces was written for 1.65.0 (#510) and declared nothing, and neither
+# did the ones before it (1.63.0, and 1.62.0 which retired the last inherited
+# row). Several consecutive empty rotations is exactly the shape the sibling
+# citation guard warns about -- an empty list is indistinguishable from an
+# unrotated one -- so this comment is written about THIS entry rather than
+# inherited, and states below why each quantity 1.67.0 asserts is undeclarable
+# here. `_files_defining`,
+# `_local_dict_len`, `_tuple_len` and `_test_function_count` are kept unused,
+# as earlier releases kept them, for the next entry that cites their class.
+#
+# ZERO rows, and for a reason this file can state precisely: every quantity the
+# 1.67.0 entry asserts is spelled as a WORD -- "a fifth WARN", "the three scanned
+# sections", "two of the three checkers", "two thirds of the he->en volume's
+# blocks", "a second instance" -- and `_TOKEN` matches digits only, so none of
+# them can be declared as a row here (a row whose phrase holds no numeral fails
+# this test's own one-numeral-per-phrase check). The entry's actual numerals are
+# of three kinds, none a measurement: version numbers (1.67.0, and 1.25.0/1.28.0
+# cited as precedent for the same resume-identity movement), the issue number,
+# the release date, and pipeline stage labels (W7, Step 0a).
+#
+# The one figure that COULD have been declared was rejected deliberately rather
+# than missed: the entry says the scan covers three field families, which
+# `_tuple_len("final_audit.py", "SCANNED_DRAFT_SECTIONS")` re-derives exactly.
+# It is not declared because the entry spells that count as "three", not "3", so
+# the phrase carries no numeral for the tokenizer to check -- rewording the prose
+# to suit the guard would be the tail wagging the dog. This is the accepted
+# residual the docstring above names, not an oversight.
+#
+# The rotations before it, each kept as its own record:
+#
+# Rewritten for 1.62.0 (#534), per the maintenance contract above. This rotation
+# retired nothing and declared nothing. 1.62.0's figures are FIELD measurements
+# over two live books (109 title occurrences for ~10 defects; 98 quotation sites,
+# 86 already correct, 66 of them under a different rule; 93 roman against 2
+# italic) plus one measurement of the rendered prompt (11 lines to 13, +1 072
+# characters, re-derived by rendering the template at origin/main and at HEAD).
+# The prompt measurement is the only one this tree CAN re-derive, and it is
+# still not declared: its derivation would have to shell out to node, render
+# both revisions of a template file and diff them, which is a second
+# implementation of what tests/fix_prompt_class_concentration.test.py's harness
+# already owns -- and a derivation that cannot read a live book, as the other
+# three would need to, hardcodes its own answer, the `lambda: 17` failure this
+# file refuses. Recorded here so the empty row list reads as a decision.
+#
+#
+# The previous rotation, kept as its own record:
 # Rewritten for 1.65.0 (#510 -- the glossary agent's trap discovery is
 # rerouted, and the durable prompt is gated on content), per the maintenance
 # contract above. This rotation inherited an already-empty row list from
@@ -219,9 +266,7 @@ def _local_dict_len(filename, funcname, varname):
 # The previous rotation, kept as its own record:
 # Rewritten for 1.63.0 (#526), per the maintenance contract above. The previous
 # rotation (1.51.0, #498) retired the one inherited row, the size of
-# `PLUGIN_BUNDLE_MEMBERS`. `_files_defining`, `_local_dict_len`, `_tuple_len`
-# and `_test_function_count` are kept unused, as earlier releases kept them, for
-# the next entry that cites their class.
+# `PLUGIN_BUNDLE_MEMBERS`.
 #
 # ZERO rows, because no figure 1.63.0 states is one this file's tokenizer can
 # both SEE and RE-DERIVE. Every numeral it can see is an IDENTIFIER, never a

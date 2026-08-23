@@ -61,6 +61,26 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
+# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic
+# style bans) per the maintenance contract above. This rotation inherited an
+# already-empty map and left it empty: the 1.67.0 entry cites no `name.ext:NNN`
+# anywhere. It names plenty of artefacts -- `final_audit.py`,
+# `validate_draft.py`, `draft.schema.json`, `profile.yml`,
+# `validate_conservation.py`, `style_bible.md` -- but every claim made about
+# them is BEHAVIOURAL: what the scan reads, which sections it walks, which hash
+# covers which file, what a malformed declaration produces. A behavioural claim
+# is pinned by a test that exercises it, and this release ships those tests in
+# `final_audit.test.py` and `profile_validate.test.py`, each watched failing by
+# mutating the shipped script or schema rather than the assertion. A line
+# citation would be the weaker instrument in every case.
+#
+# One claim in the entry is guarded by review alone and is named here so the gap
+# is recorded rather than implied away: that `assets/scripts/` contains no
+# existing search for a run of adjacent asterisks. That is a CENSUS -- an
+# absence over a directory -- and no test asserts it, because a test that did
+# would freeze the absence rather than the reason for it.
+#
+# The previous rotation, kept as its own record:
 # Rewritten for 1.65.0 (#510 -- the glossary agent's trap discovery is rerouted
 # out of style_bible.md's E-traps, and the durable prompt is gated on content)
 # per the maintenance contract above. This rotation inherited an already-empty

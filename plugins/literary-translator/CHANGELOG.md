@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.67.0 — 2026-08-23
+
+**The style contract carries rules a machine could check, and nothing checks any of them.** A project's `style_bible.md` states deterministic, codepoint-decidable bans — the fr→ru book forbids a run of two or more adjacent asterisks, and says why: the project's own EPUB renderer prints such a run literally to the reader — while `assets/scripts/` contains no search for one, and neither `validate_draft.py` nor `validate_assembled.py` nor `assemble.py` looks. Every such rule is enforced by a reasoning model re-reading the bible on each job, and by reviewer attention. This release ships the mechanism for a project to declare those rules and have W7 report violations. Closes #520.
+
+### What ships, and what deliberately does not
+
+The plugin ships **no patterns and hardcodes none**. That is the design, not a shortcut. A style contract lives in the project's own bible, and only the project knows which of its rules are codepoint-decidable — the very rule that motivated this cannot ship as a builtin, because a run of two asterisks is ordinary Markdown bold on the shipped Obsidian output path. So `profile.yml` gains one opt-in key, `validation.forbidden_patterns`, a list of `id` / `pattern` / `message` triples, and `final_audit.py` gains a fifth WARN keyed on it.
+
+Two of the three checkers #520 proposed are **cut on measurement**, not deferred. A typographic sweep over quotation marks, dashes and ellipses was already measured wrong in both directions on the he→en volume, and would convert the English half of original-plus-gloss pairs that book intends to differ. A source↔draft numeral-conservation check was measured here across both live books: the digit multiset disagrees on two thirds of the he→en volume's blocks, because Hebrew gematria section labels legitimately render as Arabic digits in English, and on a smaller but still substantial share of the fr→ru book. Neither is codepoint-decidable; both would be noise. A checker ships here only for what a codepoint can decide.
+
+### The three properties the check has, each chosen against a plausible alternative
+
+The scanned text is **the draft as the translator wrote it**. Sentinels are not substituted out the way the foreign-remainder WARN does for its own purposes: doing so would both hide a violation sitting inside a sentinel and manufacture one that exists only because a placeholder became a space. A pattern is written against the draft, not against the rendered book, and both directions are pinned by a test.
+
+Every **string leaf** of a converged draft's `blocks`, `footnotes` and `verses` is tested, including one nested inside a verse object — not an allowlist of known verse fields. `draft.schema.json` constrains a verse value no further than "is an object" precisely because which fields exist varies by `verse_policy.mode`, and `validate_draft.py` is that question's sole authority; an allowlist here would duplicate that authority and be wrong under some mode. The scan is therefore a deliberate superset of what any one renderer reads. The three scanned sections are the only families carrying translator-authored prose; `names` and `notes` are machinery and are not scanned, which a test pins in the widening direction. The walk uses an explicit stack rather than recursion, because `json.loads` decodes container nesting far past Python's own recursion limit and a recursive walker would be the first thing in this script to fail on a draft the loader accepted.
+
+A declaration that **fails to compile is reported, never skipped** — once for the run, not once per segment. A silently unenforced operator rule is a false green: the audit reads exactly as it would if the rule had held. Its siblings still compile and fire.
+
+### What this release costs
+
+No segment cache key moves, so no converged segment re-stales: `final_audit.py` is a member of neither hashed bundle tuple, the per-segment schema hash covers only the draft, review and segpack schemas, and the profile-semantics hash reaches none of the new key. Resume identity is a different matter and does move — the mass/glossary resume digest and the skeptic digest each hash every schema file in the durable root, and this release edits two of them. So once a root takes the Step 0a copy pass, a run candidate created before that refresh no longer matches and the next mass, glossary or skeptic run takes a fresh `RUN_ID` with `resume:false`; unfinished in-flight work re-dispatches, finished work does not. Same shape as 1.25.0 and 1.28.0. An existing project needs that ordinary refresh to get the checker at all, since `final_audit.py` runs from its durable copy — but no schema migration: Step 0 validates against the plugin's own copy, never the durable one.
+
+The check is advisory. A hit is one WARN line; it never changes the exit code and never gates delivery.
+
+### Known residuals, disclosed rather than fixed
+
+A hand-edited draft nested past the interpreter's recursion limit already aborts W7 before any WARN runs — the two hard checks load and canonically re-encode the whole draft first, and neither catches the resulting error. That predates this release and is untouched by it; the explicit-stack walk merely declines to add a second instance. Two verse keys differing only in the run-length of internal whitespace render as the same path label, because the emitted line is whitespace-normalized as its last step; that is an ambiguous advisory string, and warnings gate nothing. Neither the pattern list nor pattern execution is cost-bounded: `profile.yml` is operator-authored, the same trust footing on which `validate_conservation.py` already compiles operator-supplied line patterns.
+
 ## 1.66.0 — 2026-08-23
 
 **The loop could reverse its own applied fix at one locus on consecutive rounds, at HIGH severity, and nothing compared a finding against the previous round's finding on the same locus.** Each review is a `--fresh` codex thread, so round N+1 cannot know round N moved that locus, let alone why; and the canonical `segments/{seg}.review.json` is atomically overwritten by the next round's promote, so round N's verdict was destroyed before round N+1's fix turn ever ran. Measured on `historiettes-fr-ru/tome1`, `seg19 PARA:0005`, where rounds 9, 10 and 11 flipped `le passa` between "ran him through" and "went past him", the correct original text having been damaged in round 9 by a finding that cited `FN:191` as its support and read it backwards. `codex_job.py` now preserves the outgoing verdict at `segments/.prev_review.<seg>.r<label>.json` and `fixPrompt()` hands it to the fix turn. Closes #541, and #499 (folded into it).
@@ -300,6 +328,7 @@ A decision is canon-shaped when it changes the target form of a name that ALREAD
 ### What was deliberately not built
 
 The issue proposed two other directions: a new hashed, reviewer-visible channel for settled decisions, and routing `consistency_issues.md` itself into the review task and into a cache-key field. Both add a permanent cache-key surface that re-stales the whole book for a class the canon route already invalidates per-term, and neither trigger survives the cheap fix. An earlier draft of this release also tried to document which route an UNFROZEN name should take through the glossary planner's curation; four consecutive review rounds found a defect in that procedure, each in the same place, and it was cut rather than patched a fifth time. R4 already owns unfrozen names, and W6 now points there instead of re-deciding it.
+
 ## 1.50.0 — 2026-08-23
 
 **A draft that moved because it was RE-TRANSLATED was charged for a fix round it never got.** `derive_next_action()`'s non-final, non-clean branch read "the draft's sha1 no longer matches the review's" as "a fix was applied" and advanced to the next review round. A same-run retranslate moves the draft exactly the same way — `translate_dispatch_token()` is a pure function of `run_id` and `seg`, so the fresh draft carries a byte-identical token — and the surviving review still matches this run. The fresh draft was then reviewed one round further along than it had earned; at `max_fix_rounds: 1` it went straight to the mandatory `final` round and capped, having never been offered a fix. Reproduced against the shipped function before anything was written: two invocations with identical on-disk evidence, differing only in why the draft moved, both returned `{"action": "review", "round_label": "2"}`. Closes #441.
@@ -360,6 +389,7 @@ Unpinned behavior is unchanged in every respect but one: when `resume_setup.py` 
 ### What it costs
 
 `segment_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` entry (`cache_key.py:156`), and `plugin_bundle_hash` is a GLOBAL cache-key field (`cache_key.py:193`, not in `PER_SEGMENT_FIELDS` at `cache_key.py:196-198`) — so once a project refreshes its `${durable_root}/scripts/` copy, EVERY converged segment's cache key moves and every converged unit reads `stale`. The hash itself is read back from the `runs/.plugin_bundle_hash` marker rather than recomputed per segment (`cache_key.py:563-569`), so an un-refreshed root is untouched until Step 0a re-copies. This is unavoidable for any fix that lives in this file, and it is the same cost every prior plugin-bundle release has paid.
+
 ## 1.46.0 — 2026-08-23
 **A source EPUB can carry RTL text in visual order instead of logical order, and nothing in this pipeline could tell you.** Extraction is byte-faithful — that is correct, and `segpack.py` is a pass-through by construction — so the mangling is upstream, from a PDF-to-EPUB conversion. But no deterministic gate here can see it: token counts, digests, schema validation and `validate_draft` never read what a fragment MEANS. The damage lands on the LLM turns. On a live Hebrew book a visual-order run tore words apart, a reviewer read a stranded fragment as a real word and filed a finding against a CORRECT draft — twice — and a translator inverted who did what to whom in a passage that reached a converged draft a full review round had already called clean. Closes #489.
 
@@ -417,7 +447,6 @@ Three GLOBAL cache-key fields move, and the moved set is exactly the machinery-o
 Both the sidecar lookup and the `canon.json` lookup beside it are keyed on the candidate string exactly as `extract_candidates()` emitted it. For a candidate past `bootstrap_names`' character cap that string carries a truncation marker, so it matches neither key and a capped split form still lands in `new_names`. The blindness is pre-existing and shared identically by the canon lookup; teaching only the sidecar lookup to match a capped representation would make it strictly more capable than its neighbour, which is the half-fix shape #383 already records. Measured population at the time of writing: of 3884 candidate names in the live fr→ru corpus, zero exceed the cap (the longest is 62 characters). Characterized by test, and a comment at the call site names the shared class.
 
 Suite 6094 → 6143 passing; `tests/segpack_split_names_delivery.test.py` adds 45 test functions. Five existing suites gained the new required field in their hand-built segpack fixtures, and `seg_safety_segpack.test.py`'s durable-root scaffolds now copy `canon_senses.py` the way Step 0a really does.
-
 
 ## 1.42.0 — 2026-08-22
 
@@ -594,7 +623,6 @@ What ships instead: `SKILL.md` now states, at the claim recipe where an operator
 
 **No converged segment re-stales — which is not the same as "nothing re-translates", and the difference is paid for by the operator.** `select_segments.py` is an ORCHESTRATION member, not one of the 17 `PLUGIN_BUNDLE_MEMBERS`, so no cache-key field moves and finished work stays finished; `SKILL.md` and the tests are in no hashed tuple at all. What does move is `orchestration_bundle_hash`, which `input_digest` consumes: a refreshed root's next run therefore mints a fresh `RUN_ID` and reports `resume: false`, and every NOT-YET-CONVERGED draft still carrying the previous run's `dispatch_token` is orphaned by it and re-translates, discarding any fix applied to it by hand. That is the standing cost of any edit to this script — it is what `select_segments.py`'s own `--allow-retranslate-converged` refusal already warns about as the second number — and the release does not escape it. The membership this rests on is now pinned by a test rather than asserted here, because two successive drafts of this very paragraph were wrong: the first claimed the orchestration-only exemption for `resume_setup.py`, which does not have it, and the second turned "no converged segment re-stales" into "nothing re-translates", which is a different and false claim.
 
-
 ## 1.37.0 — 2026-08-22
 **The fix turn was ordered to apply every reviewer finding in full, so the one turn that could catch a false finding was instructed not to.** `fixPrompt` told the fixer that `<seg>.review.json` is "the AUTHORITATIVE source of the reviewer's findings for this round" and to "apply every entry in its `findings[]` array, in full, to the draft" — and nothing in any shipped template, task file or reference granted it permission to question, downgrade, defer or refuse one. The architecture does put a separate Claude turn between the reviewer's verdict and the artifact; the prompt turned that turn into a conduit. What does run around this step is deterministic and address-shaped — token freshness, `dispatch_token` binding, schema shape, `loc` authenticity — and **not one of those reads what the edit says**. Nor is there a deterministic check after the edit: `review_ready.py` verifies review-schema validity, a current `draft_sha1` and the `dispatch_token`, and coverage is the NEXT reviewer's own self-report of `validate_draft.py`, not an independently enforced gate. Measured while operating deliberately outside the shipped instruction, on two live books in one day: **7 distinct false findings across 10 filings**, of which three would have damaged correct text and one did (applied, then reverted, only because the fixer ran a canon-resolution grep the plugin does not ask for). Closes #532.
 
@@ -681,7 +709,6 @@ Frequency is stated as measured rather than as a rate: across the 107 archived p
 
 ## 1.34.3 — 2026-08-22
 
-
 **`{{PLUGIN_ROOT}}` named a directory that does not exist, and #582's question gets a written answer instead of a command rewrite.** Two corrections to shipped prose, no behaviour change and no script edited — `plugin_bundle_hash` does not move and no project re-translates or re-resumes.
 
 ### The token was defined one directory too high
@@ -700,7 +727,6 @@ Rewriting the commands was evaluated first. Relocating an individual entry point
 - **A per-command rewrite does not converge.** The invocations are not a closed set — this file, `references/`, the three `*_TASK.template.md` prompts and the three workflow templates' own command builders — and any future dispatch adds one. Three successive review passes over the same change each found more of them.
 
 So the guarantee is stated narrowly rather than broadly: `--plugin-root` bypasses a tampered *sibling checker* by executing the trusted plugin copy — it does not detect or report the tampering, and it does not make a tampered *entry point* impossible; and `plugin_bundle_hash` does not catch one either, since `cache_key.py` reads the Step-0a marker and never re-hashes the copies. The `--plugin-root` paragraphs that implied otherwise now say what the flag does not buy. Closing the class properly means constraining the fix turn's write surface, which is tracked separately.
-
 
 ## 1.34.2 — 2026-08-22
 
@@ -727,6 +753,7 @@ Tests and docs only — nothing under `assets/scripts/` is in the diff and no me
 That rewrite is worth naming, because this release's first draft asserted the file was untouched and a later edit in the same release made the sentence false — the exact defect described above, arriving in the entry that introduces the check for it. The digit-bearing figures were caught by the new test; this one was prose with no number in it, and a reviewer caught it.
 
 **And then the check fired for real, on itself, before this ever merged.** 1.34.1 (#547) landed on `main` while this branch was in review, which forced a rebase and a renumber to 1.34.2 — and moved this changelog's entry count out from under a figure written when it was 61. Nobody noticed by reading; the test went red naming the number and the tree's answer. That is the whole shape #580 describes — a figure true when written, false at merge, moved by an edit nobody connected to it — and it is the reason the count in the scope note below is 62. The suite grows to 162 test modules and this file to 62 release entries; both are declared in the new test, and both are moved BY this release, so writing either figure before making the change is that same failure — and it is caught here.
+
 ## 1.34.1 — 2026-08-22
 Documentation only, at two sites. The marked bytes of `style_bible.md` are hashed into every segment's cache key, and the two places a reader learns that were each missing one half of the story. No runtime script bytes change — nothing under `assets/scripts/` is in the diff. Closes #547.
 
@@ -865,7 +892,6 @@ Suite: `python3 -m pytest -q` from `plugins/literary-translator`, no selection o
 
 Also corrected in place: `diff_rendered_output.py`'s docstring claimed a "full closed reason set" that omitted two reasons the script really emits (`profile_precondition`, `out_dir_symlink`, both reachable only on the default no-`--candidate-dir` path) and did not mention that `main()`'s defensive catch-all emits a JSON line carrying no `reason` field at all. The enumeration now matches the code, and `out_dir_symlink` — emitted but pinned by no test until now — has one per condition it covers: the resolver refuses both a `..` traversal segment and a symlinked path component under that single reason string.
 
-
 ## 1.32.0 — 2026-08-18
 
 Collision de-linking finally says what it costs, and a book can tell the renderer that two spellings are one man. Closes #588.
@@ -930,6 +956,7 @@ Two consumers, one authority: `render()` validates whatever map it is handed (`R
 `render_obsidian.py`'s own bytes changed, so `render_version` moved. With no sidecar the rendered markdown is unchanged, so `diff_rendered_output.py` still MATCHES — it prints the advisory `stale_baseline` WARN and exits `0`, and re-accepting is optional. **Adopting a group that takes effect changes the rendered links**, so the diff then MISMATCHES (exit `1`) and a deliberate re-accept is required. A book that carried a fall-through link (a short name linked inside a de-linked longer one) will also mismatch without any group, since that link is now correctly absent. (A group whose target has no occurrences, or one the outsider/`sense_translated` rules leave de-linked anyway, changes no Markdown and still matches.) Either way the re-accept is `--accept-baseline --force-accept-baseline`: `--accept-baseline` alone refuses to overwrite a baseline that already exists. (The new schema file's own `_schemas_dir_hash` effect is the mid-run cost described above; it is not a cache-key field and never re-translates converged work.)
 
 Doing nothing is a supported outcome: with no sidecar present the loader is never imported (and neither is `jsonschema` on its behalf), and no `link_groups` key is attached. The rendered Markdown is unchanged from 1.31.1's apart from the marker's new block — with the one exception named above, a book that carried a fall-through link.
+
 ## 1.31.2 — 2026-08-18
 
 Corrections: ten sentences that state how many scripts a hashed bundle covers or enumerate them, and the drift test that was holding one of the enumerations wrong. No runtime behaviour changes and no new instruction. Closes #591 in part — one site is deliberately left, see below.
@@ -4189,6 +4216,7 @@ No canon, ledger, or source-data content changes. The new pre-run wipe deletes n
 `${durable_root}/glossary/runs/<RUN_ID>/` and nothing inside it but `out_*` / `approved_*` fragments;
 a resume keeps the attempt-0 fragments its resume-skip depends on. `skeptic-pass-wf.template.js` is
 not touched, so the separate skeptic resume domain is unaffected.
+
 ## 1.15.3 — 2026-07-26
 
 Version-only release. It ships **no behavior change** — its entire purpose is to make the

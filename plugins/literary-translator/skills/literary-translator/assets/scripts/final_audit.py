@@ -25,8 +25,9 @@ Two HARD checks, each counted separately, both rolling into `hard_failures`
      structurally valid but silently substitutes prose the reviewer never
      saw.
 
-Four WARN-only, advisory, non-gating checks (generalized from the real
-reference's A1/A3/A4/A5 -- the real `main()` only ever gated on coverage):
+Five WARN-only, advisory, non-gating checks -- four generalized from the
+real reference's A1/A3/A4/A5 (the real `main()` only ever gated on coverage),
+plus one whose content the PROJECT supplies:
 
   (1) glossary-diff    -- cross-segment source-name -> target-form drift
                            using each converged draft's own `names[]`, plus
@@ -48,6 +49,13 @@ reference's A1/A3/A4/A5 -- the real `main()` only ever gated on coverage):
                            up to whitespace), plus a segpack-completeness
                            check (parent block carries no source text at
                            all -- a citation would be empty).
+  (5) forbidden-pattern  -- the PROJECT's own deterministic style bans,
+                           declared as profile.yml's
+                           `validation.forbidden_patterns` (#520). The plugin
+                           ships no patterns and hardcodes none; a project's
+                           codepoint-decidable style_bible rules are the only
+                           thing this check knows. Scans every string leaf of
+                           blocks/footnotes/verses exactly as written.
 
 A third, distinct gate -- the **whole-project completeness gate** -- shells
 out to `select_segments.py` one final time, over the FULL `manifest.json`
@@ -55,7 +63,7 @@ with no `--only-segs` restriction, and folds its classification report into
 `completeness_counts`/`project_complete`. This is NOT the same population as
 the two hard checks above: the hard checks only ever look at segments
 ALREADY converged; the completeness gate looks at the whole book, converged
-or not. Unlike the four WARN-only checks below, this gate DOES affect the
+or not. Unlike the five WARN-only checks below, this gate DOES affect the
 exit code -- a project that is not yet complete exits `3` (below `1`
 priority) rather than `0`, so `select_segments.py`'s W5 delivery-refusal
 rule holds on this default path too.
@@ -729,6 +737,166 @@ def warn_verse_structure(seg):
                 f"(a citation of the original would be empty)"
             )
     return warns
+
+
+# ---------------------------------------------------------------------------
+# WARN 5: forbidden-pattern scan -- the project's OWN deterministic style
+# bans, declared in profile.yml as `validation.forbidden_patterns` (#520).
+#
+# The plugin ships NO patterns and hardcodes none. A style contract lives in
+# the project's `style_bible.md`, and only the project knows which of its
+# rules are codepoint-decidable: the one concrete rule that motivated this
+# (a ban on runs of two or more asterisks, because the operator's own EPUB
+# renderer prints them literally) cannot ship as a builtin, since `**` is
+# ordinary Markdown bold on the shipped Obsidian output path. So the plugin
+# ships the MECHANISM and the project supplies the rule.
+#
+# Three properties this check deliberately has, each of which a plausible
+# alternative gets wrong:
+#
+#   - **The scanned text is the draft AS WRITTEN.** Sentinels are NOT
+#     substituted out the way warn_foreign_remainder() does at its own call
+#     site: `SENTINEL_RE.sub(" ", txt)` would both HIDE a violation that sits
+#     inside a sentinel and MANUFACTURE one that only exists because a
+#     placeholder became a space. A style contract is a statement about what
+#     the translator wrote, so that is what is tested.
+#   - **Every string leaf of blocks/footnotes/verses, not an allowlist of
+#     fields.** `draft.schema.json` constrains a `verses` value no further
+#     than "is an object", because which fields exist varies by
+#     `verse_policy.mode` and validate_draft.py is that question's SOLE
+#     authority. An allowlist here (`rendered`/`literal_gloss`) would
+#     duplicate that authority and be wrong under some mode, so the scan is a
+#     deliberate SUPERSET of what any one renderer reads. `names` and `notes`
+#     are machinery/metadata and are not scanned.
+#   - **A pattern that fails to compile is REPORTED, never skipped.** A
+#     silently-unenforced operator rule is a false green: the run looks
+#     exactly like one where the rule held.
+#
+# Advisory only. A hit never changes the exit code -- see this module's
+# docstring on the WARN/hard split.
+# ---------------------------------------------------------------------------
+
+# Only these three families of a draft carry translator-authored prose.
+SCANNED_DRAFT_SECTIONS = ("blocks", "footnotes", "verses")
+
+
+def forbidden_patterns(profile):
+    """Reads profile.yml's `validation.forbidden_patterns` (#520) as a list
+    of declaration dicts, or `[]` when the project declares none.
+
+    The ONE compatibility case this has to serve is the sub-key being
+    ABSENT -- every project that predates this field. A missing `validation`
+    object is not a real state to support: `ProfileConfig` already requires
+    `validation.untranslated_sentinel` (validate_draft.py) and this same run
+    has consumed it in hard_check_coverage() long before any WARN runs. The
+    defensive `or {}` below therefore buys robustness, not a supported shape.
+
+    Anything that is not a list of dicts reads as no declaration at all, and
+    a declaration missing a required key is dropped by
+    compile_forbidden_patterns() with its own WARN -- profile.schema.json is
+    the gate that refuses those at Step 0, and this reader is downstream of
+    an operator who may have edited profile.yml since."""
+    validation = (profile or {}).get("validation")
+    if not isinstance(validation, dict):
+        return []
+    decls = validation.get("forbidden_patterns")
+    if not isinstance(decls, list):
+        return []
+    return [d for d in decls if isinstance(d, dict)]
+
+
+def compile_forbidden_patterns(decls):
+    """(compiled, warns) -- compiled is a list of (id, regex, message).
+
+    A `re.error` never propagates: it becomes a WARN naming the id, and the
+    SIBLING declarations still compile and run. The alternative (raise, or
+    skip quietly) either takes down an advisory lane over an operator typo or
+    reports a clean audit for a rule that was never enforced."""
+    compiled = []
+    warns = []
+    for index, decl in enumerate(decls):
+        rule_id = decl.get("id")
+        pattern = decl.get("pattern")
+        message = decl.get("message")
+        label = rule_id if isinstance(rule_id, str) and rule_id else f"#{index}"
+        if not isinstance(pattern, str) or not pattern:
+            warns.append(
+                f"STYLE-PATTERN {label}: declaration has no usable 'pattern' "
+                f"-- rule NOT enforced this run -- MANUAL"
+            )
+            continue
+        if not isinstance(message, str) or not message:
+            message = "(declaration carries no message)"
+        try:
+            regex = re.compile(pattern)
+        except re.error as exc:
+            warns.append(
+                f"STYLE-PATTERN {label}: pattern {pattern!r} does not "
+                f"compile ({exc}) -- rule NOT enforced this run -- MANUAL"
+            )
+            continue
+        compiled.append((label, regex, message))
+    return compiled, warns
+
+
+def _string_leaves(node, path):
+    """Yields (path_label, string) for every string leaf under `node`.
+
+    An explicit stack, NOT recursion: `json.loads` decodes container nesting
+    far deeper than Python's own recursion limit (measured: past 20 000 levels
+    against a default limit of 1 000), and a `verses` value may legitimately
+    carry nested objects, so a recursive walker would be the first thing in
+    this script to fail on a draft the loader accepted.
+
+    Each path component is bracketed and repr'd -- `verses['v1']['rendered']`
+    -- so that a key which itself contains a dot cannot render the same as the
+    equivalent nesting. Two keys differing only in the RUN-LENGTH of internal
+    whitespace still collapse to the same label once the emitted line is
+    normalized; that is an ambiguous advisory string, and warnings gate
+    nothing."""
+    stack = [(node, path)]
+    while stack:
+        current, label = stack.pop()
+        if isinstance(current, str):
+            yield label, current
+        elif isinstance(current, dict):
+            for key, value in current.items():
+                stack.append((value, f"{label}[{key!r}]"))
+        elif isinstance(current, list):
+            for index, value in enumerate(current):
+                stack.append((value, f"{label}[{index}]"))
+
+
+def warn_forbidden_patterns(seg, compiled):
+    warns = []
+    if not compiled:
+        return warns
+    draft, err = load_json(draft_path(seg), f"draft {seg}")
+    if err or not isinstance(draft, dict):
+        return warns
+
+    for section in SCANNED_DRAFT_SECTIONS:
+        for label, text in _string_leaves(draft.get(section), section):
+            for rule_id, regex, message in compiled:
+                hits = regex.findall(text)
+                if not hits:
+                    continue
+                first = next(regex.finditer(text))
+                start = max(0, first.start() - 40)
+                snippet = text[start:first.end() + 40]
+                # One normalization, applied to the WHOLE formatted line as
+                # its last step: main() prints each warning string raw, and a
+                # line break reaching stderr from ANY of the three operator-
+                # or draft-controlled fragments (the message, the snippet, or
+                # a draft KEY inside the path label) would split one warning
+                # across physical lines. `\s` here is Unicode-aware, so
+                # U+0085, U+2028 and U+2029 collapse too, not just CR/LF.
+                warns.append(_norm_ws(
+                    f"[{seg}] STYLE-PATTERN {rule_id} in {label}: {message} "
+                    f"(hits={len(hits)}) :: {snippet!r} -- MANUAL"
+                ))
+    return warns
+
 
 
 # ---------------------------------------------------------------------------
@@ -1534,7 +1702,7 @@ def main():
     hard_failures = coverage_failures + stale_review_failures
 
     # WARN checks: A1 cross-segment once; A2 (link-graph)/A3 (foreign-scan)/
-    # A4 (verse-structure) per converged segment.
+    # A4 (verse-structure)/#520 (forbidden-pattern) per converged segment.
     warn_details.extend(warn_glossary_diff(converged))
 
     stopwords_lower = frozenset()
@@ -1553,10 +1721,27 @@ def main():
             file=sys.stderr,
         )
 
+    # #520. Compiled ONCE, before the loop: a declaration that does not
+    # compile is an operator-level fact about this run, not a per-segment one,
+    # so its WARN must appear exactly once however many segments converged.
+    #
+    # Its own vd.load_profile(), not the one the stopwords block above just
+    # read -- for the same reason #533's reader takes its own further down:
+    # that read sits inside a try which downgrades any failure to "skip the
+    # foreign-remainder check", and borrowing it would let a stopwords problem
+    # silently cancel the operator's forbidden-pattern declaration while the
+    # audit still reported a clean WARN lane. A malformed profile cannot reach
+    # here -- hard_check_coverage()'s own unguarded load raises first.
+    compiled_patterns, pattern_decl_warns = compile_forbidden_patterns(
+        forbidden_patterns(vd.load_profile())
+    )
+    warn_details.extend(pattern_decl_warns)
+
     for seg in sorted(converged):
         warn_details.extend(warn_link_graph(seg))
         warn_details.extend(warn_foreign_remainder(seg, stopwords_lower))
         warn_details.extend(warn_verse_structure(seg))
+        warn_details.extend(warn_forbidden_patterns(seg, compiled_patterns))
 
     warnings_count = len(warn_details)
 

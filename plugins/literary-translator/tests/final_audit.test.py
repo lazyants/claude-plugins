@@ -83,7 +83,7 @@ Coverage (per the test's own enumeration):
     ledger-fragment reviewed_draft_sha1 mismatch, isolated from hard check 1;
   - the hard_failures rollup invariant across two segments, one failing each
     hard check;
-  - all four WARN-only advisory checks (glossary-diff name-form drift +
+  - all five WARN-only advisory checks (glossary-diff name-form drift +
     canon.json self-consistency, link-graph sentinel bijection,
     foreign-remainder stopword-density scan, verse-structure per
     verse_policy.mode);
@@ -181,6 +181,7 @@ def default_profile(
     particle_config="fr_test.json",
     verse_mode="full_rhymed_plus_literal",
     admit_contract_only_stale=None,
+    forbidden_patterns=None,
 ):
     """`admit_contract_only_stale=None` OMITS the #533 key entirely -- the
     shape every existing project has -- while True/False write it
@@ -209,6 +210,13 @@ def default_profile(
     }
     if admit_contract_only_stale is not None:
         profile["validation"]["admit_contract_only_stale"] = admit_contract_only_stale
+    # #520, same three-shape discipline as the key above: None OMITS
+    # `forbidden_patterns` entirely (every project predating the field),
+    # while [] declares it empty and a list declares rules. Absent and
+    # declared-empty must be indistinguishable in behaviour, and a fixture
+    # that could only express one of them could not prove it.
+    if forbidden_patterns is not None:
+        profile["validation"]["forbidden_patterns"] = forbidden_patterns
     return profile
 
 
@@ -220,6 +228,7 @@ def make_durable_root(
     stopwords=None,
     canon=None,
     admit_contract_only_stale=None,
+    forbidden_patterns=None,
 ) -> Path:
     """Build a COMPLETE, internally-consistent durable_root: real copies of
     every script final_audit.py touches, real schemas/ (ledger_merge.py
@@ -244,6 +253,7 @@ def make_durable_root(
             default_profile(
                 verse_mode=verse_mode,
                 admit_contract_only_stale=admit_contract_only_stale,
+                forbidden_patterns=forbidden_patterns,
             ),
             sort_keys=False,
         ),
@@ -540,7 +550,7 @@ def load_final_audit_module():
 
 
 # ---------------------------------------------------------------------------
-# 1. Clean baseline: hard checks AND all four WARN checks clean.
+# 1. Clean baseline: hard checks AND all five WARN checks clean.
 # ---------------------------------------------------------------------------
 
 
@@ -2089,6 +2099,257 @@ def test_relative_plugin_root_resolves_against_the_original_invoker_cwd(tmp_path
     assert_schema_valid(summary)
     assert summary["project_complete"] is False
     assert summary["completeness_counts"]["not_started"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 8. WARN 5 -- forbidden-pattern scan (#520).
+#
+# The plugin ships NO patterns, so every case here declares its own. The
+# helper below is the one used by all of them: a clean single-segment root
+# whose ONLY reason to warn is the declaration under test, so a nonzero
+# `warnings` count is attributable and a zero one is meaningful.
+#
+# Every assertion runs the REAL script as a subprocess (run_final_audit), so
+# each is simultaneously the wiring test: deleting the
+# `warn_forbidden_patterns(...)` call from main() turns them red. That
+# deletion was watched failing, as was mutating the declaration reader to
+# return [] unconditionally.
+# ---------------------------------------------------------------------------
+
+
+def _pattern_root(tmp_path, patterns, draft=None):
+    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG), forbidden_patterns=patterns)
+    add_converged_segment(root, "seg01", clean_segpack(), draft or clean_draft())
+    return root
+
+
+def _style_lines(proc):
+    return [ln for ln in proc.stderr.splitlines() if "STYLE-PATTERN" in ln]
+
+
+def _warn_block_lines(proc):
+    """The PHYSICAL stderr lines of the WARN section.
+
+    main() emits each warning as `"  • " + w`, so a warning carrying an
+    embedded line break lands as a first line with the bullet and one or more
+    continuation lines WITHOUT it. Counting lines that contain
+    "STYLE-PATTERN" cannot see that -- the marker is only on the first
+    fragment -- which is why the split has to be detected here, on bullet
+    structure, and not by counting matches."""
+    out = []
+    inside = False
+    for line in proc.stderr.splitlines():
+        if line.startswith("WARN / MANUAL-REVIEW ("):
+            inside = True
+            continue
+        if inside:
+            if line.startswith("WHOLE-PROJECT COMPLETENESS:") or not line.strip():
+                break
+            out.append(line)
+    return out
+
+
+def test_forbidden_patterns_absent_adds_no_warning(tmp_path):
+    """The compatibility case: a profile.yml predating #520 has no key at
+    all, and the audit must behave exactly as it did before the check
+    existed."""
+    root = _pattern_root(tmp_path, None)
+    proc = run_final_audit(root)
+    summary = parse_summary(proc)
+    assert_schema_valid(summary)
+    assert _style_lines(proc) == []
+    assert summary["warnings"] == 0, proc.stderr
+
+
+def test_forbidden_patterns_declared_empty_matches_absent(tmp_path):
+    """Declared-empty and absent must be indistinguishable. Compared on the
+    parsed summary with `generated_at` dropped -- the script stamps a fresh
+    timestamp on every run, so raw stdout can never be byte-equal -- plus the
+    stderr WARN section, which is where a spurious line would actually show."""
+    absent = run_final_audit(_pattern_root(tmp_path / "a", None))
+    empty = run_final_audit(_pattern_root(tmp_path / "b", []))
+
+    def comparable(proc):
+        summary = dict(parse_summary(proc))
+        summary.pop("generated_at")
+        return summary
+
+    assert comparable(absent) == comparable(empty)
+    assert _style_lines(absent) == _style_lines(empty) == []
+    assert absent.returncode == empty.returncode
+
+
+def test_forbidden_patterns_hit_in_block_reports_once(tmp_path):
+    # Keeps {FN_PH} so footnote 1 stays referenced: without it the link-graph
+    # WARN also fires and `warnings` stops being attributable to this check.
+    draft = clean_draft(p1_text=f"A line with **bold** in it {FN_PH} and nothing else.")
+    root = _pattern_root(
+        tmp_path,
+        [{"id": "adjacent-asterisks", "pattern": r"\*{2,}",
+          "message": "two or more adjacent asterisks reach the reader verbatim"}],
+        draft=draft,
+    )
+    proc = run_final_audit(root)
+    summary = parse_summary(proc)
+    assert_schema_valid(summary)
+    lines = _style_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    line = lines[0]
+    assert "[seg01]" in line
+    assert "adjacent-asterisks" in line
+    assert "blocks['p1']" in line
+    assert "two or more adjacent asterisks reach the reader verbatim" in line
+    # Two runs of asterisks around one bold span.
+    assert "(hits=2)" in line
+    assert summary["warnings"] == 1
+
+
+def test_forbidden_patterns_scan_footnotes_and_verses_and_nested(tmp_path):
+    """The scanned surface is every string LEAF of blocks/footnotes/verses,
+    including one nested inside a verse object -- `draft.schema.json`
+    constrains a verse value no further than 'is an object', so a field set
+    beyond rendered/literal_gloss is schema-valid and must not be a blind
+    spot."""
+    draft = clean_draft(extra_footnotes={"2": "A note carrying FORBIDDEN text."})
+    draft["blocks"]["p1"] = "Ordinary prose with no trigger at all."
+    draft["verses"]["vA"]["literal_gloss"] = "A gloss carrying FORBIDDEN text."
+    draft["verses"]["vB"]["provenance"] = {"note": ["deep FORBIDDEN leaf"]}
+    root = _pattern_root(
+        tmp_path,
+        [{"id": "no-placeholder", "pattern": "FORBIDDEN", "message": "placeholder left in"}],
+        draft=draft,
+    )
+    proc = run_final_audit(root)
+    lines = _style_lines(proc)
+    paths = sorted(ln.split(" in ", 1)[1].split(":", 1)[0] for ln in lines)
+    assert paths == [
+        "footnotes['2']",
+        "verses['vA']['literal_gloss']",
+        "verses['vB']['provenance']['note'][0]",
+    ], proc.stderr
+
+
+def test_forbidden_patterns_do_not_scan_names_or_notes(tmp_path):
+    """`names` and `notes` are machinery/metadata, not translator prose. This
+    pins the scanned surface: widening it to the whole draft turns this red."""
+    draft = clean_draft(names=[{"source_form": "FORBIDDEN", "target_form": "FORBIDDEN"}])
+    draft["notes"] = ["a FORBIDDEN operator note"]
+    root = _pattern_root(
+        tmp_path,
+        [{"id": "no-placeholder", "pattern": "FORBIDDEN", "message": "placeholder left in"}],
+        draft=draft,
+    )
+    proc = run_final_audit(root)
+    assert _style_lines(proc) == [], proc.stderr
+
+
+def test_forbidden_patterns_scan_draft_as_written_not_sentinel_stripped(tmp_path):
+    """Both directions of the as-written rule, which is what separates this
+    check from warn_foreign_remainder's `SENTINEL_RE.sub(" ", txt)`:
+
+      - a pattern matching INSIDE a sentinel hits (stripping would hide it);
+      - a pattern that would only match once a sentinel became a space does
+        NOT hit (stripping would manufacture it).
+    """
+    draft = clean_draft(p1_text=f"Prose before{FN_PH}prose after.")
+    root = _pattern_root(
+        tmp_path,
+        [
+            {"id": "inside-sentinel", "pattern": "FNREF", "message": "sentinel body matched"},
+            {"id": "only-after-strip", "pattern": r"before prose", "message": "would need stripping"},
+        ],
+        draft=draft,
+    )
+    proc = run_final_audit(root)
+    lines = _style_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "inside-sentinel" in lines[0]
+    assert "only-after-strip" not in proc.stderr
+
+
+def test_forbidden_patterns_malformed_regex_warns_once_and_siblings_still_run(tmp_path):
+    """A pattern that will not compile is REPORTED, never skipped -- a
+    silently-unenforced rule is a false green. Reported once for the run, not
+    once per segment, and its siblings still compile and fire."""
+    draft = clean_draft(p1_text=f"A line with FORBIDDEN text in it {FN_PH}.")
+    root = make_durable_root(
+        tmp_path,
+        seg_ids=("seg01", "seg02", PAD_SEG),
+        forbidden_patterns=[
+            {"id": "broken", "pattern": "(unclosed", "message": "never mind"},
+            {"id": "no-placeholder", "pattern": "FORBIDDEN", "message": "placeholder left in"},
+        ],
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), draft)
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    proc = run_final_audit(root)
+    assert proc.returncode != 2, proc.stderr
+    broken = [ln for ln in _style_lines(proc) if "broken" in ln]
+    assert len(broken) == 1, proc.stderr
+    assert "does not compile" in broken[0]
+    assert "NOT enforced" in broken[0]
+    assert len([ln for ln in _style_lines(proc) if "no-placeholder" in ln]) == 1
+
+
+def test_forbidden_patterns_many_hits_collapse_to_one_line(tmp_path):
+    draft = clean_draft(p1_text=f"X X X X X {FN_PH}")
+    root = _pattern_root(
+        tmp_path,
+        [{"id": "x-marker", "pattern": "X", "message": "marker left in"}],
+        draft=draft,
+    )
+    proc = run_final_audit(root)
+    lines = _style_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "(hits=5)" in lines[0]
+
+
+def test_forbidden_patterns_zero_width_pattern_terminates(tmp_path):
+    """A zero-width pattern must not spin: the hit count is over finditer's
+    non-overlapping matches, which for an empty match is one per position
+    plus one."""
+    draft = clean_draft(p1_text=f"abcd {FN_PH}")
+    root = _pattern_root(
+        tmp_path,
+        [{"id": "zero-width", "pattern": "(?=a)|(?!x)", "message": "zero width"}],
+        draft=draft,
+    )
+    proc = run_final_audit(root, timeout=90)
+    assert [ln for ln in _style_lines(proc) if "zero-width" in ln], proc.stderr
+
+
+def test_forbidden_patterns_newlines_never_split_a_warn_line(tmp_path):
+    """Three independent line-break sources -- the operator's `message`, the
+    matched snippet, and a draft KEY inside the path label -- must each still
+    yield exactly ONE physical line, because main() prints each warning
+    string raw. Also pins that a key containing a dot renders distinctly from
+    the equivalent nesting."""
+    draft = clean_draft(p1_text=f"before\nTRIGGER\nafter {FN_PH}")
+    draft["verses"]["vA"]["od\ndd"] = "TRIGGER in a newline key"
+    draft["verses"]["vA"]["a.b"] = "TRIGGER in a dotted key"
+    draft["verses"]["vA"]["a"] = {"b": "TRIGGER in real nesting"}
+    root = _pattern_root(
+        tmp_path,
+        [{"id": "trig", "pattern": "TRIGGER", "message": "a message\nwith a newline"}],
+        draft=draft,
+    )
+    proc = run_final_audit(root)
+    summary = parse_summary(proc)
+    lines = _style_lines(proc)
+    assert len(lines) == 4, proc.stderr
+
+    # The load-bearing assertion: every physical line of the WARN section
+    # still carries the bullet, and there are exactly `warnings` of them. A
+    # warning split across physical lines leaves a continuation line without
+    # one, which counting STYLE-PATTERN markers cannot detect.
+    block = _warn_block_lines(proc)
+    assert len(block) == summary["warnings"] == 4, proc.stderr
+    assert all(ln.startswith("  \u2022 ") for ln in block), proc.stderr
+
+    paths = sorted(ln.split(" in ", 1)[1].split(":", 1)[0] for ln in lines)
+    assert "verses['vA']['a.b']" in paths
+    assert "verses['vA']['a']['b']" in paths
+    assert len(set(paths)) == 4, paths
 
 
 if __name__ == "__main__":

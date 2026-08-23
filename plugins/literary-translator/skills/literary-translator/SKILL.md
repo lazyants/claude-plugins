@@ -2918,8 +2918,9 @@ Runs at W7 over every converged segment:
   but silently substitutes prose the reviewer never saw. Counted separately
   from check 1, both roll into `hard_failures` for backward-compat
   reporting.
-- **Four WARN-only, advisory, whole-book checks** (generalized from the real
-  reference's A1/A3/A4/A5 — the real `main()` only ever gates on coverage):
+- **Five WARN-only, advisory, whole-book checks** — four generalized from the
+  real reference's A1/A3/A4/A5 (the real `main()` only ever gates on coverage),
+  plus (5) whose content the project itself supplies:
   (1) glossary-diff — cross-segment name-form drift + `canon.json`
   self-consistency using each draft's `names[]`; (2) link-graph —
   `⟦FNREF_N⟧`/`⟦VERSE_...⟧` sentinel bijection on the translated draft,
@@ -2929,7 +2930,16 @@ Runs at W7 over every converged segment:
   (generalized from the real reference's hardcoded French list); (4)
   verse-structure — per `verse_policy.mode`'s own required-field table,
   generalized from the real reference's hardcoded `ru_rhymed`/`podstrochnik`
-  field names. Prints every WARN as free text for human eyeballing — never
+  field names; (5) forbidden-pattern — the project's own deterministic style
+  bans, declared as `validation.forbidden_patterns` in `profile.yml` (#520).
+  The plugin ships no patterns and hardcodes none: a style contract lives in
+  the project's `style_bible.md`, and only the project knows which of its
+  rules are codepoint-decidable. Each declaration is an `id`/`pattern`/
+  `message` triple; every string leaf of a converged draft's
+  `blocks`/`footnotes`/`verses` is tested **as the translator wrote it**
+  (sentinels not stripped, emphasis not stripped), and a pattern that fails
+  to compile is reported as its own WARN rather than skipped, so an
+  unenforced rule can never read as a clean run. Prints every WARN as free text for human eyeballing — never
   auto-"fixed."
 - **Whole-project completeness gate** (a third gate, distinct from the two
   hard checks which only ever cover segments already converged): shells out
