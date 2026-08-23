@@ -1021,6 +1021,13 @@ def test_run_defers_completed_attempt_when_budget_exhausted(tmp_path, monkeypatc
 def test_adopt_pending_promotes_valid(tmp_path, monkeypatch):
     job = _mkjob(tmp_path, kind="translate")
     Path(job.pending).write_text("{}", encoding="utf-8")
+    # #483: run() records the canonical's authorization as its first act, and this test
+    # calls adopt_pending() directly, so it states that baseline itself. The value is the
+    # honest one for this fixture -- the canonical is absent, which the predicate
+    # establishes as "no token" -- rather than a blanket permit: seeding it THROUGH the
+    # shipped predicate means a change to what an absent canonical means shows up here.
+    job.canonical_authority = job._canonical_authority(job.poll_remaining)
+    assert job.canonical_authority == (True, None), "premise: absent reads as no token"
     gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
     monkeypatch.setattr(job, "_gate", gate)
     assert job.adopt_pending() is True
@@ -3627,7 +3634,18 @@ def test_canonical_replaceable_check_then_replace_window_is_a_known_unclosed_rac
     If this test ever starts FAILING -- the raced content survives -- that is real
     news: the implementation gained an atomicity property this comment says it does
     not have. Update this docstring and the design's own known-limits documentation
-    then; do not just delete the test."""
+    then; do not just delete the test.
+
+    #483 NARROWED WHAT "NEVER OBSERVED" MEANS HERE, without closing this window, and
+    this paragraph is that instruction being honoured. The promote now re-reads the
+    canonical's `dispatch_token` before the archive/replace pair, so a raced writer that
+    MOVES the token is seen and the promotion is refused -- pinned by
+    test_a_raced_writer_that_moves_the_token_in_the_check_replace_window_is_refused.
+    This test still passes, and still documents a real limit, because its raced writer
+    publishes content carrying NO dispatch_token: the authorization did not move, so the
+    late check has nothing to compare against and the content race is destroyed exactly
+    as before. What remains open is the CONTENT half of the window, which no token
+    comparison can close."""
     job = _mkjob(tmp_path, kind="translate", deadline=100)
     monkeypatch.setattr(job, "hygiene", lambda: None)
 
@@ -3711,17 +3729,33 @@ def test_run_refuses_immediately_when_adopt_pending_hits_canonical_unreadable(tm
 
     # run()'s OWN preflight lstat()s this exact same self.canonical path first -- must
     # be let through genuinely (as absent) or the run never reaches adopt_pending() at
-    # all. Only the SECOND observation, adopt_pending()'s own, is faulted.
-    lstat_calls = {"n": 0}
+    # all. Only adopt_pending()'s OWN observation is faulted.
+    #
+    # ARMED AT THE SEAM, never by an absolute call count. Counting observations makes
+    # this test a hostage to how many any earlier phase happens to make: #483 added one
+    # ahead of the preflight, and under the old `n >= 2` rule that faulted the PREFLIGHT
+    # instead -- run() then refused one phase too early, every assertion below still
+    # held, and the test went on passing while proving nothing about adopt_pending() at
+    # all. The gates are the seam: they run inside adopt_pending() and nowhere else, so
+    # arming on the last of them fires on exactly the observation this test is about,
+    # whatever any future phase adds above it.
+    armed = {"v": False}
     real_lstat = os.lstat
 
     def fake_lstat(path, *a, **kw):
-        if os.fspath(path) == job.canonical:
-            lstat_calls["n"] += 1
-            if lstat_calls["n"] >= 2:
-                raise OSError(errno.EIO, "Input/output error", path)
+        if armed["v"] and os.fspath(path) == job.canonical:
+            raise OSError(errno.EIO, "Input/output error", path)
         return real_lstat(path, *a, **kw)
     monkeypatch.setattr(os, "lstat", fake_lstat)
+
+    real_gate = gate
+
+    def gate_then_arm(argv, timeout):
+        proc = real_gate(argv, timeout)
+        if argv[0] == "validate_draft.py":     # adopt_pending()'s LAST gate
+            armed["v"] = True
+        return proc
+    monkeypatch.setattr(job, "_gate", gate_then_arm)
 
     launch_calls = {"n": 0}
 
@@ -3737,6 +3771,10 @@ def test_run_refuses_immediately_when_adopt_pending_hits_canonical_unreadable(tm
     assert launch_calls["n"] == 0, (
         "no fresh paid turn may be spent once adopt_pending() has already found a "
         "blocked-but-validated candidate"
+    )
+    assert calls == ["draft_ready.py", "validate_draft.py"], (
+        "adopt_pending() must have RUN its gates -- otherwise the refusal came from an "
+        "earlier phase and nothing below is about this call site: %r" % (calls,)
     )
     assert job.reason == "canonical-unreadable"
     assert job.canonical_unreadable is True
@@ -4562,3 +4600,609 @@ def test_a_non_content_pending_rejection_still_buys_a_fresh_job(tmp_path, label,
     assert not fragment_path(root, seg).exists(), (
         "%s: a recoverable rejection must never leave a terminal blocked fragment" % label
     )
+
+
+# --------------------------------------------------------------------------- #
+# #483: the late authorization re-check.
+#
+# The defect: both promote sites (adopt_pending()'s os.replace(pending, canonical)
+# and run()'s os.replace(attempt, canonical)) used to be unconditional once their
+# local gates passed. A job validated its candidate against the token it read when
+# it started and promoted against whatever the canonical held at finalize time, so
+# a concurrent re-stamp -- a select_segments.py --from-cap/--from-converged claim
+# takes NO per-segment lease -- was silently overwritten, putting the OLD token
+# back with the OLD bytes. The downstream ACCEPT gate expects exactly that old
+# token, so it reads as a green run.
+#
+# ORDERING IS THE WHOLE FINDING. Every positive test below moves the token AFTER
+# the gates the driver already runs and BEFORE the replace, by injecting into the
+# very seam the driver passes through -- never by pre-seeding a canonical, which
+# would prove nothing about when the check happens.
+# --------------------------------------------------------------------------- #
+def _write_canonical(job, token, **extra):
+    """A canonical artifact carrying `token`, or carrying NO dispatch_token when
+    `token` is None (a real state: the field is optional in the draft schema, so a
+    re-emitted draft can lose it)."""
+    doc = {"seg": job.seg}
+    doc.update(extra)
+    if token is not None:
+        doc["dispatch_token"] = token
+    Path(job.canonical).write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _promote_run(job, monkeypatch, on_validate=None):
+    """Drive job.run() all the way to its post-validation promote, with the codex
+    turn stubbed out. `on_validate` runs INSIDE validate_attempt(), i.e. after every
+    gate and immediately before the promote branch -- the exact window #483 is about.
+    Returns nothing; the caller asserts on the job."""
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    monkeypatch.setattr(job, "adopt_pending", lambda: False)
+
+    def spy_launch():
+        job.jobId = "J"
+        return True
+
+    def fake_poll():
+        job.job_status = "completed"
+
+    def fake_validate_attempt():
+        Path(job.attempt).write_text(
+            json.dumps({"seg": job.seg, "dispatch_token": job.tok}), encoding="utf-8")
+        if on_validate is not None:
+            on_validate()
+        return True
+
+    monkeypatch.setattr(job, "launch", spy_launch)
+    monkeypatch.setattr(job, "poll", fake_poll)
+    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
+
+
+def test_promote_refuses_when_the_token_moves_after_validation(tmp_path, monkeypatch):
+    """THE issue's own scenario, at run()'s promote site: the job starts against
+    token A, a concurrent claim re-stamps the canonical to B while the codex turn
+    runs, and the validated A-candidate must NOT go back over it.
+
+    The move is injected inside validate_attempt() so it lands after the candidate
+    gates and before the promote branch. Delete the _authorization_moved() call at
+    that site and this test reports rc 0, reason 'promoted', and a canonical holding
+    A's token again -- three independent failures."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    _write_canonical(job, job.tok, marker="claimed-then-restamped")
+    _promote_run(job, monkeypatch,
+                 on_validate=lambda: _write_canonical(job, "OTHERRUN:c001",
+                                                      marker="claimed-then-restamped"))
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.promoted is False
+    assert job.reason == "authorization-moved"
+    doc = json.loads(Path(job.canonical).read_text(encoding="utf-8"))
+    assert doc["dispatch_token"] == "OTHERRUN:c001", (
+        "the racing claimant's token must survive -- a promote here would restore "
+        "this job's own older token along with older bytes"
+    )
+    assert job.tok in job.error_detail and "OTHERRUN:c001" in job.error_detail
+
+
+def test_promote_still_succeeds_over_a_stable_foreign_token(tmp_path, monkeypatch):
+    """THE control that fixes the shape of the check: an ordinary re-translation
+    finds ANOTHER run's token on the canonical for the whole of its job (run B
+    supplies --expect-token B:seg while the draft is still stamped A -- see
+    _refuse_claimed_translate()'s own account of that flow), and it must still
+    promote. Tighten the comparison to `== self.tok` and this test goes red while
+    every refusal test above stays green, which is exactly the wrong invariant
+    shipping unnoticed."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    _write_canonical(job, "PREVIOUSRUN:c001")
+    _promote_run(job, monkeypatch)
+
+    rc = job.run()
+
+    assert rc == 0
+    assert job.reason == "promoted"
+    assert job.promoted is True
+    doc = json.loads(Path(job.canonical).read_text(encoding="utf-8"))
+    assert doc["dispatch_token"] == job.tok
+
+
+def test_review_promote_over_a_previous_round_verdict_is_not_refused(tmp_path, monkeypatch):
+    """The second false-RED counterexample: a round-2 review promotes over the
+    round-1 verdict, whose dispatch_token carries the r1 label and therefore
+    differs from this job's --expect-token throughout. Unchanged during the job, so
+    nothing moved and nothing may be refused."""
+    job = _mkjob(tmp_path, kind="review", tok="RUN:c001:r2", deadline=100)
+    _write_canonical(job, "RUN:c001:r1", clean=True)
+    _promote_run(job, monkeypatch)
+
+    rc = job.run()
+
+    assert rc == 0
+    assert job.reason == "promoted"
+    doc = json.loads(Path(job.canonical).read_text(encoding="utf-8"))
+    assert doc["dispatch_token"] == "RUN:c001:r2"
+
+
+def test_promote_refuses_when_the_token_is_deleted_under_the_job(tmp_path, monkeypatch):
+    """present -> absent is a MOVE, not a no-op. A fix round that re-emits the draft
+    legitimately drops `dispatch_token` (the field is optional in the schema), so
+    the canonical this job started against is no longer the artifact it observed.
+    A guard that only compared two strings, treating a missing token as 'nothing to
+    compare', would permit this."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    _write_canonical(job, job.tok)
+    _promote_run(job, monkeypatch, on_validate=lambda: _write_canonical(job, None))
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.reason == "authorization-moved"
+    doc = json.loads(Path(job.canonical).read_text(encoding="utf-8"))
+    assert "dispatch_token" not in doc
+
+
+def test_promote_refuses_when_the_canonical_cannot_be_parsed_at_promote_time(
+        tmp_path, monkeypatch):
+    """An observation that cannot be ESTABLISHED refuses. Unparsable JSON is the
+    cheapest reachable instance of that whole row class; every other row is covered
+    against the predicate itself below. A guard that mapped 'could not read' to 'no
+    token' would compare None against None here and promote."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    _write_canonical(job, job.tok)
+
+    def corrupt():
+        Path(job.canonical).write_text("{not json at all", encoding="utf-8")
+    _promote_run(job, monkeypatch, on_validate=corrupt)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.reason == "authorization-moved"
+    assert Path(job.canonical).read_text(encoding="utf-8") == "{not json at all"
+
+
+@pytest.mark.parametrize("seam", ["makedirs", "preflight", "flock"])
+def test_the_authorization_baseline_is_run_s_very_first_act(tmp_path, monkeypatch, seam):
+    """PLACEMENT, pinned from three sides. The baseline is worth exactly the window
+    it precedes: a token that moved BEFORE it is recorded as this job's own
+    legitimate starting state, and nothing downstream ever questions it (safe_adopt()
+    only rejects the foreign draft, and foreign_owner_refusal() explicitly permits a
+    foreign-token draft whose owner holds no claim record).
+
+    Each seam fails a different wrong placement, which is why one is not enough:
+
+      * `flock`  -- _acquire_flock() retries for the whole poll window, so a
+        baseline taken after it can trail this job's dispatch by minutes.
+      * `preflight` -- fails any placement after the device/canonical preflight.
+      * `makedirs` -- run()'s literal first call, and the ONLY seam that fails a
+        baseline taken between makedirs and the preflight. Without this case an
+        implementation can snapshot one line too late and pass the other two.
+    """
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    Path(job.segdir).mkdir(parents=True, exist_ok=True)
+    _write_canonical(job, job.tok)
+
+    def move_token():
+        _write_canonical(job, "OTHERRUN:c001")
+
+    if seam == "makedirs":
+        real_makedirs = os.makedirs
+
+        def fake_makedirs(path, *a, **kw):
+            result = real_makedirs(path, *a, **kw)
+            if os.fspath(path) == job.segdir:
+                move_token()
+            return result
+        monkeypatch.setattr(os, "makedirs", fake_makedirs)
+    elif seam == "preflight":
+        real_preflight = job._preflight_same_device
+
+        def fake_preflight():
+            result = real_preflight()
+            move_token()
+            return result
+        monkeypatch.setattr(job, "_preflight_same_device", fake_preflight)
+    else:
+        real_flock = job._acquire_flock
+
+        def fake_flock(fd):
+            result = real_flock(fd)
+            move_token()
+            return result
+        monkeypatch.setattr(job, "_acquire_flock", fake_flock)
+
+    _promote_run(job, monkeypatch)
+
+    rc = job.run()
+
+    assert rc == 1, (
+        "a token that moved at the %r seam was baselined as legitimate -- the "
+        "snapshot is taken too late" % (seam,)
+    )
+    assert job.reason == "authorization-moved"
+    assert job.promoted is False
+    doc = json.loads(Path(job.canonical).read_text(encoding="utf-8"))
+    assert doc["dispatch_token"] == "OTHERRUN:c001"
+
+
+# --------------------------------------------------------------------------- #
+# #483: every row of _canonical_authority()'s own table, against the SHIPPED
+# predicate. Without these, a mutation collapsing every delegated None to an
+# ESTABLISHED "(True, None)" passes every promote-path test above whenever both
+# observations happen to be None -- the fail-open shape the predicate exists to
+# close, shipping under a green suite.
+# --------------------------------------------------------------------------- #
+def _authority_of(job, remaining=30.0):
+    return job._canonical_authority(lambda: remaining)
+
+
+def test_authority_row_readable_object_with_a_string_token(tmp_path):
+    job = _mkjob(tmp_path)
+    _write_canonical(job, "RUN:c001")
+    assert _authority_of(job) == (True, "RUN:c001")
+
+
+@pytest.mark.parametrize("token_value", [None, 7, ["RUN:c001"], {"a": 1}, True])
+def test_authority_row_readable_object_without_a_usable_token(tmp_path, token_value):
+    """ESTABLISHED, token None -- the file was read and it names no run. A real
+    state: dispatch_token is optional in the draft schema, so a re-emitted draft can
+    lose it, and a non-str value is not a token either."""
+    job = _mkjob(tmp_path)
+    doc = {"seg": job.seg}
+    if token_value is not None:
+        doc["dispatch_token"] = token_value
+    Path(job.canonical).write_text(json.dumps(doc), encoding="utf-8")
+    assert _authority_of(job) == (True, None)
+
+
+def test_authority_row_definitively_absent(tmp_path):
+    """The ONE row where a failed read still counts as established -- and it is
+    established by the PRE-probe, never by the read's own None."""
+    job = _mkjob(tmp_path)
+    assert not os.path.exists(job.canonical)
+    assert _authority_of(job) == (True, None)
+
+
+def test_authority_row_non_regular_entry_is_unestablished(tmp_path):
+    job = _mkjob(tmp_path)
+    os.mkfifo(job.canonical)
+    assert _authority_of(job) == (False, None)
+
+
+def test_authority_row_unreadable_entry_is_unestablished(tmp_path):
+    job = _mkjob(tmp_path)
+    _write_canonical(job, "RUN:c001")
+    os.chmod(job.canonical, 0o000)
+    try:
+        assert _authority_of(job) == (False, None)
+    finally:
+        os.chmod(job.canonical, 0o644)
+
+
+def test_authority_row_oversized_entry_is_unestablished(tmp_path):
+    job = _mkjob(tmp_path)
+    Path(job.canonical).write_bytes(b"x" * (codex_job._MAX_REGULAR_READ_BYTES + 1))
+    assert _authority_of(job) == (False, None)
+
+
+@pytest.mark.parametrize("body", ["{not json", "[]", '"a string"', "17", ""])
+def test_authority_row_unparsable_or_non_object_is_unestablished(tmp_path, body):
+    job = _mkjob(tmp_path)
+    Path(job.canonical).write_text(body, encoding="utf-8")
+    assert _authority_of(job) == (False, None)
+
+
+@pytest.mark.parametrize("exists", [True, False])
+def test_authority_row_exhausted_budget_is_unestablished(tmp_path, exists):
+    """Including the ABSENT case, which is the one that needs its own check:
+    _read_regular_bounded() opens and fstats BEFORE its first budget test and
+    returns None for ENOENT without ever consulting the budget, so without an entry
+    check an absent canonical would read as established with no deadline honoured at
+    all -- and both observations would then compare equal and permit a promotion
+    after the caller's phase expired."""
+    job = _mkjob(tmp_path)
+    if exists:
+        _write_canonical(job, "RUN:c001")
+    assert _authority_of(job, remaining=0.0) == (False, None)
+
+
+def test_a_symlinked_canonical_is_unestablished(tmp_path):
+    """O_NOFOLLOW in the delegated read: a symlink planted at the canonical path is
+    refused rather than followed, so its target's token never becomes this job's
+    baseline."""
+    job = _mkjob(tmp_path)
+    target = Path(job.canonical + ".target")
+    target.write_text(json.dumps({"dispatch_token": "RUN:c001"}), encoding="utf-8")
+    os.symlink(target, job.canonical)
+    assert _authority_of(job) == (False, None)
+
+
+# --------------------------------------------------------------------------- #
+# #483 at the OTHER promote site: adopt_pending()'s os.replace(pending, canonical).
+# --------------------------------------------------------------------------- #
+def test_adopt_pending_refuses_when_the_token_moves_while_its_gates_run(tmp_path, monkeypatch):
+    """The adoption gates are where the real time passes at this site, so that is
+    where the move is injected -- after the candidate has passed everything and
+    before the replace. The pending must SURVIVE: it passed every gate, and what
+    changed is who owns the slot it would land in, so a future dispatch under the
+    current authorization can still re-gate it."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    _write_canonical(job, job.tok)
+    job.canonical_authority = job._canonical_authority(job.poll_remaining)
+    assert job.canonical_authority == (True, job.tok), "premise: the baseline was taken"
+    Path(job.pending).write_text("{}", encoding="utf-8")
+
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+
+    def gate_then_move(argv, timeout):
+        proc = gate(argv, timeout)
+        if argv[0] == "validate_draft.py":          # the LAST gate: move after it passes
+            _write_canonical(job, "OTHERRUN:c001")
+        return proc
+    monkeypatch.setattr(job, "_gate", gate_then_move)
+
+    assert job.adopt_pending() is False
+    assert calls == ["draft_ready.py", "validate_draft.py"], (
+        "the gates must have RUN -- otherwise this proves nothing about the window "
+        "between them and the replace: %r" % (calls,)
+    )
+    assert job.authorization_moved is True
+    assert job.reason == "authorization-moved"
+    assert os.path.exists(job.pending), "a refused promotion must not consume the pending"
+    doc = json.loads(Path(job.canonical).read_text(encoding="utf-8"))
+    assert doc["dispatch_token"] == "OTHERRUN:c001"
+
+
+def test_a_promote_without_a_baseline_refuses(tmp_path, monkeypatch):
+    """The field's initial value is the UNESTABLISHED one, so a promote path reached
+    without run() having taken a baseline refuses instead of comparing against an
+    assumption. Flip that initial value to an established `(True, None)` -- the
+    obvious "harmless default" -- and this test goes red while nothing else does."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    assert job.canonical_authority == (False, None), "premise: no baseline taken"
+    _write_canonical(job, job.tok)
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    gate, _calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "_gate", gate)
+
+    assert job.adopt_pending() is False
+    assert job.reason == "authorization-moved"
+    assert "baseline" in job.error_detail
+    assert os.path.exists(job.pending)
+
+
+def test_run_stops_without_launching_after_an_adopt_pending_authorization_refusal(
+        tmp_path, monkeypatch):
+    """run() must not fall through to launch() after this refusal. A fresh paid codex
+    turn cannot succeed either -- its own promote re-checks the same authorization and
+    refuses the same way -- and a completion landing in the no-budget branch would put
+    an unvalidated attempt into the pending slot the refusal deliberately kept.
+
+    rc and reason are asserted alongside "launch not called" on purpose: a SUCCESSFUL
+    adoption also skips launch(), so the spy alone cannot tell the two apart."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    _write_canonical(job, job.tok)
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+
+    def gate_then_move(argv, timeout):
+        proc = gate(argv, timeout)
+        if argv[0] == "validate_draft.py":
+            _write_canonical(job, "OTHERRUN:c001")
+        return proc
+    monkeypatch.setattr(job, "_gate", gate_then_move)
+
+    launched = {"v": False}
+
+    def spy_launch():
+        launched["v"] = True
+        return True
+    monkeypatch.setattr(job, "launch", spy_launch)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.reason == "authorization-moved"
+    assert launched["v"] is False, "a paid turn was spent on a segment already taken over"
+    assert calls == ["draft_ready.py", "validate_draft.py"]
+    assert os.path.exists(job.pending)
+
+
+def test_run_driven_pending_adoption_over_a_stable_foreign_token_still_promotes(
+        tmp_path, monkeypatch):
+    """The control for the two tests above, and the one that proves run() actually
+    TAKES the baseline: the canonical carries a foreign run's token for the whole
+    job, unchanged. It can only adopt if the baseline was recorded -- with no
+    snapshot the initial unestablished value refuses -- and it must adopt, because
+    nothing moved."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    _write_canonical(job, "PREVIOUSRUN:c001")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "_gate", gate)
+    monkeypatch.setattr(job, "launch", lambda: pytest.fail("must not launch"))
+
+    rc = job.run()
+
+    assert rc == 0
+    assert job.reason == "adopted-pending"
+    assert calls == ["draft_ready.py", "validate_draft.py"]
+    assert os.path.exists(job.canonical)
+    assert not os.path.exists(job.pending)
+
+
+def test_a_raced_writer_that_moves_the_token_in_the_check_replace_window_is_refused(
+        tmp_path, monkeypatch):
+    """The mirror of test_canonical_replaceable_check_then_replace_window_is_a_known
+    _unclosed_race above, and the reason that test's docstring now carries a
+    narrowing clause. Same injection -- a writer publishing after the REAL
+    _canonical_replaceable() answer, in the window that guard structurally cannot
+    see -- but the raced content carries a DIFFERENT dispatch_token. That is the
+    half of the window #483 closes: the promote's own late observation sees the
+    moved token and refuses.
+
+    Injected only on the FINAL promote's own check, never on run()'s preflight:
+    injecting on every successful call would fire at preflight and prove nothing
+    about this window. With adopt_pending() stubbed out, that is call TWO -- the
+    preflight is call one -- and the count is asserted below rather than assumed,
+    so a future phase that adds a replaceability check fails here loudly instead of
+    silently relocating the injection."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    _write_canonical(job, job.tok)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+
+    real_check = job._canonical_replaceable
+    calls = {"n": 0}
+
+    def racing_check(remaining_fn):
+        result = real_check(remaining_fn)
+        calls["n"] += 1
+        if result and calls["n"] == 2:      # preflight is 1; the promote's own is 2
+            _write_canonical(job, "OTHERRUN:c001")
+        return result
+    monkeypatch.setattr(job, "_canonical_replaceable", racing_check)
+    _promote_run(job, monkeypatch)
+    monkeypatch.setattr(job, "adopt_pending", lambda: False)
+
+    rc = job.run()
+
+    assert calls["n"] >= 2, "the promote's own replaceability check never ran"
+    assert rc == 1
+    assert job.reason == "authorization-moved"
+    doc = json.loads(Path(job.canonical).read_text(encoding="utf-8"))
+    assert doc["dispatch_token"] == "OTHERRUN:c001", (
+        "the raced writer's token must survive: this is the half of the "
+        "check-then-replace window #483 closes"
+    )
+
+
+class _ExpiringBudget:
+    """A remaining_fn that is positive for its first `live` calls and expired after --
+    the shape a real phase budget takes when it runs out MID-observation. Callable, so
+    it drops straight into _canonical_authority()'s own parameter."""
+
+    def __init__(self, live=1, value=30.0):
+        self.calls = 0
+        self.live = live
+        self.value = value
+
+    def __call__(self):
+        self.calls += 1
+        return self.value if self.calls <= self.live else -1.0
+
+
+@pytest.mark.parametrize("exists", [True, False])
+def test_authority_refuses_when_the_budget_expires_mid_observation(tmp_path, exists):
+    """The entry check alone is not enough: it runs BEFORE the lstat, the read, the
+    decode and the parse, all of which consume real time. An observation that only
+    finished after its phase expired must not authorize a promotion -- it would let the
+    promote encroach on the tail this driver reserves for its terminal stdout line, fail
+    sentinel and joblog.
+
+    THE ABSENT ARM IS THE ONE THAT DISCRIMINATES, and saying so is the point of this
+    note: a PRESENT canonical refuses even without the new re-checks, because
+    _read_regular_bounded() consults the budget itself and returns None, which the
+    pre-probe then classifies as unestablished anyway. Delete the re-checks and only the
+    `exists=False` case goes red. The present arm is kept as a guard on that delegated
+    path rather than as proof of this one -- a test that looks like it pins a property
+    while a lower layer is really doing the work is exactly the vacuity worth naming."""
+    job = _mkjob(tmp_path)
+    if exists:
+        _write_canonical(job, "RUN:c001")
+    budget = _ExpiringBudget(live=1)
+    assert job._canonical_authority(budget) == (False, None)
+    assert budget.calls > 1, "the budget was never re-consulted after the entry check"
+
+
+def test_authority_refuses_when_an_entry_appears_after_an_absent_pre_probe(
+        tmp_path, monkeypatch):
+    """The internal window: the pre-probe genuinely saw nothing, and a non-cooperating
+    writer published between it and the read. If that entry then fails to read, calling
+    it established-absence would compare EQUAL to a tokenless baseline and permit the
+    promotion -- absence claimed from a moment that had already passed.
+
+    The entry is published from inside the delegated read itself, which is the only way
+    to land in that window deterministically. It is a FIFO, so the read that follows
+    genuinely fails rather than being faked."""
+    job = _mkjob(tmp_path)
+    assert not os.path.exists(job.canonical), "premise: the pre-probe must see nothing"
+
+    real_read = job._read_regular_bounded
+
+    def read_after_a_writer_lands(path, remaining_fn):
+        if os.fspath(path) == job.canonical and not os.path.exists(job.canonical):
+            os.mkfifo(job.canonical)          # published inside the window
+        return real_read(path, remaining_fn)
+    monkeypatch.setattr(job, "_read_regular_bounded", read_after_a_writer_lands)
+
+    assert job._canonical_authority(lambda: 30.0) == (False, None), (
+        "an entry that appeared after the pre-probe and could not be read must be "
+        "UNESTABLISHED -- claiming absence here permits a promotion over it"
+    )
+    assert os.path.exists(job.canonical), "premise: the fixture's writer really landed"
+
+
+def test_a_moved_token_message_stays_inside_the_durable_joblog_budget(tmp_path, monkeypatch):
+    """error_detail lands in the DURABLE joblog under the operator's root and in the
+    stdout line, which is why this file caps every other text that reaches it
+    (_GATE_OUTPUT_CAP: "this text lands in the durable joblog, so it must stay
+    bounded"). A dispatch_token is untrusted text out of a JSON file the codex process
+    this driver launches can write, and the bounded read admits anything under 64 MiB --
+    so an uncapped token would put the whole thing on disk on every refusal.
+
+    The token here is large but well under the read ceiling, so it is genuinely read,
+    genuinely established, and genuinely compared: the refusal is real and only its
+    MESSAGE is bounded."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    _write_canonical(job, job.tok)
+    huge = "OTHERRUN:" + ("z" * 200_000)
+    _promote_run(job, monkeypatch, on_validate=lambda: _write_canonical(job, huge))
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.reason == "authorization-moved"
+    assert len(job.error_detail) < 3 * codex_job.CodexJob._GATE_OUTPUT_CAP, (
+        "the refusal message is unbounded: %d chars" % len(job.error_detail)
+    )
+    assert "truncated at" in job.error_detail
+    # ...and the guard still compared the FULL token, never a truncated one: two
+    # oversized tokens sharing a prefix must not read as equal.
+    assert job.canonical_authority == (True, job.tok)
+
+
+def test_an_unestablished_baseline_refuses_before_spending_a_codex_turn(tmp_path, monkeypatch):
+    """A canonical that is present, regular, readable and in budget but whose bytes are
+    not a JSON object passes _canonical_replaceable() and would previously have been
+    promoted over. It is now refused -- and refused at the TOP of run(), because every
+    promote this run could reach would refuse on the same reading, so launching a codex
+    turn first buys nothing but cost.
+
+    Delete the early return and this test still ends in a refusal, but `launched` flips
+    to True and the reason changes: a paid turn burned on every retry, forever, on a
+    segment nothing can repair."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    Path(job.canonical).write_text("{ truncated write from a straggler", encoding="utf-8")
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+
+    launched = {"v": False}
+
+    def spy_launch():
+        launched["v"] = True
+        return True
+    monkeypatch.setattr(job, "launch", spy_launch)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert launched["v"] is False, "a paid codex turn was spent on an unreadable baseline"
+    assert job.reason == "authorization-unestablished"
+    assert job.canonical in job.error_detail
+    assert Path(job.canonical).read_text(encoding="utf-8").startswith("{ truncated")

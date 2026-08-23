@@ -46,6 +46,12 @@ Design (PLAN-198 §2.1; the 7 steps below map 1:1) -- #409 SANDBOX HARDENING:
   5. Poll to a terminal job status or the poll deadline (cancel-on-deadline).
   6. Best-effort validate the ATTEMPT (kind-specific candidate-file gate), then ONE atomic
      os.replace -- no backup, no post-confirm. Validation-failure => canonical untouched.
+     The replace is NOT unconditional: since #483 both promote sites re-check, on the line
+     immediately above, that the canonical's `dispatch_token` has not MOVED since the
+     baseline this job took as run()'s first act (_authorization_moved()). It refuses when
+     it moved and when the current value cannot be established. Detection, not exclusion --
+     it consults no claim record, and the window between that check and the replace stays
+     open (see _canonical_replaceable()).
      The pre-promote validation is a BEST-EFFORT PRE-FILTER; consumption-safety rests SOLELY
      on the Workflow's own ACCEPT gate re-validating the CURRENT canonical (§2.3). A
      `completed` attempt reached with no finalize budget left to validate it is DEFERRED
@@ -378,6 +384,18 @@ class CodexJob:
         # reassignment -- a string comparison there would stop protecting the file the
         # moment anything downstream narrates a different outcome.
         self.canonical_unreadable = False
+        # #483: what this job could prove about the canonical's `dispatch_token` at the
+        # moment it started, as `(established, token)` -- the baseline every promote is
+        # re-checked against (see _authorization_moved()). run() overwrites it as its
+        # FIRST act; the initial value is deliberately the UNESTABLISHED one, so a
+        # promote reached without that snapshot refuses rather than silently comparing
+        # against an assumption. There is no value of this field that disables the check.
+        self.canonical_authority = (False, None)
+        # Set when an authorization-moved refusal blocks a promote. A DEDICATED flag for
+        # the same reason self.canonical_unreadable above is one: self.reason is
+        # last-writer-wins, so run()'s decision to stop rather than launch must not rest
+        # on a string that anything downstream can overwrite.
+        self.authorization_moved = False
 
     # ---- time helpers (FLOAT, no floor) -------------------------------------
     def poll_remaining(self):
@@ -871,6 +889,165 @@ class CodexJob:
                     os.close(fd)
                 except OSError:
                     pass
+
+    # ---- #483: the late authorization re-check ------------------------------
+    def _canonical_authority(self, remaining_fn):
+        """`(established, token)` -- what this call can PROVE about the canonical's
+        `dispatch_token` right now. `established` False means "could not be determined",
+        which every caller must treat as a refusal, NOT as "no token".
+
+        The distinction is the whole point. `_read_regular_bounded()` returns the same
+        `None` for a file that is absent, non-regular, oversized, unreadable, or that ran
+        the caller's budget out mid-read -- and mapping that `None` to "no token" is the
+        fail-open shape this guard exists to close. `_canonical_replaceable()` does not
+        cover it either: it establishes "absent, or a readable regular file", never JSON
+        or token identity.
+
+        ORDER IS LOAD-BEARING: probe, then ALWAYS read, then classify.
+
+          * The `lstat` PRE-probe runs first and only records whether a directory entry
+            was seen. It cannot be moved after the read: an entry that was present but
+            unreadable and then REMOVED would come back from a trailing probe as
+            `FileNotFoundError`, i.e. as established-absence -- which compares EQUAL to a
+            genuinely absent snapshot and PERMITS the promotion. Only a probe taken
+            before the read can tell "I looked and there was nothing" from "I could not
+            read what was there".
+          * The read runs UNCONDITIONALLY, whatever the probe said. Probing INSTEAD of
+            reading would return established-absence for a canonical that was absent at
+            the probe and published a microsecond later -- skipping the read in exactly
+            the window the concurrent writer this guard exists for occupies.
+          * A probe that merely FAILED (not ENOENT) counts as "an entry may be there",
+            the same direction `_canonical_replaceable()` takes for the same reason.
+
+        The budget is the CALLER's own phase-specific `remaining_fn`, never a floor or a
+        fixed bound: `_is_regular()`'s docstring enumerates the only legitimate shapes,
+        and `_read_regular_bounded()`'s post-EOF check exists precisely to stop a caller
+        publishing after its phase expired while holding the per-segment lease. An
+        exhausted budget therefore refuses -- and it needs the explicit check below,
+        because `_read_regular_bounded()` opens and `fstat`s BEFORE its first budget test
+        and returns `None` for ENOENT without ever consulting it, so an absent canonical
+        would otherwise read as established with no deadline check at all. Same
+        discipline as `_canonical_replaceable()`'s own `return remaining_fn() > 0` on its
+        absent path."""
+        if remaining_fn() <= 0:
+            return False, None
+        try:
+            os.lstat(self.canonical)
+        except FileNotFoundError:
+            probe_saw_entry = False
+        except OSError:
+            probe_saw_entry = True      # could not look -> assume something is there
+        else:
+            probe_saw_entry = True
+        data = self._read_regular_bounded(self.canonical, remaining_fn)
+        if data is None:
+            if probe_saw_entry:
+                # Something was there and this call could not read it. Unknown, refuses.
+                return False, None
+            # The pre-probe said ENOENT and the read agrees it got nothing -- but those
+            # are two moments, and a writer can publish between them. RE-PROBE before
+            # calling it absence: an entry that appeared in that internal window and
+            # then failed to read (non-regular, oversized, unreadable, or the budget
+            # spent) would otherwise be recorded as established-absence, which against a
+            # tokenless baseline compares EQUAL and permits the very promotion this
+            # predicate exists to refuse. Absence is claimed only when BOTH probes agree,
+            # and only while the caller's phase is still live.
+            try:
+                os.lstat(self.canonical)
+            except FileNotFoundError:
+                # BOTH probes agree, so this is the one row where a failed read still
+                # counts as ESTABLISHED -- and it still needs its own budget check,
+                # because every OTHER established return in this method has just spent
+                # real time reading, decoding and parsing, while this one can be reached
+                # having spent almost none. A promotion authorized by an observation
+                # whose phase had already expired is exactly what the budget threading in
+                # this file prevents everywhere else.
+                return (True, None) if remaining_fn() > 0 else (False, None)
+            except OSError:
+                return False, None
+            return False, None
+        try:
+            obj = json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # json.loads raises a plain ValueError, and a deeply nested document a
+            # RecursionError -- neither is an OSError, and an unparsable canonical is
+            # "cannot be determined", never "no token".
+            return False, None
+        if not isinstance(obj, dict):
+            return False, None
+        tok = obj.get("dispatch_token")
+        # A non-str token is not a token. It is still an ESTABLISHED observation: the
+        # file was read and it names no run, which is a real state a draft can be in
+        # (the field is optional in the draft schema, so a re-emitted draft can lose it).
+        # Re-checked against the caller's phase for the same reason the absent path is:
+        # the read, the decode and the parse all consume real time, and an observation
+        # that finished after its phase expired is not one this job may act on.
+        if remaining_fn() <= 0:
+            return False, None
+        return True, (tok if isinstance(tok, str) else None)
+
+    def _authorization_moved(self, remaining_fn):
+        """None iff this promotion may proceed; otherwise the operator-facing detail of
+        why it may not. Called on the line immediately above every os.replace() landing
+        on self.canonical (#483).
+
+        WHAT IT COMPARES, and why it is NOT `self.tok`: the promotion is legitimate when
+        the canonical's authorization has not MOVED under this job -- never when it
+        equals the token this job was dispatched with. Comparing against `self.tok` would
+        refuse every ordinary re-translation, since a run B translating over run A's
+        draft finds A's token on the canonical for the whole of its job (see
+        _refuse_claimed_translate()'s own account of that flow), and every second-round
+        review, whose canonical carries the previous round's label.
+
+        DETECTION, NOT EXCLUSION. It refuses a promotion that raced a foreign
+        re-stamp; it cannot stop the other writer, and it does not consult a claim
+        record -- a claimant writes its record BEFORE re-stamping, so the window between
+        those two writes stays invisible here. Nor is it atomic: a writer publishing
+        between this observation and the os.replace below is undetected, which is the
+        same check-then-replace window `_canonical_replaceable()` already documents."""
+        was_established, was_tok = self.canonical_authority
+        if not was_established:
+            return ("this job never established an authorization baseline for %s, so a "
+                    "move under it cannot be ruled out -- refusing to promote over a "
+                    "canonical whose authorization is unknown (#483)"
+                    % (self.canonical,))
+        established, tok = self._canonical_authority(remaining_fn)
+        if not established:
+            return ("the current dispatch_token of %s could not be established (it is "
+                    "unreadable, not a regular file, oversized, unparsable, or this "
+                    "phase's budget is spent) -- refusing to promote over a canonical "
+                    "this job cannot re-check (#483)" % (self.canonical,))
+        if tok != was_tok:
+            return ("the authorization on %s moved under this job: %s when the job "
+                    "started, %s now. Promoting would put the older token back together "
+                    "with older bytes, and the gate that consumes this artifact expects "
+                    "exactly that older token -- refusing (#483)"
+                    % (self.canonical,
+                       self._capped_repr(was_tok), self._capped_repr(tok)))
+        return None
+
+    def _capped_repr(self, value):
+        """`repr(value)`, bounded. This file caps every other text that can reach
+        self.error_detail for one reason it states at _GATE_OUTPUT_CAP itself: the text
+        lands in the DURABLE joblog under the operator's root, and in the stdout line on
+        top of that.
+
+        A `dispatch_token` is untrusted, unpatterned text read out of a JSON file that
+        the codex process this driver launches can write, and _read_regular_bounded()
+        admits anything under its 64 MiB ceiling -- so an uncapped token would put
+        hundreds of MiB (repr expands non-printables several-fold) on disk per refusal,
+        repeatably. HALF the cap per token, so a message naming two of them stays inside
+        one budget.
+
+        Only the MESSAGE is capped, never the value stored in self.canonical_authority:
+        two distinct oversized tokens sharing a prefix would compare EQUAL once
+        truncated, which is a fail-open in the guard itself -- the exact defect class
+        this whole change exists to close."""
+        half = self._GATE_OUTPUT_CAP // 2
+        text = repr(value)
+        if len(text) <= half:
+            return text
+        return text[:half] + ("... [truncated at %d chars]" % half)
 
     # #399: a gate that RAN and REJECTED an attempt currently discards both its
     # own diagnostic output and the rejected attempt itself (finalize()
@@ -1590,6 +1767,32 @@ class CodexJob:
             self.canonical_unreadable = True
             self.reason = "canonical-unreadable"
             return False
+        # #483 sits ABOVE the #541 archive, not between it and the os.replace, and the
+        # ordering is forced by a contract older than this one: EVERY
+        # os.replace(..., self.canonical) in this file must be immediately preceded by
+        # _archive_outgoing_review(), a structural invariant tests/prev_review_archive
+        # .test.py asserts over this file's own AST. Both cannot be the last statement
+        # before the replace, and this is the right way round anyway -- a refusal here
+        # archives NOTHING, which is correct, because nothing is about to be destroyed.
+        # The cost is that the window this check cannot see now spans the archive's own
+        # bounded I/O as well as the replace itself. That window was already open and is
+        # already documented (see _canonical_replaceable() and the known-limit test);
+        # this widens it by one bounded local read and one small private-slot write, and
+        # closing it at all needs the atomicity neither guard has.
+        moved = self._authorization_moved(self.poll_remaining)
+        if moved is not None:
+            # Disposed of exactly as the canonical-unreadable refusal above does it, and
+            # for the same reasons: the SNAPSHOT goes, because it is this invocation's
+            # alone and nothing later can name it; self.pending STAYS, because the
+            # candidate passed every gate and what changed is who owns the slot it would
+            # land in -- a future dispatch under the CURRENT authorization re-gates it
+            # (the gates' own --expect-token check rejects it if it no longer belongs),
+            # so discarding it here would destroy recoverable work to no end.
+            _silent_remove(self.attempt)
+            self.authorization_moved = True
+            self.reason = "authorization-moved"
+            self.error_detail = moved
+            return False
         self._archive_outgoing_review(self.poll_remaining)  # #541, advisory; never gates this promote
         os.replace(self.attempt, self.canonical)   # every gate passed -- and judged THESE bytes
         # The slot is moot now: its content is the canonical. Two steps rather than the one
@@ -1865,6 +2068,19 @@ class CodexJob:
     def run(self):
         lock_fd = None
         try:
+            # #483: the authorization BASELINE, and deliberately this method's very first
+            # act -- ahead of the makedirs below, the device preflight, the sandbox, the
+            # prompt write and, decisively, ahead of _acquire_flock(), which retries for
+            # the whole poll window and can sit between this job's dispatch and any later
+            # baseline for minutes. Every one of those is real I/O that a concurrent
+            # re-stamp can land behind, and a token that moved BEFORE the baseline is
+            # taken would be recorded as this job's own legitimate starting state --
+            # nothing downstream would ever question it, because safe_adopt() only
+            # rejects the foreign draft and foreign_owner_refusal() explicitly permits a
+            # foreign-token draft whose owner holds no claim record. A canonical under a
+            # segments/ that does not exist yet reads as definitively absent, which is
+            # the correct baseline for a first translation.
+            self.canonical_authority = self._canonical_authority(self.poll_remaining)
             try:
                 os.makedirs(self.segdir, exist_ok=True)
             except OSError:
@@ -1900,6 +2116,42 @@ class CodexJob:
             if not self._setup_sandbox():
                 # #409 property 4-adjacent: an unconfined sandbox is worse than none.
                 self.reason = "sandbox-not-isolated"
+                return 1
+            if not self.canonical_authority[0]:
+                # A baseline that could not be established refuses at EVERY promote this
+                # run could reach, so refuse here instead of at the end. Same shape as
+                # the device-mismatch and canonical-unreadable checks above: refuse
+                # BEFORE spending a real codex turn, not after.
+                #
+                # BELOW those checks, deliberately, and not beside the baseline read at
+                # the top of this method. _canonical_replaceable() owns the unreadable,
+                # non-regular and vanished-target cases; it reports them as
+                # `canonical-unreadable` and sets the flag that makes finalize() KEEP a
+                # validated attempt. Refusing here first would relabel all of them and
+                # drop that flag. What is left for this branch is exactly the state no
+                # earlier check owns.
+                #
+                # This is the only route by which this run() ends without launching that
+                # is not already covered by one of those two, and the state it exists for
+                # is narrow: the canonical is present, regular, readable and in budget --
+                # so _canonical_replaceable() below would pass it -- but its bytes are not
+                # a UTF-8 JSON object. A truncated write from a straggling codex turn
+                # produces exactly that. Before #483 such a segment promoted; now it does
+                # not, and it does not self-heal either, because the fresh translation
+                # that would have repaired it is refused by this same guard. That is a
+                # deliberate trade in the fail-closed direction (an artifact this driver
+                # cannot read is one whose authorization it cannot rule out), and the
+                # cost is bounded to zero paid turns by refusing right here, with a reason
+                # of its own so the wedge is diagnosable in the joblog rather than
+                # presenting as a mystery refusal after a spent turn.
+                self.authorization_moved = True
+                self.reason = "authorization-unestablished"
+                self.error_detail = (
+                    "the authorization on %s could not be established when this job "
+                    "started (it is unreadable, not a regular file, oversized, or its "
+                    "bytes are not a JSON object) -- refusing before spending a codex "
+                    "turn, since every promote this run could reach would refuse on the "
+                    "same reading (#483)" % (self.canonical,))
                 return 1
             self._write_final_prompt()
             lock_fd = os.open(self.lock, os.O_CREAT | os.O_RDWR | _O_CLOEXEC, 0o600)
@@ -2001,6 +2253,15 @@ class CodexJob:
                 self.reason = "pending-rejected"
                 self._record_translate_rejected()
                 return 1
+            if self.authorization_moved:
+                # #483: adopt_pending() found a candidate that passed every gate and
+                # refused to promote it because the canonical's authorization moved under
+                # this job. Stop here for the same reason the branch above stops: a fresh
+                # paid codex turn cannot succeed either -- its own promote re-checks the
+                # same authorization and refuses the same way -- and a completion landing
+                # in the no-budget branch below would put an unvalidated attempt into the
+                # pending slot this refusal deliberately left intact.
+                return 1
             if not self.launch():                     # False (incl. no-budget, pending kept) -> launch fresh
                 self.reason = "launch-failed"
                 return 1
@@ -2025,11 +2286,27 @@ class CodexJob:
                         # a disclosed limit, not a defect this release closes: see the
                         # release's own "Known limits" text.
                     else:
-                        self._archive_outgoing_review(self.finalize_timeout)  # #541, advisory
-                        os.replace(self.attempt, self.canonical)
-                        self.promoted = True
-                        self.reason = "promoted"
-                        return 0
+                        # #483 above the #541 archive -- see adopt_pending()'s own copy
+                        # of this ordering for why that way round is forced, and what it
+                        # costs.
+                        moved = self._authorization_moved(self.finalize_timeout)
+                        if moved is not None:
+                            self.reason = "authorization-moved"
+                            self.error_detail = moved
+                            # self.attempt is NOT given the canonical-unreadable
+                            # exception that keeps a validated candidate on disk. That
+                            # exception exists for bytes nothing has read; these bytes
+                            # were authorized under a token that no longer owns the
+                            # canonical, so keeping them at a per-invocation random path
+                            # no later run consults would be storage with no consumer.
+                            # finalize() removes them on the ordinary not-promoted path.
+                            self.authorization_moved = True
+                        else:
+                            self._archive_outgoing_review(self.finalize_timeout)  # #541
+                            os.replace(self.attempt, self.canonical)
+                            self.promoted = True
+                            self.reason = "promoted"
+                            return 0
                 else:
                     self.reason = "validate-failed"
                     # The `kind` conjunct is defence in depth, not load-bearing: only the
