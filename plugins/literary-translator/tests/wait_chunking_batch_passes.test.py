@@ -1819,18 +1819,17 @@ def _ladder_row_needle(ladder: str, per_batch: int, documented_max: int) -> re.P
     value. That is deliberate and is the cheaper half of the trade -- a suffix
     allow-list is policy this table has never needed -- and the failure names
     the row, so an operator who wants the annotation moves it off the column."""
-    return re.compile(
-        rf"{re.escape(ladder)}\s+\S+\s+{re.escape(f'{per_batch}N+2')}"
-        rf"\s+\S+\s+->\s+{documented_max}(?!\S)"
-    )
+    label = re.escape(ladder)
+    formula = re.escape(f"{per_batch}N+2")
+    return re.compile(rf"{label}\s+\S+\s+{formula}\s+\S+\s+->\s+{documented_max}(?!\S)")
 
 
 def _ladder_table_row(profile: str, ladder: str) -> str | None:
     """The one physical line of the ladder table that OPENS with `ladder`'s
     label -- located rather than hard-coded, so nothing here freezes a table
     shape the shipped file has since moved past. Returns the raw line (None if
-    no line carries the label); the prose that merely mentions a label further
-    down the file does not open with it."""
+    no line OPENS with the label); the prose that merely mentions a label
+    further down the file does not, so it never stands in for the row."""
     for line in profile.splitlines():
         if " ".join(line.split()).startswith(f"# {ladder} "):
             return line
@@ -1867,12 +1866,12 @@ def test_the_shipped_cap_still_admits_the_documented_batch_count(ladder):
     # `"5N+2" in flat` / `"-> 1999" in flat` pair was satisfied by whichever of
     # the two colliding rows survived, so corrupting the other one stayed green
     # in BOTH directions -- and the formula half was satisfied by prose alone.
-    actual = _ladder_table_row(profile, ladder)
+    shipped_row = _ladder_table_row(profile, ladder)
     assert _ladder_row_needle(ladder, per_batch, documented_max).search(flat), (
         f"profile.example.yml's ladder table has no row reading "
         f"'{ladder} <before> {per_batch}N+2 <before-max> -> {documented_max}' "
         f"(the post-1.16.2-formula, post-#409-step-2-cap figures); it reads: "
-        f"{' '.join(actual.split()) if actual else '<no line opens with this label>'}"
+        f"{' '.join(shipped_row.split()) if shipped_row else '<no line opens with this label>'}"
     )
 
 
@@ -1913,8 +1912,17 @@ def test_a_corrupted_ladder_row_is_seen_by_its_own_needle_and_no_other(ladder, f
     row = _ladder_table_row(profile, ladder)
     assert row is not None, f"no ladder-table row opens with {ladder!r}"
 
-    corrupted = profile.replace(row, _corrupt_ladder_row(row, field))
-    assert corrupted != profile, f"corrupting {field} of {ladder!r} changed nothing"
+    # Guards the CORRUPTION rather than the replace: the row was located IN
+    # `profile`, so a replace that finds nothing is not a reachable failure --
+    # a field rewrite landing on text that already reads that way is, and only
+    # the collapsed comparison sees it (`corrupted != profile` is satisfied by
+    # the whitespace collapse alone, so it could never fire).
+    corrupted_row = _corrupt_ladder_row(row, field)
+    assert corrupted_row != " ".join(row.split()), (
+        f"corrupting the {field} of {ladder!r} changed nothing, so this case "
+        f"would say nothing about the needle"
+    )
+    corrupted = profile.replace(row, corrupted_row)
     flat = " ".join(corrupted.split())
 
     for other, (per_batch_other, max_other) in LADDER_MAX_BATCHES.items():
