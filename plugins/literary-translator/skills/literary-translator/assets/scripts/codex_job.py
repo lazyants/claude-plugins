@@ -81,6 +81,78 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 <durable_root>/scripts/ at Step 0a (it IS a PLUGIN_BUNDLE_MEMBERS script -- see cache_key.py).
 """
 
+# ---- "private staging slot": what the term means in this file (#697) --------
+# Used throughout for the dot-prefixed entries this driver writes into segdir. Exactly ONE
+# property is shared by all of them: they are DOT-PREFIXED, so both dispatch scans over
+# segments/ skip them outright (#428 made those scans skip the whole dot namespace rather
+# than test a suffix). That is the whole of what the term guarantees.
+#
+# It does NOT promise this-invocation cleanup. Several of these entries OUTLIVE THE
+# INVOCATION THAT CREATED THEM -- which is not the same as surviving forever, and each has
+# its own retention rule rather than a shared one:
+#   - .codex_job.*.lock  -- never unlinked by anything (see 3. above: the kernel releases
+#     the flock, the file stays);
+#   - .codex_job.*.json  -- the joblog is REPLACED in place by each terminal
+#     _write_joblog(), so it persists as a slot while its contents are per-run;
+#   - .codex_failed.*    -- a failure record left for the operator;
+#   - .att_pending.*     -- deliberately consumed by a LATER invocation (#213), which
+#     promotes it with os.replace() or clears it via _silent_remove();
+#   - .att_superseded.*  -- a preserved copy kept for hand recovery (#429).
+# The disposable scratch -- the .pub.*.tmp / .codex_job.*.tmp / .prev_review_tmp.*.json
+# temporaries and the .codex_ledger_payload.* payload -- is removed by the invocation that
+# created it, by EXACT path, never a wildcard. self.attempt is USUALLY in that group, with
+# one deliberate exception: finalize() skips the removal when self.canonical_unreadable is
+# set, so validated bytes survive at the .att.* path for a later run rather than being
+# discarded into an unreadable canonical. Which group an entry is in is stated where it is
+# built; do not read a blanket lifetime into the shared prefix, in either direction.
+#
+# The namespace splits in two and the split is load-bearing -- it is the very distinction
+# #665 turns on, so do not let "private staging slot" blur it. A RULE, deliberately not a
+# list: a name is PER-INVOCATION iff it interpolates self.inv, and DETERMINISTIC otherwise
+# (keyed on seg/ext/disp/label alone, so it PERSISTS ACROSS RUNS and is trivially
+# derivable). #697 carried an enumeration here and a test pinning it; both were removed
+# after the roster went stale once and the guard proved vacuous three ways. A roster of
+# names fails exactly as the roster of ACTORS this header already replaced -- the rule is
+# the durable form, and it is checkable by reading any one construction site.
+#
+# It does NOT mean secret, unguessable or unwritable, and no decision in this file may rest
+# on reading it that way. self.inv is os.urandom(8).hex() (see __init__), and THIS DRIVER
+# publishes that nonce into segdir itself, in EVERY per-invocation name it builds there
+# (the rule below says which those are -- deliberately no list, see #697), and in plaintext
+# inside the joblog's own JSON body, whose `inv` field both the launched and the terminal
+# record carry. No single run creates all of them; one is enough.
+#
+# So the property that actually holds is: anything that can LIST segments/ can discover the
+# name, and anything that can WRITE segments/ can overwrite it. Those are two separate
+# permissions and the second does not follow from the first.
+#
+# WHO that is depends on segments/'s OWN mode, which this driver does not set: run()
+# creates it with a bare os.makedirs(self.segdir, exist_ok=True), so the mode is whatever
+# the operator's umask yields -- 0755 at the usual 0022 (writes are owner-only, and the
+# actors below are then all same-uid), 0775 at 0002 (the writer set is the GROUP). The
+# 0o600 mode these entries are created with does NOT bound the writer set: a process with
+# write on the DIRECTORY can unlink and recreate any of them whatever the file mode says.
+# What 0o600 does bound is who can read the joblog's BODY; at a 0755 segdir any uid can
+# still LIST the directory and read the nonce straight out of the filenames. And
+# _setup_sandbox()'s mkdtemp(prefix="ltcj.<seg>.<inv>.") publishes the same nonce into
+# TMPDIR, which on a shared /tmp is a second discovery path that is not same-uid at all.
+#
+# Exactly ONE actor is excluded, and only it: the codex processes THIS DRIVER launches.
+# _setup_sandbox() refuses to dispatch unless _sandbox_is_confined() has proved the sandbox
+# resolves to itself, failing closed on a probe that returned no verdict. Nothing else in
+# the pipeline is confined by that mechanism -- the comment on _trusted_scripts_dir() below
+# already says so, and says which shipped passes hold write access over the whole durable
+# root; read the two together, they are one statement. Deliberately no roster of the
+# others here: three review rounds each added an actor that a roster had missed, so the
+# property is stated instead of the population.
+#
+# The residual this leaves is real and is not closed anywhere: a TERMINAL verdict
+# (validate_draft.py exit 1, which that script also returns for a missing or malformed
+# candidate) rests on an artifact that is neither private nor immutable. Its consequence is
+# bounded -- the segment lands `blocked`, classifies human_escalation, and --only-segs is
+# the documented retry -- and its measured population is zero. See #697, which stays open
+# and parked for the staging relocation that would close it.
+
 import argparse
 import fcntl
 import hashlib
@@ -1140,9 +1212,13 @@ class CodexJob:
             self.segdir, ".codex_ledger_payload.%s.%s.json" % (self.seg, self.inv))
         try:
             # O_EXCL|O_NOFOLLOW|O_NONBLOCK, not a plain open(..., "w"): this file is
-            # created inside segments/, a directory the codex process this driver launches
-            # holds write access over, and a straggler turn can outlive poll()'s
-            # best-effort cancel (see finalize()'s own comment). A plain truncating open
+            # created inside segments/, a directory this driver does not own exclusively --
+            # anything that can write it can plant a name here, and the module header states
+            # who that is and who it is not. (#697 corrected this sentence: it used to name
+            # the codex process THIS driver launches, which the #409 sandbox is the one
+            # actor to exclude. The justification never depended on that actor -- it is any
+            # directory writer -- but the wrong version was quoted downstream as if it
+            # established one.) A plain truncating open
             # would FOLLOW a symlink planted at this exact name, and would BLOCK
             # indefinitely on a FIFO -- before _gate()'s timeout starts, so the bound
             # below would not cover it, in a method whose entire contract is that it
@@ -1665,9 +1741,11 @@ class CodexJob:
         True. Return False in every other case, handling the pending file so it is never lost or left
         to block a future run:
           - absent / a non-regular squatter -> cleared, return False;
-          - #665: the gates judge an immutable per-invocation SNAPSHOT of the pending, not the
-            deterministic slot -- see the body for why a terminal verdict cannot rest on a name
-            another process can write. A snapshot that cannot be taken -> LEAVE the pending
+          - #665: the gates judge a per-invocation SNAPSHOT of the pending, not the
+            deterministic slot -- see the body for why a terminal verdict should not rest on a
+            name that persists across runs. The snapshot is a private staging slot in the
+            sense the module header defines: per-invocation and dot-prefixed, NOT immutable
+            (#697). A snapshot that cannot be taken -> LEAVE the pending
             intact, return False (nothing was judged, so nothing is discarded);
           - a gate that RAN and REJECTED the candidate (proc.returncode != 0: bad content / stale
             cross-run token) -> DISCARD the pending, return False;
@@ -1688,7 +1766,9 @@ class CodexJob:
         if not self._is_regular(self.pending, self.poll_remaining):
             self._clear_nonregular(self.pending)
             return False
-        # #665: gate an IMMUTABLE SNAPSHOT, never the deterministic slot itself.
+        # #665: gate a PER-INVOCATION SNAPSHOT, never the deterministic slot itself.
+        # (#697: "snapshot" is the module header's private staging slot -- per-invocation and
+        # dot-prefixed. It is NOT immutable, and the paragraph below no longer claims it is.)
         #
         # Every gate re-OPENS its --candidate-file BY PATH, so gating self.pending directly
         # means two independent opens, with a window in between, of a name that persists
@@ -1696,35 +1776,36 @@ class CodexJob:
         # was recoverable. It stopped being tolerable when a validate_draft.py exit 1 became
         # TERMINAL: that script answers a MISSING OR MALFORMED candidate with exit 1 as
         # well, so an ordinary truncate-and-rewrite in that window is indistinguishable from
-        # a content verdict and would block the segment permanently.
+        # a content verdict. The segment then lands `blocked` and classifies
+        # human_escalation, which drops it from the default dispatch set until an operator
+        # names it in --only-segs -- terminal by default, not unrecoverable (#697).
         #
-        # WHO could write it, stated precisely, because the obvious answer is wrong. NOT the
-        # codex process this driver launches: since #409 it runs in a mkdtemp sandbox that
-        # _setup_sandbox() REFUSES to dispatch into unless _sandbox_is_confined() has proved
-        # its workspace root resolves to itself, so a confined turn -- straggler or not --
-        # cannot reach segments/ at all. (_record_translate_rejected()'s own comment names
-        # that actor for its O_EXCL|O_NOFOLLOW; over-caution is free there and this is not a
-        # licence to repeat the claim as fact.) What remains is the operator's own hand, and
-        # a second dispatcher over one durable_root -- already unsupported, and the flock
-        # only serializes runs that reach it. Neither is a strong adversary, which is why
-        # this is one copy rather than a new staging model: the cost of being wrong about
-        # the actor is a segment blocked forever, and the cost of the copy is one read.
+        # WHO could write it: the module header's property, which this slot inherits -- and
+        # NOT a roster, which is what stood here until #697 and was wrong three times over.
+        # (_record_translate_rejected()'s O_EXCL|O_NOFOLLOW is justified against the same
+        # property, since #697 corrected that comment too; the file states one actor model,
+        # in one place.) The snapshot is therefore weaker than "an artifact no one else
+        # can touch"; what it actually buys is stated below.
         #
-        # Re-checking the slot after the fact cannot close that -- neither a type re-check
+        # Re-checking the slot after the fact closes nothing -- neither a type re-check
         # (an in-place overwrite leaves a perfectly regular file) nor a before/after digest
         # (a truncate-then-restore is an ABA: both samples read the same bytes the validator
-        # never saw). Both were tried and both were reproduced against. The property the
-        # terminal verdict actually needs is that the judged artifact CANNOT be written by
-        # anyone else, and the only way to have it is to hold one.
+        # never saw). Both were tried and both were reproduced against.
         #
         # So: copy once, through the same fd-pinned, digest-verified primitive
         # validate_attempt() already uses (identity + digest BOTH before and after -- it
         # refuses outright if a writer is still mutating the source underneath the read),
-        # into self.attempt: the per-invocation .att.<seg>.<inv>... name that carries
-        # os.urandom(8) and that no other process can name. Every gate then judges that
+        # into self.attempt: a per-invocation .att.<seg>.<inv>... name carrying
+        # os.urandom(8).hex(). What that buys is precise and limited -- the judged artifact
+        # is no longer the DETERMINISTIC slot that persists across runs and is trivially
+        # derivable, so the ordinary cross-run collision stops being a verdict. It does NOT
+        # buy privacy: this driver publishes the same nonce into segdir in other filenames
+        # and in the joblog body (see the module header). Every gate then judges that
         # snapshot, and the promote moves the very bytes that were judged. This makes
         # adopt_pending() the same shape as validate_attempt(), which is the point: the
-        # deferred path had no reason to be the weaker of the two.
+        # deferred path had no reason to be the weaker of the two. The residual both paths
+        # share -- a terminal verdict resting on an enumerable, writable artifact -- is #697,
+        # open and parked; nothing here closes it.
         if not self._publish_from_sandbox(self.pending, self.attempt):
             # Could not take a trustworthy snapshot (unreadable, non-regular, or mutating
             # under the read). Nothing has been judged, so nothing is discarded: keep the
@@ -1737,14 +1818,18 @@ class CodexJob:
             argv += ["--candidate-file", self.attempt]
             proc = self._gate(argv, self.poll_timeout())
             if proc is None:
-                _silent_remove(self.attempt)       # the snapshot is this invocation's alone
+                _silent_remove(self.attempt)       # this invocation's to clean up (lifecycle,
+                                                   # not exclusivity -- see module header)
                 return False                       # could not validate -> keep pending, launch fresh
             if proc.returncode != 0:
                 self._capture_gate_rejection(name, proc)  # #399: capture before discarding
                 if name == "validate_draft.py" and proc.returncode == 1:
                     # #665: the SAME exit-1 contract _validate_candidate() reads for a fresh
                     # attempt, read here for a DEFERRED one, and now on the same footing --
-                    # an artifact only this invocation can name. That this is a same-token
+                    # a per-invocation artifact rather than the cross-run slot. Same footing
+                    # is the whole claim: not that the artifact is unreachable (#697 -- it is
+                    # enumerable and writable, see the module header), only that the deferred
+                    # path is no weaker than the fresh one. That this is a same-token
                     # verdict on CONTENT, and never a stale cross-run token, is guaranteed by
                     # the gate ORDER _adoption_gates() owns: draft_ready.py carries
                     # --expect-token and runs FIRST, and this loop returns on its rejection,
@@ -1782,8 +1867,11 @@ class CodexJob:
         moved = self._authorization_moved(self.poll_remaining)
         if moved is not None:
             # Disposed of exactly as the canonical-unreadable refusal above does it, and
-            # for the same reasons: the SNAPSHOT goes, because it is this invocation's
-            # alone and nothing later can name it; self.pending STAYS, because the
+            # for the same reasons: the SNAPSHOT goes, because it belongs to this
+            # invocation's own lifecycle and no LATER RUN OF THIS DRIVER consults it (a
+            # fresh invocation mints its own nonce and reads only self.canonical and
+            # self.pending) -- not because nothing else could name it, which #697 records is
+            # false; self.pending STAYS, because the
             # candidate passed every gate and what changed is who owns the slot it would
             # land in -- a future dispatch under the CURRENT authorization re-gates it
             # (the gates' own --expect-token check rejects it if it no longer belongs),

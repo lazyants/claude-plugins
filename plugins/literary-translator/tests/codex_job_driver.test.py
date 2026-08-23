@@ -4385,21 +4385,31 @@ def test_adopt_pending_non_content_rejection_leaves_the_flag_false(
 @pytest.mark.parametrize("race", ["unlink", "overwrite", "aba"])
 def test_a_concurrent_write_to_the_pending_cannot_change_what_the_gates_judge(
         tmp_path, monkeypatch, race):
-    """The terminal verdict must rest on an artifact no other process can write.
+    """The terminal verdict must not rest on the DETERMINISTIC cross-run slot.
 
     `self.pending` is a DETERMINISTIC name that persists across runs, and every gate
     re-OPENS its --candidate-file BY PATH, so gating that name directly means two
     independent opens with a writable window between them. validate_draft.py answers a
     MISSING OR MALFORMED candidate with exit 1, the same code its contract reserves for a
     content verdict, so a write landing in that window is indistinguishable from one -- and
-    since #665 acts on it TERMINALLY, it would block the segment permanently.
+    since #665 acts on it TERMINALLY, the segment lands `blocked`, classifies
+    human_escalation, and needs an explicit --only-segs to be retried at all (terminal by
+    default, not unrecoverable -- #697 corrected an earlier "permanently" here).
 
-    WHO can write it, per adopt_pending()'s own comment: NOT the codex process this driver
-    launches -- since #409 it runs in a mkdtemp sandbox that _setup_sandbox() refuses to
-    dispatch into unless _sandbox_is_confined() proves it standalone, so it cannot reach
-    segments/. The reachable writers are the operator's own hand, a second dispatcher over
-    one durable_root (already unsupported), and a pre-#409 straggler. This test does not
-    depend on which: it simulates the write at the seam, whoever performs it.
+    WHO can write it: #409 excludes EXACTLY ONE actor, the codex process this driver
+    launches, which runs in a mkdtemp sandbox _setup_sandbox() refuses to dispatch into
+    unless _sandbox_is_confined() proves it standalone. It excludes nothing else. #697
+    replaced the roster that used to stand here -- operator's hand, second dispatcher,
+    pre-#409 straggler -- because three review rounds each found a writer it had missed;
+    codex_job.py's module header now states the PROPERTY instead: anything that can list
+    segments/ discovers these names, anything that can write it can overwrite them. This
+    test does not depend on which actor: it simulates the write at the seam.
+
+    SCOPE, and read this before trusting it (#697). These three rows pin isolation from
+    `self.pending` ONLY. The race callback below writes `job.pending`, never the `.att.*`
+    snapshot the gates are actually handed, so nothing here attacks that snapshot -- and
+    the snapshot is itself enumerable and writable. The residual is pinned separately, by
+    test_a_write_to_the_gated_snapshot_still_decides_a_terminal_verdict below.
 
     The three rows are a history of guards that did not hold, kept because each still
     describes a real concurrent write and the design has to survive all three:
@@ -4448,7 +4458,84 @@ def test_a_concurrent_write_to_the_pending_cannot_change_what_the_gates_judge(
     # The straggler's writes went to the slot and changed nothing that was judged, so the
     # gate's exit 1 IS a genuine content verdict on the snapshot and stays terminal.
     assert job.translate_content_rejected is True
-    assert not os.path.exists(job.attempt), "the snapshot is this invocation's alone"
+    assert not os.path.exists(job.attempt), (
+        "the snapshot is this invocation's to clean up -- lifecycle ownership, not exclusive "
+        "access; see codex_job.py's module header (#697)"
+    )
+
+
+def test_a_write_to_the_gated_snapshot_still_decides_a_terminal_verdict(tmp_path, monkeypatch):
+    """KNOWN LIMIT, pinning #697's OPEN residual -- this asserts the defect, not a fix.
+
+    The sibling test above pins isolation from `self.pending`. It does NOT attack the
+    artifact the gates are actually handed, and that artifact is not out of reach: the
+    `.att.<seg>.<inv>...` snapshot is dot-prefixed and per-invocation, but the driver
+    publishes the same nonce into segments/ in other filenames and in the joblog body, so
+    anything that can list that directory discovers the name and anything that can write
+    the directory can overwrite it (see codex_job.py's module header). #409 excludes
+    exactly one actor -- the codex process this driver launches -- and nothing else.
+
+    So the same seam the snapshot was introduced to close is still open one level down:
+    every gate re-OPENS --candidate-file BY PATH, and validate_draft.py answers a MISSING
+    OR MALFORMED candidate with exit 1, the code its contract reserves for a content
+    verdict. A write landing between the two opens is therefore indistinguishable from a
+    verdict on the candidate's own content, and adopt_pending() acts on it TERMINALLY.
+
+    This test drives exactly that and asserts CURRENT behaviour: the segment is rejected
+    terminally on bytes no validator ever approved. When #697 is closed, this test goes
+    RED -- that is its purpose, and the fix should replace it rather than delete it.
+
+    Bounded consequence, so this is a known limit rather than a stop-ship: `blocked`
+    classifies human_escalation and --only-segs is the documented retry. Measured
+    population is zero.
+    """
+    job = _mkjob(tmp_path, kind="translate")
+    original = json.dumps({"draft": "the bytes a prior run deferred"})
+    Path(job.pending).write_text(original, encoding="utf-8")
+    seen = {}
+
+    def racing_gate(args, timeout):
+        if args[0] != "validate_draft.py":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        # ENUMERATE, never read the handed argument. Taking args[--candidate-file] would
+        # corrupt whatever path the gate is given -- including a RELOCATED one -- so this
+        # test would stay green under the very fix #697 is parked for, while claiming to go
+        # red. Discovering the snapshot by listing segdir is the residual itself: it is what
+        # a foreign writer must do, and it stops working the moment staging leaves segments/.
+        found = sorted(Path(job.segdir).glob(".att.%s.*.json" % job.seg))
+        seen["found"] = [p.name for p in found]
+        assert len(found) == 1, (
+            "the gated snapshot is no longer discoverable by listing segments/ -- if #697's "
+            "relocation shipped, replace this known-limit test with one asserting refusal"
+        )
+        candidate = str(found[0])
+        # The bytes must be sampled INSIDE the stub: adopt_pending() removes the snapshot
+        # on this branch, so nothing after the call returns can read them.
+        seen["handed"] = args[args.index("--candidate-file") + 1]
+        seen["candidate"] = candidate
+        seen["before"] = Path(candidate).read_text(encoding="utf-8")
+        Path(candidate).write_text("{", encoding="utf-8")   # a foreign write at the seam
+        seen["after"] = Path(candidate).read_text(encoding="utf-8")
+        return SimpleNamespace(returncode=1, stdout="FAIL: candidate missing", stderr="")
+    monkeypatch.setattr(job, "_gate", racing_gate)
+
+    assert job.adopt_pending() is False
+
+    # The path found by ENUMERATION is the very path the gate was handed -- that identity is
+    # the residual in one line. Plus: the write landed on the snapshot, not on the
+    # deterministic slot the sibling test covers. Without these the final assertion would
+    # pass for an ordinary content rejection and pin nothing.
+    assert seen["candidate"] == seen["handed"]
+    assert seen["candidate"] != job.pending
+    assert seen["before"] == original
+    assert seen["after"] != seen["before"]
+
+    # ... and the driver treated it as a verdict on the candidate's own content. THIS is
+    # the open residual: no validator ever approved the bytes that decided the segment.
+    assert job.translate_content_rejected is True, (
+        "#697 closed? Then this known-limit test has done its job and should be replaced "
+        "by one asserting the write is refused instead."
+    )
 
 
 def test_a_pending_that_cannot_be_snapshotted_is_recoverable(tmp_path, monkeypatch):
