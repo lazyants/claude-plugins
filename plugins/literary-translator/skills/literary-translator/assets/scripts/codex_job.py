@@ -98,41 +98,29 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 #   - .att_pending.*     -- deliberately consumed by a LATER invocation (#213), which
 #     promotes it with os.replace() or clears it via _silent_remove();
 #   - .att_superseded.*  -- a preserved copy kept for hand recovery (#429).
-# Only the disposable scratch -- self.attempt once it is not promoted, the .pub.*.tmp /
-# .codex_job.*.tmp / .prev_review_tmp.*.json temporaries and the .codex_ledger_payload.*
-# payload -- is removed by the invocation that created it, and then by EXACT path, never a
-# wildcard. Which group an entry is in is stated where it is built; do not read a blanket
-# lifetime into the shared prefix, in either direction.
+# The disposable scratch -- the .pub.*.tmp / .codex_job.*.tmp / .prev_review_tmp.*.json
+# temporaries and the .codex_ledger_payload.* payload -- is removed by the invocation that
+# created it, by EXACT path, never a wildcard. self.attempt is USUALLY in that group, with
+# one deliberate exception: finalize() skips the removal when self.canonical_unreadable is
+# set, so validated bytes survive at the .att.* path for a later run rather than being
+# discarded into an unreadable canonical. Which group an entry is in is stated where it is
+# built; do not read a blanket lifetime into the shared prefix, in either direction.
 #
 # The namespace splits in two and the split is load-bearing -- it is the very distinction
-# #665 turns on, so do not let "private staging slot" blur it. The RULE decides, not this
+# #665 turns on, so do not let "private staging slot" blur it. A RULE, deliberately not a
 # list: a name is PER-INVOCATION iff it interpolates self.inv, and DETERMINISTIC otherwise
 # (keyed on seg/ext/disp/label alone, so it PERSISTS ACROSS RUNS and is trivially
-# derivable). Classify anything added later by that rule rather than by membership here.
-#
-# The roster below is MACHINE-CHECKED: codex_job_driver.test.py derives both sets from this
-# file's own AST and requires them to equal these two lines exactly -- not to appear
-# somewhere in this block, which prose elsewhere in the header would satisfy on its own.
-# Hence the delimiters and the one canonical spelling per name, `<prefix>*<suffix>`. Edit
-# the lines, never the markers; a name added to the file and not to its line fails there.
-# ROSTER-BEGIN
-#   PER-INVOCATION: .att.*.json .att_superseded.* .prev_review_tmp.*.json
-#                   .codex_ledger_payload.*.json .pub.*.tmp .codex_job.*.tmp
-#   DETERMINISTIC:  .att_pending.*.json .codex_job.*.json .codex_job.*.lock
-#                   .codex_failed.* .prev_review.*.json
-# ROSTER-END
-# The per-invocation side is the one the nonce paragraph above depends on; .att_pending.*
-# .json is the deferred slot #665 turns on, .pub.*.tmp is created BEFORE the .att.*.json
-# rename it feeds, and .codex_job.*.json is the joblog rather than the .tmp beside it.
-# "Two runs cannot collide" is true of the first group ONLY. Saying it of .att_pending.*
-# would assert, of the exact artifact #665 exists to stop gating directly, the property the
-# rest of this header denies.
+# derivable). #697 carried an enumeration here and a test pinning it; both were removed
+# after the roster went stale once and the guard proved vacuous three ways. A roster of
+# names fails exactly as the roster of ACTORS this header already replaced -- the rule is
+# the durable form, and it is checkable by reading any one construction site.
 #
 # It does NOT mean secret, unguessable or unwritable, and no decision in this file may rest
 # on reading it that way. self.inv is os.urandom(8).hex() (see __init__), and THIS DRIVER
-# publishes that nonce into segdir itself, in every one of the six per-invocation names
-# above, and in plaintext inside the joblog's own JSON body, whose `inv` field both the
-# launched and the terminal record carry. Not every run creates all six; one is enough.
+# publishes that nonce into segdir itself, in EVERY per-invocation name it builds there
+# (the rule below says which those are -- deliberately no list, see #697), and in plaintext
+# inside the joblog's own JSON body, whose `inv` field both the launched and the terminal
+# record carry. No single run creates all of them; one is enough.
 #
 # So the property that actually holds is: anything that can LIST segments/ can discover the
 # name, and anything that can WRITE segments/ can overwrite it. Those are two separate

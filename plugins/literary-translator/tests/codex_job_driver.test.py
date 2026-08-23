@@ -35,13 +35,11 @@ launched with, matching codex-companion's own workspaceRoot-keyed job store) rat
 passing vacuously regardless of which cwd the driver happens to send.
 """
 
-import ast
 import errno
 import hashlib
 import importlib.util
 import json
 import os
-import re
 import shutil
 import signal
 import stat
@@ -4535,98 +4533,6 @@ def test_a_write_to_the_gated_snapshot_still_decides_a_terminal_verdict(tmp_path
         "#697 closed? Then this known-limit test has done its job and should be replaced "
         "by one asserting the write is refused instead."
     )
-
-
-def test_the_module_headers_segdir_name_split_matches_the_names_the_code_builds():
-    """#697: the header's per-invocation/deterministic split is CHECKED, not trusted.
-
-    That header replaced a roster of ACTORS with a property, precisely because a roster
-    goes stale -- three review rounds each found a writer the old one had missed. It then
-    introduced a roster of NAMES, which has the same failure mode, and did go stale in
-    review: `.prev_review.<seg>.r<label>.json` was missing from the deterministic side.
-
-    So the rule is enforced rather than restated. A name is PER-INVOCATION iff it
-    interpolates `self.inv`; deterministic otherwise. This derives both sets from the AST
-    of codex_job.py itself and requires the header to agree, so adding a dot-prefixed
-    segdir name without classifying it fails here instead of silently making the header
-    false. The per-invocation side must be EXACT: the header's nonce-publication claim
-    ("in every one of the six per-invocation names above") depends on it."""
-    src = Path(codex_job.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(src)
-
-    filename_re = re.compile(r"^\.[a-z_]+\.")
-    per_inv, determ = set(), set()
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod)
-                and isinstance(node.left, ast.Constant)
-                and isinstance(node.left.value, str)
-                and filename_re.match(node.left.value)):
-            continue
-        # Key on the FULL pattern, never a stem: `.codex_job.` alone is the prefix of three
-        # different names, one per-invocation (`.codex_job.%s.%s.tmp`) and two deterministic
-        # (`.codex_job.%s.json`, `.codex_job.%s.lock`), so a stem-keyed set reports them as
-        # one name built both ways.
-        pattern = node.left.value
-        (per_inv if "self.inv" in ast.unparse(node.right) else determ).add(pattern)
-
-    assert per_inv and determ, "the AST scan found nothing -- it has stopped testing anything"
-
-    # Parse the DELIMITED roster, not the whole header. Presence-anywhere-in-the-block was
-    # the previous shape and it was vacuous twice over: the bot deleted the header's
-    # `.codex_job.*.json` entry and the test still passed, because the retention paragraph
-    # above the roster names the same file in prose. Only these two lines are the contract.
-    body = src.split("# ROSTER-BEGIN", 1)
-    assert len(body) == 2, "the ROSTER-BEGIN marker is gone from codex_job.py's header"
-    roster = body[1].split("# ROSTER-END", 1)
-    assert len(roster) == 2, "the ROSTER-END marker is gone from codex_job.py's header"
-    roster = roster[0]
-
-    declared = {}
-    for group, key in (("PER-INVOCATION:", "inv"), ("DETERMINISTIC:", "det")):
-        assert group in roster, "the roster lost its %s line" % group
-        chunk = roster.split(group, 1)[1].split("PER-INVOCATION:")[0]
-        chunk = chunk.split("DETERMINISTIC:")[0]
-        declared[key] = set(re.findall(r"\.[A-Za-z_]+[.*][^\s]*", chunk.replace("#", " ")))
-    assert not (declared["inv"] & declared["det"]), (
-        "a name is declared in BOTH roster groups: %s"
-        % sorted(declared["inv"] & declared["det"]))
-
-    # ONE canonical token per pattern, matched whole. Searching `prefix` and `suffix`
-    # independently is what the first version did, and it was VACUOUS: `.codex_job.` is
-    # supplied by the lock and .tmp entries and `.json` by unrelated names, so deleting the
-    # header's `.codex_job.*.json` entry still passed. The bot reproduced exactly that.
-    def canonical(pattern):
-        prefix = pattern.split("%")[0]                    # ".codex_job."
-        tail = pattern.rsplit("%", 1)[-1]                 # "s.json" / "s" / "s.tmp"
-        suffix = tail[1:] if tail[:1] in ("s", "d") else tail
-        return prefix + "*" + suffix                      # ".codex_job.*.json"
-
-    built_inv = {canonical(p) for p in per_inv}
-    built_det = {canonical(p) for p in determ}
-    assert not (built_inv & built_det), (
-        "two constructed names share a canonical token, so one could mask the other: %s"
-        % sorted(built_inv & built_det))
-
-    # EQUALITY, not containment, and per GROUP -- so a deleted entry, an added name, and a
-    # MISCLASSIFIED one each fail, which containment-anywhere could not distinguish.
-    assert declared["inv"] == built_inv, (
-        "roster PER-INVOCATION line disagrees with the names this file builds with "
-        "self.inv.\n  only in roster: %s\n  only in code:   %s"
-        % (sorted(declared["inv"] - built_inv), sorted(built_inv - declared["inv"])))
-    assert declared["det"] == built_det, (
-        "roster DETERMINISTIC line disagrees with the names this file builds without "
-        "self.inv.\n  only in roster: %s\n  only in code:   %s"
-        % (sorted(declared["det"] - built_det), sorted(built_det - declared["det"])))
-
-    # Both COUNTS are pinned, so a new name cannot slip in under an existing prefix. The
-    # per-invocation one is load-bearing: the header's nonce-publication sentence says
-    # "every one of the six per-invocation names above".
-    assert len(built_inv) == 6, (
-        "the header says the nonce reaches six per-invocation names; the code now builds "
-        "%d: %s" % (len(built_inv), sorted(built_inv)))
-    assert len(built_det) == 5, (
-        "the header's deterministic side lists five names; the code now builds %d: %s"
-        % (len(built_det), sorted(built_det)))
 
 
 def test_a_pending_that_cannot_be_snapshotted_is_recoverable(tmp_path, monkeypatch):
