@@ -56,6 +56,12 @@ directly comparable to what a local run would have produced, which is the point 
   a clean one. `esbuild` is the one genuinely optional tool (the suite never network-fetches it).
 - `literary-translator` installs Node even though its suite is Python: a dozen test files are
   `skipif(NODE is None)` and would silently not execute.
+- `literary-translator` checks out with `fetch-depth: 0`. Its `retired_wording_pins` and
+  `wait_chunking_batch_passes` tests resolve frozen baseline commits with `git show`/`git diff`;
+  on the default depth-1 shallow clone all 67 of them fail with `bad object`, saying nothing
+  about the code. History is ~14 MiB packed, so the full clone is cheap.
+- The pytest step passes `--durations=25`, so every run reports where its ~10 minutes went
+  instead of leaving the question open.
 
 ## Repo conventions
 
