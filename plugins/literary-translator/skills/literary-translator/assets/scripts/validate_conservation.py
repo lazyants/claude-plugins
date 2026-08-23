@@ -384,6 +384,41 @@ def _strip_omission_lines(text, line_patterns):
 # ---------------------------------------------------------------------------
 
 
+def _load_json_artifact(path, label):
+    """Read and parse ONE operator-authored JSON artifact, or raise
+    ConservationError. `label` names it in every diagnostic, so both callers
+    keep their own wording without keeping their own copy of the policy.
+
+    #277 -- this load boundary catches the CLASS, not one member of it,
+    following validate_assembled.py's own load_json (its R8-1 comment carries
+    the full reasoning). UnicodeDecodeError and json.JSONDecodeError are BOTH
+    ValueError subclasses, and json.loads() can additionally raise a BARE
+    ValueError (an integer literal past sys.get_int_max_str_digits()) or a
+    RecursionError (deeply nested JSON -- a RuntimeError subclass) that no
+    narrower name covers. Both artifacts are operator-authored, so every one
+    of those is reachable from a hand-prepared file; uncaught, they escaped
+    main() as a raw traceback at Python's DEFAULT exit 1 -- the code SKILL.md
+    assigns to "the hand-wrap dropped content", turning a re-encode-your-file
+    problem into a your-wrap-is-broken diagnosis. Deliberately still NOT a
+    blanket `except Exception`: a genuine bug in this script must stay a loud
+    traceback rather than a clean exit 2.
+
+    It is ONE function rather than the same three arms written twice, because
+    the defect it closes IS a policy stated at one site and missed at the
+    other -- a second copy is the shape that reopens it."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConservationError(f"could not read {label} {path}: {exc}")
+    try:
+        doc = json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        raise ConservationError(f"{label} {path} is not valid JSON: {exc}")
+    if not isinstance(doc, dict):
+        raise ConservationError(f"{label} {path} must be a JSON object")
+    return doc
+
+
 def load_allowed_omissions(path):
     """Returns (line_patterns: list[re.Pattern], ranges: list[(start, end)]).
     `ranges` are CHARACTER (code point) offsets, the same coordinate system
@@ -394,29 +429,7 @@ def load_allowed_omissions(path):
     must be provenance-covered."""
     if path is None:
         return [], []
-    # #277 -- this load boundary catches the CLASS, not one member of it,
-    # following validate_assembled.py's own load_json (its R8-1 comment
-    # carries the full reasoning). UnicodeDecodeError and json.JSONDecodeError
-    # are BOTH ValueError subclasses, and json.loads() can additionally raise
-    # a BARE ValueError (an integer literal past sys.get_int_max_str_digits())
-    # or a RecursionError (deeply nested JSON -- a RuntimeError subclass) that
-    # no narrower name covers. All three artifacts here are operator-authored,
-    # so every one of those is reachable from a hand-prepared file; uncaught,
-    # they escaped main() as a raw traceback at Python's DEFAULT exit 1 --
-    # the code SKILL.md assigns to "the hand-wrap dropped content", turning a
-    # re-encode-your-file problem into a your-wrap-is-broken diagnosis.
-    # Deliberately still NOT a blanket `except Exception`: a genuine bug in
-    # this script must stay a loud traceback rather than a clean exit 2.
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ConservationError(f"could not read allowed-omissions file {path}: {exc}")
-    try:
-        doc = json.loads(text)
-    except (ValueError, RecursionError) as exc:
-        raise ConservationError(f"allowed-omissions file {path} is not valid JSON: {exc}")
-    if not isinstance(doc, dict):
-        raise ConservationError(f"allowed-omissions file {path} must be a JSON object")
+    doc = _load_json_artifact(path, "allowed-omissions file")
 
     raw_patterns = doc.get("line_patterns", [])
     if not isinstance(raw_patterns, list) or not all(isinstance(x, str) for x in raw_patterns):
@@ -435,13 +448,17 @@ def load_allowed_omissions(path):
     # sibling states: an uncompilable operator-authored pattern is REPORTED on
     # the documented exit-2 path, never fatal-by-traceback.
     patterns = []
-    for p in raw_patterns:
+    for i, raw in enumerate(raw_patterns):
         try:
-            compiled = re.compile(p)
+            compiled = re.compile(raw)
         except Exception as exc:
+            # The INDEX, not the pattern: every sibling per-element diagnostic
+            # in these two loaders names its position (`ranges[i]`, `spans[i]`),
+            # and echoing the pattern back is unbounded -- a legal entry can be
+            # thousands of characters wide.
             raise ConservationError(
-                f"allowed-omissions file {path}: invalid regex in 'line_patterns' "
-                f"({type(exc).__name__}: {exc})"
+                f"allowed-omissions file {path}: line_patterns[{i}] is not a "
+                f"valid regex ({type(exc).__name__}: {exc})"
             )
         patterns.append(compiled)
 
@@ -500,17 +517,7 @@ def load_provenance(path, baseline_len):
     already-decoded baseline `str` for the same reason. Hand-rolled shape
     validation -- see module docstring on why there is no dedicated
     schema.json for this artifact."""
-    # #277 -- same class as load_allowed_omissions() above; see its comment.
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ConservationError(f"could not read provenance map {path}: {exc}")
-    try:
-        doc = json.loads(text)
-    except (ValueError, RecursionError) as exc:
-        raise ConservationError(f"provenance map {path} is not valid JSON: {exc}")
-    if not isinstance(doc, dict):
-        raise ConservationError(f"provenance map {path} must be a JSON object")
+    doc = _load_json_artifact(path, "provenance map")
 
     raw_spans = doc.get("spans")
     if not isinstance(raw_spans, list) or not raw_spans:

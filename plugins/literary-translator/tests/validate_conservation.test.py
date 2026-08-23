@@ -1573,26 +1573,25 @@ def test_277_non_utf8_artifact_exits_2(tmp_path, artifact, needle):
     _wrapper_fixture_green(root)
     (root / artifact).write_bytes(CP1255_TEXT.encode("cp1255"))
 
-    _assert_fatal_not_traceback(run_validate_conservation(root, "wrapper-conservation"), needle)
+    proc = run_validate_conservation(root, "wrapper-conservation")
+    _assert_fatal_not_traceback(proc, needle)
 
 
 @pytest.mark.parametrize("artifact,needle", [
     ("provenance_map.json", "provenance map"),
     ("allowed_omissions.json", "allowed-omissions file"),
 ])
-@pytest.mark.parametrize("payload_kind", ["deep_nest", "oversized_int"])
-def test_277_unparseable_json_artifact_exits_2(tmp_path, artifact, needle, payload_kind):
+@pytest.mark.parametrize("payload", [
+    pytest.param("[" * DEEP_NEST_DEPTH + "]" * DEEP_NEST_DEPTH, id="deep_nest"),
+    pytest.param('{"schema_version": ' + "9" * BIG_INT_DIGITS + "}", id="oversized_int"),
+])
+def test_277_unparseable_json_artifact_exits_2(tmp_path, artifact, needle, payload):
     """Neither payload raises json.JSONDecodeError: deeply nested JSON raises
     RecursionError (a RuntimeError subclass) and an oversized integer literal
     raises a BARE ValueError. Both artifacts are parameterized because pinning
     only one leaves the other loader's arm free to be reverted."""
     root = make_root(tmp_path)
     _wrapper_fixture_green(root)
-    payload = (
-        "[" * DEEP_NEST_DEPTH + "]" * DEEP_NEST_DEPTH
-        if payload_kind == "deep_nest"
-        else '{"schema_version": ' + "9" * BIG_INT_DIGITS + "}"
-    )
     (root / artifact).write_text(payload, encoding="utf-8")
 
     proc = run_validate_conservation(root, "wrapper-conservation")
@@ -1620,15 +1619,17 @@ def test_277_unencodable_provenance_block_id_exits_2(tmp_path):
     _assert_fatal_not_traceback(proc, "provenance map", "not UTF-8 encodable")
 
 
+# Which family each raises is deliberately NOT asserted: the handler is
+# `except Exception` precisely because that is not a contract any version
+# pins, and CI tracks a moving 3.14 series, so pinning the name here would
+# false-RED on a patch release while the shipped behaviour stayed correct.
+# Both carry an explicit id -- the second pattern is 4001 characters, and
+# pytest would otherwise print all of it in -v and --durations output.
 @pytest.mark.parametrize("pattern", [
-    # raises OverflowError on this build...
-    "a{" + "9" * 36 + "}",
-    # ...and RecursionError on this one. Which family is deliberately NOT
-    # asserted: the handler is `except Exception` precisely because that is
-    # not a contract any version pins, and CI tracks a moving 3.14 series, so
-    # pinning the name here would false-RED on a patch release while the
-    # shipped behaviour stayed correct.
-    "(" * DEEP_GROUP_DEPTH + "a" + ")" * DEEP_GROUP_DEPTH,
+    pytest.param("a{" + "9" * 36 + "}", id="oversized_repetition"),
+    pytest.param(
+        "(" * DEEP_GROUP_DEPTH + "a" + ")" * DEEP_GROUP_DEPTH, id="deep_nested_group"
+    ),
 ])
 def test_277_uncompilable_line_pattern_exits_2(tmp_path, pattern):
     """`re.compile` does not raise one family, and which one a given
@@ -1642,7 +1643,7 @@ def test_277_uncompilable_line_pattern_exits_2(tmp_path, pattern):
     write_allowed_omissions(root, line_patterns=[pattern])
 
     proc = run_validate_conservation(root, "wrapper-conservation")
-    _assert_fatal_not_traceback(proc, "invalid regex in 'line_patterns'")
+    _assert_fatal_not_traceback(proc, "line_patterns[0] is not a valid regex")
 
 
 if __name__ == "__main__":
