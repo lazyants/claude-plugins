@@ -6,9 +6,11 @@ SKILL.md's W5 section is where a model or operator picks a launcher. Since
 #516 the pick is `segment_dispatch_driver.py`, with the
 `mass-translate-wf.template.js` + `pipeline()` path retained as the FALLBACK.
 Nothing executes that designation -- it is one paragraph of prose against
-which a whole book's cost is decided (#409 measured 83.4% of a 25.0M-token
-run spent on the fallback's orchestration bookkeeping), so a later edit can
-revert it silently and no script, schema or gate will notice.
+which a whole book's cost is decided (the measured share of a real run's
+tokens that went to the fallback's orchestration bookkeeping is stated in
+that paragraph, and is deliberately NOT copied here: nothing can check that
+two hand-copied sets of digits still agree), so a later edit can revert it
+silently and no script, schema or gate will notice.
 
 ## Two directions, and why BOTH are needed here
 
@@ -94,10 +96,12 @@ def test_w5_discloses_what_the_default_path_does_not_carry():
     assert "(2) The batch-final `batchComplete`" in w5
     assert "this path has no per-batch equivalent, deliberately" in w5
     # The heading and the numbered label are markers: flipping the claim
-    # under them from "does NOT" to "does" leaves both in place. The
-    # substantive sentence is what these two pin.
+    # under them from "does NOT" to "does" leaves both in place, so each
+    # residual is pinned by its substantive sentence instead -- (1) here,
+    # (2) by the "no per-batch equivalent" line above, and, together with the
+    # gate that carries the guarantee in its place, by
+    # test_what_replaces_the_fallback_batch_final_check_is_stated.
     assert "Nothing afterwards checks that only `segments/<seg>.draft.json`" in w5
-    assert "it does NOT perform the batch-final" in w5
 
 
 def test_the_fix_turn_is_a_step_of_the_default_loop():

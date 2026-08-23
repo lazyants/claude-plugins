@@ -6,12 +6,11 @@ own claim-aware --expect-token refusal.
 
 D9 (PLAN.md) measured that the `mass-translate-wf.template.js` dispatch path
 (W5's fallback launcher since #516) has exactly ONE deterministic site that
-ever runs
-`draft_ready.py --expect-token` (`translateAcceptCmd`, the translate wait
-poll) and it never runs again after a fix round -- `runRound` goes straight
-from `callFix()` to the NEXT `getVerifiedReview()`, whose own accept command
-is `review_ready.py --expect-token` (the REVIEW artifact's token, not the
-DRAFT's). So on that path, the only thing standing between a claimed
+ever runs `draft_ready.py --expect-token` (`translateAcceptCmd`, the translate
+wait poll) and it never runs again after a fix round -- `runRound` goes
+straight from `callFix()` to the NEXT `getVerifiedReview()`, whose own accept
+command is `review_ready.py --expect-token` (the REVIEW artifact's token, not
+the DRAFT's). So on that path, the only thing standing between a claimed
 segment's token and a fix round that drops it is a sentence in `fixPrompt()`
 -- "copy its existing value byte for byte ... never invent, drop, or
 recompute it." A prompt line protected by a prompt line.

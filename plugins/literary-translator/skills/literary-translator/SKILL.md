@@ -2163,8 +2163,7 @@ called. It:
 **1.2.0: the deterministic pre-workflow step, after `SEGS` and before
 `pipeline()`.** With `SEGS` finalized, invoke `resume_setup.py` (kind
 `mass`) before the Workflow tool ever launches (on the DEFAULT driver path
-there is no separate call for a session to make — the driver performs this
-one itself, every time it runs): it derives the resume-
+the driver performs this call itself — see **Default dispatch path**): it derives the resume-
 integrity digest's own segment domain directly from `manifest.json`'s full
 candidate set (LT-409 — NEVER from `SEGS`, which shrinks by one entry every
 time a segment converges, and would otherwise force a fresh, non-resuming
@@ -2616,15 +2615,15 @@ completion condition: a segment whose translate or review FAILED produces no
 fix prompt to act on, and the driver still exits successfully carrying it in
 `summary.failed`. A batch holding a failure is unfinished, and that id
 belongs in no completeness claim. When a segment's review comes back
-not-clean, the driver stops at that segment and
-returns `outcome: "needs_fix"` — the round label, the findings, and the exact
+not-clean, the driver stops at that segment and returns
+`outcome: "needs_fix"` — the round label, the findings, and the exact
 rendered fix prompt — then moves on/exits without fixing it (applying
 findings to a draft is a real LLM content-editing turn a plain Python process
-cannot perform). Someone — a human, or an orchestrating session — must notice
-this in the driver's own JSON output or its redirected log
-(`runs/driver.<SESSION_ID>.log`, per the launch command above), perform
-ONE Claude turn using that exact fix prompt to rewrite the draft, and
-re-invoke the driver to resume. **That JSON arrives only at exit** — stdout
+cannot perform). Someone — a human, or an orchestrating session — has to
+notice that: the only two channels it is ever announced on are the driver's
+own JSON output and its redirected log (`runs/driver.<SESSION_ID>.log`, per
+the launch command above), and what follows from reading either is the fix
+turn of the loop above. **That JSON arrives only at exit** — stdout
 carries exactly ONE line, printed on the driver's terminal path, so the
 redirected log shows no per-segment progress at all while the run is in
 flight; only the driver's stderr warnings land there live. The channel that

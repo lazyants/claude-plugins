@@ -3,8 +3,7 @@ chokepoint refusal for a translate launch against a CLAIMED segment.
 
 Why this file exists (D8, PLAN.md): the `mass-translate-wf.template.js`
 dispatch path (W5's fallback launcher since #516) has NO claim-aware guard of
-its own --
-`translateStage` is nine flagless lines that unconditionally invoke
+its own -- `translateStage` is nine flagless lines that unconditionally invoke
 `codex_job.py --kind translate`. So the refusal that keeps a claimed segment
 from ever being re-translated has to live HERE, inside codex_job.py itself.
 
