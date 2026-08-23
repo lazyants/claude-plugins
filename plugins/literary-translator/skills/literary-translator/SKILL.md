@@ -2650,14 +2650,15 @@ and three of them are unenforced traps with no code-side safety net:**
 as a lightweight, hand-maintained tracker after every batch, before the next
 starts. Never the output of an automated script, never read back in or
 acted on programmatically. A decision recorded here is invisible to the
-reviewer, which reads `style_bible.md` and the segpack's `canon_map` only, so
-it binds nothing until it is promoted into one of those two documents.
+reviewer, which reads `style_bible.md` and the segpack — its `canon_map` and,
+since 1.45.0, its `split_names` — so it binds nothing until it is promoted into
+one of those.
 **R9 governs a promotion into the style contract**: it binds the segments still
 to come, never a re-review of the ones already converged.
 
 **Where a decision goes is a question nothing asks today, and the destinations
 are not interchangeable.** Ask it while you are writing the item down. There
-are four outcomes:
+are five outcomes:
 
 - **Already owned elsewhere** — `style_bible.template.md`'s own rule is not to
   restate anything `profile.yml`, the segpack or
@@ -2682,6 +2683,17 @@ are four outcomes:
   those segments' segpacks before selection runs again. A name that is NOT
   already frozen is not this channel and is never a hand edit either — R4's
   glossary/adjudication route owns it.
+- **Homonym split** — the decision is that one source form carries two distinct
+  senses. That goes through the `canon_senses.json` adjudication route and into
+  regenerated segpacks, where it reaches the reviewer as `split_names`. It is
+  NOT a canon row and cannot be made one: `canon_validate.py`'s recollapse guard
+  refuses a bare `entries{}` entry for a split form, and the mandatory pre-W3a
+  audit halts on one that predates the split. It is not a contract edit either.
+  A split carries no frozen target form, so the reviewer may argue the wrong
+  sense was chosen but may never prescribe a canonical target form there.
+  Invalidation is per-segment exactly as for canon: `split_names` is inside
+  `used_terms_hash`, so adding a split or editing a sense's `disambiguator`
+  re-stales the segments that carry that form.
 - **Section G** — most of what this sweep produces belongs here: a character's
   settled voice, the recurring cast, a motif held to one rendering.
   `style_bible.md`'s `G-cast`/`G-voices`/`G-motifs` sit OUTSIDE the

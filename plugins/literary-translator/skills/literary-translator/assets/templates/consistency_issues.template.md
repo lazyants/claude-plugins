@@ -41,8 +41,9 @@ as genuinely ambiguous," record that decision explicitly too, rather than silent
 
 Record one thing more, in the same entry: **where the decision now lives** -- a structured owner (name the
 surface: `profile.yml`, the segpack, a task template), `canon.json` (and which segments' segpacks were
-regenerated), section G of `style_bible.md`, or the marked style contract. Those four are W6's outcomes and
-W6 carries the discriminator for each.
+regenerated), the `canon_senses.json` adjudication route (for a form that is a homonym SPLIT -- and which
+segments' segpacks were regenerated), section G of `style_bible.md`, or the marked style contract. Those
+five are W6's outcomes and W6 carries the discriminator for each.
 
 There is one legitimate fifth answer, and it is the "leave it as genuinely ambiguous" decision above:
 **nothing**, because the item deliberately fixes no rule. Write it that way, with the reason -- it is a
