@@ -683,26 +683,49 @@ def _coerce_record(record: dict, manifest: dict, language_config, *, competitors
     NOT coerce the whole record on its own. A ``propose_split`` that started
     with more referents than survive verification is not thrown away
     wholesale as long as >=2 verified referents remain -- the failed
-    referents are dropped INDIVIDUALLY and this call's ``evidence_coverage``
-    records THIS invocation's cited/verified split; the record itself is
-    coerced to ``insufficient_window`` only when fewer than 2 verified
-    referents remain.
+    referents are dropped INDIVIDUALLY and ``evidence_coverage`` records the
+    cited/verified split (see the #368 paragraph below for how ``cited``
+    survives a re-validation); the record itself is coerced to
+    ``insufficient_window`` only when fewer than 2 verified referents remain.
 
-    DO NOT read ``evidence_coverage`` as a durable record of that pruning:
-    ``cited`` below is ``len(record.get("referents"))`` as the record stands
-    AT THIS CALL, never the batch's original referent count. Because
-    ``--validate-fragment`` rewrites the fragment in place (see
-    ``run_validate_fragment``), a SECOND validation of an already-pruned
-    fragment hands this function the already-pruned referent list, so
-    ``cited`` recomputes to the pruned count and ``cited == verified`` even
-    though referents were dropped on the first pass. The normal path
-    validates at least twice -- codex's own self-check, then the wait poll --
-    so by merge time a partial coverage is generally no longer distinguishable
-    from a complete one here. See ``skeptic-triage.schema.json``'s
-    ``evidence_coverage`` description for the full consequence: a merged
-    record showing ``cited == verified`` does NOT establish that nothing was
-    pruned. Never mutates ``record``; always returns a NEW, schema-conformant
-    record.
+    ``evidence_coverage.cited`` IS a durable record of that pruning (#368) for
+    as long as the record stays ``propose_split``; a record that downgrades to
+    ``insufficient_window`` drops ``evidence_coverage`` with the rest of its
+    shape, but that loss is LOUD -- the verdict moves and ``coerced`` counts
+    it. It is MONOTONE: the maximum of the value already stored on the record and
+    this call's own referent count -- never a plain ``len(referents)`` recount
+    of the list this call happened to be handed. That distinction is the whole
+    of #368, because ``--validate-fragment`` rewrites the fragment IN PLACE
+    (see ``run_validate_fragment``) and the shipped workflow runs it at least
+    twice on the ordinary path -- codex's own self-check, then the wait poll.
+    A plain recount therefore handed the SECOND validation its own pruned
+    output, and an honest "3 offered, 2 verified" silently became "2 offered,
+    2 verified" while ``coerced`` stayed 0, because the VERDICT had not moved.
+    With the max, the second validation reproduces the first's values exactly,
+    and a later validation that prunes further reports the ORIGINAL offer
+    count against the currently-verified one (4 offered, 2 verified), which is
+    what a reader of ``skeptic_report.py``'s ``(partial)`` label needs.
+
+    THE TRADE-OFF, deliberate and one-way: taking the max trusts a number the
+    fragment's own author wrote, so ``cited`` is a durable but UNAUTHENTICATED
+    high-water mark -- ``cited > verified`` records either what the validator
+    pruned or a count the author inflated, and nothing here can tell them
+    apart. An inflated ``cited`` can only make a record read MORE partial,
+    never complete, and ``skeptic_report.py`` already bounds an oversized
+    label; a deflated one below this call's referent count is simply
+    overridden. The idempotence claimed above is the REWRITTEN FRAGMENT's:
+    the command's own printed JSON is not byte-stable across a downgrade,
+    because ``coerced`` counts that transition once and 0 thereafter.
+
+    What this does NOT give is tamper-proof durability:
+    an agent that edits the fragment BETWEEN two validations can lower
+    ``cited`` to the surviving referent count, and the next validation will
+    agree with it. That is out of scope by construction -- the pipeline has no
+    authority such an agent cannot reach (see
+    ``_frozen_input_tamper_reason``'s own docstring), and inventing one is
+    exactly the retention machinery this fix refuses to grow.
+
+    Never mutates ``record``; always returns a NEW, schema-conformant record.
 
     ``competitors`` (#243): threaded straight through to every
     ``_evidence_failure_reason()`` call below -- see that function's own
@@ -735,9 +758,26 @@ def _coerce_record(record: dict, manifest: dict, language_config, *, competitors
                 verified_referents.append(ref)
         if len(verified_referents) < 2:
             return _downgrade("fewer_than_2_referents_byte_verified")
+        # #368: `cited` is MONOTONE -- the max of whatever is already on disk
+        # and this call's own referent count -- never a plain recount of the
+        # list this call happened to be handed. See this function's docstring.
+        # `bool` is excluded explicitly because isinstance(True, int) is true
+        # in Python. BOTH callers schema-validate before reaching here
+        # (run_validate_fragment, and run_verify_merged's own gate), so a bool
+        # cannot actually arrive today -- the guard is this file's standing
+        # idiom, kept so the branch stays correct if a caller ever reaches
+        # _coerce_record without validating first.
+        # `prior`/`prior_cited` in two steps rather than one expression: a
+        # one-liner over `(record.get(...) or {})` would silently accept a
+        # non-dict where this refuses it.
+        prior = record.get("evidence_coverage")
+        prior_cited = prior.get("cited") if isinstance(prior, dict) else None
+        cited = len(referents)
+        if isinstance(prior_cited, int) and not isinstance(prior_cited, bool):
+            cited = max(cited, prior_cited)
         new_record = dict(record)
         new_record["referents"] = verified_referents
-        new_record["evidence_coverage"] = {"cited": len(referents), "verified": len(verified_referents)}
+        new_record["evidence_coverage"] = {"cited": cited, "verified": len(verified_referents)}
         return new_record
 
     if verdict in (TRIAGE_ADVERSE, TRIAGE_PROPOSE_RESCOPE):

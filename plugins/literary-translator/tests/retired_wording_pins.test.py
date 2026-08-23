@@ -200,8 +200,21 @@ BASELINE_1_35_0 = "c6feef8e7b6eea1526f52db1cc1184b634fca3a8"
 # baselines, where it occurs zero times.
 BASELINE_PRE_1_63_0 = "e2cf120971837d3713a73a7e1f6905f01143acef"
 
+# origin/main's tip when the #368 branch was cut, and the baseline for the two
+# rows #368 retires. Same properties as the one above -- already on main as the
+# tip of a merged PR, so no merge method chosen for the #368 branch can move it
+# out of main's ancestry, and none of BASELINE_FIX_ROUND's fragility. It needs
+# to be its own baseline for the reason BASELINE_FIX_ROUND does: the claims
+# #368 retires were INTRODUCED by 1.16.2 and its own fix round, so they occur
+# zero times at BASELINE_RELEASE and would fail presence-before against it.
+# Each new frozen baseline here is a generation of one sentence being corrected
+# and the correction going stale in turn; the count is not worth stating,
+# because a concurrent release adds one without this comment noticing.
+BASELINE_LT_368 = "912eef245ba556b927e1a298b20f0086f1a3b222"
+
 PIN_BASELINES = (
     BASELINE_RELEASE, BASELINE_FIX_ROUND, BASELINE_1_35_0, BASELINE_PRE_1_63_0,
+    BASELINE_LT_368,
 )
 
 
@@ -288,9 +301,19 @@ def diff_removed_text(path: Path, baseline: str) -> str:
     return _diff_side(path, baseline, "-")
 
 
-def _diff_hunks(path: Path, baseline: str) -> list[tuple[str, str]]:
+def _diff_hunks(path: Path, baseline: str, end: str | None = None) -> list[tuple[str, str]]:
     """One (removed_text, added_text) pair per hunk of the diff between
-    `baseline` and the working tree, both sides normalized independently.
+    `baseline` and the working tree -- or, when `end` names a second frozen
+    commit, between the two frozen commits -- both sides normalized
+    independently.
+
+    `end` exists for the self-tests below, which reconstruct a HISTORICAL
+    authoring mistake rather than checking the current tree. Anchored to the
+    working tree, such a reconstruction stops being reproducible the moment a
+    later change edits the strings it narrates -- which is exactly what #368
+    did to trap 3. Anchored to a frozen pair, it describes an edit that can
+    never be un-made. Every parametrized ROW still uses the working-tree
+    default; nothing about their behaviour changes.
 
     THIS IS THE GRANULARITY `_diff_side()` DELIBERATELY DISCARDS, and the gap
     that discarding leaves open: `_diff_side()` proves a needle occurs
@@ -357,7 +380,8 @@ def _diff_hunks(path: Path, baseline: str) -> list[tuple[str, str]]:
     evidence the tie cannot bite; do not read the other direction into it
     either."""
     rel = path.relative_to(REPO_ROOT).as_posix()
-    proc = git("diff", "-U0", baseline, "--", rel)
+    refs = [baseline] if end is None else [baseline, end]
+    proc = git("diff", "-U0", *refs, "--", rel)
     assert proc.returncode == 0, f"git diff failed for {rel}: {proc.stderr.strip()}"
     pairs: list[tuple[list[str], list[str]]] = []
     removed: list[str] = []
@@ -403,10 +427,12 @@ RETIRED = [
         BASELINE_RELEASE, SKEPTIC_TEMPLATE,
         "but that coercion is idempotent, so running it // again here is always safe, "
         "never destructive",
-        "THAT NORMALIZATION IS NOT IDEMPOTENT.", 1,
-        "the claim that --validate-fragment is idempotent, which it is not: the "
-        "successful run rewrites the fragment in place, so a second run consumes "
-        "its own already-pruned output",
+        "THAT NORMALIZATION IS IDEMPOTENT AS OF #368, and it was not before.", 1,
+        "the claim that --validate-fragment was idempotent, which it was not at "
+        "the time: the successful run rewrites the fragment in place, so a second "
+        "run consumed its own already-pruned output. #368 made that true rather "
+        "than merely asserted, and the successor stored here says so; the row "
+        "that retires 1.16.2's own correction is the BASELINE_LT_368 one below",
     ),
     (
         BASELINE_RELEASE, SKEPTIC_TEMPLATE,
@@ -485,10 +511,12 @@ RETIRED = [
     (
         BASELINE_FIX_ROUND, SKEPTIC_TEMPLATE,
         "OUT of scope for #352 and is filed // separately",
-        "OUT of scope for #352, and it is NOT filed", 1,
-        "a claim that the non-idempotence defect was FILED. No issue tracks it -- "
-        "writing 'filed' about work nobody filed is the same defect class as any "
-        "other unverified claim, and no reviewer lane can see it",
+        "Fixing that non-idempotence was OUT of scope for #352; #368 filed it and fixed it.", 1,
+        "a claim that the non-idempotence defect was FILED. Nothing tracked it "
+        "when 1.16.2 shipped -- writing 'filed' about work nobody filed is the "
+        "same defect class as any other unverified claim, and no reviewer lane "
+        "can see it. #368 is the issue that eventually did track it, and the "
+        "BASELINE_LT_368 row below retires the 'NOT filed' correction in turn",
     ),
     (
         BASELINE_FIX_ROUND, GLOSSARY_TEMPLATE,
@@ -520,8 +548,28 @@ RETIRED = [
         "partial coverage shown as partial.",
         "which labels cited > verified as par", 1,
         "the claim that evidence_coverage durably records partial coverage. It "
-        "does not: --validate-fragment rewrites the fragment in place and the "
-        "second validation recomputes cited from the already-pruned list",
+        "did not when this row was written: --validate-fragment rewrites the "
+        "fragment in place and the second validation recomputed cited from the "
+        "already-pruned list. #368 made it durable, so the successor sentence "
+        "this row pins is the one that survived that change unaltered",
+    ),
+    # -- #368 (retired from BASELINE_LT_368, the tree this branch was cut from) --
+    (
+        BASELINE_LT_368, SKEPTIC_TEMPLATE,
+        "THAT NORMALIZATION IS NOT IDEMPOTENT.",
+        "THAT NORMALIZATION IS IDEMPOTENT AS OF #368, and it was not before.", 1,
+        "1.16.2's own correction, which was true when written and stopped being "
+        "true when #368 made evidence_coverage.cited monotone. A correction is "
+        "as perishable as the claim it corrected -- this is the third generation "
+        "of the same sentence, and each one needed its own baseline",
+    ),
+    (
+        BASELINE_LT_368, SKEPTIC_TEMPLATE,
+        "OUT of scope for #352, and it is NOT filed",
+        "Fixing that non-idempotence was OUT of scope for #352; #368 filed it and fixed it.", 1,
+        "the companion 'nobody filed it' claim, retired by #368 being filed and "
+        "fixed. Pinned rather than merely edited because 'no issue tracks it' is "
+        "exactly the kind of sentence that gets copied forward unread",
     ),
     # -- 1.40.0 (#529): review_TASK.template.md ------------------------
     (
@@ -906,21 +954,31 @@ IDEMPOTENCE_RETIRED_NEEDLE = normalize(
     "never destructive"
 )
 
-# The replacement this row set stored BEFORE this fix -- real text this change
+# The replacement this row set stored BEFORE this fix -- real text 1.16.2
 # added, so it passed both `_diff_side()` checks, but drawn from
 # batchDispatchPrompt()'s lines.push() call rather than from the comment that
 # actually retired the needle above. Recorded here as a literal, not read out
 # of RETIRED, because the whole point is that it no longer appears there.
+# #368 deleted this sentence from the template outright (the rationale it
+# stated stopped being true), which is why the self-test below reads a FROZEN
+# pair of commits rather than the working tree -- see its own docstring.
 HISTORICAL_CROSS_HUNK_MISPAIRING = normalize("it is not idempotent")
+
+# 1.16.2's own same-hunk replacement for IDEMPOTENCE_RETIRED_NEEDLE. Recorded
+# here as a literal for the SAME reason as the line above: #368 retired it in
+# turn, so RETIRED now stores it as a NEEDLE on BASELINE_LT_368 rather than as
+# that row's replacement, and a self-test that went looking for it among the
+# replacement fields would find nothing.
+IDEMPOTENCE_RETIRED_REPLACEMENT = normalize("THAT NORMALIZATION IS NOT IDEMPOTENT.")
 
 
 def test_a_needle_pair_bound_only_by_diff_side_can_share_no_hunk():
     """TRAP 3, measured on this file's own review round rather than invented.
 
     This row set first shipped pairing the skeptic idempotence retirement with
-    `it is not idempotent` as its replacement. That string is real text this
-    change added -- it occurs in batchDispatchPrompt()'s lines.push() call --
-    so it passed test_replacement_is_installed_and_bound_to_the_hunk_that_added_it
+    `it is not idempotent` as its replacement. That string was real text 1.16.2
+    added -- it occurred in batchDispatchPrompt()'s lines.push() call -- so it
+    passed test_replacement_is_installed_and_bound_to_the_hunk_that_added_it
     outright. It is also in a DIFFERENT hunk than the retired needle: the
     retired sentence sits in checkCommand()'s comment, several unchanged lines
     away from the dispatch prompt string it was mispaired with. Both
@@ -928,9 +986,19 @@ def test_a_needle_pair_bound_only_by_diff_side_can_share_no_hunk():
     which is exactly the gap _diff_hunks() exists to close.
 
     The comment's OWN immediate replacement, `THAT NORMALIZATION IS NOT
-    IDEMPOTENT.`, sits in the SAME hunk as the retired sentence -- and is what
-    this row set stores now."""
-    pairs = _diff_hunks(SKEPTIC_TEMPLATE, BASELINE_RELEASE)
+    IDEMPOTENT.`, sits in the SAME hunk as the retired sentence.
+
+    READ AGAINST A FROZEN PAIR OF COMMITS, not the working tree, and that is
+    the durable form. This self-test reconstructs an authoring mistake made
+    once, in 1.16.2; anchored to the working tree it stayed reproducible only
+    for as long as no later change touched the strings it narrates. #368 is
+    the change that broke that: it deleted `it is not idempotent` from the
+    template and retired `THAT NORMALIZATION IS NOT IDEMPOTENT.` in turn, so
+    every assertion below went false at once -- not because the trap stopped
+    being real, but because the demonstration had been pinned to a moving
+    end-point. BASELINE_RELEASE -> BASELINE_FIX_ROUND is the edit that
+    actually contains the mistake, and no future change can un-make it."""
+    pairs = _diff_hunks(SKEPTIC_TEMPLATE, BASELINE_RELEASE, BASELINE_FIX_ROUND)
     # Refuse an implausible case count BEFORE trusting the `any(...)` below --
     # on an EMPTY pairs list `any()` is vacuously False, which would make
     # `assert not same_hunk_historical` pass for having tested nothing rather
@@ -953,22 +1021,20 @@ def test_a_needle_pair_bound_only_by_diff_side_can_share_no_hunk():
     )
     # ...yet it is genuinely among the lines this change added, so both
     # diff-side checks alone would have let it through.
-    assert HISTORICAL_CROSS_HUNK_MISPAIRING in diff_added_text(
-        SKEPTIC_TEMPLATE, BASELINE_RELEASE
-    ), (
+    added_at_fix_round = normalize(" ".join(a for _r, a in pairs))
+    assert HISTORICAL_CROSS_HUNK_MISPAIRING in added_at_fix_round, (
         "the historical mispairing is no longer among this change's added lines "
         "at all, so it no longer demonstrates a pair that clears the diff-side "
         "checks while sharing no hunk"
     )
 
-    # The row set's actual, same-hunk replacement.
-    stored = next(
-        r for _b, p, n, r, _c, _a in RETIRED
-        if p is SKEPTIC_TEMPLATE and r is not None and "IDEMPOTENT" in r
-    )
+    # 1.16.2's actual, same-hunk replacement -- read from the module literal
+    # above rather than from RETIRED, which since #368 stores this string as a
+    # NEEDLE on BASELINE_LT_368 instead of as this row's replacement.
     assert any(
-        IDEMPOTENCE_RETIRED_NEEDLE in rem and normalize(stored) in add for rem, add in pairs
-    ), "the row set's stored replacement no longer shares a hunk with the retired needle"
+        IDEMPOTENCE_RETIRED_NEEDLE in rem and IDEMPOTENCE_RETIRED_REPLACEMENT in add
+        for rem, add in pairs
+    ), "1.16.2's replacement no longer shares a hunk with the retired needle"
 
 
 @pytest.mark.parametrize("kept", ["always safe", "never destructive"])

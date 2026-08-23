@@ -459,6 +459,198 @@ def test_validate_fragment_propose_split_survives_with_partial_referent_coverage
 
 
 # ---------------------------------------------------------------------------
+# #368: evidence_coverage.cited is DURABLE across repeated validation.
+#
+# --validate-fragment rewrites the fragment in place, and the shipped workflow
+# runs it at least twice on the ordinary path (codex's own self-check, then the
+# wait poll). Before #368 the second run recomputed `cited` from the
+# ALREADY-PRUNED referent list, so an honest "3 offered, 2 verified" silently
+# became "2 offered, 2 verified" and the only human-visible trace that a
+# citation had been rejected -- skeptic_report.py's `(partial)` label -- was
+# gone. Measured before the fix, three consecutive runs over one fragment:
+# {'cited': 3, 'verified': 2} -> {'cited': 2, 'verified': 2} -> {'cited': 2,
+# 'verified': 2}, with `coerced` 0 throughout because the VERDICT never moved.
+#
+# `cited` is now MONOTONE: max(the value already on disk, this call's referent
+# count). The first four tests below were each watched RED against that old
+# behaviour; the last two were GREEN before the fix as well and are labelled
+# as characterization, not as regressions.
+#
+# Every one of them drives the SHIPPED writer, run_validate_fragment(), over a
+# real on-disk fragment -- never _coerce_record() in isolation -- because it is
+# the in-place rewrite that makes the second call see its own output.
+# ---------------------------------------------------------------------------
+
+def _partial_split_fixture(tmp_path, *, referent_count=3, bad_referents=1):
+    """A propose_split fragment on disk whose LAST `bad_referents` referents
+    cite a span shifted one character off the real production occurrence, so
+    they cannot byte-verify. Returns (fragment_path, manifest_path,
+    particle_config, languages_dir)."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = " and ".join(["Jean"] * referent_count) + " met at the market."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    referents = []
+    for i in range(referent_count):
+        ev = dict(evidence_for("Jean", block_id, "seg01", text, lang, index=i))
+        if i >= referent_count - bad_referents:
+            ev["char_start"] += 1
+            ev["char_end"] += 1  # shifted off the real production span
+        referents.append({"disambiguator": f"Jean {i}", "evidence": ev})
+
+    frag_path = tmp_path / "triage_0.json"
+    write_json(frag_path, {
+        "schema_version": 1, "run_id": "run-1",
+        "records": [propose_split_record("Jean", referents)],
+    })
+    return frag_path, manifest_path, particle_config, lang_dir
+
+
+def _coverage_on_disk(frag_path):
+    return json.loads(frag_path.read_text(encoding="utf-8"))["records"][0]["evidence_coverage"]
+
+
+def test_validate_fragment_second_run_preserves_partial_coverage(tmp_path):
+    """#368, the defect itself. The FIRST run prunes 3 referents to 2 and
+    records {3, 2}; the SECOND run is handed the pruned list and must NOT
+    recompute `cited` down to 2. Watched RED before the fix, where run 2
+    wrote {'cited': 2, 'verified': 2} -- a partial coverage silently
+    rewritten as complete."""
+    frag_path, manifest_path, pc, lang_dir = _partial_split_fixture(tmp_path)
+
+    first = sr.run_validate_fragment(frag_path, manifest_path, pc, languages_dir=lang_dir)
+    assert first["coerced"] == 0
+    assert _coverage_on_disk(frag_path) == {"cited": 3, "verified": 2}
+
+    second = sr.run_validate_fragment(frag_path, manifest_path, pc, languages_dir=lang_dir)
+    assert second["coerced"] == 0
+    assert _coverage_on_disk(frag_path) == {"cited": 3, "verified": 2}, (
+        "the second validation recomputed `cited` from the already-pruned "
+        "referent list -- the #368 defect"
+    )
+
+
+def test_validate_fragment_is_idempotent_bytes(tmp_path):
+    """The stronger form of the same claim, and the one that also covers the
+    referent list and `notes`: under unchanged verifier inputs the second run
+    writes a BYTE-IDENTICAL document. Watched RED before the fix (the two
+    documents differed in `evidence_coverage.cited`)."""
+    frag_path, manifest_path, pc, lang_dir = _partial_split_fixture(tmp_path)
+
+    sr.run_validate_fragment(frag_path, manifest_path, pc, languages_dir=lang_dir)
+    after_first = frag_path.read_bytes()
+
+    sr.run_validate_fragment(frag_path, manifest_path, pc, languages_dir=lang_dir)
+    assert frag_path.read_bytes() == after_first, (
+        "a second --validate-fragment over an already-normalized fragment is "
+        "not a no-op on disk"
+    )
+
+
+def test_evidence_coverage_cited_never_shrinks_on_further_pruning(tmp_path):
+    """`cited` is the count ORIGINALLY offered -- a high-water mark ACROSS
+    calls, never a recount of the list one call happened to receive. A fragment that starts at 4 referents with 1 unverifiable,
+    then loses a second referent on a later validation, must read {4, 2} --
+    4 offered against 2 that still verify. Watched RED before the fix, which
+    reported {3, 2}: the count of what happened to be on disk at that call."""
+    frag_path, manifest_path, pc, lang_dir = _partial_split_fixture(
+        tmp_path, referent_count=4, bad_referents=1
+    )
+    sr.run_validate_fragment(frag_path, manifest_path, pc, languages_dir=lang_dir)
+    assert _coverage_on_disk(frag_path) == {"cited": 4, "verified": 3}
+
+    # A survivor stops verifying before the next validation -- the same shape
+    # a moved manifest, a new #243 fold collision, or a meddling agent
+    # produces. Only the citation moves; the referent stays present.
+    doc = json.loads(frag_path.read_text(encoding="utf-8"))
+    doc["records"][0]["referents"][0]["evidence"]["char_start"] += 1
+    doc["records"][0]["referents"][0]["evidence"]["char_end"] += 1
+    write_json(frag_path, doc)
+
+    sr.run_validate_fragment(frag_path, manifest_path, pc, languages_dir=lang_dir)
+    assert _coverage_on_disk(frag_path) == {"cited": 4, "verified": 2}
+
+
+def test_evidence_coverage_inflated_prior_cited_is_kept_partial(tmp_path):
+    """THE COUNTEREXAMPLE FOR THE TRADE-OFF, pinned so a later "tighten it"
+    change has to argue with a test rather than with a comment.
+
+    Taking the max means trusting a number the fragment's own author wrote.
+    The direction of that trust is deliberate and one-way: an inflated `cited`
+    can only make the record read MORE partial (`2/9 verified (partial)`),
+    never complete, and skeptic_report.py already bounds an oversized label.
+    Watched RED before the fix, which overwrote the inflated value with
+    {2, 2} -- i.e. turned a suspicious record into a clean-looking one."""
+    frag_path, manifest_path, pc, lang_dir = _partial_split_fixture(
+        tmp_path, referent_count=2, bad_referents=0
+    )
+    doc = json.loads(frag_path.read_text(encoding="utf-8"))
+    doc["records"][0]["evidence_coverage"] = {"cited": 9, "verified": 9}
+    write_json(frag_path, doc)
+
+    sr.run_validate_fragment(frag_path, manifest_path, pc, languages_dir=lang_dir)
+    rec = json.loads(frag_path.read_text(encoding="utf-8"))["records"][0]
+    assert rec["verdict"] == "propose_split"
+    assert rec["evidence_coverage"] == {"cited": 9, "verified": 2}
+
+
+def test_evidence_coverage_prior_cited_below_actual_is_ignored(tmp_path):
+    """CHARACTERIZATION -- green before #368 as well as after, and recorded as
+    such rather than dressed up as a regression. The max is one-directional:
+    a prior BELOW this call's referent count can never pull `cited` down, so a
+    deflated value is simply overridden. What it cannot do is recover a value
+    an agent deflated AFTER a validation already pruned the list -- see the
+    #368 non-goal in _coerce_record's own docstring."""
+    frag_path, manifest_path, pc, lang_dir = _partial_split_fixture(
+        tmp_path, referent_count=3, bad_referents=0
+    )
+    doc = json.loads(frag_path.read_text(encoding="utf-8"))
+    doc["records"][0]["evidence_coverage"] = {"cited": 0, "verified": 0}
+    write_json(frag_path, doc)
+
+    sr.run_validate_fragment(frag_path, manifest_path, pc, languages_dir=lang_dir)
+    assert _coverage_on_disk(frag_path) == {"cited": 3, "verified": 3}
+
+
+def test_downgraded_record_second_run_does_not_reappend_its_note(tmp_path):
+    """CHARACTERIZATION -- green before #368 as well. It pins the OTHER half of
+    the idempotence claim the fix now makes in prose: a record coerced down to
+    insufficient_window keeps exactly ONE
+    `skeptic_ready:coerced_insufficient_window:` note however many times the
+    fragment is re-validated, because the second call takes the
+    insufficient_window branch and returns a copy without re-appending."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = "Jean met Paul at the market."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+    bad = dict(evidence_for("Jean", block_id, "seg01", text, lang))
+    bad["char_start"] += 1
+    bad["char_end"] += 1
+    frag_path = tmp_path / "triage_0.json"
+    write_json(frag_path, {
+        "schema_version": 1, "run_id": "run-1",
+        "records": [adverse_record("Jean", bad)],
+    })
+
+    first = sr.run_validate_fragment(frag_path, manifest_path, particle_config, languages_dir=lang_dir)
+    assert first["coerced"] == 1
+    after_first = frag_path.read_bytes()
+    notes = json.loads(after_first)["records"][0]["notes"]
+    assert sum(1 for n in notes if n.startswith("skeptic_ready:coerced_insufficient_window:")) == 1
+
+    second = sr.run_validate_fragment(frag_path, manifest_path, particle_config, languages_dir=lang_dir)
+    assert second["coerced"] == 0
+    assert frag_path.read_bytes() == after_first
+
+
+# ---------------------------------------------------------------------------
 # --merge-fragments
 # ---------------------------------------------------------------------------
 
