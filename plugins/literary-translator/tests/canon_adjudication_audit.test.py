@@ -2696,10 +2696,12 @@ def test_sample_adjudications_file_validates_against_schema(tmp_path):
 
 
 def item_line(proc, key):
-    """The ONE stderr line the item list printed for `key`. Asserting exactly
-    one match is also what proves a display field never SPLIT the line:
-    str.splitlines() breaks on U+2028/U+0085, so a raw one carried in from a
-    review_queue note would strand the rest of the identity on a second line."""
+    """The ONE stderr line the item list printed for `key`. Uniqueness is all
+    this asserts: a raw U+2028 in a display field WOULD split the line (str.
+    splitlines() breaks on it), and the fragment carrying the key would still
+    be the only match -- so the no-split property is pinned by the escaping
+    test's own assertions below (the literal escape present, the raw code
+    point absent, the post-U+2028 tail on this same line), never here."""
     lines = [ln for ln in proc.stderr.splitlines() if key in ln]
     assert len(lines) == 1, (
         f"expected exactly one stderr line carrying {key!r}, got {len(lines)}:\n{proc.stderr}"
