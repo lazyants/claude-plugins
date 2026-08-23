@@ -442,12 +442,16 @@ and atomically promotes it.
    `review-artifact-mismatch`, `fix-call-failed`, `ledger-write-failed`,
    `ledger-merge-failed`) `detail` describes what the call actually
    returned, capped and collapsed to one line by `flattenDetail()`
-   (`DETAIL_CAP = 160`) — the single chokepoint every detail source runs
-   through: the agent reply via `replyDetail()`, the artifact check's
-   `mismatch_detail`, the relayed ledger/merge `error`, and the
-   `ledger-write-mismatch` string; `sourcedDetail()` re-flattens so a
-   source label counts against the same budget rather than being appended
-   past it. Two reasons read differently: `review-fabricated-loc`'s
+   (`DETAIL_CAP = 160`) — the chokepoint every MODEL-AUTHORED or otherwise
+   dynamic detail runs through: the agent reply via `replyDetail()`, the
+   artifact check's `mismatch_detail`, the relayed ledger/merge `error`,
+   and the `ledger-write-mismatch` string; `sourcedDetail()` re-flattens so
+   a source label counts against the same budget rather than being
+   appended past it. (The fixed fallback constants — `replyDetail()`'s own
+   three, `FABRICATED_LOC_DETAIL`, `PROBE_NULL_DETAIL`, and the two
+   ledger/merge "did not report success" strings — are short, single-line
+   by construction and never reach `flattenDetail()`.) Two reasons read
+   differently: `review-fabricated-loc`'s
    `detail` is the fixed `FABRICATED_LOC_DETAIL` constant naming the shape
    defect, never a returned reply, and `draft-missing`/`cap` carry no
    `detail` at all. A `source:` prefix (`review dispatch`, `translate

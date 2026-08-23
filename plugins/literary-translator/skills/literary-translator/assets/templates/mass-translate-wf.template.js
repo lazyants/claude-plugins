@@ -650,8 +650,9 @@ const DETAIL_CAP = 160;
 // line breaks into the log.
 const DETAIL_BREAKS = /[\n\r\t\v\f\u0085\u2028\u2029]+/g;
 
-// EVERY string that reaches a detail goes through here, not just an agent's
-// raw reply: a schema-validated field is still model-authored text under no
+// Every MODEL-AUTHORED or otherwise dynamic string that reaches a detail goes
+// through here, not just an agent's raw reply (the handful of fixed fallback
+// constants below are short and single-line by construction and do not): a schema-validated field is still model-authored text under no
 // length or charset restriction, so a mismatch_detail or a relayed script
 // error copied verbatim would carry its own line breaks straight into the
 // operator log and blow the cap that this file promises.
@@ -1757,8 +1758,13 @@ async function recordLedgerCall(seg, fields, label) {
     // error field, and the operator reads a script failure that never
     // happened. Only the falsy case is re-routed; a truthy-but-rejected
     // object keeps the constant.
-    const detail = raw && typeof raw.error === "string"
-      ? flattenDetail(raw.error)
+    // A flattened-empty error is not an error message -- the schema accepts any
+    // string, so a whitespace-only one would otherwise become detail:"" and
+    // form an empty bucket in the batch tally. Same guard the artifact-check
+    // site already applies.
+    const relayed = raw && typeof raw.error === "string" ? flattenDetail(raw.error) : "";
+    const detail = relayed !== ""
+      ? relayed
       : (raw ? "ledger_update.py write did not report success" : replyDetail(raw));
     return {
       ok: false,
@@ -2590,8 +2596,10 @@ if (!ledgerMergeSucceeded(mergeResult)) {
   // #400 -- same asymmetry as recordLedgerCall: the constant is accurate when
   // ledger_merge.py ANSWERED and was rejected, and false when the call itself
   // died. Only the falsy case is re-routed.
-  const detail = mergeResult && typeof mergeResult.error === "string"
-    ? flattenDetail(mergeResult.error)
+  const relayedMergeError = mergeResult && typeof mergeResult.error === "string"
+    ? flattenDetail(mergeResult.error) : "";
+  const detail = relayedMergeError !== ""
+    ? relayedMergeError
     : (mergeResult ? "ledger_merge.py completeness check did not report success" : replyDetail(mergeResult));
   log("Ledger merge/completeness check failed: " + detail);
   return {

@@ -2246,6 +2246,58 @@ def test_ledger_merge_error_detail_is_flattened_and_capped(tmp_path):
     assert out["result"]["detail"] == EXPECTED_FLATTENED_LEDGER_ERROR
 
 
+# Round 2 of the same #400 review: a schema-accepted but WHITESPACE-ONLY
+# `error` string flattens to "" (DETAIL_BREAKS only matches break characters,
+# never plain spaces, but a break collapses to one space and the surrounding
+# spaces then vanish under flattenDetail()'s own trim()) -- which used to
+# become detail:"" and form an empty-string bucket in the batch tally. Both
+# ledger sites now compute the flattened relayed error first and fall back to
+# the existing WRITE_FAILED_DEFAULT_DETAIL/MERGE_FAILED_DEFAULT_DETAIL
+# constant when it comes back empty, the same non-empty guard the
+# artifact-check site already carried. Built with chr(), never pasted glyphs:
+# space, tab, LF, tab, space -- whitespace-only, and the tab-LF-tab run is
+# one contiguous break-character sequence, not merely spaces.
+WHITESPACE_ONLY_ERROR = chr(0x20) + chr(0x09) + chr(0x0A) + chr(0x09) + chr(0x20)
+
+
+def test_ledger_write_whitespace_only_error_falls_back_to_the_constant(tmp_path):
+    """TWO segments share the identical whitespace-only error so the "no
+    empty-string bucket" property is pinned through the tally, not just the
+    per-row detail. RED before this fix against a mutant that drops the
+    `relayed !== ""` guard in recordLedgerCall (reverted to using
+    `flattenDetail(raw.error)` directly, unconditionally): the detail comes
+    back as "" on both rows, and failureDetailTally reports a bucket of
+    {"detail": "", "count": 2} instead of the constant, failing the
+    assertions below."""
+    overrides = {}
+    for seg in ("seg01", "seg02"):
+        overrides[f"ledger:converged:{seg}"] = {"success": False, "error": WHITESPACE_ONLY_ERROR}
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "ledger-write-failed", "detail": WRITE_FAILED_DEFAULT_DETAIL},
+        {"seg": "seg02", "converged": False, "reason": "ledger-write-failed", "detail": WRITE_FAILED_DEFAULT_DETAIL},
+    ]
+    assert out["result"]["failureDetailTally"] == [{"detail": WRITE_FAILED_DEFAULT_DETAIL, "count": 2}]
+
+
+def test_ledger_merge_whitespace_only_error_falls_back_to_the_constant(tmp_path):
+    """The merge-ledger twin -- single batch-level call, so just the
+    top-level `detail` field. RED before this fix against a mutant that
+    drops the equivalent `relayedMergeError !== ""` guard: detail comes back
+    as "" instead of MERGE_FAILED_DEFAULT_DETAIL, failing the assertion
+    below."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={
+        "merge-ledger": {"success": False, "error": WHITESPACE_ONLY_ERROR},
+    })
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["batchComplete"] is False
+    assert out["result"]["reason"] == "ledger-merge-failed"
+    assert out["result"]["detail"] == MERGE_FAILED_DEFAULT_DETAIL
+
+
 # A fix reply long enough that replyDetail() alone already caps it at
 # DETAIL_CAP (160): naively appending "fix call: " (10 chars) on top would
 # land at 170, over budget. Confirmed against the real template: the
