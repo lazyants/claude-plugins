@@ -2,32 +2,35 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "canon-correction.schema.json",
   "title": "Canon Correction",
-  "description": "ONE out-of-band, adjudicated correction to an ALREADY-FROZEN canon.json entries{} record, submitted to canon_validate.py --correct as a whole JSON document and appended verbatim to canon.json's corrections[] once applied (#495). The same shape is both the request and the record, deliberately: two shapes for one decision drift apart, and the record's whole job is to let the next operator see what was adjudicated. This is NOT a relaxed merge -- an ordinary --merge-batches item carrying a differing resolution for a frozen source_form still collides and still raises; correction is a separate, explicitly-named route. old_entry is a REQUIRED interlock, not documentation: --correct refuses, naming both values, when it does not equal what is on disk, so the mode cannot be used blind against a canon.json that moved since it was read. disposition:\"correct\" replaces the record under the same source_form key (new_entry required, and its own source_form field must equal that key); disposition:\"remove\" deletes it (new_entry forbidden) -- removal is the sanctioned repair for an entry that should never have existed, and the only route to clear canon_adjudication_audit.py's BLOCKING collapsed_split, which no substituted bare entry can satisfy. A key RENAME is a remove followed by an ordinary --merge-batches under the new key, never a third disposition.",
+  "description": "ONE out-of-band, adjudicated correction to canon.json, submitted to canon_validate.py --correct as a whole JSON document and appended verbatim to canon.json's corrections[] once applied (#495; disposition:\"dismiss\" added by #653). The same shape is both the request and the record, deliberately: two shapes for one decision drift apart, and the record's whole job is to let the next operator see what was adjudicated. This is NOT a relaxed merge -- an ordinary --merge-batches item carrying a differing resolution for a frozen source_form still collides and still raises; correction is a separate, explicitly-named route. Three dispositions, over two disjoint targets. disposition:\"correct\" replaces an ALREADY-FROZEN entries{} record under the same source_form key (old_entry and new_entry required, and new_entry's own source_form field must equal that key); disposition:\"remove\" deletes that frozen record (old_entry required, new_entry forbidden) -- removal is the sanctioned repair for an entry that should never have existed, and the only route to clear canon_adjudication_audit.py's BLOCKING collapsed_split, which no substituted bare entry can satisfy. For both, old_entry is a REQUIRED interlock, not documentation: --correct refuses, naming both values, when it does not equal what is on disk, so the mode cannot be used blind against a canon.json that moved since it was read. disposition:\"dismiss\" drops one review_queue[] row instead (old_item required, old_entry and new_entry forbidden) -- the human record that a queued candidate was looked at and judged not canon-worthy; entries{} is left untouched. old_item carries the SAME blind-use interlock as old_entry, scoped to a queue row: the stated row must equal what is on disk, attributable to this document's own source_form, or the call is refused naming both. A key RENAME in entries{} is a remove followed by an ordinary --merge-batches under the new key, never accomplished by a single correction document.",
   "type": "object",
   "properties": {
     "source_form": {
       "type": "string",
       "minLength": 1,
-      "description": "The entries{} key being corrected. Must already be present -- a correction never inserts blind; adding a new name is --merge-batches' job."
+      "description": "The entries{} key being corrected (disposition:\"correct\"/\"remove\"), or the review_queue[] row's own source_form being dismissed (disposition:\"dismiss\"). Must already be present in the collection the disposition targets -- a correction never inserts blind; adding a new name is --merge-batches' job. For dismiss this is enforced via old_item's attribution (see canon_validate.py's run_correct), not via entries{} membership: a dismissed form need not be, and often is not, an entries{} key at all."
     },
     "disposition": {
       "type": "string",
-      "enum": ["correct", "remove"]
+      "enum": ["correct", "remove", "dismiss"]
     },
     "old_entry": {
-      "description": "The value the caller states is CURRENTLY on disk under source_form. The blind-use interlock: --correct refuses, naming both, when this does not match. UNCONSTRAINED -- not a $ref to canon-entry.schema.json, and not even `type: object` -- and the asymmetry with new_entry is the point. old_entry's job is EQUALITY against what is on disk, not shape, and the value most in need of correcting is the one that fails its own schema. A hand-edited canon.json (the only repair route that existed before this mode) can put ANY JSON value under an entries{} key -- `_load_canon` type-checks `entries` itself but never its values -- and --validate-only exists to find exactly that. Constraining this field at all would leave those rows with no route but the hand edit this mode replaces: `type: object` alone already refused a string, an array or a null, so a malformed row could be diagnosed and not repaired. new_entry IS $ref-validated, because it becomes the frozen record."
+      "description": "The value the caller states is CURRENTLY on disk under source_form's entries{} record. Required for disposition:\"correct\"/\"remove\", forbidden for disposition:\"dismiss\" (which has its own interlock field, old_item). The blind-use interlock: --correct refuses, naming both, when this does not match. UNCONSTRAINED -- not a $ref to canon-entry.schema.json, and not even `type: object` -- and the asymmetry with new_entry is the point. old_entry's job is EQUALITY against what is on disk, not shape, and the value most in need of correcting is the one that fails its own schema. A hand-edited canon.json (the only repair route that existed before this mode) can put ANY JSON value under an entries{} key -- `_load_canon` type-checks `entries` itself but never its values -- and --validate-only exists to find exactly that. Constraining this field at all would leave those rows with no route but the hand edit this mode replaces: `type: object` alone already refused a string, an array or a null, so a malformed row could be diagnosed and not repaired. new_entry IS $ref-validated, because it becomes the frozen record."
+    },
+    "old_item": {
+      "description": "disposition:\"dismiss\" only: the value the caller states is CURRENTLY on disk as ONE row of canon.json's review_queue[] -- old_entry's analogue, scoped to a queue row rather than an entries{} record. The blind-use interlock: --correct refuses, naming both, when no row attributable to source_form equals this exactly. UNCONSTRAINED here, like old_entry and for the same reason: a row malformed in every OTHER respect must still be dismissible, and canon_validate.py's own `_attributable_to` (run_correct's dismiss branch) is the ACTUAL check -- it already refuses every shape a schema-level constraint could (a mapping naming some other source_form or missing it, a list, a number, a boolean, null), and refuses MORE (an empty string can never equal a non-empty source_form). A schema-level `oneOf` constraint here was tried and removed (#653 code review): it was strictly weaker than `_attributable_to`, and it produced a FALSE error message on rejection -- jsonschema's oneOf formatter is written for canon-batch's disposition-discriminated union, and neither old_item branch carries a disposition const, so the message came back claiming the disposition was absent or unrecognized, which was never true. A wrong-shape old_item is refused at RUNTIME instead, by the code that actually owns the rule, naming both values."
     },
     "new_entry": {
       "$ref": "canon-entry.schema.json",
-      "description": "The corrected record. Required for disposition:\"correct\", forbidden for disposition:\"remove\"."
+      "description": "The corrected record. Required for disposition:\"correct\", forbidden for disposition:\"remove\" and disposition:\"dismiss\"."
     },
     "reason": {
       "type": "string",
       "pattern": "\\S",
-      "description": "Why this frozen decision was wrong, in the corrector's own words. Required and non-blank -- an unexplained diff is the thing #495 exists to stop -- but deliberately NOT length-capped: canon-entry.schema.json's own `note` is unbounded and rides in the same document via new_entry, so a cap here would bound one field while leaving the record's total size exactly as open as every other operator-authored free text in canon.json. Same convention as `note`, no special pleading."
+      "description": "Why this correction is being made, in the corrector's own words -- for disposition:\"correct\"/\"remove\", why the frozen decision was wrong; for disposition:\"dismiss\", why the queued candidate is judged not canon-worthy. Required and non-blank -- an unexplained diff is the thing #495 exists to stop -- but deliberately NOT length-capped: canon-entry.schema.json's own `note` is unbounded and rides in the same document via new_entry, so a cap here would bound one field while leaving the record's total size exactly as open as every other operator-authored free text in canon.json. Same convention as `note`, no special pleading."
     }
   },
-  "required": ["source_form", "disposition", "old_entry", "reason"],
+  "required": ["source_form", "disposition", "reason"],
   "additionalProperties": false,
   "allOf": [
     {
@@ -38,7 +41,10 @@
         }
       },
       "then": {
-        "required": ["new_entry"]
+        "required": ["old_entry", "new_entry"],
+        "properties": {
+          "old_item": false
+        }
       }
     },
     {
@@ -49,7 +55,24 @@
         }
       },
       "then": {
+        "required": ["old_entry"],
         "properties": {
+          "new_entry": false,
+          "old_item": false
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["disposition"],
+        "properties": {
+          "disposition": { "const": "dismiss" }
+        }
+      },
+      "then": {
+        "required": ["old_item"],
+        "properties": {
+          "old_entry": false,
           "new_entry": false
         }
       }

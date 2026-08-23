@@ -32,6 +32,29 @@ Selection, per candidate, in this exact precedence order:
         request" retry path). A --retry name present in NEITHER
         name_candidates.json NOR review_queue fails loudly (a stale retry
         name from an earlier book must not be silently swallowed).
+      - Excluded if `name` was DISMISSED via `canon_validate.py --correct
+        disposition:"dismiss"` (#653) -- tracked separately from
+        review_queue, because a dismissal's whole job is to DROP the queue
+        row, so keying the exclusion on review_queue[] alone would make the
+        dismissal undo itself on the very next W3 sweep (the name is still
+        in the source text, so it reappears in name_candidates.json). The
+        dismissal survives instead in canon.json's `corrections[]`: `name`
+        is excluded whenever ANY corrections[] document for it carries
+        disposition:"dismiss" -- UNLESS overridden by --retry, exactly like
+        the review_queue case (that flag IS the "operator says so" #653
+        requires for automated re-research). Deliberately NOT "most recent
+        document wins": `dismiss` adjudicates review_queue[] and
+        `correct`/`remove` adjudicate the disjoint entries{}, so a LATER,
+        unrelated entries{}-side correction sharing the same source_form
+        (an operator --retries the name, it gets researched and merged into
+        entries{}, and is later `remove`d for some other reason entirely)
+        must never silently revoke the earlier review_queue{}-side dismiss
+        decision -- that would reopen a dismissed name to automated
+        re-research with no operator saying so, exactly what #653 forbids.
+        --RETRY IS THE SOLE REOPENING MECHANISM for a dismissed name: no
+        combination of subsequent corrections[] documents (of ANY
+        disposition, on ANY source_form) ever lifts a dismissal on its own
+        -- only this run's --retry flag does, and only for this run.
       - Excluded, UNCONDITIONALLY (never overridable by --retry), if
         `name`'s normalized form (canon_senses.py's shared `normalize_form`,
         via its `is_split` predicate) is an adjudicated homonym split
@@ -217,19 +240,20 @@ def normalize_rows(candidates, path: Path):
 
 
 def load_canon(path: Path, explicit: bool):
-    """Return (entry_keys, queued_source_forms) as two sets. A missing
-    canon.json at the SELF-ANCHORED default is a legitimate first-glossary-run
-    state (no prior entries/queue) -> two empty sets. A missing canon.json at
-    an EXPLICIT --canon path is a caller error -> fail loudly (silently
-    skipping exclusion is exactly the #101 bug this script exists to fix)."""
+    """Return (entry_keys, queued_source_forms, dismissed_source_forms) as
+    three sets. A missing canon.json at the SELF-ANCHORED default is a
+    legitimate first-glossary-run state (no prior entries/queue/corrections)
+    -> three empty sets. A missing canon.json at an EXPLICIT --canon path is a
+    caller error -> fail loudly (silently skipping exclusion is exactly the
+    #101 bug this script exists to fix)."""
     if not path.is_file():
         if explicit:
             fail(f"--canon path not found: {path}")
         sys.stderr.write(
             f"note: no canon.json at {path} -- treating as empty "
-            "(no prior entries{}/review_queue to exclude).\n"
+            "(no prior entries{}/review_queue/corrections to exclude).\n"
         )
-        return set(), set()
+        return set(), set(), set()
     canon = read_json_object(path, "canon.json")
 
     entries = canon.get("entries", {})
@@ -238,6 +262,12 @@ def load_canon(path: Path, explicit: bool):
     review_queue = canon.get("review_queue", [])
     if not isinstance(review_queue, list):
         fail(f"canon.json at {path} has a non-array 'review_queue'.")
+    # OPTIONAL: absent from every canon.json written before #495/#653 --
+    # absence must stay valid and mean "no corrections yet", same convention
+    # as `entries`/`review_queue` defaulting to {}/[] above.
+    corrections = canon.get("corrections", [])
+    if not isinstance(corrections, list):
+        fail(f"canon.json at {path} has a non-array 'corrections'.")
 
     entry_keys = set(entries.keys())
     queued = set()
@@ -246,7 +276,36 @@ def load_canon(path: Path, explicit: bool):
             source_form = item.get("source_form")
             if isinstance(source_form, str) and source_form:
                 queued.add(source_form)
-    return entry_keys, queued
+
+    # #653: a dismissal's whole point is to DROP the review_queue row, so the
+    # exclusion has to survive somewhere else or it undoes itself on the next
+    # W3 sweep. A name is dismissed iff ANY corrections[] document for it
+    # carries disposition:"dismiss" -- deliberately NOT "most recent document
+    # for this source_form wins". `dismiss` adjudicates review_queue[];
+    # `correct`/`remove` adjudicate the disjoint entries{}. A "most recent
+    # wins" rule would let a LATER, unrelated entries{}-side correction that
+    # happens to share the same source_form (the name gets --retry'd,
+    # researched, merged into entries{}, and is later `remove`d for some
+    # other reason entirely) silently REVOKE the earlier review_queue{}-side
+    # dismiss decision -- reopening a dismissed name to automated
+    # re-research with no operator saying so, exactly what #653 forbids
+    # (review-loop MAJOR: reachable through four ordinary sanctioned moves,
+    # not a hand-edited file). --RETRY IS THE SOLE REOPENING MECHANISM: no
+    # later corrections[] document, of any disposition, ever lifts a
+    # dismissal on its own -- only --retry does, and only for that one run.
+    # Malformed items are skipped exactly like the review_queue loop above,
+    # never fatal (a hand-edited log with one bad row must not block every
+    # other row's exclusion).
+    dismissed = set()
+    for item in corrections:
+        if not isinstance(item, dict):
+            continue
+        if item.get("disposition") != "dismiss":
+            continue
+        source_form = item.get("source_form")
+        if isinstance(source_form, str) and source_form:
+            dismissed.add(source_form)
+    return entry_keys, queued, dismissed
 
 
 def load_senses_sidecar(path: Path, explicit: bool):
@@ -288,9 +347,13 @@ def _int_field(row, key: str) -> int:
     return value
 
 
-def select_included(rows, entry_keys, queued, retry, min_freq, senses):
+def select_included(rows, entry_keys, queued, dismissed, retry, min_freq, senses):
     """Apply the two-step precedence and return the ordered list of included
     candidate rows (input order preserved). Pure -- no I/O.
+
+    `dismissed` (#653) is a SEPARATE set from `queued` -- not folded together
+    -- so diagnostics can tell an operator which of the two exclusions a name
+    hit. Both are lifted by --retry identically.
 
     `senses` is the `SensesResult` from `canon_senses.load_senses` (possibly
     empty). A row whose normalized `name` is an adjudicated split there is
@@ -303,6 +366,8 @@ def select_included(rows, entry_keys, queued, retry, min_freq, senses):
         if name in entry_keys:
             continue
         if name in queued and name not in retry:
+            continue
+        if name in dismissed and name not in retry:
             continue
         if is_split(senses, name):
             continue
@@ -414,35 +479,95 @@ def build_result(batches):
 
 
 def emit_retry_diagnostics(
-    retry, included_names, rows, candidate_names, entry_keys, min_freq, senses
+    retry, included_names, rows, candidate_names, entry_keys, queued, dismissed,
+    min_freq, senses,
 ):
     """Non-fatal stderr diagnostics (never touches stdout or the exit code): a
     --retry name that cleared the neither-input fatal guard but STILL resolved
     to no dispatched candidate is surfaced with the reason it was not
     dispatched -- never silently swallowed, which would undercut #101's
     explicit-human-retry intent. The fatal neither-input guard stays separate
-    and unchanged (that case never reaches here)."""
+    and unchanged (that case never reaches here).
+
+    Branch order: `entry_keys` is checked FIRST, ahead of candidate-name
+    absence (#653 bot review P2, PR #703). A name can legitimately be BOTH
+    a resolved entries{} key AND carry a `dismiss` document in
+    corrections[] -- the sanctioned dismiss -> --retry -> accepted-merge
+    sequence produces exactly that overlap (see the regression test driving
+    it end to end). If candidate-name absence were checked first, such a
+    name -- absent from a re-extracted name_candidates.json -- would get
+    the (a2) dismissal note below, which says "the source may have been
+    re-extracted since it was dismissed" and thereby implies a future
+    re-extraction would let --retry dispatch it. That is FALSE: step (1)
+    excludes a resolved entries{} key UNCONDITIONALLY and --retry never
+    overrides that exclusion, so the accurate entries{} note (this branch)
+    would be unreachable for that name. Checking `entry_keys` first makes
+    it reachable; candidate-name absence and `is_split` keep their existing
+    relative order below it, unchanged.
+
+    `dismissed` (#653) gets its OWN note distinct from the queued case
+    inside the candidate-absence branch: a dismissed name's review_queue
+    row is gone by design (that is what dismissal means), so telling the
+    operator it "is in canon.json's review_queue" would be false for it.
+    `queued` is checked FIRST there -- a name dismissed and then RE-QUEUED
+    (D8) is, at that point, literally back in review_queue, so that message
+    stays the accurate one; the dismissal note is for the ordinary case
+    where the row is gone and nothing replaced it."""
     if not retry:
         return
     row_by_name = {row["name"]: row for row in rows}
     for name in sorted(retry):
         if name in included_names:
             continue
-        if name not in candidate_names:
-            # (a) queued (so it cleared the fatal guard) but no candidate row.
-            sys.stderr.write(
-                f"note: --retry name {name!r} is in canon.json's review_queue but "
-                "not among the current name_candidates.json candidates -- nothing "
-                "to dispatch for it (the source may have been re-extracted since "
-                "it was queued).\n"
-            )
-        elif name in entry_keys:
-            # Already-resolved: retry overrides only the review_queue exclusion.
+        if name in entry_keys:
+            # Already-resolved: retry overrides only the review_queue
+            # exclusion. Checked BEFORE candidate-name absence (#653 bot
+            # review P2) -- see the docstring's ordering paragraph.
             sys.stderr.write(
                 f"note: --retry name {name!r} is already resolved in canon.json's "
                 "entries{} -- retry overrides only the review_queue exclusion, "
                 "never a resolved entry, so nothing is dispatched for it.\n"
             )
+        elif name not in candidate_names:
+            # (a) queued or dismissed (so it cleared the fatal guard) but no
+            # candidate row.
+            if name in queued:
+                sys.stderr.write(
+                    f"note: --retry name {name!r} is in canon.json's review_queue but "
+                    "not among the current name_candidates.json candidates -- nothing "
+                    "to dispatch for it (the source may have been re-extracted since "
+                    "it was queued).\n"
+                )
+            elif name in dismissed:
+                # (a2) dismissed rather than (still) queued: the guard's
+                # other non-candidate-names route (#653). CHECKED, not
+                # assumed on a bare `else` -- Pyright flagged `dismissed` as
+                # unused when this was an unconditional else (bot review
+                # follow-up), and the note's own claim ("was dismissed")
+                # must be backed by the set it names.
+                sys.stderr.write(
+                    f"note: --retry name {name!r} was dismissed in canon.json's "
+                    "corrections[] and is not among the current "
+                    "name_candidates.json candidates -- nothing to dispatch for "
+                    "it (the source may have been re-extracted since it was "
+                    "dismissed).\n"
+                )
+            else:
+                # Unreachable via main()'s own call path today (the
+                # unknown_retry guard there only lets a --retry name through
+                # when it is in candidate_names, queued, or dismissed, and
+                # this branch has already ruled out all three) -- kept as a
+                # named, truthful fallback rather than silence, because the
+                # module docstring's promise is that a --retry name
+                # resolving to no dispatch is NEVER silently swallowed, and
+                # a future change to that guard's invariant must not make
+                # this function violate it quietly.
+                sys.stderr.write(
+                    f"note: --retry name {name!r} cleared the --retry input guard "
+                    "but matched no known exclusion (not in canon.json's "
+                    "review_queue or corrections[], and no current "
+                    "name_candidates.json row) -- nothing to dispatch for it.\n"
+                )
         elif is_split(senses, name):
             # Adjudicated split: retry overrides only the review_queue
             # exclusion, never a split (RFC #215 item 1f).
@@ -510,9 +635,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--retry", action="append", default=None, metavar="SRC[,SRC...]",
         help="Comma-separated source_form(s) to re-include even though they "
-             "sit in canon.json's review_queue (the explicit human retry "
-             "path). Repeatable. A name present in neither name_candidates.json "
-             "nor review_queue fails loudly. Never overrides a split "
+             "sit in canon.json's review_queue, or were DISMISSED from it "
+             "(#653) -- the explicit human retry path either way. Repeatable. "
+             "A name present in neither name_candidates.json nor "
+             "review_queue/corrections fails loudly. Never overrides a split "
              "exclusion (see --senses-path).",
     )
     parser.add_argument(
@@ -544,28 +670,43 @@ def main(argv=None) -> int:
     senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
 
     rows = load_name_candidates(name_candidates_path)
-    entry_keys, queued = load_canon(canon_path, canon_explicit)
+    entry_keys, queued, dismissed = load_canon(canon_path, canon_explicit)
     senses = load_senses_sidecar(senses_path, senses_explicit)
     retry = parse_retry(args.retry)
 
-    # A stale --retry name (present in neither input) fails loudly.
+    # A stale --retry name (present in NEITHER input, queued OR dismissed --
+    # #653 widens this the same way it widens select_included, so a retried
+    # dismissed name is RECOGNIZED here rather than aborting the run) fails
+    # loudly.
     candidate_names = {row["name"] for row in rows}
     unknown_retry = sorted(
-        name for name in retry if name not in candidate_names and name not in queued
+        name for name in retry
+        if name not in candidate_names and name not in queued and name not in dismissed
     )
     if unknown_retry:
         fail(
             "--retry name(s) present in neither name_candidates.json nor "
-            "canon.json's review_queue: " + ", ".join(repr(n) for n in unknown_retry)
+            "canon.json's review_queue/corrections: "
+            + ", ".join(repr(n) for n in unknown_retry)
         )
 
     included = select_included(
-        rows, entry_keys, queued, retry, args.min_candidate_freq, senses
+        rows, entry_keys, queued, dismissed, retry, args.min_candidate_freq, senses
     )
     included_names = {row["name"] for row in included}
+    # Keyword args (#653 closing pass): two adjacent set[str] parameters
+    # (queued, dismissed) in a 9-positional call is a swap waiting to
+    # happen for a future edit -- names pin each argument to its parameter.
     emit_retry_diagnostics(
-        retry, included_names, rows, candidate_names, entry_keys,
-        args.min_candidate_freq, senses,
+        retry=retry,
+        included_names=included_names,
+        rows=rows,
+        candidate_names=candidate_names,
+        entry_keys=entry_keys,
+        queued=queued,
+        dismissed=dismissed,
+        min_freq=args.min_candidate_freq,
+        senses=senses,
     )
 
     if not included:

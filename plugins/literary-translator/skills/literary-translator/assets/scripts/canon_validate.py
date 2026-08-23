@@ -55,31 +55,41 @@ accidentally omit declaring the precondition):
 
 --correct PATH
     The ONE sanctioned, RECORDED route to change an already-frozen
-    entries{} record (#495). Every other path refuses: --merge-batches
-    collides (which is correct -- a re-adjudication must never silently
-    overwrite a frozen decision), --init is create-only, validate-only
-    writes nothing. That left a canon entry that is simply WRONG
-    repairable only by a hand-edit of the exact artifact the whole gate
-    chain treats as frozen, performed outside every validation this script
-    owns and recorded nowhere -- and a canon that contradicts the text
-    keeps generating false review findings, so the cheapest way to silence
-    them was to revert correct prose to match a wrong canon.
+    entries{} record, OR to dismiss a review_queue[] candidate (#495;
+    disposition:"dismiss" added by #653). Every other path refuses:
+    --merge-batches collides (which is correct -- a re-adjudication must
+    never silently overwrite a frozen decision), --init is create-only,
+    validate-only writes nothing. That left a canon entry that is simply
+    WRONG repairable only by a hand-edit of the exact artifact the whole
+    gate chain treats as frozen, performed outside every validation this
+    script owns and recorded nowhere -- and a canon that contradicts the
+    text keeps generating false review findings, so the cheapest way to
+    silence them was to revert correct prose to match a wrong canon. A
+    review_queue[] row had the same problem one step earlier: nothing
+    recorded that a human looked at a candidate and judged it not
+    canon-worthy, so it stayed queued forever with no route but a hand
+    edit either.
 
     PATH is a canon-correction.schema.json document (a FILE, never inline
     argv -- a corrected canonical_target_form is exactly the kind of
     multiword/apostrophe/RTL string --expect-source-forms-file is read
-    from a file to avoid). It names the source_form, states the OLD value
-    (refused, naming both, when it does not match disk -- so the mode
-    cannot be used blind), carries a required free-text reason, and
-    dispositions either `correct` (replace, new_entry required) or
-    `remove` (delete, new_entry forbidden). The document is appended
-    verbatim to canon.json's corrections[].
+    from a file to avoid). It names the source_form, carries a required
+    free-text reason, and dispositions one of three ways: `correct`
+    (replace the entries{} record, old_entry + new_entry required) or
+    `remove` (delete it, new_entry forbidden) -- both state the OLD
+    entries{} value via old_entry, refused naming both when it does not
+    match disk, so the mode cannot be used blind -- or `dismiss` (drop one
+    review_queue[] row, old_item required instead of old_entry, entries{}
+    untouched) -- the same blind-use interlock, scoped to a queue row via
+    old_item. The document is appended verbatim to canon.json's
+    corrections[].
 
     A `correct` runs new_entry through the SAME content controls the merge
     path enforces -- the #347 static citation boundary and the offline
     basis:"established" backstop -- because being a second write path into
-    entries{} is precisely why they must apply here too. `remove` is
-    exempt from both: they constrain what may be FROZEN, and nothing is.
+    entries{} is precisely why they must apply here too. `remove` and
+    `dismiss` are both exempt: they constrain what may be FROZEN, and
+    neither freezes anything.
 
     OUT-OF-BAND, deliberately: _merge_batch is not touched, no --force
     exists, and an ordinary batch carrying a differing resolution still
@@ -91,7 +101,14 @@ accidentally omit declaring the precondition):
     corrected entry is cache_key.py's per-segment used_terms_hash, which
     hashes only the entries a segment actually references, so a correction
     costs bounded re-review of exactly those segments and never reaches
-    translate.
+    translate. A dismissal re-stales no translation SEGMENT either -- no
+    used_terms_hash moves, since compute_used_terms_hash projects entries{}
+    only, and a dismissal never touches entries{}. It is NOT free of cost
+    whole-canon: review_queue[] changes and corrections[] grows, so
+    canon.json's bytes change, and those bytes are a frozen input of
+    whole-canon consumers (skeptic_ready.py's canon_sha256 stamp,
+    suspicion_scan.py's worklist freshness gate). Run a dismissal BETWEEN
+    skeptic passes, not into a live one.
 
 --check-batch PATH [--expect-source-forms-file M.json]
     Pass 1 (per-item) + the offline backstop on the ONE fragment at PATH.
@@ -1486,6 +1503,34 @@ def _same_json_value(a, b) -> bool:
     )
 
 
+def _attributable_to(value, source_form: str) -> bool:
+    """True iff `value` -- either the correction document's stated old_item,
+    or one raw review_queue[] row read off disk -- can be said to be ABOUT
+    `source_form`. Two shapes qualify: a mapping whose own source_form
+    field equals `source_form` (the ordinary queued shape, and the same
+    identity `_merge_batch`'s accept-branch filter uses), or a bare string
+    equal to `source_form` (the legacy shape review_queue[] can carry --
+    `_load_canon` type-checks the array itself, never its items).
+
+    Called on BOTH sides of run_correct's dismiss branch: once on old_item
+    itself, and once per row in review_queue[]. NEITHER side is
+    schema-constrained to these shapes -- old_item is UNCONSTRAINED in
+    canon-correction.schema.json, deliberately (#653 code review: a
+    schema-level `oneOf` there was strictly weaker than this function and
+    produced a FALSE error message on rejection, so it was removed; this
+    function is the actual, sole authority on the rule), and review_queue[]
+    rows are not schema-constrained here either and can be any JSON value a
+    hand edit left behind. Anything else -- a list, a number, a boolean,
+    null, or a mapping naming some OTHER source_form -- cannot be about
+    `source_form` and returns False.
+    """
+    if isinstance(value, dict):
+        return value.get("source_form") == source_form
+    if isinstance(value, str):
+        return value == source_form
+    return False
+
+
 def _load_correction(correction_path_str: str) -> dict:
     """The parsed correction document for --correct (#495), read through
     `_read_json_bytes` for the same reason every fragment read is: a
@@ -2063,9 +2108,25 @@ def _content_view(doc: dict) -> dict:
     review_queue-only merge genuinely changed what this file does and MUST
     re-stamp. Equality is plain `==`, so list order counts as content --
     entries{} is written with sort_keys=True so its order is not observable,
-    and review_queue[] is only ever filtered/appended by `_merge_batch`, so a
-    pure reorder is not reachable today; treating one as a change is the
-    safe direction if that ever stops being true.
+    and review_queue[] is only ever filtered/appended by `_merge_batch`, or
+    filtered (never reordered) by run_correct's dismiss branch (#653), so a
+    pure reorder is not reachable today by any writing mode; treating one as
+    a change is the safe direction if that ever stops being true.
+
+    A dismissal is nonetheless exempt from THIS function's re-stamp
+    consequence, deliberately: run_correct passes `preserve_stamp=True` for
+    every disposition including dismiss, so `_stamp_write_verify` never
+    calls this comparison for it at all (see run_correct's own docstring,
+    D5b). The stamp is a claim about DERIVATION PROVENANCE, not about
+    every consumer's behaviour, so "unchanged" here is scoped to exactly
+    what the stamp is about: carrying the exclusion a dismissed row's
+    review_queue entry represented over into corrections[] is what keeps
+    glossary_batch_plan.py's automated re-research exclusion unchanged.
+    Other consumers DO see a dismissal -- canon_adjudication_audit.py stops
+    enumerating the row (acceptance criterion 4 REQUIRES exactly this) and
+    person_registry.py's refusals[] stops listing it -- and that is fine:
+    neither reads generation_hashes, and select_segments.py's
+    derivation-state gate is the one thing this stamp actually governs.
     """
     return {k: v for k, v in doc.items() if k != "generation_hashes"}
 
@@ -2338,6 +2399,55 @@ def run_restamp_derivation(
     }
 
 
+def _finish_correction(
+    canon_path: Path,
+    canon: dict,
+    merged: dict,
+    doc: dict,
+    registry: "Registry",
+    research_mode: str,
+    source_form: str,
+    disposition: str,
+    **extra,
+) -> dict:
+    """The write-and-report tail every `run_correct` disposition shares --
+    factored out because it was the SAME ~20 lines twice (#653 code
+    review): append `doc` to corrections[], write through
+    `_stamp_write_verify(..., preserve_stamp=True)` (a correction never
+    stamps, whatever disposition), and build the result payload. `merged`
+    must already carry whichever of entries{}/review_queue[] this call's
+    own disposition owns -- this function only adds corrections{} and
+    writes; it never decides entries{} vs review_queue[] content. `**extra`
+    folds in a disposition-specific payload field (dismiss's
+    `rows_dropped`) without a mode-shaped branch here -- there is only one
+    payload dict, so a key added to it later cannot silently miss the
+    other disposition the way two separately hand-written dicts could.
+    """
+    merged["corrections"] = list(canon.get("corrections", [])) + [doc]
+
+    on_disk, restamped = _stamp_write_verify(
+        canon_path, merged, registry, preserve_stamp=True
+    )
+
+    payload = {
+        "success": True,
+        "mode": "correct",
+        "canon_path": str(canon_path),
+        "research_mode": research_mode,
+        "source_form": source_form,
+        "disposition": disposition,
+        "entries_count": len(on_disk["entries"]),
+        "review_queue_count": len(on_disk["review_queue"]),
+        "corrections_count": len(on_disk["corrections"]),
+        # Every writing mode answers this the same way. Always false here --
+        # a correction (any disposition) carries the stamp forward
+        # verbatim, by design.
+        "generation_hashes_restamped": restamped,
+    }
+    payload.update(extra)
+    return payload
+
+
 def run_correct(
     canon_path: Path,
     correction_path: str,
@@ -2346,9 +2456,13 @@ def run_correct(
     senses_path: Path,
     allow_absent_senses: bool,
 ) -> dict:
-    """--correct: apply ONE out-of-band, adjudicated correction to an
-    already-frozen entries{} record, and record it in canon.json's
-    corrections[] (#495).
+    """--correct: apply ONE out-of-band, adjudicated correction, and record
+    it in canon.json's corrections[] (#495; disposition:"dismiss" added by
+    #653). Two disjoint targets: `correct`/`remove` repair an already-frozen
+    entries{} record; `dismiss` drops one review_queue[] row instead,
+    recording that a human looked at a queued candidate and judged it not
+    canon-worthy. entries{} and review_queue[] are never both touched by one
+    call.
 
     Why this is a separate mode rather than a relaxed merge: `_merge_batch`
     refuses an accepted item whose source_form already carries a DIFFERENT
@@ -2371,7 +2485,8 @@ def run_correct(
     both values, so the mode cannot be used blind against a canon.json that
     moved since it was read.
 
-    Two dispositions, and the asymmetry between them is deliberate:
+    Three dispositions. `correct`/`remove` share the interlock above
+    (`old_entry`); the asymmetry between them is deliberate:
 
       correct -- replace the record under the same key. Refused when
         `source_form` is an adjudicated homonym split, through the SAME
@@ -2388,6 +2503,26 @@ def run_correct(
         finding with no route at all. Removal is also what an interpolated
         name with zero source occurrences needs, and a key RENAME is a
         remove followed by an ordinary --merge-batches under the new key.
+
+      dismiss -- drop one review_queue[] row (#653). States `old_item`
+        instead of `old_entry`: the same blind-use interlock, scoped to a
+        queue row rather than an entries{} record. Checked FIRST against an
+        attribution allowlist (`_attributable_to`) -- a mapping whose own
+        source_form equals this document's, or a bare string equal to it,
+        and nothing else -- before any search, so a document naming the
+        wrong source_form can never be matched against some other name's
+        row. Reads/writes review_queue[] only: no entries{}-key refusal (a
+        form that is ALSO an entries{} key -- the overlap
+        `_assert_no_entries_review_queue_overlap` forbids -- is exactly the
+        state dismissing its queue row repairs; removing the ENTRY is a
+        different decision, spelled disposition:"remove"), no split refusal,
+        and none of the content controls below (a dismissal freezes
+        nothing, same exemption `remove` already takes). Every row equal to
+        `old_item` is dropped -- two rows for one form are ORDINARY
+        (`_merge_batch` appends whenever the whole object differs, so one
+        form queued by two batches for two different reasons is two rows;
+        matching on the whole value dismisses one reason without silently
+        dismissing the other).
 
     Writes through the SAME `_stamp_write_verify` path every other writing
     mode uses -- Pass 2 before disk, one atomic write, post-write re-read
@@ -2417,8 +2552,86 @@ def run_correct(
     # that happens not to need it.
     senses = _load_senses_or_raise(senses_path, allow_absent_senses)
 
-    entries = dict(canon.get("entries", {}))
     source_form = doc["source_form"]
+    disposition = doc["disposition"]
+
+    if disposition == "dismiss":
+        # A wholly separate path -- reads/writes review_queue[] only, and
+        # NEVER touches entries{} (see the docstring's dismiss paragraph for
+        # why: no entries{}-key refusal, no split refusal, no content
+        # controls). Kept as its own branch rather than folded into the
+        # entries{}-membership checks below, which do not apply here at all.
+        old_item = doc["old_item"]
+        if not _attributable_to(old_item, source_form):
+            # Checked BEFORE any search: a document whose stated row cannot
+            # belong to its own source_form is refused on that ground alone,
+            # naming both, so it can never be matched against some other
+            # name's row.
+            raise CanonValidationError(
+                f"{source_form!r}: stated old_item "
+                f"{_bounded_message(repr(old_item))} is not attributable to "
+                f"this document's own source_form -- a dismissal must name a "
+                f"row that IS the form it claims to dismiss (a mapping whose "
+                f"own source_form field equals {source_form!r}, or the bare "
+                f"string {source_form!r} itself).",
+                offending=[_bounded_message(repr(source_form))],
+            )
+
+        # No `list()` copy: unlike `_merge_batch` (which APPENDS to its own
+        # local in place), every rebind below is a fresh comprehension, so
+        # there is nothing in-place to protect the original from.
+        review_queue = canon.get("review_queue", [])
+        attributable_rows = [
+            row for row in review_queue if _attributable_to(row, source_form)
+        ]
+        # old_item is dumped to canonical JSON text ONCE here, not once per
+        # row per traversal: `_same_json_value` dumps BOTH sides on every
+        # call, and an operator-authored old_item of unbounded size was
+        # otherwise re-serialized 2xN times across the match check and the
+        # drop pass below (code review, #653).
+        old_item_dump = json.dumps(old_item, sort_keys=True, ensure_ascii=False)
+
+        def _matches_old_item(row) -> bool:
+            return json.dumps(row, sort_keys=True, ensure_ascii=False) == old_item_dump
+
+        if not any(_matches_old_item(row) for row in attributable_rows):
+            # The same blind-use interlock --correct already enforces for
+            # old_entry, scoped to a queue row: both the stated value and
+            # what is actually queued under this source_form are named.
+            # old_item is BOUNDED here, matching the treatment
+            # `_bounded_list` already gives attributable_rows beside it --
+            # an unbounded old_item would otherwise push "Currently queued
+            # under ...: <the actual rows>" past CanonValidationError's
+            # 4000-char TAIL truncation, deleting exactly the recovery
+            # information this interlock exists to deliver.
+            raise CanonValidationError(
+                f"{source_form!r}: stated old_item does not match any row "
+                f"currently queued under this source_form -- refusing to "
+                f"dismiss blind. Stated: {_bounded_message(repr(old_item))}. "
+                f"Currently queued under {source_form!r}: "
+                + ", ".join(_bounded_list(attributable_rows))
+                + ". Re-read canon.json and re-author the correction "
+                f"against its CURRENT value.",
+                offending=[_bounded_message(repr(source_form))],
+            )
+        # Drop EVERY row equal to old_item, in ONE traversal. Two rows for
+        # one form are ORDINARY (see the docstring), so this is a
+        # whole-value match, not "the first row" or "every row for this
+        # source_form" -- `rows_dropped` is the count that DIDN'T survive,
+        # not a second pass re-counting matches.
+        kept = [row for row in review_queue if not _matches_old_item(row)]
+        rows_dropped = len(review_queue) - len(kept)
+
+        merged = dict(canon)
+        merged["review_queue"] = kept
+        # entries{} is passed through untouched -- not even copied, since
+        # `merged = dict(canon)` already carries it forward verbatim.
+        return _finish_correction(
+            canon_path, canon, merged, doc, registry, research_mode,
+            source_form, disposition, rows_dropped=rows_dropped,
+        )
+
+    entries = dict(canon.get("entries", {}))
     if source_form not in entries:
         raise CanonValidationError(
             f"{source_form!r}: no such entry in canon.json's entries{{}} -- a "
@@ -2442,7 +2655,6 @@ def run_correct(
             offending=[_bounded_message(repr(source_form))],
         )
 
-    disposition = doc["disposition"]
     if disposition == "correct":
         new_entry = doc["new_entry"]
         if _same_json_value(new_entry, old_entry):
@@ -2562,33 +2774,20 @@ def run_correct(
                 offending=[_bounded_message(repr(source_form))],
             )
         entries[source_form] = new_entry
-    else:  # "remove" -- the schema's enum admits nothing else
+    else:  # "remove" -- "dismiss" already returned above, and the schema's
+        # enum admits nothing else
         del entries[source_form]
 
     merged = dict(canon)
     merged["entries"] = entries
-    # Append-only, and created on first use: a canon.json written before
-    # this mode existed has no corrections[] and must stay valid without one.
-    merged["corrections"] = list(canon.get("corrections", [])) + [doc]
-
-    on_disk, restamped = _stamp_write_verify(
-        canon_path, merged, registry, preserve_stamp=True
+    # review_queue[] is passed through untouched -- not even copied, since
+    # `merged = dict(canon)` already carries it forward verbatim. Append-only
+    # corrections[]/write/report tail lives in `_finish_correction`, shared
+    # with the dismiss branch above.
+    return _finish_correction(
+        canon_path, canon, merged, doc, registry, research_mode,
+        source_form, disposition,
     )
-
-    return {
-        "success": True,
-        "mode": "correct",
-        "canon_path": str(canon_path),
-        "research_mode": research_mode,
-        "source_form": source_form,
-        "disposition": disposition,
-        "entries_count": len(on_disk["entries"]),
-        "review_queue_count": len(on_disk["review_queue"]),
-        "corrections_count": len(on_disk["corrections"]),
-        # Every writing mode answers this the same way. Always false here --
-        # a correction carries the stamp forward verbatim, by design.
-        "generation_hashes_restamped": restamped,
-    }
 
 
 def _validate_and_enforce_batch(batch: list, registry: "Registry", research_mode: str) -> None:
@@ -2927,12 +3126,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "#495: apply ONE out-of-band, adjudicated correction to an "
-            "already-frozen canon.json entries{} record. PATH is a "
-            "canon-correction.schema.json document; it must state the OLD "
-            "value (refused, naming both, when it does not match disk) and "
-            "carry a reason, and it dispositions either 'correct' or "
-            "'remove'. Deliberately NOT a relaxed merge, and the one WRITING "
-            "mode that does not STAMP -- see this file's module docstring."
+            "already-frozen canon.json entries{} record, or dismiss one "
+            "review_queue[] row (#653). PATH is a canon-correction.schema.json "
+            "document; it must state the OLD value (refused, naming both, "
+            "when it does not match disk) and carry a reason, and it "
+            "dispositions 'correct'/'remove' (entries{}, old_entry) or "
+            "'dismiss' (review_queue[], old_item). Deliberately NOT a relaxed "
+            "merge, and the one WRITING mode that does not STAMP -- see this "
+            "file's module docstring."
         ),
     )
     parser.add_argument(
