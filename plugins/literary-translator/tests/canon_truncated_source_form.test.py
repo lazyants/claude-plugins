@@ -17,7 +17,8 @@ structural pin now closes.
 
 Three things are pinned here, and the third is the one that rots silently:
 
-1. REFUSAL. A marker-bearing `accepted` item is refused on both paths.
+1. REFUSAL. A marker-bearing `accepted` item is refused on all three entry
+   points.
 2. THE PERMITTED FORM. The same `source_form` as `review_queue` still passes.
    That asymmetry is the whole remedy -- refusing both would leave the
    candidate nowhere to go, and `glossary_batch_plan.py` excludes a queued
@@ -176,7 +177,7 @@ def test_the_restatement_tracks_a_producer_digest_width_change():
     )
 
 
-# --- both call paths -------------------------------------------------------
+# --- all three entry points ------------------------------------------------
 
 
 def _write(tmp_path: Path, name: str, doc) -> Path:
