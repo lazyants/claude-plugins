@@ -2754,8 +2754,39 @@ def test_item_list_shows_cat4_display_fields(tmp_path):
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
     line = item_line(proc, cat4_key(item))
-    assert "source_form=" in line and "'Dov Ber'" in line
-    assert "note=" in line and "'two live candidates, unresolved'" in line
+    assert "queue_entry=" in line
+    assert "'Dov Ber'" in line and "'two live candidates, unresolved'" in line
+    assert "'disposition'" in line and "'is_proper_name'" in line, (
+        "category 4 hashes the WHOLE entry, so the display carries the whole entry"
+    )
+
+
+def test_item_list_distinguishes_two_queue_records_differing_in_one_field(tmp_path):
+    """The display must be INJECTIVE over what the key hashes. Two schema-valid
+    review_queue records with the same source_form and note, differing only in
+    `is_proper_name`, are two required items with two different digests --
+    neither the schema nor canon_validate's `_merge_batch` refuses the pair. A
+    source_form/note summary printed them identically, which is the same defect
+    as the bare key: the reviewer cannot tell which payload they are signing,
+    or why a key changed."""
+    root = make_durable_root(tmp_path)
+    proper = queued("Mercury", note="ambiguous referent")
+    common = queued("Mercury", note="ambiguous referent", is_proper_name=False)
+    write_canon(root, [], review_queue=[proper, common])
+
+    proc = run_audit(root, "--check", "--pair-review-cap", "10")
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    summary = parse_stdout(proc)
+    assert summary["totals"]["by_kind"]["review_queue_unresolved"] == 2, (
+        "two distinct records -> two distinct keys"
+    )
+    proper_line = item_line(proc, cat4_key(proper))
+    common_line = item_line(proc, cat4_key(common))
+    assert proper_line != common_line, (
+        f"two different required items printed the same payload:\n{proper_line}"
+    )
+    assert "True" in proper_line and "False" in common_line
 
 
 def test_item_list_escapes_invisible_characters_carried_in_a_queue_note(tmp_path):

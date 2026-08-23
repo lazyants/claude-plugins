@@ -911,12 +911,16 @@ def compute_cat4_items(review_queue: list, key_to_identity: dict, warnings: list
     """Category 4, review_queue_unresolved: every review_queue[] item, keyed
     by the whole item as canonical JSON (so any content change re-blocks).
     Covers every queued item unconditionally -- no proper-name scope
-    filter."""
+    filter. The whole entry is also what gets DISPLAYED (#405): the key
+    hashes every field, and neither the schema nor canon_validate's
+    `_merge_batch` refuses two records that differ only in, say,
+    `is_proper_name` -- a source_form/note summary would print those two as
+    the same payload beside two different digests."""
     items = []
     for entry in review_queue:
         item = build_item(
             key_to_identity, KIND_QUEUE, entry, warnings,
-            source_form=entry.get("source_form"), note=entry.get("note"),
+            queue_entry=entry,
         )
         if item is not None:
             items.append(item)
@@ -1260,9 +1264,13 @@ def _print_item_list(label: str, items: list, file) -> None:
     a named party to record a `reason` per item, and nobody can examine a
     digest (#405).
 
-    These fields IDENTIFY the item for a reviewer, deliberately not the key's
-    full preimage: category 4 hashes the whole review_queue entry and category
-    5 hashes every sense, while both display a short summary. Rendered with
+    These fields IDENTIFY the item for a reviewer. Where a category hashes more
+    than it could readably print, the display must still be INJECTIVE over what
+    the key hashes, or two distinct keys read as the same payload: category 4
+    therefore displays its whole review_queue entry (two records differing only
+    in `is_proper_name` or `basis` are otherwise indistinguishable), while
+    category 5 can display a sense COUNT because one sidecar holds at most one
+    record per source_form, so no two of its items ever share one. Rendered with
     `!r` (the discipline _print_evidence_failures below already uses) rather
     than as JSON: repr keeps printable non-ASCII readable -- a Hebrew source
     form stays a Hebrew source form -- while escaping every non-printable code
