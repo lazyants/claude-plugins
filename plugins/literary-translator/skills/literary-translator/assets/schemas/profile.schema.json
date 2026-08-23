@@ -621,9 +621,9 @@
             "required": ["id", "pattern", "message"],
             "properties": {
               "id": {
-                "description": "Stable slug naming the rule, echoed in the WARN line so an operator can trace it back to the style_bible clause it enforces.",
+                "description": "Stable slug naming the rule, echoed in the WARN line so an operator can trace it back to the style_bible clause it enforces. The trailing (?![\\s\\S]) is a true end-of-string anchor, NOT decoration -- same pitfall the citation_content_types pattern above documents: jsonschema evaluates `pattern` with Python's `re`, whose `$` also matches before a trailing newline, so `...$` would admit \"rule\\n\" here. That id is then interpolated into the declaration WARN, where it is not covered by the whole-line normalization the HIT warnings get.",
                 "type": "string",
-                "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?![\\s\\S])"
               },
               "pattern": {
                 "description": "Python `re` pattern. Matched with finditer, so the reported hit count is over NON-OVERLAPPING matches.",

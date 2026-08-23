@@ -981,7 +981,14 @@ def test_forbidden_patterns_unknown_property_rejected():
     assert "severity" in errors[0]
 
 
-@pytest.mark.parametrize("bad_id", ["Has-Capitals", "-leading-dash", "has space", "", "a" * 65])
+# "rule\n" is the case a `$`-anchored pattern silently ADMITS: jsonschema
+# evaluates `pattern` with Python's `re`, whose `$` also matches before a
+# trailing newline. A double-quoted YAML scalar carries that newline through to
+# Step 0, and the id is then interpolated into a declaration WARN without the
+# whole-line normalization the hit warnings get.
+@pytest.mark.parametrize(
+    "bad_id", ["Has-Capitals", "-leading-dash", "has space", "", "a" * 65, "rule\n"]
+)
 def test_forbidden_patterns_bad_id_rejected(bad_id):
     assert schema_errors(_with_patterns([
         {"id": bad_id, "pattern": "y", "message": "z"},

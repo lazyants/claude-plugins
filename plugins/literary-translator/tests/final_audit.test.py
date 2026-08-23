@@ -2283,10 +2283,47 @@ def test_forbidden_patterns_malformed_regex_warns_once_and_siblings_still_run(tm
     add_converged_segment(root, "seg01", clean_segpack(), draft)
     add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
     proc = run_final_audit(root)
-    assert proc.returncode != 2, proc.stderr
+    # The EXACT baseline, not `!= 2`: this fixture carries PAD_SEG, so a run
+    # whose only WARNs are advisory exits 3 (project incomplete) and nothing
+    # else. `!= 2` would stay green if a declaration warning started exiting 1,
+    # which is precisely the regression -- an advisory lane gating delivery --
+    # that the older generic "WARN checks do not gate" tests cannot see,
+    # because they never declare a pattern.
+    assert proc.returncode == 3, (proc.returncode, proc.stderr)
     broken = [ln for ln in _style_lines(proc) if "broken" in ln]
     assert len(broken) == 1, proc.stderr
     assert "does not compile" in broken[0]
+    assert "NOT enforced" in broken[0]
+    assert len([ln for ln in _style_lines(proc) if "no-placeholder" in ln]) == 1
+
+
+def test_forbidden_patterns_uncompilable_beyond_re_error_is_still_advisory(tmp_path):
+    """`re.compile` does not raise one family. A malformed pattern raises
+    `re.error`; an oversized repetition count raises `OverflowError` -- from a
+    39-character pattern the schema's 200-codepoint cap admits without
+    complaint. Catching only `re.error` turned this advisory check into a
+    traceback that aborted the whole audit before its summary, taking the two
+    HARD checks' verdict with it.
+
+    The sibling declaration must still fire, and the exit code must still be
+    the advisory baseline."""
+    draft = clean_draft(p1_text=f"A line with FORBIDDEN text in it {FN_PH}.")
+    root = make_durable_root(
+        tmp_path,
+        seg_ids=("seg01", PAD_SEG),
+        forbidden_patterns=[
+            {"id": "overflowing", "pattern": "a{" + "9" * 36 + "}", "message": "never mind"},
+            {"id": "no-placeholder", "pattern": "FORBIDDEN", "message": "placeholder left in"},
+        ],
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), draft)
+    proc = run_final_audit(root)
+    assert proc.returncode == 3, (proc.returncode, proc.stderr)
+    summary = parse_summary(proc)
+    assert_schema_valid(summary)
+    broken = [ln for ln in _style_lines(proc) if "overflowing" in ln]
+    assert len(broken) == 1, proc.stderr
+    assert "OverflowError" in broken[0], broken[0]
     assert "NOT enforced" in broken[0]
     assert len([ln for ln in _style_lines(proc) if "no-placeholder" in ln]) == 1
 

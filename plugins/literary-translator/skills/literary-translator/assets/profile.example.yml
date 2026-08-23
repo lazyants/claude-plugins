@@ -331,8 +331,9 @@ validation:
     #
     # A pattern that fails to compile is reported as its own WARN naming the id -- never silently
     # skipped, so a rule you thought was enforced can never read as a clean run. There is no
-    # size cap and no execution-cost bound: profile.yml is yours, on the same trust footing as the
-    # scripts themselves.
+    # LIST-LENGTH cap and no execution-cost bound on a pattern: profile.yml is yours, on the same
+    # trust footing as the scripts themselves. Individual fields ARE capped, and Step 0 refuses a
+    # violation: `pattern` and `message` at 200 characters each, `id` at 64.
     #
     # Example -- a project whose own renderer prints a run of asterisks literally to the reader:
     #   forbidden_patterns:

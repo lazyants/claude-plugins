@@ -829,10 +829,23 @@ def compile_forbidden_patterns(decls):
             message = "(declaration carries no message)"
         try:
             regex = re.compile(pattern)
-        except re.error as exc:
+        except Exception as exc:
+            # Deliberately `Exception`, not `re.error`, and the try body is
+            # exactly one call so nothing else can hide in here. `re.compile`
+            # does NOT raise a single family: a malformed pattern raises
+            # `re.error`, but an oversized repetition count raises
+            # `OverflowError` -- measured on 3.14, from a 39-character pattern
+            # that the schema's 200-codepoint cap admits without complaint --
+            # and which types a given interpreter raises is not a contract any
+            # version pins. Enumerating them means the NEXT unlisted type turns
+            # an advisory lane into a traceback that blocks delivery, which is
+            # exactly the failure this whole check exists to avoid. The
+            # invariant is the one worth holding: a bad declaration is
+            # REPORTED, never fatal.
             warns.append(
                 f"STYLE-PATTERN {label}: pattern {pattern!r} does not "
-                f"compile ({exc}) -- rule NOT enforced this run -- MANUAL"
+                f"compile ({type(exc).__name__}: {exc}) -- rule NOT enforced "
+                f"this run -- MANUAL"
             )
             continue
         compiled.append((label, regex, message))
@@ -845,8 +858,12 @@ def _string_leaves(node, path):
     An explicit stack, NOT recursion: `json.loads` decodes container nesting
     far deeper than Python's own recursion limit (measured: past 20 000 levels
     against a default limit of 1 000), and a `verses` value may legitimately
-    carry nested objects, so a recursive walker would be the first thing in
-    this script to fail on a draft the loader accepted.
+    carry nested objects. This is NOT the script's first depth-sensitive step
+    and does not claim to be -- `hard_check_stale_review()` canonically
+    re-encodes the whole draft long before any WARN runs, and that
+    `json.dumps` raises first on such a draft. The iterative form costs the
+    same as the recursive one and simply declines to add a SECOND place that
+    fails; the pre-existing one is disclosed rather than fixed here.
 
     Each path component is bracketed and repr'd -- `verses['v1']['rendered']`
     -- so that a key which itself contains a dot cannot render the same as the
