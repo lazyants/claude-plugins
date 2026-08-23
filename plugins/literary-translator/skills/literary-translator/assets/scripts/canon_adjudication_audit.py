@@ -247,8 +247,8 @@ treated as empty -- and that non-enumeration is STATED, never printed as a
 bare `homonym_split: 0`: the report's category-5 row reads `NOT ENUMERATED
 (canon_senses.json absent or empty at ...)` and the summary carries
 `senses_enumerated: false` (#403), so a vacuous zero cannot be read as an
-enumerated-clean one; an EXPLICIT `--senses-path` that does not exist, or any
-non-regular path (directory, dangling symlink, ...), is a load failure and
+enumerated-clean one; an EXPLICIT `--senses-path` that does not exist, or
+any non-regular path (directory, dangling symlink, ...), is a load failure and
 therefore FATAL here too (folded into `CanonAdjudicationAuditError`, exit
 2) -- see `load_senses`'s own docstring for the full path-state/schema-
 validation contract.
@@ -332,10 +332,7 @@ OUTPUT / EXIT CODE
 Exactly ONE JSON line to stdout -- `canon-adjudication-audit-summary.
 schema.json`-shaped (a check summary, or the distinct --init-only summary
 when --init is given without --check) -- all human-readable detail to
-stderr. Every check summary carries `senses_enumerated` (false iff
-canon_senses.json was absent or schema-valid-empty, so category 5
-enumerated nothing); it is purely descriptive and feeds neither
-blocking_count, gate_passed, nor the exit code. Exit 0 = gate clean (or `--init`-only success), 1 = blocking
+stderr. Exit 0 = gate clean (or `--init`-only success), 1 = blocking
 findings (categories 1-4, `homonym_split`'s missing/stale verdict,
 `collapsed_split`, `evidence_unverified`, or `canon_absent_with_senses` --
 unless `--advisory`, which forces 0 for the categories-1-4 component only
@@ -344,6 +341,12 @@ canon/adjudications/canon_senses.json, enumeration-critical row
 malformation, a genuine key collision, a non-empty canon_senses.json with
 no resolvable --particle-config, or a usage error when neither --init nor
 --check is given). `--advisory` never masks a fatal exit 2.
+
+Every check summary also carries `senses_enumerated` -- false iff
+canon_senses.json was absent or schema-valid-empty, so category 5
+enumerated nothing and its `by_kind` zero is vacuous rather than
+enumerated-clean. Purely descriptive: it feeds neither blocking_count,
+gate_passed, nor the exit code.
 
 STATUS: categories 1-4 remain an OPT-IN rollout gate. Category 5 (the
 homonym-split evidence gate) is MANDATORY whenever a project has adjudicated
@@ -1601,11 +1604,15 @@ def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
         "by_kind": by_kind,
     }
 
+    # One derivation, two views: the summary field and the report row must never
+    # disagree about whether category 5 was enumerated.
+    senses_enumerated = not senses.is_empty
+
     summary = {
         "success": True, "mode": mode,
         "canon_path": str(canon_path), "adjudications_path": str(adjudications_path),
         "senses_path": str(senses_path), "canon_present": True,
-        "senses_enumerated": not senses.is_empty,
+        "senses_enumerated": senses_enumerated,
         "pair_review_cap": pair_review_cap, "advisory": advisory,
         "totals": totals, "blocking_count": blocking_count, "gate_passed": gate_passed,
         "warnings": warnings, "generated_at": now_iso(),
@@ -1615,7 +1622,7 @@ def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
         canon_path, adjudications_path, totals, buckets, unaccepted_items,
         collapsed_split_findings, evidence_failures,
         blocking_count, gate_passed, advisory, warnings,
-        senses_path, not senses.is_empty,
+        senses_path, senses_enumerated,
     )
 
     return summary, exit_code

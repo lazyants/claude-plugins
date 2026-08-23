@@ -255,7 +255,8 @@ def assert_fatal(proc):
 # -- never a regex over the whole multi-line blob, where an unanchored (or
 # non-MULTILINE) pattern silently misses an embedded row.
 # ---------------------------------------------------------------------------
-NOT_ENUMERATED_PREFIX = "  homonym_split: NOT ENUMERATED"
+NOT_ENUMERATED_MARKER = "NOT ENUMERATED"
+NOT_ENUMERATED_PREFIX = f"  homonym_split: {NOT_ENUMERATED_MARKER}"
 VACUOUS_ZERO_ROW = "  homonym_split: 0"
 
 
@@ -275,9 +276,12 @@ def assert_split_row_enumerated(proc, expected_count):
     assert f"  homonym_split: {expected_count}" in lines, (
         f"expected an enumerated homonym_split: {expected_count} row; got:\n{proc.stderr}"
     )
-    assert not any("NOT ENUMERATED" in ln for ln in lines), (
+    # Deliberately the bare marker, not NOT_ENUMERATED_PREFIX: a NOT ENUMERATED
+    # claim anywhere in this report is wrong when category 5 really was enumerated.
+    assert not any(NOT_ENUMERATED_MARKER in ln for ln in lines), (
         f"an ENUMERATED category 5 must never claim NOT ENUMERATED; got:\n{proc.stderr}"
     )
+
 
 # ===========================================================================
 # 1. homonym_split category wiring
