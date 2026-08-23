@@ -193,7 +193,20 @@ Output: exactly one JSON object on stdout. Success:
 {"success": true, "durable_root": ..., "segs": [...],
  "requested_only_segs": [...] | null, "classification": {seg: {...}},
  "counts": {...}, "ids_by_category": {category: [seg, ...]},
- "overrides": [...], "excluded_only_segs": [...], "claims": {seg: {...}}}.
+ "overrides": [...], "excluded_only_segs": [...],
+ "eligible_not_dispatched": [...], "claims": {seg: {...}}}.
+ `eligible_not_dispatched` (#530) is the other direction of
+ `excluded_only_segs`: the eligible units this invocation is NOT dispatching,
+ i.e. `select_default()`'s own result minus the emitted SEGS, in candidate
+ order and with duplicate manifest entries collapsed to one. It is ALWAYS
+ present and ALWAYS a list; it is `[]` on every default-path invocation by
+ construction, since there SEGS *is* `select_default()`'s result. Dispatching
+ a subset is legitimate, so this is reported and never refused -- the defect
+ it closes is that an under-specified `--only-segs` was previously
+ indistinguishable from a complete one, while the over-specified direction
+ already refused loudly. The same list is disclosed on stderr when non-empty,
+ and carried on the empty-SEGS refusal payload (alone among the
+ post-selection refusals -- see that fatal's own note).
  `counts` and `ids_by_category` are keyed by the same six ALL_CATEGORIES,
  one the per-category tally and the other the per-category segment-id list
  (each stale segment's own `stale_reason` lives inline in `classification`)
@@ -4124,19 +4137,81 @@ def run(args, dirs: dict) -> dict:
     for seg in candidates:
         ids_by_category[classification[seg]["category"]].append(seg)
 
+    # #530: the full eligible set, computed ONCE and used for both the default
+    # selection and the eligible-not-dispatched census below. Hoisted out of
+    # the `else` branch on purpose: the census's correctness rests on "on the
+    # default path the emitted SEGS IS the eligible set", and with one call
+    # that is structurally true rather than an assertion that two separate
+    # calls agree.
+    eligible = select_default(classification, candidates)
+
     if only_segs is not None:
         segs, overrides, excluded_only_segs = select_only_segs(only_segs, classification)
         requested_display = only_segs
     else:
-        segs = select_default(classification, candidates)
+        segs = eligible
         overrides = []
         excluded_only_segs = []
         requested_display = candidates
+
+    # ---- #530: the eligible units this invocation is NOT dispatching -------
+    # `excluded_only_segs` above covers ids the operator NAMED and this script
+    # declined. Nothing covered the opposite direction: an eligible unit the
+    # operator never named at all. The claim gate further down refuses the
+    # superset direction loudly ("the authorization would not be a subset of
+    # what is dispatched"), so an over-specified --only-segs is caught while an
+    # under-specified one produced no signal whatsoever -- a round could report
+    # 31 stale and dispatch 11 with both numbers in the same journal record and
+    # nothing comparing them.
+    #
+    # Taken from `eligible` -- select_default()'s own result -- rather than by
+    # re-deriving the category membership: that function OWNS which categories
+    # are eligible, and a second copy of DEFAULT_ELIGIBLE_CATEGORIES here would
+    # drift silently the first time the set changed.
+    #
+    # No `only_segs is not None` branch, deliberately: on the default path `segs`
+    # IS `eligible`, the same object, so the difference is empty and the default
+    # path gains no output. `segs` is assigned once above and never mutated
+    # afterwards (the claim gate only VALIDATES that claimed ids are a subset of
+    # it), so the comparison stays exact wherever it is read below.
+    #
+    # Deduplicated, order-preserving: manifest.schema.json puts no uniqueItems on
+    # segments[], load_candidate_segments() appends every occurrence, and a
+    # duplicate manifest entry is an accepted shape (segment_dispatch_driver.py
+    # dedupes SEGS downstream for exactly that reason). Without this an id would
+    # be reported twice and the count inflated, and the driver's own journal
+    # record would carry a deduped `segs` beside an undeduped remainder.
+    # Named `dispatched_segs` rather than `segs_set`: the #438 claim gate far
+    # below builds its own `segs_set` from this same never-mutated list, and two
+    # identically-named sets in one function make a reader prove they agree.
+    dispatched_segs = set(segs)
+    eligible_not_dispatched = []
+    seen_not_dispatched = set()
+    for seg in eligible:
+        if seg in dispatched_segs or seg in seen_not_dispatched:
+            continue
+        seen_not_dispatched.add(seg)
+        eligible_not_dispatched.append(seg)
 
     print(
         f"select_segments.py: requested={requested_display} emitted={segs}",
         file=sys.stderr,
     )
+    # Printed only when non-empty, and worded as a DISCLOSURE rather than a
+    # warning. Measured over both live books' driver journals, 61 of 97 real
+    # rounds dispatched a strict subset of the eligible set: a subset is the
+    # NORM here, so an alarm on this condition would be tuned out and the ids
+    # -- which are what distinguish a deliberate batch from a forgotten unit --
+    # would go unread with it. Immediately after the requested/emitted line
+    # because the two together are one disclosure.
+    if eligible_not_dispatched:
+        print(
+            f"select_segments.py: {len(eligible_not_dispatched)} eligible unit(s) are "
+            f"outstanding and NOT in this dispatch: "
+            f"{', '.join(eligible_not_dispatched)}. Dispatching a subset is legitimate; "
+            f"this line is the record that the remainder exists.",
+            file=sys.stderr,
+        )
 
     if not segs and not args.allow_empty:
         fatal(
@@ -4146,6 +4221,13 @@ def run(args, dirs: dict) -> dict:
             classification=classification,
             counts=counts,
             ids_by_category=ids_by_category,
+            # #530: carried on THIS refusal alone, of every post-selection
+            # fatal. An empty emitted SEGS is this defect's purest shape -- the
+            # operator's own list selected nothing -- and what is still
+            # outstanding is the one field that turns the refusal into a next
+            # action. The other post-selection refusals are ABOUT specific named
+            # segments; the remainder answers no question they ask.
+            eligible_not_dispatched=eligible_not_dispatched,
         )
 
     # ---- #409 Step 1: refuse to silently re-translate converged work -------
@@ -5071,6 +5153,14 @@ def run(args, dirs: dict) -> dict:
         "ids_by_category": ids_by_category,
         "overrides": overrides,
         "excluded_only_segs": excluded_only_segs,
+        # #530: the eligible units this invocation is NOT dispatching -- see
+        # the module docstring's Output contract for its shape and the
+        # computation site above for how it is derived. The one fact worth
+        # repeating HERE, because it is a fact about this dict rather than
+        # about the value: segment_dispatch_driver.py requires the key and
+        # refuses a payload without it rather than defaulting to `[]`, so
+        # dropping it from this literal is a breaking change, not a trim.
+        "eligible_not_dispatched": eligible_not_dispatched,
         # #438 D3: the claim authorization, keyed by segment id -- a subset
         # of `segs` by construction (validated above). Empty {} when no
         # claim was requested. Each entry is EXACTLY the claim_record.py

@@ -950,9 +950,13 @@ def main():
         encoding="utf-8",
     )
 
+    # #530: `eligible_not_dispatched` is REQUIRED of every success payload --
+    # segment_dispatch_driver.py refuses a payload without it (exit 2) rather
+    # than reading a missing key as "nothing outstanding". This fake emits no
+    # segs at all, so `[]` is also the truthful value here.
     print(json.dumps({
         "success": True, "segs": [], "claims": {},
-        "counts": {}, "classification": {},
+        "counts": {}, "classification": {}, "eligible_not_dispatched": [],
     }))
 
 

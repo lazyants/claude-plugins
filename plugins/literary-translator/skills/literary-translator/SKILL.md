@@ -1856,6 +1856,22 @@ is called. It:
   confirmation run).
 - Every invocation logs requested `--only-segs` IDs alongside
   actually-emitted `SEGS` IDs side by side.
+- **#530:** every invocation also reports `eligible_not_dispatched` — the
+  eligible units it is NOT dispatching, i.e. the full eligible set minus the
+  emitted `SEGS`, in candidate order and de-duplicated. It is in the JSON
+  payload (always present, always a list, `[]` on the default path by
+  construction) and, when non-empty, on stderr directly under the
+  requested/emitted line. `excluded_only_segs` above covers the ids you NAMED
+  and this script declined; this covers the opposite direction — an eligible
+  unit you never named at all, which previously produced no signal whatsoever
+  while the over-specified direction refused loudly. It is a REPORT, never a
+  refusal: dispatching a subset is legitimate (operator-paced batches, a
+  deliberately narrow retry), and the defect was that an under-specified
+  `--only-segs` was indistinguishable from a complete one. Read the IDs, not
+  just the count — an omission and a deliberate batch differ only in *which*
+  units are outstanding. `segment_dispatch_driver.py` carries the same list in
+  its `step1_gate_passed` journal entry and prints the same one-line
+  disclosure on its own stderr.
 - **#409:** `--allow-retranslate-converged` (optional) — without it,
   `select_segments.py` FATALs if the emitted `SEGS` would include any
   segment that has EVER converged before (a durable per-segment sentinel,

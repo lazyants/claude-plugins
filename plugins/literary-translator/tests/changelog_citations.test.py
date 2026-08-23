@@ -61,9 +61,9 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.51.0 (#498 -- which channel a settled W6 decision goes to) per
-# the maintenance contract above. This rotation inherited an already-empty map
-# (1.50.0 had retired the previous entry's anchors) and left it empty.
+# Rewritten for 1.52.0 (#530 -- an eligible unit left out of --only-segs) per the
+# maintenance contract above. This rotation inherited an already-empty map and
+# left it empty: the 1.52.0 entry cites NO `file.ext:NNN`.
 #
 # Phrase every future note this way -- in the PAST tense, about what this
 # rotation did to what it inherited, never in the present tense about what the
@@ -74,30 +74,25 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # way -- two rotations of this file shipped green with a note that had been
 # true one rebase earlier.
 #
-# Worth carrying forward, because this file cannot detect it and it was live on
-# main within the last day: four `cache_key.py` anchors labelled 1.44.0 were
-# still standing under 1.49.0's entry while the prose above them announced
-# itself as "Rewritten for 1.34.1" -- rows, comment and newest entry each naming
-# a different release, with every assertion here green. Rebasing is how the two
-# halves diverge: the declaration and the comment sit in different regions, so
-# one can be rotated, or inherited from main, without the other conflicting.
-# Rotate this block BY NAME every release; nothing prompts it.
+# Why 1.52.0 cites nothing, stated so the empty map is legible as a decision.
+# The entry names `select_default()`, `DEFAULT_ELIGIBLE_CATEGORIES`,
+# `parse_claims_field()`, `step1_gate_passed`, `PLUGIN_BUNDLE_MEMBERS` and
+# `manifest.schema.json`'s missing `uniqueItems`, but every claim about them is
+# BEHAVIOURAL -- what the payload always carries, what the driver refuses, which
+# categories the census covers, which bundle a file belongs to -- and a
+# behavioural claim is pinned by a test that exercises it, not by a line number.
+# Each of those has one: the exact-key assertion in `select_segments.test.py`,
+# `test_a_selector_payload_without_the_field_is_refused_not_defaulted`,
+# `test_eligible_not_dispatched_never_reports_an_ineligible_category` and
+# `test_a_duplicate_manifest_entry_is_reported_once_in_the_remainder`.
 #
-# 1.51.0 cites NO `file.ext:NNN`, so this map is empty -- its documented
-# per-release state, not a lapse. The entry names `canon_validate.py`,
-# `compute_used_terms_hash()`, `compute_prompt_hash()`, `compute_schema_hash()`,
-# `resume_setup.py`, `PLUGIN_BUNDLE_MEMBERS` and D6's fresh-segpack precondition,
-# but every claim about them is BEHAVIOURAL -- what a validate-only run checks,
-# which canon a hash reads, which file a hash covers -- and a behavioural claim
-# is pinned by a test that exercises it, not by a line number. The one exception
-# is the entry's "exactly one caller" for D6's fresh-segpack precondition: that
-# is a CENSUS, no test asserts it, and it is guarded by review alone -- named
-# here so the gap is recorded rather than implied away. A line citation would
-# still be the wrong instrument for it, since it would pin WHERE the caller
-# lives rather than that there is only one. The entry states no figure this file's
-# sibling `changelog_figures.test.py` can see either -- its counts are spelled
-# out as words, which that file's tokenizer reads nothing of -- so its row list
-# is empty for this release as well, with the residual named in its own comment.
+# The entry's one unpinned claim is its field measurement -- sixty-one of
+# ninety-seven `step1_gate_passed` records in the two live books dispatched a
+# strict subset. That is a fact about run journals OUTSIDE this repo; no test
+# here can see it and no line citation would help, since a citation pins where
+# code lives rather than what a corpus measured. Named so the gap is recorded
+# rather than implied away. `changelog_figures.test.py` cannot see it either --
+# see its own comment for why its row list is empty for this release.
 #
 # An empty map is exactly the case where a correct rotation and a SKIPPED one
 # look identical, and 1.40.0 is the instance that proved it: the previous
@@ -107,10 +102,11 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # four real rows, and they were still standing under 1.49.0's entry, which is the
 # OTHER failure and equally invisible here. Two instances are known, and both are
 # a stale COMMENT rather than a stale assertion. The empty-map precedent runs
-# further back for its own reasons (1.34.1 (#547) and 1.33.1 were empty too). Both halves still bite against an empty map
-# -- a citation with no anchors fails and an anchor no citation uses fails -- but
-# neither half fires on a stale COMMENT, which is why the rewrite is a
-# maintenance contract rather than an assertion.
+# further back for its own reasons (1.51.0 (#498), 1.34.1 (#547) and 1.33.1 were
+# empty too). Both halves still bite against an empty map -- a citation with no
+# anchors fails and an anchor no citation uses fails -- but neither half fires on
+# a stale COMMENT, which is why the rewrite is a maintenance contract rather than
+# an assertion.
 CITATION_ANCHORS = {}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an

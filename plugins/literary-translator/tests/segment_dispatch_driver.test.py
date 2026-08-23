@@ -562,6 +562,173 @@ def phase2_project(tmp_path, n=1, name="durable_root", profile_yaml=FULL_PROFILE
 # ===========================================================================
 
 
+# ---------------------------------------------------------------------------
+# #530 -- the eligible units a dispatch is NOT carrying.
+# ---------------------------------------------------------------------------
+
+_DRIVER_DISCLOSURE_MARK = "eligible unit(s) are outstanding and NOT in this dispatch:"
+
+
+def _driver_disclosure_lines(stderr: str) -> list:
+    """Every #530 disclosure line the DRIVER printed.
+
+    A list rather than `in stderr`: the contract is exactly ONE line for a
+    non-empty remainder and NONE for an empty one, and `in` cannot tell one
+    line from two.
+    """
+    return [
+        line
+        for line in stderr.splitlines()
+        if line.startswith("segment_dispatch_driver.py: ") and _DRIVER_DISCLOSURE_MARK in line
+    ]
+
+
+def test_step1_journal_and_stderr_report_the_units_left_out_of_only_segs(tmp_path):
+    """#530: the driver journalled `segs` and `counts` into ONE
+    step1_gate_passed record and compared neither, so a round could report 31
+    stale and dispatch 11 with both numbers side by side and nothing
+    remarking on the gap. The superset direction already refused loudly ("the
+    authorization would not be a subset of what is dispatched"); the subset
+    direction produced no signal at all.
+
+    stderr as well as the journal because SKILL.md's own launch section says
+    the driver's stdout carries exactly ONE line at exit, so its stderr is the
+    only channel that reaches the redirected run log while the run is live.
+    """
+    root = phase2_project(tmp_path, n=3)
+
+    proc = run_driver(root, "--only-segs", "seg01", timeout=60)
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+
+    journal = DRIVER.journal_path(root, payload["session_id"])
+    entries = [json.loads(ln) for ln in journal.read_text(encoding="utf-8").splitlines()]
+    gate = next(e for e in entries if e["type"] == "step1_gate_passed")
+    assert gate["segs"] == ["seg01"]
+    assert gate["eligible_not_dispatched"] == ["seg02", "seg03"], gate
+
+    lines = _driver_disclosure_lines(proc.stderr)
+    assert len(lines) == 1, proc.stderr
+    assert "2 eligible unit(s)" in lines[0], lines[0]
+    assert "seg02" in lines[0] and "seg03" in lines[0], lines[0]
+
+
+def test_no_driver_disclosure_when_the_whole_eligible_set_is_dispatched(tmp_path):
+    """#530, NEGATIVE REGRESSION -- green before the change by construction,
+    since no such line existed. It earns its keep through its mutation alone:
+    make the driver's print unconditional and this goes red.
+
+    Measured over both live books' driver journals, 61 of 97 real rounds
+    dispatched a strict subset, so the line must stay silent on the other 36
+    or it becomes noise that gets tuned out along with the ids that are the
+    actual signal.
+    """
+    root = phase2_project(tmp_path, n=2)
+
+    proc = run_driver(root, timeout=60)
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+
+    journal = DRIVER.journal_path(root, payload["session_id"])
+    entries = [json.loads(ln) for ln in journal.read_text(encoding="utf-8").splitlines()]
+    gate = next(e for e in entries if e["type"] == "step1_gate_passed")
+    # The default path dispatches select_default()'s own result, so the
+    # remainder is empty BY CONSTRUCTION -- the key is still present.
+    assert gate["eligible_not_dispatched"] == [], gate
+    assert _driver_disclosure_lines(proc.stderr) == [], proc.stderr
+
+
+def test_a_refused_empty_selection_still_reports_what_is_outstanding(tmp_path):
+    """#530: the empty-SEGS refusal is the one refusal select_segments.py
+    carries the remainder on -- and on the driver path it would otherwise be
+    thrown away twice over.
+
+    `run_select_segments()` runs the selector with `capture_output=True`, so
+    the selector's own stderr disclosure never reaches this operator, and the
+    refusal handler used to journal only `error`. Without the forwarding this
+    test pins, the single case the field was added for would show a driver
+    operator nothing at all.
+
+    The fixture names only an id that is ineligible for dispatch, which is
+    exactly how an operator reaches this refusal by accident: seg01 has
+    genuinely converged (a real draft plus a fragment whose cache_key and
+    reviewed_draft_sha1 both match it -- `reusable`, which
+    DEFAULT_ELIGIBLE_CATEGORIES excludes and which --only-segs never
+    force-includes), so `--only-segs seg01` selects nothing while seg02 and
+    seg03 are still outstanding. The recipe is the one
+    test_resume_digest_stays_stable_as_a_segment_converges... already uses.
+    """
+    root = phase2_project(tmp_path, n=3)
+    driver_mod = _load_fixture_driver(root)
+    draft = {"seg": "seg01", "blocks": {"p1": "hola"}}
+    (root / "segments" / "seg01.draft.json").write_text(
+        json.dumps(draft, ensure_ascii=False), encoding="utf-8"
+    )
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    write_fragment(root, "seg01", converged_fragment(make_cache_key("seg01"), draft_sha1))
+    mark_ever_converged(root, "seg01")
+
+    proc = run_driver(root, "--only-segs", "seg01", timeout=60)
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "refusing to no-op silently" in payload["error"], payload
+    # The machine-readable half...
+    assert payload["eligible_not_dispatched"] == ["seg02", "seg03"], payload
+    # A refusal payload carries no `session_id`, so the journal is located by
+    # glob rather than by name -- this driver writes exactly one per run.
+    journals = list((root / "runs").glob("*/driver_journal.jsonl"))
+    assert len(journals) == 1, journals
+    entries = [json.loads(ln) for ln in journals[0].read_text(encoding="utf-8").splitlines()]
+    refused = next(e for e in entries if e["type"] == "step1_gate_refused")
+    assert refused["eligible_not_dispatched"] == ["seg02", "seg03"], refused
+    # ...and the live half, which is what an operator watching the redirected
+    # run log actually sees.
+    lines = _driver_disclosure_lines(proc.stderr)
+    assert len(lines) == 1, proc.stderr
+    assert "2 eligible unit(s)" in lines[0], lines[0]
+    assert "seg02" in lines[0] and "seg03" in lines[0], lines[0]
+    assert read_argv_log(root) == [], "a refusal must dispatch nothing"
+
+
+_SELECT_SEGMENTS_WITHOUT_THE_FIELD = (
+    "#!/usr/bin/env python3\n"
+    "import json\n"
+    "import sys\n"
+    "print(json.dumps({\n"
+    '    "success": True, "segs": ["seg01"], "claims": {},\n'
+    '    "counts": {}, "classification": {}, "ids_by_category": {},\n'
+    "}))\n"
+    "sys.exit(0)\n"
+)
+
+
+def test_a_selector_payload_without_the_field_is_refused_not_defaulted(tmp_path):
+    """#530: the driver REQUIRES `eligible_not_dispatched` rather than
+    defaulting a missing key to [].
+
+    Same reasoning as parse_claims_field()'s own missing-field refusal ("must
+    be refused here, not read as 'nothing was claimed'"), applied to a field
+    whose entire purpose is that absence and "nothing outstanding" must not
+    look alike: defaulting would recreate the silent green this release
+    closes. Exit 2, not 1 -- this is a broken contract between two scripts,
+    not a project-state refusal.
+    """
+    root = phase2_project(tmp_path, n=2)
+    (root / "scripts" / "select_segments.py").write_text(
+        _SELECT_SEGMENTS_WITHOUT_THE_FIELD, encoding="utf-8"
+    )
+
+    proc = run_driver(root, timeout=60)
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "eligible_not_dispatched" in payload["error"], payload
+    assert read_argv_log(root) == [], "nothing may be dispatched after this refusal"
+
+
 def test_step1_gate_refuses_a_previously_converged_segment_without_the_flag(tmp_path):
     root = make_durable_root(tmp_path)
     write_manifest(root, ["seg01"])
