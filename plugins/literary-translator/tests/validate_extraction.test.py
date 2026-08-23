@@ -1043,3 +1043,236 @@ def test_heading_levels_key_in_declared_heading_types_passes(tmp_path, monkeypat
     results = ve.run_derivable_checks(m, "omit_apparatus", 700)
     assert _ok(results, "heading_levels_keys_are_declared_heading_types") is True
     assert _run_gate(tmp_path, monkeypatch, m) == 0
+
+
+# ---------------------------------------------------------------------------
+# #397 -- an empty content unit that still reaches a draft
+#
+# Two checks, because two different branches of validate_draft.py judge the two
+# populations and they do NOT agree on what "empty" means:
+#
+#   no_untranslatable_empty_blocks   segment blocks; FALSY plain_text (a
+#                                    whitespace-only one is TRUTHY to
+#                                    _block_source_text and converges) AND a
+#                                    non-blank source_html; single-claimant
+#                                    verse parents exempt.
+#   no_empty_footnote_definitions    footnote def blocks; `.strip()`-empty
+#                                    plain_text, NO source_html conjunct, and
+#                                    NO reachability filter at all.
+#
+# Every assertion below looks the check up BY NAME through _ok(), which raises
+# "check ... was not run" when the name is absent -- so a `is True` case is a
+# genuine RED on an unfixed tree, never a vacuous pass. The one exception is
+# the policy-gate test, which asserts ABSENCE and is a pin, not a non-vacuity
+# proof; it is called out in its own docstring.
+# ---------------------------------------------------------------------------
+
+_HR_HTML = '<hr class="c30 p4"/>'
+
+
+def _manifest_with_empty_seg_block(plain_text="", *, source_html=_HR_HTML, in_segment=True,
+                                   fnrefs=None) -> dict:
+    """Baseline manifest plus one extra block carrying ``plain_text`` and
+    ``source_html``, cited by seg01's own block_ids unless ``in_segment`` is
+    False. Models the issue's own case: a purely structural <hr> that the
+    extractor emitted as a translatable content block."""
+    m = _baseline_manifest()
+    bid = "PARA:seg01:0002"
+    block = {
+        "id": bid, "type": "PARA", "order_index": 5,
+        "source_file": "body.xhtml", "plain_text": plain_text,
+        "sha1": _sha1(plain_text),
+    }
+    if source_html is not None:
+        block["source_html"] = source_html
+    if fnrefs is not None:
+        block["fnrefs"] = fnrefs
+    m["blocks"][bid] = block
+    if in_segment:
+        m["segments"][0]["block_ids"] = m["segments"][0]["block_ids"] + [bid]
+    return m
+
+
+def _manifest_verse_parent_empty(n_claimants=1) -> dict:
+    """``_manifest_with_verse()`` with the verse's PARENT block emptied (falsy
+    plain_text, non-blank source_html) -- the shape 14a would refuse if it did
+    not honour validate_draft's placeholder branch. ``n_claimants`` controls how
+    many NON-EMBEDDED verse.store entries name that same parent: exactly one is
+    the exempt case, two is the SOURCE DEFECT case validate_draft deliberately
+    keeps OUT of bid_to_verse_ph, so it stays checked."""
+    m = _manifest_with_verse()
+    parent = "PARA:seg01:0001"
+    m["blocks"][parent]["plain_text"] = ""
+    m["blocks"][parent]["sha1"] = _sha1("")
+    m["blocks"][parent]["source_html"] = "<p><span class='poem'>...</span></p>"
+    if n_claimants > 1:
+        m["verse"]["store"].append({
+            "vid": "V2", "placeholder": "⟦VERSE_V2_cafebabe⟧", "context": "body",
+            "parent_block": parent, "plain_text": "Another line of verse",
+            "sha1": _sha1("Another line of verse"), "mount": "body",
+        })
+        # keep verse_counts_reconcile satisfied: n_block still counts the ONE
+        # VERSE-typed block, so the second store entry is carried as embedded.
+        m["verse"]["n_nodes"] = 2
+        m["verse"]["n_embedded"] = 1
+        m["verse"]["by_context"]["body"] = 2
+    return m
+
+
+def _manifest_empty_footnote_def(plain_text="", *, source_html=None) -> dict:
+    """``_manifest_translate_all()`` whose footnote definition block carries no
+    text. ``source_html`` is deliberately settable: unlike 14a, 14b must refuse
+    the block WITH markup too, because segpack carries `plain_text` only."""
+    m = _manifest_translate_all()
+    m["blocks"]["Footnote_1"]["plain_text"] = plain_text
+    m["blocks"]["Footnote_1"]["sha1"] = _sha1(plain_text)
+    if source_html is not None:
+        m["blocks"]["Footnote_1"]["source_html"] = source_html
+    return m
+
+
+# --- 14a --------------------------------------------------------------------
+
+def test_no_untranslatable_empty_blocks_violation():
+    # The issue's own case: plain_text "" with a non-empty structural <hr>.
+    m = _manifest_with_empty_seg_block("")
+    assert _ok(ve.run_derivable_checks(m, "omit_apparatus", 700),
+               "no_untranslatable_empty_blocks") is False
+
+
+def test_no_untranslatable_empty_blocks_whitespace_converges():
+    """A whitespace-only plain_text is TRUTHY to validate_draft's
+    _block_source_text, which returns it verbatim and never consults
+    source_html; the empty-translation guard then sees src_text.strip() == ""
+    and does not fire. That block converges today, so refusing it would be a
+    false RED -- this is why the predicate is falsy, not `.strip()`-empty."""
+    m = _manifest_with_empty_seg_block("   ")
+    assert _ok(ve.run_derivable_checks(m, "omit_apparatus", 700),
+               "no_untranslatable_empty_blocks") is True
+
+
+def test_no_untranslatable_empty_blocks_needs_source_html():
+    """With no source_html the fallback yields "", so validate_draft's guard
+    never fires and the segment converges -- not this check's business."""
+    m = _manifest_with_empty_seg_block("", source_html=None)
+    assert _ok(ve.run_derivable_checks(m, "omit_apparatus", 700),
+               "no_untranslatable_empty_blocks") is True
+
+
+def test_no_untranslatable_empty_blocks_ignores_blocks_outside_segments():
+    """A block no segment cites never reaches a segpack, so it never reaches
+    validate_draft either."""
+    m = _manifest_with_empty_seg_block("", in_segment=False)
+    assert _ok(ve.run_derivable_checks(m, "omit_apparatus", 700),
+               "no_untranslatable_empty_blocks") is True
+
+
+def test_no_untranslatable_empty_blocks_fnrefs_do_not_excuse():
+    """#397's text proposes exempting a block that still anchors a footnote.
+    Not taken: such a block still has a truthy source_html, so validate_draft
+    still reports it as an empty translation -- the guard would open a hole."""
+    m = _manifest_with_empty_seg_block("", fnrefs=[1])
+    assert _ok(ve.run_derivable_checks(m, "omit_apparatus", 700),
+               "no_untranslatable_empty_blocks") is False
+
+
+def test_no_untranslatable_empty_blocks_single_verse_parent_is_exempt():
+    """validate_draft requires a non-embedded verse's parent block to equal the
+    verse placeholder and `continue`s before the empty-translation branch, so
+    that block converges carrying no text of its own."""
+    m = _manifest_verse_parent_empty(n_claimants=1)
+    assert _ok(ve.run_derivable_checks(m, "omit_apparatus", 700),
+               "no_untranslatable_empty_blocks") is True
+
+
+def test_no_untranslatable_empty_blocks_multi_verse_parent_is_not_exempt():
+    """A parent claimed by SEVERAL non-embedded verses is reported as a SOURCE
+    DEFECT and deliberately kept OUT of bid_to_verse_ph, so it DOES fall through
+    to the empty-translation branch. Exempting every named parent would be a
+    false GREEN; the exemption counts claimants, exactly as the consumer does."""
+    m = _manifest_verse_parent_empty(n_claimants=2)
+    assert _ok(ve.run_derivable_checks(m, "omit_apparatus", 700),
+               "no_untranslatable_empty_blocks") is False
+
+
+def test_no_untranslatable_empty_blocks_runs_under_every_policy():
+    for policy, manifest in (
+        ("omit_apparatus", _baseline_manifest()),
+        ("translate_all", _manifest_translate_all()),
+        ("preserve_source", _manifest_translate_all()),
+        ("body_refs_only", _manifest_body_refs()),
+    ):
+        names = _names(ve.run_derivable_checks(manifest, policy, 700))
+        assert "no_untranslatable_empty_blocks" in names, policy
+
+
+# --- 14b --------------------------------------------------------------------
+
+def test_no_empty_footnote_definitions_violation():
+    for policy in ("translate_all", "preserve_source"):
+        m = _manifest_empty_footnote_def("")
+        assert _ok(ve.run_derivable_checks(m, policy, 700),
+                   "no_empty_footnote_definitions") is False, policy
+
+
+def test_no_empty_footnote_definitions_whitespace_is_fatal():
+    """Unlike 14a, whitespace-only IS fatal here: validate_draft refuses a blank
+    footnote TRANSLATION unconditionally, with no test of the source at all, so
+    a whitespace-only source_text still demands a non-blank translation."""
+    m = _manifest_empty_footnote_def("   ")
+    assert _ok(ve.run_derivable_checks(m, "translate_all", 700),
+               "no_empty_footnote_definitions") is False
+
+
+def test_no_empty_footnote_definitions_source_html_is_no_defence():
+    """segpack carries `plain_text` ONLY for a footnote -- there is no
+    source_html fallback on that path, so markup cannot rescue the definition.
+    This is the deliberate asymmetry against 14a."""
+    m = _manifest_empty_footnote_def("", source_html="<p><span class='label'>1.</span></p>")
+    assert _ok(ve.run_derivable_checks(m, "translate_all", 700),
+               "no_empty_footnote_definitions") is False
+
+
+def test_no_empty_footnote_definitions_ignores_anchor_block():
+    """There is no reachability filter, deliberately: build_pack() never reads
+    anchor_block (it seeds from segment blocks' recorded fnrefs[] plus FNREF
+    sentinels found in their TEXT). A footnote whose recorded anchor points at a
+    block outside every segment is still refused."""
+    m = _manifest_empty_footnote_def("")
+    m["blocks"]["PARA:detached:0001"] = {
+        "id": "PARA:detached:0001", "type": "PARA", "order_index": 6,
+        "source_file": "body.xhtml", "plain_text": "Detached prose.",
+        "sha1": _sha1("Detached prose."),
+    }
+    m["footnotes"][0]["anchor_block"] = "PARA:detached:0001"
+    assert _ok(ve.run_derivable_checks(m, "translate_all", 700),
+               "no_empty_footnote_definitions") is False
+
+
+def test_no_empty_footnote_definitions_not_run_without_footnote_apparatus():
+    """Policy gate. NOTE: this asserts ABSENCE, so it already passes on a tree
+    where the check does not exist -- it is a pin that the check does not fire
+    where segpack carries no footnote text, NOT red-before-green evidence."""
+    for policy, manifest in (
+        ("omit_apparatus", _baseline_manifest()),
+        ("body_refs_only", _manifest_body_refs()),
+    ):
+        names = _names(ve.run_derivable_checks(manifest, policy, 700))
+        assert "no_empty_footnote_definitions" not in names, policy
+
+
+def test_no_empty_footnote_definitions_clean_manifest_passes():
+    assert _ok(ve.run_derivable_checks(_manifest_translate_all(), "translate_all", 700),
+               "no_empty_footnote_definitions") is True
+
+
+# --- bypass closure: both are FATAL through the real gate --------------------
+
+def test_bypass_no_untranslatable_empty_blocks(tmp_path, monkeypatch):
+    m = _manifest_with_empty_seg_block("")
+    assert _run_gate(tmp_path, monkeypatch, m) == 1
+
+
+def test_bypass_no_empty_footnote_definitions(tmp_path, monkeypatch):
+    m = _manifest_empty_footnote_def("")
+    assert _run_gate(tmp_path, monkeypatch, m, apparatus_policy="translate_all") == 1

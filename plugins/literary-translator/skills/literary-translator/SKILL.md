@@ -993,6 +993,41 @@ consult, so reconstruction is the only recovery. Binding on every turn:
    codepoints.
 ```
 
+### An empty content unit is refused at W2 (#397)
+
+`run_derivable_checks` refuses two shapes that used to pass W2 and then left
+their segment convergeable **only on an invented-text draft** — the faithful
+draft is rejected forever — surfacing only much later, after a paid translation
+job had already run:
+
+- **`no_untranslatable_empty_blocks`** — a block cited by a segment's
+  `block_ids` whose `plain_text` is empty while its `source_html` is not. A
+  purely structural node (a scene-separating `<hr>`) emitted as a content block
+  is the usual cause. `validate_draft` falls back to `source_html` when
+  `plain_text` is falsy, so it reports the (correctly) empty draft block as an
+  empty translation. The segment then converges only if the translator invents
+  text for a node that has none — which is worse than the refusal. Runs under
+  every `apparatus_policy`. A block that is the parent of exactly one
+  non-embedded verse is exempt — that block legitimately carries no text of its
+  own. *Whitespace-only* `plain_text` is NOT refused: it is truthy, so the
+  faithful empty draft already converges.
+- **`no_empty_footnote_definitions`** — a footnote whose definition block
+  carries no text (whitespace-only included). Runs only under
+  `footnotes.apparatus_policy: translate_all | preserve_source`, the two
+  policies where footnote text is carried into a segpack at all. A footnote's
+  `source_text` is taken from `plain_text` alone, with no `source_html`
+  fallback, and a blank footnote translation is refused unconditionally.
+  This check has **no reachability filter by design**: an empty definition is
+  refused even if no segpack would have carried it. That over-catch is
+  deliberate — the remedy is the same either way, and both attempts to model
+  reachability got it wrong in a way that let the defect through.
+
+**What to do when one fires.** The gate names the offending block ids or
+footnote numbers. Adapt `${durable_root}/extract.py` so the node is not emitted
+as a content block (or so the empty definition is not emitted), then re-extract.
+Do NOT edit the check: the failure is real, and it is cheaper here than after a
+translation round.
+
 **New in 1.12.0 (#210) — two additional HARD checks land in
 `run_derivable_checks`**, both exit `1`, both running unconditionally,
 including for `source.format: custom` (only the extractor self-check
