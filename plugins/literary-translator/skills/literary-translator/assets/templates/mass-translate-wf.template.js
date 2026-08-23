@@ -1053,8 +1053,13 @@ function reviewDispatchPrompt(seg, roundLabel) {
   // files a finding. The fixer never raises one, and repeating a raise-side rule
   // in its prompt would read as licence to skip a finding rather than substantiate
   // it. The two halves are deliberately independent: a finding refused at the fix
-  // turn still costs a round and still stands in review.json, which the next
-  // reviewer reads.
+  // turn still costs a round, and its verdict still stands in review.json, so the
+  // unit does not converge until the round advances, an operator rejection lands
+  // (#461/#527) or the cap fires. It does NOT reach the next REVIEWER -- this
+  // function's read list is review_TASK.md, style_bible.md, the segpack and the
+  // draft, and nothing puts a prior review in front of it (corrected in 1.63.0,
+  // #526; the 1.40.0 CHANGELOG entry still carries the superseded sentence as the
+  // record of what that release claimed).
   // The prohibition binds only a finding that PRESCRIBES a target form. A blanket
   // "no canon_map entry means do not raise" would suppress findings that are
   // authorized today and grounded in the source, not in a canon: segpack.py admits a
@@ -1062,6 +1067,51 @@ function reviewDispatchPrompt(seg, roundLabel) {
   // its canonical_target_form is empty, and the strong-name detector can drop a
   // canonized name from the segpack altogether.
   lines.push("Authority direction. The segpack's canon_map is the only frozen canon you are given -- canon.json is not in your read list, and canon_names may name a person whose canon_map entry is deliberately absent. The draft's own names[] entries and any note prefixed NEW: were written by the translator in the same turn as the prose you are reviewing: they are unratified proposals, never a standard, and the artifact under review is never the authority it is reviewed against. Cite them as context if it helps, never as the rule a rendering violates. So a finding that prescribes a particular canonical target form -- demanding the prose be changed to it, restored to it, or reverted to it -- must quote, in its own issue text, the canon_map entry (source form -> target form) it rests on; if that form has no canon_map entry, there is no frozen canon at that name and you may not assert one. Findings grounded in the source rather than in a canonical target form are untouched -- an omitted name, a canonical name left untranslated, a name rendered as a different person are all reported exactly as before. One case is neither canon nor an unratified proposal: the segpack's split_names lists source forms adjudicated as HOMONYM SPLITS, each sense carrying a disambiguator. A split form is absent from canon_map and from canon.json BY DESIGN, so the rule above still binds -- you may not prescribe a canonical target form at a split name, and you must not report it as an uncanonized or new name either, because its adjudication already happened. What you may report, quoting the disambiguator it rests on, is the draft carrying the WRONG SENSE for this passage; that is a source-grounded finding like any other.");
+  // #526 -- BOOK-SCOPED RULES. The style contract carries rules whose predicate
+  // spans the whole book (gloss at its FIRST occurrence only; identify on FIRST
+  // mention; the Common Era equivalent at its FIRST mention; the original-script
+  // parenthetical on FIRST mention -- style_bible.template.md ships the last of
+  // those as a REQUIRED FILL, so a project authors one by construction). This
+  // reviewer holds ONE segment, so it cannot see where a term first occurs and
+  // re-derives the same obligation at every later occurrence: measured on a live
+  // book, 5 distinct false findings over 2 rounds, all demanding one gloss whose
+  // first occurrence was already glossed six segments earlier -- a count that
+  // grows with book length rather than being a one-off.
+  //
+  // 1.37.0 (#532) already gave the FIX turn the apply-side half, and says so in
+  // its own words: a book-scoped rule turns on something this segment does not
+  // contain, so settle it against the earlier segments' drafts or refuse -- "this
+  // is the class the reviewer cannot evaluate at all, having seen one segment".
+  // The plugin has been telling the fixer that while never telling the reviewer.
+  // This is the RAISE-side half, scoped to THIS function by ROLE exactly as #529
+  // is: the same text in translatePrompt would read as licence to skip
+  // first-mention treatment altogether (the mirror defect), and in fixPrompt it
+  // would contradict that branch, which sends the fixer to GO AND SETTLE the fact
+  // rather than to leave it alone.
+  //
+  // The in-segment carve-back is one-directional, and that asymmetry is the whole
+  // of it: two occurrences of a term in this segment settle that the SECOND is not
+  // the book's first -- that fact needs no segment the reviewer cannot see -- while
+  // saying anything about the FIRST of the two still needs the whole book. So the
+  // remove direction is restored there and the add direction is not.
+  //
+  // The second disjunct is anchored IN THAT FILE, and that is not padding. The
+  // reviewer's read list also holds the draft, whose notes[] are written by the
+  // translator in the same turn as the prose under review and are routinely
+  // phrased as first-mention records; an unanchored "a written note" would let one
+  // of those count as the evidence, which is exactly the authority #529 spent a
+  // release taking away ("the artifact under review is never the authority it is
+  // reviewed against"). The segpack's source text can carry editorial-note-shaped
+  // prose for the same reason.
+  //
+  // The carve-back binds in BOTH directions on purpose. A recorded first
+  // occurrence does not only license the addition finding at the recorded place --
+  // it equally proves that every OTHER occurrence is not the first, so the
+  // redundant-repeat finding is evaluable there. Binding it to "the recorded place
+  // is in this segment" would suppress the removal half at every later segment
+  // even where the contract has already settled it, and a clean verdict would then
+  // converge over a contract violation.
+  lines.push("Book-scoped rules. style_bible.md carries rules whose predicate spans the WHOLE book -- gloss a realia at its FIRST occurrence only, identify a person on FIRST mention, give a source-calendar year its Common Era equivalent at its FIRST mention, render an original-script name in parentheses on FIRST mention. You hold ONE segment, and a term's first occurrence in the book is normally in a segment you will never see, so a finding may not rest on the assertion that an occurrence in this segment is, or is not, the book's first. Concretely: do not demand that a first-mention treatment -- a gloss, a parenthetical original, an identification, an era equivalent -- be ADDED here, and do not demand that a treatment already present be REMOVED here as a redundant repeat. Both directions are unevaluable from your inputs, and the remove direction deletes correct text rather than merely costing a round. The one place the evidence IS in your hands: where style_bible.md itself records where a term first occurs -- its motif table's first-occurrence column, or a written note IN THAT FILE naming the block that holds the first mention -- that record settles the question in BOTH directions, and you report normally: a missing first-mention treatment at the recorded place when that place is in this segment, and a redundant repeat at any occurrence the record puts elsewhere. A second place the evidence is in your hands is THIS SEGMENT ITSELF: where an occurrence here is preceded by another occurrence of the same term in this same segment, the later one is provably not the book's first whatever lies in the segments you cannot see, so a redundant repeat there is reported normally. That reasoning runs in the REMOVE direction only -- an earlier occurrence here proves a later one is not the first, and proves nothing about whether that earlier one is. Everything else about such a rule stays in scope: where the treatment IS present, whether it is correctly FORMED -- the right script, the transliteration system style_bible.md names, correct era arithmetic -- is fully evaluable here, and a finding grounded in the source rather than in a whole-book predicate is untouched.");
   // #539 -- the loc VOCABULARY, stated here because this prompt is the site
   // that binds: :1008 above declares it self-contained and says
   // review_TASK.md's own field list must never override it. Before #539 this

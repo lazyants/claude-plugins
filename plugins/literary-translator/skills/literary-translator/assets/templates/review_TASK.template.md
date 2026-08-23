@@ -140,6 +140,38 @@ example baked into this file):
   intentionally awkward or archaic passage) is NOT itself a defect --
   distinguish "faithfully odd" from "translation is wrong."
 
+**Book-scoped style rules:**
+
+- `style_bible.md` carries rules whose predicate spans the WHOLE book -- gloss a
+  realia at its **first occurrence only**, identify a person on **first
+  mention**, give a source-calendar year its Common Era equivalent at its
+  **first mention**, render an original-script name in parentheses on **first
+  mention**. You hold ONE segment, and a term's first occurrence in the book is
+  normally in a segment you will never see, so **a finding may not rest on the
+  assertion that an occurrence in this segment is, or is not, the book's
+  first.** Do not demand that a first-mention treatment be ADDED here, and do
+  not demand that a treatment already present be REMOVED here as a redundant
+  repeat -- both directions are unevaluable from your inputs, and the remove
+  direction deletes correct text.
+- Where `style_bible.md` itself records where a term first occurs -- its
+  motif table's first-occurrence column, or a written note IN THAT FILE naming the
+  block that holds the first mention -- that record settles the question in BOTH
+  directions, and you report normally: a missing first-mention treatment at the
+  recorded place when that place is in this segment, and a redundant repeat at
+  any occurrence the record puts elsewhere.
+- A second place the evidence is in your hands is THIS SEGMENT ITSELF: where an
+  occurrence here is preceded by another occurrence of the same term in this same
+  segment, the later one is provably not the book's first whatever lies in the
+  segments you cannot see, so a redundant repeat there is reported normally. That
+  reasoning runs in the REMOVE direction only -- an earlier occurrence here proves
+  a later one is not the first, and proves nothing about whether that earlier one
+  is.
+- Everything else about such a rule stays in scope: where the treatment IS
+  present, whether it is correctly FORMED -- the right script, the
+  transliteration system `style_bible.md` names, correct era arithmetic -- is
+  fully evaluable here, and a finding grounded in the source rather than in a
+  whole-book predicate is untouched.
+
 ## Output -- write the file, then print one sentinel line
 
 This is a detached-driver dispatch (the `codex_job.py` driver launches you and

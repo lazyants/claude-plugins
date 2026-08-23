@@ -101,6 +101,10 @@ REVIEW_TASK_TEMPLATE = ASSETS / "templates" / "review_TASK.template.md"
 GLOSSARY_TEMPLATE = ASSETS / "templates" / "glossary-pass-wf.template.js"
 SKEPTIC_SETUP = ASSETS / "scripts" / "skeptic_setup.py"
 SKEPTIC_TRIAGE_SCHEMA = ASSETS / "schemas" / "skeptic-triage.schema.json"
+MASS_TRANSLATE_TEMPLATE = ASSETS / "templates" / "mass-translate-wf.template.js"
+ENGINE_LOOP_DOC = (
+    PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "engine-loop.md"
+)
 
 GIT = shutil.which("git")
 pytestmark = pytest.mark.skipif(
@@ -188,7 +192,17 @@ BASELINE_FIX_ROUND = "c33d1d8a68348f1edf2b4fdeee5f3874bbb17083"
 # what was actually true immediately before the edit.
 BASELINE_1_35_0 = "c6feef8e7b6eea1526f52db1cc1184b634fca3a8"
 
-PIN_BASELINES = (BASELINE_RELEASE, BASELINE_FIX_ROUND, BASELINE_1_35_0)
+# The tip of main that the 1.63.0 (#526) branch was rebased onto. It is a merge
+# commit already on main -- the tip of a merged PR -- so no merge method
+# chosen for THIS branch can move it out of main's ancestry, and it carries none
+# of BASELINE_FIX_ROUND's fragility. A 1.63.0 row needs its own baseline because
+# the sentence it retires was introduced by 1.40.0, i.e. AFTER all three older
+# baselines, where it occurs zero times.
+BASELINE_PRE_1_63_0 = "e2cf120971837d3713a73a7e1f6905f01143acef"
+
+PIN_BASELINES = (
+    BASELINE_RELEASE, BASELINE_FIX_ROUND, BASELINE_1_35_0, BASELINE_PRE_1_63_0,
+)
 
 
 def normalize(text: str) -> str:
@@ -521,6 +535,38 @@ RETIRED = [
         "the draft's own unratified proposal against that same draft -- measured "
         "twice, once applied to correct prose and once used to justify reverting a "
         "correct change. The successor says it is never a standard",
+    ),
+    # -- 1.63.0 (#526): the two LIVE copies of a false #529 sentence -----
+    #
+    # BOTH rows retire the SAME claim from two files, and the third copy -- in
+    # this file's 1.40.0 CHANGELOG entry -- is deliberately KEPT, because an
+    # entry records what a past release claimed. That is exactly why these are
+    # pins rather than a repo-wide absence check: a copy-paste source for the
+    # retired wording still exists in the tree, three directories away, which is
+    # the resurrection route this module was built for.
+    (
+        BASELINE_PRE_1_63_0, MASS_TRANSLATE_TEMPLATE,
+        "still costs a round and still stands in review.json, which the next "
+        "// reviewer reads.",
+        "It does NOT reach the next REVIEWER -- this // function's read list is "
+        "review_TASK.md, style_bible.md, the segpack and the // draft", 1,
+        "the claim that a refused finding reaches the NEXT reviewer. It does not: "
+        "reviewDispatchPrompt's read list is review_TASK.md, style_bible.md, the "
+        "segpack and the draft, render_review_prompt builds the reviewer's prompt "
+        "from that function verbatim, and the canonical review.json is overwritten "
+        "per round. The successor keeps the true half -- the verdict stands and the "
+        "unit does not converge until the round advances, an operator rejection "
+        "lands or the cap fires",
+    ),
+    (
+        BASELINE_PRE_1_63_0, ENGINE_LOOP_DOC,
+        "still costs a round and still stands in `review.json`, where the next "
+        "reviewer reads it.",
+        "It does **not** reach the next REVIEWER \u2014 `reviewDispatchPrompt`'s read "
+        "list is `review_TASK.md`, `style_bible.md`, the segpack and the draft", 1,
+        "the same false claim as the row above, in the shipped reference doc rather "
+        "than in a template comment. Retired in the same release for the same "
+        "reason, and separately because the two files have independent editors",
     ),
 ]
 

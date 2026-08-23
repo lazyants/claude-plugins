@@ -7907,6 +7907,242 @@ def test_review_task_template_bullet_states_the_names_negative():
             f"{fragment!r} (#529)"
         )
 
+# ===========================================================================
+# #526 -- BOOK-SCOPED RULES, asserted on the PROMPT OUTPUT.
+#
+# The style contract carries rules whose predicate spans the whole book (gloss
+# at its FIRST occurrence only; identify on FIRST mention; the Common Era
+# equivalent at its FIRST mention; the original-script parenthetical on FIRST
+# mention -- style_bible.template.md ships that last one as a REQUIRED FILL, so
+# a project authors a book-scoped rule by construction). A reviewer holding ONE
+# segment cannot see where a term first occurs, so it re-derived the same
+# obligation at every later occurrence. The field measurement behind that is in
+# the 1.63.0 CHANGELOG entry, which is where a number belongs -- it goes stale,
+# and it is not actionable here.
+#
+# OUTPUT-LEVEL for the reason the #546 and #529 blocks above state: a substring
+# check against the template's function BODY passes on a sentence sitting in a
+# comment or after `return`, without it ever reaching a reviewer.
+#
+# WHICH FRAGMENTS, AND WHY EACH. None is a heading or a label -- a marker would
+# stay green while the rule under it was deleted:
+#   - the prohibition is the half that closes the defect;
+#   - the REMOVE half is pinned separately because it is the one most plausibly
+#     dropped as redundant, and the only one whose loss deletes correct text
+#     rather than merely costing a round;
+#   - the carve-back is pinned on its BOTH-DIRECTIONS clause specifically. A
+#     recorded first occurrence does not only license the addition finding at the
+#     recorded place; it equally proves every OTHER occurrence is not the first,
+#     so the redundant-repeat finding is evaluable there too. Trimming the
+#     carve-back back to "the recorded place is in this segment" is the likeliest
+#     regression and would suppress the removal half wherever the contract has
+#     already settled it;
+#   - the formation carve-back keeps the evaluable part of the same rule in
+#     scope, which is what stops this release from reading as a blanket ban.
+#
+# NO SEPARATE VERSE-POLICY SWEEP HERE, unlike #529/#546: that map's resolved
+# text is SPLICED INTO translatePrompt's and fixPrompt's output, so the two leak
+# assertions below already cover the only route by which this rule could reach
+# either of them.
+# ===========================================================================
+
+_BOOK_SCOPE_PROHIBITION = (
+    "a finding may not rest on the assertion that an occurrence in this segment "
+    "is, or is not, the book's first"
+)
+_BOOK_SCOPE_REMOVE_HALF = (
+    "do not demand that a treatment already present be REMOVED here as a redundant repeat"
+)
+# Each carve-back is pinned as ONE SPAN running to the end of what it licenses,
+# never at its opening clause. A fragment stopping at "BOTH directions" proves a
+# label: it stays green while the two licenses that follow it are reversed or
+# deleted, which is the whole content of the rule. Same for the formation half --
+# stopping before "is fully evaluable here" leaves "out of scope" green, and
+# stopping before the source-grounded tail lets that carve-back be deleted
+# outright.
+# ONE CONTIGUOUS SPAN, from the evidence condition through both licenses, and
+# deliberately not two independent substrings. Two earlier shapes were each
+# defeated by a mutant: a span beginning at "that record" stayed green while
+# "records where a term first occurs" was weakened to "mentions the term" (a
+# passing mention would then count as proof of first-ness and revive the whole
+# class), and splitting it into two independently-checked fragments stayed green
+# while a widening disjunct -- "or merely mentions the term" -- was appended
+# BETWEEN them. Contiguity is what pins the adjacency, so both mutants go red.
+# The span also covers the IN THAT FILE anchor on the second disjunct, which is
+# what stops the draft's own notes[] -- LLM-authored in the same turn as the
+# prose under review, and in this reviewer's read list -- from counting as the
+# record.
+_BOOK_SCOPE_BIBLE_CARVEBACK = (
+    "where style_bible.md itself records where a term first occurs -- its motif "
+    "table's first-occurrence column, or a written note IN THAT FILE naming the "
+    "block that holds the first mention -- that record settles the question in "
+    "BOTH directions, and "
+    "you report normally: a missing first-mention treatment at the recorded place "
+    "when that place is in this segment, and a redundant repeat at any occurrence "
+    "the record puts elsewhere"
+)
+_BOOK_SCOPE_FORM_CARVEBACK = (
+    "where the treatment IS present, whether it is correctly FORMED -- the right "
+    "script, the transliteration system style_bible.md names, correct era arithmetic "
+    "-- is fully evaluable here, and a finding grounded in the source rather than in "
+    "a whole-book predicate is untouched"
+)
+
+# The IN-SEGMENT carve-back, pinned as one span THROUGH its one-directional
+# qualifier. Two occurrences of a term inside this segment settle that the SECOND
+# is not the book's first without any segment the reviewer cannot see, so the
+# remove direction is evaluable there; nothing about the FIRST of the two is. A
+# span stopping before "REMOVE direction only" would stay green on the mutant
+# that drops the asymmetry and licenses the ADD direction here too, which is the
+# original defect wearing the carve-back's clothes.
+_BOOK_SCOPE_IN_SEGMENT_CARVEBACK = (
+    "where an occurrence here is preceded by another occurrence of the same term "
+    "in this same segment, the later one is provably not the book's first whatever "
+    "lies in the segments you cannot see, so a redundant repeat there is reported "
+    "normally. That reasoning runs in the REMOVE direction only"
+)
+
+# The 1.37.0 branch's OPERATIVE tail. The opener (`_FIX_BOOK_SCOPED_FACT`, in the
+# #532 block above) alone
+# establishes only that a rule HAS book
+# scope; the tail is what sends the fixer to settle the claim outside this segment
+# and to refuse when it cannot. Deleting the tail while keeping the opener is the
+# mutant that leaves the apply-side half decorative.
+_FIX_BOOK_SCOPED_SETTLE_OR_REFUSE = (
+    "the ones ordered before this one -- and if you cannot establish there that the "
+    "claim holds, refuse it rather than apply it"
+)
+
+_BOOK_SCOPE_FRAGMENTS = (
+    _BOOK_SCOPE_PROHIBITION,
+    _BOOK_SCOPE_REMOVE_HALF,
+    _BOOK_SCOPE_BIBLE_CARVEBACK,
+    _BOOK_SCOPE_IN_SEGMENT_CARVEBACK,
+    _BOOK_SCOPE_FORM_CARVEBACK,
+)
+
+# What must NOT reach the other two prompts. The two carve-backs are absent from
+# this set on purpose: they merely describe when the evidence is in hand, which a
+# future clarification could state truthfully elsewhere, so pinning them in the
+# negative direction would go red on a correct edit. The two halves below carry
+# the mirror-image risk -- in translatePrompt they read as licence to skip
+# first-mention treatment altogether, and in fixPrompt they contradict 1.37.0's
+# own book-scoped branch, which sends the fixer to SETTLE the fact against the
+# earlier segments' drafts rather than to leave it alone.
+_BOOK_SCOPE_LEAK_FRAGMENTS = (_BOOK_SCOPE_PROHIBITION, _BOOK_SCOPE_REMOVE_HALF)
+
+# The block the rule must live in inside the narrative template, and the heading
+# that follows it. Both are asserted present: a slice whose boundaries were
+# reworded away would be empty, and every containment check over an empty slice
+# is vacuous.
+_BOOK_SCOPE_BLOCK_OPENER = "**Book-scoped style rules:**"
+_BOOK_SCOPE_BLOCK_CLOSER = "## Output -- write the file"
+
+
+def test_review_dispatch_prompt_bars_a_book_scoped_predicate(tmp_path):
+    """#526. The reviewer is told, in its own task text, that it cannot settle a
+    whole-book predicate from one segment -- the same thing 1.37.0's fixPrompt
+    has been saying since 1.37.0."""
+    out = _review_translate_fix_prompts(tmp_path)
+
+    for fragment in _BOOK_SCOPE_FRAGMENTS:
+        assert fragment in out["review"], (
+            f"reviewDispatchPrompt's OUTPUT must carry the #526 book-scope rule "
+            f"({fragment!r}) -- not merely the template's source text"
+        )
+    for fragment in _BOOK_SCOPE_LEAK_FRAGMENTS:
+        assert fragment not in out["translate"], (
+            f"translatePrompt's output must NOT carry {fragment!r} (#526): the "
+            f"translator files no findings, so it reads as licence to skip "
+            f"first-mention treatment altogether -- this defect's mirror image"
+        )
+        assert fragment not in out["fix"], (
+            f"fixPrompt's output must NOT carry {fragment!r} (#526): 1.37.0 (#532) "
+            f"tells the FIXER to settle a book-scoped claim against the earlier "
+            f"segments' drafts or refuse, and a leave-it-alone rule contradicts that"
+        )
+
+
+def test_fix_prompt_still_owns_the_apply_side_book_scoped_branch(tmp_path):
+    """#526 control. The raise-side half only pays off while the apply-side half
+    survives: a false finding raised in spite of the clause is still refused at
+    the fix turn. Only the branch's OPERATIVE TAIL is asserted here -- its opener
+    is already a member of `_FIX_FRAGMENTS` and is checked by the #532 test, and
+    the tail is the half that the #532 set does not cover. Asserted in this block
+    rather than added to that set so a `-k book_scope` run still protects the
+    other end of the property this release depends on."""
+    dirs = DRIVER.resolve_dirs(None)
+    subst = _fixture_template_subst(tmp_path, "20260101T000000Z")
+    out = DRIVER.call_template_functions(
+        dirs, subst,
+        [{"key": "fix", "fn": "fixPrompt", "args": ["seg01", 1, {"findings": []}]}],
+    )
+    assert _FIX_BOOK_SCOPED_SETTLE_OR_REFUSE in out["fix"], (
+        f"fixPrompt's OUTPUT must still carry the OPERATIVE tail of the 1.37.0 "
+        f"book-scoped branch ({_FIX_BOOK_SCOPED_SETTLE_OR_REFUSE!r}) -- #526 bars "
+        f"the reviewer from RAISING the class, and this is what still catches one "
+        f"that is raised anyway"
+    )
+
+
+def test_review_task_template_block_states_the_book_scope_rule():
+    """#526. The narrative template says it too, in its own block. Bounded to
+    that block for the reason the #529 slice test states: this file opens with a
+    ~40-line HTML comment, and a whole-file substring check would pass on the
+    rule written into that comment while the operative check list still read as
+    an unqualified obligation. A boundary slice rather than a Markdown parse --
+    a hand-rolled parser fails OPEN, silently matching nothing when the shape
+    changes.
+
+    The fragments are restated here rather than referencing the prompt-output
+    constants above: these are two independently editable artifacts, so sharing a
+    literal would make a reflow of one report as a regression in the other, and
+    would let a lockstep weakening of both pass two checks that are supposed to
+    be independent."""
+    assert REVIEW_TASK_TEMPLATE.is_file(), REVIEW_TASK_TEMPLATE
+    raw = REVIEW_TASK_TEMPLATE.read_text(encoding="utf-8")
+
+    start = raw.find(_BOOK_SCOPE_BLOCK_OPENER)
+    assert start != -1, (
+        f"{REVIEW_TASK_TEMPLATE.name} no longer contains "
+        f"{_BOOK_SCOPE_BLOCK_OPENER!r} -- the #526 rule's own block was renamed, "
+        f"so this test can no longer say where the rule must live"
+    )
+    end = raw.find(_BOOK_SCOPE_BLOCK_CLOSER, start)
+    assert end != -1, (
+        f"{REVIEW_TASK_TEMPLATE.name} no longer contains "
+        f"{_BOOK_SCOPE_BLOCK_CLOSER!r} after {_BOOK_SCOPE_BLOCK_OPENER!r} -- "
+        f"without that closing boundary the slice below would run to end of file "
+        f"and every check on it would be vacuous"
+    )
+    block = _squash(raw[start:end])
+
+    for fragment in (
+        "a finding may not rest on the assertion that an occurrence in this "
+        "segment is, or is not, the book's first",
+        "do not demand that a treatment already present be REMOVED here as a "
+        "redundant repeat",
+        "Where `style_bible.md` itself records where a term first occurs -- its "
+        "motif table's first-occurrence column, or a written note IN THAT FILE "
+        "naming the block that holds the first mention -- that record settles the "
+        "question in BOTH directions, and you report normally: a missing "
+        "first-mention treatment at "
+        "the recorded place when that place is in this segment, and a redundant "
+        "repeat at any occurrence the record puts elsewhere",
+        "where an occurrence here is preceded by another occurrence of the same "
+        "term in this same segment, the later one is provably not the book's first "
+        "whatever lies in the segments you cannot see, so a redundant repeat there "
+        "is reported normally. That reasoning runs in the REMOVE direction only",
+        "where the treatment IS present, whether it is correctly FORMED -- the right "
+        "script, the transliteration system `style_bible.md` names, correct era "
+        "arithmetic -- is fully evaluable here, and a finding grounded in the source "
+        "rather than in a whole-book predicate is untouched",
+    ):
+        assert fragment in block, (
+            f"{REVIEW_TASK_TEMPLATE.name}'s book-scoped-rules block must carry "
+            f"{fragment!r} (#526)"
+        )
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

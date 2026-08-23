@@ -61,65 +61,26 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.58.0 (#534 -- the fix turn reports the round's class
-# concentration) per the maintenance contract above. This rotation inherited an
-# already-empty map (1.57.0 had inherited it empty in turn) and left it empty:
-# the 1.58.0 entry cites files by name -- mass-translate-wf.template.js,
-# review.schema.json, assemble.py -- and no `file.ext:NNN` location anywhere, so
-# there is nothing for this map to anchor.
+# Rewritten for 1.63.0 (#526 -- a book-scoped style rule is unevaluable from one
+# segment) per the maintenance contract above. EMPTY, and empty by construction
+# rather than by omission: the entry cites its subjects by FUNCTION and FILE name
+# (`reviewDispatchPrompt()`, `derive_next_action()`, `PLUGIN_BUNDLE_MEMBERS`,
+# `MACHINERY_ONLY_CACHE_KEY_FIELDS`) and states no `file.ext:NNN` line citation at
+# all, which is the shape this guard reads. Nothing here is unpinned as a result:
+# every claim the entry makes about prompt text is asserted on the BUILT prompt
+# output in `tests/segment_dispatch_driver.test.py` -- `test_review_dispatch_
+# prompt_bars_a_book_scoped_predicate`, `test_fix_prompt_still_owns_the_apply_
+# side_book_scoped_branch` and `test_review_task_template_block_states_the_book_
+# scope_rule`.
 #
-# The previous rotation, kept as its own record:
-# Rewritten for 1.52.0 (#530 -- an eligible unit left out of --only-segs) per the
-# maintenance contract above. This rotation inherited an already-empty map and
-# left it empty: the 1.52.0 entry cites NO `file.ext:NNN`.
-#
-# The previous rotation, kept as its own record:
-# Rewritten for 1.57.0 (#545/#549 -- which gate admitted a re-claimed unit) per
-# the maintenance contract above. This rotation inherited an already-empty map
-# and left it empty: the 1.57.0 entry cites files and functions by name and
-# declares no `name.ext:NNN` line citation, so there was nothing to anchor and
-# nothing to retire. The rotation before it, for 1.55.0 (#512 -- the glossary
-# rule's worked examples), likewise inherited an empty map and left it empty.
-#
-# The previous rotation, kept as its own record:
-# Rewritten for 1.59.0 (#514 -- the volume cap charged a claimed id a translate
-# job the claim guard refuses) per the maintenance contract above. This rotation
-# inherited 1.57.0's own empty map (which had inherited it empty in turn)
-# and left it empty: the 1.59.0 entry cites code by FUNCTION name throughout and
-# carries no `file.ext:NNN` citation for this map to anchor. That was a
-# deliberate choice while writing the entry, not an omission -- a line number is
-# correct when written and silently false the moment anything is inserted above
-# it, which is the drift this map exists to catch and which a function name does
-# not have.
-#
-# Phrase every future note this way -- in the PAST tense, about what this
-# rotation did to what it inherited, never in the present tense about what the
-# base contains. A note that says "the base declares X" expires the next time
-# this branch is rebased, and no assertion here can tell: the guards check the
-# DECLARATION against the newest entry, never the prose against the base it
-# describes, and the base is not in the tree at test time. Measured the hard
-# way -- two rotations of this file shipped green with a note that had been
-# true one rebase earlier.
-#
-# Why 1.52.0 cites nothing, stated so the empty map is legible as a decision.
-# The entry names `select_default()`, `DEFAULT_ELIGIBLE_CATEGORIES`,
-# `parse_claims_field()`, `step1_gate_passed`, `PLUGIN_BUNDLE_MEMBERS` and
-# `manifest.schema.json`'s missing `uniqueItems`, but every claim about them is
-# BEHAVIOURAL -- what the payload always carries, what the driver refuses, which
-# categories the census covers, which bundle a file belongs to -- and a
-# behavioural claim is pinned by a test that exercises it, not by a line number.
-# Each of those has one: the exact-key assertion in `select_segments.test.py`,
-# `test_a_selector_payload_without_the_field_is_refused_not_defaulted`,
-# `test_eligible_not_dispatched_never_reports_an_ineligible_category` and
-# `test_a_duplicate_manifest_entry_is_reported_once_in_the_remainder`.
-#
-# The entry's one unpinned claim is its field measurement -- sixty-one of
-# ninety-seven `step1_gate_passed` records in the two live books dispatched a
-# strict subset. That is a fact about run journals OUTSIDE this repo; no test
-# here can see it and no line citation would help, since a citation pins where
-# code lives rather than what a corpus measured. Named so the gap is recorded
-# rather than implied away. `changelog_figures.test.py` cannot see it either --
-# see its own comment for why its row list is empty for this release.
+# The entry's one unpinned claim is its field measurement -- five distinct false
+# findings across two rounds on the live he/yi->en book, all demanding one gloss
+# already given six segments earlier. That is a fact about review artifacts
+# OUTSIDE this repo; no test here can see it and no line citation would help,
+# since a citation pins where code lives rather than what a corpus measured.
+# Named so the gap is recorded rather than implied away.
+# `changelog_figures.test.py` cannot see it either -- see its own comment for why
+# its row list is empty for this release.
 #
 # An empty map is exactly the case where a correct rotation and a SKIPPED one
 # look identical, and 1.40.0 is the instance that proved it: the previous
@@ -127,9 +88,9 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # landed, and only a reviewer reading the comment caught that it still described
 # 1.35.0. Do not read that as "it happens on every release" -- 1.44.0 declared
 # four real rows, and they were still standing under 1.49.0's entry, which is the
-# OTHER failure and equally invisible here. Two instances are known, and both are
-# a stale COMMENT rather than a stale assertion. The empty-map precedent runs
-# further back for its own reasons (1.51.0 (#498), 1.34.1 (#547) and 1.33.1 were
+# OTHER failure and equally invisible here. Both instances are a stale COMMENT
+# rather than a stale assertion. The empty-map precedent runs further back for
+# its own reasons (1.52.0 (#530), 1.51.0 (#498), 1.34.1 (#547) and 1.33.1 were
 # empty too). Both halves still bite against an empty map -- a citation with no
 # anchors fails and an anchor no citation uses fails -- but neither half fires on
 # a stale COMMENT, which is why the rewrite is a maintenance contract rather than
