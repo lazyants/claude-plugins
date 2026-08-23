@@ -61,6 +61,8 @@ from urllib.parse import urlsplit
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
 FETCH_SRC = SCRIPTS_DIR / "fetch_citation.py"
+GLOSSARY_TEMPLATE_SRC = (PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
+                          / "templates" / "glossary-pass-wf.template.js")
 
 assert FETCH_SRC.is_file(), f"expected the boundary at {FETCH_SRC}"
 
@@ -1152,6 +1154,243 @@ def test_batch_stops_admitting_work_once_the_batch_budget_is_spent(tmp_path, mon
     assert all("outcome" in e for e in entries)
 
 
+def test_batch_stops_admitting_work_once_the_byte_budget_is_spent(tmp_path, monkeypatch, capsys):
+    """Same soft-fail shape as the batch-deadline test above, one budget later.
+    A budget small enough to admit the first items and refuse the rest must
+    still record EVERY item, still write a parseable index.json, still print
+    its one metadata line, and still exit 0 -- exactly like batch-deadline.
+
+    fc.MAX_BYTES is patched down ALONGSIDE fc.BATCH_MAX_TOTAL_BYTES: the admit
+    threshold run_batch actually checks against is
+    BATCH_MAX_TOTAL_BYTES - 3 * MAX_BYTES, so patching only the batch-wide
+    constant while MAX_BYTES stays at its real 2 MB would drive the threshold
+    negative and refuse item 1 outright. This coupling is a trap for the next
+    person patching either constant alone.
+    """
+    body = b"a" * 500                             # ASCII: written bytes == received bytes
+    FakeNet(monkeypatch, default=http_response(200, {"Content-Type": "text/plain"}, body))
+    monkeypatch.setattr(fc, "MAX_BYTES", 500)
+    monkeypatch.setattr(fc, "BATCH_MAX_TOTAL_BYTES", 2500)
+    items = [accepted(f"N{i}", f"https://example.com/{i}") for i in range(6)]
+    path = write_snapshot(tmp_path, items)
+    out = tmp_path / "evidence"
+
+    assert fc.run_batch(path, out) == 0
+    payload = json.loads(capsys.readouterr().out)     # the metadata line still prints and parses
+
+    entries = json.loads((out / "index.json").read_text(encoding="utf-8"))["entries"]
+    assert len(entries) == 6, "every item must still be RECORDED, not dropped"
+    outcomes = [e["outcome"] for e in entries]
+    assert outcomes.count("fetched") >= 1, "the budget must admit SOME items, not just refuse everything"
+    assert "refused:batch-byte-budget" in outcomes, outcomes
+    assert payload["n_sources"] == 6
+
+    # The REAL ceiling now -- see BATCH_MAX_TOTAL_BYTES's own comment ("HOW
+    # THE CEILING HOLDS EXACTLY"): the total written can never reach this
+    # number, whatever the batch size, so this is no longer a loose margin
+    # scaled to the fixture (that framing was only needed before this fix,
+    # when the constant was a spend threshold rather than an actual ceiling).
+    on_disk = sum(p.stat().st_size for p in out.glob(f"{fc.EVIDENCE_PREFIX}*.txt"))
+    assert on_disk <= fc.BATCH_MAX_TOTAL_BYTES
+
+
+def test_the_budget_counts_the_bytes_written_not_the_bytes_received(tmp_path, monkeypatch, capsys):
+    """The invalid byte b"\\xff" decodes (errors="replace") to U+FFFD, which is
+    3 bytes when written back as UTF-8 -- so the quantity spent must be the
+    WRITTEN size, not result["bytes"] (the RAW, pre-decode count, which the
+    rejected accounting would have spent instead).
+
+    The admit threshold (BATCH_MAX_TOTAL_BYTES - 3 * MAX_BYTES) is set to
+    EXACTLY 3n, same coupling as the test above (fc.MAX_BYTES patched down
+    alongside fc.BATCH_MAX_TOTAL_BYTES). A threshold set ABOVE 3n admits under
+    EITHER accounting and asserts nothing. Exactly 3n is what discriminates:
+    correct accounting spends 3n, so `3n >= 3n` refuses the next item; the
+    rejected result["bytes"] accounting spends only n, so `n >= 3n` is false
+    and it would admit the same item.
+    """
+    n = 10
+    body = b"\xff" * n
+    # content-type must be ALLOWED, or the item is refused before the body is
+    # read at all and this test would prove nothing about byte accounting.
+    FakeNet(monkeypatch, default=http_response(200, {"Content-Type": "text/plain"}, body))
+    test_max_bytes = 100                          # >= n, so the raw body is not truncated pre-decode
+    monkeypatch.setattr(fc, "MAX_BYTES", test_max_bytes)
+    monkeypatch.setattr(fc, "BATCH_MAX_TOTAL_BYTES", 3 * n + 3 * test_max_bytes)  # threshold == 3n
+    items = [accepted("Alpha", "https://example.com/0"), accepted("Beta", "https://example.com/1")]
+    path = write_snapshot(tmp_path, items)
+    out = tmp_path / "evidence"
+
+    assert fc.run_batch(path, out) == 0
+    capsys.readouterr()
+
+    written = (out / "citation-000.txt").read_bytes()
+    assert len(written) == 3 * n, "each invalid byte must become a 3-byte U+FFFD on disk"
+
+    entries = json.loads((out / "index.json").read_text(encoding="utf-8"))["entries"]
+    assert entries[0]["outcome"] == "fetched"
+    assert entries[1]["outcome"] == "refused:batch-byte-budget", (
+        "the second item must be refused once the WRITTEN 3n bytes reach the threshold; "
+        "admitting it here means the guard is still spending result[\"bytes\"] (n), not len(written) (3n)")
+
+
+def test_the_ceiling_holds_even_when_the_last_admitted_item_is_worst_case(tmp_path, monkeypatch, capsys):
+    """THE CEILING ITSELF, tested against the case that broke it before this
+    fix (the bot's finding on PR #686): the admit check runs BEFORE an item's
+    worst-case 3x expansion is known, so a guard that compares spent_bytes
+    directly against BATCH_MAX_TOTAL_BYTES can admit an item whose write
+    pushes the running total PAST that number.
+
+    Six ordinary items bring spent_bytes to just under the admit threshold.
+    Then TWO invalid-UTF-8 items (each expanding 3x on write -- the worst
+    case) arrive back to back. The first is still under threshold and must be
+    admitted; the second must be REFUSED by the threshold before its write
+    could push the total past the ceiling.
+
+    fc.MAX_BYTES is patched down alongside fc.BATCH_MAX_TOTAL_BYTES, same
+    coupling as the tests above.
+
+    Watched RED against the OLD guard (`spent_bytes >= BATCH_MAX_TOTAL_BYTES`,
+    checked directly instead of against the derived threshold): with these
+    same fixtures it admits BOTH invalid-UTF-8 items and the on-disk total
+    reaches 1200 against the 1000 ceiling -- a 200-byte overshoot, within the
+    "up to 3 * MAX_BYTES" (300) this fix closes.
+    """
+    ordinary = http_response(200, {"Content-Type": "text/plain"}, b"a" * 100)
+    invalid = http_response(200, {"Content-Type": "text/plain"}, b"\xff" * 100)
+    routes = {f"/ord{i}": ordinary for i in range(6)}
+    routes["/inv0"] = invalid
+    routes["/inv1"] = invalid
+    FakeNet(monkeypatch, routes=routes)
+    monkeypatch.setattr(fc, "MAX_BYTES", 100)
+    monkeypatch.setattr(fc, "BATCH_MAX_TOTAL_BYTES", 1000)     # admit threshold: 1000 - 3*100 = 700
+
+    items = [accepted(f"Ord{i}", f"https://example.com/ord{i}") for i in range(6)]
+    items += [accepted("Inv0", "https://example.com/inv0"),
+              accepted("Inv1", "https://example.com/inv1")]
+    path = write_snapshot(tmp_path, items)
+    out = tmp_path / "evidence"
+
+    assert fc.run_batch(path, out) == 0
+    capsys.readouterr()
+
+    entries = json.loads((out / "index.json").read_text(encoding="utf-8"))["entries"]
+    assert len(entries) == 8, "every item must still be RECORDED, not dropped"
+    outcomes = [e["outcome"] for e in entries]
+    assert outcomes[:6] == ["fetched"] * 6
+    assert outcomes[6] == "fetched", "the first worst-case item is still under threshold and must be admitted"
+    assert outcomes[7] == "refused:batch-byte-budget", (
+        "the second worst-case item must be refused -- admitting it is exactly "
+        "the old defect that let the total overshoot the ceiling")
+
+    on_disk = sum(p.stat().st_size for p in out.glob(f"{fc.EVIDENCE_PREFIX}*.txt"))
+    assert on_disk <= fc.BATCH_MAX_TOTAL_BYTES, (
+        f"{on_disk} exceeds the ceiling {fc.BATCH_MAX_TOTAL_BYTES} -- the whole point of this fix")
+
+
+def test_an_ordinary_batch_does_not_exhaust_the_byte_budget(tmp_path, monkeypatch, capsys):
+    """Control at the SHIPPED constant. Renamed from an earlier
+    'spends_nothing_of', which was false -- ordinary items DO spend against the
+    budget. The assertion is non-exhaustion, not non-spending."""
+    FakeNet(monkeypatch, default=HTML_OK)
+    items = [accepted(f"N{i}", f"https://example.com/{i}") for i in range(5)]
+    path = write_snapshot(tmp_path, items)
+    out = tmp_path / "evidence"
+
+    assert fc.run_batch(path, out) == 0
+    capsys.readouterr()
+    entries = json.loads((out / "index.json").read_text(encoding="utf-8"))["entries"]
+    assert len(entries) == 5, "vacuous otherwise: all(...) over an empty entries list passes trivially"
+    assert all(e["outcome"] == "fetched" for e in entries)
+    assert "refused:batch-byte-budget" not in {e["outcome"] for e in entries}
+
+
+def _default_batch_size() -> int:
+    """DEFAULT_BATCH_SIZE, read from glossary_batch_plan.py's own AST -- no
+    import. glossary_batch_plan.py:123 does a bare
+    `from canon_senses import CanonSensesLoadError, is_split, load_senses`,
+    so an actual import would need sys.path surgery that would persist for
+    the whole test session. Mirrors _emitted_refusal_reasons's own idiom
+    above."""
+    src = SCRIPTS_DIR / "glossary_batch_plan.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "DEFAULT_BATCH_SIZE" for t in node.targets)
+                and isinstance(node.value, ast.Constant)):
+            return node.value.value
+    raise AssertionError("glossary_batch_plan.py no longer assigns DEFAULT_BATCH_SIZE at module level")
+
+
+def test_the_budget_covers_a_nominal_default_batch_at_a_megabyte_a_source():
+    """NOMINAL property only, NOT an admissibility guarantee -- see
+    BATCH_MAX_TOTAL_BYTES's own comment for why. This pins only that the
+    ORDINARY default batch -- the case documented as normal -- has real
+    headroom, at a generous 1 MB per source.
+
+    Pinned against the ADMIT THRESHOLD (BATCH_MAX_TOTAL_BYTES - 3 * MAX_BYTES),
+    not the ceiling itself: an item is admitted only while spent_bytes stays
+    below the threshold, so the threshold -- not the ceiling -- is what has to
+    cover the nominal batch. Pinning the ceiling instead would silently pass
+    even if the threshold sank below the nominal batch's size (raising
+    MAX_BYTES alone shrinks the threshold while leaving the ceiling
+    unchanged), so a ceiling-only pin would miss exactly the regression this
+    test exists to catch.
+
+    Preferred over materialising 40 real ~1 MB fixture bodies, which would
+    assert the identical arithmetic at 40 MB of fixture cost and still not be
+    a guarantee.
+    """
+    assert fc.BATCH_MAX_TOTAL_BYTES - 3 * fc.MAX_BYTES >= _default_batch_size() * 1_000_000
+
+
+def test_the_refusal_the_module_emits_is_named_in_the_judge_prompt(tmp_path, monkeypatch, capsys):
+    """THE PRODUCER/CONSUMER SEAM. fetch_citation.py (Python) and
+    citationJudgePrompt in glossary-pass-wf.template.js (JavaScript) are two
+    files in two languages, maintained by whoever touches each.
+    tests/glossary_citation_review.test.py already pins the run-fact count on
+    the CONSUMER side (the leading count word matches the tokens the prompt
+    enumerates) -- what this test adds ON TOP is that its needle is not typed
+    by hand: the literal "refused:batch-byte-budget" below only SELECTS the
+    matching entry out of index.json; the string this test actually ASSERTS
+    against the template is read back out of that WRITTEN index.json, so it is
+    the module's own real output, not a copy this test could get wrong or let
+    go stale on the producer side.
+
+    Runs run_batch for real until it actually emits the budget refusal, then
+    asserts that string is named inside citationJudgePrompt's OWN function
+    body specifically (not merely somewhere in the template file -- a token
+    parked in a dead comment outside the function would satisfy a whole-file
+    search and tell the judge nothing). Reads the template as TEXT only --
+    this test does not own, import, or edit it.
+    """
+    FakeNet(monkeypatch, default=HTML_OK)
+    monkeypatch.setattr(fc, "BATCH_MAX_TOTAL_BYTES", 1)
+    items = [accepted("Alpha", "https://example.com/0"), accepted("Beta", "https://example.com/1")]
+    path = write_snapshot(tmp_path, items)
+    out = tmp_path / "evidence"
+
+    assert fc.run_batch(path, out) == 0
+    capsys.readouterr()
+    entries = json.loads((out / "index.json").read_text(encoding="utf-8"))["entries"]
+    refused = [e["outcome"] for e in entries if e["outcome"] == "refused:batch-byte-budget"]
+    assert refused, "fixture must actually reproduce the refusal, or this test proves nothing"
+    outcome = refused[0]                          # read back from the WRITTEN index.json, not typed here
+
+    template_text = GLOSSARY_TEMPLATE_SRC.read_text(encoding="utf-8")
+    # Scoped to the FUNCTION BODY, not the whole file: `^function
+    # citationJudgePrompt` to the next `^}` at column 0. re.S makes `.` cross
+    # newlines and the lazy `.*?` stops at the FIRST such closing brace, which
+    # is this function's own -- a token anywhere outside these bounds (a stale
+    # comment above the function, a sibling function below it) must not count.
+    match = re.search(r"^function citationJudgePrompt\(.*?\n^\}", template_text, re.S | re.M)
+    assert match, "citationJudgePrompt's function body could not be located in the template"
+    prompt_body = match.group(0)
+    assert outcome in prompt_body, (
+        f"{outcome!r} is emitted by fetch_citation.py but citationJudgePrompt's "
+        "OWN function body does not name it -- the judge would see a token its "
+        "own instructions never define")
+
+
 def test_batch_writes_no_evidence_file_for_a_refused_item(tmp_path, monkeypatch, capsys):
     FakeNet(monkeypatch)
     path = write_snapshot(tmp_path, [accepted("Alpha", "http://127.0.0.1:6379/")])
@@ -1490,7 +1729,7 @@ OUTCOME_RE = re.compile(
     r"fetched"
     r"|http_error:\d{3}"
     r"|refused:(?:"
-    r"total-timeout|batch-deadline|read-timeout|unparseable-url"
+    r"total-timeout|batch-deadline|batch-byte-budget|read-timeout|unparseable-url"
     r"|embedded-credentials|no-host"
     r"|localhost-name|control-character-in-url|invalid-port|too-many-redirects"
     r"|unparseable-redirect-location|content-type-not-allowed|connect-timeout"
@@ -1572,8 +1811,9 @@ def test_the_documented_outcome_vocabulary_matches_what_the_module_emits():
         "OUTCOME_RE does not admit reasons the module emits: " + ", ".join(unmatched))
 
     # The outcomes composed OUTSIDE _refuse(), which the AST walk cannot see.
-    composed_elsewhere = {"batch-deadline", "internal-error"}
+    composed_elsewhere = {"batch-deadline", "batch-byte-budget", "internal-error"}
     for outcome in ("fetched", "http_error:404", "refused:batch-deadline",
+                    "refused:batch-byte-budget",
                     "refused:internal-error:MemoryError"):
         assert OUTCOME_RE.match(outcome), f"OUTCOME_RE rejects {outcome!r}"
 
@@ -1998,8 +2238,7 @@ def test_a_cross_host_redirect_hostname_is_marked_untrusted_not_claimed_clean(mo
     # The load-bearing half: the prompt the judge actually receives must name
     # these fields untrusted. Without this assertion the test would pass while
     # the judge is told the opposite, which is the defect codex flagged.
-    template = (PLUGIN_ROOT / "skills/literary-translator/assets/templates"
-                / "glossary-pass-wf.template.js").read_text(encoding="utf-8")
+    template = GLOSSARY_TEMPLATE_SRC.read_text(encoding="utf-8")
     claim = " ".join(template.split())
     assert "SERVER-SELECTED: final_origin and chain[].host/origin" in claim, \
         "the judge prompt must mark the redirect-selected hostname untrusted"
@@ -2149,6 +2388,21 @@ def test_the_caps_are_finite():
     assert 0 < fc.MAX_BYTES <= 10_000_000
     assert 0 < fc.TOTAL_TIMEOUT_SEC <= 120
     assert 0 < fc.CONNECT_TIMEOUT_SEC <= fc.TOTAL_TIMEOUT_SEC
+    # Not fc.MAX_BYTES <= fc.BATCH_MAX_TOTAL_BYTES: the ceiling counts WRITTEN
+    # bytes, and one item's write can be 3 * MAX_BYTES (an invalid-UTF-8 body,
+    # see the module's own comment beside the write). The property this must
+    # establish is that the worst-case single-item write still fits under the
+    # ceiling with room for at least one such item, i.e. the per-item cap's
+    # WORST-CASE EXPANSION must never exceed the ceiling on its own --
+    # 6 MB <= 46 MB today.
+    assert 3 * fc.MAX_BYTES <= fc.BATCH_MAX_TOTAL_BYTES
+    # And the derived ADMIT THRESHOLD (BATCH_MAX_TOTAL_BYTES - 3 * MAX_BYTES)
+    # must be strictly positive -- not merely non-negative -- or run_batch's
+    # guard refuses item 1 unconditionally (spent_bytes starts at 0, and
+    # `0 >= 0` is already true). A future MAX_BYTES rise that lands exactly on
+    # BATCH_MAX_TOTAL_BYTES would pass the assertion above while silently
+    # breaking every batch; this catches that.
+    assert fc.BATCH_MAX_TOTAL_BYTES - 3 * fc.MAX_BYTES > 0
 
 
 if __name__ == "__main__":
@@ -2181,11 +2435,11 @@ def test_an_exception_after_the_deadline_is_reported_as_our_timeout(monkeypatch,
     phases came back as `network-error:BrokenPipeError`: our own watchdog
     reported as the remote host misbehaving.
 
-    That is not cosmetic. citationJudgePrompt names exactly two reasons as facts
-    about THIS RUN rather than about the citation (`batch-deadline`,
-    `read-timeout`), so a mislabelled timeout is read as a citation defect and
-    the next attempt is sent hunting a fault nobody has shown to exist -- and
-    citations are overwhelmingly https.
+    That is not cosmetic. citationJudgePrompt names facts about THIS RUN rather
+    than about the citation (`batch-deadline`, `read-timeout`, `total-timeout`,
+    `batch-byte-budget`), so a mislabelled timeout is read as a citation defect
+    and the next attempt is sent hunting a fault nobody has shown to exist --
+    and citations are overwhelmingly https.
 
     Past the deadline, WE are the cause whatever the stdlib called it. The
     shipped real-socket test cannot see this because it speaks http only, which
@@ -2330,7 +2584,7 @@ def test_a_hop_entered_past_the_deadline_still_names_a_security_refusal(
     hop entered late returned `total-timeout` without ever computing the static
     verdict. An attacker who burns the per-item budget on hop 0 and then answers
     `302 Location: http://127.0.0.1:6379/` got the loopback attempt recorded as a
-    run fact -- one of the three reasons the judge is told NOT to read as a
+    run fact -- one of the run-fact reasons the judge is told NOT to read as a
     defect in the source. It never flipped the gate (any refused:* fails check 1)
     but the evidence named our clock instead of their redirect.
 

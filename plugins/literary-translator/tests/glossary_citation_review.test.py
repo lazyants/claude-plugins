@@ -2222,6 +2222,79 @@ def test_judge_is_told_the_fetched_evidence_is_untrusted_input(tmp_path):
     assert "REJECT the batch" in prompt
 
 
+# Spelled-out English count word -> the number it stands for, used only by
+# test_run_fact_refusal_count_word_matches_the_reasons_it_enumerates below.
+# Extend this if the run-fact sentence legitimately grows past ten reasons.
+_COUNT_WORDS = {
+    "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5,
+    "SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10,
+}
+
+
+def test_run_fact_refusal_count_word_matches_the_reasons_it_enumerates(tmp_path):
+    """STEP 3's run-fact paragraph opens with a spelled-out count ("<N>
+    refusal reasons are about THIS RUN...") and closes with the same count
+    repeated in prose ("None of the <n> says anything..."). Both numbers are
+    English words typed by hand, not a computed value, and the next person to
+    add a reason can extend the enumerated list while forgetting to move the
+    word, leaving the judge told an undercount of its own run-facts. #361 is
+    the release that moved it last, by adding "refused:batch-byte-budget" --
+    stated as history, which does not stale, rather than as today's count,
+    which would.
+
+    The COUNT property never hard-codes today's list or number: it recomputes
+    the count from the distinct "refused:<token>" clauses the sentence itself
+    enumerates, so it fails for the RIGHT reason (a moved number) rather than
+    an unrelated wording change, and it stays correct across future additions
+    or removals. The separate `batch-byte-budget` assertion below IS a
+    hard-coded member of today's list -- deliberately: that one is #361's own
+    pin on its reason surviving in the sentence, not part of the count
+    property, and conflating the two is what the earlier wording did."""
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])])
+    assert res["ok"], res["stderr"]
+    prompt = prompts_for(res["out"], "glossary:citation-review:0")[0]
+
+    # Bounded between the two structural anchors: the opening clause names
+    # the count, the closing clause repeats it. Non-greedy + DOTALL is safe
+    # here because the sentence itself contains no other occurrence of
+    # "None of the" -- verified against the rendered prompt, not assumed.
+    match = re.search(
+        r"(?P<opening>[A-Z]+) refusal reasons are about THIS RUN.*?"
+        r"None of the (?P<closing>\w+) says anything about whether "
+        r"the citation is real or on-point\.",
+        prompt,
+        re.DOTALL,
+    )
+    assert match, (
+        "expected the run-fact count sentence in the judge prompt; prompt "
+        f"was:\n{prompt}"
+    )
+    sentence = match.group(0)
+
+    tokens = sorted(set(re.findall(r'"refused:([a-z0-9-]+)"', sentence)))
+    assert "batch-byte-budget" in tokens, (
+        f"the #361 run-fact reason must be enumerated in this sentence; "
+        f"found {tokens}; sentence was:\n{sentence}"
+    )
+
+    opening_word = match.group("opening")
+    closing_word = match.group("closing").upper()
+    assert opening_word == closing_word, (
+        f"the opening count word {opening_word!r} and the closing count "
+        f"word {closing_word!r} must agree; sentence was:\n{sentence}"
+    )
+    assert opening_word in _COUNT_WORDS, (
+        f"unrecognized count word {opening_word!r}; extend _COUNT_WORDS if "
+        f"the sentence legitimately grew past ten reasons; sentence was:\n{sentence}"
+    )
+    assert _COUNT_WORDS[opening_word] == len(tokens), (
+        f"the run-fact sentence says {opening_word} but enumerates "
+        f"{len(tokens)} distinct refused:<reason> tokens {tokens} -- the "
+        f"count word was not moved when a reason was added or removed; "
+        f"sentence was:\n{sentence}"
+    )
+
+
 def test_judge_never_names_the_mutable_fragment_path(tmp_path):
     """The judge's read set is the snapshot plus the evidence directory. Handing
     it the attempt path at all -- even inside prose explaining why it must not
