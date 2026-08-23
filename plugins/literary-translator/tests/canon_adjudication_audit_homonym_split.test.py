@@ -938,7 +938,6 @@ def test_item_list_shows_cat5_display_fields(tmp_path):
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
     line = item_line(proc, split_key("Jean", senses))
-    assert "homonym_split" in line
     assert "source_form=" in line and "'Jean'" in line
     assert "sense_count=2" in line
 

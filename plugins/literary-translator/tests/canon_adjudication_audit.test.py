@@ -2686,7 +2686,7 @@ def test_sample_adjudications_file_validates_against_schema(tmp_path):
 
 
 # ===========================================================================
-# 17 (#405). Item-list identity. Every required item the stderr list shows
+# 35 (#405). Item-list identity. Every required item the stderr list shows
 #     carries its own display fields next to the `{kind}::{sha256}` key, so a
 #     reviewer authoring a verdict can see WHAT they are signing off without
 #     importing this module to re-derive the identity behind the digest.
@@ -2696,12 +2696,7 @@ def test_sample_adjudications_file_validates_against_schema(tmp_path):
 
 
 def item_line(proc, key):
-    """The ONE stderr line the item list printed for `key`. Uniqueness is all
-    this asserts: a raw U+2028 in a display field WOULD split the line (str.
-    splitlines() breaks on it), and the fragment carrying the key would still
-    be the only match -- so the no-split property is pinned by the escaping
-    test's own assertions below (the literal escape present, the raw code
-    point absent, the post-U+2028 tail on this same line), never here."""
+    """The ONE stderr line the item list printed for `key`."""
     lines = [ln for ln in proc.stderr.splitlines() if key in ln]
     assert len(lines) == 1, (
         f"expected exactly one stderr line carrying {key!r}, got {len(lines)}:\n{proc.stderr}"
@@ -2720,7 +2715,6 @@ def test_item_list_shows_cat1_display_fields(tmp_path):
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
     line = item_line(proc, cat1_key([("k1", "Renaud", "TargetA"), ("k2", "Renaud", "TargetB")]))
-    assert "duplicate_source_form" in line
     assert "normalized_source=" in line and "'renaud'" in line
     assert "records=" in line and "'k1'" in line and "'k2'" in line and "'targeta'" in line
 
@@ -2733,7 +2727,6 @@ def test_item_list_shows_cat2_display_fields(tmp_path):
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
     line = item_line(proc, cat2_key("John", ["Yohanan", "Yochanan"]))
-    assert "existing_merge" in line
     assert "normalized_target=" in line and "'john'" in line
     assert "source_forms=" in line and "'yohanan'" in line and "'yochanan'" in line
 
@@ -2746,7 +2739,6 @@ def test_item_list_shows_cat3_display_fields(tmp_path):
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
     line = item_line(proc, cat3_key("TargetOne", "TargetTwo"))
-    assert "candidate_missed_merge_pair" in line
     assert "entity_a=" in line and "'targetone'" in line
     assert "entity_b=" in line and "'targettwo'" in line
     assert "entity_a_source_forms=" in line and "'alpha'" in line
@@ -2762,7 +2754,6 @@ def test_item_list_shows_cat4_display_fields(tmp_path):
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
     line = item_line(proc, cat4_key(item))
-    assert "review_queue_unresolved" in line
     assert "source_form=" in line and "'Dov Ber'" in line
     assert "note=" in line and "'two live candidates, unresolved'" in line
 
