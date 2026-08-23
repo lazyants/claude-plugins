@@ -73,8 +73,20 @@ migration as cheap — it needs an explicit sanctioned recovery step, not automa
 NOT re-translation — converged segments stay reusable via surface 1; only in-flight/unmerged work
 redoes. `resume_setup.py` folds in:
 - `_schemas_dir_hash` = sha256 of **EVERY `*.schema.json`** in `schemas/` (`resume_setup.py`
-  ~:207-216) — so `manifest.schema.json` and `language-smoke-report.schema.json` DO matter here even
-  though they miss surface 1.
+  ~:207-216) — so `manifest.schema.json`, `language-smoke-report.schema.json` and
+  **`profile.schema.json`** DO matter here even though they miss surface 1. `profile.schema.json`
+  reaches `${durable_root}/schemas/` through Step 0a's flat `assets/schemas/*.json` copy pass, and
+  that pass is NOT absence-guarded (unlike the `assets/templates/` one), so every refresh re-copies
+  it. `person_registry.py`'s own header states the consequence as the reason it ships with no
+  profile knob at all: a `profile.yml` flag "would have meant editing
+  `assets/schemas/profile.schema.json` … costing EVERY project its resume identity".
+- **THERE ARE TWO SCHEMA-DIR DIGESTS, NOT ONE, AND READING `resume_setup.py` ALONE UNDERSTATES THE
+  COST.** `skeptic_setup.py` carries its OWN `_schemas_dir_hash` — a deliberate duplicate
+  implementation, not an import (its docstring cites the same "never depend on `resume_setup.py`"
+  rule as its `RUN_ID` logic) — folded into the separate digest `compute_skeptic_input_digest`
+  builds. So a schema edit ALSO makes an interrupted opt-in skeptic pass mint a fresh skeptic run
+  (`resolve_skeptic_run`) rather than resume. Measured 2026-08-23 on the `output.index` retirement:
+  a review round admitted a MAJOR for a cost paragraph that named only `resume_setup.py`.
 - `.orchestration_bundle_hash` — covers the orchestration-only scripts (`select_segments.py`,
   `language_smoke_report.py`, `draft_ready.py`, …). SKILL.md / `ledger-and-resumability.md` call this
   "non-gating/provenance-only" — TRUE for convergence, MISLEADING for resume (it gates resume).
