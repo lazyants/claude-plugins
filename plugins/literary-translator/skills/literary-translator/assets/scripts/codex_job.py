@@ -1763,23 +1763,12 @@ class CodexJob:
         # human_escalation, which drops it from the default dispatch set until an operator
         # names it in --only-segs -- terminal by default, not unrecoverable (#697).
         #
-        # WHO could write it. #409 excludes EXACTLY ONE actor: the codex process this driver
-        # launches, which runs in a mkdtemp sandbox _setup_sandbox() REFUSES to dispatch into
-        # unless _sandbox_is_confined() has proved its workspace root resolves to itself. It
-        # excludes nothing else, and the comment on _trusted_scripts_dir() says so in its own
-        # words, naming shipped passes that hold write access over the whole durable root.
-        # (_record_translate_rejected()'s own comment names that actor for its
+        # WHO could write it: the module header's property, which this slot inherits -- and
+        # NOT a roster, which is what stood here until #697 and was wrong three times over.
+        # (_record_translate_rejected()'s own comment names one actor for its
         # O_EXCL|O_NOFOLLOW; over-caution is free there and this is not a licence to repeat
-        # the claim as fact.)
-        #
-        # #697: this comment used to continue with a roster of who was left -- the operator's
-        # hand and a second dispatcher over one durable_root. That roster was wrong three
-        # times over, each review round finding another writer it had missed, so it is
-        # replaced by the property the module header states and this slot inherits: anything
-        # that can LIST segments/ discovers the name, anything that can WRITE segments/ can
-        # overwrite it -- a set bounded by segments/'s OWN umask-derived mode, not by these
-        # entries' 0o600 (see the module header). The snapshot is weaker than "an artifact
-        # no one else can touch"; what it actually buys is stated below.
+        # the claim as fact.) The snapshot is therefore weaker than "an artifact no one else
+        # can touch"; what it actually buys is stated below.
         #
         # Re-checking the slot after the fact closes nothing -- neither a type re-check
         # (an in-place overwrite leaves a perfectly regular file) nor a before/after digest

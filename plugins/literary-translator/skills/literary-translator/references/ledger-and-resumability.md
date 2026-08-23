@@ -1155,15 +1155,11 @@ alike, neither of which is changed to get it:
   narrower than it looks in ONE respect only: since #409 the codex process this
   driver launches runs in a sandbox `_setup_sandbox()` refuses to dispatch into
   unless it is proved confined, so that one actor cannot reach `segments/`.
-  #697: this passage used to continue with a roster of who was left — the
-  operator's hand and a second dispatcher over one `durable_root`. That roster
-  was wrong, and `codex_job.py`'s own `_trusted_scripts_dir()` comment already
-  said so, naming shipped passes that hold write access over the whole durable
-  root. The property, not the population: anything that can list `segments/`
-  discovers these names and anything that can write it can overwrite them.)
-  That was
-  tolerable
-  while every rejection was recoverable; it stopped being tolerable once a
+  #697: the property, not a population — anything that can list `segments/`
+  discovers these names and anything that can write it can overwrite them.
+  `codex_job.py`'s `_trusted_scripts_dir()` comment names shipped passes that
+  hold write access over the whole durable root.) That was tolerable while
+  every rejection was recoverable; it stopped being tolerable once a
   `validate_draft.py` exit 1 became terminal, because that script answers a
   missing or malformed candidate with exit 1 too. An ordinary truncate-and-
   rewrite in that window is indistinguishable from a content verdict.
@@ -1171,12 +1167,12 @@ alike, neither of which is changed to get it:
   No re-check of the slot closes that: a type re-check passes an in-place
   overwrite, and a before/after digest passes a truncate-then-restore (both
   samples read bytes the validator never saw). So the gates now judge a
-  per-invocation SNAPSHOT instead -- copied once through the same
-  fd-pinned, digest-verified primitive `validate_attempt()` already uses, into
-  the `.att.<seg>.<inv>...` name that carries `os.urandom(8).hex()` -- and the
-  promote moves the very bytes that were judged.
-  A snapshot that cannot be taken is not a verdict: the pending survives and
-  the run launches fresh, exactly as when a gate could not run.
+  per-invocation SNAPSHOT instead -- copied once through the same fd-pinned,
+  digest-verified primitive `validate_attempt()` already uses, into the
+  `.att.<seg>.<inv>...` name that carries `os.urandom(8).hex()` -- and the
+  promote moves the very bytes that were judged. A snapshot that cannot be
+  taken is not a verdict: the pending survives and the run launches fresh,
+  exactly as when a gate could not run.
 
   **What the snapshot buys, stated at its real strength (#697).** It is no
   longer the DETERMINISTIC slot that persists across runs and is trivially
@@ -1187,10 +1183,10 @@ alike, neither of which is changed to get it:
   joblog's own JSON body, so the name is discoverable by anything that can list
   that directory and writable by anything that can write it. Who that is comes
   from `segments/`'s own mode, which the driver never sets (a bare
-  `os.makedirs`, so the operator's umask decides), **not** from these entries'
-  `0600` — a process with write on the directory can unlink and recreate any of
-  them whatever the file mode says. A terminal verdict
-  still rests on that artifact on BOTH paths. That residual is #697, open and
+  `os.makedirs`, so the operator's umask decides), **not** from these
+  entries' `0600` — a process with write on the directory can unlink and
+  recreate any of them whatever the file mode says. A terminal verdict still
+  rests on that artifact on BOTH paths. That residual is #697, open and
   parked; its measured population is zero, and its consequence is bounded --
   the segment lands `blocked`, classifies `human_escalation`, and `--only-segs`
   is the documented retry.

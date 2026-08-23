@@ -4492,11 +4492,23 @@ def test_a_write_to_the_gated_snapshot_still_decides_a_terminal_verdict(tmp_path
     seen = {}
 
     def racing_gate(args, timeout):
-        candidate = args[args.index("--candidate-file") + 1]
         if args[0] != "validate_draft.py":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
+        # ENUMERATE, never read the handed argument. Taking args[--candidate-file] would
+        # corrupt whatever path the gate is given -- including a RELOCATED one -- so this
+        # test would stay green under the very fix #697 is parked for, while claiming to go
+        # red. Discovering the snapshot by listing segdir is the residual itself: it is what
+        # a foreign writer must do, and it stops working the moment staging leaves segments/.
+        found = sorted(Path(job.segdir).glob(".att.%s.*.json" % job.seg))
+        seen["found"] = [p.name for p in found]
+        assert len(found) == 1, (
+            "the gated snapshot is no longer discoverable by listing segments/ -- if #697's "
+            "relocation shipped, replace this known-limit test with one asserting refusal"
+        )
+        candidate = str(found[0])
         # The bytes must be sampled INSIDE the stub: adopt_pending() removes the snapshot
         # on this branch, so nothing after the call returns can read them.
+        seen["handed"] = args[args.index("--candidate-file") + 1]
         seen["candidate"] = candidate
         seen["before"] = Path(candidate).read_text(encoding="utf-8")
         Path(candidate).write_text("{", encoding="utf-8")   # a foreign write at the seam
@@ -4506,9 +4518,11 @@ def test_a_write_to_the_gated_snapshot_still_decides_a_terminal_verdict(tmp_path
 
     assert job.adopt_pending() is False
 
-    # The write really did land on the GATED snapshot -- not on the deterministic slot the
-    # sibling test covers, and not on a path the gate never opened. Without these three the
-    # assertion below would pass for an ordinary content rejection and pin nothing.
+    # The path found by ENUMERATION is the very path the gate was handed -- that identity is
+    # the residual in one line. Plus: the write landed on the snapshot, not on the
+    # deterministic slot the sibling test covers. Without these the final assertion would
+    # pass for an ordinary content rejection and pin nothing.
+    assert seen["candidate"] == seen["handed"]
     assert seen["candidate"] != job.pending
     assert seen["before"] == original
     assert seen["after"] != seen["before"]
