@@ -36,7 +36,7 @@ The price of a halt is real and is stated rather than buried: it forfeits the `-
 
 The estimator's per-segment worst case rises from 86 to **94** calls at `WAIT_CALLS = 9`, `max_fix_rounds: 4` — the audit plus the one retry a CONTINUING round may spend on it, which is why the normal-round term is 8 and not 7. Every downstream figure is re-derived from that formula rather than carried forward: the shipped `batch_agent_cap: 10000` now admits 106 segments (`1 + 106*94 = 9965`; 107 needs 10059), down from 116; the pre-#409-step-2 cap of 3500 would admit 37 (`1 + 37*94 = 3479`), down from 40. The pre-#348 identity `10 + 7*max_fix_rounds` no longer holds and is recorded as broken in both the template and the estimator suite rather than quietly dropped.
 
-The check and its wiring ship with **36 new test functions across two files** (`fix_scope_audit.test.py`, `fix_scope_gate.test.py`), each one watched failing with its fix backed out before it was kept.
+The check and its wiring ship with **38 new test functions across two files** (`fix_scope_audit.test.py`, `fix_scope_gate.test.py`), each one watched failing with its fix backed out before it was kept.
 
 ## 1.67.0 — 2026-08-23
 

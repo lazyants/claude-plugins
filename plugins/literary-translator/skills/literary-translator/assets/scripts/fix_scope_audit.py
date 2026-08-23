@@ -164,6 +164,17 @@ WHAT THIS CANNOT DO, stated here so no caller overstates it downstream:
     changes is that the tamper must now cover a second tree.
   * It sees nothing outside the compared set: another segment's draft,
     `runs/`, `$HOME`.
+  * **It is a point-in-time comparison, so a write that lands AFTER it returns
+    is not in it.** A fix turn that spawns a DETACHED child which writes once
+    the turn has already returned defeats this round's audit specifically --
+    reproduced. What it does not defeat is the NEXT round's audit, or the next
+    batch's first audited round, since the check has no baseline and compares
+    against the plugin bytes every time: the divergence is found whenever an
+    audit next runs on that root, just not by the round that caused it. On the
+    LAST fix round of a converging segment there is no next audit, and that is
+    the uncovered case. This is the same family as "it cannot confine the
+    turn", but it is stated separately because the confinement sentence does
+    not by itself tell a reader that TIMING is the gap.
   * **No `.pyc` is ever compared**, and `${durable_root}/scripts/__pycache__/`
     is an EXECUTION surface: `codex_job.py` runs from the durable `scripts/`
     on every translate and every review dispatch and imports the durable
@@ -317,6 +328,29 @@ def load_member_tuples():
     }
 
 
+def listdir_or_empty(directory: Path) -> list:
+    """`sorted(directory.iterdir())`, or [] when the directory is absent or
+    unreadable.
+
+    EVERY directory walk in this file goes through here, and that is the point:
+    `glob()` swallows both errors and returns empty while `iterdir()` RAISES,
+    so a mixed file would fail LOUDLY on one class of authority and silently on
+    another -- and the loud failure is a traceback with no JSON line, which
+    breaks fail()'s own invariant and reaches the workflow as "the relay is
+    flaky" rather than "the install is broken". An empty class is not a pass:
+    sweep_degenerate() turns an empty PLUGIN class over a populated durable one
+    into a RED, and an unreadable DURABLE directory can only hide files that
+    would have been reported, never invent a clean verdict for a compared pair
+    (those are read individually, and a failed read is `unreadable`).
+    """
+    if not directory.is_dir():
+        return []
+    try:
+        return sorted(directory.iterdir())
+    except OSError:
+        return []
+
+
 def compared_pairs() -> list:
     """Every (plugin_path, durable_relative_path) pair the Step 0a copy pass
     creates, derived from the plugin tree's own contents rather than from a
@@ -332,17 +366,11 @@ def compared_pairs() -> list:
     # Flat only -- assets/schemas/registry/ is plugin-only and uncopied.
     for path in sorted(PLUGIN_SCHEMAS_DIR.glob("*.json")):
         pairs.append((path, Path("schemas") / path.name))
-    # is_dir() first: unlike glob() above, iterdir() RAISES on an absent
-    # directory, and a traceback instead of a JSON line breaks fail()'s own
-    # invariant -- the relay would report nothing, the workflow would spend
-    # both attempts, and the segment would terminalize as if the RELAY were
-    # flaky, pointing the operator away from the broken install. Returning
-    # the class empty instead lets sweep_degenerate() render the verdict this
-    # state actually deserves.
-    if PLUGIN_LANGUAGES_DIR.is_dir():
-        for path in sorted(PLUGIN_LANGUAGES_DIR.iterdir()):
-            if path.is_file():
-                pairs.append((path, Path("languages") / path.name))
+    # listdir_or_empty, never a bare iterdir(): see its docstring -- an absent
+    # OR unreadable authority directory must be a VERDICT, never a traceback.
+    for path in listdir_or_empty(PLUGIN_LANGUAGES_DIR):
+        if path.is_file():
+            pairs.append((path, Path("languages") / path.name))
     return pairs
 
 
@@ -350,11 +378,8 @@ def sweep_extra(durable_root: Path, expected_script_names) -> list:
     """`${durable_root}/scripts/*.py` with no plugin twin. Scoped to
     scripts/ and to `.py` on purpose -- see the module docstring on
     `fr.local.json`."""
-    scripts_dir = durable_root / "scripts"
-    if not scripts_dir.is_dir():
-        return []
     extra = []
-    for entry in sorted(scripts_dir.iterdir()):
+    for entry in listdir_or_empty(durable_root / "scripts"):
         # The `.py` filter is what keeps `__pycache__/` and its `*.pyc` out of
         # this sweep, and that exclusion is deliberate rather than incidental:
         # the interpreter writes there whenever a durable script imports a
@@ -388,11 +413,8 @@ def sweep_orphaned_schemas(durable_root: Path, expected_schema_names) -> list:
     (`canon_validate.py`, `ledger_update.py`, `glossary_preflight.py`,
     `canon_senses.py`, `canon_link_groups.py`) only ever READS from it.
     """
-    schemas_dir = durable_root / "schemas"
-    if not schemas_dir.is_dir():
-        return []
     orphaned = []
-    for entry in sorted(schemas_dir.iterdir()):
+    for entry in listdir_or_empty(durable_root / "schemas"):
         if not entry.is_file():
             continue
         if not entry.name.endswith(".json"):
@@ -428,10 +450,8 @@ def sweep_degenerate(durable_root: Path) -> list:
         }
         if plugin_names:
             continue
-        if not durable_dir.is_dir():
-            continue
         durable_names = [
-            entry.name for entry in durable_dir.iterdir()
+            entry.name for entry in listdir_or_empty(durable_dir)
             if entry.is_file() and entry.name.endswith(suffix)
         ]
         if durable_names:
@@ -497,8 +517,16 @@ def audit(durable_root: Path) -> dict:
     for label, rel_parts, tuple_name in MARKER_SPECS:
         marker_path = durable_root.joinpath(*rel_parts)
         rel_str = "/".join(rel_parts)
-        if not marker_path.is_file():
+        if not os.path.lexists(marker_path):
             missing.append(rel_str)
+            continue
+        # lstat, never is_file(): is_file() FOLLOWS a symlink, so a marker
+        # replaced by a link to a file holding the expected hash read as a
+        # clean regular file. The copied files above already reject that shape
+        # for the same reason -- a link's target changes outside anything this
+        # script looks at -- and the markers are gate identity, not content.
+        if not os.path.isfile(marker_path) or os.path.islink(marker_path):
+            irregular.append(rel_str)
             continue
         try:
             stored = marker_path.read_text(encoding="utf-8").strip()

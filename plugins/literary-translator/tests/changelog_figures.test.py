@@ -330,8 +330,8 @@ def _local_dict_len(filename, funcname, varname):
 # filed about.
 FIGURES = [
     Figure(
-        phrase="36 new test functions across two files",
-        value=36,
+        phrase="38 new test functions across two files",
+        value=38,
         derive=lambda: sum(_test_function_count(f) for f in (
             "fix_scope_audit.test.py",
             "fix_scope_gate.test.py",

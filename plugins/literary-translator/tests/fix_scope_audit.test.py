@@ -422,3 +422,39 @@ def test_a_plugin_tree_with_no_languages_directory_still_prints_a_verdict(tmp_pa
     assert out["ok"] is False, out
     assert out["degenerate"] == ["languages"], out
     assert out["n_checked"] == out["n_expected"], out
+
+
+def test_a_symlinked_bundle_marker_is_red_even_with_the_right_hash(root):
+    """The markers were checked with `is_file()`, which FOLLOWS a link, while
+    every copied file was checked with `lstat`. So a marker replaced by a
+    symlink to a file holding the expected hash read as clean -- and a link's
+    target changes outside anything this script looks at, which is exactly why
+    the copied files reject the shape. The markers are gate identity; they get
+    the same rule."""
+    marker = root / "runs" / ".plugin_bundle_hash"
+    stored = marker.read_text(encoding="utf-8")
+    elsewhere = root.parent / "planted_hash"
+    elsewhere.write_text(stored, encoding="utf-8")
+    marker.unlink()
+    marker.symlink_to(elsewhere)
+    assert marker.read_text(encoding="utf-8") == stored, "the fixture must keep the CONTENT correct"
+    out = audit(root)
+    assert out["ok"] is False, out
+    assert out["irregular"] == ["runs/.plugin_bundle_hash"], out
+
+
+def test_an_unreadable_plugin_class_is_a_verdict_not_a_traceback(tmp_path, root):
+    """A directory that EXISTS but cannot be read passes `is_dir()` and then
+    raises on scandir, so the guard added for the absent case did not cover it.
+    `glob()` swallows the same error and returns empty, so before this the
+    three authority classes disagreed about how they fail -- and the loud one
+    failed as a traceback with no JSON line at all, which the workflow reads as
+    a flaky relay rather than a broken install."""
+    fake = build_fake_plugin(tmp_path)
+    (fake / "languages").chmod(0o000)
+    try:
+        out = audit_from(fake, root)
+    finally:
+        (fake / "languages").chmod(0o755)
+    assert out["ok"] is False, out
+    assert out["degenerate"] == ["languages"], out

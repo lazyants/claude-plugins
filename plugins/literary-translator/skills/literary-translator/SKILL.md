@@ -2264,6 +2264,12 @@ whole residual:
   CONTENT. One that is not is `runs/<id>/.resume_gate_ack`, a per-run
   authorization with no derivable authority: it is gate state, it is
   uncovered, and it is named here rather than left implicit.
+- It is a **point-in-time** comparison. A write that lands after the audit
+  call returns — a detached child the fix turn spawned — is not in it, and is
+  reproducible. The next audit on that root still finds the divergence, since
+  the check has no baseline and re-reads the plugin bytes every time; the
+  uncovered case is the LAST fix round of a segment that then converges, where
+  no next audit runs.
 - It cannot **confine** the turn. That turn is a plain Claude agent holding
   the operator's own permissions, and the Workflow `agent()` API offers no
   filesystem confinement. A party able to alter the PLUGIN tree — including
