@@ -1568,3 +1568,64 @@ def test_write_all_finishes_a_short_write_and_refuses_a_zero_length_one(tmp_path
             os.close(fd)
     finally:
         module.os.write = real_write
+
+
+ROUND_LABEL_CASES = [
+    ("numeric", "RUN-1", "segA", "RUN-1:segA:r3", "3"),
+    ("the terminal label", "RUN-1", "segA", "RUN-1:segA:rfinal", "final"),
+    # ':r' occurring INSIDE the run id and inside the segment id. A reader
+    # that searched for ':r' instead of splitting by the length of the token
+    # already accepted would cut here and record a label never dispatched.
+    ("':r' inside the run id", "RUN:right", "segA", "RUN:right:segA:r2", "2"),
+    ("':r' inside the segment id", "RUN-1", "seg:rear", "RUN-1:seg:rear:r2", "2"),
+    ("a token for another segment", "RUN-1", "segA", "RUN-1:segB:r2", None),
+    ("no round suffix at all", "RUN-1", "segA", "RUN-1:segA", None),
+    ("not a string", "RUN-1", "segA", 7, None),
+    ("absent", "RUN-1", "segA", None, None),
+]
+
+
+@pytest.mark.parametrize("label,run,seg,token,expected", ROUND_LABEL_CASES,
+                         ids=[case[0] for case in ROUND_LABEL_CASES])
+def test_the_round_label_is_split_by_length_not_by_searching_for_a_marker(
+    label, run, seg, token, expected
+):
+    """#443 records the round a segment converged at, read off review.json's
+    own `'<draft_token>:r<roundLabel>'`. The split is by the LENGTH of the
+    token review_token_matches() already accepted -- these cases are why. Two
+    of them put ':r' inside the run id and inside the segment id, where a
+    search-based split records a label that was never dispatched; recording a
+    wrong round in the marker is worse than recording none, because the whole
+    value of the field is that it can be checked against the run."""
+    module = _load_module("ledger_update_round_" + label.replace(" ", "_"), SCRIPT_SRC)
+    review = {} if token is None else {"dispatch_token": token}
+    expected_token = module.expected_draft_token(run, seg)
+    assert module._review_round_label(review, expected_token) == expected
+
+
+def test_the_round_label_is_bounded_so_the_marker_cannot_be_grown_through_it(tmp_path):
+    """The label is the one field whose LENGTH is not fixed by this script.
+    It reaches the marker only through a token the checks above accepted, so
+    the cap is a bound on the marker's SIZE rather than a validation -- the
+    census reads one body per segment and nothing downstream should have to
+    defend against an unbounded one."""
+    module = _load_module("ledger_update_round_cap", SCRIPT_SRC)
+    expected_token = module.expected_draft_token("RUN-1", "segA")
+    long_label = "9" * 500
+    got = module._review_round_label(
+        {"dispatch_token": f"{expected_token}:r{long_label}"}, expected_token
+    )
+    assert got == "9" * module._MAX_ROUND_LABEL
+    assert module._review_round_label({"dispatch_token": expected_token + ":r"},
+                                      expected_token) is None, (
+        "an EMPTY label is not a label -- recording '' would put a field in "
+        "the marker that says nothing while looking like evidence"
+    )
+
+
+def test_no_run_token_means_no_round_label_even_with_a_review_token_present(tmp_path):
+    """The pre-1.2.0 call shape has no anchor to split against. A review
+    artifact may still carry a dispatch_token, and guessing where the prefix
+    ends is exactly the search-based split the cases above rule out."""
+    module = _load_module("ledger_update_round_noanchor", SCRIPT_SRC)
+    assert module._review_round_label({"dispatch_token": "RUN-1:segA:r3"}, None) is None

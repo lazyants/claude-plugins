@@ -590,12 +590,15 @@ census established nothing read as a healthy project:
 
 **`sentinel_attribution` is not on that list, and deliberately so.** The
 report also names, for every marker it found ALREADY present, which writer
-published it — `ledger_update` (earned at a real convergence, carrying that
-run's token, round label and reviewed draft sha1 inside the marker),
-`backfill_ever_converged` (retrofitted from a ledger row by a run of this
-script), `unattributed`, or `unreadable`. It is a DIAGNOSTIC: it moves no
-bucket, no count and not `success`, and no gate anywhere reads a marker's
-body. **`unattributed` does not mean unprotected.** Every marker written
+the marker SAYS published it — `ledger_update` (earned at a real convergence,
+carrying that convergence's reviewed draft sha1, plus its run token and round
+label when the recording call supplied a run token), `backfill_ever_converged`
+(retrofitted from a ledger row by a run of this script), `unattributed`, or
+`unreadable`. It is a DIAGNOSTIC: it moves no bucket, no count and not
+`success`, and no gate anywhere reads a marker's body. It is also
+**self-reported, not authenticated** — nothing signs the marker, so the value
+is that the plugin's own writers now record their evidence for you to check,
+not that a claim of authorship proves anything on its own. **`unattributed` does not mean unprotected.** Every marker written
 before this field existed is unattributed and protects exactly as it always
 did — that is what makes the change safe to adopt on a project mid-flight,
 and reading it as a defect would invert it. What the field is FOR is the

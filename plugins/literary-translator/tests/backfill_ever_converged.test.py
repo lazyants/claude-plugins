@@ -3135,3 +3135,121 @@ def test_the_body_reader_stops_at_its_cap_and_reports_an_unreadable_entry(tmp_pa
     a_dir = segments_dir / ".ever_converged.segDir"
     a_dir.mkdir()
     assert backfill.read_sentinel_attribution(a_dir) in ("unreadable", "unattributed")
+
+
+def test_the_body_reader_is_strict_about_the_shape_it_will_vouch_for(tmp_path):
+    """The body is UNTRUSTED: anyone who can write the marker can write any
+    `by` they like. So attribution is granted only to a body that matches what
+    sentinel_body() actually emits, and the answer comes from a CLOSED set --
+    echoing an arbitrary `by` back would put a value outside this script's own
+    documented output contract into its JSON and dress a foreign file up as
+    provenance.
+
+    The `expected_seg` arm is the one with teeth beyond tidiness: a marker
+    copied from another segment is real, well-formed, plugin-written
+    provenance -- for a DIFFERENT segment -- and reporting it as this one's is
+    precisely the empty authority #443 is about."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_strict")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    path = segments_dir / ".ever_converged.segS"
+
+    def attribution(body, **kw):
+        path.write_text(json.dumps(body), encoding="utf-8")
+        return backfill.read_sentinel_attribution(path, **kw)
+
+    good = {"marker": "ever_converged", "v": 1, "by": "ledger_update", "seg": "segS"}
+    assert attribution(good) == "ledger_update"
+    assert attribution(good, expected_seg="segS") == "ledger_update"
+
+    assert attribution({**good, "by": "some_other_tool"}) == "unattributed"
+    assert attribution({**good, "v": 2}) == "unattributed"
+    assert attribution({k: v for k, v in good.items() if k != "v"}) == "unattributed"
+    assert attribution({k: v for k, v in good.items() if k != "seg"}) == "unattributed"
+    assert attribution({**good, "seg": ""}) == "unattributed"
+    assert attribution({**good, "seg": 7}) == "unattributed"
+    assert attribution(good, expected_seg="a_different_segment") == "unattributed"
+
+
+def test_the_body_reader_answers_even_when_json_raises_a_non_value_error(tmp_path):
+    """`json.loads()` raises RecursionError -- which is NOT a ValueError -- on
+    deeply nested input, and the reader's contract is that it never raises.
+
+    Reproduced deterministically by making the parse raise, rather than by
+    nesting brackets: measured, a body deep enough to trip CPython's own
+    recursion does NOT fit under the 4096-byte cap on this project's 3.14.7,
+    where the C scanner does not recurse in Python frames -- so a nesting
+    fixture would pass here whether or not the arm exists, on the very
+    interpreter CI runs. This plugin's floor is 3.10, where it does raise."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_recursion")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    path = segments_dir / ".ever_converged.segR"
+    path.write_bytes(b'{"marker":"ever_converged"}\n')
+
+    real_loads = backfill.json.loads
+
+    def raising_loads(*args, **kwargs):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    backfill.json.loads = raising_loads
+    try:
+        assert backfill.read_sentinel_attribution(path) == "unattributed"
+    finally:
+        backfill.json.loads = real_loads
+
+
+def test_the_body_reader_is_safe_on_both_branches_a_symlink_and_a_fifo(tmp_path):
+    """The census reads relative to the run's directory descriptor; every test
+    above exercises the PATHNAME branch, which nothing in production uses. Both
+    are pinned here, over the two entries that make the open flags load-bearing.
+
+    A symlink at the marker name must not be followed -- an entry the writers
+    never publish, and following one reads a file outside `segments/` and
+    attributes it to this segment. A FIFO must not BLOCK: without O_NONBLOCK
+    the open waits forever for a writer, and the repair tool hangs on exactly
+    the project that needs it. Neither is reachable from the census today,
+    because classify_ever_converged_sentinel() has already rejected both as
+    AMBIGUOUS -- but that ordering is the caller's, not this function's, and a
+    reader whose safety depends on its caller having checked first is one
+    refactor from being unsafe."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_branches")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    dir_fd = os.open(str(segments_dir), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        target = tmp_path / "elsewhere.json"
+        target.write_text(
+            json.dumps({"marker": "ever_converged", "v": 1,
+                        "by": "ledger_update", "seg": "segL"}),
+            encoding="utf-8",
+        )
+        link = segments_dir / ".ever_converged.segL"
+        link.symlink_to(target)
+        assert backfill.read_sentinel_attribution(link) == "unreadable"
+        assert backfill.read_sentinel_attribution(link, dir_fd=dir_fd) == "unreadable"
+
+        fifo = segments_dir / ".ever_converged.segF"
+        os.mkfifo(fifo)
+        # No reader/writer is ever attached: without O_NONBLOCK these two
+        # calls never return, so the test hanging IS the failure signal.
+        assert backfill.read_sentinel_attribution(fifo) in ("unreadable", "unattributed")
+        assert backfill.read_sentinel_attribution(
+            fifo, dir_fd=dir_fd
+        ) in ("unreadable", "unattributed")
+
+        real = segments_dir / ".ever_converged.segOK"
+        real.write_text(
+            json.dumps({"marker": "ever_converged", "v": 1,
+                        "by": "backfill_ever_converged", "seg": "segOK"}),
+            encoding="utf-8",
+        )
+        assert backfill.read_sentinel_attribution(
+            real, dir_fd=dir_fd, expected_seg="segOK"
+        ) == "backfill_ever_converged", (
+            "the descriptor branch is the one production uses; a positive "
+            "control keeps the two assertions above from passing because the "
+            "branch refuses everything"
+        )
+    finally:
+        os.close(dir_fd)

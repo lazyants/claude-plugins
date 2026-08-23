@@ -137,9 +137,10 @@ imported for the bundle-hash reason spelled out in
 ``classify_ever_converged_sentinel()`` below -- NOT for the "no shared lib
 between self-contained scripts" convention, which is already false in this
 codebase. Pinned against the real writer by dedicated drift tests in
-``tests/backfill_ever_converged.test.py`` (byte identity of the sentinel's
-content/mode, and agreement on refusing a non-regular entry), not a second
-source of truth.
+``tests/backfill_ever_converged.test.py``: identical sentinel MODE, an
+identical shared ``sentinel_body()``/``write_all()`` source, deliberately
+DIFFERENT body bytes (the ``by`` field -- see #443 above), and agreement on
+refusing a non-regular entry. Drift tests, not a second source of truth.
 
 ## CLI flags
 
@@ -511,7 +512,8 @@ STAGING_PREFIX = ".ever_converged_staging."
 _STAGING_NAME_ATTEMPTS = 32
 
 
-# #443's marker body. Spelled BYTE-IDENTICALLY to ledger_update.py's copy --
+# #443's marker body. The FUNCTION is spelled byte-identically to
+# ledger_update.py's copy (the BODIES the two produce differ, deliberately) --
 # `tests/backfill_ever_converged.test.py` pins the two with inspect.getsource,
 # the same technique that keeps the sentinel PREDICATE's five copies honest --
 # because a reader must be able to parse either writer's output with one rule.
@@ -588,6 +590,15 @@ def write_all(fd, data: bytes) -> None:
 SENTINEL_ATTRIBUTION_UNATTRIBUTED = "unattributed"
 SENTINEL_ATTRIBUTION_UNREADABLE = "unreadable"
 
+# The only two names a marker may be attributed to. The body is UNTRUSTED --
+# anyone who can write the file can write any `by` they like -- so the reader
+# answers from a closed set rather than echoing whatever string it found:
+# reporting an arbitrary `by` back would put a value outside this script's own
+# documented output contract into its JSON, and would dress up a foreign file
+# as provenance. Adding a third writer means adding it here, in the same
+# commit that adds the writer.
+SENTINEL_KNOWN_WRITERS = ("ledger_update", "backfill_ever_converged")
+
 # A whole marker body is well under 300 bytes. The cap is not a guess at that
 # size, it is a refusal to let an operator-authored or foreign file at this
 # path decide how much this run reads: everything past it is discarded and the
@@ -595,7 +606,7 @@ SENTINEL_ATTRIBUTION_UNREADABLE = "unreadable"
 SENTINEL_BODY_READ_CAP = 4096
 
 
-def read_sentinel_attribution(path: Path, *, dir_fd=None) -> str:
+def read_sentinel_attribution(path: Path, *, dir_fd=None, expected_seg=None) -> str:
     """WHICH WRITER published the marker at `path` -- `"ledger_update"`,
     `"backfill_ever_converged"`, `"unattributed"` or `"unreadable"`.
 
@@ -610,14 +621,28 @@ def read_sentinel_attribution(path: Path, *, dir_fd=None) -> str:
     issue, all ten bytes of `converged\n`) becomes unprotected in the same
     instant.
 
+    WHAT IT IS NOT, second: this is the body's SELF-ATTRIBUTION, not an
+    authenticated publisher identity. Nothing signs the marker, so anyone who
+    can write the file can write `"by": "ledger_update"` into it. The value of
+    the field is that a marker written by the plugin's own writers now SAYS so
+    and carries the evidence to check by hand, not that a claim of authorship
+    can be trusted on its own.
+
+    Which is why a body is attributed only when it matches the shape
+    sentinel_body() actually emits -- the right `marker`, this `v`, a
+    non-empty `seg` (equal to `expected_seg` when the caller knows which
+    segment it is asking about, so a marker copied from another segment is
+    not reported as this one's provenance), and a `by` from
+    SENTINEL_KNOWN_WRITERS. Everything else is `unattributed`.
+
     So every failure answers, none raises. `unattributed` covers a legacy
     body, an empty or torn one, invalid UTF-8, a body that is not JSON, JSON
-    that is not an object, a `marker` field that names something else, and a
-    `by` that is not a non-empty string -- all of them "there is no provenance
-    here I can vouch for", which is exactly what an operator needs to be told.
-    `unreadable` is kept separate and means the READ failed, because "I could
-    not look" and "I looked and found nothing" are different facts for the
-    operator, and folding them is how a diagnostic starts lying.
+    that is not an object, and every field mismatch above -- all of them
+    "there is no provenance here I can vouch for", which is exactly what an
+    operator needs to be told. `unreadable` is kept separate and means the
+    READ failed, because "I could not look" and "I looked and found nothing"
+    are different facts for the operator, and folding them is how a
+    diagnostic starts lying.
 
     Read relative to `dir_fd` like every other lookup this script makes, and
     O_NOFOLLOW|O_NONBLOCK on the final component: the caller has already
@@ -639,14 +664,29 @@ def read_sentinel_attribution(path: Path, *, dir_fd=None) -> str:
 
     try:
         body = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        # RecursionError is NOT a ValueError, and deeply nested JSON is the
+        # one malformed shape that raises it out of json.loads() rather than
+        # returning a decode error. Measured: it does not reproduce under the
+        # 4096-byte cap on this project's own CPython 3.14.7 (the C scanner
+        # does not recurse in Python frames there) -- but this plugin's floor
+        # is 3.10, where it does, and "the reader never raises" is a contract
+        # about every supported interpreter rather than about the one that
+        # happens to be installed.
         return SENTINEL_ATTRIBUTION_UNATTRIBUTED
     if not isinstance(body, dict):
         return SENTINEL_ATTRIBUTION_UNATTRIBUTED
     if body.get("marker") != SENTINEL_MARKER_NAME:
         return SENTINEL_ATTRIBUTION_UNATTRIBUTED
+    if body.get("v") != SENTINEL_BODY_VERSION:
+        return SENTINEL_ATTRIBUTION_UNATTRIBUTED
+    seg = body.get("seg")
+    if not isinstance(seg, str) or not seg:
+        return SENTINEL_ATTRIBUTION_UNATTRIBUTED
+    if expected_seg is not None and seg != expected_seg:
+        return SENTINEL_ATTRIBUTION_UNATTRIBUTED
     writer = body.get("by")
-    if not isinstance(writer, str) or not writer:
+    if writer not in SENTINEL_KNOWN_WRITERS:
         return SENTINEL_ATTRIBUTION_UNATTRIBUTED
     return writer
 
@@ -1512,7 +1552,8 @@ def _run_with_segments_dir(args, dirs, ledger_path, ledger_source,
         if state == SENTINEL_PRESENT:
             already_sentineled.append(seg)
             sentinel_attribution[seg] = read_sentinel_attribution(
-                ever_converged_path(seg, segments_dir), dir_fd=dir_fd
+                ever_converged_path(seg, segments_dir), dir_fd=dir_fd,
+                expected_seg=seg,
             )
         elif state == SENTINEL_ABSENT:
             missing_sentinels.append(seg)
