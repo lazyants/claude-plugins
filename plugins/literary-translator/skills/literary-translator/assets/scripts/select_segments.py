@@ -223,7 +223,7 @@ alone.
 
 import argparse
 import errno
-# #455: the two kernel leases --from-stalled admission holds (runs/.driver.lock
+# #455: the two kernel leases --from-stalled admission establishes (runs/.driver.lock
 # and segments/.codex_job.<seg>.lock). Module level, matching reject_review.py's
 # own `import fcntl`, rather than the local-import treatment `os`/importlib get
 # above: those notes are about a SIBLING SCRIPT that may be absent from an
@@ -3395,19 +3395,43 @@ def rewrite_draft_dispatch_token(
     open is the gap between that final hash and the os.replace() a few
     statements later: an edit landing THERE is still overwritten. That is a
     few syscalls instead of the whole staging + fsync + hashing span, but it
-    is not zero, and nothing in this file can make it zero. Two further
-    limits belong in the same breath rather than in a footnote: the
-    comparator is draft_content_sha1(), which projects `dispatch_token` OUT
-    (it must -- changing that field is this function's entire job), so a
-    concurrent writer that moved ONLY the token is invisible to BOTH checks;
-    and a refusal is detection, not prevention -- it declines to overwrite,
-    it cannot stop the other writer, and the two edits still have to be
-    reconciled by hand afterwards. Closing the class properly needs
-    something the filesystem does not offer: an atomic compare-and-swap
-    rename, or a lock honoured by EVERY writer -- including a human in a
-    text editor, which is precisely the writer this feature exists to
-    protect and the one least likely to take a lock. Do not upgrade this
-    paragraph's claim without first upgrading the mechanism.
+    is not zero. Two further limits belong in the same breath rather than in
+    a footnote: the comparator is draft_content_sha1(), which projects
+    `dispatch_token` OUT (it must -- changing that field is this function's
+    entire job), so a concurrent writer that moved ONLY the token is
+    invisible to BOTH checks; and a refusal is detection, not prevention --
+    it declines to overwrite, it cannot stop the other writer, and the two
+    edits still have to be reconciled by hand afterwards.
+
+    ONE WRITER IS NOW EXCLUDED FROM THAT GAP, ON ONE PATH. This paragraph
+    used to say that nothing in this file could make the gap zero. That
+    stopped being true in 1.24.0: for an id admitted under --from-stalled,
+    acquire_from_stalled_leases() below holds that segment's codex-job lease
+    across this whole write, and codex_job.py cannot promote a canonical
+    draft without the same lease -- so on that path the promoting job cannot
+    be inside the gap at all. Which lease is held by whom, and what each one
+    misses, is that function's docstring to state and is deliberately not
+    restated here: a second copy of that account is exactly how the sentence
+    above came to be false.
+
+    WHAT STILL REACHES THIS GAP, one clause each: a
+    human in a text editor, on every path and by design, since it takes
+    nothing and is precisely the writer this function exists to protect; a
+    Workflow fix turn, which also holds nothing; an id admitted under
+    --from-converged or --from-cap, since the per-segment lease is taken for
+    the stalled ids only; a second concurrent claim invocation, where
+    neither carries --from-stalled and so neither excludes the other; and a
+    second machine reaching this durable root through a sync-replicated
+    folder, since flock cannot see across kernels. (An unenforcing
+    filesystem is NOT on that list: acquire_and_hold_lease() re-attempts
+    every lease it holds from an independent descriptor and refuses if that
+    attempt SUCCEEDS, so that case fails closed.)
+
+    Closing the class properly still needs an atomic compare-and-swap
+    rename, which the filesystem does not offer, or one lease every writer
+    takes -- #484. Do not upgrade this paragraph's claim without first
+    upgrading the mechanism, and do not upgrade the MECHANISM without coming
+    back here.
 
     Hashing the staged file also means the comparator is draft_content_sha1()
     itself -- the function that OWNS this hash, seven byte-identical copies
@@ -3724,7 +3748,7 @@ def rewrite_draft_dispatch_token(
 
 
 # ---------------------------------------------------------------------------
-# #455: the two kernel leases --from-stalled admission holds
+# #455: the two kernel leases --from-stalled admission establishes
 #
 # NOTHING IN THIS SECTION RUNS UNLESS AT LEAST ONE --from-stalled ID WAS
 # REQUESTED. That is acceptance criterion 4 -- an ordinary invocation must be
@@ -3738,8 +3762,10 @@ def rewrite_draft_dispatch_token(
 # TWICE -- the durable claim record, then the draft's own dispatch_token (a
 # full-file os.replace of the canonical draft) -- and the fact that has to hold
 # is "nothing else is writing this draft WHILE those two writes happen". So
-# every lease is taken before the admission gates read anything and is held,
-# by descriptor, until the process exits. The fds are parked in a module-level
+# every lease is taken before the admission gates read anything, and every
+# lease that is OURS to hold (see acquire_from_stalled_leases() on the
+# --driver-lease-held asymmetry) is held by descriptor until the process
+# exits. The fds are parked in a module-level
 # list for the reason reject_review.py parks its own: an flock lives on its
 # open file description and dies with it, so ANY edit that closes the
 # descriptor -- a reader deciding a write-only "unused" variable can be
@@ -3978,14 +4004,25 @@ def acquire_and_hold_lease(lock_path: Path, what: str) -> "tuple[bool, str]":
 
 
 def acquire_from_stalled_leases(stalled_segs: list, dirs: dict, args) -> "dict[str, list]":
-    """Establishes -- and holds -- both #455 leases for every requested
-    --from-stalled id. Returns {seg: [reason, ...]} for the ids that must be
-    refused; an empty dict means every lease is held.
+    """Establishes both #455 leases for every requested --from-stalled id, and
+    holds the ones that are ours to hold. Returns {seg: [reason, ...]} for the
+    ids that must be refused; an empty dict means every lease is established.
+
+    NOT SYMMETRIC, and this is the one place that says so. The per-segment
+    lease is always acquired and HELD here, by descriptor, for each stalled id
+    allowed to proceed. The driver lease is held here only when this script
+    runs standalone; under --driver-lease-held it belongs to the parent driver
+    and this process merely PROBES it once against the kernel -- so if that
+    parent exits while this child runs on, the driver leg is gone and nothing
+    here notices. #448 was one account of these leases drifting away from the
+    mechanism while another stayed right, so keep any other mention of them --
+    a refusal message, the --help text, FROM_STALLED_DISCLOSURE -- to that
+    surface's own consequence, and derive the ownership only here.
 
     Called ONLY when `stalled_segs` is non-empty (acceptance criterion 4), and
     strictly BEFORE the admission gates read any artifact, so the whole
     decision -- read, admit, write the claim record, re-stamp the draft --
-    happens under both leases rather than after a probe that proved something
+    happens under those leases rather than after a probe that proved something
     about a moment already past.
 
     WHAT EACH LEASE IS FOR, and what it is not.
@@ -4000,15 +4037,20 @@ def acquire_from_stalled_leases(stalled_segs: list, dirs: dict, args) -> "dict[s
     and that constant drift into three different promises.
 
     segments/.codex_job.<seg>.lock is the leg that actually protects the draft.
-    codex_job.py opens and flocks exactly this path immediately before launch()
-    (codex_job.py:1426-1427) and releases it in the finally after finalize()
-    (:1540-1549), and its canonical promotion -- os.replace(self.attempt,
-    self.canonical), :1524 -- sits INSIDE that window re-checking neither the
-    draft's dispatch_token nor any claim record. Holding it across our claim
-    write and token re-stamp is what stops an already-launched job from
-    overwriting a freshly claimed draft and restoring its old token; a job that
-    starts AFTERWARDS instead meets _refuse_claimed_translate() (D8,
-    codex_job.py:1030) with the claim already on disk.
+    codex_job.py's run() flocks exactly this path via _acquire_flock() -- before
+    launch() and before BOTH of its canonical-promotion routes -- and releases it
+    by closing that descriptor in run()'s own finally, after finalize(). run() is
+    the only way that job is ever driven (main() ends in job.run()), so no
+    promotion route exists outside that window. Its canonical promotion --
+    os.replace(self.attempt, self.canonical) -- sits INSIDE it re-checking neither
+    the draft's dispatch_token nor any claim record. Cited by SYMBOL and not by
+    line: this docstring shipped four numeric citations and every one of them had
+    drifted. Holding it across our claim write and token re-stamp is what stops an
+    already-launched job from overwriting a freshly claimed draft and restoring
+    its old token. A job that starts AFTERWARDS never reaches that overwrite: it
+    either adopts the already-valid claimed draft through safe_adopt() and
+    returns, or -- if that draft is missing or invalid -- reaches codex_job.py's
+    _refuse_claimed_translate() (D8) with the claim already on disk.
 
     ONE MORE THING THIS DOES NOT COVER, stated because the gap is invisible:
     the materialized ledger these gates read was loaded by run() before any
@@ -4082,7 +4124,7 @@ def acquire_from_stalled_leases(stalled_segs: list, dirs: dict, args) -> "dict[s
                 f"{seg!r} requested under --from-stalled, but this invocation could not take "
                 f"that segment's own codex-job lease at {seg_lock}: {problem}. codex_job.py "
                 f"holds exactly this lock across its canonical promotion "
-                f"(os.replace(attempt, canonical), codex_job.py:1524), which re-checks "
+                f"(os.replace(attempt, canonical), in its run()), which re-checks "
                 f"neither the draft's dispatch_token nor any claim record -- so claiming "
                 f"while it is held would let an already-launched job overwrite the draft "
                 f"this claim just re-stamped and put its old token back. "
@@ -4712,8 +4754,10 @@ def run(args, dirs: dict) -> dict:
                     previously_converged=previously_converged,
                 )
 
-        # #455: BOTH kernel leases, taken here and HELD until this process
-        # exits. Placed after every cheap, purely-argument-shaped refusal above
+        # #455: both kernel leases established here, and held here when they
+        # are ours to hold -- see acquire_from_stalled_leases() for the
+        # --driver-lease-held asymmetry.
+        # Placed after every cheap, purely-argument-shaped refusal above
         # (a contradictory command should not touch a lock) and strictly before
         # the admission gates below read a single artifact, so the whole
         # decision -- read, admit, write the claim record, re-stamp the draft --
@@ -5399,8 +5443,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             + FROM_STALLED_DISCLOSURE
             + " Where those two facts live in the code: the per-segment lock is the one "
             "whose critical section contains codex_job.py's canonical draft promotion "
-            "(codex_job.py:1524), and the fix turn's byte-for-byte dispatch_token copy is "
-            "mass-translate-wf.template.js:1288. "
+            "(the os.replace in its run()), and the fix turn's byte-for-byte "
+            "dispatch_token copy is the instruction mass-translate-wf.template.js's "
+            "fixPrompt() emits, telling the fixer to copy the existing value unchanged. "
             + CLAIM_CONSUMPTION_NOTE
         ),
     )
