@@ -84,12 +84,19 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
 MASS_TRANSLATE_SRC = TEMPLATES_DIR / "mass-translate-wf.template.js"
 GLOSSARY_SRC = TEMPLATES_DIR / "glossary-pass-wf.template.js"
+# #109 -- skeptic joins this file for the codex-dispatch sweep at its foot.
+# It has no bounded-poll assertions here (those live in its own suite); it is
+# loaded because the routing pin below is a property of EVERY codex dispatch
+# this plugin ships, and a sweep that silently omits a template is the shape
+# that lets one lose the line while the sweep stays green.
+SKEPTIC_SRC = TEMPLATES_DIR / "skeptic-pass-wf.template.js"
 
-for _p in (MASS_TRANSLATE_SRC, GLOSSARY_SRC):
+for _p in (MASS_TRANSLATE_SRC, GLOSSARY_SRC, SKEPTIC_SRC):
     assert _p.is_file(), f"expected plugin template not found: {_p}"
 
 MASS_TRANSLATE_SOURCE = MASS_TRANSLATE_SRC.read_text(encoding="utf-8")
 GLOSSARY_SOURCE = GLOSSARY_SRC.read_text(encoding="utf-8")
+SKEPTIC_SOURCE = SKEPTIC_SRC.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -1311,9 +1318,101 @@ def test_glossary_codex_dispatch_set_is_exactly_batch_dispatch():
     )
 
 
+def test_skeptic_codex_dispatch_set_is_exactly_batch_dispatch():
+    """#109 -- skeptic's own exact-set lock, the twin of glossary's above.
+
+    It exists for the sweep below rather than for its own sake: an exact set,
+    asserted per template, is what stops a discovery-driven loop from passing
+    over an EMPTY population. `find_all_agent_calls` recognises one syntactic
+    shape -- `agent(someBuilder(...), { ... })` -- so a dispatch rewritten to
+    pass its prompt or its options through a variable would simply not be
+    found, and a loop over the findings would then assert nothing at all while
+    still reporting green."""
+    calls = find_all_agent_calls(SKEPTIC_SOURCE)
+    codex_builders = {name for name, opts in calls if is_codex_dispatch(opts)}
+    assert codex_builders == {"batchDispatchPrompt"}, (
+        f"expected exactly the skeptic batch codex work-call in "
+        f"skeptic-pass-wf.template.js, got {codex_builders}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #109 -- THE BACKGROUND ROUTING PIN, swept across every template this plugin
+# ships.
+#
+# The dispatch is an awaited agent() call and the Workflow agent() API offers
+# no timeout, so what bounds it is not a cap but WHAT THE AWAITED CALL COSTS.
+# The codex:codex-rescue forwarder runs one `codex-companion.mjs task` call and
+# chooses foreground or background by its own heuristic unless the request
+# names one; foreground runs the codex turn inside that single Bash call, so
+# the await blocks for the whole turn and the turn dies with the call at the
+# harness's per-call cap. Background enqueues a detached worker and returns.
+# Both templates' bounded waits, and the comments that say the codex job
+# outlives the awaited call, are written for the second shape only.
+#
+# Asserted as the FIRST pushed line, not merely as present somewhere: a
+# forwarder reads a routing control at the head of the request, and "present
+# anywhere" would be satisfied by a mention buried a hundred lines into a
+# prompt, or by a comment. The pin is paired with the exact-set locks above so
+# that a template whose dispatch stops being recognisable fails the set
+# assertion rather than silently contributing nothing to this sweep.
+#
+# The rendered counterpart -- the same line asserted on the prompt a real run
+# actually emits, taken from the e2e harnesses' own promptByLabel capture --
+# lives in glossary_pipeline_e2e.test.py and skeptic_pipeline_e2e.test.py.
+# This one is the by-shape sweep; that one proves the string reaches the wire.
+# ---------------------------------------------------------------------------
+
+BACKGROUND_ROUTING_PUSH = 'lines.push("--background")'
+
+_FIRST_PUSH_RE = re.compile(r"^\s*lines\.push\(.*$", re.MULTILINE)
+
+CODEX_DISPATCH_POPULATION = [
+    (MASS_TRANSLATE_SOURCE, "mass-translate-wf.template.js", set()),
+    (GLOSSARY_SOURCE, "glossary-pass-wf.template.js", {"batchDispatchPrompt"}),
+    (SKEPTIC_SOURCE, "skeptic-pass-wf.template.js", {"batchDispatchPrompt"}),
+]
+
+
+@pytest.mark.parametrize(
+    "source,label,expected",
+    CODEX_DISPATCH_POPULATION,
+    ids=[label for _s, label, _e in CODEX_DISPATCH_POPULATION],
+)
+def test_every_codex_dispatch_prompt_opens_with_the_background_routing_line(source, label, expected):
+    calls = find_all_agent_calls(source)
+    codex_builders = {name for name, opts in calls if is_codex_dispatch(opts)}
+    assert codex_builders == expected, (
+        f"{label}: the codex-agentType dispatch set moved -- this sweep's "
+        f"population is asserted, never discovered, so that an unrecognised "
+        f"dispatch fails here instead of dropping out silently. Expected "
+        f"{expected or 'no codex dispatch'}, got {codex_builders}"
+    )
+
+    for builder in sorted(codex_builders):
+        body = extract_function_body(source, builder)
+        pushes = _FIRST_PUSH_RE.findall(body)
+        assert pushes, f"{label}: {builder}() pushes no prompt lines at all"
+        assert pushes[0].strip() == BACKGROUND_ROUTING_PUSH, (
+            f"{label}: {builder}() must open with {BACKGROUND_ROUTING_PUSH} so the "
+            f"codex:codex-rescue forwarder is given an explicit routing control "
+            f"instead of choosing foreground by its own heuristic (#109). Its "
+            f"first pushed line is instead: {pushes[0].strip()}"
+        )
+        assert 'lines.join("\\n")' in body, (
+            f"{label}: {builder}() must still render by joining `lines`, or the "
+            f"first-push assertion above stops being a claim about the first "
+            f"rendered line"
+        )
+
+
 @pytest.mark.parametrize(
     "source,label",
-    [(MASS_TRANSLATE_SOURCE, "mass-translate-wf.template.js"), (GLOSSARY_SOURCE, "glossary-pass-wf.template.js")],
+    [
+        (MASS_TRANSLATE_SOURCE, "mass-translate-wf.template.js"),
+        (GLOSSARY_SOURCE, "glossary-pass-wf.template.js"),
+        (SKEPTIC_SOURCE, "skeptic-pass-wf.template.js"),
+    ],
 )
 def test_every_codex_dispatch_in_file_is_schema_less(source, label):
     calls = find_all_agent_calls(source)

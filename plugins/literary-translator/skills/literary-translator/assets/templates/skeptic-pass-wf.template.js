@@ -428,6 +428,18 @@ function batchDispatchPrompt(batch) {
   const outPath = fragmentPath(batch.index)
   const checkCmd = checkCommand(batch)
   const lines = []
+  // #109 -- THE ROUTING CONTROL, and it must stay the FIRST rendered line.
+  // Identical in wording and purpose to glossary-pass-wf.template.js's own
+  // copy; read that one for the full account, which is not restated here.
+  // In short: the codex:codex-rescue forwarder chooses foreground or
+  // background by its own heuristic unless the request states one, a
+  // foreground choice runs the codex turn inside that forwarder's single
+  // Bash call -- so the awaited dispatch below blocks for the whole turn and
+  // the turn dies with the call -- and this pass's bounded wait, like its
+  // twin's, is written for a job that outlives the call. tests/
+  // bounded_poll_present.test.py pins this line, in the same position, for
+  // every codex dispatch in all three templates.
+  lines.push("--background")
   lines.push("Effort: high. Skeptic pass (codex-skeptic-pass, RFC #215 Phase 2) for a " + SOURCE_LANG + " literary translation project's canon, batch " + batch.index + ".")
   lines.push("You are the ADVERSARY, not the author. Every entity below was already accepted into this project's canon.json by an EARLIER, blind (source-text-unaware) pass. Your ONLY job here is to try to find a concrete reason that earlier acceptance was wrong, using ONLY the actual source-text windows given below for each entity. You may NEVER confirm an entity is correctly identified -- there is no verdict available to you that means \"confirmed\"; your output schema accepts only adverse, propose_split, propose_rescope, or insufficient_window. When in genuine doubt, insufficient_window is always the safe, correct answer -- never strain for a split or an adverse finding you cannot back with an exact, real quote.")
   lines.push("Verdict rules, applied independently to EACH entity below:")
