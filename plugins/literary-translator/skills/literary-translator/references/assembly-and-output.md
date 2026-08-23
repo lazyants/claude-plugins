@@ -189,10 +189,18 @@ in `manifest.json`.
    `cache_key.py`'s own field computers, and compares them to every SHIPPED
    record's stored `cache_key`. A moved field refuses with
    `reason: stale_live_inputs`, naming each segment and each field, and tells
-   the operator to re-run the merge. The invariant is that assembly's verdict
-   does not depend on whether a merge happened to run since the last edit: the
-   pipeline does normally run W7 before W9, but nothing enforced the ordering,
-   and getting it wrong produced a finished-looking book rather than a halt.
+   the operator to re-run the merge. The invariant is ONE-DIRECTIONAL, and
+   deliberately so: a record the snapshot still calls `converged` can no longer
+   ship on a merge that predates the edit. The pipeline does normally run W7
+   before W9, but nothing enforced the ordering, and getting it wrong produced
+   a finished-looking book rather than a halt. The reverse direction is NOT
+   rehabilitated and is not meant to be: a record the snapshot already calls
+   `stale` is refused by the completeness gate in step 2 before this check ever
+   runs, even where the live inputs have since reverted to the reviewed key.
+   That refusal is fail-closed and its remedy is one command (re-run W7);
+   re-deciding a reverted key here would make assembly a second admission
+   authority over a verdict `ledger_merge.py` owns, which is exactly the design
+   #492's own body records as tried and rejected.
    Three things bound it. The machinery-only trio above is EXCLUDED — the check
    is exactly the complement of that carve-out, so a plugin upgrade still
    cannot strand a finished book. Only

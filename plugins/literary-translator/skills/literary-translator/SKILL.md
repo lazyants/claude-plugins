@@ -794,7 +794,8 @@ here, follow the linked doc:
   global `style_contract_hash` cannot distinguish that from an addition, and
   that is exactly why this is an operator decision rather than a default.
   Undeclared — or declared `false` — every gate behaves as it always did.
-  **Since #492 the flip does not depend on remembering to re-run the merge.**
+  **Since #492 the flip no longer needs a merge to have run since the edit —
+  in the direction that ships.**
   It used to: the `converged → stale` reclassification is written by
   `ledger_merge.py`, so an edit landing after the last merge left every record
   saying `converged`, and running W9 without an intervening W7 assembled a book
@@ -802,7 +803,9 @@ here, follow the linked doc:
   a successful run. W9 now re-derives the content-affecting cache-key fields
   from the live root and compares them itself, so the same edit reaches the
   same verdict on either ordering: refused without the declaration, admitted
-  and named with it (sentinel condition included).
+  and named with it (sentinel condition included). The reverse is untouched: a
+  record the ledger already calls `stale` still needs a merge before it can
+  ship, whatever the live bytes now say.
   The timing constraint is narrower than it was written here: it is NOT that
   the block only bites "after the last segment converges". **Every** unit that
   converged before the edit is flipped and blocked, whenever the edit lands;
