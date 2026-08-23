@@ -117,6 +117,7 @@ Coverage (per the test's own enumeration):
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -2404,6 +2405,59 @@ def test_forbidden_patterns_zero_width_pattern_terminates_and_counts(tmp_path):
     line = [ln for ln in _style_lines(proc) if "in blocks['p1']" in ln]
     assert len(line) == 1, proc.stderr
     assert "(hits=2)" in line[0], line[0]
+
+
+def test_forbidden_patterns_count_does_not_retain_every_match(tmp_path):
+    """A zero-width rule yields one hit per position, and a draft leaf has no
+    length cap, so retaining a Match per hit is not a micro-cost: measured on a
+    1 000 000-character leaf the materialized list peaks at ~122 MiB against
+    ~0 for a streaming count, and under a constrained address space that is a
+    MemoryError raised from an ADVISORY check -- aborting W7 before it emits
+    its summary, exactly as the uncompilable-pattern traceback once did.
+
+    Drives the SHIPPED warn_forbidden_patterns() rather than re-creating its
+    loop here: a test that mirrors the implementation measures the mirror, and
+    would stay green while the shipped code went back to materializing. The
+    module is loaded in-process and re-anchored at a tmp segments dir, because
+    a leaf this size in a full durable-root subprocess fixture would cost
+    minutes for no extra coverage.
+
+    tracemalloc measures the allocation the fix removes, with a threshold an
+    order of magnitude below the materialized peak, so it fails on a regression
+    without being sensitive to interpreter noise."""
+    import tracemalloc
+
+    fa = load_final_audit_module()
+    text = "a" * 200_000
+    segments = tmp_path / "segments"
+    segments.mkdir()
+    (segments / "seg01.draft.json").write_text(
+        json.dumps({"seg": "seg01", "blocks": {"p1": text}, "footnotes": {}, "verses": {}}),
+        encoding="utf-8",
+    )
+    fa.SEGMENTS_DIR = segments
+
+    compiled, decl_warns = fa.compile_forbidden_patterns(
+        [{"id": "zero-width", "pattern": "(?=)", "message": "zero width"}]
+    )
+    assert decl_warns == []
+    assert len(compiled) == 1
+
+    tracemalloc.start()
+    try:
+        warns = fa.warn_forbidden_patterns("seg01", compiled)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert len(warns) == 1, warns
+    assert f"(hits={len(text) + 1})" in warns[0], warns[0]
+    assert "blocks['p1']" in warns[0], warns[0]
+    # Materializing every Match allocates ~24 MiB at this size; streaming stays
+    # in the kilobytes, and the 200 000-character leaf itself is already
+    # allocated before the measurement starts. Anything under a megabyte
+    # proves the per-match list is gone.
+    assert peak < 1_000_000, peak
 
 
 def test_forbidden_patterns_newlines_never_split_a_warn_line(tmp_path):

@@ -913,14 +913,21 @@ def warn_forbidden_patterns(seg, compiled):
     for section in SCANNED_DRAFT_SECTIONS:
         for label, text in _string_leaves(draft.get(section), section):
             for rule_id, regex, message in compiled:
-                # ONE traversal, and `finditer` rather than `findall`: the
-                # count and the first match come from the same walk, and the
-                # schema's own description of how a pattern is matched stays
-                # literally true of the code.
-                matches = list(regex.finditer(text))
-                if not matches:
+                # ONE traversal, `finditer` rather than `findall`, and the
+                # iterator is CONSUMED rather than materialized. Retaining a
+                # Match per hit is not a micro-optimization here: a zero-width
+                # rule is explicitly supported and yields len(text)+1 hits,
+                # draft leaves carry no length cap, and measured on a
+                # 1 000 000-character leaf the list peaks at 122.5 MiB against
+                # roughly nothing for the streaming count. That is the
+                # OverflowError failure in another costume -- an ADVISORY check
+                # aborting W7 before it can emit its summary, taking the two
+                # hard checks' verdict with it.
+                found = regex.finditer(text)
+                first = next(found, None)
+                if first is None:
                     continue
-                first = matches[0]
+                hit_count = 1 + sum(1 for _ in found)
                 start = max(0, first.start() - 40)
                 snippet = text[start:first.end() + 40]
                 # One normalization, applied to the WHOLE formatted line as
@@ -932,7 +939,7 @@ def warn_forbidden_patterns(seg, compiled):
                 # U+0085, U+2028 and U+2029 collapse too, not just CR/LF.
                 warns.append(_norm_ws(
                     f"[{seg}] STYLE-PATTERN {rule_id} in {label}: {message} "
-                    f"(hits={len(matches)}) :: {snippet!r} -- MANUAL"
+                    f"(hits={hit_count}) :: {snippet!r} -- MANUAL"
                 ))
     return warns
 

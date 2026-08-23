@@ -69,10 +69,11 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # `validate_conservation.py`, `style_bible.md` -- but every claim made about
 # them is BEHAVIOURAL: what the scan reads, which sections it walks, which hash
 # covers which file, what a malformed declaration produces. A behavioural claim
-# is pinned by a test that exercises it, and this release ships those tests in
-# `final_audit.test.py` and `profile_validate.test.py`, each watched failing by
-# mutating the shipped script or schema rather than the assertion. A line
-# citation would be the weaker instrument in every case.
+# is pinned by a test that exercises it, and this release ships thirteen of them
+# in `final_audit.test.py` plus eight in `profile_validate.test.py` (28
+# collected cases, since two of the latter are parametrized), each watched
+# failing by mutating the shipped script or schema rather than the assertion. A
+# line citation would be the weaker instrument in every case.
 #
 # One claim in the entry is guarded by review alone and is named here so the gap
 # is recorded rather than implied away: that `assets/scripts/` contains no
