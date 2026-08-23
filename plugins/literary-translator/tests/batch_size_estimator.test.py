@@ -239,9 +239,16 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import (  # noqa: E402
+    instantiate_mass_translate as _shared_instantiate_mass_translate,
+    instantiate_glossary_pass as _shared_instantiate_glossary_pass,
+)
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
@@ -269,9 +276,6 @@ FIXTURE_TARGET_LANG = "ru"
 FIXTURE_VERSE_POLICY_INSTRUCTION_BLOCK = "Render every verse literally, line by line."
 
 
-FIXTURE_PLUGIN_ROOT = "/fixture/plugin/literary-translator"
-
-
 def instantiate_mass_translate(
     *,
     max_fix_rounds: int,
@@ -282,53 +286,29 @@ def instantiate_mass_translate(
     target_lang: str = FIXTURE_TARGET_LANG,
     verse_policy_instruction_block: str = FIXTURE_VERSE_POLICY_INSTRUCTION_BLOCK,
 ) -> str:
-    """Re-implements the exact one-time substitution contract the template's
-    own header comment documents (same contract
-    tests/workflow_template_instantiation.test.py's instantiate helper
-    implements -- duplicated here, not imported, so this file stays
-    self-contained like every other sibling test file in this directory).
-    Deliberately does NOT substitute {{RUN_ID}} -- this file's mock never
-    inspects prompt text (only opts.label), so RUN_ID's exact value is
-    irrelevant to the call-counting this file cares about; it is left
-    unresolved on purpose and simply never asserted against.
+    """Thin wrapper over _workflow_instantiation.py's instantiate_mass_translate
+    (#413) -- the token map itself now lives there. RUN_ID is always
+    overridden to a fixed literal: this file's mock never inspects prompt
+    text (only opts.label), so RUN_ID's exact value is irrelevant to the
+    call-counting this file cares about; it only needs to resolve to
+    something, and is never asserted against.
 
     #409 stage 0 -- max_codex_jobs_per_batch defaults to a value no fixture
     in this file could ever reach, so the NEW, independent codex-jobs
     preflight (which runs and can return BEFORE the batch_agent_cap gate
     this whole file exists to exercise) never trips here and never shadows
     what every fixture below is actually testing."""
-    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", durable_root)
-    text = text.replace("{{RUN_ID}}", "fixture-run-id")
-    text = text.replace("{{SOURCE_LANG}}", source_lang)
-    text = text.replace("{{TARGET_LANG}}", target_lang)
-    text = text.replace("{{MAX_FIX_ROUNDS}}", str(int(max_fix_rounds)))
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
-    escaped_verse_block = json.dumps(verse_policy_instruction_block)[1:-1]
-    text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", escaped_verse_block)
-    # #198 -- CODEX_COMPANION_PATH_JSON: a strict json.dumps JS string literal
-    # (quotes included; the token sits OUTSIDE quotes in the template). This
-    # test's mock never launches the driver, so the exact value is irrelevant
-    # to the call-counting here -- it only needs to resolve so the "{{ not in
-    # text" assertion below (no unresolved token) still holds.
-    text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps("/fixture/codex/codex-companion.mjs"))
-    # #197 -- engine.effort/engine.model. Neither is inspected by this file's
-    # call-counting assertions; they only need to resolve.
-    text = text.replace("{{EFFORT}}", "high")
-    # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
-    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
-    text = text.replace("{{MODEL}}", "")
-    # #412/#607 -- PLUGIN_ROOT. This fixture used to substitute the empty
-    # value ("not opted into the redirect"), because none of the assertions
-    # here inspect a dispatch launch line. #607 made empty a REFUSAL: the
-    # fix-scope audit runs only from the plugin install tree, so a batch with
-    # no plugin root has no trusted checker and does not start. Every fixture
-    # in this file drives fix rounds, so all of them need a real value; the
-    # refusal itself is covered by its own test below.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(FIXTURE_PLUGIN_ROOT))
-    assert "{{" not in text, "fixture instantiation left an unresolved token -- fix the fixture, not the assertion below"
-    return text
+    return _shared_instantiate_mass_translate(
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=batch_agent_cap,
+        max_codex_jobs_per_batch=max_codex_jobs_per_batch,
+        durable_root=durable_root,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        verse_policy_instruction_block=verse_policy_instruction_block,
+        run_id="fixture-run-id",
+        codex_companion_path_json="/fixture/codex/codex-companion.mjs",
+    )
 
 
 def _wrap_for_execution(js_source: str) -> str:
@@ -1773,39 +1753,22 @@ def instantiate_glossary_pass(
     research_mode: str = "live",
     run_id: str = "fixture-run-id",
 ) -> str:
-    """Re-implements glossary-pass-wf.template.js's own one-time substitution
-    contract (its header comment's token list), the glossary twin of
-    instantiate_mass_translate above. Substitutes {{BATCH_AGENT_CAP}} as a
-    BARE integer (feeding the preflight cost cap). The mock never inspects
-    prompt text (only opts.label), so the exact string values are irrelevant
-    beyond being syntactically valid."""
-    text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", durable_root)
-    text = text.replace("{{RUN_ID}}", run_id)
-    text = text.replace("{{SOURCE_LANG}}", source_lang)
-    text = text.replace("{{TARGET_LANG}}", target_lang)
-    text = text.replace("{{RESEARCH_MODE}}", research_mode)
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    # #197 -- engine.effort. Not inspected by this file's call-counting
-    # assertions; it only needs to resolve.
-    text = text.replace("{{EFFORT}}", "high")
-    # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
-    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
-    # #412 -- json.dumps JS string literal, token OUTSIDE quotes. Empty is NOT
-    # a valid value for the GLOSSARY template's {{PLUGIN_ROOT}}; the canonical
-    # explanation of why (and of why instantiate_mass_translate above keeps its
-    # own empty-string opt-out, deliberately NOT harmonised with this one)
-    # lives once, on FIXTURE_GLOSSARY_PLUGIN_ROOT in
-    # workflow_template_instantiation.test.py and in the template's own header
-    # token entry -- not restated here. The real plugin skill root resolves a
-    # genuine cache_key.py, so the guard accepts it; this file's
-    # batch-size-estimator assertions inspect nothing else about it.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(str(PLUGIN_ROOT / "skills" / "literary-translator")))
-    assert "{{" not in text, (
-        "glossary fixture instantiation left an unresolved token -- fix the "
-        "fixture, not the assertion"
+    """Thin wrapper over _workflow_instantiation.py's instantiate_glossary_pass
+    (#413) -- the token map itself now lives there. source_lang/target_lang
+    stay overridden to this file's own two-letter codes ("fr"/"ru") rather
+    than the shared module's glossary defaults ("French"/"Russian"); run_id
+    stays overridden too since the mock never inspects prompt text (only
+    opts.label), so its exact value only needs to resolve, never asserted
+    against. durable_root/PLUGIN_ROOT resolve to the shared module's own
+    defaults (the real plugin skill root), so neither needs stating here."""
+    return _shared_instantiate_glossary_pass(
+        batch_agent_cap=batch_agent_cap,
+        durable_root=durable_root,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        research_mode=research_mode,
+        run_id=run_id,
     )
-    return text
 
 
 # ---------------------------------------------------------------------------

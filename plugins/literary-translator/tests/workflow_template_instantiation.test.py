@@ -62,77 +62,18 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+import _workflow_instantiation as _shared  # noqa: E402
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
 MASS_TRANSLATE_TEMPLATE = TEMPLATES_DIR / "mass-translate-wf.template.js"
 GLOSSARY_PASS_TEMPLATE = TEMPLATES_DIR / "glossary-pass-wf.template.js"
-
-# The exact substitution tokens each template documents in its own header
-# comment (references/orchestration-and-batching.md's "Prompt functions"
-# section restates the same list). Kept here only to sanity-check the raw,
-# un-substituted template still declares each one -- never used as the
-# expectation for what the instantiated OUTPUT should equal.
-MASS_TRANSLATE_TOKENS = (
-    "{{DURABLE_ROOT}}",
-    "{{RUN_ID}}",
-    "{{SOURCE_LANG}}",
-    "{{TARGET_LANG}}",
-    "{{MAX_FIX_ROUNDS}}",
-    "{{BATCH_AGENT_CAP}}",
-    # #409 stage 0 -- a SECOND, independent preflight cap sized against real
-    # codex dispatches rather than Workflow agent() calls. Unlike
-    # {{BATCH_AGENT_CAP}}, engine.max_codex_jobs_per_batch is OPTIONAL in
-    # profile.schema.json; the token itself is still always substituted
-    # (with the schema's own documented default when the profile omits it).
-    "{{MAX_CODEX_JOBS_PER_BATCH}}",
-    "{{VERSE_POLICY_INSTRUCTION_BLOCK}}",
-    # #198 -- resolved codex-companion.mjs path, substituted as a strict
-    # json.dumps JS STRING LITERAL (WITH its own quotes -- the token sits
-    # OUTSIDE quotes in `const COMPANION = {{CODEX_COMPANION_PATH_JSON}};`).
-    "{{CODEX_COMPANION_PATH_JSON}}",
-    # #197 -- engine.effort/engine.model. EFFORT drives the codex_job.py
-    # --effort flag + the Claude fix step's agent() effort option; MODEL
-    # threads only to the two codex_job.py launches (empty string when unset).
-    "{{EFFORT}}",
-    "{{MODEL}}",
-    # #412 -- the plugin's own install root, threaded to codex_job.py's
-    # --plugin-root flag on both dispatch launches. Same json.dumps JS
-    # STRING LITERAL substitution shape as CODEX_COMPANION_PATH_JSON above
-    # (token sits OUTSIDE quotes: `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`);
-    # empty string is the documented "not opted into the redirect" sentinel.
-    "{{PLUGIN_ROOT}}",
-)
-GLOSSARY_PASS_TOKENS = (
-    "{{DURABLE_ROOT}}",
-    "{{RUN_ID}}",
-    "{{SOURCE_LANG}}",
-    "{{TARGET_LANG}}",
-    "{{RESEARCH_MODE}}",
-    "{{BATCH_AGENT_CAP}}",
-    # #197 -- engine.effort. No {{MODEL}} here -- the glossary pass has no
-    # model knob (see the pinned contract in mass-translate-wf's own header).
-    "{{EFFORT}}",
-    # #347/1.16.1 -- glossary.citation_content_types, comma-separated inside
-    # its own quotes. Empty string is the ordinary case and means "use
-    # fetch_citation.py's shipped default", so every pre-1.16.1 profile keeps
-    # working -- but the token must still be SUBSTITUTED, which is why it is
-    # listed here rather than treated as optional.
-    "{{CITATION_CONTENT_TYPES}}",
-    # #412 -- the plugin's own install root, threaded ONLY into
-    # mergeBatchesPrompt()'s --merge-batches command (never checkBatchCmd()
-    # or glossaryVerifyPrompt() -- canon_validate.py's main() does not
-    # forward --plugin-root to run_check_batch or run_verify_merged). Same
-    # json.dumps JS STRING LITERAL substitution shape as mass-translate-wf's
-    # own {{PLUGIN_ROOT}} token above, but UNLIKE that token an empty string
-    # is NOT a valid opt-out here -- it throws at instantiation, because this
-    # token is brand new with no legacy caller relying on a flagless
-    # --merge-batches default to preserve (see FIXTURE_GLOSSARY_PLUGIN_ROOT).
-    "{{PLUGIN_ROOT}}",
-)
 
 # A named-token shape (always {{UPPER_SNAKE_CASE}} in both templates) --
 # used for the stricter, second-order check below that specifically targets
@@ -240,53 +181,26 @@ def instantiate_mass_translate(
     model: str = FIXTURE_MODEL,
     plugin_root: str = FIXTURE_PLUGIN_ROOT,
 ) -> str:
-    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
-
-    # Plain string tokens -- each already sits inside its own quotes in the
-    # template (e.g. `const ROOT = "{{DURABLE_ROOT}}";`), so the raw value
-    # is spliced in as-is.
-    text = text.replace("{{DURABLE_ROOT}}", durable_root)
-    text = text.replace("{{RUN_ID}}", run_id)
-    text = text.replace("{{SOURCE_LANG}}", source_lang)
-    text = text.replace("{{TARGET_LANG}}", target_lang)
-    # #197 -- EFFORT/MODEL both sit inside their own quotes in the template
-    # (`const EFFORT = "{{EFFORT}}";` / `const MODEL = "{{MODEL}}";`), so the
-    # raw value is spliced in as-is, same as the plain-string tokens above.
-    # MODEL is the empty string when engine.model is unset.
-    text = text.replace("{{EFFORT}}", effort)
-    text = text.replace("{{MODEL}}", model)
-
-    # Bare-integer tokens -- the header comment is explicit that these two
-    # substitute as a BARE integer literal (`const MAXFIX = {{MAX_FIX_ROUNDS}};`),
-    # never a quoted string.
-    text = text.replace("{{MAX_FIX_ROUNDS}}", str(int(max_fix_rounds)))
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    # #409 stage 0 -- same bare-integer-literal contract as BATCH_AGENT_CAP
-    # above (`const MAX_CODEX_JOBS_PER_BATCH = {{MAX_CODEX_JOBS_PER_BATCH}};`).
-    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
-
-    # VERSE_POLICY_INSTRUCTION_BLOCK -- the header comment requires a
-    # JSON-string-escaped form with the outer quotes stripped (the token
-    # already sits inside its own quotes in the template:
-    # `const VERSE_POLICY_INSTRUCTION_BLOCK = "{{VERSE_POLICY_INSTRUCTION_BLOCK}}";`),
-    # so any quote/backslash/newline in the resolved text stays a valid JS
-    # string body.
-    escaped_verse_block = json.dumps(verse_policy_instruction_block)[1:-1]
-    text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", escaped_verse_block)
-
-    # #198 CODEX_COMPANION_PATH_JSON -- unlike the plain-string tokens, this
-    # one sits OUTSIDE its quotes in the template
-    # (`const COMPANION = {{CODEX_COMPANION_PATH_JSON}};`), so the orchestrator
-    # substitutes a full json.dumps JS string LITERAL (quotes included).
-    text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(companion_path))
-
-    # #412 PLUGIN_ROOT -- same json.dumps JS string literal substitution
-    # shape as CODEX_COMPANION_PATH_JSON above (token sits OUTSIDE its
-    # quotes: `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`). Empty string is the
-    # documented "not opted into the redirect" sentinel.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
-
-    return text
+    # #413 -- the token set and each token's ENCODING (plain / bare integer /
+    # JSON string body / full JSON string literal) now live once, in
+    # _workflow_instantiation.py, together with the rationale that used to be
+    # restated per token here. This wrapper exists only to keep this file's own
+    # signature, whose parameters are all REQUIRED where the tests below want
+    # the value stated at the call site rather than defaulted invisibly.
+    return _shared.instantiate_mass_translate(
+        durable_root=durable_root,
+        run_id=run_id,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=batch_agent_cap,
+        max_codex_jobs_per_batch=max_codex_jobs_per_batch,
+        verse_policy_instruction_block=verse_policy_instruction_block,
+        codex_companion_path_json=companion_path,
+        effort=effort,
+        model=model,
+        plugin_root=plugin_root,
+    )
 
 
 def instantiate_glossary_pass(
@@ -301,36 +215,22 @@ def instantiate_glossary_pass(
     citation_content_types: str = "",
     plugin_root: str = FIXTURE_GLOSSARY_PLUGIN_ROOT,
 ) -> str:
-    text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
-
-    text = text.replace("{{DURABLE_ROOT}}", durable_root)
-    text = text.replace("{{RUN_ID}}", run_id)
-    text = text.replace("{{SOURCE_LANG}}", source_lang)
-    text = text.replace("{{TARGET_LANG}}", target_lang)
-    # research_mode is passed through literally -- "this script never
-    # parses YAML itself" (the template's own header comment).
-    text = text.replace("{{RESEARCH_MODE}}", research_mode)
-    # batch_agent_cap -- the SAME engine.batch_agent_cap field the mass
-    # template reads, substituted as a BARE integer literal (never a quoted
-    # string), feeding the glossary preflight cost cap.
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    # #197 -- EFFORT sits inside its own quotes (`const EFFORT = "{{EFFORT}}"`),
-    # so the raw value is spliced in as-is. No {{MODEL}} here -- the glossary
-    # pass has no model knob.
-    text = text.replace("{{EFFORT}}", effort)
-    # #347/1.16.1 -- also inside its own quotes. Comma-separated; empty means
-    # the fetcher's shipped default list.
-    text = text.replace("{{CITATION_CONTENT_TYPES}}", citation_content_types)
-    # #412 PLUGIN_ROOT -- same json.dumps JS string literal substitution
-    # shape as mass-translate-wf's own {{PLUGIN_ROOT}} token (token sits
-    # OUTSIDE its quotes: `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`). UNLIKE
-    # that token, empty is NOT a valid value here -- the template throws at
-    # instantiation for a blank PLUGIN_ROOT, so the default above is
+    # #413 -- see instantiate_mass_translate above. The default plugin_root is
     # FIXTURE_GLOSSARY_PLUGIN_ROOT, a real non-empty path, never
-    # FIXTURE_PLUGIN_ROOT's empty sentinel.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
-
-    return text
+    # FIXTURE_PLUGIN_ROOT's empty sentinel: the glossary template throws at
+    # instantiation for a blank PLUGIN_ROOT, and that asymmetry with
+    # mass-translate-wf's own token is deliberate, not an oversight.
+    return _shared.instantiate_glossary_pass(
+        durable_root=durable_root,
+        run_id=run_id,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        research_mode=research_mode,
+        batch_agent_cap=batch_agent_cap,
+        effort=effort,
+        citation_content_types=citation_content_types,
+        plugin_root=plugin_root,
+    )
 
 
 def _context_around(text: str, index: int, radius: int = 60) -> str:
@@ -350,29 +250,145 @@ def _assert_no_double_brace(text: str, label: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sanity: the raw, un-substituted templates actually declare every token
-# this file's instantiate helpers replace -- guards against a future rename
-# of a token in the template silently turning one of our .replace() calls
-# into a no-op that never exercises anything.
+# The token authority (#413).
+#
+# `_workflow_instantiation.TEMPLATE_DEFAULTS` is the ONE declaration of which
+# shipped template takes which substitution tokens. The tests below are what
+# make it an authority rather than a second copy: they compare it against the
+# templates on disk in BOTH directions.
+#
+# The direction that did not exist before #413 is the load-bearing one. The
+# checks these replace looped over a hand-typed token tuple asserting each name
+# still appeared in the template -- so a token ADDED to a template with nothing
+# to substitute it passed the whole suite, and the miss surfaced later as a
+# stale value rendered by whichever call site had not been updated. That is the
+# quiet failure #409 actually shipped. `template - declared` closes it; the
+# `declared - template` direction closes the mirror case, a default kept for a
+# token no template declares any more, whose renderer call silently no-ops.
+#
+# Neither side is a list this file maintains: one comes from the shipped
+# template text, the other from the shared module. There is no third copy.
 # ---------------------------------------------------------------------------
 
 
-def test_mass_translate_raw_template_declares_every_documented_token():
-    raw = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
-    for token in MASS_TRANSLATE_TOKENS:
-        assert raw.count(token) >= 1, (
-            f"expected {MASS_TRANSLATE_TEMPLATE.name} to still declare {token} "
-            f"at least once; the instantiation contract may have drifted"
+@pytest.mark.parametrize(
+    "template",
+    sorted(_shared.TEMPLATE_DEFAULTS, key=lambda p: p.name),
+    ids=lambda p: p.name,
+)
+def test_declared_token_set_matches_the_shipped_template(template):
+    raw = template.read_text(encoding="utf-8")
+    in_template = set(_shared.TOKEN_RE.findall(raw))
+    declared = set(_shared.TEMPLATE_DEFAULTS[template])
+
+    undeclared = sorted(in_template - declared)
+    assert not undeclared, (
+        f"{template.name} declares {undeclared} but tests/_workflow_instantiation.py "
+        f"has no default for them -- add one there (and an ENCODERS entry), which is "
+        f"the ONLY edit a new token needs. Leaving it out renders a stale value at "
+        f"every call site that predates the token, which no other test would catch."
+    )
+
+    orphaned = sorted(declared - in_template)
+    assert not orphaned, (
+        f"tests/_workflow_instantiation.py declares {orphaned} for {template.name}, "
+        f"but the template no longer contains them -- the substitution is a silent "
+        f"no-op. Remove the default (and its ENCODERS entry if no other template "
+        f"uses the token)."
+    )
+
+
+def test_every_declared_token_has_an_encoder():
+    """A default with no encoder is a `KeyError` at render time, in whichever
+    unrelated test file happens to instantiate first. Fail here instead."""
+    for template, defaults in _shared.TEMPLATE_DEFAULTS.items():
+        missing = sorted(set(defaults) - set(_shared.ENCODERS))
+        assert not missing, (
+            f"{template.name} declares {missing} with no ENCODERS entry -- an encoder "
+            f"says whether the token sits inside its own quotes, outside them, or as a "
+            f"bare integer literal, and there is no safe default for that."
         )
 
 
-def test_glossary_pass_raw_template_declares_every_documented_token():
-    raw = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
-    for token in GLOSSARY_PASS_TOKENS:
-        assert raw.count(token) >= 1, (
-            f"expected {GLOSSARY_PASS_TEMPLATE.name} to still declare {token} "
-            f"at least once; the instantiation contract may have drifted"
-        )
+def test_integer_tokens_are_bound_to_the_bare_integer_encoder():
+    """Presence of an encoder is not the same as the RIGHT encoder.
+
+    `test_every_declared_token_has_an_encoder` above goes red when a token has
+    no `ENCODERS` entry, but rebinding one from `_bare_int` to `_plain` left
+    every other authority test green -- the rendered value only changes for an
+    input that is not already a canonical decimal string, and no current fixture
+    passes one. That is the whole failure mode this file exists to make loud, so
+    the binding is pinned rather than left to the next reader to notice.
+
+    The pin is a BIJECTION derived from the defaults, not a hand-typed list of
+    integer tokens: a list would freeze exactly what it is supposed to detect,
+    and would have to be edited for every new token -- the unbounded edit #413
+    closed. `type(value) is int` deliberately excludes `bool` (a bool default
+    would be a separate mistake, not an integer token).
+
+    The BIJECTION is a convention, and this is where it is declared: **a
+    default's Python type is the encoding tag.** An `int` default means "this
+    token renders as a bare integer literal"; anything else means it does not.
+    Two consequences for whoever adds the next token, because the biconditional
+    would otherwise read as a surprising false RED:
+
+    * A token that carries a NUMBER but sits inside its own quotes (`const N =
+      "{{SOME_COUNT}}"`) must declare a STRING default -- `"5"`, not `5`. That
+      is also what it literally renders as, so the default stays honest.
+    * `_bare_int` accepts a numeric string or a bool so a CALLER can pass one
+      (`instantiate(..., max_fix_rounds="004")` still emits `4`). That
+      normalization is for OVERRIDES; a default that wants to stress it belongs
+      at the call site, not in the defaults map.
+
+    The alternative -- a wrapper type carrying the lexical context separately
+    from the Python type -- buys nothing here and costs a concept, so it is
+    deliberately not built.
+    """
+    for template, defaults in _shared.TEMPLATE_DEFAULTS.items():
+        for name, value in defaults.items():
+            encoder = _shared.ENCODERS[name]
+            if type(value) is int:
+                assert encoder is _shared._bare_int, (
+                    f"{template.name}'s {name} defaults to an int but renders via "
+                    f"{encoder.__name__} -- a token that sits as a BARE integer "
+                    f"literal must use _bare_int, or a non-canonical value like "
+                    f'"004" emits invalid JS'
+                )
+            else:
+                assert encoder is not _shared._bare_int, (
+                    f"{template.name}'s {name} renders via _bare_int but its "
+                    f"default is {type(value).__name__}, not int -- one of the two "
+                    f"is wrong about whether this token is a bare integer literal"
+                )
+
+
+def test_every_shipped_template_has_a_declared_token_set():
+    """A FOURTH shipped workflow template must not be able to appear with no
+    declared token set -- that would restore the unbounded search #413 closed,
+    silently, for the one template nothing yet drives."""
+    on_disk = {p.resolve() for p in _shared.TEMPLATES_DIR.glob("*.template.js")}
+    declared = {p.resolve() for p in _shared.TEMPLATE_DEFAULTS}
+    assert on_disk == declared, (
+        f"templates on disk with no declared token set: "
+        f"{sorted(p.name for p in on_disk - declared)}; "
+        f"declared but absent from disk: "
+        f"{sorted(p.name for p in declared - on_disk)}"
+    )
+
+
+@pytest.mark.parametrize(
+    "template",
+    sorted(_shared.TEMPLATE_DEFAULTS, key=lambda p: p.name),
+    ids=lambda p: p.name,
+)
+def test_shipped_defaults_alone_instantiate_with_zero_unresolved_tokens(template):
+    """Every template renders from its declared defaults with no override at
+    all. Without this, a default could be missing for a token no CURRENT call
+    site happens to leave defaulted, and the set-equality test above would
+    still pass on a map whose renderer had never been exercised."""
+    _assert_no_double_brace(
+        _shared.instantiate(template), f"{template.name} @ declared defaults"
+    )
 
 
 # ---------------------------------------------------------------------------

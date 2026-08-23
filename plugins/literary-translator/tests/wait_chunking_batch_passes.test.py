@@ -74,9 +74,16 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import (  # noqa: E402
+    instantiate_glossary_pass,
+    instantiate_skeptic_pass,
+)
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PLUGIN_ROOT.parents[1]
@@ -109,7 +116,6 @@ EXPECTED_WAIT_BOUND_SEC = 900
 # plus the one authoritative re-check. Independent literal for the same reason.
 EXPECTED_WAIT_CALLS = 3
 
-FIXTURE_DURABLE_ROOT = "/fixture/project/durable_root"
 FIXTURE_RUN_ID = "20260728T000000Z"
 
 
@@ -126,27 +132,21 @@ FIXTURE_RUN_ID = "20260728T000000Z"
 
 def instantiate_glossary(source: str, *, batch_agent_cap: int = 100000,
                          research_mode: str = "live") -> str:
-    text = source
-    text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
-    text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
-    text = text.replace("{{SOURCE_LANG}}", "French")
-    text = text.replace("{{TARGET_LANG}}", "Russian")
-    text = text.replace("{{RESEARCH_MODE}}", research_mode)
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    text = text.replace("{{EFFORT}}", "high")
-    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
-    # #412 -- json.dumps JS string literal, token OUTSIDE quotes. Empty is NOT
-    # a valid value for the GLOSSARY template's {{PLUGIN_ROOT}}; the canonical
-    # explanation of why (and of why mass-translate-wf.template.js's own
-    # empty-string opt-out is deliberately NOT harmonised with it) lives once,
-    # on FIXTURE_GLOSSARY_PLUGIN_ROOT in workflow_template_instantiation
-    # .test.py and in the template's own header token entry -- not restated
-    # here. The real plugin skill root resolves a genuine cache_key.py, so the
-    # guard accepts it; this file's wait-chunking assertions inspect nothing
-    # else about it.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(str(PLUGIN_ROOT / "skills" / "literary-translator")))
-    assert "{{" not in text, "glossary fixture instantiation left an unresolved token"
-    return text
+    """The token map and its encoding now live in _workflow_instantiation.py
+    (#413). `RUN_ID` is this file's own value; `SOURCE_LANG`/`TARGET_LANG`,
+    `EFFORT` and `CITATION_CONTENT_TYPES` happen to already equal the shared
+    module's glossary defaults and are left unset, as is `PLUGIN_ROOT` --
+    `instantiate_glossary_pass`'s own default already points at this plugin's
+    real skill root (`FIXTURE_GLOSSARY_PLUGIN_ROOT`), which is what the
+    template's `--merge-batches` guard needs to resolve a genuine
+    `cache_key.py`; this file's wait-chunking assertions inspect nothing else
+    about it."""
+    return instantiate_glossary_pass(
+        source=source,
+        run_id=FIXTURE_RUN_ID,
+        batch_agent_cap=batch_agent_cap,
+        research_mode=research_mode,
+    )
 
 
 def instantiate_skeptic(source: str, *, batch_agent_cap: int = 100000,
@@ -155,14 +155,17 @@ def instantiate_skeptic(source: str, *, batch_agent_cap: int = 100000,
     # review and therefore no mode knob. Kept in the signature so the two
     # targets stay call-compatible and the shared test bodies need no branching.
     del research_mode
-    text = source
-    text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
-    text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
-    text = text.replace("{{SOURCE_LANG}}", "French")
-    text = text.replace("{{PARTICLE_CONFIG}}", "fr.json")
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    assert "{{" not in text, "skeptic fixture instantiation left an unresolved token"
-    return text
+    # RUN_ID, SOURCE_LANG and PARTICLE_CONFIG are this file's own values --
+    # French/fr.json rather than the shared module's he/particles.json
+    # defaults. DURABLE_ROOT and BATCH_AGENT_CAP already match the shared
+    # skeptic defaults and are left unset.
+    return instantiate_skeptic_pass(
+        source=source,
+        run_id=FIXTURE_RUN_ID,
+        source_lang="French",
+        particle_config="fr.json",
+        batch_agent_cap=batch_agent_cap,
+    )
 
 
 def _wrap(js_source: str) -> str:

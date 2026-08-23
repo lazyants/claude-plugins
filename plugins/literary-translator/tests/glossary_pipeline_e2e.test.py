@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,9 @@ import pytest
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
 GLOSSARY_TEMPLATE = TEMPLATES_DIR / "glossary-pass-wf.template.js"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _workflow_instantiation import instantiate_glossary_pass  # noqa: E402
 
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(
@@ -46,8 +50,6 @@ pytestmark = pytest.mark.skipif(
 
 FIXTURE_DURABLE_ROOT = "/fixture/project/durable_root"
 FIXTURE_RUN_ID = "20260719T000000Z"
-FIXTURE_SOURCE_LANG = "French"
-FIXTURE_TARGET_LANG = "Russian"
 FIXTURE_RESEARCH_MODE = "offline"
 # #412 -- glossary-pass-wf.template.js's {{PLUGIN_ROOT}} is REQUIRED: unlike
 # mass-translate-wf.template.js's own {{PLUGIN_ROOT}} (a pre-#412 token with
@@ -64,32 +66,24 @@ FIXTURE_PLUGIN_ROOT = "/fixture/plugin/root/skills/literary-translator"
 
 
 def instantiate(*, batch_agent_cap: int, plugin_root: str = FIXTURE_PLUGIN_ROOT) -> str:
-    """The exact one-time substitution the template's header documents
-    (duplicated, not imported, so this file stays self-contained like every
-    sibling harness)."""
-    text = GLOSSARY_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
-    text = text.replace("{{SOURCE_LANG}}", FIXTURE_SOURCE_LANG)
-    text = text.replace("{{TARGET_LANG}}", FIXTURE_TARGET_LANG)
-    text = text.replace("{{RESEARCH_MODE}}", FIXTURE_RESEARCH_MODE)
-    text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    # #197 -- engine.effort (no {{MODEL}} here -- the glossary pass has no
-    # model knob). Not inspected by this file's dispatch/wait assertions; it
-    # only needs to resolve.
-    text = text.replace("{{EFFORT}}", "high")
-    # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
-    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
-    # #412 -- json.dumps JS string literal, token OUTSIDE quotes
-    # (`const PLUGIN_ROOT = {{PLUGIN_ROOT}};`). See FIXTURE_PLUGIN_ROOT's own
-    # comment above -- empty is NOT a valid value for this template, so the
-    # default here is a real path; the PLUGIN_ROOT-specific tests below pass
-    # a different real value (to exercise --merge-batches carrying it) or
-    # the empty string (to exercise the instantiation-time throw) through
-    # this same parameter.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
-    assert "{{" not in text, "fixture instantiation left an unresolved token"
-    return text
+    """The token map and renderer now live in _workflow_instantiation.py
+    (#413); this stays a thin wrapper. FIXTURE_RESEARCH_MODE and plugin_root
+    are the two overrides this file needs against the shared module's own
+    GLOSSARY_PASS_DEFAULTS -- research_mode because this file's default is
+    "offline" (the module default is "live"), and plugin_root because the
+    tests below exercise it with special/empty/hostile values that alter
+    control flow (see FIXTURE_PLUGIN_ROOT's own comment above: empty is NOT
+    a valid value for this template, so the default here is a real path, and
+    the PLUGIN_ROOT-specific tests pass a different real value or the empty
+    string through this same parameter to exercise the instantiation-time
+    throw)."""
+    return instantiate_glossary_pass(
+        durable_root=FIXTURE_DURABLE_ROOT,
+        run_id=FIXTURE_RUN_ID,
+        research_mode=FIXTURE_RESEARCH_MODE,
+        batch_agent_cap=batch_agent_cap,
+        plugin_root=plugin_root,
+    )
 
 
 def _wrap(js_source: str) -> str:

@@ -56,9 +56,13 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import instantiate_mass_translate  # noqa: E402
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
@@ -72,11 +76,9 @@ pytestmark = pytest.mark.skipif(
     "plugin otherwise)",
 )
 
-FIXTURE_DURABLE_ROOT = "/fixture/project/durable_root"
 FIXTURE_RUN_ID = "20260727T000000Z"
 FIXTURE_SOURCE_LANG = "he"
 FIXTURE_TARGET_LANG = "en"
-FIXTURE_VERSE_POLICY = "Render every verse literally, line by line."
 FIXTURE_COMPANION_PATH = "/opt/codex/1.0.10/codex-companion.mjs"
 FIXTURE_EFFORT = "xhigh"
 FIXTURE_MODEL = ""
@@ -97,38 +99,34 @@ def read_template() -> str:
 def instantiate(*, max_fix_rounds: int, batch_agent_cap: int, max_codex_jobs_per_batch: int = 100000,
                 effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL,
                 source: str | None = None) -> str:
-    """The exact one-time substitution the template's header documents
-    (duplicated, not imported, so this file stays self-contained like every
-    sibling). `source`, when given, replaces the on-disk read -- this is how a
-    mutation-proof test drives a MUTATED string through the real control flow
-    without ever writing to the template file: this worktree is shared with
-    concurrently running teammates, and an on-disk mutation would corrupt
-    whatever suite they are running at that moment (mirrors
-    tests/wait_chunking_batch_passes.test.py's own read_template(target)-or-
-    source convention). #409 stage 0 -- max_codex_jobs_per_batch defaults
-    generously (matching batch_agent_cap's own default below): this file
-    exercises the wait/chunk machinery, not either preflight gate."""
-    text = read_template() if source is None else source
-    text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
-    text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
-    text = text.replace("{{SOURCE_LANG}}", FIXTURE_SOURCE_LANG)
-    text = text.replace("{{TARGET_LANG}}", FIXTURE_TARGET_LANG)
-    text = text.replace("{{MAX_FIX_ROUNDS}}", str(int(max_fix_rounds)))
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
-    text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", json.dumps(FIXTURE_VERSE_POLICY)[1:-1])
-    text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
-    text = text.replace("{{EFFORT}}", effort)
-    text = text.replace("{{MODEL}}", model)
-    # #412 -- PLUGIN_ROOT: empty USED TO mean "not opted into the redirect". This file
-    # exercises the wait/chunk machinery, not the opt-in dispatch shape.
-    # #607 -- a non-empty plugin root is now REQUIRED: the fix-scope audit
-    # runs only from the plugin install tree, so the W5 template refuses to
-    # start without one. This fixture used to substitute the empty value as
-    # the documented "redirect opt-out"; that opt-out no longer exists.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps("/fixture/plugin/literary-translator"))
-    assert "{{" not in text, "fixture instantiation left an unresolved token"
-    return text
+    """The token map and its encoding now live in _workflow_instantiation.py
+    (#413); this wrapper only pins the values THIS file cares about. `RUN_ID`,
+    `SOURCE_LANG`/`TARGET_LANG` (he/en, not the shared module's fr/ru default)
+    and `CODEX_COMPANION_PATH_JSON` (this plugin's real install path, not the
+    module's non-ASCII stress fixture) are explicit overrides for that reason;
+    `DURABLE_ROOT`, `VERSE_POLICY_INSTRUCTION_BLOCK` and `PLUGIN_ROOT` happen to
+    equal the shared defaults already and are left unset. `source`, when given,
+    replaces the on-disk read -- this is how a mutation-proof test drives a
+    MUTATED string through the real control flow without ever writing to the
+    template file: this worktree is shared with concurrently running
+    teammates, and an on-disk mutation would corrupt whatever suite they are
+    running at that moment (mirrors tests/wait_chunking_batch_passes.test.py's
+    own read_template(target)-or-source convention). #409 stage 0 --
+    max_codex_jobs_per_batch defaults generously (matching batch_agent_cap's
+    own default below): this file exercises the wait/chunk machinery, not
+    either preflight gate."""
+    return instantiate_mass_translate(
+        source=source,
+        run_id=FIXTURE_RUN_ID,
+        source_lang=FIXTURE_SOURCE_LANG,
+        target_lang=FIXTURE_TARGET_LANG,
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=batch_agent_cap,
+        max_codex_jobs_per_batch=max_codex_jobs_per_batch,
+        codex_companion_path_json=FIXTURE_COMPANION_PATH,
+        effort=effort,
+        model=model,
+    )
 
 
 def _wrap(js_source: str) -> str:

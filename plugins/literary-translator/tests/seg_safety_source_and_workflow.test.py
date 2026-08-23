@@ -45,6 +45,11 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import (  # noqa: E402
+    instantiate_mass_translate as _shared_instantiate_mass_translate,
+)
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 SELECT_SCRIPT_SRC = ASSETS_DIR / "scripts" / "select_segments.py"
@@ -342,52 +347,31 @@ function log(msg) { logLines.push(String(msg)); }
 
 def instantiate_mass_translate(*, batch_agent_cap: int, max_codex_jobs_per_batch: int = 1_000_000,
                                 effort: str = "high", model: str = "") -> str:
-    """Same one-time substitution contract every sibling test file
-    re-implements. `batch_agent_cap` is the value the SEG-guard tests care
-    about -- deliberately set to 0 by the "safe id" tests below so the
-    batch-too-large gate trips immediately AFTER the seg-id guard runs,
-    without ever needing a real agent()/pipeline() mock. `effort`/`model`
-    default to a schema-valid pair (unaffecting the SEG tests) and are
-    overridden only by the #197 EFFORT/MODEL guard tests. {{RUN_ID}} (CONTRACT
-    -1.2.0-reliability.md sec2, a NEW documented substitution token the
-    1.2.0 reliability build added to this template) is substituted here with
-    a stable, colon-free, allowlist-legal fixture value purely so the
-    "no leftover {{...}}" assertion below stays meaningful -- this file's
-    own SEG_ID-guard assertions never read or depend on RUN_ID's value."""
-    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", "/fixture/project/durable_root")
-    text = text.replace("{{RUN_ID}}", "20260710T000000Z")
-    text = text.replace("{{SOURCE_LANG}}", "fr")
-    text = text.replace("{{TARGET_LANG}}", "ru")
-    text = text.replace("{{MAX_FIX_ROUNDS}}", "2")
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    # #409 stage 0 -- placed AFTER batch_agent_cap in the template itself, so
-    # with this file's default batch_agent_cap=0 the OLDER gate always trips
-    # first and this token's value is never actually reached by any SEG-guard
-    # test below; it only needs to resolve so the "no leftover {{...}}"
-    # assertion stays meaningful.
-    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
-    text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", "Render literally.")
-    # 1.4.7 (#198): the driver's codex-companion path, spliced into
-    # `const COMPANION = {{...}};` as a JSON string literal. This file's
-    # SEG_ID-guard assertions never read its value; it only needs to be a valid
-    # JS literal so the "no leftover {{...}}" assertion below stays meaningful.
-    text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", '"/fake/codex-companion.mjs"')
-    # #197 -- engine.effort/engine.model. Default to a schema-valid pair so the
-    # SEG-guard tests are unaffected; the #197 EFFORT/MODEL guard tests below
-    # override them with allowlist-violating values to prove the guard throws.
-    text = text.replace("{{EFFORT}}", effort)
-    text = text.replace("{{MODEL}}", model)
-    # #412 -- PLUGIN_ROOT: empty USED TO mean "not opted into the redirect". This file's
-    # charter is seg-id shell-injection safety, not the opt-in; the
-    # SEG-guard tests below never read this value, only need it to resolve.
-    # #607 -- a non-empty plugin root is now REQUIRED: the fix-scope audit
-    # runs only from the plugin install tree, so the W5 template refuses to
-    # start without one. This fixture used to substitute the empty value as
-    # the documented "redirect opt-out"; that opt-out no longer exists.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps("/fixture/plugin/literary-translator"))
-    assert "{{" not in text
-    return text
+    """The token map and its encoding now live in _workflow_instantiation.py
+    (#413), imported here as `_shared_instantiate_mass_translate` (this
+    file's own function keeps the un-prefixed name -- its callers must not
+    change). `batch_agent_cap` is the value the SEG-guard tests care about --
+    deliberately set to 0 by the "safe id" tests below so the batch-too-large
+    gate trips immediately AFTER the seg-id guard runs, without ever needing a
+    real agent()/pipeline() mock. `effort`/`model` default to a schema-valid
+    pair (unaffecting the SEG tests) and are overridden only by the #197
+    EFFORT/MODEL guard tests. `max_fix_rounds=2` and
+    `verse_policy_instruction_block`/`codex_companion_path_json` are this
+    file's own fixed values (2, not the shared module's 3; "Render
+    literally.", not its longer sentence); the SEG_ID-guard assertions below
+    never read any of these, they only need to resolve so the "no leftover
+    {{...}}" assertion stays meaningful. `DURABLE_ROOT`, `RUN_ID`,
+    `SOURCE_LANG`, `TARGET_LANG` and `PLUGIN_ROOT` already equal the shared
+    module's defaults and are left unset."""
+    return _shared_instantiate_mass_translate(
+        max_fix_rounds=2,
+        batch_agent_cap=batch_agent_cap,
+        max_codex_jobs_per_batch=max_codex_jobs_per_batch,
+        verse_policy_instruction_block="Render literally.",
+        codex_companion_path_json="/fake/codex-companion.mjs",
+        effort=effort,
+        model=model,
+    )
 
 
 def run_guard_harness(tmp_path: Path, segs: list, batch_agent_cap: int = 0, timeout: int = 30, effort: str = "high", model: str = ""):

@@ -59,10 +59,9 @@ from _canon_project_fixture import (  # noqa: E402
     make_project,
     run_canon_init,
 )
+from _workflow_instantiation import instantiate_glossary_pass  # noqa: E402
 
 FIXTURE_RUN_ID = "20260726T000000Z"
-FIXTURE_SOURCE_LANG = "French"
-FIXTURE_TARGET_LANG = "Russian"
 SOURCE_FORM = "Sappho"
 TARGET_FORM = "Sapho"
 
@@ -70,35 +69,29 @@ TARGET_FORM = "Sapho"
 def instantiate(durable_root: str, *, plugin_root: str,
                 research_mode: str = "live",
                 batch_agent_cap: int = 10_000) -> str:
-    """The template's documented one-time substitution -- but with DURABLE_ROOT
-    bound to a REAL writable directory (unlike the sibling harnesses' fixed
-    /fixture/... root), so the paths it emits can be created and the command it
-    emits can actually run against the real script staged inside that root."""
-    text = GLOSSARY_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", durable_root)
-    text = text.replace("{{SOURCE_LANG}}", FIXTURE_SOURCE_LANG)
-    text = text.replace("{{TARGET_LANG}}", FIXTURE_TARGET_LANG)
-    text = text.replace("{{RESEARCH_MODE}}", research_mode)
-    text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    text = text.replace("{{EFFORT}}", "high")
-    # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
-    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
-    # #412 -- json.dumps JS string literal, token OUTSIDE quotes. REQUIRED,
-    # with no default: unlike mass-translate-wf.template.js's own
-    # {{PLUGIN_ROOT}}, an empty string is not a "did not opt into the
-    # redirect" sentinel for THIS template -- it throws at instantiation, so
-    # a defaulted-empty call would surface as run()'s opaque "template threw
-    # under Node" rather than as a missing argument. Callers must name a
-    # root, and this harness's one caller
-    # (test_the_emitted_approve_command_snapshots_byte_identically_against_the_real_script)
-    # names the REAL skill root, because its --merge-batches command is run
-    # for real against the REAL canon_validate.py, which since #412 refuses
-    # every stamping mode without either --plugin-root or
-    # --allow-durable-sibling.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
-    assert "{{" not in text, "fixture instantiation left an unresolved token"
-    return text
+    """The token map and renderer now live in _workflow_instantiation.py
+    (#413); this stays a thin wrapper. `durable_root` stays a REAL writable
+    directory this caller controls (unlike the sibling harnesses' fixed
+    /fixture/... root), so the paths the template emits can be created and
+    the command it emits can actually run against the real script staged
+    inside that root. `plugin_root` stays REQUIRED with no default: unlike
+    mass-translate-wf.template.js's own {{PLUGIN_ROOT}}, an empty string is
+    not a "did not opt into the redirect" sentinel for THIS template -- it
+    throws at instantiation, so a defaulted-empty call would surface as
+    run()'s opaque "template threw under Node" rather than as a missing
+    argument. Callers must name a root, and this harness's one caller
+    (test_the_emitted_approve_command_snapshots_byte_identically_against_the_real_script)
+    names the REAL skill root, because its --merge-batches command is run
+    for real against the REAL canon_validate.py, which since #412 refuses
+    every stamping mode without either --plugin-root or
+    --allow-durable-sibling."""
+    return instantiate_glossary_pass(
+        durable_root=durable_root,
+        run_id=FIXTURE_RUN_ID,
+        research_mode=research_mode,
+        batch_agent_cap=batch_agent_cap,
+        plugin_root=plugin_root,
+    )
 
 
 def _wrap(js_source: str) -> str:

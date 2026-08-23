@@ -129,9 +129,13 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import instantiate_mass_translate  # noqa: E402
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
@@ -282,42 +286,33 @@ def whitespace_prefixed_ready(glue: str) -> str:
 # Harness
 # ---------------------------------------------------------------------------
 
-FIXTURE_DURABLE_ROOT = "/fixture/project/durable_root"
 FIXTURE_RUN_ID = "20260725T000000Z"
 FIXTURE_COMPANION_PATH = "/opt/codex/codex-companion.mjs"
 
 
 def instantiate() -> str:
-    """The one-time substitution the template's header documents (duplicated,
-    not imported, so this file stays self-contained like every sibling)."""
-    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
-    for token, value in (
-        ("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT),
-        ("{{RUN_ID}}", FIXTURE_RUN_ID),
-        ("{{SOURCE_LANG}}", "fr"),
-        ("{{TARGET_LANG}}", "ru"),
-        ("{{MAX_FIX_ROUNDS}}", "1"),
-        ("{{BATCH_AGENT_CAP}}", "100000"),
-        # #409 stage 0 -- generously above any need in this file, same
-        # reasoning as BATCH_AGENT_CAP above: this file exercises sentinel/
-        # glue-character containment, not either preflight gate.
-        ("{{MAX_CODEX_JOBS_PER_BATCH}}", "100000"),
-        ("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", "Render every verse literally."),
-        ("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH)),
-        ("{{EFFORT}}", "high"),
-        ("{{MODEL}}", ""),
-        # #412 -- PLUGIN_ROOT: empty USED TO mean "not opted into the
-        # redirect". This file exercises sentinel/glue-character
-        # containment, not the opt-in.
-        # #607 -- a non-empty plugin root is now REQUIRED: the fix-scope
-        # audit runs only from the plugin install tree, so the W5 template
-        # refuses to start without one. The value below is arbitrary; it
-        # only has to be non-empty and to resolve.
-        ("{{PLUGIN_ROOT}}", json.dumps("/fixture/plugin/literary-translator")),
-    ):
-        text = text.replace(token, value)
-    assert "{{" not in text, "fixture instantiation left an unresolved token"
-    return text
+    """The one-time substitution the template's header documents; the token
+    map itself now lives in _workflow_instantiation.py (#413). RUN_ID,
+    MAX_FIX_ROUNDS, VERSE_POLICY_INSTRUCTION_BLOCK and the companion path
+    stay overridden to this file's own values -- a run id, a 1-round cap, a
+    shorter verse-instruction sentence and a companion path that all differ
+    from the shared module's defaults. BATCH_AGENT_CAP, EFFORT, MODEL and
+    PLUGIN_ROOT are pinned explicitly too even though they equal the shared
+    module's own defaults, so this file's substitution stays stated rather
+    than riding on a default that could drift later. MAX_CODEX_JOBS_PER_BATCH
+    is left at the shared default (also generously above any need here, same
+    reasoning): this file exercises sentinel/glue-character containment, not
+    either preflight gate."""
+    return instantiate_mass_translate(
+        run_id=FIXTURE_RUN_ID,
+        max_fix_rounds=1,
+        batch_agent_cap=100000,
+        verse_policy_instruction_block="Render every verse literally.",
+        codex_companion_path_json=FIXTURE_COMPANION_PATH,
+        effort="high",
+        model="",
+        plugin_root="/fixture/plugin/literary-translator",
+    )
 
 
 def _wrap(js_source: str) -> str:

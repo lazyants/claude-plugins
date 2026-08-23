@@ -124,6 +124,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import instantiate_mass_translate  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -768,61 +771,31 @@ def _instantiate_and_slice_js(durable_root_str):
     )
     head, _, _tail = raw.partition(_JS_CUT_MARKER)
 
-    substitutions = {
-        "{{DURABLE_ROOT}}": durable_root_str,
-        # 1.2.0 (CONTRACT §2): a stable fixture run id -- colon-free
-        # YYYYMMDDTHHMMSSZ form, matching the allowlist
-        # ^[A-Za-z0-9][A-Za-z0-9._-]*$. Only this file's own no-leftover-
-        # token assertion below cares that it's substituted at all; the
-        # exact value is irrelevant to every prompt-text assertion in this
-        # file (they only check draft_path(seg)/review_path(seg) strings).
-        "{{RUN_ID}}": "20260710T000000Z",
-        "{{SOURCE_LANG}}": "fr",
-        "{{TARGET_LANG}}": "ru",
-        "{{MAX_FIX_ROUNDS}}": "3",
-        "{{BATCH_AGENT_CAP}}": "999",
-        # #409 stage 0. Irrelevant to this file's draft_path/review_path
-        # prompt-builder assertions (this harness never runs the preflight
-        # gates at all, only slices out function declarations); it only
-        # needs to resolve so the no-leftover-token assertion below holds.
-        "{{MAX_CODEX_JOBS_PER_BATCH}}": "999",
-        "{{VERSE_POLICY_INSTRUCTION_BLOCK}}": "Test verse policy instructions.",
-        # 1.4.7 (#198): the driver's codex-companion path, substituted as a JSON
-        # string literal directly into `const COMPANION = {{...}};`. The exact
-        # value is irrelevant to this file's draft_path/review_path assertions;
-        # it only needs to be a valid JS literal so the sliced head parses.
-        "{{CODEX_COMPANION_PATH_JSON}}": json.dumps("/fake/codex-companion.mjs"),
-        # #197 -- engine.effort/engine.model. Neither value is inspected by
-        # this file's draft_path/review_path assertions; they only need to
-        # resolve so the no-leftover-token assertion below stays meaningful.
-        "{{EFFORT}}": "high",
-        "{{MODEL}}": "",
-        # #412/#607 -- PLUGIN_ROOT must be a real path: since #607 the
-        # template refuses an empty one before dispatch. This file's charter
-        # is the draft_path/review_path invariant, not the #412 dispatch
-        # opt-in, so the value is arbitrary; it only needs to resolve.
-        "{{PLUGIN_ROOT}}": json.dumps("/fixture/plugin/literary-translator"),
-    }
-    for token, value in substitutions.items():
-        head = head.replace(token, value)
+    # durable_root is a per-call fixture (asserted in the returned prompts),
+    # so it stays a parameter rather than a fixed override. #412/#607 --
+    # PLUGIN_ROOT must be a real path: since #607 the template refuses an
+    # empty one before dispatch. This file's charter is the draft_path/
+    # review_path invariant, not the #412 dispatch opt-in, so the value is
+    # arbitrary; it only needs to resolve.
+    head = instantiate_mass_translate(
+        source=head,
+        durable_root=durable_root_str,
+        run_id="20260710T000000Z",
+        source_lang="fr",
+        target_lang="ru",
+        max_fix_rounds=3,
+        batch_agent_cap=999,
+        max_codex_jobs_per_batch=999,
+        verse_policy_instruction_block="Test verse policy instructions.",
+        codex_companion_path_json="/fake/codex-companion.mjs",
+        effort="high",
+        model="",
+        plugin_root="/fixture/plugin/literary-translator",
+    )
     # The file's sole `export` keyword (on `export const meta = {...}`) is
     # ESM syntax; strip it so the sliced body runs as a plain CommonJS
     # script under `node file.js` (no --input-type=module dance needed).
     head = head.replace("export const meta", "const meta", 1)
-    # A genuine unresolved substitution token always has this ALL-CAPS/
-    # underscore shape ({{RUN_ID}}, {{DURABLE_ROOT}}, ...) -- every token
-    # this template documents is named that way (see the template's own
-    # header comment). A blind "{{" / "}}" substring check is too broad:
-    # this file's own "RELAXED union" schema-literal comment legitimately
-    # contains the literal text `{type:"string"}}` (a nested JS object
-    # literal's own closing braces, not a template token), which a plain
-    # substring check would wrongly flag as an unresolved token.
-    leftover = re.search(r"\{\{[A-Z][A-Z0-9_]*\}\}", head)
-    assert leftover is None, (
-        f"an instantiation substitution token survived unresolved "
-        f"({leftover.group(0)!r}) -- the template's own token list "
-        f"changed; update `substitutions` above"
-    )
     return head, raw
 
 

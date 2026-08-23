@@ -28,9 +28,13 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+import _workflow_instantiation as _shared  # noqa: E402
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
@@ -227,36 +231,51 @@ FIXTURE_RUN_ID = "20260823T000000Z"
 FIXTURE_PLUGIN_ROOT = str(PLUGIN_ROOT / "skills" / "literary-translator")
 
 
+# #413 -- the token map these two helpers used to carry now lives once, in
+# tests/_workflow_instantiation.py, which also owns each token's encoding. Only
+# the values this file deliberately pins are stated below.
+#
+# `allow_unresolved` needs its own machinery, because the shared renderer
+# REFUSES to return text with a `{{TOKEN}}` still in it -- that refusal is the
+# point of #413 and must not gain a bypass flag. The two tests that use it are
+# not asking for an unsubstituted template: they substitute a value that happens
+# to SPELL a token, to prove the template's own guard rejects the case where the
+# session never substituted at all. So the value goes in as a sentinel that
+# cannot collide with anything in the template, and is swapped for the token
+# spelling afterwards. The rendered bytes are identical either way; the shared
+# renderer's guard stays strict for every other caller.
+_UNRESOLVED_SENTINEL = "\x00lt413-unresolved-sentinel\x00"
+
+
 def instantiate_glossary(*, research_mode: str, batch_agent_cap: int = 0,
                          allow_unresolved: bool = False) -> str:
-    text = GLOSSARY_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
-    text = text.replace("{{SOURCE_LANG}}", "French")
-    text = text.replace("{{TARGET_LANG}}", "Russian")
-    text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    text = text.replace("{{EFFORT}}", "high")
-    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
-    # A real, quote-free install root: the template's own PLUGIN_ROOT guard runs
-    # BEFORE the one under test here and would otherwise be what aborts the run.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(FIXTURE_PLUGIN_ROOT))
-    text = text.replace("{{RESEARCH_MODE}}", research_mode)
-    if not allow_unresolved:
-        assert "{{" not in text, "fixture instantiation left an unresolved token"
-    return text
+    text = _shared.instantiate_glossary_pass(
+        durable_root=FIXTURE_DURABLE_ROOT,
+        source_lang="French",
+        target_lang="Russian",
+        run_id=FIXTURE_RUN_ID,
+        batch_agent_cap=batch_agent_cap,
+        effort="high",
+        citation_content_types="",
+        # A real, quote-free install root: the template's own PLUGIN_ROOT guard
+        # runs BEFORE the one under test here and would otherwise be what aborts
+        # the run.
+        plugin_root=FIXTURE_PLUGIN_ROOT,
+        research_mode=_UNRESOLVED_SENTINEL if allow_unresolved else research_mode,
+    )
+    return text.replace(_UNRESOLVED_SENTINEL, research_mode) if allow_unresolved else text
 
 
 def instantiate_skeptic(*, particle_config: str, batch_agent_cap: int = 0,
                         allow_unresolved: bool = False) -> str:
-    text = SKEPTIC_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
-    text = text.replace("{{SOURCE_LANG}}", "French")
-    text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    text = text.replace("{{PARTICLE_CONFIG}}", particle_config)
-    if not allow_unresolved:
-        assert "{{" not in text, "fixture instantiation left an unresolved token"
-    return text
+    text = _shared.instantiate_skeptic_pass(
+        durable_root=FIXTURE_DURABLE_ROOT,
+        source_lang="French",
+        run_id=FIXTURE_RUN_ID,
+        batch_agent_cap=batch_agent_cap,
+        particle_config=_UNRESOLVED_SENTINEL if allow_unresolved else particle_config,
+    )
+    return text.replace(_UNRESOLVED_SENTINEL, particle_config) if allow_unresolved else text
 
 
 def _wrap_for_execution(js_source: str) -> str:

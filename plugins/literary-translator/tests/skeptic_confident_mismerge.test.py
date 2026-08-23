@@ -60,6 +60,9 @@ ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 SCRIPTS_DIR = ASSETS_DIR / "scripts"
 TEMPLATES_DIR = ASSETS_DIR / "templates"
 SKEPTIC_PASS_TEMPLATE = TEMPLATES_DIR / "skeptic-pass-wf.template.js"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _workflow_instantiation import instantiate_skeptic_pass as _shared_instantiate_skeptic_pass  # noqa: E402
 SKEPTIC_READY_SCRIPT = SCRIPTS_DIR / "skeptic_ready.py"
 OCC_INDEX_SCRIPT = SCRIPTS_DIR / "occ_index.py"
 BOOTSTRAP_NAMES_SCRIPT = SCRIPTS_DIR / "bootstrap_names.py"
@@ -190,14 +193,17 @@ def make_aggregate_manifest(run_id, assignments, batch_count=1) -> dict:
 
 def instantiate_skeptic_pass(*, durable_root: str, source_lang: str, particle_config: str,
                               run_id: str, batch_agent_cap: int) -> str:
-    text = SKEPTIC_PASS_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", durable_root)
-    text = text.replace("{{SOURCE_LANG}}", source_lang)
-    text = text.replace("{{PARTICLE_CONFIG}}", particle_config)
-    text = text.replace("{{RUN_ID}}", run_id)
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    assert "{{" not in text, "fixture instantiation left an unresolved token -- fix the fixture, not the assertion"
-    return text
+    """The token map and renderer now live in _workflow_instantiation.py
+    (#413); this stays a thin wrapper. All five parameters stay required
+    keywords with no defaults -- the skeptic template declares no other
+    token (no {{TARGET_LANG}}, {{EFFORT}}, {{MODEL}} or {{PLUGIN_ROOT}}), so
+    every one of SKEPTIC_PASS_DEFAULTS' keys is exercised here explicitly
+    rather than left to the shared module's own fixture values."""
+    return _shared_instantiate_skeptic_pass(
+        durable_root=durable_root, source_lang=source_lang,
+        particle_config=particle_config, run_id=run_id,
+        batch_agent_cap=batch_agent_cap,
+    )
 
 
 def _wrap_for_execution(js_source: str) -> str:

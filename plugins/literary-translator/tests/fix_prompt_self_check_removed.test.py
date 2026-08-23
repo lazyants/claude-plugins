@@ -37,9 +37,9 @@ reimplementation of the prompt text.
   not as this file's own primary target.
 """
 import json
-import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +51,9 @@ assert MASS_TRANSLATE_WF_SRC.is_file(), f"template not found at {MASS_TRANSLATE_
 
 NODE_PATH = shutil.which("node")
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import instantiate_mass_translate  # noqa: E402
+
 # Same slice boundary tests/draft_path_convention.test.py's own
 # _JS_CUT_MARKER uses -- fixPrompt is a function DECLARATION, defined well
 # before this marker, so slicing here (rather than instantiating the WHOLE
@@ -58,29 +61,6 @@ NODE_PATH = shutil.which("node")
 # tests/batch_size_estimator.test.py's own _wrap_for_execution() builds) is
 # sufficient and keeps this file simpler.
 _JS_CUT_MARKER = "const estimatedCalls"
-
-# Same minimal substitutions tests/draft_path_convention.test.py's own
-# _instantiate_and_slice_js() uses -- every token that appears before the
-# cut marker must resolve; the exact values are irrelevant to this file's
-# own prompt-TEXT assertions (they only check for the presence/absence of
-# specific substrings in fixPrompt's returned string).
-_SUBSTITUTIONS = {
-    "{{DURABLE_ROOT}}": "/fixture/durable_root",
-    "{{RUN_ID}}": "20260801T000000Z",
-    "{{SOURCE_LANG}}": "fr",
-    "{{TARGET_LANG}}": "ru",
-    "{{MAX_FIX_ROUNDS}}": "3",
-    "{{BATCH_AGENT_CAP}}": "999",
-    "{{MAX_CODEX_JOBS_PER_BATCH}}": "999",
-    "{{VERSE_POLICY_INSTRUCTION_BLOCK}}": "Test verse policy instructions.",
-    "{{CODEX_COMPANION_PATH_JSON}}": json.dumps("/fake/codex-companion.mjs"),
-    "{{EFFORT}}": "high",
-    "{{MODEL}}": "",
-    # #412/#607 -- PLUGIN_ROOT must be a real path: since #607 the template
-    # refuses an empty one before dispatch. fixPrompt's self-check text does
-    # not depend on the value; it only needs to resolve to something valid.
-    "{{PLUGIN_ROOT}}": json.dumps("/fixture/plugin/literary-translator"),
-}
 
 
 def _instantiate_and_slice():
@@ -90,14 +70,25 @@ def _instantiate_and_slice():
         f"{_JS_CUT_MARKER!r} slice boundary -- update this test's harness"
     )
     head, _, _tail = raw.partition(_JS_CUT_MARKER)
-    for token, value in _SUBSTITUTIONS.items():
-        head = head.replace(token, value)
-    head = head.replace("export const meta", "const meta", 1)
-    leftover = re.search(r"\{\{[A-Z][A-Z0-9_]*\}\}", head)
-    assert leftover is None, (
-        f"an instantiation substitution token survived unresolved "
-        f"({leftover.group(0)!r}) -- update _SUBSTITUTIONS above"
+    # #412/#607 -- PLUGIN_ROOT must be a real path: since #607 the template
+    # refuses an empty one before dispatch. fixPrompt's self-check text does
+    # not depend on the value; it only needs to resolve to something valid.
+    head = instantiate_mass_translate(
+        source=head,
+        durable_root="/fixture/durable_root",
+        run_id="20260801T000000Z",
+        source_lang="fr",
+        target_lang="ru",
+        max_fix_rounds=3,
+        batch_agent_cap=999,
+        max_codex_jobs_per_batch=999,
+        verse_policy_instruction_block="Test verse policy instructions.",
+        codex_companion_path_json="/fake/codex-companion.mjs",
+        effort="high",
+        model="",
+        plugin_root="/fixture/plugin/literary-translator",
     )
+    head = head.replace("export const meta", "const meta", 1)
     return head
 
 

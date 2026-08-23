@@ -119,6 +119,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import instantiate_mass_translate  # noqa: E402
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 SCRIPTS_SRC_DIR = ASSETS_DIR / "scripts"
@@ -488,34 +491,24 @@ def parse_one_json_line(proc):
 # return, not a mocked agent()/pipeline() run.
 # ---------------------------------------------------------------------------
 
-FIXTURE_DURABLE_ROOT = "/fixture/project/durable_root"
-FIXTURE_SOURCE_LANG = "fr"
 FIXTURE_TARGET_LANG = "en"
-FIXTURE_VERSE_POLICY = "Render every verse literally, line by line."
 FIXTURE_COMPANION_PATH = "/opt/codex/1.0.10/codex-companion.mjs"
 FIXTURE_EFFORT = "high"
 
 
 def instantiate_template(run_id: str) -> str:
-    text = MASS_TRANSLATE_TEMPLATE_SRC.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
-    text = text.replace("{{RUN_ID}}", run_id)
-    text = text.replace("{{SOURCE_LANG}}", FIXTURE_SOURCE_LANG)
-    text = text.replace("{{TARGET_LANG}}", FIXTURE_TARGET_LANG)
-    text = text.replace("{{MAX_FIX_ROUNDS}}", "3")
-    text = text.replace("{{BATCH_AGENT_CAP}}", "100000")
-    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", "100000")
-    text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", json.dumps(FIXTURE_VERSE_POLICY)[1:-1])
-    text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
-    text = text.replace("{{EFFORT}}", FIXTURE_EFFORT)
-    text = text.replace("{{MODEL}}", "")
-    # #607 -- a non-empty plugin root is now REQUIRED: the fix-scope audit
-    # runs only from the plugin install tree, so the W5 template refuses to
-    # start without one. This fixture used to substitute the empty value as
-    # the documented "redirect opt-out"; that opt-out no longer exists.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps("/fixture/plugin/literary-translator"))
-    assert "{{" not in text, "fixture instantiation left an unresolved token"
-    return text
+    """The token map itself now lives in _workflow_instantiation.py (#413).
+    TARGET_LANG/CODEX_COMPANION_PATH_JSON/EFFORT stay overridden to this
+    file's own fixture values; DURABLE_ROOT, SOURCE_LANG, MAX_FIX_ROUNDS,
+    BATCH_AGENT_CAP, MAX_CODEX_JOBS_PER_BATCH, VERSE_POLICY_INSTRUCTION_BLOCK,
+    MODEL and PLUGIN_ROOT are exactly the shared module's own defaults, so no
+    override is needed for them here."""
+    return instantiate_mass_translate(
+        run_id=run_id,
+        target_lang=FIXTURE_TARGET_LANG,
+        codex_companion_path_json=FIXTURE_COMPANION_PATH,
+        effort=FIXTURE_EFFORT,
+    )
 
 
 def _wrap(js_source: str) -> str:
