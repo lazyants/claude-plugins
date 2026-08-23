@@ -18,6 +18,7 @@ them independent of where the file sits, which is the property under test here.
 """
 
 import ast
+import glob
 import importlib.util
 import json
 import os
@@ -513,6 +514,57 @@ def test_default_glob_tiers_reports_the_problem_instead_of_dropping_the_tier(mon
     tiers, problem, _note = rcc.default_glob_tiers()
     assert tiers is None, tiers
     assert problem and "CLAUDE_CONFIG_DIR" in problem, problem
+
+
+@pytest.mark.parametrize("home_name,decoy_name", [
+    ("h*me", "hXme"),       # star
+    ("h[1]me", "h1me"),     # bracket set
+    ("h?me", "hXme"),       # single-char wildcard
+])
+def test_glob_metacharacters_in_home_are_literal(tmp_path, home_name, decoy_name):
+    """The cross-profile ROOT is operator-authored too. Unescaped, an absolute HOME
+    holding `*`, `[` or `?` is read as a PATTERN, so the tier enumerates a SIBLING
+    directory and can bind a companion that lives outside the real home entirely.
+    Both halves are driven: the decoy must not win, and the real profile under the
+    literal metacharacter home must still be found -- escaping the root while
+    over-escaping the deliberate `.claude*` wildcard would break the second half
+    and pass the first."""
+    home = tmp_path / home_name
+    home.mkdir()
+    make_companion(tmp_path / decoy_name, "1.0.10", ".claudeDecoy")   # newer, sibling
+    active = tmp_path / "active"                                       # absolute, EMPTY
+    active.mkdir()
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+
+    proc = run_resolver_env(tmp_path, node, home, active)
+    assert proc.returncode != 0, f"bound outside the real home: {proc.stdout}"
+    assert proc.stdout.strip() == "", proc.stdout
+
+    make_companion(home, "1.0.6", ".claudeReal")                       # older, real home
+    got = chosen_path(run_resolver_env(tmp_path, node, home, active))
+    assert "/.claudeReal/" in got and decoy_name not in got, got
+
+
+def test_both_tiers_are_built_by_the_one_root_constructor(monkeypatch, tmp_path):
+    """The property that closes the class rather than the instance: three review
+    rounds each found a different root-validation rule missing from the
+    cross-profile tier, because that tier was assembled inline while the running
+    tier went through `_store_glob`. Pin that there is no second path -- both
+    roots come back ESCAPED, and a relative root cannot be turned into a glob at
+    all."""
+    home = tmp_path / "h*me"
+    active = tmp_path / "a*ctive"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(active))
+    tiers, problem, note = rcc.default_glob_tiers()
+    assert problem is None and note is None, (problem, note)
+    assert glob.escape(str(active)) in tiers[0][0], tiers[0]
+    assert glob.escape(str(home)) in tiers[1][0], tiers[1]
+    # the deliberate wildcard survives beside the escaped root: the tier must still
+    # END with an unescaped `.claude*` segment, not `.claude[*]`
+    assert os.path.join(glob.escape(str(home)), ".claude*") in tiers[1][0], tiers[1]
+    with pytest.raises(AssertionError):
+        rcc._store_glob("relative/root")
 
 
 def test_a_relative_home_drops_the_cross_profile_tier_rather_than_globbing_it(

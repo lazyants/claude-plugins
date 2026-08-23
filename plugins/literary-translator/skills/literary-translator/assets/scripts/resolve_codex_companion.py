@@ -124,17 +124,33 @@ def running_profile_dir():
     return raw, None
 
 
-def _store_glob(config_dir):
-    """The openai-codex install-cache glob under ONE config profile.
+def _store_glob(root, profile_pattern=None):
+    """The openai-codex install-cache glob under one root. THE ONLY PLACE A ROOT BECOMES A
+    PATTERN -- both tiers go through here, and every root-validation rule lives here once.
 
-    `glob.escape` is load-bearing, not defensive noise: `CLAUDE_CONFIG_DIR` is an
-    operator-authored path, and a legitimate one containing `[`, `*` or `?` would otherwise
-    be read as a PATTERN and could match a DIFFERENT profile's store -- reproducing the very
-    binding this preference exists to stop. The `**` is appended AFTER the escape, so it
-    stays recursive.
+    Three rounds of review found three different ways a root reached `glob` unvalidated, one
+    property at a time, because the running-profile root was built here while the
+    cross-profile root was assembled inline at the call site. A second construction path is
+    what made each of those a separate defect instead of one; there is now no second path.
+
+    `glob.escape` is load-bearing, not defensive noise: BOTH roots are operator-authored
+    (`CLAUDE_CONFIG_DIR`, and `HOME` behind `expanduser`), and a legitimate one containing
+    `[`, `*` or `?` would otherwise be read as a PATTERN and could match a DIFFERENT
+    directory's store -- reproducing the very binding this preference exists to stop.
+    `profile_pattern` is the ONE deliberately unescaped segment (`.claude*` for the
+    cross-profile tier); the running-profile tier passes none, because its root already IS
+    the profile. The `**` is appended AFTER the escape, so it stays recursive.
+
+    Callers must pass an ABSOLUTE root -- `root_problem()` is the check, and both call sites
+    run it first. Asserted here too, since a relative root silently becomes a cwd-relative
+    glob rather than failing.
     """
-    return os.path.join(glob.escape(config_dir), "plugins", "cache", "openai-codex",
-                        "**", "codex-companion.mjs")
+    assert os.path.isabs(root), "root must be absolute, got %r" % (root,)
+    parts = [glob.escape(root)]
+    if profile_pattern is not None:
+        parts.append(profile_pattern)
+    parts += ["plugins", "cache", "openai-codex", "**", "codex-companion.mjs"]
+    return os.path.join(*parts)
 
 
 def default_glob_tiers():
@@ -168,8 +184,7 @@ def default_glob_tiers():
             "so `~/.claude*` is not an absolute root and globbing it would resolve against "
             "this script's cwd and could bind a FOREIGN profile's companion (#287)" % home
         )
-    tiers.append([os.path.join(home, ".claude*", "plugins", "cache", "openai-codex",
-                               "**", "codex-companion.mjs")])
+    tiers.append([_store_glob(home, profile_pattern=".claude*")])
     return tiers, None, None
 
 
