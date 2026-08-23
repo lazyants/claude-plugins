@@ -367,6 +367,16 @@ the DURABLE record, which on a re-claim inside one run id was written at
 that run id's first claim, while `claims_admitted_via` reports the gate
 THIS invocation admitted under (#545/#549). Report-only -- nothing gates
 on it.
+A third sibling, `claims_from_cap_over_sentinel` (#536), names the ids
+--from-cap admitted over a PRESENT `.ever_converged` sentinel. It is
+validated (see `parse_claims_from_cap_over_sentinel()`, which also owns
+why it is required only under `--from-cap`) and journaled into
+`step1_gate_passed`, which is the point: the selector announces that
+admission on its own stderr and nowhere else, so before this the fact
+survived no run. This driver adds the DURABLE record, not a second
+announcement -- relaying the selector's stderr is #551's job, and a
+driver-side re-print of a line the relay already carries would put the
+same fact in the run log twice.
 `--from-stalled` additionally carries `--driver-lease-held` forward to
 `select_segments.py` whenever at least one id is requested under it, but
 only ever on this code path -- run after `acquire_driver_lock()` has
@@ -1780,7 +1790,13 @@ def run_select_segments(
 # request them (`--from-cap`/`--from-converged`/`--from-stalled`) so a
 # mismatched literal is visible by inspection rather than needing a
 # lookup table.
-KNOWN_CLAIM_PROFILES = ("from-cap", "from-converged", "from-stalled")
+# #536: mirrors select_segments.py's own constant of the same name, and lets
+# parse_claims_from_cap_over_sentinel() compare against this ONE profile with
+# nothing to drift from. Deliberately NOT `KNOWN_CLAIM_PROFILES[0]` -- an index
+# re-derives the meaning from tuple ORDER, so reordering the tuple would
+# silently change which profile that check enforces.
+CLAIM_PROFILE_FROM_CAP = "from-cap"
+KNOWN_CLAIM_PROFILES = (CLAIM_PROFILE_FROM_CAP, "from-converged", "from-stalled")
 
 
 def parse_claims_field(select_result: dict, segs: list) -> dict:
@@ -1937,6 +1953,113 @@ def parse_claims_admitted_via(select_result: dict, claims: dict) -> dict:
                 exit_code=2,
             )
     return dict(admitted_via)
+
+
+def parse_claims_from_cap_over_sentinel(select_result: dict, claims: dict, admitted_via: dict) -> list:
+    """Validates select_segments.py's `claims_from_cap_over_sentinel` field and
+    returns it as a list -- the ids `--from-cap` admitted over a PRESENT
+    `.ever_converged` sentinel (#537's converged-then-staled-then-capped
+    population, #536's transport of the fact).
+
+    Called ONLY when this invocation actually forwarded `--from-cap`. That is
+    the one place its two siblings and this function differ, and the narrowing
+    is LOSSLESS rather than a relaxation: run_select_segments() forwards the
+    flag iff `from_cap is not None`, select_segments.py builds a `from-cap`
+    request only from that flag, and its `from_cap_over_sentinel` is set only
+    inside the CLAIM_PROFILE_FROM_CAP branch -- so a real admission over a
+    sentinel IMPLIES the flag was forwarded, and skipping the check without it
+    cannot read one as `[]`. Requiring it there anyway would only add a fresh
+    refusal surface for a selector/driver pair that `claims_admitted_via`
+    (required unconditionally since 1.57.0) already refuses on every
+    invocation -- it would detect no skew that is not detected already.
+
+    UNDER `--from-cap` the field IS required, for the reason
+    `eligible_not_dispatched` gives for its own: a selector that stopped
+    emitting it would be read as "no unit was admitted over a sentinel", which
+    is exactly the silent green this field closes.
+
+    `claims` must be parse_claims_field()'s own RETURN VALUE (the reduced
+    `{seg: profile}` map), never the raw `claims` JSON. Its check is there FOR
+    THE MESSAGE, and that is worth saying plainly: parse_claims_admitted_via()
+    has already fatalled unless `set(admitted_via) == set(claims)`, so an id
+    outside `claims` is outside `admitted_via` too and the profile check below
+    would refuse it anyway -- just while naming a profile of None rather than
+    saying the id was never claimed. Membership does still supply
+    validate_seg() and the subset-of-`segs` check transitively, since every
+    key of the reduced map passed both.
+
+    `admitted_via` must be parse_claims_admitted_via()'s return value, and
+    every member must map to `from-cap` in it. Membership in `claims` alone is
+    NOT sufficient, and the gap was not cosmetic: distinct ids may legitimately
+    be admitted under DIFFERENT profiles in one selector call, so a payload
+    placing a `from-converged` id in this list would make this driver journal
+    and print, as fact, that a `--from-cap` claim was admitted over a sentinel
+    when no such admission happened. The one thing this field exists to report
+    is exactly the thing membership in `claims` cannot establish.
+
+    Checked against `admitted_via` rather than `claims[seg]` deliberately:
+    `claims[seg]` is the DURABLE record's profile, which on a re-claim inside
+    one run id is the FIRST claim's, while this field describes what THIS
+    invocation admitted -- the distinction #545 exists for.
+
+    A repeated member is refused too. Unreachable from the real selector, which
+    appends inside a loop visiting each id once -- but the operator disclosure
+    counts this list, so a repeat would misstate how many claims were admitted
+    that way, and one set rules it out. Order is otherwise the selector's own
+    publication order, NOT re-sorted here -- a second ordering in this file
+    would drift from the one the selector's stderr disclosure prints in.
+
+    This field is REPORT-ONLY. Nothing gates on it, exactly as for
+    `claims_admitted_via`: widening its authority would make a reporting fix
+    into an admission change.
+
+    FATAL (never a silent default) on: the field missing entirely; not a JSON
+    array; a member that is not a key of `claims`; a member this invocation did
+    not admit under `from-cap`; or a repeated member."""
+    over_sentinel = select_result.get("claims_from_cap_over_sentinel")
+    if over_sentinel is None:
+        fatal(
+            "select_segments.py's JSON output has no 'claims_from_cap_over_sentinel' "
+            "field -- this driver cannot report which --from-cap ids were admitted "
+            "over an ever-converged sentinel, and reporting nothing would be "
+            "indistinguishable from none having been. Refused rather than defaulted "
+            "(#536). A driver from this release requires a selector from it: "
+            "--plugin-root can point the two at different installs.",
+            exit_code=2,
+        )
+    if not isinstance(over_sentinel, list):
+        fatal(
+            f"select_segments.py's 'claims_from_cap_over_sentinel' field is not a JSON "
+            f"array: {over_sentinel!r} (#536)",
+            exit_code=2,
+        )
+    seen = set()
+    for seg in over_sentinel:
+        if seg not in claims:
+            fatal(
+                f"claims_from_cap_over_sentinel names {seg!r}, which is not a key of "
+                f"this invocation's own 'claims' -- the disclosure must name ids this "
+                f"run actually claimed (#536)",
+                exit_code=2,
+            )
+        if admitted_via.get(seg) != CLAIM_PROFILE_FROM_CAP:
+            fatal(
+                f"claims_from_cap_over_sentinel names {seg!r}, which this invocation "
+                f"admitted under {admitted_via.get(seg)!r}, not {CLAIM_PROFILE_FROM_CAP!r} -- "
+                f"this field reports a --from-cap admission specifically, and "
+                f"journalling it for an id admitted by another gate would record a "
+                f"claim that was never made (#536)",
+                exit_code=2,
+            )
+        if seg in seen:
+            fatal(
+                f"claims_from_cap_over_sentinel names {seg!r} more than once -- the "
+                f"operator disclosure counts this list, so a repeat would misstate how "
+                f"many claims were admitted over a sentinel (#536)",
+                exit_code=2,
+            )
+        seen.add(seg)
+    return list(over_sentinel)
 
 
 # ---------------------------------------------------------------------------
@@ -6749,6 +6872,13 @@ def run(args, dirs: dict) -> dict:
         # of the reported profile, so a fix that reached stdout alone would
         # leave the audit surface wrong.
         claims_admitted_via = parse_claims_admitted_via(select_result, claims)
+        # #536: gated on the flag, not validated unconditionally -- see
+        # parse_claims_from_cap_over_sentinel() for why that is lossless.
+        claims_from_cap_over_sentinel = (
+            parse_claims_from_cap_over_sentinel(select_result, claims, claims_admitted_via)
+            if args.from_cap is not None
+            else []
+        )
 
         # #530: the eligible units this dispatch is NOT carrying. Computed by
         # select_segments.py (which owns DEFAULT_ELIGIBLE_CATEGORIES) and read
@@ -6787,6 +6917,13 @@ def run(args, dirs: dict) -> dict:
                 "type": "step1_gate_passed", "segs": segs,
                 "counts": select_result.get("counts"), "claims": claims,
                 "claims_admitted_via": claims_admitted_via,
+                # #536: the only DURABLE record of this fact on the driver
+                # path. The selector writes it nowhere on disk -- deliberately
+                # not a claim-record field -- and its stderr disclosure is
+                # discarded here, so without this line the run leaves no trace
+                # that a re-review was authorized over a unit that had already
+                # converged once.
+                "claims_from_cap_over_sentinel": claims_from_cap_over_sentinel,
                 "eligible_not_dispatched": eligible_not_dispatched,
             },
         )
@@ -6841,6 +6978,12 @@ def run(args, dirs: dict) -> dict:
                 "segs": segs, "counts": select_result.get("counts"), "engine": engine_cfg,
                 "dispatched": False, "results": [], "claims": claims,
                 "claims_admitted_via": claims_admitted_via,
+                # #536: carried in BOTH result payloads for the same reason
+                # `claims_admitted_via` is -- this driver's stdout is the one
+                # artifact every caller reads, and a fact reported only on
+                # stderr and in the journal is a fact two of the three
+                # channels disagree about.
+                "claims_from_cap_over_sentinel": claims_from_cap_over_sentinel,
                 # Always present, `null` on the ordinary path that never got
                 # as far as resolving one -- never a key that appears only
                 # sometimes. On a claim invocation this is the id whose
@@ -6936,6 +7079,8 @@ def run(args, dirs: dict) -> dict:
             "results": segment_results,
             "claims": claims,
             "claims_admitted_via": claims_admitted_via,
+            # #536 -- see the empty-SEGS result above for why both carry it.
+            "claims_from_cap_over_sentinel": claims_from_cap_over_sentinel,
             "summary": {
                 "converged": [r["seg"] for r in converged],
                 "needs_fix": [{"seg": r["seg"], "round_label": r.get("round_label")} for r in needs_fix],

@@ -989,6 +989,13 @@ def test_a_selector_payload_without_the_field_is_refused_not_defaulted(tmp_path)
     # `eligible_not_dispatched` at all.
     assert "claims_admitted_via" in _SELECT_SEGMENTS_WITHOUT_THE_FIELD
     assert "eligible_not_dispatched" not in _SELECT_SEGMENTS_WITHOUT_THE_FIELD
+    # #536 added a THIRD required field, but only on a --from-cap invocation --
+    # and this driver call passes no such flag. So the stub deliberately does
+    # NOT supply it, and this assertion PINS that narrowing: make the
+    # requirement unconditional and this test starts refusing on the wrong key,
+    # which is exactly the failure the comment above describes for
+    # `claims_admitted_via`.
+    assert "claims_from_cap_over_sentinel" not in _SELECT_SEGMENTS_WITHOUT_THE_FIELD
 
     proc = run_driver(root, timeout=60)
 
@@ -1234,16 +1241,22 @@ CLAIM_SOURCE_RUN_ID = "20260801T090000Z"
 HAND_FIXED_TEXT = "hola -- hand-fixed after the cap"
 
 
-def from_cap_project(tmp_path, seg="seg01", **kwargs):
+def from_cap_project(tmp_path, seg="seg01", sentinel_present=False, **kwargs):
     """A fully phase2-staged durable_root holding exactly one segment in the
     --from-cap population (POPULATIONS.md P2, the same shape
     tests/claim_selector.test.py and tests/claim_end_to_end.test.py build for
     the selector's own unit tests): materialized ledger status
-    non_converged/reason=cap, NO .ever_converged sentinel, a stored review
-    that is clean:false WITH findings, and a draft whose bytes were edited
-    by hand after the cap and whose dispatch_token still names the run it was
-    dispatched under. Classified human_escalation, so it reaches `segs` only
-    via --only-segs -- exactly as a real operator would have to name it."""
+    non_converged/reason=cap, a stored review that is clean:false WITH
+    findings, and a draft whose bytes were edited by hand after the cap and
+    whose dispatch_token still names the run it was dispatched under.
+    Classified human_escalation, so it reaches `segs` only via --only-segs --
+    exactly as a real operator would have to name it.
+
+    `sentinel_present` (#536/#537) selects WHICH of the two --from-cap
+    populations this is. Default False: the unit never converged. True: it
+    converged once, went stale when the contract moved, and exhausted its fix
+    rounds after that -- admitted by --from-cap since 1.27.0 and the population
+    whose admission this driver must disclose."""
     root = make_durable_root(tmp_path, profile_yaml=FULL_PROFILE_YAML, **kwargs)
     stage_phase2_scripts(root)
     write_manifest(root, [seg])
@@ -1287,6 +1300,9 @@ def from_cap_project(tmp_path, seg="seg01", **kwargs):
         }, ensure_ascii=False),
         encoding="utf-8",
     )
+    if sentinel_present:
+        mark_ever_converged(root, seg)
+
     write_fragment(root, seg, {
         "timestamp": "2026-01-01T00:00:00Z", "status": "non_converged", "reason": "cap", "rounds": 4,
     })
@@ -1307,6 +1323,257 @@ def minted_run_dirs(root):
         p.name for p in (root / "runs").iterdir()
         if p.is_dir() and (p / "input.digest").is_file() and p.name != CLAIM_SOURCE_RUN_ID
     )
+
+
+# ---------------------------------------------------------------------------
+# #536 -- the #537 sentinel disclosure, transported to the DRIVER path.
+#
+# select_segments.py has printed this disclosure on its own stderr since
+# 1.27.0, but run_select_segments() runs it with capture_output=True and parses
+# only stdout, so on the success path the line was discarded and no durable
+# artifact recorded it either -- not the claim record, not this driver's
+# journal. SKILL.md calls the driver the main path, so the disclosure reached
+# nobody where it mattered.
+# ---------------------------------------------------------------------------
+
+def test_a_from_cap_claim_over_a_sentinel_is_journalled_and_disclosed(tmp_path):
+    """#536, the headline. Driven through the REAL select_segments.py against a
+    real PRESENT sentinel -- NOT a hand-built payload. That matters: a stub
+    that simply returned a non-empty list would stay green when the selector's
+    own append condition is mutated to False, so the test would pin this
+    driver's plumbing while the fact it transports quietly stopped being
+    produced.
+
+    Two channels are asserted, because those are the two the defect left
+    empty: the driver's stdout result and its journal -- the only DURABLE copy
+    on this path. The driver deliberately prints NO line of its own: the
+    selector already announces each admission on its own stderr, and relaying
+    that stream is #551's job, so a driver-side re-print would put the same
+    fact in the run log twice.
+    """
+    root = from_cap_project(tmp_path, sentinel_present=True)
+    assert (root / "segments" / ".ever_converged.seg01").is_file(), (
+        "precondition: this test is about a capped unit that DID converge once"
+    )
+
+    proc = run_driver(root, "--only-segs", "seg01", "--from-cap", "seg01", timeout=60)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["claims"] == {"seg01": "from-cap"}, payload
+    assert payload["claims_from_cap_over_sentinel"] == ["seg01"], payload
+
+    journal = DRIVER.journal_path(root, payload["session_id"])
+    entries = [json.loads(ln) for ln in journal.read_text(encoding="utf-8").splitlines()]
+    gate = next(e for e in entries if e["type"] == "step1_gate_passed")
+    assert gate["claims_from_cap_over_sentinel"] == ["seg01"], gate
+
+    assert "segment_dispatch_driver.py: 1 --from-cap" not in proc.stderr, (
+        "this driver must not re-print what the selector already discloses -- "
+        f"stderr={proc.stderr!r}"
+    )
+
+
+# A selector stub that claims seg01 under --from-cap and supplies every
+# required field EXCEPT #536's. `eligible_not_dispatched` is present here (it
+# is absent from _SELECT_SEGMENTS_WITHOUT_THE_FIELD above), so a refusal on
+# THIS stub can only be the #536 check -- otherwise these tests would pass on
+# the wrong key, the trap that stub's own assertions already guard against.
+_SELECT_SEGMENTS_FROM_CAP_WITHOUT_OVER_SENTINEL = (
+    "#!/usr/bin/env python3\n"
+    "import json\n"
+    "import sys\n"
+    "print(json.dumps({\n"
+    '    "success": True, "segs": ["seg01"],\n'
+    '    "claims": {"seg01": {"seg": "seg01", "profile": "from-cap"}},\n'
+    '    "claims_admitted_via": {"seg01": "from-cap"},\n'
+    '    "eligible_not_dispatched": [],\n'
+    '    "counts": {}, "classification": {}, "ids_by_category": {},\n'
+    "}))\n"
+    "sys.exit(0)\n"
+)
+
+
+def _from_cap_stub_with(over_sentinel_literal: str) -> str:
+    """The stub above with #536's field spliced back in, carrying an arbitrary
+    JSON literal -- so the wrong-TYPE case and the missing case share one
+    fixture and cannot drift apart."""
+    return _SELECT_SEGMENTS_FROM_CAP_WITHOUT_OVER_SENTINEL.replace(
+        '    "eligible_not_dispatched": [],\n',
+        '    "eligible_not_dispatched": [],\n'
+        '    "claims_from_cap_over_sentinel": ' + over_sentinel_literal + ',\n',
+    )
+
+
+def test_a_from_cap_payload_without_the_over_sentinel_field_is_refused(tmp_path):
+    """#536: under --from-cap the field is REQUIRED, never defaulted to [].
+
+    The reason `eligible_not_dispatched` gives for its own refusal applies with
+    full force: a selector that stopped emitting this would be read as "no unit
+    was admitted over a sentinel", and that is indistinguishable from the truth
+    only when the truth happens to agree. Exit 2, not 1 -- a broken contract
+    between two scripts, not a project-state refusal.
+
+    Asserted on the MESSAGE, not merely the code: several other checks in this
+    driver also exit 2, and a test that accepted any of them would keep passing
+    if this one were deleted.
+    """
+    root = from_cap_project(tmp_path, sentinel_present=True)
+    (root / "scripts" / "select_segments.py").write_text(
+        _SELECT_SEGMENTS_FROM_CAP_WITHOUT_OVER_SENTINEL, encoding="utf-8"
+    )
+    assert "claims_from_cap_over_sentinel" not in _SELECT_SEGMENTS_FROM_CAP_WITHOUT_OVER_SENTINEL
+    # NOT because #530's check runs first -- it does not: run() calls this
+    # field's parser before it reads `eligible_not_dispatched`. The stub
+    # supplies it so that the payload is otherwise COMPLETE, which is what
+    # makes the refusal below attributable to the one field this test removed
+    # rather than to a stub that was missing two things.
+    assert "eligible_not_dispatched" in _SELECT_SEGMENTS_FROM_CAP_WITHOUT_OVER_SENTINEL
+
+    proc = run_driver(root, "--only-segs", "seg01", "--from-cap", "seg01", timeout=60)
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "claims_from_cap_over_sentinel" in payload["error"], payload
+    assert read_argv_log(root) == [], "nothing may be dispatched after this refusal"
+
+
+def test_a_non_array_over_sentinel_field_is_refused(tmp_path):
+    """#536: the field must be a JSON array. A string is the shape that would
+    otherwise iterate CHARACTER by character in the membership loop below it
+    and produce a refusal naming a one-letter 'segment', which is a worse
+    message for the same defect."""
+    root = from_cap_project(tmp_path, sentinel_present=True)
+    (root / "scripts" / "select_segments.py").write_text(
+        _from_cap_stub_with('"seg01"'), encoding="utf-8"
+    )
+
+    proc = run_driver(root, "--only-segs", "seg01", "--from-cap", "seg01", timeout=60)
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "not a JSON array" in payload["error"], payload
+    assert read_argv_log(root) == [], "nothing may be dispatched after this refusal"
+
+
+def test_an_over_sentinel_id_outside_claims_is_refused(tmp_path):
+    """#536: the disclosure must name ids this run actually claimed. Without
+    this the driver would print, and durably journal, a disclosure about a
+    segment no claim in this invocation authorized."""
+    root = from_cap_project(tmp_path, sentinel_present=True)
+    (root / "scripts" / "select_segments.py").write_text(
+        _from_cap_stub_with('["seg99"]'), encoding="utf-8"
+    )
+
+    proc = run_driver(root, "--only-segs", "seg01", "--from-cap", "seg01", timeout=60)
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "seg99" in payload["error"] and "not a key of" in payload["error"], payload
+    assert read_argv_log(root) == [], "nothing may be dispatched after this refusal"
+
+
+def test_an_over_sentinel_id_this_invocation_admitted_under_another_gate_is_refused(tmp_path):
+    """#536: membership in `claims` is not sufficient -- the id must be one
+    THIS invocation admitted under --from-cap.
+
+    Distinct ids may legitimately be admitted under different profiles in one
+    selector call, so a payload that files a `from-converged` id under this
+    field would make the driver journal and print, as fact, a --from-cap
+    admission over a sentinel that never happened. The field's entire content
+    is that claim, so this is the one check membership could not supply.
+
+    Checked against `claims_admitted_via` and not `claims[seg]["profile"]`:
+    on a re-claim inside one run id the durable record carries the FIRST
+    claim's profile, so the two answer different questions (#545). The stub
+    below makes them DISAGREE, which is what proves which one is read.
+    """
+    root = from_cap_project(tmp_path, sentinel_present=True)
+    stub = _SELECT_SEGMENTS_FROM_CAP_WITHOUT_OVER_SENTINEL.replace(
+        '    "claims_admitted_via": {"seg01": "from-cap"},\n',
+        '    "claims_admitted_via": {"seg01": "from-converged"},\n'
+        '    "claims_from_cap_over_sentinel": ["seg01"],\n',
+    )
+    assert '"from-converged"' in stub and '"claims_from_cap_over_sentinel"' in stub
+    (root / "scripts" / "select_segments.py").write_text(stub, encoding="utf-8")
+
+    proc = run_driver(root, "--only-segs", "seg01", "--from-cap", "seg01", timeout=60)
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "from-converged" in payload["error"], payload
+    assert "claims_from_cap_over_sentinel" in payload["error"], payload
+    assert read_argv_log(root) == [], "nothing may be dispatched after this refusal"
+
+
+def test_a_repeated_over_sentinel_id_is_refused(tmp_path):
+    """#536: the operator disclosure counts this list, so a repeat would
+    misstate how many claims were admitted over a sentinel. Unreachable from
+    the real selector (it appends once per loop iteration) -- pinned because
+    the refusal is cheap and the wrong COUNT would be believed."""
+    root = from_cap_project(tmp_path, sentinel_present=True)
+    (root / "scripts" / "select_segments.py").write_text(
+        _from_cap_stub_with('["seg01", "seg01"]'), encoding="utf-8"
+    )
+
+    proc = run_driver(root, "--only-segs", "seg01", "--from-cap", "seg01", timeout=60)
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "more than once" in payload["error"], payload
+    assert read_argv_log(root) == [], "nothing may be dispatched after this refusal"
+
+
+def test_the_over_sentinel_field_is_not_required_without_from_cap(tmp_path):
+    """#536: the narrowing, pinned from the driver side.
+
+    The SAME field-less stub, driven with no --from-cap, must exit 0 and
+    journal []. Without this test, unconditional and narrowed validation are
+    indistinguishable in this suite -- and the narrowing is the whole
+    disposition of a review finding, so it needs a test of its own rather than
+    a comment.
+
+    It is lossless rather than a relaxation: select_segments.py sets the
+    underlying flag only inside evaluate_claim_admission()'s --from-cap branch,
+    so an admission over a sentinel cannot occur on this path at all.
+    """
+    root = from_cap_project(tmp_path, sentinel_present=True)
+    (root / "scripts" / "select_segments.py").write_text(
+        _SELECT_SEGMENTS_FROM_CAP_WITHOUT_OVER_SENTINEL, encoding="utf-8"
+    )
+
+    proc = run_driver(root, "--only-segs", "seg01", "--allow-empty", timeout=60)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["claims_from_cap_over_sentinel"] == [], payload
+
+
+def test_no_over_sentinel_disclosure_for_a_capped_unit_that_never_converged(tmp_path):
+    """#536, NEGATIVE. The ordinary --from-cap population carries no sentinel,
+    so the field is present and EMPTY and no line is printed.
+
+    Green before the change by construction -- it earns its keep through its
+    mutation alone: make the selector append for every --from-cap admission
+    rather than only the sentinel-bearing ones, and this goes red. Both
+    populations are real and both take --from-cap since 1.27.0, so a field that
+    listed both would say nothing at all."""
+    root = from_cap_project(tmp_path)
+    assert not (root / "segments" / ".ever_converged.seg01").exists(), (
+        "precondition: the default fixture is the never-converged population"
+    )
+
+    proc = run_driver(root, "--only-segs", "seg01", "--from-cap", "seg01", timeout=60)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["claims"] == {"seg01": "from-cap"}, payload
+    assert payload["claims_from_cap_over_sentinel"] == [], payload
 
 
 def test_from_cap_claim_admitted_end_to_end_through_the_real_selector(tmp_path):
