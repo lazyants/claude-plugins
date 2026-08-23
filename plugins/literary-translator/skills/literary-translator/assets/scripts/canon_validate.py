@@ -2394,7 +2394,15 @@ def run_correct(
         # because the entry being deleted carries a bad `source` would trap the
         # exact record most worth deleting.
         _enforce_citation_source_safety([new_entry])
-        if new_entry.get("basis") == "established" and old_entry.get("basis") != "established":
+        # `old_entry` is an UNCONSTRAINED JSON value on purpose (see the
+        # schema): the row most worth correcting is one a hand edit left
+        # malformed, and that includes a string, an array or a null under an
+        # entries{} key -- `_load_canon` type-checks `entries` itself, never
+        # its values. So read `basis` off it defensively; a non-mapping simply
+        # has no basis, which is the right answer here (any new established
+        # claim over it IS new).
+        old_basis = old_entry.get("basis") if isinstance(old_entry, dict) else None
+        if new_entry.get("basis") == "established" and old_basis != "established":
             # SCOPED TO THE DELTA, and the citation check above deliberately is
             # NOT -- the asymmetry is measured, not aesthetic.
             #

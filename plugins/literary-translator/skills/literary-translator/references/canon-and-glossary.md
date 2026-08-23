@@ -399,7 +399,7 @@ adjudicated.
 {
   source_form: { type: "string", minLength: 1 },   // must already be in entries{}
   disposition: { enum: ["correct", "remove"] },
-  old_entry:   { type: "object" },                 // the value the caller says is on disk
+  old_entry:   <any JSON value>,                   // the value the caller says is on disk
   new_entry:   <canon-entry.schema.json shape>,    // required iff correct, forbidden iff remove
   reason:      { type: "string", pattern: "\\S" }
 }
@@ -407,13 +407,16 @@ adjudicated.
 
 Two asymmetries carry real weight:
 
-- **`old_entry` is a plain object, `new_entry` is `$ref`-validated.**
+- **`old_entry` is UNCONSTRAINED, `new_entry` is `$ref`-validated.**
   `old_entry`'s job is EQUALITY against what is on disk, not shape — and the
-  entry most in need of correcting is the one that fails its own schema. A
-  hand-edited `canon.json` (the only repair route that existed before this
-  mode) can hold exactly that, and VALIDATE-ONLY exists to find it; requiring
-  the OLD value to validate would leave those entries with no route at all.
-  `new_entry` is what gets frozen, so it validates.
+  value most in need of correcting is the one that fails its own schema. A
+  hand-edited `canon.json` (the only repair route that existed before this mode)
+  can put ANY JSON value under an `entries{}` key — `_load_canon` type-checks
+  `entries` itself, never its values — and VALIDATE-ONLY exists to find exactly
+  that. Even `type: "object"` was too strong: it refused a string, an array or a
+  `null`, so such a row could be DIAGNOSED and not REPAIRED, sending the
+  operator back to the hand edit. `new_entry` is what gets frozen, so it
+  validates.
 - **`old_entry` is not an open channel, despite its loose type.** It must EQUAL
   what is on disk, so the only value that can ever be recorded through it is one
   `canon.json` already held. `reason` is required and non-blank but NOT

@@ -883,5 +883,85 @@ def test_correction_can_repair_an_entry_that_fails_its_own_schema(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    "broken", ["not-an-object", ["a", "list"], None, 17], ids=["str", "list", "null", "int"]
+)
+def test_a_primitive_valued_entries_row_can_be_removed(tmp_path, broken):
+    """The conclusion of the `old_entry` design call, and the case that made it
+    a bug rather than a preference (PR review, ped-ant P2).
+
+    `_load_canon` type-checks `entries` itself but never its VALUES, so a hand
+    edit -- the very repair route this mode replaces -- can leave any JSON value
+    under an entries{} key. `--validate-only` reports it (exit 1). While
+    `old_entry` was `type: "object"`, the correction document naming that value
+    was refused by its own schema BEFORE the equality interlock could run, so
+    the row could be diagnosed and not repaired, and the operator was sent back
+    to the hand edit. `old_entry` is therefore unconstrained."""
+    root = make_french_project(tmp_path)
+    canon = read_canon(root)
+    canon["entries"]["broken"] = broken
+    (root / "canon.json").write_text(json.dumps(canon, ensure_ascii=False), encoding="utf-8")
+
+    assert run_canon_validate(root).returncode == 1, (
+        "the malformed row does not fail validate-only, so this fixture is not "
+        "the state the repair route exists for"
+    )
+
+    doc = {
+        "source_form": "broken",
+        "disposition": "remove",
+        "old_entry": broken,
+        "reason": "row is not a canon entry at all; removing it",
+    }
+    proc = run_correct(root, write_correction(root, doc))
+    assert proc.returncode == 0, (
+        f"a malformed entries{{}} row cannot be removed:\n{proc.stdout}\n{proc.stderr}"
+    )
+    assert "broken" not in read_canon(root)["entries"]
+    assert run_canon_validate(root).returncode == 0, "canon.json is still unhealthy after the repair"
+
+
+def test_a_primitive_valued_entries_row_can_be_replaced_offline(tmp_path):
+    """The `correct` half of the same case, and the one that reaches the
+    delta-scoped backstop with a non-mapping `old_entry`. Reading `basis` off it
+    naively would raise AttributeError, so the repair would fail as an
+    "unexpected error" rather than succeed."""
+    root = make_french_project(tmp_path)
+    canon = read_canon(root)
+    canon["entries"][CORRECTED] = "not-an-object"
+    (root / "canon.json").write_text(json.dumps(canon, ensure_ascii=False), encoding="utf-8")
+
+    doc = correction_doc(
+        old_entry="not-an-object",
+        new_entry=_entry(CORRECTED, "Jean Valjean"),
+        reason="row was corrupted to a bare string; restoring the real entry",
+    )
+    proc = run_correct(root, write_correction(root, doc), research_mode="offline")
+    assert proc.returncode == 0, (
+        f"a malformed entries{{}} row cannot be replaced:\n{proc.stdout}\n{proc.stderr}"
+    )
+    assert read_canon(root)["entries"][CORRECTED] == doc["new_entry"]
+    assert run_canon_validate(root).returncode == 0
+
+
+def test_a_primitive_old_entry_still_faces_the_interlock(tmp_path):
+    """Unconstraining `old_entry` must not weaken what it is FOR. A correction
+    naming the wrong primitive is still refused, naming both values."""
+    root = make_french_project(tmp_path)
+    canon = read_canon(root)
+    canon["entries"]["broken"] = "not-an-object"
+    (root / "canon.json").write_text(json.dumps(canon, ensure_ascii=False), encoding="utf-8")
+    before = canon_bytes(root)
+
+    doc = {
+        "source_form": "broken",
+        "disposition": "remove",
+        "old_entry": "a-different-string",
+        "reason": "stale read",
+    }
+    proc = run_correct(root, write_correction(root, doc))
+    assert_refused(proc, root, before, "a-different-string", "not-an-object")
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -15,8 +15,7 @@
       "enum": ["correct", "remove"]
     },
     "old_entry": {
-      "type": "object",
-      "description": "The value the caller states is CURRENTLY on disk under source_form. The blind-use interlock: --correct refuses, naming both, when this does not match. Deliberately a plain object rather than a $ref to canon-entry.schema.json, and the asymmetry with new_entry is the point -- old_entry's job is EQUALITY against what is on disk, not shape, and the entry most in need of correcting is the one that fails its own schema. A hand-edited canon.json (the only repair route that existed before this mode) can hold exactly that, and --validate-only exists to find it; requiring the old value to validate would leave those entries with no route at all, which is the defect this mode closes. new_entry IS $ref-validated, because it becomes the frozen record."
+      "description": "The value the caller states is CURRENTLY on disk under source_form. The blind-use interlock: --correct refuses, naming both, when this does not match. UNCONSTRAINED -- not a $ref to canon-entry.schema.json, and not even `type: object` -- and the asymmetry with new_entry is the point. old_entry's job is EQUALITY against what is on disk, not shape, and the value most in need of correcting is the one that fails its own schema. A hand-edited canon.json (the only repair route that existed before this mode) can put ANY JSON value under an entries{} key -- `_load_canon` type-checks `entries` itself but never its values -- and --validate-only exists to find exactly that. Constraining this field at all would leave those rows with no route but the hand edit this mode replaces: `type: object` alone already refused a string, an array or a null, so a malformed row could be diagnosed and not repaired. new_entry IS $ref-validated, because it becomes the frozen record."
     },
     "new_entry": {
       "$ref": "canon-entry.schema.json",
