@@ -1,0 +1,62 @@
+name: literary-translator
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/literary-translator/**'
+      - '.github/workflows/literary-translator.yml'
+  pull_request:
+    paths:
+      - 'plugins/literary-translator/**'
+      - '.github/workflows/literary-translator.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: plugins/literary-translator/requirements.txt
+
+      # node is a real coverage input, not a convenience: a dozen test files are
+      # `skipif(NODE is None)`, so a runner without it goes green while whole
+      # files never execute.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check pytest
+          python3 -m pip install --disable-pip-version-check -r plugins/literary-translator/requirements.txt
+
+      - name: Toolchain
+        run: |
+          python3 -V
+          python3 -m pytest --version
+          node -v
+          git --version
+
+      # Run from the plugin directory, never from the repo root: pytest only
+      # reads plugins/literary-translator/pytest.ini when rootdir resolves into
+      # that directory, and without it `python_files = *.test.py` never applies
+      # — a repo-root run collects a small fraction of the suite and exits 0.
+      - name: pytest
+        working-directory: plugins/literary-translator
+        run: python3 -m pytest -q

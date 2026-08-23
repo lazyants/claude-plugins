@@ -1,0 +1,60 @@
+name: enduser-handbook
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/enduser-handbook/**'
+      - '.github/workflows/enduser-handbook.yml'
+  pull_request:
+    paths:
+      - 'plugins/enduser-handbook/**'
+      - '.github/workflows/enduser-handbook.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      # ruby and node are NOT optional here even though the suite degrades
+      # politely without them: several gates print "SKIPPED" and still pass, and
+      # a skipped gate reads exactly like a clean one. Failing loudly at this
+      # step is the only way a missing runtime is distinguishable from a green
+      # run. esbuild is genuinely optional (the suite never network-fetches it),
+      # so it is installed best-effort and its absence only costs one assertion.
+      - name: Toolchain
+        run: |
+          bash --version | head -1
+          node -v
+          ruby -v
+          ruby -ryaml -rjson -e 'puts "ruby yaml/json ok"'
+
+      - name: Install esbuild (optional .ts syntax gate)
+        run: npm install -g esbuild || echo "esbuild unavailable — the .ts syntax gate will report SKIPPED"
+
+      # Explicit file paths, never the bare directory: `node --test <dir>` treats
+      # the positional as a script entry point and reports a bogus 1/0/1 with a
+      # MODULE_NOT_FOUND that has nothing to do with the tests.
+      - name: node --test
+        working-directory: plugins/enduser-handbook
+        run: node --test tests/*.test.mjs
+
+      - name: tests/reference-assets.test.sh
+        working-directory: plugins/enduser-handbook
+        run: bash tests/reference-assets.test.sh

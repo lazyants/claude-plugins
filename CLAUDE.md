@@ -1,0 +1,67 @@
+# claude-plugins — working rules
+
+## Run the suites in CI, not on this laptop
+
+Every plugin suite in this repo runs in **GitHub Actions** (`.github/workflows/<plugin>.yml`).
+The repo is public, so Actions on standard runners costs nothing and has no minute budget to
+ration. **Do not run a full suite locally.** `literary-translator` alone is ~6 200 pytest cases
+and `enduser-handbook`'s `reference-assets.test.sh` is a 5 500-line bash suite; a full local run
+drains the battery and wedges a machine that other sessions and agents are sharing.
+
+Split of duty:
+
+- **Local** — only the one test file that covers the change, plus cheap host-side static checks
+  (`sh -n`, `node --check`, `jq -e . <file>`, `actionlint`).
+- **CI** — everything broad: the whole plugin suite, every plugin, both runtimes.
+
+Push the branch (or open the PR) and read the run:
+
+```sh
+gh run list --branch "$(git branch --show-current)" --limit 5
+gh run view <run-id> --log-failed        # or: gh run watch <run-id>
+gh workflow run literary-translator.yml --ref main   # manual, once the workflow is on main
+```
+
+A green run on the branch head is sufficient proof, and waiting for it is not a stall. Scope the
+work, never the coverage: skipping a suite locally is right, skipping it remotely is not.
+
+## What CI runs
+
+| Workflow | Suite it drives | Runtimes installed |
+| --- | --- | --- |
+| `ai-cli-optout.yml` | `tests/run-all.sh` | bash, jq, curl (preinstalled) |
+| `cc-usage-coach.yml` | `tests/run-all.sh` (pytest) | Python 3.14 |
+| `db-guardrails.yml` | `tests/block-destructive-db.test.sh` | bash, python3, jq (preinstalled) |
+| `enduser-handbook.yml` | `node --test tests/*.test.mjs`, then `tests/reference-assets.test.sh` | Node 22, ruby (preinstalled), esbuild (best-effort) |
+| `literary-translator.yml` | `python3 -m pytest -q`, run **from the plugin directory** | Python 3.14 + `requirements.txt`, Node 22 |
+
+`multi-profile-plugins` and `obsidian-project-vault` ship no tests, so they have no workflow.
+
+Each workflow is path-filtered to its own plugin plus its own file, so a PR touching one plugin
+runs one suite; `workflow_dispatch` runs any of them by hand. Superseded runs on the same ref are
+cancelled, so only the newest commit's run gates anything.
+
+Runtime versions are pinned to mirror this machine (Python 3.14, Node 22) — a CI result is then
+directly comparable to what a local run would have produced, which is the point of not running one.
+
+### Things the workflows deliberately do
+
+- `literary-translator` runs pytest with `working-directory: plugins/literary-translator`. From the
+  repo root, pytest never reads that plugin's `pytest.ini`, so `python_files = *.test.py` does not
+  apply, a fraction of the suite is collected, and the run exits 0 — a green that means nothing.
+- `enduser-handbook` passes **explicit file paths** to `node --test`. A bare directory positional is
+  treated as a script entry point and reports a bogus `1/0/1` with a misleading `MODULE_NOT_FOUND`.
+- `enduser-handbook`'s toolchain step fails loudly if `node` or `ruby -ryaml -rjson` is missing.
+  Several gates in that suite print `SKIPPED` and still pass, and a skipped gate reads exactly like
+  a clean one. `esbuild` is the one genuinely optional tool (the suite never network-fetches it).
+- `literary-translator` installs Node even though its suite is Python: a dozen test files are
+  `skipif(NODE is None)` and would silently not execute.
+
+## Repo conventions
+
+- `plugins/**` changes ship via **pull request** — that is what gets the `lazy-ants-reviewer` bot's
+  review. Internal `.claude/skills/**` docs are committed directly to `main`.
+- Merging to `main` **is** publishing: `claude plugin install <name>@lazyants` resolves the version
+  straight from the manifests on `main`. There is no release pipeline and tags are not in the
+  resolution path.
+- Follow-ups, bugs, and permanent caveats are **GitHub issues**, never an in-repo markdown backlog.
