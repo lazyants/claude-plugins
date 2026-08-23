@@ -4365,8 +4365,17 @@ def run(args, dirs: dict) -> dict:
     # status has ALSO moved off converged/stale -- an interrupted convergence
     # commit leaves `in_progress` with the sentinel already raised, and an
     # interrupted re-dispatch leaves it too -- has neither witness left, reads
-    # as `recoverable`, and is still dispatched. That residual needs provenance
-    # the marker does not carry (#443) or a dispatch-time participant (#621).
+    # as `recoverable`, and is still dispatched.
+    #
+    # That residual is NOT closed by marker provenance, which this comment
+    # used to name as its remedy. #443 shipped exactly that -- a
+    # content-bearing marker -- and the residual is unchanged: provenance
+    # describes a marker that EXISTS, and here the marker is gone. What would
+    # close it is a second durable witness THIS gate can read after the marker
+    # is deleted: the convergence record committed together with the marker
+    # rather than in two directories with two durability stories, or an
+    # append-only convergence journal. Still open on #442; the separate
+    # dispatch-time race is #621.
     lost_sentinels = []
     if authorizes_dispatch:
         # resolve_dirs() exposes durable_root, not a segments_dir -- derive it
