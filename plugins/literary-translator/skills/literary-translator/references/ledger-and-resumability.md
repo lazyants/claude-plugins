@@ -1185,8 +1185,11 @@ alike, neither of which is changed to get it:
   It is **not** private and **not** immutable: the driver publishes the same
   nonce into `segments/` in several other per-invocation filenames and in the
   joblog's own JSON body, so the name is discoverable by anything that can list
-  that directory and writable by anything that can write it (both paths create
-  these entries `0600`, so this concerns same-uid writers). A terminal verdict
+  that directory and writable by anything that can write it. Who that is comes
+  from `segments/`'s own mode, which the driver never sets (a bare
+  `os.makedirs`, so the operator's umask decides), **not** from these entries'
+  `0600` — a process with write on the directory can unlink and recreate any of
+  them whatever the file mode says. A terminal verdict
   still rests on that artifact on BOTH paths. That residual is #697, open and
   parked; its measured population is zero, and its consequence is bounded --
   the segment lands `blocked`, classifies `human_escalation`, and `--only-segs`

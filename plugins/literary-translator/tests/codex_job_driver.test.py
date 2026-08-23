@@ -4455,7 +4455,10 @@ def test_a_concurrent_write_to_the_pending_cannot_change_what_the_gates_judge(
     # The straggler's writes went to the slot and changed nothing that was judged, so the
     # gate's exit 1 IS a genuine content verdict on the snapshot and stays terminal.
     assert job.translate_content_rejected is True
-    assert not os.path.exists(job.attempt), "the snapshot is this invocation's alone"
+    assert not os.path.exists(job.attempt), (
+        "the snapshot is this invocation's to clean up -- lifecycle ownership, not exclusive "
+        "access; see codex_job.py's module header (#697)"
+    )
 
 
 def test_a_write_to_the_gated_snapshot_still_decides_a_terminal_verdict(tmp_path, monkeypatch):

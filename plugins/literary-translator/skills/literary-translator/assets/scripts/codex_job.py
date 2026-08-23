@@ -82,13 +82,24 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 """
 
 # ---- "private staging slot": what the term means in this file (#697) --------
-# Used throughout for .att.*, .att_pending.*, .pub.*.tmp and the other dot-prefixed
-# per-invocation entries this driver writes into segdir. It is a LIFECYCLE property and
-# nothing more:
+# Used throughout for the dot-prefixed entries this driver writes into segdir. It is a
+# LIFECYCLE property and nothing more:
 #   - DOT-PREFIXED, so both dispatch scans over segments/ skip it outright (#428 made them
 #     skip the whole dot namespace rather than test a suffix);
-#   - named per invocation, so two runs of one seg cannot collide;
 #   - owned by this invocation's own cleanup, removed by EXACT path and never a wildcard.
+#
+# The namespace splits in two and the split is load-bearing -- it is the very distinction
+# #665 turns on, so do not let "private staging slot" blur it:
+#   - PER-INVOCATION (the name carries self.inv, so two runs of one seg cannot collide):
+#     .att.*, .att_superseded.*, .prev_review_tmp.*, .codex_ledger_payload.*, .pub.*.tmp,
+#     .codex_job.*.tmp;
+#   - DETERMINISTIC (keyed on seg/ext/disp alone, so the name PERSISTS ACROSS RUNS and is
+#     trivially derivable): .att_pending.* -- the deferred slot itself -- plus the joblog
+#     .codex_job.<seg>.json, the lease .codex_job.<seg>.lock and the .codex_failed.* fail
+#     sentinel.
+# "Two runs cannot collide" is true of the first group ONLY. Saying it of .att_pending.*
+# would assert, of the exact artifact #665 exists to stop gating directly, the property the
+# rest of this header denies.
 #
 # It does NOT mean secret, unguessable or unwritable, and no decision in this file may rest
 # on reading it that way. self.inv is os.urandom(8).hex() (see __init__), and THIS DRIVER
@@ -100,9 +111,18 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 #
 # So the property that actually holds is: anything that can LIST segments/ can discover the
 # name, and anything that can WRITE segments/ can overwrite it. Those are two separate
-# permissions and the second does not follow from the first. Every such entry is created
-# 0o600, so this is a statement about SAME-UID writers -- which is what every actor below
-# is.
+# permissions and the second does not follow from the first.
+#
+# WHO that is depends on segments/'s OWN mode, which this driver does not set: run()
+# creates it with a bare os.makedirs(self.segdir, exist_ok=True), so the mode is whatever
+# the operator's umask yields -- 0755 at the usual 0022 (writes are owner-only, and the
+# actors below are then all same-uid), 0775 at 0002 (the writer set is the GROUP). The
+# 0o600 mode these entries are created with does NOT bound the writer set: a process with
+# write on the DIRECTORY can unlink and recreate any of them whatever the file mode says.
+# What 0o600 does bound is who can read the joblog's BODY; at a 0755 segdir any uid can
+# still LIST the directory and read the nonce straight out of the filenames. And
+# _setup_sandbox()'s mkdtemp(prefix="ltcj.<seg>.<inv>.") publishes the same nonce into
+# TMPDIR, which on a shared /tmp is a second discovery path that is not same-uid at all.
 #
 # Exactly ONE actor is excluded, and only it: the codex processes THIS DRIVER launches.
 # _setup_sandbox() refuses to dispatch unless _sandbox_is_confined() has proved the sandbox
@@ -1757,8 +1777,8 @@ class CodexJob:
         # times over, each review round finding another writer it had missed, so it is
         # replaced by the property the module header states and this slot inherits: anything
         # that can LIST segments/ discovers the name, anything that can WRITE segments/ can
-        # overwrite it, and the 0o600 mode makes that a statement about same-uid writers,
-        # which is what all of them are. The snapshot is therefore weaker than "an artifact
+        # overwrite it -- a set bounded by segments/'s OWN umask-derived mode, not by these
+        # entries' 0o600 (see the module header). The snapshot is weaker than "an artifact
         # no one else can touch"; what it actually buys is stated below.
         #
         # Re-checking the slot after the fact closes nothing -- neither a type re-check
@@ -1792,7 +1812,8 @@ class CodexJob:
             argv += ["--candidate-file", self.attempt]
             proc = self._gate(argv, self.poll_timeout())
             if proc is None:
-                _silent_remove(self.attempt)       # the snapshot is this invocation's alone
+                _silent_remove(self.attempt)       # this invocation's to clean up (lifecycle,
+                                                   # not exclusivity -- see module header)
                 return False                       # could not validate -> keep pending, launch fresh
             if proc.returncode != 0:
                 self._capture_gate_rejection(name, proc)  # #399: capture before discarding
