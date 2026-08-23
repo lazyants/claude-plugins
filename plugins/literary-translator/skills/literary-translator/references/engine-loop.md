@@ -143,6 +143,18 @@ path that KEEPS the direct `codex:codex-rescue` call — it is out of #198's sco
   be tempted to author a missing translation — see
   `references/ledger-and-resumability.md`.)
 
+  **1.62.0 (#534): the fix turn also reports the round's SHAPE, and gains nothing
+  by it.** Its reply now groups the round's findings by the `style_bible.md` rule
+  each instantiates and states `<rule>: N of M findings this round`, so the
+  operator can see that a round is evidence about a CLASS and not only about the
+  loci it names — the observation a per-segment reviewer structurally cannot make.
+  The instruction that produces the number also refuses the sweep it invites: the
+  fix turn still edits only loci a finding named, including where an unnamed site
+  plainly instantiates a rule it just applied. Enumerating a class belongs to W6
+  and to the operator (`SKILL.md`), which carries the two reasons and the
+  site-by-site adjudication rule. Nothing mechanical parses the report, exactly
+  as nothing parses the refusal report beside it.
+
 ### The per-segment cycle
 
 Translate → readiness poll → review/fix loop → confirming final review, in that

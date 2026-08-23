@@ -61,6 +61,27 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
+# Rewritten for 1.58.0 (#534 -- the fix turn reports the round's class
+# concentration) per the maintenance contract above. This rotation inherited an
+# already-empty map (1.57.0 had inherited it empty in turn) and left it empty:
+# the 1.58.0 entry cites files by name -- mass-translate-wf.template.js,
+# review.schema.json, assemble.py -- and no `file.ext:NNN` location anywhere, so
+# there is nothing for this map to anchor.
+#
+# The previous rotation, kept as its own record:
+# Rewritten for 1.52.0 (#530 -- an eligible unit left out of --only-segs) per the
+# maintenance contract above. This rotation inherited an already-empty map and
+# left it empty: the 1.52.0 entry cites NO `file.ext:NNN`.
+#
+# The previous rotation, kept as its own record:
+# Rewritten for 1.57.0 (#545/#549 -- which gate admitted a re-claimed unit) per
+# the maintenance contract above. This rotation inherited an already-empty map
+# and left it empty: the 1.57.0 entry cites files and functions by name and
+# declares no `name.ext:NNN` line citation, so there was nothing to anchor and
+# nothing to retire. The rotation before it, for 1.55.0 (#512 -- the glossary
+# rule's worked examples), likewise inherited an empty map and left it empty.
+#
+# The previous rotation, kept as its own record:
 # Rewritten for 1.59.0 (#514 -- the volume cap charged a claimed id a translate
 # job the claim guard refuses) per the maintenance contract above. This rotation
 # inherited 1.57.0's own empty map (which had inherited it empty in turn)

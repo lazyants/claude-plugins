@@ -192,6 +192,53 @@ def _local_dict_len(filename, funcname, varname):
     raise AssertionError(f"{funcname} is no longer defined in {filename}")
 
 
+# Rewritten for 1.62.0 (#534), per the maintenance contract above. This rotation
+# retired nothing and declared nothing. 1.62.0's figures are FIELD measurements
+# over two live books (109 title occurrences for ~10 defects; 98 quotation sites,
+# 86 already correct, 66 of them under a different rule; 93 roman against 2
+# italic) plus one measurement of the rendered prompt (11 lines to 13, +1 072
+# characters, re-derived by rendering the template at origin/main and at HEAD).
+# The prompt measurement is the only one this tree CAN re-derive, and it is
+# still not declared: its derivation would have to shell out to node, render
+# both revisions of a template file and diff them, which is a second
+# implementation of what tests/fix_prompt_class_concentration.test.py's harness
+# already owns -- and a derivation that cannot read a live book, as the other
+# three would need to, hardcodes its own answer, the `lambda: 17` failure this
+# file refuses. Recorded here so the empty row list reads as a decision.
+#
+# The rotations before it, each kept as its own record. 1.58.0 is the
+# note directly below. Before that, 1.51.0 (#498)
+# retired one inherited row, the size of `PLUGIN_BUNDLE_MEMBERS`, which the
+# entry it belonged to quoted -- stated in the past tense about what was
+# retired rather than about what the base holds, because the latter expires on
+# the next rebase and nothing here can catch it (see the sibling citation
+# guard's note for the measured instances). `_files_defining`,
+#
+# Rewritten for 1.57.0 (#545/#549 -- which gate admitted a re-claimed unit) per
+# the maintenance contract above. This rotation inherited an already-empty list
+# -- 1.55.0's rotation (#512) inherited it empty and retired nothing -- and
+# left it empty: the 1.57.0 entry states no figure this file could re-derive.
+# Its numbers -- three capped units on the fr->ru volume; 35 claims across two
+# runs on the he->en one, of which 13 were misreported (nine plus four) and 22
+# were correctly reported -- are field observations from outside this tree,
+# recorded in #545 and #549, and the entry names them as observations for that
+# reason. The 13/22 split is the ped-ant correction to an earlier draft that
+# said none of the 35 was admitted as from-converged; #549's own body records
+# the per-run flag counts it is derived from.
+# Stated in the past tense about what this rotation did to what it inherited,
+# never in the present tense about what the base holds, because the latter
+# expires on the next rebase and nothing here can catch it (see the sibling
+# citation guard's note for the measured instances). `_files_defining`,
+# `_local_dict_len`, `_tuple_len` and `_test_function_count` are kept unused, as
+# earlier releases kept them, for the next entry that cites their class.
+#
+# Rewritten for 1.58.0 (#433 -- a footnote anchor lost inside a verse fails the
+# build), per the maintenance contract above. This rotation inherited an empty
+# list and declared ONE row; it retired nothing, because there was nothing to
+# retire. Phrased in the past tense about what THIS rotation did, per the
+# sibling citation guard's note: a note phrased in the present tense about what
+# the base holds expires on the next rebase and nothing here can catch it.
+#
 # Rewritten for 1.61.0 (#514), per the maintenance contract above. This rotation
 # inherited 1.58.0's own empty row set and left it empty -- stated in the
 # past tense about what was inherited rather than about what the base holds,
@@ -202,6 +249,15 @@ def _local_dict_len(filename, funcname, varname):
 #
 # ZERO rows for 1.61.0, and this one needs the reasoning spelled out because the
 # entry DOES state tokenizer-visible numbers. They fall in four classes.
+#
+# `_files_defining`, `_local_dict_len`, `_tuple_len` and `_test_function_count`
+# stay unused, as earlier
+# releases kept them, for the next entry citing their class.
+# 1.62.0 (#534) retired the one row it inherited -- `defines 72 test functions`,
+# which 1.58.0's entry quoted about assemble.test.py. Stated in the past tense
+# about what this rotation retired, never about what the base holds: the latter
+# expires on the next rebase, and this branch was rebased four times while that
+# row sat here.
 #
 # Version, issue and date numerals -- not measurements.
 #
