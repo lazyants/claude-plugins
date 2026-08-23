@@ -1286,9 +1286,9 @@ def test_verify_merged_routine_coverage_gaps_do_not_evict_the_integrity_kinds(tm
     canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
 
     # "Dup" is assigned once and triaged TWICE (duplicate-record integrity);
-    # "Ghost" is triaged but never assigned (foreign-record integrity); the
-    # six "Miss<i>" entities are assigned and never triaged (the routine
-    # coverage-gap population that used to evict the other two).
+    # three "Ghost<i>" records are triaged but never assigned (foreign-record
+    # integrity); the six "Miss<i>" entities are assigned and never triaged
+    # (the routine coverage-gap population that used to evict the other two).
     assignments = [make_assignment("Dup", [])]
     for i in range(6):
         assignments.append(make_assignment(f"Miss{i}", []))
@@ -1302,7 +1302,7 @@ def test_verify_merged_routine_coverage_gaps_do_not_evict_the_integrity_kinds(tm
         "records": [
             insufficient_record("Dup"),
             insufficient_record("Dup"),
-            insufficient_record("Ghost"),
+            *(insufficient_record(f"Ghost{i}") for i in range(3)),
         ],
     })
 
@@ -1329,9 +1329,19 @@ def test_verify_merged_routine_coverage_gaps_do_not_evict_the_integrity_kinds(tm
     )
     # Each population's own tail line counts ITS population, never the pooled
     # total: 6 gaps bounded at _MAX_LISTED_MISSING_HALF, so 4 shown of 6.
-    assert any(
-        "... and 2 more (showing the first 4 of 6)" == m for m in result["missing"]
-    ), f"the coverage-gap tail must report the gap population's own size: {result['missing']}"
+    assert "... and 2 more (showing the first 4 of 6)" in result["missing"], (
+        f"the coverage-gap tail must report the gap population's own size: "
+        f"{result['missing']}"
+    )
+    # And the integrity slice is bounded at the SMALLER
+    # _MAX_LISTED_MISSING_INTEGRITY, not merely at something nonzero: 3
+    # foreign records, 2 shown. Without this the cap could be raised back to
+    # the coverage-gap budget -- or to the full 8 -- and every other
+    # assertion here would stay green.
+    assert "... and 1 more (showing the first 2 of 3)" in result["missing"], (
+        f"the foreign-record population must be bounded at "
+        f"_MAX_LISTED_MISSING_INTEGRITY: {result['missing']}"
+    )
 
 
 def test_verify_merged_fails_on_senses_tamper(tmp_path):
