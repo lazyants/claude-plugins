@@ -545,8 +545,13 @@ census established nothing read as a healthy project:
   a finished, reviewed unit at `in_progress` with its marker up — delete the
   marker after that and nothing remembers. (The other route is an
   authorized re-dispatch interrupted after the driver's own `in_progress`
-  write.) Closing that needs provenance the one-bit marker does not carry —
-  tracked as #443, with the dispatch-time race tracked separately as #621.
+  write.) **#443 shipped a content-bearing marker and did NOT close this** —
+  provenance describes a marker that exists, and a deleted one has nothing
+  left to describe. Closing it needs a second durable witness this gate can
+  read when the marker is gone: the convergence record committed together
+  with the marker rather than in two directories with two durability
+  stories, or an append-only convergence journal. That remains open on #442
+  itself, with the dispatch-time race tracked separately as #621.
   Until then: treat a clean run as evidence about the moment it ran, and
   re-run it immediately before dispatching rather than relying on an earlier
   result.

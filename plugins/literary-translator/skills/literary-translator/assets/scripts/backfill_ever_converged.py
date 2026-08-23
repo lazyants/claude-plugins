@@ -986,8 +986,12 @@ def check_segments_dir_identity(dir_fd: int, segments_dir: Path):
     HERE. The gate reads one witness this run cannot: a unit whose status has
     ALSO moved off converged/stale (a convergence commit interrupted after the
     marker was raised, or an interrupted re-dispatch) has neither witness left
-    and is still dispatched -- that residual is #442's remaining scope and
-    needs the marker provenance tracked as #443."""
+    and is still dispatched -- that residual is #442's remaining scope. It is
+    NOT closed by #443's content-bearing marker, which shipped: provenance
+    describes a marker that exists, and a deleted one has nothing left to
+    describe. It needs a second durable witness the dispatch gate can read
+    when the marker is gone -- the convergence record committed together with
+    the marker, or an append-only journal -- and stays open on #442."""
     try:
         held = os.fstat(dir_fd)
         current = os.stat(str(segments_dir))
