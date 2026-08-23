@@ -529,9 +529,15 @@ def load_json(path, label):
     # this class in one place -- the same lesson the profile-load boundary
     # already learned (R6-1/R7-1: enumerating exception types at a
     # black-box parse boundary is whack-a-mole). security-review: deeply
-    # nested adversarial JSON (`"["*2000 + "]"*2000`) makes json.loads()
-    # raise RecursionError -- a RuntimeError subclass, NOT a ValueError --
-    # which would otherwise escape this same boundary uncaught; added here
+    # nested adversarial JSON makes json.loads() raise RecursionError -- a
+    # RuntimeError subclass, NOT a ValueError -- which would otherwise
+    # escape this same boundary uncaught. The depth that does it is NOT the
+    # 2000 this comment first claimed: measured on 3.14.7, `"["*d + "]"*d`
+    # parses fine through d=100_000 and first raises at d=200_000, which is
+    # why tests/validate_assembled.test.py pins `depth = 300_000` for margin
+    # -- read the threshold off that constant, not off this sentence, since
+    # CI tracks a moving 3.14 series and nothing here is version-pinned.
+    # Added here
     # as the third genuinely INPUT-triggered load-boundary class (I/O,
     # parse/decode/int-limit, deep-nest), deliberately still NOT a blanket
     # `except Exception`, so a genuine internal-code bug still surfaces as
