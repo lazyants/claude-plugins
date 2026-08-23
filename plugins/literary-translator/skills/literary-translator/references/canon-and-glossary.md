@@ -73,16 +73,39 @@ Canon population is not "paste the whole book into context and ask for a glossar
    `glossary_TASK.template.md` therefore instructs the adjudicator to route
    any marker-bearing candidate to `review_queue`.
 
-   **This is an instruction, not a gate — know which.** `glossary_preflight.py`
-   guarantees the adjudicator is *told* the rule (step 6c halts a durable copy that
-   lacks it). Nothing checks the answer it gives back: `canon-batch.schema.json`
-   constrains `source_form` to `type: string`, so a marker-bearing item returned as
-   `accepted` still passes `canon_validate.py --check-batch` and still reaches
-   `_merge_batch()`. Closing that would put the refusal in `canon_validate.py`, a
-   `PLUGIN_BUNDLE_MEMBERS` entry — a `plugin_bundle_hash` flip, i.e. re-translating
-   every converged segment in every project, for a case that needs BOTH a >200-char
-   accepted run AND the model ignoring an instruction it was just handed. Parked as
-   **#659**, to be folded into the next release that moves that hash anyway.
+   **Both halves are enforced.** `glossary_preflight.py` step 6c guarantees the
+   adjudicator is *told* the rule (it refuses to dispatch a durable prompt that lacks
+   it), and `canon_validate._enforce_no_truncated_accepted()` refuses the answer if it
+   comes back wrong — a marker-bearing item with `disposition: "accepted"` is rejected
+   on BOTH batch paths, the `--check-batch` precheck and the `--merge-batches` write,
+   so it can never reach `entries{}`. The same `source_form` as `review_queue` still
+   passes: that asymmetry is the remedy, and `glossary_batch_plan.py` then excludes a
+   queued form from every later batch.
+
+   `canon_validate.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this moves
+   `plugin_bundle_hash` — but that field is one of the three inside the #491
+   **machinery-only carve-out** (`assemble.py`'s `SAFE_STALE_CARVEOUT_FIELDS`,
+   alongside `schema_hash` and `derivation_bundle_hash`), the set whose whole meaning
+   is "can never change what the prose should say". A converged segment whose only
+   drift is this field is admitted exactly like `converged`, expressly so that a
+   plugin upgrade cannot strand a finished book. **Nothing re-translates.** What does
+   move is resume identity: the next run in a refreshed root is a fresh `RUN_ID` with
+   `resume: false`.
+
+   In practice the trigger is not
+   hostile input but source boilerplate: measured over a live French Gutenberg book,
+   the single marker-bearing candidate was a 232-character all-caps run of the
+   licence block, extracted with `likely_name: true`.
+
+   **The dispatch prompt says so too.** `glossary-pass-wf.template.js` builds the
+   per-batch prompt, and both of its sentences about `name` now carry the caveat: the
+   field gloss no longer claims `name` is simply "the surface form as it appears in
+   the source text", and the `source_form` instruction says the marker travels with
+   the string and points at `glossary_TASK.md` for what that means. An earlier draft
+   of this release left both alone to avoid moving `plugin_bundle_hash` — that
+   reasoning was doubly wrong: the release moves that hash anyway (`canon_validate.py`
+   is a bundle member), and the field is inside the machinery-only carve-out, so
+   moving it re-translates nothing.
 
    In practice the trigger is not
    hostile input but source boilerplate: measured over a live French Gutenberg book,
