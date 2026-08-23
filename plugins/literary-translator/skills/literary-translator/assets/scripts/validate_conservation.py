@@ -391,8 +391,15 @@ def _load_json_artifact(path, label):
 
     #277 -- this load boundary catches the CLASS, not one member of it,
     following validate_assembled.py's own load_json (its R8-1 comment carries
-    the full reasoning). UnicodeDecodeError and json.JSONDecodeError are BOTH
-    ValueError subclasses, and json.loads() can additionally raise a BARE
+    the full reasoning). `UnicodeError`, not `UnicodeDecodeError`: read_text()
+    encodes the FILENAME before it opens anything, so a path carrying a lone
+    surrogate -- which `profile.schema.json` admits as a non-empty string and
+    PyYAML round-trips -- raises UnicodeEncodeError on the same line that
+    decoding the CONTENT raises UnicodeDecodeError. Naming one of the two
+    siblings was exactly this defect one level down, which is why the path is
+    reported with !r: repr escapes every surrogate, so the diagnostic cannot
+    fail the same way on its way to stderr. UnicodeDecodeError and
+    json.JSONDecodeError are BOTH ValueError subclasses, and json.loads() can additionally raise a BARE
     ValueError (an integer literal past sys.get_int_max_str_digits()) or a
     RecursionError (deeply nested JSON -- a RuntimeError subclass) that no
     narrower name covers. Both artifacts are operator-authored, so every one
@@ -408,8 +415,8 @@ def _load_json_artifact(path, label):
     other -- a second copy is the shape that reopens it."""
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ConservationError(f"could not read {label} {path}: {exc}")
+    except (OSError, UnicodeError) as exc:
+        raise ConservationError(f"could not read {label} {path!r}: {exc}")
     try:
         doc = json.loads(text)
     except (ValueError, RecursionError) as exc:
@@ -801,7 +808,7 @@ def run_wrapper_conservation(manifest):
         else None
     )
 
-    # #277 -- UnicodeDecodeError, not just OSError: the baseline is the one
+    # #277 -- UnicodeError, not just OSError: the baseline is the one
     # artifact an operator preserves by hand from some OTHER pre-wrap form
     # (SKILL.md's own example is hand-split `pdftotext -layout` output), and
     # this script reads it as UTF-8 without saying so anywhere the operator
@@ -809,8 +816,10 @@ def run_wrapper_conservation(manifest):
     # adversarial input.
     try:
         baseline_text = baseline_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ConservationError(f"could not read conservation baseline {baseline_path}: {exc}")
+    except (OSError, UnicodeError) as exc:
+        raise ConservationError(
+            f"could not read conservation baseline {baseline_path!r}: {exc}"
+        )
 
     line_patterns, omit_ranges = load_allowed_omissions(omissions_path)
 

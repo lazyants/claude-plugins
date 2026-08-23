@@ -1600,6 +1600,33 @@ def test_277_unparseable_json_artifact_exits_2(tmp_path, artifact, needle, paylo
     _assert_fatal_not_traceback(proc, needle, "is not valid JSON")
 
 
+# A lone surrogate is legal in a `profile.yml` string: `profile.schema.json`
+# asks only for a non-empty string, and PyYAML round-trips `"\uD800"`. It is
+# the PATH, not the file's bytes, so `read_text()` raises UnicodeEncodeError
+# while encoding the filename -- before it opens anything.
+@pytest.mark.parametrize("field,needle", [
+    ("baseline_path", "could not read conservation baseline"),
+    ("provenance_path", "could not read provenance map"),
+    ("allowed_omissions_path", "could not read allowed-omissions file"),
+])
+def test_277_unencodable_conservation_path_exits_2(tmp_path, field, needle):
+    """The read arms' sibling escape: UnicodeEncodeError on the FILENAME, on
+    the same `read_text()` line that UnicodeDecodeError covers for content.
+    Naming one of the two Unicode siblings is what left this open."""
+    root = make_root(tmp_path)
+    _wrapper_fixture_green(root)
+    conservation = {
+        "baseline_path": "baseline.txt",
+        "provenance_path": "provenance_map.json",
+        "allowed_omissions_path": "allowed_omissions.json",
+    }
+    conservation[field] = "\ud800"
+    write_profile(root, conservation=conservation)
+
+    proc = run_validate_conservation(root, "wrapper-conservation")
+    _assert_fatal_not_traceback(proc, needle)
+
+
 def test_277_unencodable_provenance_block_id_exits_2(tmp_path):
     """A lone surrogate escape survives json.loads and passes the non-empty-
     string check, then dies on the way OUT: json.dumps(ensure_ascii=False) ->
