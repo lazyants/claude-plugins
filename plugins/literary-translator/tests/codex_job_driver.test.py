@@ -4193,7 +4193,7 @@ def test_a_failing_ledger_write_does_not_change_the_job_outcome(tmp_path):
     a return to the old behaviour, never a new failure mode."""
     root, companion, node = build_root(tmp_path)
     # STDOUT, matching ledger_update.py's own emit_failure(): a stub that failed on stderr
-    # would bake in the stream-preference mistake _gate_output() exists to avoid.
+    # would bake in the stream-preference mistake _gate_rejection_text() (#399) avoids.
     (root / "scripts" / "ledger_update.py").write_text(
         "#!/usr/bin/env python3\nimport sys\nprint('{\"success\": false, \"error\": \"boom\"}')"
         "\nsys.exit(3)\n",

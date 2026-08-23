@@ -1729,3 +1729,72 @@ def test_the_envelope_lets_systemexit_through_untouched(tmp_path, monkeypatch):
         )
     else:
         raise AssertionError("SystemExit did not propagate at all")
+
+
+# ---------------------------------------------------------------------------
+# #398, PR #664 bot review: json.loads() does not reject every malformed input
+# with JSONDecodeError. Two candidate-controlled escapes reach a DIFFERENT
+# exception, and before this was closed both slipped past _load_json() into
+# _main_or_exit_2() -- reported as exit 2, i.e. an environment failure, so
+# codex_job.py left the segment recoverable and the same malformed translation
+# was paid for again on every run. That is precisely the loop #398 exists to
+# stop, reachable through the candidate the translator itself writes.
+#
+# Both thresholds below are measured on the interpreter this suite runs, not
+# taken from the review: 5000 digits raises ValueError; nesting parses fine at
+# 1e5 and raises RecursionError at 1e6.
+# ---------------------------------------------------------------------------
+def test_candidate_with_an_oversized_integer_literal_exits_1(tmp_path):
+    """A number past sys.get_int_max_str_digits() raises a plain ValueError, NOT
+    json.JSONDecodeError -- the escape the narrower except missed."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+    (root / "segments" / "seg01.draft.json").write_text(
+        '{"seg": "seg01", "blocks": {"p1": ' + "9" * 5000 + "}}", encoding="utf-8"
+    )
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 1, (
+        f"a candidate the decoder rejects is a CONTENT defect (exit 1); at exit 2 "
+        f"codex_job.py writes no terminal fragment and the segment loops\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "Traceback" not in result.stderr
+
+
+def test_candidate_with_pathological_nesting_exits_1(tmp_path):
+    """RecursionError is not a ValueError, so it needs its own arm."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+    depth = 1_000_000
+    (root / "segments" / "seg01.draft.json").write_text(
+        "[" * depth + "]" * depth, encoding="utf-8"
+    )
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 1, (
+        f"a candidate whose nesting exhausts the decoder is a CONTENT defect "
+        f"(exit 1)\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "Traceback" not in result.stderr
+
+
+def test_a_segpack_the_decoder_rejects_still_exits_2(tmp_path):
+    """The other side of the same widening: the identical decoder failure in the
+    SOURCE is an environment problem, and must not be pulled onto exit 1 along
+    with the candidate cases above."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+    (root / "segments" / "segpack_seg01.json").write_text(
+        '{"seg": ' + "9" * 5000 + "}", encoding="utf-8"
+    )
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 2, (
+        f"a segpack the decoder rejects is an environment failure (exit 2)\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "not readable JSON" in result.stderr

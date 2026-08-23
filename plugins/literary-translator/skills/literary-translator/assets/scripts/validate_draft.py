@@ -479,7 +479,21 @@ def _load_json(path, label):
         return None, f"{label} missing: {path}"
     try:
         return json.loads(path.read_text(encoding="utf-8")), None
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+        # ValueError, not json.JSONDecodeError: the decoder rejects some
+        # candidate-controlled input with a PLAIN ValueError rather than its own
+        # subclass -- an integer literal past sys.get_int_max_str_digits() is the
+        # reachable one (verified: a 5000-digit number raises
+        # "Exceeds the limit ... for integer string conversion"). RecursionError
+        # is the other escape, from pathological nesting (verified at 1e6 levels;
+        # 1e5 still parses). JSONDecodeError subclasses ValueError, so this stays
+        # a superset of what was caught before.
+        #
+        # Why it matters here specifically: both are defects in the CANDIDATE, and
+        # letting them escape to _main_or_exit_2() would report them as exit 2 --
+        # so codex_job.py would leave the segment recoverable and pay for the same
+        # malformed translation on every run, which is the failure #398 exists to
+        # stop.
         return None, f"{label} at {path} is not valid JSON: {exc}"
 
 
@@ -781,7 +795,12 @@ def _refuse_unless_segpack_readable(seg, segments_dir) -> None:
                f"defect in the candidate.")
     try:
         json.loads(sp.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+        # Same widened set as _load_json() above, for the same decoder escapes --
+        # but routed the OTHER way on purpose: a segpack this script cannot decode
+        # is a SOURCE problem, so it stays exit 2. Stated explicitly rather than
+        # left to _main_or_exit_2()'s envelope, so the classification is visible
+        # at the site that owns it.
         _fatal(f"segpack at {sp} is not readable JSON: {exc} -- this is an "
                f"environment failure, not a defect in the candidate.")
 
