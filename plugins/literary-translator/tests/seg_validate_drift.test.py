@@ -4,35 +4,34 @@ duplicated seg-id safety helper (issue #63).
 This plugin's "no shared lib between self-contained scripts" convention
 (see tests/seg_safety_source_and_workflow.test.py, tests/
 seg_safety_segpack.test.py) means the path/shell-safety contract for a
-segment id -- `_SEG_ID_RE` + `validate_seg()` -- is hand-copied into TEN
-scripts. The seg_safety_*.test.py suite proves each copy accepts/rejects
-the right *values*, but nothing asserts the copies' *source text* stays in
-sync -- a silent hand-edit to one copy (e.g. narrowing/widening the
-allowlist regex in cache_key.py without mirroring the change everywhere
-else) would pass every existing behavioral test for the nine UNTOUCHED
-scripts while quietly diverging. This file closes that gap.
+segment id -- `_SEG_ID_RE` + `validate_seg()` -- is hand-copied into
+several scripts under skills/literary-translator/assets/scripts/. The
+seg_safety_*.test.py suite proves each copy accepts/rejects the right
+*values*, but nothing asserts the copies' *source text* stays in sync -- a
+silent hand-edit to one copy (e.g. narrowing/widening the allowlist regex
+in cache_key.py without mirroring the change everywhere else) would pass
+every existing behavioral test for the UNTOUCHED scripts while quietly
+diverging. This file closes that gap.
 
-The 10 scripts (all under skills/literary-translator/assets/scripts/):
-cache_key.py, draft_ready.py, draft_sha1.py, ledger_update.py,
-validate_draft.py, select_segments.py, segpack.py, review_artifact_check.py,
-review_ready.py, codex_job.py. review_ready.py (1.2.0) was a PRE-EXISTING
-omission -- it carries the copy but `ALL_SCRIPTS` used to miss it; codex_job.py
-(1.4.7, #198) is the new W5 dispatch driver.
+NO COUNT AND NO ROSTER IS RESTATED IN THIS PROSE. `ALL_SCRIPTS` below is
+the one roster, and the census that keeps it honest is
+`test_roster_is_exactly_the_scripts_that_carry_the_copy`. A number written
+here could only drift out of agreement with that census silently -- which is
+the very failure this file exists to catch (#469).
 
-Reality is NOT "all 10 byte-identical" -- three groups (verified by reading
-every copy):
+Reality is NOT "every copy byte-identical" -- three groups (verified by
+reading every copy):
 
   1. `_SEG_ID_RE = re.compile(r"(?:FRONTBACK:)?[A-Za-z0-9_]+")` -- the
      load-bearing, path/shell-safety-critical allowlist literal -- IS
-     byte-identical across all 10. This is the highest-value invariant to
-     guard: it is the actual security boundary (see
+     byte-identical across every carrier. This is the highest-value
+     invariant to guard: it is the actual security boundary (see
      tests/seg_safety_source_and_workflow.test.py's module docstring for
      the vulnerability this regex closes), and it should never need a
      legitimate per-script variant.
-  2. `validate_seg()`'s function body is byte-identical across EIGHT scripts
-     (cache_key.py, draft_ready.py, draft_sha1.py, ledger_update.py,
-     validate_draft.py, segpack.py, review_ready.py, codex_job.py).
-  3. `select_segments.py`'s `validate_seg()` differs from that group of eight
+  2. `validate_seg()`'s function body is byte-identical across the bulk of
+     the carriers.
+  3. `select_segments.py`'s `validate_seg()` differs from that bulk group
      by a DOCSTRING LINE-WRAP ONLY -- the same words, rewrapped across
      lines differently. Its executable logic is identical. Normalizing
      docstring whitespace (collapsing all runs of whitespace to a single
@@ -66,52 +65,39 @@ SCRIPTS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scrip
 
 # Every script carrying a copy of the seg-id safety contract.
 #
-# THIS LIST IS NO LONGER MAINTAINED BY HAND ALONE. It was, and it silently
-# under-covered: when `reject_review.py` (#461) was added the roster held ten
-# entries while FOURTEEN scripts carried the copy -- so three omissions
-# (`backfill_ever_converged.py`, `resume_setup.py`,
-# `segment_dispatch_driver.py`) had been unchecked for several releases, and
-# a fourth was about to join them. That is the exact failure this file's own
-# docstring already records happening once before, which is what makes a
-# hand roster the wrong instrument: it fails SILENTLY and its green is
-# indistinguishable from coverage.
+# THIS LIST IS NOT MAINTAINED BY HAND ALONE, and it must not be: when
+# `reject_review.py` (#461) was added the roster was already missing three
+# carriers (`backfill_ever_converged.py`, `resume_setup.py`,
+# `segment_dispatch_driver.py`), unchecked for several releases, and a fourth
+# was about to join them. That is the exact failure this file's own docstring
+# already records happening once before, which is what makes a hand roster
+# the wrong instrument: it fails SILENTLY and its green is indistinguishable
+# from coverage. `test_roster_is_exactly_the_scripts_that_carry_the_copy`
+# below is what keeps this list honest.
 #
-# `test_roster_is_exactly_the_scripts_that_carry_the_copy` below now derives
-# the true population from the scripts directory and asserts this list equals
-# it, in BOTH directions. Adding a copy to a new script without listing it
-# here fails; listing a script that does not carry it fails too.
+# #469 closed the last gap. The three named above carried the copy with a
+# missing (`backfill_ever_converged.py`, `segment_dispatch_driver.py`) or
+# reworded (`resume_setup.py`, which had dropped "absolute paths," from the
+# canonical sentence) docstring; their executable logic had never diverged.
+# They were parked in a `KNOWN_UNENROLLED` list the census accepted as the
+# only permitted excuse. All three now carry the canonical docstring and are
+# enrolled here, so that escape list is GONE rather than left behind empty --
+# an empty excuse list is a standing invitation to refill it.
 ALL_SCRIPTS = [
+    "backfill_ever_converged.py",
     "cache_key.py",
+    "codex_job.py",
     "draft_ready.py",
     "draft_sha1.py",
     "ledger_update.py",
     "reject_review.py",
-    "validate_draft.py",
-    "select_segments.py",
-    "segpack.py",
+    "resume_setup.py",
     "review_artifact_check.py",
     "review_ready.py",
-    "codex_job.py",
-]
-
-# Scripts that DO carry the copy and are deliberately NOT enrolled above yet.
-#
-# Measured when #461 added `reject_review.py`: fourteen scripts carry
-# `_SEG_ID_RE` + `def validate_seg`, while the roster held ten. Enrolling
-# these three fails the body comparison TODAY -- their `validate_seg` has no
-# docstring at all, so they have genuinely drifted from the canonical copy
-# and have been unchecked for several releases.
-#
-# They are NAMED here rather than enrolled because repairing three unrelated
-# scripts would widen a release whose subject is the rejection record, and a
-# silent omission is exactly what this file exists to prevent. The census
-# below treats this list as the only permitted excuse: a carrier in NEITHER
-# list fails, so the next omission cannot be silent even while these stay
-# open. Enrolling them is follow-up work, not an oversight.
-KNOWN_UNENROLLED = [
-    "backfill_ever_converged.py",
-    "resume_setup.py",
     "segment_dispatch_driver.py",
+    "segpack.py",
+    "select_segments.py",
+    "validate_draft.py",
 ]
 
 
@@ -119,42 +105,57 @@ def test_roster_is_exactly_the_scripts_that_carry_the_copy():
     """CENSUS, in BOTH directions, because a hand roster fails silently.
 
     Derives the true carrier population from the scripts directory rather
-    than trusting either list above: a script carries the contract when it
+    than trusting the roster above: a script carries the contract when it
     defines `validate_seg` AND references `_SEG_ID_RE`. Asserts that set
-    equals ALL_SCRIPTS + KNOWN_UNENROLLED exactly.
+    equals ALL_SCRIPTS exactly.
 
     Adding a copy to a new script without listing it fails here. Listing a
     script that no longer carries one fails here too -- a roster entry for a
     file that dropped the copy is a check that silently stopped checking,
-    which is the same defect wearing the other face."""
-    import ast as _ast
+    which is the same defect wearing the other face.
 
+    BOUND, stated rather than closed: `validate_seg` must be at MODULE level
+    for a script to count as a carrier, but `_SEG_ID_RE` is only required as
+    a substring of the source. A script defining the canonical function at
+    module level while assigning the regex inside some OTHER function would
+    therefore be censused, and would compare equal in every check below,
+    while raising NameError the first time validate_seg() ran. That shape is
+    not defended here because it is not silent: the seg_safety_*.test.py
+    suite exercises each copy's actual behaviour and would fail loudly on it,
+    and no carrier is written that way (measured: all of them assign at module
+    level). Tightening the predicate would trade a loud failure this census
+    does not need to catch for a second way to write it wrong."""
     carriers = set()
     for path in sorted(SCRIPTS_DIR.glob("*.py")):
         source = path.read_text(encoding="utf-8")
         if "_SEG_ID_RE" not in source:
             continue
-        tree = _ast.parse(source)
+        tree = ast.parse(source)
         if any(
-            isinstance(node, _ast.FunctionDef) and node.name == "validate_seg"
+            isinstance(node, ast.FunctionDef) and node.name == "validate_seg"
             for node in tree.body
         ):
             carriers.add(path.name)
 
-    listed = set(ALL_SCRIPTS) | set(KNOWN_UNENROLLED)
-    assert carriers == listed, (
-        f"the seg-id contract census disagrees with the rosters.\n"
-        f"  carries the copy but is listed nowhere: {sorted(carriers - listed)}\n"
-        f"  listed but does not carry the copy:     {sorted(listed - carriers)}\n"
-        f"A script carrying this contract must be enrolled in ALL_SCRIPTS, or "
-        f"named in KNOWN_UNENROLLED with the reason it cannot be yet."
+    listed = set(ALL_SCRIPTS)
+    assert carriers, (
+        "the census found NO carrier of the seg-id contract in "
+        f"{SCRIPTS_DIR}. This fires only when ALL_SCRIPTS has ALSO been "
+        "emptied -- two vacuities that agree with each other, which the "
+        "set comparison below would report as a clean sweep. A merely "
+        "moved or renamed SCRIPTS_DIR never reaches here: the existence "
+        "loop under the roster fails at import time instead."
     )
-    assert not (set(ALL_SCRIPTS) & set(KNOWN_UNENROLLED)), (
-        "a script cannot be both enrolled and excused"
+    assert carriers == listed, (
+        f"the seg-id contract census disagrees with the roster.\n"
+        f"  carries the copy but is not enrolled: {sorted(carriers - listed)}\n"
+        f"  enrolled but does not carry the copy: {sorted(listed - carriers)}\n"
+        f"A script carrying this contract must be enrolled in ALL_SCRIPTS. "
+        f"There is deliberately no excuse list to park one in (#469)."
     )
 
 # The canonical copy the function-body check compares everything else
-# against. Arbitrary choice among the byte-identical group of six.
+# against. Arbitrary choice among the byte-identical bulk group.
 CANONICAL_SCRIPT = "cache_key.py"
 
 # review_artifact_check.py's validate_seg() is a documented, deliberate
@@ -256,8 +257,8 @@ def _executable_body_dump(func_node: ast.FunctionDef) -> str:
 
 # ---------------------------------------------------------------------------
 # 1. Universal invariant, NO exemption: the allowlist regex literal itself.
-#    This is the security-critical bit -- every one of the 8 scripts must
-#    carry the exact same `_SEG_ID_RE` pattern.
+#    This is the security-critical bit -- every enrolled script must
+#    carry the exact same `_SEG_ID_RE` pattern, with no exemption.
 # ---------------------------------------------------------------------------
 
 
@@ -276,7 +277,7 @@ def test_seg_id_re_assignment_matches_canonical(script_name):
 
 def test_seg_id_re_pattern_is_the_expected_allowlist():
     """Pins the canonical literal itself, so a drift that moved in lockstep
-    across all 8 scripts (passing the test above) still gets caught."""
+    across every carrier (passing the test above) still gets caught."""
     canonical = _seg_id_re_assign_source(CANONICAL_SCRIPT)
     assert canonical == '_SEG_ID_RE = re.compile(r"(?:FRONTBACK:)?[A-Za-z0-9_]+")', (
         f"canonical `_SEG_ID_RE` pattern has changed: {canonical!r}"
@@ -344,13 +345,14 @@ def test_review_artifact_check_is_the_only_function_body_exemption():
 #    (PLAN #198 §3), not merely listed in this test's ALL_SCRIPTS. The two are
 #    DISTINCT lists: ALL_SCRIPTS enumerates the scripts carrying the seg-id
 #    SAFETY copy; PLUGIN_BUNDLE_MEMBERS is the gating-hash membership tuple in
-#    cache_key.py (which includes non-copy-carriers like canon_validate.py /
-#    resume_setup.py + the two workflow templates, and EXCLUDES copy-carriers
-#    like draft_ready.py). A named assertion here -- parsed from
-#    cache_key.py SOURCE, never a doc/test-list echo that could drift in
-#    lockstep -- catches the failure mode where codex_job.py is added to
-#    ALL_SCRIPTS but never registered as a bundle member, so an edit to the W5
-#    dispatch driver would silently NOT flip plugin_bundle_hash.
+#    cache_key.py. Neither list contains the other: the bundle holds
+#    non-carriers (canon_validate.py, glossary_batch_plan.py, the two workflow
+#    templates) and omits carriers (draft_ready.py), while some scripts are
+#    both (resume_setup.py, enrolled here by #469). A named assertion here --
+#    parsed from cache_key.py SOURCE, never a doc/test-list echo that could
+#    drift in lockstep -- catches the failure mode where codex_job.py is added
+#    to ALL_SCRIPTS but never registered as a bundle member, so an edit to the
+#    W5 dispatch driver would silently NOT flip plugin_bundle_hash.
 # ---------------------------------------------------------------------------
 
 

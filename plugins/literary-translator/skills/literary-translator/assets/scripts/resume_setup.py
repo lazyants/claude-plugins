@@ -400,8 +400,8 @@ _SEG_ID_RE = re.compile(r"(?:FRONTBACK:)?[A-Za-z0-9_]+")
 
 def validate_seg(seg):
     """Return an error string if `seg` is not a path/shell-safe segment id,
-    else None. Allows ONLY [A-Za-z0-9_] with an optional literal
-    'FRONTBACK:' prefix -- rejecting empties, path separators, '..', and
+    else None. Allows ONLY [A-Za-z0-9_] with an optional literal 'FRONTBACK:'
+    prefix -- rejecting empties, path separators, '..', absolute paths, and
     every shell metacharacter."""
     if not isinstance(seg, str) or not seg:
         return "segment id must be a non-empty string."
