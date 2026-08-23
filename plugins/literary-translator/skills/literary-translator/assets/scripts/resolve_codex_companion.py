@@ -145,16 +145,32 @@ def default_glob_tiers():
     real, independent `plugins/` directory), so it enumerates several distinct files rather
     than several names for one.
 
-    Returns `(tiers, problem)`; exactly one of the two is None. A profile that cannot be
-    identified is reported, never quietly dropped to the cross-profile tier.
+    Returns `(tiers, problem, note)`. `problem` aborts; `note` is extra context for the
+    not-found message when a tier had to be left out. A profile that cannot be identified is
+    reported, never quietly dropped to the cross-profile tier.
+
+    The cross-profile ROOT needs the same absoluteness guard the running profile got, for
+    the same reason: `os.path.expanduser("~")` returns its argument UNCHANGED when HOME is
+    unset or relative, so the tier becomes a cwd-relative glob and `glob` will happily bind
+    a foreign companion found under whatever directory this script was launched from. That
+    tier is therefore dropped rather than searched -- dropping it can only ever REFUSE,
+    never bind the wrong file, so unlike an unusable running profile it does not have to
+    abort a run whose own profile tier can still answer.
     """
     running, problem = running_profile_dir()
     if problem:
-        return None, problem
+        return None, problem, None
     home = os.path.expanduser("~")
-    cross_profile = [os.path.join(home, ".claude*", "plugins", "cache", "openai-codex",
-                                  "**", "codex-companion.mjs")]
-    return [[_store_glob(running)], cross_profile], None
+    tiers = [[_store_glob(running)]]
+    if not os.path.isabs(home):
+        return tiers, None, (
+            "the cross-profile fallback was NOT searched: HOME is unset or relative (%r), "
+            "so `~/.claude*` is not an absolute root and globbing it would resolve against "
+            "this script's cwd and could bind a FOREIGN profile's companion (#287)" % home
+        )
+    tiers.append([os.path.join(home, ".claude*", "plugins", "cache", "openai-codex",
+                               "**", "codex-companion.mjs")])
+    return tiers, None, None
 
 
 def _version_key(path):
@@ -215,7 +231,8 @@ def companion_runnable(node, companion, root, timeout_sec):
     return True, None
 
 
-def resolve(durable_root, glob_tiers, node="node", timeout_sec=DEFAULT_STATUS_TIMEOUT_SEC):
+def resolve(durable_root, glob_tiers, node="node", timeout_sec=DEFAULT_STATUS_TIMEOUT_SEC,
+            note=None):
     """Return (raw_path, None) on success or (None, reason).
 
     `glob_tiers` is an ORDERED list of glob-lists. The first tier that yields any candidate
@@ -244,9 +261,10 @@ def resolve(durable_root, glob_tiers, node="node", timeout_sec=DEFAULT_STATUS_TI
         return chosen, None
     # Reachable only when EVERY tier hit the `continue` above, so the tiers
     # searched are always all of them -- no accumulator needed to say so.
-    return None, "no codex-companion.mjs found under: %s" % "; ".join(
-        pattern for tier in glob_tiers for pattern in tier
-    )
+    searched = "; ".join(pattern for tier in glob_tiers for pattern in tier)
+    if note:
+        return None, "no codex-companion.mjs found under: %s (%s)" % (searched, note)
+    return None, "no codex-companion.mjs found under: %s" % searched
 
 
 def main(argv=None):
@@ -270,14 +288,15 @@ def main(argv=None):
     # it. The suite relies on that -- it drives this script with --search-glob precisely so
     # the real ~/.claude* store is never touched.
     if args.search_glob:
-        tiers, problem = [args.search_glob], None
+        tiers, problem, note = [args.search_glob], None, None
     else:
-        tiers, problem = default_glob_tiers()
+        tiers, problem, note = default_glob_tiers()
     if problem:
         print("resolve_codex_companion: %s" % problem, file=sys.stderr)
         return 1
     timeout_sec = args.timeout_sec if args.timeout_sec > 0 else DEFAULT_STATUS_TIMEOUT_SEC
-    raw, reason = resolve(args.durable_root, tiers, node=args.node, timeout_sec=timeout_sec)
+    raw, reason = resolve(args.durable_root, tiers, node=args.node, timeout_sec=timeout_sec,
+                          note=note)
     if raw is None:
         print("resolve_codex_companion: %s" % reason, file=sys.stderr)
         return 1

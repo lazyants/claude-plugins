@@ -510,9 +510,27 @@ def test_default_glob_tiers_reports_the_problem_instead_of_dropping_the_tier(mon
     tier here reads as an ordinary one-tier resolution downstream, and resolve()
     would then bind a FOREIGN profile's companion with exit 0."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "relative/dir")
-    tiers, problem = rcc.default_glob_tiers()
+    tiers, problem, _note = rcc.default_glob_tiers()
     assert tiers is None, tiers
     assert problem and "CLAUDE_CONFIG_DIR" in problem, problem
+
+
+def test_a_relative_home_drops_the_cross_profile_tier_rather_than_globbing_it(
+        monkeypatch, tmp_path):
+    """`os.path.expanduser("~")` returns its argument UNCHANGED when HOME is unset
+    or relative, so the cross-profile tier would become a cwd-relative glob and
+    bind whatever foreign companion sits under the launch directory. Dropping the
+    tier can only refuse, never bind wrong, so the running profile's own tier is
+    kept and the reason is carried into the not-found message."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "active"))
+    monkeypatch.setenv("HOME", "relative-home")
+    tiers, problem, note = rcc.default_glob_tiers()
+    assert problem is None, problem
+    assert len(tiers) == 1, tiers
+    assert str(tmp_path / "active") in tiers[0][0], tiers
+    assert note and "HOME" in note, note
+    _got, reason = rcc.resolve(str(tmp_path), tiers, node="/nonexistent", note=note)
+    assert "HOME" in reason, reason
 
 
 # Kept at the TRUE END of the file. Mid-file it exits before every definition
