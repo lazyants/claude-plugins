@@ -61,9 +61,14 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.52.0 (#530 -- an eligible unit left out of --only-segs) per the
-# maintenance contract above. This rotation inherited an already-empty map and
-# left it empty: the 1.52.0 entry cites NO `file.ext:NNN`.
+# Rewritten for 1.55.0 (#512 -- the glossary rule's worked examples stop
+# spelling their answers in one project's target language) per the maintenance
+# contract above. This rotation inherited an already-empty map and left it
+# empty: the entry it was rotated for was written deliberately without any
+# `name.ext:NNN` citation, naming files and functions in prose instead, so
+# there was nothing to anchor and nothing to retire. The rotation before it,
+# for 1.52.0 (#530 -- an eligible unit left out of --only-segs), likewise
+# inherited an empty map and left it empty.
 #
 # Phrase every future note this way -- in the PAST tense, about what this
 # rotation did to what it inherited, never in the present tense about what the
