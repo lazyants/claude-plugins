@@ -193,13 +193,14 @@ def _local_dict_len(filename, funcname, varname):
 
 
 # Rewritten for 1.67.0 (#520), per the maintenance contract above. The rotation
-# this replaces was written for 1.65.0 (#510) and declared nothing, and neither
-# did the ones before it (1.63.0, and 1.62.0 which retired the last inherited
-# row). Several consecutive empty rotations is exactly the shape the sibling
-# citation guard warns about -- an empty list is indistinguishable from an
-# unrotated one -- so this comment is written about THIS entry rather than
-# inherited, and states below why each quantity 1.67.0 asserts is undeclarable
-# here. `_files_defining`,
+# this replaces was 1.66.0's (#541) and it declared ONE row -- "30 new test
+# functions across three files" -- which this rotation RETIRED, because 1.67.0
+# became the newest entry when this branch rebased onto a main that had already
+# shipped 1.66.0, and this guard checks the newest entry only. The list is empty
+# as a result, never by inheritance. An empty list is indistinguishable from an
+# unrotated one, which is what the sibling citation guard warns about, so this
+# comment is written about THIS entry and states below why each quantity 1.67.0
+# asserts is undeclarable here. `_files_defining`,
 # `_local_dict_len`, `_tuple_len` and `_test_function_count` are kept unused,
 # as earlier releases kept them, for the next entry that cites their class.
 #

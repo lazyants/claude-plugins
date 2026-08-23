@@ -62,9 +62,13 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
 # Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic
-# style bans) per the maintenance contract above. This rotation inherited an
-# already-empty map and left it empty: the 1.67.0 entry cites no `name.ext:NNN`
-# anywhere. It names plenty of artefacts -- `final_audit.py`,
+# style bans) per the maintenance contract above. This rotation inherited the
+# NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:143-171`,
+# `cache_key.py:178-199` and `resume_setup.py:723-740` -- and RETIRED all three,
+# because 1.67.0 became the newest entry when this branch rebased onto a main
+# that had already shipped 1.66.0, and this guard checks the newest entry only.
+# The map is empty as a result, not by inheritance: the 1.67.0 entry cites no
+# `name.ext:NNN` anywhere. It names plenty of artefacts -- `final_audit.py`,
 # `validate_draft.py`, `draft.schema.json`, `profile.yml`,
 # `validate_conservation.py`, `style_bible.md` -- but every claim made about
 # them is BEHAVIOURAL: what the scan reads, which sections it walks, which hash
