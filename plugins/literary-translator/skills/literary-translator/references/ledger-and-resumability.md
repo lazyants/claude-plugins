@@ -720,33 +720,43 @@ scripts into `${durable_root}/scripts/`.
 **A `converged` count is bundle-relative.** A release that edits any
 `PLUGIN_BUNDLE_MEMBERS` entry moves `plugin_bundle_hash` — most do; a docs-only
 one does not — and the Step 0a refresh that installs it then flips the whole
-converged corpus to `stale` at once, with no draft byte touched. The
-ledger's `converged` tally therefore FALLS as such
-releases land while the translation itself never regresses — measured on one live book
-as 4 → 2 → 1 across three releases in three days, and as 75 `stale` / 0
-`converged` on another (#482) — because what it counts is "converged under the
-CURRENT bundle", not how much of the book has been reviewed. Since 1.25.0
-(#491) that population blocks nothing it used to: the always-on machinery-only
-carve-out lets `assemble.py` and `final_audit.py` treat such a record like
-`converged` (its exact conditions — machinery-only moved fields, an
-`.ever_converged.<seg>` sentinel that is not absent, and the unrelaxed
-draft-sha1 match — live in `references/assembly-and-output.md`), and
-`final_audit.py` prints `stale_previously_converged=` beside its completeness
-counts. That carve-out states what the two gates DO. It is not a judgement that
-the release changed nothing a translator was told — `PLUGIN_BUNDLE_MEMBERS`
-includes the two workflow templates, and their text is where the translate and
-review prompts are built — and no gate makes that judgement: a claim under
-`--from-converged` is in fact REFUSED for a unit whose draft is unchanged and
-whose every moved field is machinery-only, on the ground that assembly needs
-nothing from it. So running converged units against a changed instruction is an
-operator decision to authorize a fresh pass, at the cost W5's own re-dispatch
-flag describes. That pair — the completeness verdict and its carve-out count — is what
-answers "is this book done"; the raw `converged` tally is not, and neither is a
-count of `.ever_converged` sentinels (those are backfilled history, see
-`SKILL.md`'s `backfill_ever_converged.py` step). `select_segments.py`'s
-classification report does not split the bucket either — its
+converged corpus to `stale` at once, with no draft byte touched. The tally
+therefore falls at each such release, while the translation never regresses and
+work continues between them: one live book read 4 → 2 → 1 over three releases
+in three days, another 75 `stale` / 0 `converged` on a tree whose work was
+intact (#482). What it counts is "converged under the CURRENT bundle", not how
+much of the book has been reviewed.
+
+Since 1.25.0 (#491) that population no longer blocks either gate that answers
+"is this book done": the always-on machinery-only carve-out lets `assemble.py`
+and `final_audit.py` treat such a record like `converged` — its conditions,
+including the draft-sha1 match that no carve-out relaxes, live in
+`references/assembly-and-output.md` — and `final_audit.py` prints
+`stale_previously_converged=` beside its completeness counts. That pair is the
+answer. The raw `converged` tally is not, and neither is a count of
+`.ever_converged` sentinels: the sentinel is written at convergence and never
+removed by any ledger write, so it answers "did this unit ever converge", a
+different question.
+
+W5 dispatch still refuses this population, and that is where a fallen tally
+costs something. A claim under `--from-converged` is refused for it (W5 owns
+that rule), and a plain re-dispatch FATALs on the `.ever_converged` sentinel;
+`--classify-only` reads the classification without translating. Nor is the
+carve-out a judgement that the release changed nothing a translator was told —
+`PLUGIN_BUNDLE_MEMBERS` includes the two workflow templates, and their text is
+where the translate and review prompts are built — and no gate makes that
+judgement. Running these units against a changed instruction therefore means
+authorizing `--allow-retranslate-converged`, which costs two things rather than
+one: the converged units retranslate, AND every not-yet-converged draft in the
+same selection is orphaned by the fresh RUN_ID and retranslates too, discarding
+any fix applied by hand. The flag's own refusal text states both.
+
+`select_segments.py`'s classification report does not split the bucket — its
 `counts`/`ids_by_category` are keyed by the six flat categories — so on that
-surface the distinction lives in each entry's own `mismatched_fields`.
+surface the distinction lives in each entry's `stale_reason` and
+`mismatched_fields`, read together. A unit stale for draft drift alone carries
+an EMPTY `mismatched_fields`, which satisfies "every moved field is
+machinery-only" vacuously while being exactly the population assembly refuses.
 
 `resumeFromRunId` is explicitly scoped to continuing the same interrupted
 batch run. It is never the same mechanism as the ledger-driven
@@ -1103,9 +1113,10 @@ For context, `select_segments.py`'s full classification set (see also
 `SKILL.md` W5) is: `reusable` (converged, every cache-key field matches,
 draft sha1 still matches `reviewed_draft_sha1` — skip), `stale` (converged
 but a cache-key field mismatches or the draft sha1 no longer matches —
-needs a fresh pass, though a `stale` whose every moved field is
-machinery-only ships without one (see the bundle-hash section above);
-records which trigger fired in a `stale_reason`
+needs a fresh pass, though a `stale` whose draft still matches
+`reviewed_draft_sha1` and whose every moved field is machinery-only ships
+without one (see the bundle-hash section above); records which trigger fired
+in a `stale_reason`
 sub-field: `cache_key_mismatch` and/or `draft_sha1_mismatch`; a
 `draft_sha1_mismatch`-triggered stale is never reclassified as
 `blocked_needs_regeneration`, because that gate is only for the four
