@@ -9,10 +9,14 @@ unusable companion / unsafe path), so the orchestrator ABORTS W5 (codex is the r
 engine, R1) instead of silently hanging with no draft.
 
 LOCATION-INDEPENDENT: this file reads no `__file__` and imports nothing plugin-specific.
-Its entire search is rooted at `os.path.expanduser("~")` against
+Its DEFAULT search (`--search-glob` overrides it, and can root it anywhere) is
+rooted at the RUNNING Claude config profile (`CLAUDE_CONFIG_DIR`, else `~/.claude`)
+and then at `os.path.expanduser("~")` against
 `~/.claude*/plugins/cache/openai-codex/**/codex-companion.mjs` -- a DIFFERENT plugin's own
 install cache, globbed identically regardless of where this file happens to be running
-from. It is therefore copied to `${durable_root}/scripts/` by Step 0a like every other
+from. Its own location never enters that search, which is the property the copy rule below
+rests on; the search root is an ENVIRONMENT fact, never `__file__`. It is therefore
+copied to `${durable_root}/scripts/` by Step 0a like every other
 self-anchored script, and BOTH call sites are legitimate: SKILL.md's W5 instantiation step
 (1.4.7) runs the PLUGIN copy, because the orchestrating session already holds
 `{{PLUGIN_ROOT}}` at that point, while segment_dispatch_driver.py's own dispatch path runs
@@ -36,9 +40,26 @@ per-machine ENVIRONMENT fact, deliberately kept out of every bundle hash and out
 resume digest (see references/ledger-and-resumability.md).
 
 Steps:
-  1. Enumerate installed codex-companion.mjs under ~/.claude*/plugins/cache/openai-codex/**
-     and pick the newest by SEMANTIC version of the .../codex/<ver>/... path segment
-     (numeric, not lexical -- 1.0.10 > 1.0.9).
+  1. Enumerate installed codex-companion.mjs in the RUNNING profile's own store first
+     (`$CLAUDE_CONFIG_DIR`, else `~/.claude`), falling back to
+     ~/.claude*/plugins/cache/openai-codex/** only when that profile holds none; within
+     whichever tier answers, pick the newest by SEMANTIC version of the .../codex/<ver>/...
+     path segment (numeric, not lexical -- 1.0.10 > 1.0.9).
+
+     WHY THE PROFILE COMES FIRST (#287). Each profile now owns a REAL, independent
+     `plugins/` directory -- the `skills`/`memory`/`agents` trees stay shared symlinks, but
+     `plugins/` does not. A comment here used to assert the opposite ("shares one symlinked
+     plugins store"), and that false premise was the entire reason a cross-profile tie-break
+     was considered harmless: it was read as picking between four NAMES for one file. It is
+     picking between four independent files. Measured 2026-07-22 in this operator's
+     environment: eight candidates across `.claude`, `.claude2`, `.claude3` and `.claude-bm`,
+     the four 1.0.6 copies tying on version, `.claude3` winning on LEXICAL PATH ORDER while
+     the session ran under `.claude2`. Consequences that needed no attacker: a
+     `claude plugin update codex@openai-codex` in ANY profile silently rebinds W5 in all of
+     them, and an operator PINNING an older companion in the active profile is silently
+     defeated by newest-wins across foreign ones. The running profile now wins OUTRIGHT --
+     even over a newer foreign version, because an explicit local pin is a decision and a
+     foreign profile's contents are not.
   2. Injection-safe path handling: require an ABSOLUTE path whose basename is
      codex-companion.mjs; REJECT only a single-quote / any control char / newline / NUL
      (the two carriers: a single-quoted shell arg + a json.dumps JS literal). Spaces and
@@ -64,12 +85,107 @@ DEFAULT_STATUS_TIMEOUT_SEC = 30
 _VER_RE = re.compile(r"[/\\]openai-codex[/\\]codex[/\\]([^/\\]+)[/\\]")
 
 
-def default_globs():
+def running_profile_dir():
+    """The Claude config profile directory this process is running under, or None if
+    there is no usable one.
+
+    MIRRORS THE CLI'S OWN EXPRESSION AND ADDS NOTHING. The installed `claude` binary
+    computes `CLAUDE_CONFIG_DIR ?? path.join(homedir(), ".claude")` -- nullish, so only an
+    ABSENT variable falls back to `~/.claude`, and a present value is used VERBATIM: no
+    whitespace trimming, no `~` expansion. Every normalization added here would be a silent
+    divergence from the authority this claims to follow, and each one can name a DIFFERENT
+    directory than the session actually runs in -- which is the whole defect class (#287).
+
+    Returns `(config_dir, problem)`; exactly one of the two is None. A non-ABSOLUTE value
+    is a problem, NOT a skipped tier. Globbing a relative value would resolve it against
+    THIS script's cwd, which is not the cwd the CLI resolved it against -- but skipping the
+    tier and letting the cross-profile fallback answer is no better: it silently binds a
+    FOREIGN profile's companion, which is precisely the defect this preference exists to
+    stop. It is also the fail-fast contract `resolve()` states below: a tier is skipped only
+    when it holds ZERO CANDIDATES, never because validating it failed. So the caller aborts
+    with this reason instead.
+    """
+    raw = os.environ.get("CLAUDE_CONFIG_DIR")
+    if raw is None:
+        default = os.path.join(os.path.expanduser("~"), ".claude")
+        if not os.path.isabs(default):
+            return None, ("CLAUDE_CONFIG_DIR is unset and the ~/.claude fallback did not "
+                          "expand to an absolute path (%r) -- HOME is unset or relative, "
+                          "so the running Claude config profile cannot be identified"
+                          % default)
+        return default, None
+    if not os.path.isabs(raw):
+        return None, ("CLAUDE_CONFIG_DIR is set to a non-absolute path (%r), so the running "
+                      "Claude config profile cannot be identified. Resolving it against "
+                      "this script's cwd would name a different directory than the CLI "
+                      "resolved it against, and falling back across profiles would bind a "
+                      "FOREIGN profile's companion (#287). Set it to an absolute path, or "
+                      "unset it to use ~/.claude." % raw)
+    return raw, None
+
+
+def _store_glob(root, profile_pattern=None):
+    """The openai-codex install-cache glob under one root. THE ONLY PLACE A ROOT BECOMES A
+    PATTERN -- both tiers go through here, and every root-validation rule lives here once.
+
+    Three rounds of review found three different ways a root reached `glob` unvalidated, one
+    property at a time, because the running-profile root was built here while the
+    cross-profile root was assembled inline at the call site. A second construction path is
+    what made each of those a separate defect instead of one; there is now no second path.
+
+    `glob.escape` is load-bearing, not defensive noise: BOTH roots are operator-authored
+    (`CLAUDE_CONFIG_DIR`, and `HOME` behind `expanduser`), and a legitimate one containing
+    `[`, `*` or `?` would otherwise be read as a PATTERN and could match a DIFFERENT
+    directory's store -- reproducing the very binding this preference exists to stop.
+    `profile_pattern` is the ONE deliberately unescaped segment (`.claude*` for the
+    cross-profile tier); the running-profile tier passes none, because its root already IS
+    the profile. The `**` is appended AFTER the escape, so it stays recursive.
+
+    Callers must pass an ABSOLUTE root -- `root_problem()` is the check, and both call sites
+    run it first. Asserted here too, since a relative root silently becomes a cwd-relative
+    glob rather than failing.
+    """
+    assert os.path.isabs(root), "root must be absolute, got %r" % (root,)
+    parts = [glob.escape(root)]
+    if profile_pattern is not None:
+        parts.append(profile_pattern)
+    parts += ["plugins", "cache", "openai-codex", "**", "codex-companion.mjs"]
+    return os.path.join(*parts)
+
+
+def default_glob_tiers():
+    """Ordered tiers: the RUNNING profile's own store first, then every profile.
+
+    The cross-profile tier is unchanged from before #287 and is deliberately still a
+    `.claude*` wildcard: profiles no longer share one symlinked plugins store (each owns a
+    real, independent `plugins/` directory), so it enumerates several distinct files rather
+    than several names for one.
+
+    Returns `(tiers, problem, note)`. `problem` aborts; `note` is extra context for the
+    not-found message when a tier had to be left out. A profile that cannot be identified is
+    reported, never quietly dropped to the cross-profile tier.
+
+    The cross-profile ROOT needs the same absoluteness guard the running profile got, for
+    the same reason: `os.path.expanduser("~")` returns its argument UNCHANGED when HOME is
+    unset or relative, so the tier becomes a cwd-relative glob and `glob` will happily bind
+    a foreign companion found under whatever directory this script was launched from. That
+    tier is therefore dropped rather than searched -- dropping it can only ever REFUSE,
+    never bind the wrong file, so unlike an unusable running profile it does not have to
+    abort a run whose own profile tier can still answer.
+    """
+    running, problem = running_profile_dir()
+    if problem:
+        return None, problem, None
     home = os.path.expanduser("~")
-    # Every Claude config profile (~/.claude, ~/.claude2, ~/.claude-bm, ...) shares one
-    # symlinked plugins store, but glob each so a non-symlinked layout is still covered.
-    return [os.path.join(home, ".claude*", "plugins", "cache", "openai-codex",
-                         "**", "codex-companion.mjs")]
+    tiers = [[_store_glob(running)]]
+    if not os.path.isabs(home):
+        return tiers, None, (
+            "the cross-profile fallback was NOT searched: HOME is unset or relative (%r), "
+            "so `~/.claude*` is not an absolute root and globbing it would resolve against "
+            "this script's cwd and could bind a FOREIGN profile's companion (#287)" % home
+        )
+    tiers.append([_store_glob(home, profile_pattern=".claude*")])
+    return tiers, None, None
 
 
 def _version_key(path):
@@ -130,37 +246,72 @@ def companion_runnable(node, companion, root, timeout_sec):
     return True, None
 
 
-def resolve(durable_root, globs, node="node", timeout_sec=DEFAULT_STATUS_TIMEOUT_SEC):
-    """Return (raw_path, None) on success or (None, reason)."""
-    candidates = enumerate_companions(globs)
-    if not candidates:
-        return None, "no codex-companion.mjs found under: %s" % "; ".join(globs)
-    chosen = pick_newest(candidates)
-    unsafe = path_is_safe(chosen)
-    if unsafe:
-        return None, "unsafe companion path (%s): %s" % (unsafe, chosen)
-    okrun, why = companion_runnable(node, chosen, durable_root, timeout_sec)
-    if not okrun:
-        return None, why
-    return chosen, None
+def resolve(durable_root, glob_tiers, node="node", timeout_sec=DEFAULT_STATUS_TIMEOUT_SEC,
+            note=None):
+    """Return (raw_path, None) on success or (None, reason).
+
+    `glob_tiers` is an ORDERED list of glob-lists. The first tier that yields any candidate
+    decides; `pick_newest()` then chooses within THAT tier, so a foreign profile's newer
+    companion never outranks the running profile's own.
+
+    A TIER FALLS THROUGH ONLY ON ZERO CANDIDATES -- NEVER ON A VALIDATION FAILURE. Once a
+    tier yields candidates, an unsafe path or a failing `status` call ABORTS with that
+    reason; the next tier is not consulted. Retrying the cross-profile tier there would
+    hand back a green run on a foreign binary, which is the defect this preference exists
+    to stop, one step later (#287). It is also the pre-existing fail-fast contract:
+    segment_dispatch_driver.py turns any nonzero exit from this script into
+    `fatal(..., exit_code=2)`.
+    """
+    for tier in glob_tiers:
+        candidates = enumerate_companions(tier)
+        if not candidates:
+            continue
+        chosen = pick_newest(candidates)
+        unsafe = path_is_safe(chosen)
+        if unsafe:
+            return None, "unsafe companion path (%s): %s" % (unsafe, chosen)
+        okrun, why = companion_runnable(node, chosen, durable_root, timeout_sec)
+        if not okrun:
+            return None, why
+        return chosen, None
+    # Reachable only when EVERY tier hit the `continue` above, so the tiers
+    # searched are always all of them -- no accumulator needed to say so.
+    searched = "; ".join(pattern for tier in glob_tiers for pattern in tier)
+    if note:
+        return None, "no codex-companion.mjs found under: %s (%s)" % (searched, note)
+    return None, "no codex-companion.mjs found under: %s" % searched
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="resolve_codex_companion.py",
-        description="Resolve the newest installed codex-companion.mjs path (#198).",
+        description="Resolve the codex-companion.mjs path for the running Claude config "
+                    "profile, newest-semver within it (#198, #287).",
     )
     p.add_argument("--durable-root", required=True, dest="durable_root")
     p.add_argument("--search-glob", action="append", default=None, dest="search_glob",
-                   help="Override the default install-location globs (repeatable).")
+                   help="Override the default install-location globs (repeatable). Repeats "
+                        "form ONE union tier resolved by newest-semver, not a priority "
+                        "order, and the running-profile preference does not apply.")
     p.add_argument("--node", default="node")
     p.add_argument("--timeout-sec", type=int, default=DEFAULT_STATUS_TIMEOUT_SEC,
                    dest="timeout_sec")
     args = p.parse_args(argv)
 
-    globs = args.search_glob if args.search_glob else default_globs()
+    # An explicit override is fully authoritative: ONE tier holding every repeat, so its
+    # semantics are byte-identical to before #287 and the profile preference cannot reach
+    # it. The suite relies on that -- it drives this script with --search-glob precisely so
+    # the real ~/.claude* store is never touched.
+    if args.search_glob:
+        tiers, problem, note = [args.search_glob], None, None
+    else:
+        tiers, problem, note = default_glob_tiers()
+    if problem:
+        print("resolve_codex_companion: %s" % problem, file=sys.stderr)
+        return 1
     timeout_sec = args.timeout_sec if args.timeout_sec > 0 else DEFAULT_STATUS_TIMEOUT_SEC
-    raw, reason = resolve(args.durable_root, globs, node=args.node, timeout_sec=timeout_sec)
+    raw, reason = resolve(args.durable_root, tiers, node=args.node, timeout_sec=timeout_sec,
+                          note=note)
     if raw is None:
         print("resolve_codex_companion: %s" % reason, file=sys.stderr)
         return 1

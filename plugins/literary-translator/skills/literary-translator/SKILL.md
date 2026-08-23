@@ -270,12 +270,14 @@ this paragraph's total exclusion count):
 reason that a durable copy "could not glob the plugin's own install locations to
 find the newest installed `codex-companion.mjs`". That reason was false, and the
 disproof is short: the script **reads** no `__file__` — its own location never
-enters its search — and imports nothing plugin-specific; its entire search is
-rooted at `os.path.expanduser("~")` against
+enters its search — and imports nothing plugin-specific; its DEFAULT search is
+rooted at the RUNNING Claude config profile (`$CLAUDE_CONFIG_DIR`, else
+`~/.claude`) and then at `os.path.expanduser("~")` against
 `~/.claude*/plugins/cache/openai-codex/**/codex-companion.mjs` — a different
 plugin's own install cache, found the same way regardless of where
-`resolve_codex_companion.py` itself happens to be running from. A durable copy
-globs the identical `~` paths and finds the identical companions. It is now
+`resolve_codex_companion.py` itself happens to be running from. Both roots are
+ENVIRONMENT facts, so a durable copy globs the identical paths and finds the
+identical companions. It is now
 copied like every other self-anchored script; do not re-exclude it by
 re-deriving this same plausible-sounding-but-wrong argument — a literal
 occurrence count of `__file__` in the file is not this claim (the script's own
@@ -293,12 +295,30 @@ these files are never hand-edited" premise the rest of this copy pass rests on
 was NEVER true for this one path — a project that hit the exit-2 default-
 launch defect this correction fixes could have reasonably worked around it by
 placing its own adapted copy exactly there, on the explicit strength of that
-destination being documented as untouched. Copying over it unconditionally now
-would silently destroy that adaptation with no backup and no warning, and on a
-RESUMED project (outcome 2 above) this would happen with NO collision
-detection of any kind — collision detection exists only on outcome 3's
-ambiguous-adoption path, which a resumed project's own root marker match
-bypasses entirely.
+destination being documented as untouched. That window is CLOSED and its
+population was MEASURED at zero: Step 0a has been writing this exact path
+since the correction, so what sits there now is a managed copy on every
+project that has scaffolded since, and on the two live books checked before
+the regular-file limb was cut (`historiettes-fr-ru/tome1`, `ssk-he-en/vol2/run`)
+it was a managed copy in both — two managed copies, zero hand adaptations.
+
+**This is an ACCEPTED TRADEOFF, stated so it is not rediscovered as a bug.**
+An adapted regular file left over from that window is overwritten here with no
+backup and no warning, and on a RESUMED project (outcome 2 above) with NO
+collision detection of any kind — collision detection exists only on outcome
+3's ambiguous-adoption path, which a resumed project's own root marker match
+bypasses entirely. The check that used to stop that was byte-identity to the
+shipped source, and it could never actually separate the two populations: it
+asked "are these bytes the current shipped bytes?", which answers "is this
+copy MANAGED?" only while the shipped bytes never move. They move on any
+release that edits the resolver, so from that release onward the byte-identity
+halt fired on every ordinary project — the majority path — while still not
+identifying a single adaptation. Separating the populations for real needs a
+prior-version digest or a per-file managed marker, permanent machinery this
+design refuses to carry for a population measured at zero; see the paragraph
+below. A resumed project that DID adapt this file must re-apply its adaptation
+after the upgrade, which the launch fix this copy delivers makes unnecessary
+in the first place.
 
 So THIS ONE FILE, and only this one, gets a check before its copy, never the
 blanket unconditional overwrite the rest of the bundle gets. Classify the
@@ -310,20 +330,24 @@ place while reporting success:
     This is every project that never worked around the defect — the
     overwhelming majority, and the same shape a fresh project (outcome 1)
     always has.
-  - **A genuine regular file, byte-identical** to the shipped source → copy
-    normally (a no-op overwrite of itself).
-  - **Anything else** — a genuine regular file with DIFFERENT bytes, a
-    symlink (identical-looking target or not — lstat does not resolve it,
-    so its target content is never compared), a directory, or any other
-    non-absent entry `os.lstat()` reports — → HALT before copying anything.
+  - **A genuine regular file** — whatever its bytes → copy normally. A
+    stale managed copy is exactly what the rest of this copy pass
+    overwrites unconditionally, and this file is now no different. This
+    branch USED to demand byte-identity to the shipped source; that
+    condition was cut in #287 and must not come back — see the paragraph
+    below for why.
+  - **Anything else** — a symlink (identical-looking target or not — lstat
+    does not resolve it, so its target content is never compared), a
+    directory, or any other non-absent, non-regular entry `os.lstat()`
+    reports — → HALT before copying anything. This limb is NOT part of the
+    expired migration and does not expire with it: it exists because a copy
+    over a symlink writes THROUGH it, so the shipped file never lands at
+    the destination at all while the copy reports success.
     Name the exact path and state plainly that a pre-existing,
     non-managed entry sits there and this copy pass will not touch it
     silently. Instruct the operator PER ENTRY KIND, never one generic
     "move or rename it" — renaming preserves bytes only for the entry
     kinds where the name and the bytes are the same thing:
-      - **Divergent regular file** → move or rename the file itself aside.
-        This genuinely preserves its bytes; the name is the only thing
-        that changes.
       - **Symlink** → renaming the link is NOT preservation — it relocates
         the POINTER, not the bytes it points at, and that target can be
         transient, on a different filesystem, or itself deleted later.
@@ -348,15 +372,15 @@ just the symlink renamed, preserving a pointer rather than the adapted
 bytes it points at, which can go stale or vanish independently; (3) two
 concurrent scaffolds of the same durable_root can both pick the same free
 backup name and the second overwrites the first's backup. **A HALT closes
-exactly these three** — it performs no automatic write to a divergent
+exactly these three** — it performs no automatic write to a NON-REGULAR
 destination at all, so there is no automatic-copy-through-a-symlink, no
 pointer-only backup, and no concurrent-backup-name race, because none of
 those three OPERATIONS ever run. It does NOT close every race this check
 could conceivably have: `os.lstat()`'s classification and the copy that
-follows it, in the absent and byte-identical branches above, are still two
+follows it, in the absent and regular-file branches above, are still two
 separate operations, not one atomic one — an entry classified absent or
-identical can change before the copy actually runs. That window is real,
-it is not closed by refusing (refusing only ever applies to the divergent
+regular can change before the copy actually runs. That window is real,
+it is not closed by refusing (refusing only ever applies to the non-regular
 branch, which performs no copy at all), and it is not being claimed closed
 here; it is simply much less consequential in this shape (prose a session
 executes by hand, once, rather than a machine loop an attacker can race
@@ -368,15 +392,27 @@ for the ordinary sequential-regular-file case that happens to look safe
 in testing.
 
 This check has no "runs once, ever" property to claim, and does not need
-one: unlike a backup-and-copy design (which only needed to fire on the
-FIRST migration), a halt-based check is memoryless and correctly re-fires
-on ANY future divergence at this exact path — whether from an old,
-never-cleaned-up workaround or a genuinely new one an operator creates
-later — treating both identically and safely, with no marker or prior-
-version digest required to tell them apart. Every OTHER bundle member never
-needs this treatment: none of them were ever excluded from the copy pass
-before, so none of them have a population of pre-existing, possibly-
-hand-adapted destinations to protect.
+one: a halt-based check is memoryless and correctly re-fires on any future
+NON-REGULAR entry at this exact path, with no marker or prior-version digest
+required. **What memorylessness could not do is tell a stale managed copy
+from a workaround**, and an earlier version of this note claimed it did — it
+enumerated the divergent-regular-file population as "an old, never-cleaned-up
+workaround or a genuinely new one", which silently assumed the shipped bytes
+never move. They move on any release that edits the resolver, and then the
+enumeration is missing its largest member. Step 0a has been writing this exact path since the
+correction above, so from the first release that edits the resolver onward
+every ordinary project presents a divergent regular file here: an older
+MANAGED copy, not an operator's adaptation, and the halt fired on the majority
+path instead of the exceptional one. Measured before that branch was cut, on
+both live books — `historiettes-fr-ru/tome1` and `ssk-he-en/vol2/run` each held
+a plain regular file byte-identical to the then-shipped resolver, i.e. two
+managed copies and zero hand adaptations, both of which would have halted.
+Telling those two apart needs exactly the prior-version digest this design refused to carry, which is why
+the regular-file limb was CUT rather than made cleverer: no digest, no
+marker, no growing table of historical hashes. Every OTHER bundle member
+never needed the non-regular check either, and that has not changed — but
+they never needed the byte-identity one either, and now neither does this
+file.
 
 Also, separately, `scaffold_setup.py` — Step 0a's own bundle-hash marker writer
 (#194), which likewise runs only from the plugin path: it is invoked below as

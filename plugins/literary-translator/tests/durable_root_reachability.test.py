@@ -115,8 +115,8 @@ for _name in MANAGED_DIRS:
 # (the W5 codex-companion path resolver) is deliberately NOT in this set: 1.4.7
 # added it as a fourth exclusion on the claimed reason that a durable copy
 # "could not glob the plugin's own install locations" -- found false (it
-# never READS `__file__`; the whole search is rooted at `~`, independent
-# of the script's own location) and reverted. It IS now copied like every
+# never READS `__file__`; the DEFAULT search is rooted at the running config
+# profile and then `~`, independent of the script's own location) and reverted. It IS now copied like every
 # other self-anchored script, so listing it here would be actively wrong: it
 # would make the collision enumeration below silently skip warning about a
 # pre-existing resolve_codex_companion.py in an adopted directory that Step
@@ -355,8 +355,8 @@ def test_skill_no_longer_excludes_resolve_codex_companion_from_the_copy_pass():
     resolver) as a FOURTH plugin-path script never copied to durable_root,
     on the claimed reason that a durable copy "could not glob the plugin's
     own install locations" -- found false (the script never READS
-    `__file__`; its whole search is rooted at `~`, independent of its
-    own location -- pinned by resolve_codex_companion.test.py's
+    `__file__`; its DEFAULT search is rooted at the running config profile
+    and then `~`, independent of its own location -- pinned by resolve_codex_companion.test.py's
     test_the_resolver_contains_no_executable_reference_to_dunder_file,
     which parses the file instead of grepping it) and the exclusion
     reverted, so it is copied like every

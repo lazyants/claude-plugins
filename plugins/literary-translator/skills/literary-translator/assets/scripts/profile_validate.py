@@ -30,9 +30,11 @@ not do. That reason was false -- the script never READS ``__file__`` (pinned by
 ``test_the_resolver_contains_no_executable_reference_to_dunder_file``, which
 parses it rather than grepping it; the file's own docstring mentions the name
 in prose, so a text search over it is not the check)
-and its entire search is rooted at ``~/.claude*/plugins/cache/
-openai-codex/**``, a different plugin's own install cache, found identically
-regardless of where ``resolve_codex_companion.py`` itself runs from -- so it
+and its DEFAULT search is rooted at the RUNNING Claude config profile
+(``$CLAUDE_CONFIG_DIR``, else ``~/.claude``) and then at ``~/.claude*/plugins/
+cache/openai-codex/**``, a different plugin's own install cache, found
+identically regardless of where ``resolve_codex_companion.py`` itself runs from
+(the search root is an ENVIRONMENT fact, never the script's own location) -- so it
 is copied like every other self-anchored script now; see SKILL.md's Step 0a
 copy-exclusion list for the full disproof.) This script
 is always invoked directly from the plugin's own install path:
