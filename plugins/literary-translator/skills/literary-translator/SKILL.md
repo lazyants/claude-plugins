@@ -2314,9 +2314,23 @@ instead, which the plugin tree cannot shrink — `orphaned`, a
 sanctioned addition, and a file dropped there is loaded into
 `canon_validate.py`'s registry and hashed into the run identity), and
 `degenerate`, a plugin-side class that yields nothing while the durable root
-still holds files of it. `languages/` is deliberately covered only by the
-second, because the documented `fr.local.json` override would read as an
-orphan.
+still holds files of it.
+
+**`languages/` is the one class where that leaves a hole, and it is a real
+one.** An orphan sweep cannot run there — the documented `fr.local.json`
+override would read as an orphan and cost a segment a re-translation — so
+`languages/` is covered by `degenerate` alone, which fires only on WHOLESALE
+loss. If a plugin tree loses ONE preset (`assets/languages/fr.json`) while
+the others remain, the durable `fr.json` drops out of `compared_pairs()`,
+both counts shrink together, `degenerate` skips the class because plugin
+languages still exist, and a widened edit to that durable file audits CLEAN.
+That is not the disclosed "someone rewrote the auditor" case; an incomplete
+refresh reaches it. The durable language file carries the pair's particle
+configuration, so the consequence is real. It is left open rather than
+patched: every closure needs either a stored baseline (the design this
+release rejected three times) or a naming rule for legitimate overrides that
+SKILL.md does not fix. `tests/fix_scope_audit.test.py` pins the clean result
+so the limitation cannot be lost.
 
 The relay residual is stated rather than closed: the audit reaches W5 through
 a model relay, and a relay that fabricates its reply can fabricate BOTH

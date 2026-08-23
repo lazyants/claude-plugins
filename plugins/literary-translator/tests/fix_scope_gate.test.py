@@ -320,7 +320,10 @@ def test_the_audit_command_survives_a_legitimate_durable_root(tmp_path, root_pat
     argv = shlex.split(line[len("Run exactly: "):])
     assert argv[-2] == "--durable-root", (case, argv)
     assert argv[-1] == root_path, (case, argv)
-    # The script path is one argument too -- a plugin root with a space is the
-    # shape #412's own token contract explicitly supports.
+    # The script path is one argument too. Note what this does NOT prove: the
+    # shared harness fixes FIXTURE_PLUGIN_ROOT, so only the DURABLE root is
+    # parameterized here. PLUGIN_ROOT is validated to carry no single quote,
+    # and shq() renders both the same way, but a plugin root with a space is
+    # not exercised by this fixture.
     assert argv[1].endswith("/assets/scripts/fix_scope_audit.py"), (case, argv)
     assert "--verify-copies" in argv, (case, argv)

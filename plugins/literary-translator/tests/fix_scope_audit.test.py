@@ -383,3 +383,32 @@ def test_the_error_line_carries_the_counts_its_consumer_requires(tmp_path):
     payload = json.loads(proc.stdout)
     assert payload["ok"] is False and payload["verdict"] == "error"
     assert payload["n_checked"] == 0 and payload["n_expected"] == 0
+
+
+def test_partial_language_loss_is_a_known_hole_and_stays_clean(tmp_path, root):
+    """PINS A LIMITATION, not a behaviour anyone wants. `degenerate` fires only
+    on wholesale class loss, and an orphan sweep cannot run over `languages/`
+    without false-REDing the documented `fr.local.json` override. So a plugin
+    tree missing exactly one preset drops that durable copy out of
+    `compared_pairs()`, shrinks both counts together, and a widened edit to it
+    audits CLEAN.
+
+    The test asserts the tampered file is INVISIBLE, which is the point: the
+    day someone closes this hole, this test goes RED and its docstring says
+    what to do -- delete it, and delete the disclosure it guards in SKILL.md,
+    the CHANGELOG and the script's own docstring."""
+    fake = build_fake_plugin(tmp_path)
+    (fake / "languages" / "fr.json").unlink()
+    assert any(p.is_file() for p in (fake / "languages").iterdir()), (
+        "the fixture must leave other presets in place -- wholesale loss is the "
+        "case `degenerate` DOES catch, and would prove nothing here"
+    )
+    target = root / "languages" / "fr.json"
+    target.write_text(target.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    out = audit_from(fake, root)
+    assert out["ok"] is True, out
+    assert out["n_checked"] == out["n_expected"], out
+    # And the same tamper against an INTACT plugin tree is RED -- so the clean
+    # verdict above comes from the lost authority, not from a check that cannot
+    # see a languages/ edit at all.
+    assert audit(root)["differing"] == ["languages/fr.json"]

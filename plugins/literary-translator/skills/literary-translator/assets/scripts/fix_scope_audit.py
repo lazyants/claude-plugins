@@ -112,6 +112,19 @@ VERDICTS, all of them RED (see `audit()`):
                 nothing while the durable root still holds files of it. Same
                 blind spot, for the `languages/` class an orphan sweep cannot
                 cover without false-REDing a documented `fr.local.json`.
+
+KNOWN, PINNED HOLE. `degenerate` fires only on WHOLESALE class loss, so
+PARTIAL loss in `languages/` is not detected: a plugin tree missing exactly
+`fr.json` while keeping the other presets drops the durable `fr.json` out of
+`compared_pairs()`, shrinks n_checked and n_expected together, leaves
+`degenerate` silent because plugin languages still exist, and lets a widened
+edit to that durable file audit CLEAN. An incomplete refresh reaches it, not
+only a party rewriting this script. `scripts/` and `schemas/` do not have the
+hole -- their durable-side sweeps cover partial loss -- and closing it for
+`languages/` needs either a stored baseline (rejected above, three times) or
+a naming rule for legitimate overrides that SKILL.md does not fix. It ships
+open and stated, and `tests/fix_scope_audit.test.py` pins the clean result so
+that a later reader cannot mistake it for coverage.
   marker     -- a bundle marker whose stored value is not the one derivable
                 from the plugin tree.
 
