@@ -53,7 +53,11 @@ Design (PLAN-198 §2.1; the 7 steps below map 1:1) -- #409 SANDBOX HARDENING:
      NEXT dispatch's step-4 adopt_pending() validates + adopts it.
   7. Finalize within a reserved FINALIZE_TAIL: emit the ONE stdout JSON line, write the
      empty per-dispatch fail sentinel (iff not promoted) + terminal hygiene joblog (iff we
-     hold the lease), and clean this invocation's OWN scratch by exact path.
+     hold the lease), and clean this invocation's OWN scratch by exact path -- with ONE
+     deliberate exception, which is not disposable scratch despite carrying this
+     invocation's own random component: the #429 `.att_superseded.*` link, a preserved copy
+     of a pending occupant this invocation displaced. It is kept for HAND recovery and
+     nothing ever re-adopts or collects it (see _defer_attempt()).
 
 CLI (canonical path is DERIVED, never caller-supplied):
     python3 codex_job.py --kind {translate|review} --companion <abs codex-companion.mjs>
@@ -290,6 +294,24 @@ class CodexJob:
         self.canonical = canonical_path(self.root, seg, kind)
         self.attempt = os.path.join(self.segdir, ".att.%s.%s.%s.json" % (seg, self.inv, ext))
         self.pending = os.path.join(self.segdir, ".att_pending.%s.%s.json" % (seg, ext))
+        # #429: the name a displaced pending occupant is PRESERVED under (see
+        # _defer_attempt()). It carries `ext` and `seg` because hand recovery cannot read
+        # identity out of the payload -- the candidate is UNVALIDATED at defer time, and
+        # review.schema.json has no `seg` property at all -- and `inv` because a second
+        # deferral of the same segment must not overwrite the first. It deliberately does
+        # NOT end in `.draft.json`, and it is DOT-PREFIXED like every other private entry
+        # the driver writes here. The dot is what actually excludes it from both dispatch
+        # scans: since #428 they skip the whole dot-prefixed namespace rather than testing
+        # the suffix, which is the stronger property and the one to preserve if this name
+        # ever changes. Avoiding the suffix is belt-and-braces on top of that.
+        # The field order DIVERGES from self.attempt and self.pending, which both lead with
+        # `seg`, and that is deliberate rather than an oversight: leading with `ext` is what
+        # leaves `inv` last, so the name ends in hex and cannot read as a draft to the one
+        # consumer NEITHER the dot skip nor any suffix rule binds -- fixPrompt()'s
+        # natural-language census of segments/. Reordering it to match the siblings would
+        # undo that.
+        self.superseded = os.path.join(
+            self.segdir, ".att_superseded.%s.%s.%s" % (ext, seg, self.inv))
         self.lock = os.path.join(self.segdir, ".codex_job.%s.lock" % seg)
         self.joblog = os.path.join(self.segdir, ".codex_job.%s.json" % seg)
         self.fail_sentinel = os.path.join(self.segdir, ".codex_failed.%s.%s" % (seg, disp))
@@ -1281,6 +1303,14 @@ class CodexJob:
         first so the rename cannot fail into finalize()'s discard. Returns True iff a real regular
         attempt file was preserved. Promotes NOTHING.
 
+        #429 CONTRACT (the reasoning behind each clause is at its own site below, not restated
+        here): a REGULAR occupant of the slot is first given a second name, self.superseded, so
+        overwriting the slot no longer destroys its bytes. Only FileNotFoundError is read as "no
+        occupant"; every other failure REFUSES the deferral instead of destroying what it could
+        not preserve. Nothing re-adopts or collects a `.att_superseded.*` file -- it is durable
+        rather than ephemeral, its accumulation is bounded by nothing, and it exists for HAND
+        recovery only.
+
         The single per-seg/kind slot deliberately retains the MOST RECENT completed attempt
         (last-writer-wins) -- it never sticks on a stale/invalid pending. Validity cannot be
         determined at defer time -- the defer is triggered precisely because no budget remained to
@@ -1314,9 +1344,40 @@ class CodexJob:
         if not self._is_regular(self.attempt, self.abs_remaining):
             return False
         self._clear_nonregular(self.pending)
+        # #429: PRESERVE any occupant before the slot is overwritten. os.link(), never a
+        # rename: a link ADDS a name and removes none, so self.pending is never vacated and
+        # the os.replace() below stays the single mutation of it -- there is no window, and
+        # no failure combination, in which a regular occupant leaves the slot without the
+        # fresh candidate arriving. (A rename-based preserve has both: a crash or a failing
+        # replace between the two mutations strands BOTH candidates at names no later run
+        # consults.) The occupant is never OPENED -- link needs only directory write -- which
+        # is the whole point: the occupant this exists for is one that has gone UNREADABLE
+        # between runs, which adopt_pending() refuses and _clear_nonregular() leaves alone.
+        try:
+            os.link(self.pending, self.superseded, follow_symlinks=False)
+        except FileNotFoundError:
+            pass            # definitively NO occupant -- nothing to preserve, carry on
+        except (OSError, NotImplementedError) as exc:
+            # NOT FileNotFoundError, so this is "could not preserve", never "absent". Reading
+            # any other errno as absence is the refuted reasoning that makes an ESTALE
+            # destroy a good candidate. NotImplementedError is in the tuple because an
+            # unsupported follow_symlinks raises it and it is not an OSError.
+            #
+            # Refuse. This discards the fresh attempt, which is UNVALIDATED by construction
+            # (the defer fires precisely because no budget remained to gate it) -- the
+            # less-established of the two artifacts, which is the correct trade at THIS site
+            # and not at the canonical-relocate site, whose fresh candidate has passed every
+            # gate. A durable_root on a filesystem without hard links refuses every occupied
+            # deferral this way: an availability cost, never a data-loss one.
+            self.error_detail = "pending preserve failed: %r" % (exc,)
+            return False
         try:
             os.replace(self.attempt, self.pending)
-        except OSError:
+        except OSError as exc:
+            # Any occupant is still in the slot (the link never removed it) and, when there
+            # was one, also under the `.att_superseded.*` name, which is then redundant.
+            # Nothing collects it.
+            self.error_detail = "defer replace failed: %r" % (exc,)
             return False
         return True
 
@@ -1494,8 +1555,11 @@ class CodexJob:
                 # fresh completion then lands in the no-budget branch below,
                 # _defer_attempt()'s own documented last-writer-wins semantics would
                 # overwrite the still-good pending candidate with the new, unvalidated
-                # one -- destroying validated work to make room for work nobody has
-                # checked yet.
+                # one. Since #429 that no longer destroys the candidate's BYTES -- they
+                # survive under the `.att_superseded.*` name -- but nothing re-adopts that
+                # name, so the validated candidate still becomes unreachable to every later
+                # run and the work is still regenerated. Stopping here is therefore correct
+                # for exactly the same practical reason it always was.
                 return 1
             if not self.launch():                     # False (incl. no-budget, pending kept) -> launch fresh
                 self.reason = "launch-failed"
