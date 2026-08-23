@@ -674,6 +674,172 @@ class CodexJob:
         except OSError:
             pass
 
+    def _prev_review_slot(self, label):
+        """segments/.prev_review.<seg>.r<label>.json -- where the OUTGOING review verdict
+        at that round label is kept once a newer one takes the canonical. Dot-prefixed,
+        alongside this file's other private staging entries (.att.*, .att_pending.*,
+        .codex_job.*). Both dispatch-evidence scans over segments/ skip the dot-prefixed
+        namespace outright since #428 -- select_segments.py and
+        backfill_resume_gate_ack.py each drop a leading-dot entry before any suffix test
+        -- and a canonical {seg}.draft.json can never be dot-prefixed, the seg id being
+        `(?:FRONTBACK:)?[A-Za-z0-9_]+`. So this name is invisible to them by the same
+        rule that already covers the staging entries beside it."""
+        return os.path.join(self.segdir, ".prev_review.%s.r%s.json" % (self.seg, label))
+
+    def _archive_outgoing_review(self, remaining_fn):
+        """#541: preserve the review verdict this promote is about to destroy, so the NEXT
+        round's fix turn can see that a locus was already contested. Called immediately
+        before every os.replace() landing on self.canonical, on REVIEW jobs only.
+
+        WHAT THIS RECORD IS, and the property everything else rests on: it is CONTEXT, never
+        authority. Every verdict at one round label mints an identical dispatch_token
+        (review_dispatch_token() is a pure function of run/seg/label -- see
+        reject_review.py's own docstring), so NO record here can prove it is the exact
+        instance that preceded the current round. A design needing that proof would need
+        unique per-promotion candidates or a digest binding, and every failure of that
+        machinery would become a wrong edit. This one refuses the premise: fixPrompt() is
+        told the record authorizes nothing, and every change the fix turn makes still stands
+        on its own substantiation against the source. A superseded, foreign or absent record
+        therefore costs at most a moment of extra scrutiny.
+
+        KEYED BY THE OUTGOING VERDICT'S OWN LABEL, never a single slot and never the incoming
+        label: a same-label promote is reachable (a same-run retranslate invalidates
+        review_ready.py's draft-freshness check, so safe_adopt() refuses and a fresh attempt
+        promotes at the SAME label), and either of those keyings would let it overwrite the
+        genuine predecessor with a same-label verdict. Only a NUMERIC label is kept -- no fix
+        turn can ever consume an `rfinal` verdict, since neither drive path dispatches a fix
+        on the mandatory final round.
+
+        REMOVE FIRST, THEN WRITE. A slot's own token cannot tell a superseded verdict at one
+        label from the one that replaced it, so refreshing in place would leave a plausible,
+        token-valid, WRONG body behind on a failed write. Unlinking first makes an ordinary
+        write failure degrade to ABSENCE, which fixPrompt() already handles as the ordinary
+        case. A failing unlink can still leave a superseded body -- accepted, not engineered
+        away, because of the context-not-authority property above.
+
+        BEST-EFFORT AND NEVER A GATE: this returns None on every path, raises nothing, and
+        touches no field finalize() reads. self.promoted / self.adopted / self.reason / the
+        stdout line / the fail sentinel / the joblog are all unaffected by anything here.
+
+        `remaining_fn` is the CALLER's own phase-specific remaining-seconds callable, the
+        same one _is_regular() takes and for the same reason: this runs after the caller has
+        taken the per-segment flock lease and BEFORE the authoritative os.replace, so
+        unbounded advisory I/O here would delay the promote, the stdout line and every
+        cooperating retry behind a lease nothing releases. An exhausted budget abandons the
+        copy, never leaving a stale body behind: spent before the unlink -- which the
+        read's own post-EOF check is there to catch, since the read that returns EOF can
+        itself spend the last of it -- the existing record survives untouched; spent
+        after, the slot is absent, which fixPrompt() already handles as the ordinary
+        case."""
+        try:
+            if self.kind == "translate":
+                return
+            data = self._read_regular_bounded(self.canonical, remaining_fn)
+            if data is None:                # absent, non-regular, oversized, unreadable,
+                return                      # or out of budget
+            try:
+                obj = json.loads(data.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                return
+            if not isinstance(obj, dict):
+                return
+            tok = obj.get("dispatch_token")
+            if not isinstance(tok, str):
+                return
+            # RUN_ID:seg:r<label>, split from the ENDS rather than by counting colons: a
+            # seg id may legitimately be a FRONTBACK:{id} unit (see the segment-id contract
+            # above), so a token for one carries FOUR colon-separated pieces and a
+            # three-part check would silently exclude that whole segment class.
+            run, _, rest = tok.partition(":")
+            middle, _, label = rest.rpartition(":")
+            # The seg must be THIS segment -- an artifact naming another one is not this
+            # segment's predecessor whatever else it is. That one comparison also rejects
+            # every shape whose middle piece comes out empty because a colon was missing
+            # at either end, since a seg id never is; only a leading-colon token, whose
+            # run piece is empty while its middle still matches, needs its own conjunct.
+            if not run or middle != self.seg:
+                return
+            # Rounds are minted as 1, 2, 3 ... -- never zero, never zero-padded (the
+            # template's own loop starts at 1 and the driver's _next_round_label()
+            # increments). Admitting "r0" or "r01" would key a slot under a label no
+            # consumer ever asks for, which is a silently unreachable record rather
+            # than a useful one.
+            # ASCII digits only: str.isdigit() alone admits superscript aliases.
+            m = re.fullmatch(r"r([1-9][0-9]*)", label)
+            if m is None:
+                return                      # "rfinal", or anything not a minted round
+            slot = self._prev_review_slot(m.group(1))
+            tmp = os.path.join(self.segdir, ".prev_review_tmp.%s.%s.json" % (self.seg, self.inv))
+            _silent_remove(slot)            # absence beats a stale body -- see above
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_CLOEXEC | _O_NOFOLLOW
+            try:
+                fd = os.open(tmp, flags, 0o600)
+            except OSError:
+                return
+            try:
+                written = os.write(fd, data)
+            finally:
+                os.close(fd)
+            if written != len(data):
+                # POSIX write() may write fewer bytes than asked. Publishing a truncated
+                # body is worse than publishing nothing, and a zero-length return -- a
+                # wedged descriptor -- lands here too rather than in a loop that would
+                # spin against it while holding the lease. Same guard _write_joblog()
+                # and _publish_from_sandbox() apply to their own tmp-file writes.
+                _silent_remove(tmp)
+                return
+            try:
+                os.replace(tmp, slot)
+            except OSError:
+                _silent_remove(tmp)
+        except Exception:                   # noqa: BLE001 -- an advisory copy may never
+            return                          # break a promote, whatever it hit
+
+    def _read_regular_bounded(self, path, remaining_fn):
+        """The whole content of `path` as bytes, or None if it is absent, not a regular
+        file, larger than _MAX_REGULAR_READ_BYTES, unreadable, or if the caller's own
+        phase budget ran out mid-read. O_NOFOLLOW: a symlink that appeared at a
+        deterministic slot is refused rather than followed. `remaining_fn` is re-invoked
+        fresh at every check rather than snapshotted once, for the reason _is_regular()'s
+        own docstring gives: real wall-clock time passes between iterations. Never
+        raises."""
+        fd = None
+        try:
+            fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC)
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return None
+            if st.st_size > _MAX_REGULAR_READ_BYTES:
+                return None
+            buf = bytearray()
+            while True:
+                if remaining_fn() <= 0:
+                    return None             # SLOW: the caller's own phase budget, spent
+                chunk = os.read(fd, _COPY_CHUNK)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                if len(buf) > _MAX_REGULAR_READ_BYTES:
+                    return None             # GROWING past the fstat() snapshot
+            if remaining_fn() <= 0:
+                # The read that returned EOF may itself have spent the last of the
+                # budget. Returning the payload here would let the CALLER go on to
+                # decode it, unlink the existing slot and publish a replacement --
+                # all under the per-segment flock lease the budget exists to bound,
+                # and all after this advisory copy stopped being affordable. Failing
+                # here instead leaves the genuine predecessor in place, which is the
+                # better of the two absences.
+                return None
+            return bytes(buf)
+        except OSError:
+            return None
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
     # #399: a gate that RAN and REJECTED an attempt currently discards both its
     # own diagnostic output and the rejected attempt itself (finalize()
     # _silent_remove()s self.attempt when not promoted) -- so diagnosing WHY a
@@ -1193,6 +1359,7 @@ class CodexJob:
             self.canonical_unreadable = True
             self.reason = "canonical-unreadable"
             return False
+        self._archive_outgoing_review(self.poll_remaining)  # #541, advisory; never gates this promote
         os.replace(self.pending, self.canonical)   # every gate passed
         return True
 
@@ -1585,6 +1752,7 @@ class CodexJob:
                         # a disclosed limit, not a defect this release closes: see the
                         # release's own "Known limits" text.
                     else:
+                        self._archive_outgoing_review(self.finalize_timeout)  # #541, advisory
                         os.replace(self.attempt, self.canonical)
                         self.promoted = True
                         self.reason = "promoted"
