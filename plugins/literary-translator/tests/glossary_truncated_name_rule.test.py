@@ -9,13 +9,29 @@ run rather than a halt, is stated once in `references/canon-and-glossary.md`
 ("A machine-truncated candidate is never `accepted`") and is not restated
 here.
 
-Every MECHANICAL site that could refuse the spelling is inside a hashed cache
-bundle (`bootstrap_names.py`/`segpack.py` in the derivation bundle;
-`canon_validate.py` and both `.js` templates in the plugin bundle), so a
-code-side refusal would re-stale every converged segment in every project for
-a defect that needs a >200-character proper-noun run the adjudicator ACCEPTS.
-`glossary_TASK.md` is the one adjudicator-facing surface in NO hashed tuple,
-so the rule lives there and this file pins it.
+The defect is closed on BOTH halves, and this file pins the first one.
+`glossary_TASK.md` is where the adjudicator is TOLD to queue a marker-bearing
+candidate, and `glossary_preflight.py` step 6c refuses to dispatch a durable
+prompt that has lost the instruction; `canon_validate` then refuses the answer
+if it comes back `accepted` anyway -- `tests/canon_truncated_source_form.test.py`
+covers that mechanical gate. Neither half subsumes the other: the gate
+alone would turn a routine over-cap candidate into a hard halt nobody was
+warned about, and the instruction alone is only as good as a model's
+compliance.
+
+An earlier draft of this module argued the rule could live ONLY in the prompt,
+because `canon_validate.py` sits in `PLUGIN_BUNDLE_MEMBERS` and a code-side
+refusal would therefore re-stale every converged segment in every project. That
+premise is FALSE and is recorded here so it is not re-derived:
+`plugin_bundle_hash` is one of the three fields inside the #491 carve-out for
+machinery-only drift
+(`assemble.py`'s `SAFE_STALE_CARVEOUT_FIELDS`), so a converged segment whose
+only drift is that field is admitted exactly like `converged` and nothing
+re-translates. The claim that survived checking is the narrower one, and it is
+about a DIFFERENT field: bumping `PROMPT_CONTRACT_VERSION` really would
+re-stale every converged segment, because `prompt_hash` is not carved out --
+which is why the template edit this file pins is deliberately made WITHOUT a
+contract bump.
 
 WHY EXACT SENTENCES RATHER THAN PATTERNS, and why the bullet scoping is
 separate from that. Both were bought with measurements, not taste:

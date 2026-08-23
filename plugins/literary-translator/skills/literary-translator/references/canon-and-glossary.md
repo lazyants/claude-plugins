@@ -77,8 +77,11 @@ Canon population is not "paste the whole book into context and ask for a glossar
    adjudicator is *told* the rule (it refuses to dispatch a durable prompt that lacks
    it), and `canon_validate._enforce_no_truncated_accepted()` refuses the answer if it
    comes back wrong — a marker-bearing item with `disposition: "accepted"` is rejected
-   on BOTH batch paths, the `--check-batch` precheck and the `--merge-batches` write,
-   so it can never reach `entries{}`. The same `source_form` as `review_queue` still
+   on ALL THREE batch entry points: the `--check-batch` precheck, the
+   `--merge-batches` write, and the legacy single-fragment `--batch` merge. They no
+   longer each open-code the gate sequence; all three call one
+   `_validate_and_enforce_batch()`, so a fourth entry point cannot silently miss a
+   check. It can never reach `entries{}`. The same `source_form` as `review_queue` still
    passes: that asymmetry is the remedy, and `glossary_batch_plan.py` then excludes a
    queued form from every later batch.
 

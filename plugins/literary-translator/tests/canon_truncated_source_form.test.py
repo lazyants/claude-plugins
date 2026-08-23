@@ -6,11 +6,14 @@ lacks that instruction -- so the model is guaranteed to be TOLD. This file
 covers the other half: what happens when it is told and does it anyway.
 
 `canon_validate._enforce_no_truncated_accepted()` runs in Pass 1's company on
-BOTH batch paths -- `run_check_batch` (the per-fragment precheck, which is also
-what `--approve-to` snapshots after) and `run_merge_batches` (the final write).
-Covering only the first would leave the merge path open; covering only the
-second would let a doomed fragment be approved and audited before anything
-refused it.
+ALL THREE batch entry points -- `run_check_batch` (the per-fragment precheck,
+which is also what `--approve-to` snapshots after), `run_merge_batches` (the
+final write) and the still-supported legacy `run_merge` (`--batch PATH`).
+Covering only the precheck would leave the merge paths open; covering only the
+writes would let a doomed fragment be approved and audited before anything
+refused it; and covering the two modern paths while leaving `run_merge` with
+its own open-coded copy of the gate sequence is exactly the hole this file's
+structural pin now closes.
 
 Three things are pinned here, and the third is the one that rots silently:
 
