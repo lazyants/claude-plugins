@@ -1289,7 +1289,7 @@ wrong answer after a rule REVERSAL, and no hash can detect that for you
 **The pre-merge citation review** gates whether a batch counts as ready at
 all. Under `research_mode: live`, every `basis:"established"` item's `source`
 is fetched and reviewed inside `batchStep`, before that batch can reach the
-merge. **1.16.1** splits that across TWO plain Claude calls per attempt,
+merge. **1.16.1** splits that across TWO Claude calls per attempt,
 because fetching and judging in one turn is two defects sharing one call: a
 mechanical PREPARE at `effort:"low"` publishes the approved snapshot and then
 retrieves every cited page through `scripts/fetch_citation.py` (scheme and
@@ -1300,7 +1300,11 @@ files and retrieves nothing at all. The split is what makes that boundary an
 enforcement point rather than a rule the attacker can argue with — an agent
 that ingests attacker-authored page text can be told by that text to fetch
 something else, so the agent that decides what to fetch is the one that never
-reads it. Neither half is codex — codex wrote the citation, so a different
+reads it. Since `#353` the judge is dispatched as
+`agentType: "literary-translator:citation-judge"`, a plugin agent granted
+`tools: Read` and nothing else, so that boundary is the harness's rather than
+the prompt's; the prepare half keeps Bash, which is what it runs the fetcher
+with. Neither half is codex — codex wrote the citation, so a different
 model is a separate opinion rather than the same reasoning re-run — and
 neither can author or repair a canon decision. The judge checks, per
 `basis:"established"` item and from the retrieved body alone, that it

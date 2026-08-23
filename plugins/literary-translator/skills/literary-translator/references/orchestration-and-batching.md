@@ -895,10 +895,14 @@ pipeline(BATCHES, batchStep)
   earlier draft of this bullet overclaimed it: the judge *does* receive URLs.
   `index.json`'s `source` field is the cited URL itself, the judge is asked to
   name the offending source in its verdict, and a fetched body can contain any
-  URL at all. It is still an ordinary agent holding Bash. What the split removes
-  is the *reason* to fetch and the *provenance* of every byte it judges — not
-  URLs, and not the tool — which is why its prompt marks `source` and
-  `source_form` UNTRUSTED explicitly rather than relying on their absence.
+  URL at all. What the split removes is the *reason* to fetch and the
+  *provenance* of every byte it judges — not URLs — which is why its prompt
+  marks `source` and `source_form` UNTRUSTED explicitly rather than relying on
+  their absence. The tool went separately, in #353: the judge is dispatched as
+  `agentType: "literary-translator:citation-judge"`, a plugin agent whose
+  frontmatter grants `tools: Read` and nothing else, so an agent that could
+  once run a command while reading attacker-authored bodies now holds no tool
+  that can open a connection or run one.
   The approval binds bytes rather than a path.
   **This pair costs one MORE `agent()` call per attempt than 1.16.0's single
   reviewer** — that is the whole reason the live ladder moved from

@@ -627,16 +627,27 @@ rather than be given it.
 
 **The claim the split supports, and no wider one:** in the citation audit path
 retrieval happens only through `fetch_citation.py`, launched by an agent that
-never reads the retrieved bytes, and the agent that judges performs no
-retrieval at all. It does NOT make the pass SSRF-free. The batch dispatch
-still does open web research by design under `research_mode: live`, and the
-judge still holds a Bash tool — the split removes its REASON to use it and
-tells it not to, which is a different and smaller thing than removing the
-capability. Both remain residual exposures, and overclaiming here would be
-worse than the original bug, because the next reader would stop looking.
+never reads the retrieved bytes, and the agent that judges neither performs
+retrieval nor holds a tool that could. It does NOT make the pass SSRF-free:
+the batch dispatch still does open web research by design under
+`research_mode: live`. That one is accepted by design and documented rather
+than quietly covered (#353); overclaiming here would be worse than the
+original bug, because the next reader would stop looking.
 
-**Both halves are plain Claude calls, deliberately NOT codex** — no
-`agentType`, no schema, sentinel-verdict shaped exactly like the precheck
+**The judge's capability, not just its instructions (#353).** Until then the
+split had removed the judge's REASON to fetch and its INPUT for fetching, and
+said so at exactly that width, because it had not removed the CAPABILITY: the
+judge could still run a command while reading attacker-authored page bodies.
+It is now dispatched as `agentType:
+"literary-translator:citation-judge"`, a plugin agent whose frontmatter grants
+`tools: Read` and nothing else, so the boundary is the harness's rather than
+the prompt's. An agentType that cannot be resolved is fail-closed — no
+fallback to a full-tool agent, and a batch whose verdict never arrives is not
+approved.
+
+**Neither half is codex, and neither carries a schema** — the judge's
+`agentType` names the tool-restricted Claude agent above, never a codex
+dispatch; sentinel-verdict shaped exactly like the precheck
 and wait steps (a schema-bearing call can wedge the Workflow if the
 forwarder detaches, #97). Codex is what PRODUCED the citation, so a reviewer
 running under a different model is a genuinely separate opinion rather than
