@@ -1301,10 +1301,45 @@ _MAX_LISTED_MISSING = 8
 # (canon_validate.py's own `half = _MAX_LISTED_PROBLEMS // 2` precedent for
 # its two-sided case, checked here to actually fit before reusing it: same
 # "two comparable-severity populations, neither should starve the other"
-# shape, not blindly copied) rather than each claiming the full 8, so the
-# worst-case total stays close to the original single-pool budget instead of
-# tripling it.
+# shape, not blindly copied) rather than each claiming the full 8.
+#
+# #377: the COVERAGE population is itself three sub-populations of very
+# unequal severity, and one lexically-sorted head-4 budget over all three let
+# the routine kind evict both integrity kinds outright -- 'assignment '
+# (0x20, "has no triage record (coverage gap)") sorts before 'assignment_'
+# (0x5f, "has N triage records (expected exactly 1)") and before 'triage '
+# ("references an assignment_id absent from the aggregate manifest").
+# Measured, not assumed: 4 routine gaps evicted BOTH integrity entries --
+# exactly the two lines that separate "the agent skipped entities" from "the
+# agent injected a forged or duplicated record". The two integrity kinds are
+# bounded separately now, and SMALLER (`_MAX_LISTED_MISSING_INTEGRITY`): what
+# a reader needs from them is THAT such a record exists plus a sample, and
+# `_bounded_missing`'s own tail line already carries the exact count of the
+# rest.
+#
+# The cost, as arithmetic rather than as an adjective (#377 part 2 -- the
+# wording here used to call it "close to the original single-pool budget",
+# which conflated two different quantities):
+#   - Mechanical budget envelope, each call adding one tail line when it
+#     truncates: (8+1) + (4+1) + (2+1) + (2+1) + (4+1) = 25, against 19 for
+#     the previous three-population form and 9 for the original single pool.
+#   - What can actually be rendered AT ONCE is smaller, because the
+#     structural population cannot truncate: triage read-OR-schema failure
+#     (<=1), aggregate read-OR-schema failure (<=1), <=3 frozen-input reasons
+#     (reachable only in the aggregate-schema-VALID branch, hence never
+#     alongside that aggregate failure), <=1 competitors-resolution failure,
+#     <=1 run_id mismatch -- 6 standalone, and that 6 needs an INVALID
+#     triage, which leaves `records == []` and empties both the coverage and
+#     the per-record populations. With the schema-valid triage those
+#     populations require, structural tops out at 5, so the simultaneously
+#     reachable ceiling is 5 + 5 + 3 + 3 + 5 = 21, against 15 before this
+#     split: six lines, for the guarantee that neither integrity kind can be
+#     evicted by a routine one.
 _MAX_LISTED_MISSING_HALF = _MAX_LISTED_MISSING // 2
+# #377: the two INTEGRITY coverage kinds (a foreign record, a duplicated
+# record) get their own small guaranteed slice instead of competing with the
+# routine coverage-gap budget above.
+_MAX_LISTED_MISSING_INTEGRITY = _MAX_LISTED_MISSING_HALF // 2
 
 
 def _bounded_missing_item(message: str) -> str:
@@ -1357,8 +1392,20 @@ def _bounded_notes_detail(notes) -> str:
     surrounding message's own boilerplate (measured: a realistic `rec_aid` +
     verdict-pair prefix/suffix is ~158 chars; 200 leaves headroom) so the
     WHOLE composed message stays under `_MISSING_ITEM_MAX_CHARS` and never
-    needs the outer per-item cap to fire at all."""
+    needs the outer per-item cap to fire at all -- on the `len(notes) > 1`
+    path, the only one that reserves anything (#377 part 3; the early return
+    below carries its own comment for the other branch)."""
     notes = [str(n) for n in (notes or [])]
+    # #377: the reservation below is a property of THIS branch only. The
+    # early return just under it applies none, and returns a value
+    # `_bounded_missing_item` is free to leave at the full per-item cap, so
+    # nothing in this function keeps the outer cap from firing there. That
+    # branch is reachable -- `notes` is optional in skeptic-triage.schema.json
+    # and `_downgrade` appends exactly one machine note to whatever the record
+    # supplied, so a record carrying none arrives here with exactly one -- but
+    # on the current sole call path that lone note IS the machine's own
+    # fixed-form `skeptic_ready:coerced_insufficient_window:<reason>`
+    # diagnosis, far under the cap. A caller's property, not this branch's.
     if len(notes) <= 1:
         return "; ".join(_bounded_missing_item(n) for n in notes)
     head, tail = notes[:-1], notes[-1]
@@ -1645,10 +1692,16 @@ def run_verify_merged(
         f"assignment {aid} has no triage record (coverage gap)"
         for aid in sorted(assigned_ids - covered_ids, key=lambda aid: aid or "")
     )
+    # #377 coverage boundary 1/2: the ROUTINE kind ends here. What follows is
+    # integrity -- see _MAX_LISTED_MISSING_INTEGRITY's own comment for why the
+    # three are bounded apart instead of sharing one lexical head-4.
+    coverage_gap_end = len(missing)
     missing.extend(
         f"triage record {aid} references an assignment_id absent from the aggregate manifest"
         for aid in sorted(covered_ids - assigned_ids, key=lambda aid: aid or "")
     )
+    # #377 coverage boundary 2/2: foreign records above, duplicates below.
+    coverage_foreign_end = len(missing)
     missing.extend(
         f"assignment_id {aid} has {count} triage records (expected exactly 1)"
         for aid, count in sorted(id_counts.items(), key=lambda kv: kv[0] or "")
@@ -1657,9 +1710,12 @@ def run_verify_merged(
 
     # Round 10 population boundary 2/2: everything between the two markers
     # is COVERAGE (potentially large -- scales with how many entities this
-    # run assigned); everything below is PER-RECORD (potentially large --
-    # scales with entity count AND findings-per-record). Both share
-    # _MAX_LISTED_MISSING_HALF rather than each claiming the full cap.
+    # run assigned, and itself split into three by the two #377 boundaries
+    # above); everything below is PER-RECORD (potentially large -- scales
+    # with entity count AND findings-per-record). The routine coverage kind
+    # and per-record share _MAX_LISTED_MISSING_HALF rather than each claiming
+    # the full cap; the two integrity kinds take the smaller
+    # _MAX_LISTED_MISSING_INTEGRITY.
     coverage_end = len(missing)
 
     for rec in records:
@@ -1743,8 +1799,8 @@ def run_verify_merged(
                 f"re-verification (would resolve to {coerced.get('verdict')!r}: {detail})"
             )
 
-    # Round 10: bounded PER POPULATION (see the two boundary markers above),
-    # not once over the whole pooled-and-sorted list -- `sorted(set(...))`
+    # Round 10, widened by #377: bounded PER POPULATION (see the four
+    # boundary markers above), not once over the whole pooled-and-sorted list -- `sorted(set(...))`
     # stays applied WITHIN each population (dedup + a stable, readable
     # order), never across them, so the alphabetically-last item of a small
     # important population can no longer be squeezed out by a large
@@ -1752,13 +1808,17 @@ def run_verify_merged(
     # `missing` -- bounding is a rendering concern for the returned list
     # only, never the pass/fail verdict itself.
     structural = missing[:structural_end]
-    coverage = missing[structural_end:coverage_end]
+    coverage_gaps = missing[structural_end:coverage_gap_end]
+    coverage_foreign = missing[coverage_gap_end:coverage_foreign_end]
+    coverage_duplicate = missing[coverage_foreign_end:coverage_end]
     per_record = missing[coverage_end:]
     return {
         "verified": not missing,
         "missing": (
             _bounded_missing(sorted(set(structural)))
-            + _bounded_missing(sorted(set(coverage)), _MAX_LISTED_MISSING_HALF)
+            + _bounded_missing(sorted(set(coverage_gaps)), _MAX_LISTED_MISSING_HALF)
+            + _bounded_missing(sorted(set(coverage_foreign)), _MAX_LISTED_MISSING_INTEGRITY)
+            + _bounded_missing(sorted(set(coverage_duplicate)), _MAX_LISTED_MISSING_INTEGRITY)
             + _bounded_missing(sorted(set(per_record)), _MAX_LISTED_MISSING_HALF)
         ),
         "frozen_input_mismatch": frozen_input_mismatch,

@@ -1257,6 +1257,83 @@ def test_verify_merged_missing_is_bounded_per_population_not_pooled(tmp_path):
     )
 
 
+def test_verify_merged_routine_coverage_gaps_do_not_evict_the_integrity_kinds(tmp_path):
+    """#377: round 10 gave COVERAGE its own budget, but coverage is three
+    sub-populations of very unequal severity sharing one lexically-sorted
+    head-4 slice -- and the routine kind sorts first: 'assignment ' (0x20,
+    "has no triage record (coverage gap)") < 'assignment_' (0x5f, "has N
+    triage records (expected exactly 1)") < 'triage ' ("references an
+    assignment_id absent from the aggregate manifest").
+
+    So four or more ordinary coverage gaps evicted exactly the two entries
+    that distinguish "the agent skipped entities" (routine -- it ran out of
+    budget, or the batch never came back) from "the agent injected a forged
+    or duplicated record" (integrity). This fixture is the measurement, not a
+    hypothetical: six gaps alongside one foreign record and one duplicated
+    assignment_id -- under the single coverage pool the head-4 is six gaps'
+    worth of prefix and BOTH integrity messages are absent from missing[]
+    entirely, even though `verified` (computed from the unbounded list) is
+    correctly False either way. Pins that all three kinds are represented at
+    once, and that the routine kind is not starved in exchange."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Dup walked home."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+
+    # "Dup" is assigned once and triaged TWICE (duplicate-record integrity);
+    # "Ghost" is triaged but never assigned (foreign-record integrity); the
+    # six "Miss<i>" entities are assigned and never triaged (the routine
+    # coverage-gap population that used to evict the other two).
+    assignments = [make_assignment("Dup", [])]
+    for i in range(6):
+        assignments.append(make_assignment(f"Miss{i}", []))
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, make_aggregate_manifest("run-1", assignments))
+
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {
+        "schema_version": 1,
+        "run_id": "run-1",
+        "records": [
+            insufficient_record("Dup"),
+            insufficient_record("Dup"),
+            insufficient_record("Ghost"),
+        ],
+    })
+
+    result = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir, canon_path=canon_path,
+    )
+    assert result["verified"] is False
+    assert any(
+        "references an assignment_id absent from the aggregate manifest" in m
+        for m in result["missing"]
+    ), (
+        f"the FOREIGN-record integrity entry must survive alongside the routine coverage "
+        f"gaps, not lose a lexical race to them: {result['missing']}"
+    )
+    assert any(
+        "has 2 triage records (expected exactly 1)" in m for m in result["missing"]
+    ), (
+        f"the DUPLICATE-record integrity entry must survive the same way: "
+        f"{result['missing']}"
+    )
+    assert any("has no triage record (coverage gap)" in m for m in result["missing"]), (
+        "the routine coverage-gap population must still be represented -- this is not a "
+        "fix that starves one population to feed another"
+    )
+    # Each population's own tail line counts ITS population, never the pooled
+    # total: 6 gaps bounded at _MAX_LISTED_MISSING_HALF, so 4 shown of 6.
+    assert any(
+        "... and 2 more (showing the first 4 of 6)" == m for m in result["missing"]
+    ), f"the coverage-gap tail must report the gap population's own size: {result['missing']}"
+
+
 def test_verify_merged_fails_on_senses_tamper(tmp_path):
     """#243 H1 (third stamp): canon_senses.json joined canon.json/
     manifest.json as a THIRD frozen input once --verify-merged started
