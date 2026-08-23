@@ -558,7 +558,12 @@ def make_assemble_root(tmp_path: Path, label: str) -> Path:
     root = tmp_path / f"aroot_{label}"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
-    for name in ("assemble.py", "output_resolve.py", "render_obsidian.py", "validate_draft.py"):
+    # cache_key.py joins the sibling set in #492: assemble.py imports it at
+    # module scope. This root only ever calls build_nodestream() in-process --
+    # never main() -- so it needs the module importable and nothing more: no
+    # style_bible.md, no ledger, no real cache key.
+    for name in ("assemble.py", "output_resolve.py", "render_obsidian.py", "validate_draft.py",
+                 "cache_key.py"):
         shutil.copy2(SCRIPTS_DIR / name, scripts_dir / name)
     (root / "segments").mkdir()
     return root

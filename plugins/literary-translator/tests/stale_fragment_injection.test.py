@@ -70,6 +70,7 @@ SCHEMAS_SRC_DIR = ASSETS_DIR / "schemas"
 
 LEDGER_MERGE_SRC = SCRIPTS_SRC_DIR / "ledger_merge.py"
 ASSEMBLE_SRC = SCRIPTS_SRC_DIR / "assemble.py"
+CACHE_KEY_REAL_SRC = SCRIPTS_SRC_DIR / "cache_key.py"
 OUTPUT_RESOLVE_SRC = SCRIPTS_SRC_DIR / "output_resolve.py"
 RENDER_OBSIDIAN_SRC = SCRIPTS_SRC_DIR / "render_obsidian.py"
 VALIDATE_DRAFT_SRC = SCRIPTS_SRC_DIR / "validate_draft.py"
@@ -238,9 +239,27 @@ def make_root(tmp_path) -> Path:
     scripts_dir.mkdir(parents=True)
 
     shutil.copy2(LEDGER_MERGE_SRC, scripts_dir / "ledger_merge.py")
-    (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
-    for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC):
+    for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
+                CACHE_KEY_REAL_SRC):
         shutil.copy2(src, scripts_dir / src.name)
+
+    # #492: the two scripts need DIFFERENT cache_key.py copies in this one
+    # root, so the fake no longer sits at scripts/cache_key.py.
+    #
+    # ledger_merge.py wants the FAKE -- its whole point here is a fixed,
+    # fixture-controlled key table (test_fixture_cache_keys.json), and it
+    # resolves the checker from --plugin-root as
+    # `{plugin_root}/assets/scripts/cache_key.py` precisely so the copy it
+    # trusts is not the one sitting in the writable durable root. So the fake
+    # is staged at exactly that path and run_merge() passes --plugin-root.
+    #
+    # assemble.py wants the REAL module: since #492 it IMPORTS cache_key as a
+    # sibling of its own SCRIPTS_DIR to recompute the live content-affecting
+    # fields, and the fake exposes only a CLI main() -- accessing
+    # CACHE_KEY_FIELD_ORDER on it raises AttributeError at import.
+    fake_plugin_scripts = root / "fake_plugin" / "assets" / "scripts"
+    fake_plugin_scripts.mkdir(parents=True)
+    (fake_plugin_scripts / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     shutil.copytree(SCHEMAS_SRC_DIR, root / "schemas")
     (root / "runs" / "ledger.d").mkdir(parents=True)
@@ -302,8 +321,13 @@ def converged_fragment(cache_key=None, rounds=1, reviewed_draft_sha1=None, extra
 
 
 def run_merge(root, *extra_args, timeout=30) -> subprocess.CompletedProcess:
+    # --plugin-root points at the staged FAKE cache_key.py (see make_root):
+    # this is ledger_merge.py's own documented resolution path, not a test
+    # workaround. Callers may still pass their own --plugin-root; argparse
+    # takes the last occurrence, so an explicit one in *extra_args wins.
     return subprocess.run(
-        [sys.executable, str(root / "scripts" / "ledger_merge.py"), *extra_args],
+        [sys.executable, str(root / "scripts" / "ledger_merge.py"),
+         "--plugin-root", str(root / "fake_plugin"), *extra_args],
         capture_output=True,
         text=True,
         timeout=timeout,

@@ -129,11 +129,11 @@ CONTENT_AFFECTING_FIELDS = content_affecting_cache_key_fields()
 # plus the `admit` parameter)
 # ===========================================================================
 
-DUMMY_CACHE_KEY = {
-    "input_sha1": "a" * 40,
-    "style_contract_hash": "b" * 40,
-    "used_terms_hash": "c" * 40,
-}
+# #492 retired the hand-written DUMMY_CACHE_KEY that used to sit here:
+# assembly now recomputes every content-affecting cache-key field from the
+# live durable_root, so a fabricated stored key is a guaranteed refusal rather
+# than an inert schema-shaped placeholder. real_cache_key() below produces the
+# genuine one by running the shipped cache_key.py.
 
 
 def _yaml_dump(obj) -> str:
@@ -204,11 +204,66 @@ def assemble_profile(admit=None):
     return profile
 
 
+def _write_cache_key_inputs(root: Path, scripts_dir: Path) -> None:
+    """#492: the durable-root files cache_key.py's own field computers read.
+    assemble.py now recomputes every content-affecting cache-key field from
+    the live root and refuses on a mismatch, so this fixture must carry real
+    inputs and a real stored key. Restated from tests/final_audit.test.py's
+    make_durable_root() rather than imported -- house convention is one
+    self-contained file per test module. Only style_bible.md's two
+    STYLE_CONTRACT markers are load-bearing; `runs/.plugin_bundle_hash` is the
+    marker Step 0a writes and cache_key.py reads back rather than re-hashing
+    the bundle."""
+    (scripts_dir / "bootstrap_names.py").write_bytes(b"# bootstrap_names.py fixture\n")
+    (scripts_dir / "segpack.py").write_bytes(b"# segpack.py fixture\n")
+    (root / "style_bible.md").write_bytes(
+        b"# Style Bible\n\n<!-- STYLE_CONTRACT_BEGIN -->\n"
+        b"Formal register, Oxford comma.\n<!-- STYLE_CONTRACT_END -->\n"
+    )
+    (root / "translate_TASK.md").write_bytes(b"TRANSLATE TASK PROMPT v1\n")
+    (root / "review_TASK.md").write_bytes(b"REVIEW TASK PROMPT v1\n")
+    (root / "extract.py").write_bytes(b"# extract.py fixture v1\n")
+    (root / "a.txt").write_bytes(b"Ceci est un texte source de test.\n")
+    languages_dir = root / "languages"
+    languages_dir.mkdir(exist_ok=True)
+    (languages_dir / "fr_test.json").write_text(
+        json.dumps({"PARTICLES": ["de"], "STOPWORDS": ["le"], "has_elision": False,
+                    "ELISION_RE": None}),
+        encoding="utf-8",
+    )
+    (root / "schemas").mkdir(exist_ok=True)
+    for _name in ("draft.schema.json", "review.schema.json", "segpack.schema.json"):
+        (root / "schemas" / _name).write_bytes(b"{}\n")
+    runs_dir = root / "runs"
+    runs_dir.mkdir(exist_ok=True)
+    (runs_dir / ".plugin_bundle_hash").write_text(
+        "test-plugin-bundle-marker-v1\n", encoding="utf-8"
+    )
+
+
+def real_cache_key(root: Path, seg: str) -> dict:
+    """The segment's REAL 15-field cache key, from the SHIPPED cache_key.py run
+    against this fixture root -- never hand-typed, so it cannot drift from what
+    assemble.py recomputes at run time."""
+    proc = subprocess.run(
+        [sys.executable, str(root / "scripts" / "cache_key.py"), "--seg", seg],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"fixture setup: cache_key.py --seg {seg} failed:\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    return json.loads(proc.stdout)
+
+
 def make_assemble_root(tmp_path, admit=None) -> Path:
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
-    for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC):
+    # CACHE_KEY_SRC (#492): assemble.py imports it as a sibling and
+    # recomputes every content-affecting field from the live root.
+    for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
+                CACHE_KEY_SRC):
         shutil.copy2(src, scripts_dir / src.name)
 
     profile = assemble_profile(admit)
@@ -223,6 +278,8 @@ def make_assemble_root(tmp_path, admit=None) -> Path:
     )
     (root / "segments").mkdir()
     (root / "runs").mkdir()
+    # #492: last, so it can reuse the runs/ dir just created above.
+    _write_cache_key_inputs(root, scripts_dir)
     return root
 
 
@@ -314,7 +371,7 @@ def converged_ledger_record(root, seg, reviewed_draft_sha1_override=None) -> dic
         "timestamp": "2026-01-01T00:00:00+00:00",
         "status": "converged",
         "rounds": 1,
-        "cache_key": DUMMY_CACHE_KEY,
+        "cache_key": real_cache_key(root, seg),
         "n_blocks": 1,
         "n_footnotes": 0,
         "n_verses": 0,

@@ -57,20 +57,23 @@ MENTIONS_SRCS = tuple(
     SCRIPTS_SRC_DIR / name
     for name in ("occurrence_targets.py", "bootstrap_names.py", "canon_senses.py")
 )
+# #492: assemble.py imports cache_key.py as a sibling, at module import time.
+CACHE_KEY_SRC = SCRIPTS_SRC_DIR / "cache_key.py"
+# Must match this fixture's manifest.source_inputs and
+# profile source.language.particle_config respectively.
+SOURCE_INPUT_NAME = "source.txt"
+PARTICLE_CONFIG_NAME = "he_test.json"
 LINK_GROUPS_SCHEMA_SRC = SCHEMAS_SRC_DIR / "canon-link-groups.schema.json"
 
 for _src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
-             CANON_LINK_GROUPS_SRC, LINK_GROUPS_SCHEMA_SRC, *MENTIONS_SRCS):
+             CANON_LINK_GROUPS_SRC, LINK_GROUPS_SCHEMA_SRC, CACHE_KEY_SRC, *MENTIONS_SRCS):
     assert _src.is_file(), f"fixture source not found: {_src}"
 
-DUMMY_CACHE_KEY = {
-    "input_sha1": "a" * 40, "style_contract_hash": "b" * 40, "used_terms_hash": "c" * 40,
-    "pipeline_version": "v1", "schema_hash": "d" * 40, "prompt_hash": "e" * 40,
-    "agent_config_hash": "f" * 40, "profile_semantics_hash": "0" * 40,
-    "particle_config_hash": "1" * 40, "source_extraction_hash": "2" * 40,
-    "source_input_hash": "3" * 40, "derivation_bundle_hash": "4" * 40,
-    "verse_map_hash": "5" * 40, "note_map_hash": "6" * 40, "plugin_bundle_hash": "7" * 40,
-}
+# #492 retired the hand-written DUMMY_CACHE_KEY that used to sit here:
+# assembly now recomputes every content-affecting cache-key field from the
+# live durable_root, so a fabricated stored key is a guaranteed refusal rather
+# than an inert schema-shaped placeholder. real_cache_key() below produces the
+# genuine one by running the shipped cache_key.py.
 
 # Two spellings of one man -- the maqaf/no-maqaf pair #588 is actually about.
 SPACED = "משה לייב"
@@ -139,6 +142,58 @@ def _draft_content_sha1(doc: dict) -> str:
     return hashlib.sha1(canonical).hexdigest()
 
 
+def _write_cache_key_inputs(root: Path, scripts_dir: Path) -> None:
+    """#492: the durable-root files cache_key.py's own field computers read.
+    assemble.py now recomputes every content-affecting cache-key field from
+    the live root and refuses on a mismatch, so this fixture must carry real
+    inputs and a real stored key. Restated from tests/final_audit.test.py's
+    make_durable_root() rather than imported -- house convention is one
+    self-contained file per test module. Only style_bible.md's two
+    STYLE_CONTRACT markers are load-bearing; `runs/.plugin_bundle_hash` is the
+    marker Step 0a writes and cache_key.py reads back rather than re-hashing
+    the bundle."""
+    (scripts_dir / "bootstrap_names.py").write_bytes(b"# bootstrap_names.py fixture\n")
+    (scripts_dir / "segpack.py").write_bytes(b"# segpack.py fixture\n")
+    (root / "style_bible.md").write_bytes(
+        b"# Style Bible\n\n<!-- STYLE_CONTRACT_BEGIN -->\n"
+        b"Formal register, Oxford comma.\n<!-- STYLE_CONTRACT_END -->\n"
+    )
+    (root / "translate_TASK.md").write_bytes(b"TRANSLATE TASK PROMPT v1\n")
+    (root / "review_TASK.md").write_bytes(b"REVIEW TASK PROMPT v1\n")
+    (root / "extract.py").write_bytes(b"# extract.py fixture v1\n")
+    (root / SOURCE_INPUT_NAME).write_bytes(b"Ceci est un texte source de test.\n")
+    languages_dir = root / "languages"
+    languages_dir.mkdir(exist_ok=True)
+    (languages_dir / PARTICLE_CONFIG_NAME).write_text(
+        json.dumps({"PARTICLES": ["de"], "STOPWORDS": ["le"], "has_elision": False,
+                    "ELISION_RE": None}),
+        encoding="utf-8",
+    )
+    (root / "schemas").mkdir(exist_ok=True)
+    for _name in ("draft.schema.json", "review.schema.json", "segpack.schema.json"):
+        (root / "schemas" / _name).write_bytes(b"{}\n")
+    runs_dir = root / "runs"
+    runs_dir.mkdir(exist_ok=True)
+    (runs_dir / ".plugin_bundle_hash").write_text(
+        "test-plugin-bundle-marker-v1\n", encoding="utf-8"
+    )
+
+
+def real_cache_key(root: Path, seg: str) -> dict:
+    """The segment's REAL 15-field cache key, from the SHIPPED cache_key.py run
+    against this fixture root -- never hand-typed, so it cannot drift from what
+    assemble.py recomputes at run time."""
+    proc = subprocess.run(
+        [sys.executable, str(root / "scripts" / "cache_key.py"), "--seg", seg],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"fixture setup: cache_key.py --seg {seg} failed:\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    return json.loads(proc.stdout)
+
+
 def make_root(tmp_path, output_target="obsidian", entries=None, block_text=None,
               with_loader=True, mentions=False, source_text=None) -> Path:
     """A minimal one-segment, one-block converged book, with the two colliding
@@ -155,7 +210,11 @@ def make_root(tmp_path, output_target="obsidian", entries=None, block_text=None,
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
-    sources = [ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC]
+    # CACHE_KEY_SRC is unconditional (#492): assemble.py imports it as a
+    # sibling, so leaving it out would fail every case on a dependency
+    # precondition instead of on what the case is about.
+    sources = [ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
+               CACHE_KEY_SRC]
     if with_loader:
         sources.append(CANON_LINK_GROUPS_SRC)
     if mentions:
@@ -197,6 +256,7 @@ def make_root(tmp_path, output_target="obsidian", entries=None, block_text=None,
 
     (root / "segments").mkdir()
     (root / "runs").mkdir()
+    _write_cache_key_inputs(root, scripts_dir)
 
     if block_text is None:
         block_text = f"{SHARED_TARGET} spoke. Later {SHARED_TARGET} left."
@@ -233,7 +293,7 @@ def make_root(tmp_path, output_target="obsidian", entries=None, block_text=None,
     (root / "runs" / "ledger.json").write_text(
         json.dumps({"segments": {"seg01": {
             "timestamp": "2026-01-01T00:00:00+00:00", "status": "converged", "rounds": 1,
-            "cache_key": DUMMY_CACHE_KEY, "n_blocks": 1, "n_footnotes": 0, "n_verses": 0,
+            "cache_key": real_cache_key(root, "seg01"), "n_blocks": 1, "n_footnotes": 0, "n_verses": 0,
             "reviewed_draft_sha1": _draft_content_sha1(draft),
         }}}, ensure_ascii=False),
         encoding="utf-8",
