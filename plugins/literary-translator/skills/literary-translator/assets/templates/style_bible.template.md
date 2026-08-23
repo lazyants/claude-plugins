@@ -261,8 +261,9 @@ homonym has no single frozen target form) into every segment.
 Three of this section's sub-sections -- `G-cast`, `G-voices` and `G-motifs` -- are optional and ship
 empty; an empty one is a legitimate final state for a book that doesn't need it. Like the rest of section
 G they sit OUTSIDE the style_contract markers, so filling one in mid-run moves no cache-key field and
-re-stales nothing -- and, for the same reason, a segment that already converged never sees what was
-added: they bind the segments still to come.
+re-stales nothing -- so the edit alone never re-dispatches a segment that already converged: they bind
+the segments still to come. (Any later dispatch of such a segment, for whatever other reason, reads this
+file in full and does see the addition.)
 
 | source form | canonical target form | basis |
 |----|--------------|-------|

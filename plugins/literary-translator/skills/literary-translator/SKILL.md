@@ -2650,10 +2650,68 @@ and three of them are unenforced traps with no code-side safety net:**
 as a lightweight, hand-maintained tracker after every batch, before the next
 starts. Never the output of an automated script, never read back in or
 acted on programmatically. A decision recorded here is invisible to the
-reviewer, which reads `style_bible.md` and the segpack's `canon_map` only —
-so promoting a decision into the contract is what makes it enforceable, and
-**R9 governs what that promotion does and does not oblige**: it binds the
-segments still to come, never a re-review of the ones already converged.
+reviewer, which reads `style_bible.md` and the segpack — its `canon_map` and,
+since 1.45.0, its `split_names` — so it binds nothing until it is promoted into
+one of those.
+**R9 governs a promotion into the style contract**: it binds the segments still
+to come, never a re-review of the ones already converged.
+
+**Where a decision goes is a question nothing asks today, and the destinations
+are not interchangeable.** Ask it while you are writing the item down. There
+are five outcomes:
+
+- **Already owned elsewhere** — `style_bible.template.md`'s own rule is not to
+  restate anything `profile.yml`, the segpack or
+  `translate_TASK.md`/`review_TASK.md` already owns, and verse policy is its
+  standing example. A ruling one of those owns is configured there and recorded
+  here as configured, never promoted. This is the only outcome that leaves the
+  promotion question entirely.
+- **Canon** — the decision changes the target form of a name that ALREADY has
+  an `entries{}` row in `canon.json`. That row, not the segpack, is what
+  "frozen" means: do not read absence from a `canon_map` as evidence of
+  anything, since a legally empty target form is omitted from it and a segpack
+  built before the name was canonized still carries the name in `new_names[]`.
+  What the segpack does deliver is `canon_map` as source form -> target form and
+  nothing else — a `basis` never reaches the reviewer, so no decision can be
+  carried by one. Invalidation here is PRECISE, which is not the same as small:
+  `used_terms_hash` is a per-segment cache-key field, so exactly the segments
+  whose segpack lists that name in `canon_names[]` OR `new_names[]` are
+  affected — one segment for a walk-on, every segment for a protagonist — and
+  R4's rule is that each of them is RE-TRANSLATED, not merely re-reviewed.
+  **R4's `references/canon-and-glossary.md` owns the route and the two
+  obligations that come with it**: validate the edited file, and regenerate
+  those segments' segpacks before selection runs again. A name that is NOT
+  already frozen is not this channel and is never a hand edit either — R4's
+  glossary/adjudication route owns it.
+- **Homonym split** — the decision is that one source form carries two distinct
+  senses. That goes through the `canon_senses.json` adjudication route and into
+  regenerated segpacks, where it reaches the reviewer as `split_names`. It is
+  NOT a canon row and cannot be made one: `canon_validate.py`'s recollapse guard
+  refuses a bare `entries{}` entry for a split form, and the mandatory pre-W3a
+  audit halts on one that predates the split. It is not a contract edit either.
+  A split carries no frozen target form, so the reviewer may argue the wrong
+  sense was chosen but may never prescribe a canonical target form there.
+  Invalidation is per-segment exactly as for canon: `split_names` is inside
+  `used_terms_hash`, so adding a split or editing a sense's `disambiguator`
+  re-stales the segments that carry that form.
+- **Section G** — most of what this sweep produces belongs here: a character's
+  settled voice, the recurring cast, a motif held to one rendering.
+  `style_bible.md`'s `G-cast`/`G-voices`/`G-motifs` sit OUTSIDE the
+  style_contract markers, so filling one moves no cache-key field at all, while
+  every translate and review call still reads them in full. The edit alone
+  neither reclassifies nor re-dispatches an already-converged segment; any
+  later dispatch of that segment, for whatever reason, reads the bible in full
+  and does see it.
+- **Sections A–F** — only a rule none of the above owns, one that must apply
+  inside the marked span. That is the case this paragraph exists for: a
+  truncated quotation stays truncated, and the verse-rhyme requirement does not
+  reach it. One edit there flips every still-converged segment to `stale` at
+  once (R9 above), and since 1.41.0 `validation.admit_contract_only_stale` can
+  let both ship gates admit that population unjudged.
+
+Pick by what the decision IS, and read each route's price where that route is
+documented rather than assuming one is cheaper than another.
+
 The sweep's own input is a READ of this batch's converged drafts, in
 `manifest.json`'s `segments[]` order — no other pass in this pipeline
 compares translated prose across segments at all: each reviewer call sees
