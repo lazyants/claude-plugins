@@ -567,7 +567,7 @@
               "type": "integer",
               "minimum": 0,
               "default": 50,
-              "description": "GLOBAL total for the `sampled` risk class (largest-remainder across category x confidence strata), not per-stratum."
+              "description": "GLOBAL total for the `sampled` risk class (largest-remainder across category strata), not per-stratum. The strata are category-only: the sample never reads an entry's model-authored `confidence` (#506)."
             },
             "dispersion_threshold": {
               "type": "integer",

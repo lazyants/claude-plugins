@@ -48,9 +48,12 @@ order):
      found via character-bigram blocking (recall-preserving -- catches
      `Mordecai`/`Nordecai`, which first-char blocking misses) rather than
      any first-char/length bucketing.
-  7. sampled -- a globally-capped, deterministic stratified sample of the
-     remaining accepted high/medium-confidence entries (a spot-check safety
-     net over everything the first six classes did not already catch).
+  7. sampled -- a globally-capped, deterministic stratified sample of EVERY
+     remaining accepted entry (a spot-check safety net over everything the
+     other classes did not already catch). Stratified by `category` alone:
+     this class does not read `confidence` either, for the same reason
+     nothing else here does -- see `_sampled`'s own docstring for what
+     reading it cost (#506).
   8. fold_collision (#243) -- this scope_in source_form's
      `bootstrap_names.fold_match_key` collides with ANOTHER scope_in
      source_form's (`canon_senses.fold_collision_map()`, computed over the
@@ -645,46 +648,81 @@ def _near_merge(scope_in_forms: list, near_threshold: float, near_cap: int,
 # ---------------------------------------------------------------------------
 
 def _sampled(scope_in: dict, per_entry_risk: dict, sample_cap: int) -> set:
-    """A deterministic, RNG-free, resume-stable stratified sample of
-    `scope_in` entries with `confidence` in `{"high", "medium"}` that no
-    earlier class (1-6) already flagged. `--sample-cap` is a GLOBAL total,
-    distributed across occupied `(category, confidence)` strata by
-    largest-remainder apportionment (proportional to stratum size,
-    fractional remainders rounded by descending size, ties broken by the
-    stratum key's own tuple order -- `NO_CATEGORY_SENTINEL` sorts first,
-    giving a TOTAL order even though `category` is open-vocabulary).
+    """A deterministic, RNG-free, resume-stable stratified sample of EVERY
+    `scope_in` entry no earlier class (1-6, 8) already flagged.
+    `--sample-cap` is a GLOBAL total, distributed across occupied
+    `category` strata by largest-remainder apportionment (proportional to
+    stratum size, fractional remainders rounded by descending size, ties
+    broken by the stratum key itself -- the category string, so the order
+    is TOTAL even though `category` is open-vocabulary, and
+    `NO_CATEGORY_SENTINEL`'s leading NUL puts it ahead of every ordinary
+    category. It is not provably ahead of EVERY possible one: `category` is
+    an unconstrained schema string, so a crafted `"\x00!x"` sorts before
+    it. Nothing depends on the sentinel being first beyond which stratum
+    takes a remainder slot, and the order stays total and deterministic
+    either way.)
     Within a stratum, the first `quota` members by ascending
     `sha256(source_form)` hex are selected -- no randomness, stable across
     runs and resumes.
+
+    **This class does not read `confidence`, and that is the whole point
+    (#506).** It once did, twice: as an eligibility filter admitting only
+    `high`/`medium`, and as the second component of the stratum key. Both
+    are gone. `confidence` is the producing model's own self-report about
+    work nothing else re-checked, so reading it here made the one class of
+    entry with the weakest evidence -- an ACCEPTED entry the model itself
+    marked `low`, which `canon-batch.schema.json` admits at intake and
+    which sits in `entries{}` rather than `review_queue[]`, so no drainage
+    gate sees it either -- the one class this safety net could never reach,
+    at any `--sample-cap`.
+
+    Measured on `historiettes-fr-ru/tome1` (165 accepted entries) with
+    `--research-mode offline` at the default `--sample-cap` 50, running the
+    scan AS IT THEN WAS: classes 1-6/8 flagged 142, leaving 23 unflagged,
+    of which the old filter admitted 21 -- well under the cap, so the
+    budget was never the constraint -- and the ONLY two entries the whole
+    scan left unflagged were precisely the canon's only two
+    `confidence: low` ones. Under the rule below, all 23 are eligible and
+    the same run leaves nothing unflagged at all. Under
+    `--research-mode live`, class 2 (`established_offline`) is silent, the
+    pool grows past the cap and 62 entries go unflagged for the ordinary
+    budget reason. The `low` pair is unreachable in BOTH regimes; only in
+    the first is it the whole of what goes unexamined.
+
+    Dropping the field from the stratum key matters as much as dropping the
+    filter. A one-member confidence stratum is not starved unconditionally
+    -- it depends on the remainder ranking and the key's own tie-break --
+    but it CAN be, and is whenever it loses that tie: 99 `high` plus one
+    `medium` of a single category at cap 50 gives the `high` stratum ideal
+    49.5 -> quota 49 and the `medium` one ideal 0.5 -> quota 0. Their
+    fractional REMAINDERS are both 0.5, so the single leftover slot is
+    decided by the key alone and goes to `"high"`, which sorts first. The
+    tests pin the invariant this establishes -- that permuting
+    confidence labels alone cannot move the selection -- rather than any
+    one entry's fate.
     """
-    eligible = []
+    strata_members = defaultdict(list)
     for sf, entry in scope_in.items():
-        if entry.get("confidence") not in ("high", "medium"):
-            continue
         if per_entry_risk.get(sf):
-            continue  # already flagged by classes 1-6
+            continue  # already flagged by classes 1-6, 8
         category = entry.get("category")
         if not isinstance(category, str) or not category.strip():
             category = NO_CATEGORY_SENTINEL
-        eligible.append((sf, category, entry.get("confidence")))
+        strata_members[category].append(sf)
 
-    if not eligible or sample_cap <= 0:
+    if not strata_members or sample_cap <= 0:
         return set()
 
-    strata_members = defaultdict(list)
-    for sf, category, confidence in eligible:
-        strata_members[(category, confidence)].append(sf)
     strata_counts = {k: len(v) for k, v in strata_members.items()}
-
-    total_eligible = len(eligible)
+    total_eligible = sum(strata_counts.values())
     cap = min(sample_cap, total_eligible)
 
     keys = sorted(strata_counts.keys())
     ideal = {k: strata_counts[k] * cap / total_eligible for k in keys}
     quota = {k: int(ideal[k]) for k in keys}
     remainder = cap - sum(quota.values())
-    # Largest-remainder-first order; ties broken by the stratum key's own
-    # tuple order (NO_CATEGORY_SENTINEL sorts before any real category).
+    # Largest-remainder-first order; ties broken by the stratum key itself
+    # (NO_CATEGORY_SENTINEL sorts before any real category).
     order = sorted(keys, key=lambda k: (-(ideal[k] - quota[k]), k))
     for k in order[:remainder]:
         quota[k] += 1
