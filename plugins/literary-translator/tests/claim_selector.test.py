@@ -571,6 +571,19 @@ def test_from_cap_happy_path_requires_only_segs_and_claims(tmp_path):
         "tri-state: None means 'no movement to characterise', a different fact from False"
     )
     assert out["claims"][seg]["cache_key_at_claim"] == fixture_keys[seg]
+    # #536, the NEGATIVE half of the disclosure field. This is the ordinary
+    # --from-cap population (build_from_cap_segment defaults the sentinel to
+    # ABSENT), so the field must be PRESENT and EMPTY -- not missing. A
+    # consumer that could not tell those apart would read a selector which
+    # stopped emitting the field as "none were admitted over a sentinel",
+    # which is the exact silent green the field exists to close, and
+    # segment_dispatch_driver.py refuses on the difference.
+    assert "claims_from_cap_over_sentinel" in out, (
+        "the field is emitted on EVERY invocation, not only when it is non-empty"
+    )
+    assert out["claims_from_cap_over_sentinel"] == [], (
+        "no sentinel was written for this segment, so nothing may be disclosed"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -598,10 +611,12 @@ def test_from_cap_admits_a_capped_unit_that_had_converged_and_discloses_it(tmp_p
           would still exit non-zero, which is exactly what happened when
           the admission half was patched by itself in the field.
 
-    The disclosure is asserted too, and deliberately as a stderr line rather
-    than a JSON field: an operator must not have to diff the sentinel
-    directory to discover that a claim admitted a unit which had converged
-    once."""
+    The disclosure is asserted on BOTH channels: an operator must not have to
+    diff the sentinel directory to discover that a claim admitted a unit which
+    had converged once. #537 shipped the stderr line alone; #536 added the JSON
+    field beside it, because segment_dispatch_driver.py parses only this
+    script's stdout and discards its stderr on the success path, so on the
+    driver path the stderr line reached nobody."""
     root = make_durable_root(tmp_path)
     seg = "seg14"
     fixture_keys = {}
@@ -629,6 +644,23 @@ def test_from_cap_admits_a_capped_unit_that_had_converged_and_discloses_it(tmp_p
     )
     assert "RE-REVIEW only" in proc.stderr, (
         "the disclosure must say what the claim does and does not authorize"
+    )
+    # #536: the stderr line above is not enough on its own --
+    # segment_dispatch_driver.py runs this script with capture_output=True and
+    # parses only stdout, so on the driver path (SKILL.md's main one) the
+    # disclosure was discarded and nothing durable recorded it. The JSON field
+    # is what the driver transports, journals and re-discloses.
+    #
+    # Asserted non-empty FIRST: the subset check below passes trivially over
+    # [], so on its own it would be green whether or not the field was ever
+    # populated.
+    over_sentinel = out["claims_from_cap_over_sentinel"]
+    assert over_sentinel == [seg], (
+        f"the sentinel-bearing admission must be named in the JSON payload too, "
+        f"not only on stderr; got {over_sentinel!r}"
+    )
+    assert set(over_sentinel) <= set(out["claims"]), (
+        "every id here must be one this invocation actually claimed"
     )
 
 

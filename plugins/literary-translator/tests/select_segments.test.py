@@ -509,6 +509,12 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         # reading a missing key as "nothing outstanding", so silently dropping
         # it has to fail here.
         "eligible_not_dispatched",
+        # #536: the --from-cap ids admitted over a PRESENT .ever_converged
+        # sentinel. Part of this exact-key contract for the same reason
+        # `eligible_not_dispatched` above is: segment_dispatch_driver.py
+        # REFUSES a --from-cap payload without it rather than reading a missing
+        # key as "none were", so silently dropping it has to fail here.
+        "claims_from_cap_over_sentinel",
         # #409 Step 1. This exact-key assertion is deliberate: a consumer that
         # reads `authorizes_dispatch` must be able to trust that the key is
         # always present, so silently dropping it has to fail here.
@@ -2796,6 +2802,10 @@ SENTINEL_NON_PARTICIPANTS = (
     # stderr verbatim, and names `.ever_converged` exactly once, in the relay
     # helper's docstring, to say WHAT the two relayed disclosures are -- one
     # of them being #537's `--from-cap` admission over a PRESENT sentinel.
+    # #536 added a second non-docstring site, the refusal message naming
+    # `claims_from_cap_over_sentinel`, which spells the marker with a HYPHEN
+    # for exactly this reason: a human-readable message is not a path, and the
+    # occurrence-level check below cannot tell the two apart.
     # It never reads, writes, or builds a sentinel path: the only script in
     # this driver's process tree that touches the marker is the selector it
     # shells out to, whose participation is pinned above. Re-verified by the
@@ -3024,13 +3034,13 @@ def test_exactly_these_five_scripts_participate_in_the_sentinel_contract():
     # the listing that excused its prose mention would otherwise excuse its code.
     #
     # `builds_token` cannot be used here, and that gap was a MEASURED
-    # false-green, not a theoretical one: both listed files are ALREADY in
+    # false-green, not a theoretical one: every listed file is ALREADY in
     # `builds_token` because their docstrings discuss the marker, so a real
     # participant added inline -- `(segments_dir / (".ever_" + "converged." +
     # seg)).lstat()` -- changed none of the five sets and passed every
     # assertion. File granularity cannot separate DISCUSSING the convention
     # from BUILDING it; occurrence granularity can. Hence the docstring-skipping
-    # scan: for these two files the count of non-docstring token sites is 0,
+    # scan: for every listed file the count of non-docstring token sites is 0,
     # and the mutant above makes it 1.
     for name in SENTINEL_NON_PARTICIPANTS:
         assert name not in path_builders | predicate_copies | path_helpers, (

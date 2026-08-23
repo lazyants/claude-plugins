@@ -198,7 +198,17 @@ Output: exactly one JSON object on stdout. Success:
  "counts": {...}, "ids_by_category": {category: [seg, ...]},
  "overrides": [...], "excluded_only_segs": [...],
  "eligible_not_dispatched": [...], "claims": {seg: {...}},
- "claims_admitted_via": {seg: profile}}.
+ "claims_admitted_via": {seg: profile},
+ "claims_from_cap_over_sentinel": [seg, ...]}.
+ `claims_from_cap_over_sentinel` (#536) is the subset of `claims`' own keys that
+ --from-cap admitted over a PRESENT `.ever_converged` sentinel -- the #537
+ converged-then-staled-then-capped population. Always present, always a list,
+ `[]` whenever --from-cap was not requested (that branch is the only writer of
+ the underlying flag). The same ids are disclosed on stderr as each record is
+ published; the field exists because segment_dispatch_driver.py captures this
+ script's stderr and discards it on the success path, so on the driver path the
+ disclosure previously reached nobody and no durable artifact recorded it.
+ Report-only: nothing gates on it.
  `eligible_not_dispatched` (#530) is the other direction of
  `excluded_only_segs`: the eligible units this invocation is NOT dispatching,
  i.e. `select_default()`'s own result minus the emitted SEGS, in candidate
@@ -4662,6 +4672,10 @@ def run(args, dirs: dict) -> dict:
     # under the same run id. See the `claims_admitted_via` entry in the result
     # payload below for why they can differ at all.
     claims_admitted_via: dict = {}
+    # #536: the third sibling of the two above, and the only one that is a list
+    # rather than a map. See the `claims_from_cap_over_sentinel` entry in the
+    # result payload below for what it holds and why it is shaped that way.
+    claims_from_cap_over_sentinel: list = []
     # #538: hoisted to run() scope because ADMISSION and the durable WRITE no
     # longer sit together. Admission happens here; the write happens after the
     # three policy refusals, and the publication block reads this to know what
@@ -5313,6 +5327,10 @@ def run(args, dirs: dict) -> dict:
                 )
 
             if extras.get("from_cap_over_sentinel"):
+                # #536: recorded in the same guarded block as the print below,
+                # never in a second `if` of its own, so the JSON field and the
+                # printed line cannot disagree about which ids were disclosed.
+                claims_from_cap_over_sentinel.append(seg)
                 # #537: --from-cap admitting a unit that HAD converged once is
                 # correct but unusual, and an operator must not have to diff
                 # the sentinel directory to discover it. Printed here, after
@@ -5405,6 +5423,29 @@ def run(args, dirs: dict) -> dict:
         # maps is the fact worth reading, so both are reported rather than one
         # being corrected into the other.
         "claims_admitted_via": claims_admitted_via,
+        # #536: the ids in `claims` that --from-cap admitted over a PRESENT
+        # `.ever_converged` sentinel, in publication order. Always present,
+        # `[]` when there were none, and a SUBSET of `claims`' keys by
+        # construction (appended in the same block that publishes the record).
+        # Report-only, exactly like `claims_admitted_via`: nothing gates on it,
+        # and widening its authority would turn a reporting fix into an
+        # admission change.
+        #
+        # A list rather than a per-id map because the fact is a yes/no: a map's
+        # value would be a degenerate `true`, and the next hand would put the
+        # profile in it -- a third home for information #545 exists to keep to
+        # two. The list also carries PUBLICATION ORDER, which the per-id stderr
+        # lines above print in. Emitted unconditionally; the driver requires it
+        # only on a --from-cap invocation (its parser says why).
+        #
+        # SUCCESS-path only, like `claims` and `claims_admitted_via` beside it.
+        # If this invocation publishes some ids and then refuses on a later
+        # one, the records already written stay durable while the refusal
+        # payload carries none of the three -- a pre-existing residual of
+        # partial publication that this field neither widens nor closes. The
+        # per-id stderr line above was already printed for each published id,
+        # and `runs/<run_id>/.claimed.<seg>` is the durable evidence.
+        "claims_from_cap_over_sentinel": claims_from_cap_over_sentinel,
         # #409: a consumer must be able to tell an authorizing result from a
         # merely descriptive one without re-deriving which flags were passed.
         "authorizes_dispatch": authorizes_dispatch,

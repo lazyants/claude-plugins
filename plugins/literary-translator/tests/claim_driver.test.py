@@ -1033,6 +1033,10 @@ def main():
     # `segs`.
     print(json.dumps({
         "success": True, "segs": [], "claims": {}, "claims_admitted_via": {},
+        # #536: required of a --from-cap invocation, and several tests below
+        # drive this fake with --from-cap. Empty because this fake claims
+        # nothing, and the field is a SUBSET of `claims` by contract.
+        "claims_from_cap_over_sentinel": [],
         "counts": {}, "classification": {}, "eligible_not_dispatched": [],
     }))
 
