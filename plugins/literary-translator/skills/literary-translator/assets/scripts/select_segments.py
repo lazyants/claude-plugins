@@ -719,6 +719,24 @@ def scan_dispatching_run_ids(segments_dir: Path) -> dict:
     # the more locally consistent move than importing a different script's
     # pattern.
     for path in entries:
+        # #428: codex_job.py's private staging slots live in this same
+        # directory and END IN `.draft.json` too -- `.att.<seg>.<INV>.draft.json`
+        # and `.att_pending.<seg>.draft.json` (codex_job.py's own __init__).
+        # Neither `Path.glob("*.draft.json")` nor an `endswith` test over
+        # `iterdir()` excludes a dot-prefixed name, so a slot used to be
+        # counted here and attributed by the candidate's own dispatch_token
+        # -- inflating `drafts_scanned`, duplicating a seg inside
+        # `by_run_id`, and, for a slot left by an EARLIER run, injecting a
+        # run id with no real draft behind it into the evidence this gate
+        # refuses on. Skipping the whole dot-prefixed namespace is safe in
+        # BOTH directions: every private entry written into this directory
+        # is dot-prefixed, and a canonical draft never can be, since a seg id
+        # is `(?:FRONTBACK:)?[A-Za-z0-9_]+` in every copy of _SEG_ID_RE and
+        # so cannot begin with a dot. Deliberately NOT a list of the private
+        # names: they outnumber the two this fix is about and a list would
+        # rot, while the property the skip actually rests on is the dot.
+        if path.name.startswith("."):
+            continue
         if not path.name.endswith(".draft.json"):
             continue
         scanned += 1
@@ -780,9 +798,15 @@ def scan_workflow_run_ids(runs_dir: Path) -> list:
                               dispatched nothing.
       both                 -- the ordinary manual-path run.
       neither (undetectable) -- a DRIVER run (so no workflow directory was
-                              ever written for it) whose every draft was
-                              LATER overwritten by a subsequent run (so the
-                              draft scan's own trace is also gone). This
+                              ever written for it) that left no canonical
+                              draft carrying its token: either every draft
+                              it wrote was LATER overwritten by a subsequent
+                              run, or (since #428) it PROMOTED nothing and
+                              its only surviving trace is a deferred
+                              `.att_pending.<seg>.draft.json` or a kept
+                              `.att.<seg>.<INV>.draft.json`, which this scan
+                              now skips as codex_job.py's private staging
+                              state rather than reading as a draft. This
                               combination leaves NO artifact in either scan,
                               on either side of the union -- not a gap in
                               how the two are combined, but the two

@@ -235,6 +235,17 @@ def scan_dispatching_run_ids(segments_dir: Path) -> dict:
     if not segments_dir.is_dir():
         return {"by_run_id": by_run_id, "drafts_scanned": 0, "drafts_untokened": 0}
     for path in sorted(segments_dir.glob("*.draft.json")):
+        # #428: `pathlib.Path.glob` matches DOT-PREFIXED names (unlike the
+        # `glob` module), and codex_job.py's private staging slots share this
+        # directory and this suffix -- `.att.<seg>.<INV>.draft.json` and
+        # `.att_pending.<seg>.draft.json`. A slot used to be counted and
+        # attributed here by the candidate's own dispatch_token, so a slot
+        # left by an EARLIER run acknowledged a run id with no real draft
+        # behind it. Safe in both directions: every private entry the driver
+        # writes here is dot-prefixed, and a canonical draft never is (a seg
+        # id is `(?:FRONTBACK:)?[A-Za-z0-9_]+` in every copy of _SEG_ID_RE).
+        if path.name.startswith("."):
+            continue
         scanned += 1
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))

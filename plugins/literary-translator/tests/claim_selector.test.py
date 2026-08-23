@@ -1581,10 +1581,12 @@ def test_rewrite_fails_when_the_drafts_directory_entry_cannot_be_made_durable(tm
 def _write_phantom_evidence_draft(root, run_id, phantom_seg="phantom_seg"):
     """A minimal draft carrying a dispatch_token for `run_id`, NOT a member
     of manifest.json and never claimed through this suite's usual fixture
-    builders -- scan_dispatching_run_ids() scans every *.draft.json under
-    segments/ unconditionally, regardless of manifest membership, so this is
-    sufficient to manufacture "pre-existing dispatch evidence bearing this
-    exact id" without needing a full P1/P2 population."""
+    builders -- scan_dispatching_run_ids() scans every canonical
+    {seg}.draft.json under segments/ regardless of manifest membership (since
+    #428 it skips the dot-prefixed namespace, which is codex_job.py's private
+    staging state and never a draft), so this is sufficient to manufacture
+    "pre-existing dispatch evidence bearing this exact id" without needing a
+    full P1/P2 population."""
     write_draft_doc(root, phantom_seg, {"seg": phantom_seg, "dispatch_token": f"{run_id}:{phantom_seg}"})
 
 
@@ -4325,7 +4327,8 @@ UNGATED_RUN_ID = "20260805T000000Z"
 def _write_unrelated_draft(root, seg, dispatch_token):
     """A draft nothing in `segs` names, carrying a chosen dispatch_token.
 
-    scan_dispatching_run_ids() walks segments/*.draft.json project-wide and
+    scan_dispatching_run_ids() walks the canonical segments/{seg}.draft.json
+    entries project-wide (skipping the dot-prefixed namespace since #428) and
     does not consult manifest.json, so this is how a fixture supplies Step 3
     evidence WITHOUT putting it on the claimed draft. That separation is the
     whole point: an unsafe or ungated token on the CLAIMED draft is refused
