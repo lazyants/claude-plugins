@@ -651,11 +651,12 @@ const DETAIL_CAP = 160;
 const DETAIL_BREAKS = /[\n\r\t\v\f\u0085\u2028\u2029]+/g;
 
 // Every MODEL-AUTHORED or otherwise dynamic string that reaches a detail goes
-// through here, not just an agent's raw reply (the handful of fixed fallback
-// constants below are short and single-line by construction and do not): a schema-validated field is still model-authored text under no
-// length or charset restriction, so a mismatch_detail or a relayed script
-// error copied verbatim would carry its own line breaks straight into the
-// operator log and blow the cap that this file promises.
+// through here, not just an agent's raw reply: a schema-validated field is
+// still model-authored text under no length or charset restriction, so a
+// mismatch_detail or a relayed script error copied verbatim would carry its
+// own line breaks straight into the operator log and blow the cap that this
+// file promises. The handful of fixed fallback constants below do not go
+// through it -- they are short and single-line by construction.
 function flattenDetail(text) {
   const flat = String(text).replace(DETAIL_BREAKS, " ").trim();
   if (flat.length <= DETAIL_CAP) return flat;
@@ -686,8 +687,32 @@ function sourcedDetail(source, reply) {
   return flattenDetail(source + ": " + replyDetail(reply));
 }
 
-// #133's shape verdict is a content reason, not a failed call, but it reaches
-// failed[] through the same detail channel -- a constant, so it aggregates.
+// One model-authored string FIELD off a schema-validated reply, flattened.
+// Returns "" when the field is absent, wrong-typed, or whitespace-only --
+// three states that mean the same thing here, that there is no message, and
+// that a caller must not report as one: the schemas accept any string, so a
+// whitespace-only error would otherwise become an empty detail and an empty
+// bucket in the batch tally.
+function relayedDetail(reply, field) {
+  if (!reply || typeof reply[field] !== "string") return "";
+  return flattenDetail(reply[field]);
+}
+
+const WRITE_FAILED_DEFAULT_DETAIL = "ledger_update.py write did not report success";
+const MERGE_FAILED_DEFAULT_DETAIL = "ledger_merge.py completeness check did not report success";
+
+// The detail for a python-script call that did not report success. The
+// asymmetry is the point, and it is written once here rather than twice at
+// the two call sites: the default constant accuses the script of failing a
+// check, which is accurate when the script ANSWERED and was rejected, and
+// false when the CALL died -- there is then no reply at all, and replyDetail
+// says so instead.
+function scriptErrorDetail(reply, rejectedDetail) {
+  const relayed = relayedDetail(reply, "error");
+  if (relayed !== "") return relayed;
+  return reply ? rejectedDetail : replyDetail(reply);
+}
+
 // #400 -- the detail a bounded wait carries when it ends in a timeout.
 //
 // The DISPATCH reply outranks the wait reply, but only when the dispatch
@@ -715,6 +740,8 @@ function timeoutVerdict(reason, dispatchDetail, lastWaitReply) {
   return { status: "blocked", reason: reason, detail: waitDetail };
 }
 
+// #133's shape verdict is a content reason, not a failed call, but it reaches
+// failed[] through the same detail channel -- a constant, so it aggregates.
 const FABRICATED_LOC_DETAIL = "review verdict finding loc was not colon-delimited";
 
 // #400 -- the probe call itself died. draftPresentAndValid() returns null in
@@ -1752,20 +1779,7 @@ async function recordLedgerCall(seg, fields, label) {
   });
 
   if (!ledgerWriteSucceeded(raw)) {
-    // #400 -- the constant below accuses ledger_update.py of failing a check.
-    // That is accurate when the script ANSWERED and the answer was rejected,
-    // and false when the call itself died: raw is then null, there is no
-    // error field, and the operator reads a script failure that never
-    // happened. Only the falsy case is re-routed; a truthy-but-rejected
-    // object keeps the constant.
-    // A flattened-empty error is not an error message -- the schema accepts any
-    // string, so a whitespace-only one would otherwise become detail:"" and
-    // form an empty bucket in the batch tally. Same guard the artifact-check
-    // site already applies.
-    const relayed = raw && typeof raw.error === "string" ? flattenDetail(raw.error) : "";
-    const detail = relayed !== ""
-      ? relayed
-      : (raw ? "ledger_update.py write did not report success" : replyDetail(raw));
+    const detail = scriptErrorDetail(raw, WRITE_FAILED_DEFAULT_DETAIL);
     return {
       ok: false,
       failResult: { seg: seg, converged: false, reason: "ledger-write-failed", detail: detail },
@@ -2007,11 +2021,10 @@ async function getVerifiedReview(seg, roundLabel) {
   if (!retry.rev) return { status: "blocked", reason: "review-null", detail: replyDetail(retry.rev) };
   if (artifactCheckMatched(retry.art)) return matchedVerdict(retry.rev);
 
+  const relayedMismatch = relayedDetail(retry.art, "mismatch_detail");
   return {
     status: "blocked", reason: "review-artifact-mismatch",
-    detail: retry.art && typeof retry.art.mismatch_detail === "string" && flattenDetail(retry.art.mismatch_detail) !== ""
-      ? flattenDetail(retry.art.mismatch_detail)
-      : replyDetail(retry.art),
+    detail: relayedMismatch !== "" ? relayedMismatch : replyDetail(retry.art),
   };
 }
 
@@ -2593,14 +2606,7 @@ const mergeResult = await agent(mergeLedgerPrompt(SEGS), {
 });
 
 if (!ledgerMergeSucceeded(mergeResult)) {
-  // #400 -- same asymmetry as recordLedgerCall: the constant is accurate when
-  // ledger_merge.py ANSWERED and was rejected, and false when the call itself
-  // died. Only the falsy case is re-routed.
-  const relayedMergeError = mergeResult && typeof mergeResult.error === "string"
-    ? flattenDetail(mergeResult.error) : "";
-  const detail = relayedMergeError !== ""
-    ? relayedMergeError
-    : (mergeResult ? "ledger_merge.py completeness check did not report success" : replyDetail(mergeResult));
+  const detail = scriptErrorDetail(mergeResult, MERGE_FAILED_DEFAULT_DETAIL);
   log("Ledger merge/completeness check failed: " + detail);
   return {
     converged: converged, failed: failed,
