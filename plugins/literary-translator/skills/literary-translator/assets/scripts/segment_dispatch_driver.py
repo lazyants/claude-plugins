@@ -6280,6 +6280,15 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 # ok = promoted or adopted), i.e. a candidate that passed its
                 # gates and REPLACED the canonical.
                 #
+                # EVERY adoption is deliberately left unstamped, including
+                # adopt_pending() -- which DOES replace the canonical, with a
+                # prior run's validated attempt, and so is a promotion in the
+                # ordinary sense. Admitting it would buy one avoided halt in a
+                # rarer case at the cost of widening the only condition that
+                # can ever authorize discarding a draft, and the direction
+                # this costs is the safe one: an unstamped fragment reads
+                # False, which halts instead of retrying.
+                #
                 # The note names the promoted draft's content hash, not just
                 # the fact of a promotion: a constant marker still reads True
                 # after the operator has edited that draft, so the hash is

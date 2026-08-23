@@ -1030,7 +1030,19 @@ remain**:
    The workflow's `translateStage()` is deliberately NOT stamped (its
    translate is a detached dispatch, so a returned DISP proves a launch and
    never a promotion), which is why a driver pickup of a template-written run
-   halts there instead of re-translating.
+   halts there instead of re-translating. **That halt persists.**
+   `invalid_post_fix_draft` writes no ledger entry, so the fragment, the
+   review and the run identity are all unchanged, `select_segments.py` keeps
+   classifying the fragment `recoverable`, and selection arguments stay out
+   of the mass digest — so re-running with `--only-segs` reproduces the same
+   halt rather than clearing it, and `--from-stalled` is refused at the claim
+   guard before its ledger write. What clears it is making the draft
+   structurally valid again: repair it, or delete it so the segment
+   re-translates from scratch. That is the action the halt exists to demand,
+   and it is the same recovery `invalid_post_fix_draft` already requires
+   everywhere else it fires. Adoption is likewise never stamped — including
+   `adopt_pending()`, which does replace the canonical — so an adopted
+   segment halts rather than retrying, again the safe direction.
 1. **Draft-missing** — a fix round's `DRAFT_MISSING` branch fires, AND
    (1.3.6/#131) the `draftPresentAndValid` probe confirms the draft is
    genuinely absent/invalid (`present === false`). **1.16.0:** that branch is

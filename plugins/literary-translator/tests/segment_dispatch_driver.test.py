@@ -5796,8 +5796,14 @@ def test_derive_next_action_promotion_note_with_one_extra_byte_does_not_retransl
 def test_derive_next_action_correct_promotion_note_on_a_terminal_status_does_not_retranslate(tmp_path):
     """Forces the status and the note to be a CONJUNCTION. A reader that
     checks only the note passes every other case in this section, and then
-    accepts a converged fragment that happens to carry a correct-looking
-    note -- a shape a restored or hand-written ledger can produce."""
+    accepts a converged fragment carrying a correct-looking note.
+
+    Stated plainly: NO production writer emits this shape today. Every write
+    replaces the fragment wholesale and only the translate branch writes the
+    promotion prefix, always with in_progress -- so this pins defence in
+    depth, over a restored or hand-written ledger, plus the day some future
+    site copies a note forward into a terminal write. It is one comparison
+    and one test; the class it closes is the one that destroys work."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     base, current_sha1 = _dna_stage_post_fix_invalid_draft(root, driver_mod)
@@ -5817,18 +5823,24 @@ def test_derive_next_action_promotion_note_naming_the_current_draft_still_retran
     exactly as before, never terminate. Without this the fix would deadlock
     a legitimate retry.
 
-    Reachable, not hypothetical -- but NOT for the reason it is tempting to
-    give. codex_job.py and this driver resolve their gate executables the
-    same way in both root modes (resolve_dirs() points every sibling script
-    at {plugin_root}/assets/scripts when --plugin-root is given, and
-    codex_job.py's _trusted_scripts_dir() resolves to the same place from the
-    same flag), so a stale durable-root validator does NOT make the two
-    disagree. What does: validate_draft.py checks the draft's block,
-    footnote and verse KEY SETS 1:1 against segments/segpack_{seg}.json. A
-    segpack regenerated between the promotion and the next derivation -- an
-    ordinary W3/W3a rerun, including the sanctioned --restamp-derivation
-    then segpack.py recovery -- makes an untouched, genuinely promoted draft
-    read invalid here."""
+    NO reachability claim is made for the surrounding scenario, and two
+    attempts at one were written here and then refuted -- a stale durable-root
+    validator (false: resolve_dirs() and codex_job.py's
+    _trusted_scripts_dir() resolve to the same place in both root modes) and
+    an ordinary W3/W3a regeneration (false: a regeneration that reproduces
+    the same block/footnote/verse keys leaves the draft valid; only one that
+    CHANGES a compared key set would not). What remains is narrow and is not
+    enumerated here, because guessing at it a third time is how the first two
+    wrong sentences got written.
+
+    That does not make this test optional. It pins the helper's positive
+    direction as a CONTRACT: the shipped behaviour 1.43.0 added -- a genuine
+    same-run retranslate is retried, not terminated -- must survive, so a
+    later edit that narrows the reader cannot silently convert every
+    retranslate into a halt. The fixture reaches the branch by placing seg01
+    in the fixture's invalid-draft list rather than by driving a real
+    validator, which is how every other reader case in this file works and is
+    why this proves the contract rather than the frequency."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     base = int(time.time()) - 3600
