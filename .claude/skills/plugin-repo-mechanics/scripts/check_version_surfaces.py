@@ -321,7 +321,7 @@ def version_key(value: object) -> tuple[int, ...] | None:
     return tuple(int(part) for part in str(value).split(".")) if VERSION_RE.fullmatch(str(value)) else None
 
 
-def tree_index(repo: Path, ref: str) -> dict[str, tuple[str, str]] | None:
+def tree_index(repo: Path, ref: str, folding: bool) -> dict[str, tuple[str, str]] | None:
     """Every path git records under `plugins/` at `ref`, with its mode and object id.
 
     ONE listing, and every question about released state is answered out of it. That is the whole
@@ -333,15 +333,21 @@ def tree_index(repo: Path, ref: str) -> dict[str, tuple[str, str]] | None:
     is always a deeper one. A recursive listing is the SET of what exists, so absence is set
     membership and topology is the mode already sitting beside each entry. Neither is inferred from
     a failure, and there is no next level to be surprised by.
+
+    Listed WHOLE and filtered here, rather than scoped with a `-- plugins` pathspec: that pathspec
+    is exact, `ls-tree` does not accept `:(icase)` magic, and a baseline rooted at `PLUGINS` would
+    come back empty -- which reads as "no plugin has a baseline" and waves every downgrade through.
+    Measured on this repo: 676 entries and 81KB for the whole tree against 561 for the subtree, at
+    15ms a call, so the scoping bought nothing worth that failure mode.
     """
-    listing = git(repo, "ls-tree", "-r", "-t", "-z", "--full-tree", ref, "--", "plugins")
+    listing = git(repo, "ls-tree", "-r", "-t", "-z", "--full-tree", ref)
     if listing is None:
         return None
     index: dict[str, tuple[str, str]] = {}
     for entry in listing.split("\0"):
         meta, _, path = entry.partition("\t")
         fields = meta.split()
-        if path and len(fields) == 3:
+        if path and len(fields) == 3 and same_path(path.split("/", 1)[0], "plugins", folding):
             index[path] = (fields[0], fields[2])
     return index
 
@@ -361,9 +367,16 @@ def folds_paths(repo: Path) -> bool:
     """
     probe, twin = repo / "plugins", repo / "PLUGINS"
     try:
-        return probe.is_dir() and twin.exists() and os.path.samefile(probe, twin)
+        here = os.stat(probe, follow_symlinks=False)
+        there = os.stat(twin, follow_symlinks=False)
     except OSError:
         return False
+    # lstat, not samefile: `samefile` FOLLOWS symlinks, so a `PLUGINS -> plugins` entry -- which
+    # any contributor can add, tracked or not -- makes a case-SENSITIVE filesystem answer "I fold",
+    # and the answer to this question decides whether one plugin may adopt another's manifest.
+    # Comparing the identities of the entries themselves cannot be aliased that way: a symlink has
+    # its own inode, and a folding filesystem hands back one entry for both spellings.
+    return (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino)
 
 
 def same_path(one: str, other: str, folding: bool) -> bool:
@@ -394,10 +407,14 @@ def baseline_blob(
     both cases a missing entry says nothing about whether a baseline exists.
     """
     rel = f"plugins/{name}/.claude-plugin/plugin.json"
+    # Ancestors are asked as equivalence classes for the same reason the leaf is: where the
+    # filesystem folds, `plugins/Alpha` IS this plugin's directory, so a symlink there hides this
+    # plugin's baseline. Probing the exact lowercase key found nothing and called that "absent" --
+    # the one answer that lets a downgrade through.
     for step in ("plugins", f"plugins/{name}", f"plugins/{name}/.claude-plugin"):
-        mode = index.get(step, (None, None))[0]
-        if mode is not None and mode != TREE_MODE:
-            return None, "topology", f"{step} is mode {mode} on {where}, not a directory git can walk into"
+        for path, (mode, _) in sorted(index.items()):
+            if mode != TREE_MODE and same_path(path, step, folding):
+                return None, "topology", f"{path} is mode {mode} on {where}, not a directory git can walk into"
     # Every key this filesystem cannot tell apart from the manifest path, the exact spelling
     # included. Asked as ONE question rather than as an exact hit with a fallback: a tree can hold
     # several colliding spellings AND the exact one at the same time, and then the exact key is
@@ -675,7 +692,7 @@ def main() -> int:
     refs = baseline_refs(repo)
     # One recursive listing per ref, shared by every plugin: absence, topology and content all
     # come out of it, so no plugin can be told a different story about the same tree.
-    indexes = {ref: tree_index(repo, ref) for ref in dict.fromkeys(refs[:2]) if ref is not None}
+    indexes = {ref: tree_index(repo, ref, folds_paths(repo)) for ref in dict.fromkeys(refs[:2]) if ref is not None}
 
     def give_up() -> int:
         # De-duplicated: a problem with `plugins` itself is true of every plugin and is therefore

@@ -52,6 +52,23 @@ GIT_ENV = {
 }
 
 
+def filesystem_folds() -> bool:
+    """Whether the filesystem these fixtures are built on treats two spellings as one file.
+
+    Measured here, on a temp directory, because that is where every fixture lives -- and because
+    the cases below split on it: a collision is only a collision where the checkout cannot hold
+    both spellings. Asserting a folding outcome on Linux is how the shipped suite came to fail on
+    the very platform its own documented command was run on.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "plugins").mkdir()
+        return checker.folds_paths(Path(tmp))
+
+
+FOLDS_PATHS = filesystem_folds()
+ONLY_FOLDING = unittest.skipUnless(FOLDS_PATHS, "this filesystem keeps the two spellings apart")
+
+
 def git(repo: Path, *args: str) -> str:
     proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, env=GIT_ENV)
     if proc.returncode != 0:
@@ -389,6 +406,35 @@ class BaselineTopology(BaselineCase):
         build()
         sha = self.publish_head("published through a topology git will not walk")
 
+    @ONLY_FOLDING
+    def test_a_baseline_rooted_at_another_spelling_is_still_found(self) -> None:
+        """The listing is no longer scoped by an exact `-- plugins` pathspec. It was, and `ls-tree`
+        takes no `:(icase)` magic, so a baseline rooted at `PLUGINS` came back EMPTY -- which reads
+        as "no plugin has a baseline at all" and waves every downgrade through at once."""
+        self.init()
+        write_tree(self.repo, {"alpha": "2.0.0", "beta": "9.0.0"})
+        commit(self.repo, "base")
+        listing = git(self.repo, "ls-tree", "-r", "--full-tree", "HEAD").splitlines()
+        git(self.repo, "rm", "-r", "-q", "--cached", "plugins")
+        for line in listing:
+            meta, _, path = line.partition("\t")
+            mode, _, oid = meta.split()
+            if path.startswith("plugins/"):
+                git(self.repo, "update-index", "--add", "--cacheinfo",
+                    f"{mode},{oid},PLUGINS/{path[len('plugins/'):]}")
+        sha = self.publish_head("published under a differently-spelled root", index_only=True)
+        self.assertTrue(any(p.startswith("PLUGINS/") for p in
+                            git(self.repo, "ls-tree", "-r", "--name-only", sha).splitlines()),
+                        "fixture must really root the baseline at the other spelling")
+        git(self.repo, "read-tree", "--reset", "-u", "HEAD~1")
+        write_tree(self.repo, {"alpha": "1.0.0", "beta": "9.0.0"})
+        commit(self.repo, "a downgrade the exact pathspec used to hide")
+
+        code, out = run(self.repo)
+        self.assertEqual(code, 1, out)
+        self.assertIn("would publish a DOWNGRADE", out)
+        self.assertNotIn("has no manifest on origin/main yet", out)
+
     def test_symlinked_plugins_root(self) -> None:
         store = self.repo / "store"
         store.mkdir()
@@ -467,6 +513,7 @@ class BaselineTopology(BaselineCase):
         blob = git(self.repo, "hash-object", "-w", "spelling.json")
         git(self.repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
 
+    @ONLY_FOLDING
     def test_one_differing_spelling_is_used_not_refused(self) -> None:
         """A single spelling is unambiguous however it is capitalised: the checkout materialises
         that file under that name, so it IS this plugin's baseline and the downgrade is caught."""
@@ -485,6 +532,7 @@ class BaselineTopology(BaselineCase):
         self.assertIn("would publish a DOWNGRADE", out)
         self.assertIn("already publishes 2.0.0", out)
 
+    @ONLY_FOLDING
     def test_several_colliding_spellings_are_refused(self) -> None:
         """The tree says three files, the checkout can hold one, and which one it holds is decided
         by tree order. The exact spelling being among them is exactly when that goes unnoticed."""
@@ -575,6 +623,32 @@ class PathCollisionSemantics(unittest.TestCase):
             # this case can only distinguish the two answers on a machine that gives the OTHER one:
             # on a folding filesystem `measured` is True and so is a probe hardwired to True.
             self.assertFalse(checker.folds_paths(Path(bare)))
+
+    def test_the_probe_refuses_a_twin_the_checkout_can_alias(self) -> None:
+        """`samefile` follows symlinks, so a `PLUGINS -> plugins` entry -- which any contributor can
+        add, tracked or not -- used to make a case-SENSITIVE filesystem answer "I fold". The answer
+        decides whether one plugin may adopt another's manifest, so it must not be aliasable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "plugins").mkdir()
+            try:
+                # Guarded on the attempt, not on FOLDS_PATHS: the question here is whether THIS
+                # directory can hold both names, and asking the filesystem is cheaper than trusting
+                # a constant measured somewhere else to still describe it.
+                os.symlink("plugins", repo / "PLUGINS")
+            except FileExistsError:
+                self.skipTest("the twin name already resolves to the probe on this filesystem")
+            self.assertTrue(os.path.samefile(repo / "plugins", repo / "PLUGINS"),
+                            "fixture must reproduce the alias the old probe trusted")
+            self.assertFalse(checker.folds_paths(repo))
+
+    def test_a_folding_ancestor_is_topology_not_absence(self) -> None:
+        """`plugins/Alpha` IS this plugin's directory where the filesystem folds, so a symlink there
+        hides a published baseline. Probing the exact lowercase key found nothing and called that
+        absent -- the one answer that lets a downgrade through."""
+        index = {"plugins": ("040000", "t"), "plugins/Alpha": ("120000", "link")}
+        self.assertEqual(checker.baseline_blob(index, "alpha", True)[1], "topology")
+        self.assertEqual(checker.baseline_blob(index, "alpha", False)[1], "absent")
 
     def test_folding_and_exact_disagree_about_two_spellings(self) -> None:
         self.assertTrue(checker.same_path(self.ALPHA, self.CAPPED, True))

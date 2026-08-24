@@ -67,8 +67,10 @@ The section's intro paragraph and "What it covers" bullet list are easy to leave
   - **Its own suite is `scripts/check_version_surfaces.test.py`** — stdlib `unittest`, throwaway
     git repos in a temp dir, a few seconds. No workflow's path filter reaches `.claude/**` — they
     cover the five `plugins/<name>/**` trees, their own workflow file, and (for enduser-handbook)
-    the root `README.md` and `CHANGELOG.md` — so nothing runs this for you. Run it yourself after
-    touching the checker:
+    the root `README.md` and `CHANGELOG.md` — so nothing runs this for you. A few cases SKIP
+    according to whether the filesystem under them folds path spellings, because the collision
+    behaviour only exists where it does: a macOS run and a Linux run skip different cases and both
+    are green. Run it yourself after touching the checker:
     `python3 .claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.test.py`.
   - **The changelog check waits for the five surfaces to agree** (until they do there is no single
     version to look for), so a first run over a mismatched tree does not list all the remaining
