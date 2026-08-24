@@ -4200,12 +4200,14 @@ def test_the_unpinned_refusal_explains_the_run_id_it_actually_resolved(tmp_path,
     if resumed:
         assert "RESUMED run" in payload["error"], payload
         assert "MINTED a fresh RUN_ID" not in payload["error"], payload
-        # codex code review, MINOR: `resumed` does NOT entail that the
-        # foreign owner is OLDER. resume_setup.py takes the first
-        # digest-MATCHING candidate, so a run created after the one resumed
-        # here can still own a draft -- the sentence must not diagnose a
-        # chronology it cannot know.
+        # `resumed` does NOT entail that the foreign owner is OLDER:
+        # resume_setup.py takes the first digest-MATCHING candidate, so a run
+        # created after the one resumed here can own a draft. Pinned as a
+        # POSITIVE assertion on the correction AND a NEGATIVE one on the
+        # retired claim -- a substring assertion alone stays green if the
+        # false chronology is restored beside it.
         assert "not necessarily an earlier one" in payload["error"], payload
+        assert "these drafts name an earlier one" not in payload["error"], payload
     else:
         assert "MINTED a fresh RUN_ID" in payload["error"], payload
         assert "RESUMED run" not in payload["error"], payload
@@ -4326,6 +4328,19 @@ def test_unpinned_foreign_stale_draft_still_dispatches(tmp_path):
     draft = json.loads((root / "segments" / "seg01.draft.json").read_text(encoding="utf-8"))
     assert draft["dispatch_token"] == f"{payload['run_id']}:seg01", (
         f"an exempt `stale` draft must be retranslated and re-stamped for this run: {draft}"
+    )
+    # Convergence plus a current-run token is still not proof of a
+    # TRANSLATE: a job that rewrote only the dispatch_token would leave a
+    # valid current-run draft, route to review, converge cleanly, and satisfy
+    # every assertion above. The argv log is the one witness that separates
+    # them -- it records the RAW argv each fake codex process received, so a
+    # translate kind for this seg means a translate was genuinely launched.
+    assert any(
+        entry["kind"] == "translate" and entry["seg"] == "seg01"
+        for entry in read_argv_log(root)
+    ), (
+        "the exempt `stale` segment must actually be RE-TRANSLATED, not merely reach a "
+        f"clean review over an untouched draft: {read_argv_log(root)}"
     )
 
 
