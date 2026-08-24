@@ -4506,12 +4506,9 @@ def test_the_gated_snapshot_is_not_discoverable_by_listing_segments(tmp_path, mo
     it was handed, which is the whole point: taking args[--candidate-file] would corrupt the
     relocated path too and this test would pass while proving nothing about enumerability.
 
-    SCOPE, stated because #697's prior rounds all died on prose claiming more than the
-    mechanism delivers. Exactly ONE channel is closed here: discovery by listing segments/.
-    The path still travels in the gate subprocess's argv for the whole gating window, and
-    nothing about a directory move excludes a same-uid process or a codex pass whose
-    workspace-write root resolves to an ancestor of durable_root. codex_job.py's module
-    header states all three; this test pins the one that is closed."""
+    SCOPE: exactly ONE channel is closed, and this test pins that one. What the relocation
+    does NOT buy is stated once, in codex_job.py's module header -- read it there rather
+    than trusting a restatement here, which is exactly how #697's prose drifted before."""
     job = _mkjob(tmp_path, kind="translate")
     original = json.dumps({"draft": "the bytes a prior run deferred"})
     Path(job.pending).write_text(original, encoding="utf-8")
@@ -5331,6 +5328,23 @@ def test_an_unestablished_baseline_refuses_before_spending_a_codex_turn(tmp_path
 # the candidate at stake has already been paid for and gated.
 
 
+def _fail_replace(monkeypatch, predicate):
+    """Make os.replace() raise EXDEV for the renames `predicate(src, dst)` selects, and pass
+    every other one through -- _write_joblog() and the promote both use os.replace, and a
+    blanket failure would take out the joblog these tests read.
+
+    `predicate` has no default ON PURPOSE: which renames fail is precisely what separates
+    the promote-fails case from the promote-AND-preservation-fails case below, so it must
+    be spelled at every call site."""
+    real_replace = os.replace
+
+    def exdev(src, dst, *a, **kw):
+        if predicate(src, dst):
+            raise OSError(18, "Invalid cross-device link")
+        return real_replace(src, dst, *a, **kw)
+    monkeypatch.setattr(os, "replace", exdev)
+
+
 def _staging_dirs(tmp_path):
     """Every staging directory this driver could have left beside the durable root.
     _mkjob() roots the job at tmp_path/durable, so dirname(root) is tmp_path."""
@@ -5430,13 +5444,7 @@ def test_a_failed_fresh_promote_preserves_the_validated_candidate(tmp_path, monk
     monkeypatch.setattr(job, "launch", lambda: setattr(job, "jobId", "J") or True)
     monkeypatch.setattr(job, "poll", lambda: setattr(job, "job_status", "completed"))
 
-    real_replace = os.replace
-
-    def exdev(src, dst, *a, **kw):
-        if src == job.attempt and dst == job.canonical:
-            raise OSError(18, "Invalid cross-device link")
-        return real_replace(src, dst, *a, **kw)
-    monkeypatch.setattr(os, "replace", exdev)
+    _fail_replace(monkeypatch, lambda src, dst: src == job.attempt and dst == job.canonical)
 
     rc = job.run()
 
@@ -5464,13 +5472,7 @@ def test_a_failed_adoption_promote_stops_the_run_and_keeps_the_pending(tmp_path,
     monkeypatch.setattr(job, "_gate", gate)
     monkeypatch.setattr(job, "launch", lambda: pytest.fail("no fresh turn may be launched"))
 
-    real_replace = os.replace
-
-    def exdev(src, dst, *a, **kw):
-        if src == job.attempt and dst == job.canonical:
-            raise OSError(18, "Invalid cross-device link")
-        return real_replace(src, dst, *a, **kw)
-    monkeypatch.setattr(os, "replace", exdev)
+    _fail_replace(monkeypatch, lambda src, dst: src == job.attempt and dst == job.canonical)
 
     rc = job.run()
 
@@ -5502,13 +5504,8 @@ def test_a_failed_preservation_reports_where_the_bytes_survived(tmp_path, monkey
     monkeypatch.setattr(job, "launch", lambda: setattr(job, "jobId", "J") or True)
     monkeypatch.setattr(job, "poll", lambda: setattr(job, "job_status", "completed"))
 
-    real_replace = os.replace
-
-    def exdev(src, dst, *a, **kw):
-        if src == job.attempt:            # BOTH the promote and the preservation
-            raise OSError(18, "Invalid cross-device link")
-        return real_replace(src, dst, *a, **kw)
-    monkeypatch.setattr(os, "replace", exdev)
+    # BOTH the promote and the preservation -- that widened predicate IS this test.
+    _fail_replace(monkeypatch, lambda src, dst: src == job.attempt)
 
     rc = job.run()
 

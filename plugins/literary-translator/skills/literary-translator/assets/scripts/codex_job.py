@@ -165,8 +165,11 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 # The mkdtemp component is written into segments/ by no success path, so that move returns
 # nothing.
 #
-# THREE THINGS IT DOES NOT BUY. State them wherever this is described; the history of this
-# issue is prose claiming more than the mechanism delivers, corrected three times:
+# THREE THINGS IT DOES NOT BUY. THIS BLOCK IS THE ONLY COPY -- point at it from anywhere
+# else that describes the relocation, and do not restate it. The history of this issue is
+# prose claiming more than the mechanism delivers, corrected three times, and an argument
+# living in five places is one nobody can keep true; the operator-facing statement in
+# references/ledger-and-resumability.md is the one deliberate second audience.
 #   * argv is a PRE-VERDICT channel and is untouched. Both paths append `--candidate-file
 #     <path>` BEFORE _gate() runs the subprocess, and the verdict exists only when that
 #     subprocess returns, so the full path sits in the process table for the whole gating
@@ -406,7 +409,6 @@ class CodexJob:
         self.inv = os.urandom(8).hex()
         self.segdir = os.path.join(self.root, "segments")
         ext = "draft" if kind == "translate" else "review"
-        self.ext = ext
         self.canonical = canonical_path(self.root, seg, kind)
         # #697: the GATED candidate no longer lives in segdir. self.attempt is built by
         # _ensure_staging() inside a per-invocation mkdtemp directory OUTSIDE durable_root,
@@ -1543,17 +1545,6 @@ class CodexJob:
                 os.close(segdir_fd)
 
     # ---- #697: the gated candidate stages OUTSIDE durable_root ---------------
-    def _append_detail(self, text):
-        """Add one bounded diagnostic to self.error_detail WITHOUT discarding what is
-        already there. A set-if-None guard would be wrong at the only site that calls
-        this: by the time _teardown_staging() runs, every path reaching its preserve arm
-        has ALREADY written error_detail (the promote handlers below do it themselves),
-        so a None-conditioned write would silently drop the one record of where surviving
-        bytes ended up."""
-        text = text[:400]
-        self.error_detail = text if self.error_detail is None \
-            else "%s | %s" % (self.error_detail, text)
-
     def _ensure_staging(self):
         """Create this invocation's private staging directory and name self.attempt inside
         it. INITIALIZES AT MOST ONCE WHILE THE DIRECTORY REMAINS PRESENT -- deliberately not
@@ -1564,26 +1555,16 @@ class CodexJob:
         nothing verified -- and the actor able to do it is one the module header already
         declares NOT excluded, so there is no recovery machinery here.
 
-        WHAT THE LOCATION BUYS, and it is exactly one thing (#697): the gated candidate stops
-        being discoverable by LISTING segments/. Before this, a foreign writer found it with
-        glob(".att.<seg>.*.json") over segdir -- this driver publishes the same inv nonce into
-        that directory in other filenames and in the joblog body, so the name was derivable
-        from inside the very directory the pipeline's other passes are pointed at. The
-        mkdtemp component below is written into segments/ by no success path.
+        WHAT THE LOCATION BUYS -- and, just as importantly, the three things it does NOT --
+        is stated ONCE, in this module's own header block, and deliberately not restated
+        here: five copies of that argument had already begun drifting apart in wording, and
+        a scope claim that exists in five places is one nobody can keep true. Read the
+        header before describing this method anywhere.
 
-        WHAT IT DOES NOT BUY -- three things, all still true, none of them narrowed by this
-        method:
-          * argv is a PRE-VERDICT channel. Both gate paths append `--candidate-file
-            self.attempt` BEFORE _gate() runs the subprocess, and the verdict exists only
-            when that subprocess returns, so the full path sits in the process table for the
-            whole gating window.
-          * it excludes no same-uid process. A directory move is not a permission boundary
-            against something that can already read the filesystem and ps.
-          * it is NOT outside every codex write root. codex-companion resolves workspace-write
-            by walking UP to the enclosing Git root (see this file's header), and the
-            sanctioned manual W5 drive runs with --write and cwd = durable_root; with a
-            durable_root inside a repository that write root is an ANCESTOR of the directory
-            created here. No claim of write-root escape is made anywhere in this file.
+        No realpath() on the mkdtemp result, unlike _setup_sandbox() next door, and that
+        asymmetry is deliberate: self.root is already realpath()'d in __init__, so
+        dir=dirname(self.root) is a canonical prefix and mkdtemp cannot introduce a second
+        spelling of the same directory.
 
         The durable root's PARENT keeps the same filesystem in every realistic layout, and
         _preflight_same_device() verifies that live and refuses rather than assuming it.
@@ -1591,9 +1572,9 @@ class CodexJob:
         Called from run() (early, so an unwritable parent refuses before a paid turn) AND
         from validate_attempt()/_defer_attempt()/adopt_pending(). In production those three
         are always no-ops, because run() has already succeeded by the time any of them is
-        reached; they are there so a white-box test constructing CodexJob directly -- nine
-        sites across six suites -- needs no opt-in. Not dead code: the alternative is every
-        construction site having to know about staging."""
+        reached; they are there so a white-box test constructing CodexJob directly needs no
+        opt-in. Not dead code: the alternative is every construction site in the suite having
+        to know about staging."""
         if self.staging_dir is not None:
             return True
         try:
@@ -1603,8 +1584,12 @@ class CodexJob:
         except OSError as exc:
             self.error_detail = "staging setup failed: %r" % (exc,)
             return False
-        self.attempt = os.path.join(
-            self.staging_dir, ".att.%s.%s.%s.json" % (self.seg, self.inv, self.ext))
+        # Derived from self.preserved_attempt, never a second copy of the format string.
+        # The two names MUST be byte-identical -- _teardown_staging() relocates one onto the
+        # other, and two dispatch-scan fixtures build their `.att.*` case from the preserved
+        # one -- so the identity is structural here rather than a coincidence of two literals
+        # that could drift apart with nothing going red.
+        self.attempt = os.path.join(self.staging_dir, os.path.basename(self.preserved_attempt))
         return True
 
     def _teardown_staging(self):
@@ -1623,11 +1608,15 @@ class CodexJob:
         lookup takes the preserve arm, which reports where the bytes are instead of silently
         skipping them.
 
-        Removal is exact names then rmdir, never shutil.rmtree: this path is outside
-        durable_root, and refuse-and-leave is the bias every other disposal here applies. A
-        failing rmdir is best-effort -- a transient EBUSY/EIO leaves an empty dot-prefixed
-        directory beside the durable root, which is litter, not a defect worth retry
-        machinery."""
+        Removal is the exact attempt name then rmdir, never shutil.rmtree: this path is
+        outside durable_root, and refuse-and-leave is the bias every other disposal here
+        applies. Deliberately NO sweep for _publish_from_sandbox()'s .pub.*.tmp -- that
+        method unlinks its temp by exact path on every failure branch it handles, so the
+        only survivor would come from an OSError escaping its write/close, and a second copy
+        of that temp-name format here could silently stop matching the producer's. A failing
+        rmdir is best-effort either way: a transient EBUSY/ENOTEMPTY leaves an empty
+        dot-prefixed directory beside the durable root, which is litter, not a defect worth
+        retry machinery."""
         if self.staging_dir is None:
             return
         attempt_exists = False
@@ -1646,13 +1635,18 @@ class CodexJob:
                 # The bytes stay where they are and the joblog records WHERE. Publishing the
                 # staging path here is deliberate and disclosed: the gating window is long
                 # over, and the alternative is a candidate nobody can find.
-                self._append_detail("staging preserve failed: %r; candidate survives at %s"
-                                    % (exc, self.attempt))
+                # APPEND, never a set-if-None write. Every path that reaches this arm has
+                # ALREADY set error_detail -- the promote handlers do it themselves -- so a
+                # None-conditioned write would silently drop the one record of where the
+                # surviving bytes are. Bounded by the same cap the other durable-joblog
+                # diagnostic in this class uses.
+                detail = ("staging preserve failed: %r; candidate survives at %s"
+                          % (exc, self.attempt))[:self._GATE_OUTPUT_CAP]
+                self.error_detail = detail if self.error_detail is None \
+                    else "%s | %s" % (self.error_detail, detail)
                 return
         elif attempt_exists:
             _silent_remove(self.attempt)
-        _silent_remove(os.path.join(
-            self.staging_dir, ".pub.%s.%s.tmp" % (self.seg, self.inv)))
         try:
             os.rmdir(self.staging_dir)
         except OSError:
@@ -1673,12 +1667,22 @@ class CodexJob:
         two filesystems. It therefore requires _ensure_staging() to have run -- run() calls
         that first, and passing None here would be a lookup failure, i.e. a refusal.
 
+        The third stat, on dirname(self.pending), is provably equal to the first today --
+        self.pending is built directly inside segdir -- and is kept for the reason the
+        pre-#697 docstring gave for all three: it is a live guard against the pending ever
+        moving out of segdir, which #697 has now shown is a thing that happens.
+
         It compares st_dev, which is the strongest cheap test available and not a total
         one: a bind mount can present an equal st_dev while rename still returns EXDEV. The
         promote sites do not rely on this check alone -- each catches OSError and preserves
         the candidate (see _teardown_staging())."""
         if self.attempt is None:
-            return False          # _ensure_staging() has not run -> nothing to compare
+            # Guards a DIRECT caller (white-box tests), not run(), which calls
+            # _ensure_staging() three lines earlier and stops on its failure. Answering
+            # False rather than letting os.path.dirname(None) raise TypeError past a
+            # caller whose whole contract is "False means do not proceed" -- the same
+            # correction _is_regular()'s docstring records for its own OSError paths.
+            return False
         try:
             seg_dev = os.stat(self.segdir).st_dev
             staging_dev = os.stat(os.path.dirname(self.attempt)).st_dev
