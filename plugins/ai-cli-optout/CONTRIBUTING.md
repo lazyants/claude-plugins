@@ -68,7 +68,7 @@ If an edit you're adding could break user-visible Claude Code features (not just
 }
 ```
 
-The schema-test invariant blocks `requires_confirmation` without a populated `tradeoff_note` — no silent-consent theater. Current confirmed cases live in `vendors/anthropic.json` for `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and `DISABLE_TELEMETRY` (both break `/remote-control` and Opus 1M per upstream `anthropics/claude-code#34178`).
+The schema-test invariant blocks `requires_confirmation` without a populated `tradeoff_note` — no silent-consent theater. Current confirmed cases live in `vendors/anthropic.json` for `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and `DISABLE_TELEMETRY`: each disables the remote feature-flag fetch, so every capability gated behind a flag stops being offered; those notes name the capabilities measured and the build they were measured against. Upstream `anthropics/claude-code#34178` is closed without the behaviour changing; #142 carries the bisection. **Name a capability the build actually gates today, not a model or plan tier** — a `tradeoff_note` that cites a specific model version goes stale on the next model release while the gate it describes does not.
 
 ### Never point users at a patched binary
 

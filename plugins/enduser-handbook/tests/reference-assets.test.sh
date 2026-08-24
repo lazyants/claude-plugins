@@ -5111,9 +5111,15 @@ done
 has_joined_in_section "CHANGELOG: the 1.16.0 entry scopes the canvas claim to what it PAINTS (#565)" \
   "$PLUGIN_DIR/../../CHANGELOG.md" '## [enduser-handbook 1.16.0] — 2026-08-16' \
   'What a `<canvas>` paints contributes to none of them'
-# The README bullet is a single physical line, so the line-based helper is sufficient here.
-has "README: the enduser-handbook section scopes the canvas claim to what it PAINTS (#565)" \
-  'what a `<canvas>` paints contributes to none of them' "$PLUGIN_DIR/../../README.md"
+# [2026-08-24] The README's positive counterpart to the pin above is RETIRED, not relocated. It
+# asserted the scoped canvas sentence inside the root README's per-release enduser-handbook bullet
+# list, and that list no longer exists: the README section now describes what the plugin does and
+# points at this CHANGELOG for release history, so there is no release copy there to disclose the
+# scoped form in. State the consequence plainly rather than claiming nothing was lost — this DOES
+# retire the README's positive-disclosure coverage. What remains at that site is the recurrence
+# gate: the root README stays in CANVAS_UNIVERSAL_MD_SITES above, so reintroducing any of the six
+# retired wordings there still goes red. The positive obligation lives on where the release copy
+# went, in the CHANGELOG pin directly above this comment.
 # --- Site 3: the engine-agnostic masking rules a human reads before capturing.
 has_joined_in_section "capture-safety: the masking rules name the canvas gap (#565)" \
   "$REFS/capture-safety.md" "$CS_MASK_SECTION" \
