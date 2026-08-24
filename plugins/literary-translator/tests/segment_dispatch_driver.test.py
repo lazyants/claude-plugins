@@ -4200,6 +4200,12 @@ def test_the_unpinned_refusal_explains_the_run_id_it_actually_resolved(tmp_path,
     if resumed:
         assert "RESUMED run" in payload["error"], payload
         assert "MINTED a fresh RUN_ID" not in payload["error"], payload
+        # codex code review, MINOR: `resumed` does NOT entail that the
+        # foreign owner is OLDER. resume_setup.py takes the first
+        # digest-MATCHING candidate, so a run created after the one resumed
+        # here can still own a draft -- the sentence must not diagnose a
+        # chronology it cannot know.
+        assert "not necessarily an earlier one" in payload["error"], payload
     else:
         assert "MINTED a fresh RUN_ID" in payload["error"], payload
         assert "RESUMED run" not in payload["error"], payload
@@ -4308,6 +4314,18 @@ def test_unpinned_foreign_stale_draft_still_dispatches(tmp_path):
     assert payload["run_id"] != foreign_run_id, (
         "the fixture must present a genuinely FOREIGN draft, else this control proves "
         f"nothing about the exemption: {payload}"
+    )
+    # "Did not refuse" is weaker than what this control claims. The driver
+    # reports top-level success even when summary.failed is non-empty, so a
+    # translate that never happened -- a preflight failure, a dead job --
+    # would satisfy every assertion above. Assert the OUTCOME and the
+    # re-stamped token: together they say the segment actually retranslated
+    # under this run, which is the behaviour the exemption exists to keep.
+    assert payload["summary"]["converged"] == ["seg01"], payload
+    assert payload["summary"]["failed"] == [], payload
+    draft = json.loads((root / "segments" / "seg01.draft.json").read_text(encoding="utf-8"))
+    assert draft["dispatch_token"] == f"{payload['run_id']}:seg01", (
+        f"an exempt `stale` draft must be retranslated and re-stamped for this run: {draft}"
     )
 
 

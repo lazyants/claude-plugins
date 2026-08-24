@@ -806,8 +806,12 @@ an EMPTY `mismatched_fields`, which satisfies "every moved field is
 machinery-only" vacuously while being exactly the population assembly refuses.
 
 **Recovering a draft the refusal named (#742).** The refusal leaves the
-decision with the operator, so there are exactly two moves per segment and
-neither is automatic. DELETE the draft to accept the retranslation — that is
+decision with the operator, and none of the moves is automatic. When the owning
+run's recorded input digest still matches this invocation, the cheapest one
+touches no file at all: re-run under `--resume-from-run-id <owner>` TOGETHER
+with `--only-segs` naming only the ids that run owns (the pin alone still
+refuses over a second owner in the same selection). Otherwise it is per
+segment. DELETE the draft to accept the retranslation — that is
 also the only way an unfinished draft picks up a style-bible or canon edit,
 since the driver routes a same-run draft to review rather than re-translating
 it. Or KEEP the work by rewriting that draft's `dispatch_token` to the RUN_ID

@@ -3828,10 +3828,16 @@ cache-key field — a unit stale for draft drift alone carries an EMPTY
 resumes under the same `RUN_ID` finds the draft's `dispatch_token` still
 matching: `codex_job.py` then ADOPTS that draft instead of launching codex, and
 the edit survives into a review. Let any independently hashed input move as
-well, and the fresh `RUN_ID` orphans that token — and since #742 the driver
-REFUSES the dispatch (exit 1), naming that segment and every other
-not-yet-converged draft in the same selection whose token belongs to another
-run, rather than retranslating them over the edit. A
+well, and the fresh `RUN_ID` orphans that token — the segment retranslates over
+the edit. #742's foreign-draft refusal does NOT save it, and this is the one
+place that distinction has to be read carefully: the unit here is
+previously-converged, so it classifies `stale`, and `stale` is the one category
+that refusal exempts (refusing it would refuse every cache-key-drift
+retranslation the design exists to perform, which is what
+`--allow-retranslate-converged` has just authorized). What the refusal does
+cover is the rest of the selection: every NOT-yet-converged draft in it whose
+token belongs to another run halts the dispatch by name instead of being
+retranslated over a hand fix. A
 **claim** removes that dependence: `--from-converged` authorizes re-review only
 and never re-translates, and a hand-edited draft is exactly what its drift
 branch admits, so naming those ids carries the edit into a confirming review

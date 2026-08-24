@@ -4006,7 +4006,9 @@ def refuse_run_over_foreign_drafts(
     # message that announced a mint there would be diagnosing the wrong
     # thing.
     cause = (
-        f"This invocation RESUMED run {run_id!r}, and these drafts name an earlier one."
+        f"This invocation RESUMED run {run_id!r}, and these drafts name another one -- "
+        f"not necessarily an earlier one: the first digest-MATCHING candidate wins, so a "
+        f"run created after the one resumed here can still own a draft."
         if resumed
         else (
             f"This invocation MINTED a fresh RUN_ID {run_id!r}, because its inputs matched "
@@ -6981,8 +6983,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "sharing a digest with a newer one cannot be reached at all, and "
             "an invocation whose payload matches NO candidate mints "
             "a fresh RUN_ID and claims every named segment under it -- except "
-            "that since #742 a segment whose draft is stamped for another run "
-            "is refused rather than claimed, pinned or not. "
+            "that since #742 a segment whose draft is stamped for another run is "
+            "refused rather than claimed, pinned or not, unless it classifies "
+            "`stale` (see FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES for why that one "
+            "is exempt). "
             "Refusals under a pin: exit 1 when runs/RUN_ID is not a "
             "directory or carries no regular input.digest (an established "
             "state, so a gate refusal), when the pinned run's digest does "
