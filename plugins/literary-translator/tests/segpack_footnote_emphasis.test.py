@@ -228,6 +228,15 @@ FALLBACK_CASES = [
     # built-in gutenberg_epub adapter serialises through BeautifulSoup, which
     # repairs these shapes, so they arrive only from a hand-written extractor.
     ("raw self-closing <i/> with a close (R3-4)", "x", "<i/>x</i>"),
+    # `_EMPH_ANY_RE` DOES match here (`<i` followed by `/`), so the cheap
+    # no-emphasis short-circuit does not fire -- and the opener still refuses a
+    # self-closing tag, so nothing is carried and both tags are dropped as
+    # ordinary markup. Only the "nothing carried => verbatim" invariant stops
+    # the entity being re-encoded to `A &amp; B`. This is the fixture that
+    # tells the two apart; without it each masks the other's deletion.
+    ("self-closing <i/> drops out, entity must NOT be re-encoded",
+     "A & B", "<i/>A &amp; B"),
+    ("a lone </i> with an entity", "A & B", "A &amp; B</i>"),
     ("raw stray close before any open", "a b", "a</i> b"),
     ("raw unbalanced open", "a b", "<i>a b"),
     ("raw attribute containing an unescaped >", "x y", '<i title="a>b">x</i> y'),

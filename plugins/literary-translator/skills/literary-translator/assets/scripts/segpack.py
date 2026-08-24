@@ -377,6 +377,11 @@ def _footnote_source_text(def_block):
         return plain
     if not isinstance(html_src, str) or not html_src:
         return plain
+    # A cheap SHORT-CIRCUIT, not a correctness guard: the "nothing carried"
+    # invariant at the end returns plain_text for these anyway. It exists so
+    # the common case -- most definitions have no emphasis at all -- skips the
+    # walk entirely, and no test can kill it on its own for exactly that
+    # reason.
     if not _EMPH_ANY_RE.search(html_src):
         return plain
 
