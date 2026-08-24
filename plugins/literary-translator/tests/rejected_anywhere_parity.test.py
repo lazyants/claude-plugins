@@ -1954,7 +1954,7 @@ def test_precheck_decisions_never_resume_across_the_full_glue_chars_population(s
 
 SENTINEL_VERDICT_TOTAL_COUNTS = {
     MASS_TRANSLATE_TEMPLATE: 1,   # the wait's own single parse site (waitChunkVerdict); runRound's DRAFT_MISSING site uses mentionedAnywhere(), not a direct call
-    GLOSSARY_PASS_TEMPLATE: 4,    # batchStep: precheck + citation prepare + citation judge (3), plus waitChunkVerdict's own wait site (1)
+    GLOSSARY_PASS_TEMPLATE: 5,    # batchStep: precheck + citation prepare + citation judge + #723's approval record (4), plus waitChunkVerdict's own wait site (1)
     SKEPTIC_PASS_TEMPLATE: 2,     # batchStep: precheck (1), plus waitChunkVerdict's own wait site (1)
 }
 

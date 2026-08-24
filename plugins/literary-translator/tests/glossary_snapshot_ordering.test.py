@@ -341,6 +341,16 @@ async function agent(promptText, opts) {
     const prepared = seenCount["glossary:citation-prepare:" + idx] || 1;
     return nth(p.reviews, ordinal, "CITATIONS_OK " + idx + " ATTEMPT " + (prepared - 1));
   }
+  if (kind === "approval-record") {
+    // #723. Lifts the sentinel out of the prompt the template actually
+    // rendered, rather than rebuilding it from an ordinal: the record fires once
+    // per batch at whichever attempt the review approved, so a counter drifts on
+    // any ladder longer than one attempt. A fixture that wants the record to
+    // FAIL drives `records` explicitly.
+    const asked = /APPROVAL_RECORDED (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    const fallback = asked ? ("APPROVAL_RECORDED " + asked[1] + " ATTEMPT " + asked[2]) : "UNPARSEABLE_RECORD_PROMPT";
+    return nth(p.records, ordinal, fallback);
+  }
   // Deliberately non-throwing: an unrecognized label must surface as a failed
   // ASSERTION with readable context, not an opaque harness crash. RED runs
   // against the pre-fix template rely on this.
@@ -677,6 +687,7 @@ def test_precheck_and_wait_are_told_to_do_nothing_beyond_their_own_check(tmp_pat
 @pytest.mark.parametrize("label", [
     "glossary:precheck:0", "glossary:dispatch:0", "glossary:wait:0",
     "glossary:wait-recheck:0", "glossary:citation-review:0",
+    "glossary:approval-record:0",
 ])
 def test_only_the_prepare_call_ever_issues_the_approve_command(tmp_path, label):
     """PREPARE is the one call in the file that may snapshot, and the reasons
@@ -688,6 +699,13 @@ def test_only_the_prepare_call_ever_issues_the_approve_command(tmp_path, label):
     flag: a precheck, wait chunk poll or re-check that snapshotted would write
     an approved copy of bytes nobody has reviewed, and a dispatch self-check
     that did it would let the producer approve its own output.
+
+    The APPROVAL RECORD (#723) is here for the JUDGE's reason rather than the
+    four gate sites': it runs AFTER the evidence was retrieved from the first
+    snapshot, so a second --approve-to there would leave the audited bytes and
+    the fetched-from bytes as two different objects. Its own command is built
+    from checkBatchCmdForPath() against the snapshot and carries
+    --record-approval-to, never --approve-to.
 
     The JUDGE is here for a different reason and was added in 1.16.1 (the test was
     named test_no_plain_check_batch_site_ever_issues_approve_to when it covered

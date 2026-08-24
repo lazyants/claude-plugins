@@ -173,6 +173,16 @@ async function agent(promptText, opts) {
     const prepared = seenCount["glossary:citation-prepare:" + idx] || 1;
     return nth(p.reviews, ordinal, "CITATIONS_OK " + idx + " ATTEMPT " + (prepared - 1));
   }
+  if (kind === "approval-record") {
+    // #723. Lifts the sentinel out of the prompt the template actually
+    // rendered, rather than rebuilding it from an ordinal: the record fires once
+    // per batch at whichever attempt the review approved, so a counter drifts on
+    // any ladder longer than one attempt. A fixture that wants the record to
+    // FAIL drives `records` explicitly.
+    const asked = /APPROVAL_RECORDED (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    const fallback = asked ? ("APPROVAL_RECORDED " + asked[1] + " ATTEMPT " + asked[2]) : "UNPARSEABLE_RECORD_PROMPT";
+    return nth(p.records, ordinal, fallback);
+  }
   return "UNEXPECTED_LABEL " + label;
 }
 

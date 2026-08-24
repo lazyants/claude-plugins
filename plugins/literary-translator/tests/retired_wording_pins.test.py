@@ -490,7 +490,11 @@ RETIRED = [
     (
         BASELINE_RELEASE, GLOSSARY_TEMPLATE,
         "live -- perBatch = 1 + 4*(MAX_CITATION_RETRIES+1)",
-        "live -- perBatch = 1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)", 1,
+        # #723 moved the leading term 1 -> 2 (the approval record sits OUTSIDE
+        # the ladder). The RETIRED needle is untouched -- it is a frozen fact
+        # about the baseline release -- only the successor moves, which is
+        # exactly what this table's replacement column is for.
+        "live -- perBatch = 2 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)", 1,
         "the 1.16.1 live ladder (13N+2), before one wait became WAIT_CALLS calls",
     ),
     (

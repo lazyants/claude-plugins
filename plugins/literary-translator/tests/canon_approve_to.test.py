@@ -537,8 +537,11 @@ def test_approve_to_refused_in_validate_only(tmp_path):
         (["--merge-batches", "frag.json"], "--merge-batches"),
         (["--verify-merged", "--batch", "frag.json"], "--verify-merged"),
         # The legacy bare-`--batch` merge -- no flag selects it, so it is the
-        # row that historically escaped every table-driven guard. It carries an
-        # approve_to_refusal like every other merge mode, so it belongs here.
+        # row that historically escaped every table-driven guard. It carries a
+        # fragment_bytes_flag_refusal like every other merge mode, so it belongs
+        # here. That column is shared with --record-approval-to since #723;
+        # tests/canon_approval_record.test.py drives this same battery over both
+        # flags, which is what keeps the sharing honest rather than incidental.
         (["--batch", "frag.json"], "--batch (legacy single-fragment merge)"),
     ],
     ids=["init", "restamp", "merge_batches", "verify_merged", "legacy_bare_batch"],

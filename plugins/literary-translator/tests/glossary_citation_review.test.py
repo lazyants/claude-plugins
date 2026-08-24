@@ -38,7 +38,7 @@ further cases cover the structural traps a naive insertion hits:
     human resolving unsourceable candidates).
 
 SCOPE, vs tests/batch_size_estimator.test.py. That file owns the COST
-ESTIMATOR: the live 19*N+2 and offline 5*N+2 preflight formulas, the
+ESTIMATOR: the live 20*N+2 and offline 5*N+2 preflight formulas, the
 exactly-at-cap boundary, and the shape of the over-cap refusal. This file owns
 the STATE MACHINE the estimate is a model of -- what the review actually does
 to the control flow. The one place the two touch on purpose is formula
@@ -117,11 +117,18 @@ EXPECTED_MAX_CITATION_RETRIES = 2
 EXPECTED_WAIT_CALLS = 3
 # This file's copy of the live worst-case per-batch ceiling the preflight
 # charges: precheck 1 + one (dispatch 1 + wait WAIT_CALLS + citation prepare 1 +
-# citation judge 1) group per attempt. It was a triple until 1.16.1, when #347
-# split the single fetch-and-judge reviewer into a retrieving prepare call and a
-# judging call that never touches the network (10 -> 13, a security boundary
-# rather than new work), and it grew again in 1.16.2 when one wait stopped being
-# one call (13 -> 19).
+# citation judge 1) group per attempt + the #723 approval record 1. It was a
+# triple until 1.16.1, when #347 split the single fetch-and-judge reviewer into a
+# retrieving prepare call and a judging call that never touches the network
+# (10 -> 13, a security boundary rather than new work); it grew again in 1.16.2
+# when one wait stopped being one call (13 -> 19); and #723 added the verdict
+# record (19 -> 20).
+#
+# THE #723 TERM SITS OUTSIDE THE LADDER, and the leading 2 is where that shows.
+# The record is spent ONCE, after the single approval a batch can have, so the
+# worst case is no longer the exhausted batch (1 + 3*6 == 19, nothing approved,
+# no record) but the batch APPROVED ON ITS LAST ATTEMPT (that same 19 + 1).
+# Charging it per attempt would be a different, larger and wrong number.
 #
 # tests/batch_size_estimator.test.py keeps its own independent copy
 # (GLOSSARY_LIVE_PER_BATCH_CEILING), and the two must move together. What makes
@@ -129,8 +136,8 @@ EXPECTED_WAIT_CALLS = 3
 # test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file
 # at the end of the formula-tightness section below.
 LIVE_PER_BATCH_CEILING = (
-    1 + (3 + EXPECTED_WAIT_CALLS) * (EXPECTED_MAX_CITATION_RETRIES + 1)
-)  # 19
+    2 + (3 + EXPECTED_WAIT_CALLS) * (EXPECTED_MAX_CITATION_RETRIES + 1)
+)  # 20
 
 RUN_DIR = f"{FIXTURE_DURABLE_ROOT}/glossary/runs/{FIXTURE_RUN_ID}"
 
@@ -316,6 +323,17 @@ async function agent(promptText, opts) {
     // exactly once per attempt that gets past the wait, including the
     // resume-skip path's attempt 0.
     return nth(p.prepares, ordinal, "EVIDENCE_READY " + idx + " ATTEMPT " + ordinal);
+  }
+  if (kind === "approval-record") {
+    // #723. The default reply is the sentinel THIS PROMPT ASKED FOR, lifted out
+    // of the rendered text rather than reconstructed from an ordinal: the record
+    // call fires once per batch, at whichever attempt the review approved, so a
+    // harness that guessed the attempt would silently drift from the fixture on
+    // every ladder that took more than one attempt. A fixture that needs the
+    // record to FAIL drives `records` explicitly.
+    const asked = /APPROVAL_RECORDED (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    const fallback = asked ? ("APPROVAL_RECORDED " + asked[1] + " ATTEMPT " + asked[2]) : "UNPARSEABLE_RECORD_PROMPT";
+    return nth(p.records, ordinal, fallback);
   }
   if (kind === "citation-review") {
     // Default: approve THIS attempt. The attempt number is the ordinal --
@@ -1503,7 +1521,7 @@ def test_offline_mode_spends_no_review_call(tmp_path):
 #
 # The preflight REFUSAL tests (does an over-cap run return
 # reason:"batch-too-large" without dispatching, and is estimatedCalls exactly
-# 19*N+2 live / 5*N+2 offline) live in tests/batch_size_estimator.test.py --
+# 20*N+2 live / 5*N+2 offline) live in tests/batch_size_estimator.test.py --
 # that file's subject is the cost estimator, so the ladder arithmetic belongs
 # there and is not duplicated here.
 #
@@ -1527,9 +1545,18 @@ def test_offline_mode_spends_no_review_call(tmp_path):
 
 def test_live_worst_case_run_does_not_exceed_its_own_estimate(tmp_path):
     """The estimate is only meaningful if a real worst-case run stays within it.
-    Drives one batch all the way to exhaustion -- the most expensive path that
-    exists -- and counts the ACTUAL calls against the formula, rather than
-    trusting the arithmetic in the comment.
+    Drives one batch down the most expensive path that exists and counts the
+    ACTUAL calls against the formula, rather than trusting the arithmetic in the
+    comment.
+
+    #723 CHANGED WHICH PATH THAT IS, and the fixture moved with it. Until #723
+    the most expensive batch was the EXHAUSTED one; now it is the batch APPROVED
+    ON ITS LAST ATTEMPT. An exhausted batch approves nothing, so it writes no
+    verdict record and spends 19, one BELOW the ceiling -- driving exhaustion
+    here would therefore "measure" a ceiling of 20 while never reaching it, the
+    same false-green shape the wait dimension below already had to be rescued
+    from. So the ladder rejects attempts 0 and 1 and APPROVES attempt 2: the
+    full retry ladder, plus the one record that only an approval can buy.
 
     1.16.2 (#352): "worst case" now has a WAIT dimension too, and the fixture
     has to drive it explicitly. Every chunk answers PENDING and only the
@@ -1546,14 +1573,17 @@ def test_live_worst_case_run_does_not_exceed_its_own_estimate(tmp_path):
     never reaching the ladder at all."""
     attempts = EXPECTED_MAX_CITATION_RETRIES + 1
     per_batch = LIVE_PER_BATCH_CEILING
-    rejections = [f"CITATIONS_REJECTED 0 ATTEMPT {n}" for n in range(attempts)]
+    # Reject every attempt but the LAST, which approves -- see the docstring for
+    # why exhaustion is no longer the ceiling.
+    verdicts = [f"CITATIONS_REJECTED 0 ATTEMPT {n}" for n in range(attempts - 1)]
+    verdicts.append(f"CITATIONS_OK 0 ATTEMPT {attempts - 1}")
     plan = {"0": {
         "precheck": "ABSENT 0",
         # One entry per WAIT (not per wait call): every chunk of that wait sees
         # this reply, and `waitRechecks` overrides only the re-check.
         "waits": ["PENDING 0"] * attempts,
         "waitRechecks": ["READY 0"] * attempts,
-        "reviews": rejections,
+        "reviews": verdicts,
     }}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
     assert res["ok"], res["stderr"]
@@ -1570,11 +1600,37 @@ def test_live_worst_case_run_does_not_exceed_its_own_estimate(tmp_path):
         f"{labels_of(out)}"
     )
 
-    # Exhaustion skips merge + verify, so the ceiling for the batch itself is
-    # per_batch; the +2 pair is only spent on a run that reaches the merge.
-    assert len(out["calls"]) == per_batch, (
+    # The record is what makes this the ceiling rather than one below it.
+    assert count_label(out, "glossary:approval-record:0") == 1, (
+        f"the approving attempt must spend exactly one record call -- once per "
+        f"batch, not once per attempt; calls were {labels_of(out)}"
+    )
+
+    # This run DOES reach the merge (the last attempt approved), so subtract the
+    # fixed merge + verify pair to get the batch's own cost.
+    per_run_fixed = 2
+    assert len(out["calls"]) - per_run_fixed == per_batch, (
         f"a worst-case batch must cost exactly the per-batch term the preflight "
         f"charges for it ({per_batch}); calls were {labels_of(out)}"
+    )
+
+    # ...and the path this test USED to drive is now strictly cheaper, which is
+    # the whole reason the fixture changed. Asserted rather than asserted-in-prose
+    # so that a future release moving the record back inside the ladder fails
+    # here instead of quietly making the two paths equal again.
+    exhausted_plan = {"0": {
+        "precheck": "ABSENT 0",
+        "waits": ["PENDING 0"] * attempts,
+        "waitRechecks": ["READY 0"] * attempts,
+        "reviews": [f"CITATIONS_REJECTED 0 ATTEMPT {n}" for n in range(attempts)],
+    }}
+    exhausted = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=exhausted_plan)
+    assert exhausted["ok"], exhausted["stderr"]
+    assert exhausted["out"]["result"]["reason"] == "citation-review-exhausted"
+    assert len(exhausted["out"]["calls"]) == per_batch - 1, (
+        f"an exhausted batch approves nothing, so it writes no verdict record "
+        f"and must cost exactly one call less than the ceiling; calls were "
+        f"{labels_of(exhausted['out'])}"
     )
 
 

@@ -263,6 +263,16 @@ async function agent(promptText, opts) {
     reviewCounts[idx] = attempt + 1;
     return "CITATIONS_OK " + idx + " ATTEMPT " + attempt;
   }
+  if (step === "approval-record") {
+    // #723. The sentinel is lifted from the prompt the template actually
+    // rendered rather than rebuilt from a counter: the record fires once per
+    // batch at whichever attempt the review approved, so a counter drifts on
+    // any ladder longer than one attempt. This file never wants the record to
+    // FAIL -- it measures the WAIT, and a refused merge would mask that.
+    const asked = /APPROVAL_RECORDED (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    if (!asked) return "UNPARSEABLE_RECORD_PROMPT";
+    return "APPROVAL_RECORDED " + asked[1] + " ATTEMPT " + asked[2];
+  }
   throw new Error("mock agent(): unrecognized label " + label);
 }
 
@@ -1737,7 +1747,7 @@ def test_skeptic_setup_estimator_matches_the_template_and_the_shipped_ladder():
 
 @pytest.mark.parametrize(
     "research_mode,per_batch",
-    [("live", 19), ("offline", 5)],
+    [("live", 20), ("offline", 5)],
     ids=["live", "offline"],
 )
 def test_glossary_preflight_refuses_one_call_over_its_own_ladder(research_mode, per_batch, tmp_path):
@@ -1797,9 +1807,13 @@ def test_skeptic_preflight_refuses_one_call_over_its_own_ladder(tmp_path):
 # without touching either formula, which rescales every max-batch figure by
 # that same factor -- (10000-2)//per_batch, not a copy of what the code
 # happens to print today.
+#
+# #723 then moved the glossary LIVE row again, and only that one: the approval
+# record sits outside the retry ladder, so it adds exactly one call to a live
+# batch and none to an offline or skeptic one.
 SHIPPED_BATCH_AGENT_CAP = 10000
 LADDER_MAX_BATCHES = {
-    "glossary live": (19, 526),      # (10000-2)//19 = 9998//19 = 526
+    "glossary live": (20, 499),      # (10000-2)//20 = 9998//20 = 499
     "glossary offline": (5, 1999),   # (10000-2)//5  = 9998//5  = 1999
     "skeptic (both)": (5, 1999),     # same 5N+2 formula as glossary offline
 }

@@ -382,7 +382,7 @@ suppresses the re-check, which is gated on the verdict rather than on the loop
 index. A fragment that validates in chunk 1 spends exactly 1 call; only a wait
 that exhausts every chunk and still needs the re-check spends all 3. The
 estimator computes the worst case, which is what a preflight gate should do —
-but do not read `19N + 2` or `5N + 2` as what a run will actually spend. In the
+but do not read `20N + 2` or `5N + 2` as what a run will actually spend. In the
 skeptic pass the early exit is an **economy** requirement rather than a
 correctness one: each extra chunk would spend another agent call re-running
 `--validate-fragment` over a fragment that has already validated. That gate is
@@ -743,10 +743,17 @@ somebody has to know to perform, and an unaudited citation announces nothing.
 
 Three properties worth stating exactly, because each is a limit:
 
-- **It is an attestation, not a proof.** No artifact on disk records a
-  `CITATIONS_OK` verdict, and the approved snapshot the reviewer audits is
-  written by PREPARE *before* any evidence is fetched — so even "this path is
-  an `approved_*.json`" would say nothing about the verdict. What the refusal
+- **It is an attestation, not a proof.** The approved snapshot is written by
+  PREPARE *before* any evidence is fetched, so "this path is an
+  `approved_*.json`" says nothing about the verdict, and `canon_validate.py`
+  reads nothing that does. **#723** narrowed the gap without closing it from
+  this side: the pass now writes `approval_{i}_attempt_{n}.json` naming the
+  sha256 of every APPROVED fragment, so the attesting operator can pick those
+  exact bytes by digest instead of guessing which snapshot won — the guess that
+  once merged a batch whose only recorded verdicts were rejections. The record
+  is read by a PERSON and by nothing else: it lives in a directory the dispatch
+  agent can write, so a gate that trusted it would be a forgeable gate, and the
+  trusted point stays the operator. What the refusal
   converts is a SILENT freeze into a deliberate act, the same ceiling as
   `--plugin-root`/`--allow-durable-sibling` (#412) and `reject_review.py`'s
   attested `--reason` (#461).
@@ -1355,7 +1362,7 @@ its own, but since **1.16.1** the reason is no longer cost: the split already
 spends the extra call, taking the live ceiling from
 `1 + 3*(MAX_CITATION_RETRIES+1)` to `1 + 4*(MAX_CITATION_RETRIES+1)` — and
 **1.16.2** took it further still, to
-`1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` (**19** at the shipped
+`2 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` (**20** at the shipped
 `WAIT_CALLS = 3`), when the wait itself stopped being reliably one agent call
 — `WAIT_CALLS` is its worst case, not its price (see
 **The chunked wait** above). What
@@ -1510,8 +1517,8 @@ The end state is identical either way: the fail scan skips the sentinel, a
 trailing clean OK line then approves the batch, and a reply carrying BOTH
 verdicts silently resolves to the approving one.
 
-Each of this template's four sites — precheck, wait, prepare and judge —
-therefore now short-circuits to REJECT when `rejectedAnywhere(reply,
+Each of this template's five sites — precheck, wait, prepare, judge and
+(**#723**) the approval record — therefore now short-circuits to REJECT when `rejectedAnywhere(reply,
 failSentinel)` finds the fail sentinel anywhere in the reply as a plain
 substring, evaluated BEFORE `sentinelVerdict()` is consulted
 at all. Substring containment is strictly easier to satisfy than line

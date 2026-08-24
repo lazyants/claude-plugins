@@ -920,7 +920,17 @@ def write_glossary_manifests(glossary_run_dir: Path, batches) -> None:
     _atomic_write_json(glossary_run_dir / "manifest_all.json", sorted(set(all_names)))
 
 
-_GLOSSARY_FRAGMENT_RE = re.compile(r"^(out|approved)_(\d+)_attempt_(\d+)\.json$")
+# `approval` joined this alternation in #723. The verdict record follows the
+# `approved_*` rule rather than the `out_*` one, and for that rule's own reason:
+# it is an OUTPUT of the citation review, re-produced whenever the review
+# approves again, so a surviving copy is never useful and is potentially a
+# statement about a fragment this run has already rejected. Keeping it would be
+# worse than useless -- the record exists to be READ BY AN OPERATOR, and a
+# record of unknown age is exactly the guesswork #723 removed. Riding the
+# existing alternation rather than a second regex is deliberate: one pattern,
+# one keep rule, and a new artifact cannot be added to one and forgotten in the
+# other.
+_GLOSSARY_FRAGMENT_RE = re.compile(r"^(out|approved|approval)_(\d+)_attempt_(\d+)\.json$")
 
 # #347 -- the citation audit's prepare step writes a DIRECTORY per batch attempt
 # (fetched evidence bodies plus index.json), not a file, so the fragment regex
@@ -949,12 +959,14 @@ def _wipe_stale_glossary_fragments(glossary_run_dir: Path, resume: bool) -> None
       uniqueness only checks runs/<id>, not this separate glossary/runs/<id>
       tree, so an orphaned glossary dir can survive and collide on the
       one-second timestamp; keeping a stale attempt 0 there is the bug.
-    - Resume (resume is True): wipe out_* for attempt >= 1 and ALL approved_*,
-      but KEEP out_{i}_attempt_0.json. The resume-skip optimisation depends
+    - Resume (resume is True): wipe out_* for attempt >= 1 and ALL approved_*
+      and ALL approval_* (#723's verdict records), but KEEP
+      out_{i}_attempt_0.json. The resume-skip optimisation depends
       wholly on attempt 0 surviving, and a resume-skipped attempt-0 fragment is
       still citation-reviewed, so keeping it is safe here because the run_id
       genuinely matches by digest. Approved snapshots are never kept: they are
-      re-produced by the fresh review of whatever fragment wins this run.
+      re-produced by the fresh review of whatever fragment wins this run, and
+      so are the verdict records that vouch for them.
 
     Cost of the fresh-run wipe is at most one re-dispatch per batch on the rare
     orphan collision, never a wrong result.

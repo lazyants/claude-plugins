@@ -1767,7 +1767,9 @@ its own, but no longer to save a call: the **1.16.1** split already spends
 one, taking the live ceiling from `1 + 3*(MAX_CITATION_RETRIES+1)` to
 `1 + 4*(MAX_CITATION_RETRIES+1)`; **1.16.2** then took it to
 `1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` = **19**, the wait having
-stopped being a single agent call. What survives is the structural reason —
+stopped being a single agent call; **#723** then took it to
+`2 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` = **20** for the approval
+record, which sits outside the ladder and is spent once per approved batch. What survives is the structural reason —
 prepare is the one point both entry points into the review loop converge on,
 so a resume-skipped batch, which runs neither the dispatch nor the wait,
 still gets a snapshot and its evidence.

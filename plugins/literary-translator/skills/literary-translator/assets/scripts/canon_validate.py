@@ -112,7 +112,13 @@ accidentally omit declaring the precondition):
 
 --check-batch PATH [--expect-source-forms-file M.json]
     Pass 1 (per-item) + the offline backstop on the ONE fragment at PATH.
-    NO write. When --expect-source-forms-file is given (a JSON array of
+    Writes NOTHING in its flagless form, which is the form every gate in
+    the pass issues. Two opt-in flags do write, and only on a PASS:
+    --approve-to publishes the validated bytes as a snapshot, and
+    --record-approval-to (#723) writes a verdict record naming their
+    sha256. "--check-batch never writes" was stated categorically here
+    while --approve-to already existed; it is the FLAGLESS form that
+    never writes. When --expect-source-forms-file is given (a JSON array of
     expected source_form strings, read from the FILE, never inline argv),
     additionally asserts the fragment's item source_forms are an EXACT
     match (no missing, no extra) -- the coverage half of the manifest-
@@ -232,6 +238,7 @@ callers (the glossary-pass Workflow, tests) should read stdout, not rely
 on the exit code alone.
 """
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
@@ -416,7 +423,7 @@ class ModeSpec(NamedTuple):
     dest: "str | None"
     batch_ok: bool
     source_forms_refusal: "str | None"
-    approve_to_refusal: "str | None"
+    fragment_bytes_flag_refusal: "str | None"
     citations_reviewed_refusal: "str | None"
     stamps_generation_hashes: bool
 
@@ -474,13 +481,18 @@ _COVERAGE_ENFORCED_ELSEWHERE = (
     "coverage is enforced by --check-batch per fragment and by "
     "--verify-merged for the merged set"
 )
-# --approve-to snapshots the exact bytes of the ONE fragment --check-batch
-# validated, so the citation reviewer audits the approved snapshot and the merge
-# consumes that same copy. No other mode reviews a single pre-merge fragment,
-# so honoring --approve-to for one would snapshot bytes nothing reviewed --
-# the same false-success shape the source-forms refusal guards against.
+# The shared refusal for every flag that OPERATES ON ONE FRAGMENT'S EXACT
+# BYTES: --approve-to snapshots them, --record-approval-to records their
+# digest. Both belong to --check-batch alone, which is the only mode that
+# reviews a single pre-merge fragment, so honoring either elsewhere would
+# snapshot -- or vouch for -- bytes nothing reviewed, the same false-success
+# shape the source-forms refusal guards against. ONE column governs both
+# (fragment_bytes_flag_refusal): a second column repeating these same values
+# row for row is exactly the two-hand-maintained-lists defect this table
+# exists to remove, and the reason text below is per-MODE, never per-flag.
 _NOT_A_SINGLE_FRAGMENT_REVIEW = (
-    "only --check-batch snapshots the single fragment it reviews pre-merge"
+    "only --check-batch operates on the exact bytes of the single fragment "
+    "it reviews pre-merge"
 )
 # #505. The attestation exists to gate the one irreversible act: freezing an
 # `established` citation nobody audited into a frozen canon row. A mode
@@ -513,7 +525,7 @@ MODE_SPECS = (
         "init",
         batch_ok=False,
         source_forms_refusal=_READS_NO_FRAGMENT,
-        approve_to_refusal=_READS_NO_FRAGMENT,
+        fragment_bytes_flag_refusal=_READS_NO_FRAGMENT,
         citations_reviewed_refusal=_READS_NO_FRAGMENT,
         stamps_generation_hashes=True,
     ),
@@ -522,7 +534,7 @@ MODE_SPECS = (
         "restamp_derivation",
         batch_ok=False,
         source_forms_refusal=_READS_NO_FRAGMENT,
-        approve_to_refusal=_READS_NO_FRAGMENT,
+        fragment_bytes_flag_refusal=_READS_NO_FRAGMENT,
         citations_reviewed_refusal=_READS_NO_FRAGMENT,
         stamps_generation_hashes=True,
     ),
@@ -540,7 +552,7 @@ MODE_SPECS = (
         "correct",
         batch_ok=False,
         source_forms_refusal=_READS_NO_FRAGMENT,
-        approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        fragment_bytes_flag_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
         citations_reviewed_refusal=_ALREADY_AN_ON_THE_RECORD_DECISION,
         stamps_generation_hashes=False,
     ),
@@ -549,7 +561,7 @@ MODE_SPECS = (
         "check_batch",
         batch_ok=False,
         source_forms_refusal=None,
-        approve_to_refusal=None,
+        fragment_bytes_flag_refusal=None,
         citations_reviewed_refusal=_WRITES_NO_CANON_ROW,
         stamps_generation_hashes=False,
     ),
@@ -558,7 +570,7 @@ MODE_SPECS = (
         "merge_batches",
         batch_ok=False,
         source_forms_refusal=_COVERAGE_ENFORCED_ELSEWHERE,
-        approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        fragment_bytes_flag_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
         citations_reviewed_refusal=None,
         stamps_generation_hashes=True,
     ),
@@ -567,7 +579,7 @@ MODE_SPECS = (
         "verify_merged",
         batch_ok=True,
         source_forms_refusal=None,
-        approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        fragment_bytes_flag_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
         citations_reviewed_refusal=_WRITES_NO_CANON_ROW,
         stamps_generation_hashes=False,
     ),
@@ -579,7 +591,7 @@ MODE_SPECS = (
         None,
         batch_ok=True,
         source_forms_refusal=_COVERAGE_ENFORCED_ELSEWHERE,
-        approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        fragment_bytes_flag_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
         citations_reviewed_refusal=None,
         stamps_generation_hashes=True,
     ),
@@ -614,6 +626,7 @@ NON_MODE_DESTS = frozenset(
         "batch",
         "expect_source_forms_file",
         "approve_to",
+        "record_approval_to",
         "canon_path",
         "senses_path",
         "plugin_root",
@@ -1725,6 +1738,44 @@ def _write_approved_snapshot(path: Path, raw: bytes) -> None:
         )
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+GLOSSARY_APPROVAL_SCHEMA = "glossary-approval/1"
+
+
+def _write_approval_record(path: Path, raw: bytes, recorded_from: str) -> None:
+    """Publish the #723 verdict record for `raw` at `path`.
+
+    WHAT THIS IS FOR, and the one thing it is not. The glossary pass runs this
+    only after an independent citation review returned CITATIONS_OK for these
+    exact bytes, so the record is the on-disk answer to "batch i, these bytes,
+    passed the review" -- the fact an operator needs when they stop a pass and
+    merge by hand, and the fact whose absence let a batch whose only recorded
+    verdicts were REJECTIONS be merged under --citations-reviewed. It is read by
+    PEOPLE. Nothing in the pass reads it back, and no gate in this script
+    consults it: it is evidence, never an authorization, which is precisely why
+    a forged copy buys nobody anything. Do not give it an in-band consumer.
+
+    REPLACING, not create-once -- the opposite choice from
+    _write_approved_snapshot() above, and for the opposite reason. That function
+    guards a slot two concurrent reviewers could both claim within one run. This
+    one records the LATEST verdict for a batch, and a resumed run that
+    re-reviews a batch and approves different bytes must supersede the stale
+    record rather than be refused by it; a refusal there would leave the
+    operator reading a record for bytes this run rejected.
+
+    The digest is over the bytes the caller VALIDATED, taken from the same
+    single read (_load_batch_bytes), never a re-read or a re-serialisation --
+    the same TOCTOU discipline --approve-to already follows.
+    """
+    _atomic_write_json(
+        path,
+        {
+            "schema": GLOSSARY_APPROVAL_SCHEMA,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "recorded_from": recorded_from,
+        },
+    )
 
 
 def _load_source_forms_manifest(manifest_path_str: str) -> list:
@@ -3080,9 +3131,12 @@ def run_check_batch(
     senses_path: Path,
     allow_absent_senses: bool,
     approve_to: "str | None" = None,
+    record_approval_to: "str | None" = None,
 ) -> dict:
     """--check-batch PATH [--expect-source-forms-file M.json]: Pass 1 +
-    offline backstop on ONE fragment, NO write. When a manifest is given,
+    offline backstop on ONE fragment. No write unless --approve-to or
+    --record-approval-to asks for one, and then only after every check below
+    has passed. When a manifest is given,
     additionally asserts exact source_form coverage. ALSO loads canon.json
     (read-only -- an absent file is the same fresh skeleton _load_canon
     always returns; nothing is ever written here) and canon_senses.json,
@@ -3091,13 +3145,14 @@ def run_check_batch(
     rejects a doomed fragment at precheck/readiness time (RFC #215 1d),
     not only at the final --merge-batches call.
     """
-    # When --approve-to is set we need the fragment's exact bytes to snapshot,
-    # and they must come from the SAME read that is validated -- otherwise a
-    # second read between validation and copy is a TOCTOU. So take the bytes
-    # up front and derive the parsed batch from them; the snapshot below writes
-    # these same bytes, never a re-serialisation.
+    # When --approve-to or --record-approval-to is set we need the fragment's
+    # exact bytes -- to snapshot them, to digest them, or both -- and they must
+    # come from the SAME read that is validated, otherwise a second read between
+    # validation and use is a TOCTOU. So take the bytes up front and derive the
+    # parsed batch from them; the snapshot below writes these same bytes, never
+    # a re-serialisation, and the record digests these same bytes.
     raw_bytes = None
-    if approve_to is not None:
+    if approve_to is not None or record_approval_to is not None:
         raw_bytes, batch = _load_batch_bytes(batch_path)
     else:
         batch = _load_batch(batch_path)
@@ -3125,6 +3180,17 @@ def run_check_batch(
             raise CanonValidationError("internal: --approve-to set but fragment bytes unread")
         _write_approved_snapshot(Path(approve_to), raw_bytes)
         result["approved_path"] = approve_to
+    # #723, LAST and only after every check above: the verdict record vouches
+    # for bytes, so it must never be written for bytes that failed a check, and
+    # never before the snapshot those bytes are published as. Ordering is the
+    # whole of its correctness -- see _write_approval_record().
+    if record_approval_to is not None:
+        if raw_bytes is None:  # unreachable: set together with record_approval_to
+            raise CanonValidationError(
+                "internal: --record-approval-to set but fragment bytes unread"
+            )
+        _write_approval_record(Path(record_approval_to), raw_bytes, batch_path)
+        result["approval_record_path"] = record_approval_to
     return result
 
 
@@ -3376,6 +3442,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--record-approval-to",
+        metavar="PATH",
+        default=None,
+        help=(
+            "#723. Only with --check-batch: on a PASS, atomically write a "
+            "verdict record to PATH naming the sha256 of the EXACT validated "
+            "bytes and the path they were read from. Written by the glossary "
+            "pass ONLY after an independent citation review approved those "
+            "bytes, so that the operator's later --citations-reviewed "
+            "attestation has something on disk to rest on -- selecting the "
+            "attested snapshot by digest instead of guessing which snapshot "
+            "was the approved one. NOTHING in the pass reads it back: it is an "
+            "audit record for a human, never an authorization, so a forged "
+            "copy grants nobody anything. Writes nothing on failure. Refused "
+            "in every other mode."
+        ),
+    )
+    parser.add_argument(
         "--citations-reviewed",
         action="store_true",
         help=(
@@ -3387,9 +3471,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "pre-merge citation review runs inside the glossary-pass Workflow, "
             "never in this script, so a hand-driven merge would otherwise "
             "freeze an unaudited citation into a canon row nothing downstream "
-            "may question, with no signal. It is an attestation, not a proof: "
-            "nothing on disk records the review's verdict. Refused in every "
-            "non-merge mode."
+            "may question, with no signal. It is an attestation, not a proof -- but "
+            "since #723 it is no longer unsupported: a glossary pass writes a "
+            "verdict record (--record-approval-to) naming the sha256 of every "
+            "approved fragment, so the operator attesting here can select those "
+            "exact bytes by digest rather than by guesswork. This script never "
+            "reads that record; the attestation stays the operator's. Refused "
+            "in every non-merge mode."
         ),
     )
     parser.add_argument(
@@ -3560,29 +3648,37 @@ def main(argv=None) -> int:
                 "no coverage check. Pass --check-batch or --verify-merged to "
                 "enforce source-forms coverage."
             )
-    # Every mode that refuses --approve-to, with its own reason -- the same
-    # loud-refusal design as --expect-source-forms-file above, so a snapshot is
-    # never silently produced for a mode that reviewed no single fragment.
-    approve_to_refusers = [
-        spec for spec in selected_modes if spec.approve_to_refusal is not None
+    # Every mode that refuses a FRAGMENT-BYTES flag, with its own reason -- the
+    # same loud-refusal design as --expect-source-forms-file above, so neither a
+    # snapshot nor a verdict record is ever silently produced for a mode that
+    # reviewed no single fragment. Driven by ONE table column over BOTH flags:
+    # the refusal reason is a property of the MODE, not of which flag was
+    # passed, so a per-flag column would be the same list maintained twice.
+    fragment_bytes_refusers = [
+        spec for spec in selected_modes if spec.fragment_bytes_flag_refusal is not None
     ]
-    if args.approve_to is not None:
-        if approve_to_refusers:
+    for flag_name, flag_value in (
+        ("--approve-to", args.approve_to),
+        ("--record-approval-to", args.record_approval_to),
+    ):
+        if flag_value is None:
+            continue
+        if fragment_bytes_refusers:
             parser.error(
                 "; ".join(
-                    f"{spec.flag} does not accept --approve-to "
-                    f"({spec.approve_to_refusal})"
-                    for spec in approve_to_refusers
+                    f"{spec.flag} does not accept {flag_name} "
+                    f"({spec.fragment_bytes_flag_refusal})"
+                    for spec in fragment_bytes_refusers
                 )
             )
         elif not selected_modes:
             # VALIDATE-ONLY (no mode flag) has no MODE_SPECS row, so the
             # comprehension above never reaches it -- guard it by hand, exactly
             # as --expect-source-forms-file is guarded. It reviews no fragment,
-            # so honoring --approve-to would snapshot bytes nothing reviewed.
+            # so honoring either flag would vouch for bytes nothing reviewed.
             parser.error(
-                "validate-only (no mode flag) does not accept --approve-to -- "
-                "it reviews no single fragment to snapshot. Pass --check-batch."
+                f"validate-only (no mode flag) does not accept {flag_name} -- "
+                f"it reviews no single fragment. Pass --check-batch."
             )
     # #505 -- every mode that refuses --citations-reviewed, with its own
     # reason. Same table-driven shape as --approve-to above: the attestation
@@ -3677,6 +3773,7 @@ def main(argv=None) -> int:
                 senses_path,
                 allow_absent_senses,
                 args.approve_to,
+                args.record_approval_to,
             )
         elif args.merge_batches is not None:
             result = run_merge_batches(

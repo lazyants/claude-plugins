@@ -879,7 +879,7 @@ failure than one that is slightly loose. In 1.16.2 the wait can genuinely cost
 kind of quantity `3N + 2` always was, not a claim about what a run spends —
 and a refusal against it is a correct refusal. What the mode-awareness still prevents is the
 thing that would break the principle: a MODE-BLIND estimate charging an
-offline project the live `19N + 2` for a ladder it can never execute.
+offline project the live `20N + 2` for a ladder it can never execute.
 
 ## The glossary-pass template — a second, smaller `pipeline()` call
 
@@ -1021,10 +1021,10 @@ pipeline(BATCHES, batchStep)
   wait becoming worth up to `WAIT_CALLS` agent calls instead of exactly 1. See
   `references/canon-and-glossary.md`'s **Pre-merge citation review**.
 
-**All four of these verdicts are containment-guarded** — the precheck, the wait,
-and (1.16.1) both halves of the citation pair — as are mass-translate's
-`waitChunkVerdict()` and its `DRAFT_MISSING` fix check, **six sites over the two
-templates**. The total is unchanged from 1.16.0 but its composition is not: the
+**All five of these verdicts are containment-guarded** — the precheck, the wait,
+(1.16.1) both halves of the citation pair, and (#723) the approval record — as
+are mass-translate's `waitChunkVerdict()` and its `DRAFT_MISSING` fix check,
+**seven sites over the two templates**. The total is unchanged from 1.16.0 but its composition is not: the
 glossary side went from three to four when the citation reviewer split in two,
 and the mass-translate side went from three to two when 1.16.1 (#348) collapsed
 the two separate wait verdicts into the single `waitChunkVerdict()` parse site
@@ -1177,13 +1177,18 @@ inside it:
   live    -- perBatchCalls = 1 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)
              1 precheck, then dispatch + wait + citation prepare + judge per
              attempt, with attempts == MAX_CITATION_RETRIES + 1 in the worst
-             case (every review rejects until the ladder is exhausted)
+             case (every review rejects until the ladder is exhausted), PLUS one
+             approval record (#723) spent once after the single approval a batch
+             can have -- which is why the leading term is 2 and why the ceiling
+             is the approved-on-the-last-attempt path rather than the exhausted
+             one (an exhausted batch approves nothing, records nothing, and
+             costs 19)
   offline -- perBatchCalls = 1 + (1 + WAIT_CALLS) == 2 + WAIT_CALLS
              precheck + dispatch + wait
   ```
 
   At the shipped `WAIT_CALLS = 3` and `MAX_CITATION_RETRIES = 2` that is
-  **`19 * BATCHES.length + 2` live** and **`5 * BATCHES.length + 2`
+  **`20 * BATCHES.length + 2` live** and **`5 * BATCHES.length + 2`
   offline**, so a `batch_agent_cap` of 3500 admits ~184 live batches or ~699
   offline ones. The parameterized form is **provably a generalisation rather
   than a rewrite**: substituting `WAIT_CALLS = 1` collapses the two branches

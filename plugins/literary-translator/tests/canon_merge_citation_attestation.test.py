@@ -12,13 +12,25 @@ real historiettes-t3 project used, and the path #505's 7-of-23-unusable
 measurement came from) froze fabricated evidence into an immutable canon row
 with no signal at all.
 
-`--citations-reviewed` is an OPERATOR ATTESTATION, not a proof: nothing on
-disk records a `CITATIONS_OK` verdict, and the approved snapshot the reviewer
-audits is written BEFORE the evidence is even fetched, so no artifact could
-support a kernel check here. What the refusal buys is that a silent freeze
-becomes a deliberate act -- the same shape as #412's
-`--plugin-root`/`--allow-durable-sibling` and reject_review.py's attested
-`--reason`.
+`--citations-reviewed` is an OPERATOR ATTESTATION, not a proof, and it stays
+one. What the refusal buys is that a silent freeze becomes a deliberate act --
+the same shape as #412's `--plugin-root`/`--allow-durable-sibling` and
+reject_review.py's attested `--reason`.
+
+WHAT #723 CHANGED, AND WHAT IT POINTEDLY DID NOT. This docstring used to say
+"nothing on disk records a `CITATIONS_OK` verdict", and that was the defect
+rather than the design: an operator merging by hand had to GUESS which snapshot
+the reviewer approved, and on the measured run they guessed wrong for one batch
+whose only recorded verdicts were rejections. Since #723 the pass writes a
+verdict record (`canon_validate.py --record-approval-to`) naming the sha256 of
+every approved fragment, so the attesting operator can select those exact bytes
+by digest. The approved snapshot remains no evidence of a verdict -- it is still
+written BEFORE the evidence is fetched, which is exactly why a separate record
+was needed. THIS SCRIPT STILL READS NEITHER. No kernel check consults the
+record, deliberately: it lives in a directory the dispatch agent can write, so a
+gate that trusted it would be a forgeable one. The attestation remains the
+operator's, made from outside that directory -- the record just gives it
+something true to rest on.
 
 Scope of the guard, pinned below:
 
