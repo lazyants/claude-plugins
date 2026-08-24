@@ -127,10 +127,11 @@ Selecting `v1_scope: assembled_book` turns on **Step 0d** (resolve the
 output-target adapter) and **W9 Assemble** (run it), producing one rendered
 book output instead of — really, in addition to, since W7/W8's audit trail is
 unconditional — the segment-drafts handoff. This increment ships exactly one
-working target, `obsidian`; `epub` and `custom` resolve (Step 0d validates the
-enum/path shape) but do not yet render (see "Why `build_epub.py` hasn't been
-generalized" below for `epub`; `custom` is always co-designed per project, see
-`references/output-target-adapters/README.md`).
+working target, `obsidian`. `epub` does NOT resolve: `render_epub.py` has never
+been written, so Step 0 and Step 0d both HALT on it, naming the missing module
+and the alternatives (see "Why `build_epub.py` hasn't been generalized" below).
+`custom` resolves as far as its path shape and then halts for co-design, per
+project (see `references/output-target-adapters/README.md`).
 
 #### Step 0d — resolving the target, early
 
@@ -358,8 +359,9 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
 ```
 
 `assemble.py` resolves `output.target` to either a flat sibling module name
-(`render_obsidian`, `render_epub`) it imports directly from
-`assets/scripts/`, or — for `target: custom` — a `Path` loaded via
+it imports directly from `assets/scripts/` (`render_obsidian` — `render_epub`
+is mapped but unwritten, and halts at resolution rather than being returned),
+or — for `target: custom` — a `Path` loaded via
 `importlib` from the fixed `${durable_root}/scripts/custom_renderers/`
 subtree (see `references/output-target-adapters/README.md` for the full
 resolution/path-safety rules). `out_dir` defaults under
@@ -456,8 +458,11 @@ behavior against its own code (the same discipline already applied to
 description of it), or decided how much of it generalizes cleanly to
 arbitrary language pairs / source formats versus how much is specific to
 Historiettes' own layout. Until that reading happens, `output.target: epub`
-stays resolvable (Step 0d validates the enum) but unimplemented — a later
-phase, not this one.
+stays a *declared* enum value that does not resolve: Step 0
+(`profile_validate.py`) and Step 0d (`output_resolve.py`) both HALT on it,
+naming the missing `render_epub.py` and the three alternatives. It is a later
+phase, not this one — and the halt is what says so at setup time rather than at
+W9, after a whole book has been translated and converged (#726).
 
 The same discipline applies to any future `epub` output-target effort:
 `build_epub.py`'s real, current behavior — not this reference's description

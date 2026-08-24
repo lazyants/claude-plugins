@@ -8,13 +8,31 @@ path-safety-checked escape hatch), mirrored deliberately.
 
 `resolve_output_adapter(profile, durable_root)` returns one of:
 
-  - `"render_obsidian"` / `"render_epub"` -- a flat sibling module NAME
-    (never a Path) for the two built-in adapters. `assemble.py` imports
-    whichever one by name and calls its `render(...)` entry point (see
+  - `"render_obsidian"` -- a flat sibling module NAME (never a Path) for a
+    built-in adapter that has actually SHIPPED. `assemble.py` imports it by
+    name and calls its `render(...)` entry point (see
     references/output-target-adapters/README.md's shared adapter contract).
+    `BUILTIN_ADAPTER_MODULES` also maps `epub -> "render_epub"`, but that
+    module has not shipped, so `epub` never reaches a caller as a name --
+    it HALTS here, see the next section.
   - a `Path` -- for `output.target == "custom"`, the resolved,
     path-safety-checked custom renderer module under
     `{durable_root}/scripts/custom_renderers/`.
+
+## A built-in that is MAPPED but not SHIPPED halts too
+
+`BUILTIN_ADAPTER_MODULES` is exhaustive over the schema's `target` enum. It
+is NOT a claim that every module it names exists on disk: `render_epub.py`
+has never been written (`references/assembly-and-output.md`'s "Why
+`build_epub.py` hasn't been generalized"). Returning `"render_epub"`
+unchecked pushed that discovery all the way to W9 assembly -- past every
+gate, with the whole book already translated, reviewed and converged
+(#726). `assert_builtin_adapter_shipped()` moves it to the earliest point
+that can see it: Step 0 (`profile_validate.py` calls it directly) and Step
+0d (`resolve_output_adapter` calls it before returning any built-in name),
+with a message naming the alternatives -- the same HALT-with-a-reason shape
+the `custom` branch below already had, applied to the one built-in that
+needed it.
 
 `obsidian` and `epub` are two DISTINCT built-in renderers (unlike the
 source side, where `gutenberg_epub` and `plain_text` would share one
@@ -100,6 +118,47 @@ class OutputResolveError(Exception):
     exit -- never a bare traceback for an expected/actionable condition."""
 
 
+def assert_builtin_adapter_shipped(target: str) -> None:
+    """Refuse a built-in `output.target` whose adapter module has not been
+    written yet -- HALTING at the earliest gate that can see it instead of
+    at W9 assembly.
+
+    `BUILTIN_ADAPTER_MODULES` is exhaustive over the ENUM, never a claim
+    that every module it maps to exists: `epub` is mapped and unwritten.
+    The check is keyed on the MODULE FILE's presence beside this script,
+    not on a hardcoded target name -- dropping a `render_epub.py` into
+    this directory is all it takes for `epub` to resolve, with no edit
+    here.
+
+    Called by `resolve_output_adapter()` (Step 0d / W9) and directly by
+    `profile_validate.py` (Step 0, before Step 0a has created a durable
+    root at all). `SCRIPTS_DIR` is this module's own directory, so each
+    caller checks the copy that its own run would actually import.
+
+    Raises `OutputResolveError` naming the target, the module file that is
+    missing, and what to do instead. `target` must be a
+    `BUILTIN_ADAPTER_MODULES` key -- callers check that first.
+    """
+    module_name = BUILTIN_ADAPTER_MODULES[target]
+    if (SCRIPTS_DIR / f"{module_name}.py").is_file():
+        return
+    raise OutputResolveError(
+        f"output.target {target!r} names the built-in adapter module "
+        f"{module_name!r}, which has not shipped -- there is no "
+        f"{module_name}.py in {SCRIPTS_DIR}. Left unchecked this only "
+        "fails at W9 assembly, with the whole book already translated and "
+        "converged. Choose one instead: (a) keep "
+        "output.v1_scope: segment_drafts_and_audit -- converged per-segment "
+        "drafts plus the full audit trail, and build the "
+        f"{target} output yourself from those with a project-local script; "
+        "(b) set "
+        "output.target: custom and co-design a renderer under "
+        "{durable_root}/scripts/custom_renderers/; or (c) set "
+        "output.target: obsidian, the one built-in target that renders "
+        "today. See references/output-target-adapters/README.md."
+    )
+
+
 def _check_renderer_path_shape(renderer_path) -> None:
     if not isinstance(renderer_path, str) or not renderer_path:
         raise OutputResolveError(
@@ -125,10 +184,15 @@ def _check_renderer_path_shape(renderer_path) -> None:
 
 
 def resolve_output_adapter(profile: dict, durable_root: Path) -> Union[str, Path]:
-    """Returns `"render_obsidian"` | `"render_epub"` (built-in adapter
-    module names) or a `Path` (the resolved, path-safety-checked custom
-    renderer module) -- exhaustive over `output.target`'s closed enum, no
-    default fallthrough. Raises `OutputResolveError` naming the exact
+    """Returns a built-in adapter module NAME (`"render_obsidian"`) or a
+    `Path` (the resolved, path-safety-checked custom renderer module) --
+    exhaustive over `output.target`'s closed enum, no default fallthrough.
+
+    Exhaustive over the enum-to-name MAPPING is not the same as exhaustive
+    over the modules that exist: a target mapped to a module that has never
+    been written (`epub`) HALTS here via
+    `assert_builtin_adapter_shipped()` rather than handing the caller a
+    name it cannot import. Raises `OutputResolveError` naming the exact
     problem on any failure."""
     output = profile.get("output") if isinstance(profile, dict) else None
     if not isinstance(output, dict):
@@ -142,6 +206,7 @@ def resolve_output_adapter(profile: dict, durable_root: Path) -> Union[str, Path
             "references/output-target-adapters/README.md)"
         )
     if target in BUILTIN_ADAPTER_MODULES:
+        assert_builtin_adapter_shipped(target)
         return BUILTIN_ADAPTER_MODULES[target]
     if target == "custom":
         adapter_config = output.get("adapter_config") or {}

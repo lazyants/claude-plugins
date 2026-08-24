@@ -1133,6 +1133,86 @@ def test_terms_scalar_list_item_rejected():
     assert schema_errors(_with_terms(["président"])) != []
 
 
+# ---------------------------------------------------------------------------
+# Step 14 (#726): output.target naming a built-in adapter that has not shipped.
+#
+# `epub` is in the schema enum and maps to `render_epub`, which does not exist.
+# Before this check the profile cleared every gate and the failure landed at W9
+# assembly, with the whole book translated, reviewed and converged. The check is
+# deliberately NARROW: it fires only under `v1_scope: assembled_book`, only for
+# a built-in target, and only when that target's module file is absent.
+# ---------------------------------------------------------------------------
+
+
+_NO_TARGET_KEY = object()
+
+
+def _output_profile(v1_scope, target=_NO_TARGET_KEY):
+    profile = make_base_profile()
+    profile["output"]["v1_scope"] = v1_scope
+    if target is not _NO_TARGET_KEY:
+        profile["output"]["target"] = target
+    return profile
+
+
+def test_assembled_book_with_unshipped_epub_target_is_fatal():
+    errors = pv.check_output_target_shipped(_output_profile("assembled_book", "epub"))
+
+    assert len(errors) == 1
+    message = errors[0]
+    assert "output.target" in message
+    # The actionable half: WHICH file is missing, and at least one way out.
+    # A bare "epub is not supported" would pass a laxer assertion and leave an
+    # operator with a converged book and nowhere to go.
+    assert "render_epub.py" in message
+    assert "segment_drafts_and_audit" in message
+    assert "output.target: custom" in message
+    assert "output.target: obsidian" in message
+
+
+def test_inert_epub_target_under_the_default_scope_is_accepted():
+    """The over-catch guard. Under `segment_drafts_and_audit` nothing ever
+    reads output.target -- Step 0d is a no-op and W9 does not run -- so a
+    declared `epub` is inert. Refusing it would reject profiles that validate
+    today, for a target they never use."""
+    assert pv.check_output_target_shipped(_output_profile("segment_drafts_and_audit", "epub")) == []
+
+
+def test_absent_output_target_under_the_default_scope_is_accepted():
+    """`output.target` is OPTIONAL -- `output`'s own schema `required` list is
+    just v1_scope + destination, and this file's own baseline fixture omits the
+    key entirely. Reading it with `[...]` instead of `.get` would KeyError on a
+    profile Step 0 accepts today."""
+    profile = make_base_profile()
+    assert "target" not in profile["output"]
+    assert pv.check_output_target_shipped(profile) == []
+
+
+def test_absent_output_target_under_assembled_book_is_not_this_checks_business():
+    """Pins the non-expansion: a missing target under `assembled_book` IS a
+    real problem, but it is `resolve_output_adapter`'s ("no output.target set")
+    at Step 0d, and this check must not quietly grow into it."""
+    assert pv.check_output_target_shipped(_output_profile("assembled_book")) == []
+
+
+def test_shipped_obsidian_target_under_assembled_book_is_accepted():
+    assert pv.check_output_target_shipped(_output_profile("assembled_book", "obsidian")) == []
+
+
+def test_custom_target_is_untouched_at_step_0():
+    """`custom` with a null renderer_path is the documented co-design STARTING
+    state, and its HALT belongs to Step 0d/W9 -- a project may translate and
+    converge its whole book while the renderer is still being designed. Pulling
+    that halt forward to Step 0 would block the project outright."""
+    profile = _output_profile("assembled_book", "custom")
+    profile["output"]["adapter_config"] = {
+        "obsidian": None,
+        "epub": None,
+        "custom": {"renderer_path": None},
+    }
+    assert pv.check_output_target_shipped(profile) == []
+
+
 if __name__ == "__main__":
     import sys
 

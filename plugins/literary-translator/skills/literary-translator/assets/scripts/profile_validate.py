@@ -114,6 +114,19 @@ Order of operations (numbered to match SKILL.md's Step 0 list exactly):
       lives at ``scripts/custom_extractors/<value>`` -- so drift against this
       constant is meaningless there (see
       ``references/source-format-adapters/custom.md``).
+  14. ``output.target``: FATAL when it names a BUILT-IN adapter whose module
+      has not shipped (``epub`` -> ``render_epub.py``, which does not exist),
+      delegated to ``output_resolve.assert_builtin_adapter_shipped()`` so the
+      mapping and the actionable message have exactly one home. **Gated on
+      ``output.v1_scope == "assembled_book"``**: under the default
+      ``segment_drafts_and_audit`` the target is never consulted by anything,
+      and refusing an inert value would reject profiles that work today.
+      ``output.target`` is an OPTIONAL field (``output``'s own ``required``
+      list is ``v1_scope`` + ``destination``), so it is read with ``.get`` --
+      an absent target is not this check's business, and stays a Step 0d
+      condition. Runs at Step 0, i.e. before Step 0a has created a durable
+      root, which is the whole point: the same failure otherwise surfaces at
+      W9 assembly with the book already translated and converged (#726).
 
 Every violation is printed as its own field-named, actionable line. The
 script exits non-zero if ANY fatal violation was found (across every step
@@ -145,9 +158,22 @@ from pathlib import Path
 # durable_root, so its parents[1] gives the plugin's ``assets/`` root instead
 # of a durable_root. It never assumes cwd and never takes a --plugin-root flag.
 # ---------------------------------------------------------------------------
-ASSETS_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = Path(__file__).resolve().parent
+ASSETS_ROOT = SCRIPTS_DIR.parent
 EXAMPLE_PROFILE_PATH = ASSETS_ROOT / "profile.example.yml"
 SCHEMA_PATH = ASSETS_ROOT / "schemas" / "profile.schema.json"
+
+# The ONE sibling script this one imports (flat, by name, the same shape
+# assemble.py and diff_rendered_output.py already use for it): output_resolve.py
+# owns the output.target -> adapter-module mapping AND the actionable message
+# for a built-in adapter that has not shipped. Duplicating either here would be
+# a silent drift surface with nothing watching it. Imported at module load
+# rather than inside the check because output_resolve.py's module level is
+# stdlib-only -- no PyYAML, no jsonschema, no sibling import of its own -- so it
+# cannot disturb step 1's "profile absent" branch or step 2's dependency
+# preflight, both of which must still work with neither package installed.
+sys.path.insert(0, str(SCRIPTS_DIR))
+import output_resolve  # noqa: E402  -- must follow the sys.path insert above
 
 # Deferred dependency handles -- populated by _dependency_preflight(), never
 # imported at module load time (the "profile.yml is absent" branch must not
@@ -719,6 +745,44 @@ def check_resumed_contract_versions(durable_root: Path, source_format=None):
 
 
 # ---------------------------------------------------------------------------
+# Step 14: output.target names a built-in adapter that has not shipped
+# ---------------------------------------------------------------------------
+
+def check_output_target_shipped(profile: dict):
+    """Step 14: refuse an `output.target` naming a BUILT-IN adapter whose
+    module has not shipped -- at Step 0, not at W9 assembly.
+
+    Fires only under `v1_scope: assembled_book`. The default
+    `segment_drafts_and_audit` never consults `output.target` at all (Step
+    0d is a deliberate no-op and W9 does not run), so a target declared
+    there is inert and refusing it would reject profiles that validate
+    today.
+
+    `output.target` is optional in the schema -- `.get`, never `[...]`.
+    An absent target is not this check's concern: `resolve_output_adapter`
+    already halts on it at Step 0d, and nothing here should widen that.
+    `custom` is likewise untouched -- its `renderer_path: null` HALT is the
+    documented co-design starting state, and pulling it forward to Step 0
+    would block a project from translating at all while the renderer is
+    still being designed.
+    """
+    output = profile["output"]
+    if output.get("v1_scope") != "assembled_book":
+        return []
+    target = output.get("target")
+    if target not in output_resolve.BUILTIN_ADAPTER_MODULES:
+        return []
+    try:
+        output_resolve.assert_builtin_adapter_shipped(target)
+    except output_resolve.OutputResolveError as exc:
+        # No `output.target: ` prefix here, unlike the sibling checks above:
+        # the resolver's own message already opens with the field name, and
+        # prefixing it again would print `output.target: output.target '...'`.
+        return [str(exc)]
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -782,13 +846,14 @@ def main(argv=None):
             print(f"ERROR: {err}", file=sys.stderr)
         sys.exit(1)
 
-    # --- Steps 6-13: procedural checks (schema already passed) -----------
+    # --- Steps 6-14: procedural checks (schema already passed) -----------
     fatal_errors = []
     warnings = []
 
     fatal_errors += check_source_path(profile)
     fatal_errors += check_durable_root(profile)
     fatal_errors += check_output_destination(profile)
+    fatal_errors += check_output_target_shipped(profile)
 
     fatal_errors += scan_placeholders(profile)
 

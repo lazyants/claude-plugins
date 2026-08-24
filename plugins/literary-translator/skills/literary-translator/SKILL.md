@@ -188,6 +188,18 @@ Order of operations:
     syntax — this file must stay valid Python) against
     `CURRENT_EXTRACTOR_CONTRACT_VERSION`, identical four-state fatal
     treatment.
+14. `output.target`: FATAL when it names a **built-in adapter whose module has
+    not shipped** — `epub` maps to `render_epub`, and there is no
+    `render_epub.py`. Delegated to
+    `output_resolve.assert_builtin_adapter_shipped()`, so the mapping and the
+    actionable message have one home. Gated on
+    `output.v1_scope: assembled_book`: under the default
+    `segment_drafts_and_audit` nothing ever reads `output.target`, and refusing
+    an inert value would reject profiles that pass today. The field is optional
+    in the schema, so an absent `target` does not fire this — that stays a Step
+    0d condition. `custom` is untouched here: its `renderer_path: null` HALT is
+    the documented co-design starting state and belongs to Step 0d, not to
+    Step 0.
 
 Prints one field-named, actionable error line per violation, exits non-zero
 on any failure.
@@ -733,9 +745,15 @@ posture Step 0b/0c already apply to `verse_policy.mode`/`source.format`, so
 a blocking co-design need surfaces at setup time, never mid-project.
 
 - `target: obsidian` resolves to the built-in `render_obsidian` adapter
-  (shipped this increment). `target: epub` resolves to the built-in name
-  `render_epub`, a later-phase adapter not yet shipped — resolving the name
-  now is exhaustive enum coverage, not a claim the renderer exists.
+  (shipped this increment). `target: epub` maps to the built-in name
+  `render_epub`, a later-phase adapter **not yet written** — so it does not
+  resolve: `output_resolve.py` HALTS, naming the missing `render_epub.py` and
+  the three ways out (stay on `v1_scope: segment_drafts_and_audit` and build
+  the EPUB with a project-local script; `target: custom` with a co-designed
+  renderer; or `target: obsidian`). The enum-to-name mapping is exhaustive
+  over the enum; it was never a claim that every module it names exists, and
+  until this check that gap only surfaced at W9, with the whole book already
+  translated and converged (#726).
 - `target: custom` specifically: the schema validates shape only — the
   `adapter_config.custom.renderer_path` key is required whenever
   `target: custom`, value must be `string | null`. Step 0d owns the two
