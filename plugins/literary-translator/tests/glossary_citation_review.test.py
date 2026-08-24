@@ -2528,6 +2528,82 @@ def test_judge_never_names_the_mutable_fragment_path(tmp_path):
             )
 
 
+# #724 -- the FOLDED reader's positive half, driven from the entry point.
+#
+# foldedEvidenceVerdict() is guard-then-POSITIVE-proof, and only the guard half
+# was reachable from a test: every fixture in this file resolves to a wait reply
+# that carries a well-formed evidence sentinel, because the harness synthesizes
+# one. MEASURED: replacing precedingLineIs()'s body with `return true` left 291
+# tests across six files green, including the structural test that pins the
+# reader's shape -- it asserts the reader CALLS precedingLineIs, which a gutted
+# precedingLineIs still satisfies. A bare `READY 0` then reached the judge and
+# merged.
+#
+# So the property is asserted where it can actually fail: at the LADDER. A wait
+# turn that says the fragment landed but reports no evidence verdict must spend
+# no judge call and must regenerate, exactly as an EVIDENCE_FAILED would.
+#
+# `prepares: [None]` is the fixture vocabulary for "this attempt's evidence step
+# reported nothing at all" -- the harness's withPrepare() splices only a STRING,
+# so a None leaves the wait's own reply undecorated, which is precisely the
+# shipped shape being tested. It is not a harness gap being exploited: the same
+# hole is what a real wait agent produces when it answers the FIRST half of its
+# instructions and stops.
+@pytest.mark.parametrize("shape,prepares", [
+    (
+        "no evidence sentinel at all",
+        [None, None, None],
+    ),
+    (
+        "sentinel present but not in the reported position",
+        # The sentinel is in the reply, just not where the contract puts it: the
+        # prompt asks for it as the SECOND-TO-LAST line, immediately above READY.
+        # This is the near-miss a mere containment test would accept, and it is
+        # the one that matters -- an agent that narrates after its verdict has
+        # not reported a verdict in the position the parser reads.
+        [
+            "EVIDENCE_READY 0 ATTEMPT 0\nthe fetcher wrote 3 files",
+            "EVIDENCE_READY 0 ATTEMPT 1\nthe fetcher wrote 3 files",
+            "EVIDENCE_READY 0 ATTEMPT 2\nthe fetcher wrote 3 files",
+        ],
+    ),
+])
+def test_a_folded_wait_that_reports_no_positioned_evidence_verdict_never_judges(
+    tmp_path, shape, prepares
+):
+    """A folded wait must PROVE its evidence, never merely fail to deny it.
+
+    The fail-safe direction is the expensive-looking one on purpose: this costs a
+    regeneration, bounded by MAX_CITATION_RETRIES, while accepting the reply
+    would send the judge to audit a snapshot that may not exist and an evidence
+    directory that was never written -- and the judge's verdict is what the
+    approval record then attests to.
+    """
+    res = run(
+        tmp_path=tmp_path,
+        batches=[make_batch(0, ["Ninon"])],
+        plan={"0": {"prepares": prepares}},
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+
+    assert count_label(out, "glossary:citation-review:0") == 0, (
+        f"a wait reply with {shape} must reach NO judge call -- the judge would "
+        f"be auditing evidence nothing reported; calls were {labels_of(out)}"
+    )
+    assert count_label(out, "glossary:approval-record:0") == 0, (
+        "and nothing may be recorded as approved, since nothing was judged"
+    )
+    assert count_label(out, "glossary:dispatch:0") == EXPECTED_MAX_CITATION_RETRIES + 1, (
+        f"the batch must climb the SAME retry ladder an EVIDENCE_FAILED drives, "
+        f"not die on the spot; calls were {labels_of(out)}"
+    )
+    assert out["result"]["merged"] is False
+    assert out["result"]["reason"] == "citation-review-exhausted", (
+        f"got {out['result']}"
+    )
+
+
 def test_prepare_failure_regenerates_rather_than_reaching_the_judge(tmp_path):
     """A failed prepare means there is no trustworthy snapshot and no evidence,
     so there is nothing for a judge to judge. It must drive the SAME retry

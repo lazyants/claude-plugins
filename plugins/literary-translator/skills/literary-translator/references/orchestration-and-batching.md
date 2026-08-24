@@ -886,11 +886,14 @@ distinction is the whole justification. Through 1.16.1 the offline REAL COST
 did not change, so charging offline for the live ladder would have been a
 FALSE refusal — and a preflight that refuses runs it should permit is a worse
 failure than one that is slightly loose. In 1.16.2 the wait can genuinely cost
-`WAIT_CALLS` in BOTH modes, so `5N + 2` is offline's true CEILING — the same
-kind of quantity `3N + 2` always was, not a claim about what a run spends —
-and a refusal against it is a correct refusal. What the mode-awareness still prevents is the
+`WAIT_CALLS` in BOTH modes, so a wait-bearing offline term is offline's true
+CEILING — the same kind of quantity `3N + 2` always was, not a claim about what
+a run spends — and a refusal against it is a correct refusal. (1.16.2 put that
+term at `5N + 2`; **#724** took it to `4N + 2` by deleting the per-batch resume
+precheck, which no run performs in either mode any more.)
+What the mode-awareness still prevents is the
 thing that would break the principle: a MODE-BLIND estimate charging an
-offline project the live `20N + 2` for a ladder it can never execute.
+offline project the live `16N + 2` for a ladder it can never execute.
 
 ## The glossary-pass template — a second, smaller `pipeline()` call
 

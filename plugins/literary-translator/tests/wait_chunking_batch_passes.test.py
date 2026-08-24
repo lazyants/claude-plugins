@@ -1890,8 +1890,8 @@ def _ladder_row_needle(ladder: str, per_batch: int, documented_max: int) -> re.P
 
     Anchored on the row's own label because the figures alone do not identify a
     row (#416): "glossary offline" and "skeptic (both)" ship the SAME formula
-    and the SAME max, and 19N+2/5N+2 also occur in that file's prose below the
-    table. `(?!\\S)` rather than `(?!\\d)` -- a max may not merely START with
+    and the SAME max, and the live/offline figures also occur in that file's
+    prose below the table. `(?!\\S)` rather than `(?!\\d)` -- a max may not merely START with
     the right digits, or `-> 1999.5` would read as `-> 1999`. Stated at its
     real width rather than as "no false red": that guard makes the max column
     a BARE whitespace-delimited number, so a compact annotation on the figure

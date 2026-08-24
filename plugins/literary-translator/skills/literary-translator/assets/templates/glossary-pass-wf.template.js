@@ -97,7 +97,9 @@
 //     finishing after the last chunk's poll ended leaves a valid fragment on disk
 //     that nothing would otherwise ever read.
 //   * The preflight ceiling moves with it, because a wait is now WAIT_CALLS
-//     calls rather than 1: live 13N+2 -> 19N+2, offline 3N+2 -> 5N+2. The offline
+//     calls rather than 1: live 13N+2 -> 19N+2, offline 3N+2 -> 5N+2. Both have
+//     since moved again in #723/#724, to 16N+2 and 4N+2 -- the figures above are
+//     1.16.2's, not today's. The offline
 //     branch stays research-mode-aware -- see the preflight block below.
 //
 // Substitution tokens this template documents (resolved ONCE by the
@@ -139,9 +141,12 @@
 //                        chunked wait, then 4 once #724 deleted the per-batch
 //                        resume precheck), and live pays the citation-review
 //                        retry ladder plus one approval record on top of that,
-//                        reaching 19*BATCHES.length + 2. See the preflight block
+//                        reaching 16*BATCHES.length + 2. See the preflight block
 //                        below for the derivation, and read it before trusting
-//                        that 19: it is not the 19 of 1.16.2.
+//                        any figure in this series: the live term passed through
+//                        19 TWICE with disjoint terms (1.16.2's precheck 1 + 3*6,
+//                        then #724's record 1 + 3*6) before the prepare fold took
+//                        it to 16.
 //   {{RESUMED_BATCH_INDICES}} -- a BARE JSON array literal (never quoted),
 //                        copied verbatim from the `resumed_batch_indices` key
 //                        resume_setup.py reports for this glossary run: the
@@ -1312,9 +1317,11 @@ function batchWaitRecheckPrompt(batch, attempt) {
 // live ceiling moved from 1 + 3*(MAX_CITATION_RETRIES+1) to
 // 1 + 4*(MAX_CITATION_RETRIES+1). 1.16.2 moved that ceiling again, to
 // 1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1), for an unrelated reason -- the
-// wait itself became WAIT_CALLS calls (#352) -- which only sharpens the same
-// point: the cost argument has now been outrun twice, and the structural one has
-// not moved once. What survives is that structural reason, which
+// wait itself became WAIT_CALLS calls (#352) -- and #724 moved it a third time,
+// DOWNWARD, to 1 + (2 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1), by folding this
+// very turn's two commands into the wait on the fresh path. Which only sharpens
+// the same point: the cost argument has now been outrun three times, in both
+// directions, and the structural one has not moved once. What survives is that structural reason, which
 // was always the stronger one: this is the ONE point both entry points into the
 // review loop converge on (see batchStep()'s state-machine comment). Putting the
 // snapshot in the wait step instead would silently skip it on every

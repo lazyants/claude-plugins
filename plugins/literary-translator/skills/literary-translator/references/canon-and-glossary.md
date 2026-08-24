@@ -382,7 +382,7 @@ suppresses the re-check, which is gated on the verdict rather than on the loop
 index. A fragment that validates in chunk 1 spends exactly 1 call; only a wait
 that exhausts every chunk and still needs the re-check spends all 3. The
 estimator computes the worst case, which is what a preflight gate should do —
-but do not read `20N + 2` or `5N + 2` as what a run will actually spend. In the
+but do not read `16N + 2` or `4N + 2` as what a run will actually spend. In the
 skeptic pass the early exit is an **economy** requirement rather than a
 correctness one: each extra chunk would spend another agent call re-running
 `--validate-fragment` over a fragment that has already validated. That gate is

@@ -1655,15 +1655,19 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
 #     per-call ladder this whole section derives its expected counts from --
 #     never the other way round:
 #
-#         (dispatch + wait)          per attempt    (1 + WAIT_CALLS each)
-#       + (citation prepare + judge) per attempt    (2 each, LIVE ONLY)
+#         (dispatch + wait)          per attempt    (1 + WAIT_CALLS each; under
+#                                                    live the wait's READY turn
+#                                                    also runs the evidence
+#                                                    prepare, #724, which is why
+#                                                    prepare is not a term)
+#       + citation judge             per attempt    (1 each, LIVE ONLY)
 #       + 1 approval record                         (once per approval, LIVE
 #                                                    ONLY, #723)
 #       + merge + verify                            (2, fixed, per run)
 #
 #     with attempts == MAX_CITATION_RETRIES + 1 == 3 in the worst case, so:
 #
-#         live    -- perBatch = 1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)
+#         live    -- perBatch = 1 + (2 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)
 #                            = 1 + 6*3 = 19
 #         offline -- perBatch = 1 + WAIT_CALLS == 4
 #         estimatedCalls = perBatch * BATCHES.length + 2
@@ -2281,8 +2285,8 @@ def test_glossary_preflight_one_below_boundary_blocks_dispatch_entirely(tmp_path
 
 @pytest.mark.parametrize("n_batches", [1, 2, 5, 13])
 def test_glossary_preflight_live_formula_is_16_batches_plus_2(tmp_path, n_batches):
-    """Locks the LIVE formula (1 + (3+WAIT_CALLS)*(MAX_CITATION_RETRIES+1))*N + 2
-    == 19*N + 2.
+    """Locks the LIVE formula (1 + (2+WAIT_CALLS)*(MAX_CITATION_RETRIES+1))*N + 2
+    == 16*N + 2.
 
     NINETEEN IS A COLLIDING NUMBER, and that is the first thing to know about
     this test rather than a footnote. 1.16.2 shipped 19 as `precheck 1 + 3*6`;
