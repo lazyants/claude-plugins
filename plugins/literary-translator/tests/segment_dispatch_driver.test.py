@@ -4037,7 +4037,15 @@ def test_pinned_run_refuses_before_dispatch_when_a_selected_segment_draft_belong
     # this test, which otherwise reads only the exit code, the segment and
     # `pinned_run_id`.
     assert "--resume-from-run-id" in payload["error"], payload
-    assert "re-run without --resume-from-run-id" in payload["error"], payload
+    # ped-ant, P2: the unqualified "re-run without --resume-from-run-id" was
+    # true only while the unpinned path had no gate. Pinned as a POSITIVE
+    # assertion on the qualifier AND a NEGATIVE one on the bare imperative --
+    # the qualifier's own words contain the old phrase, so a substring
+    # assertion alone would survive restoring it.
+    assert "helps only if ordinary resolution then lands on the run that owns" in (
+        payload["error"]
+    ), payload
+    assert "or re-run without --resume-from-run-id." not in payload["error"], payload
     assert "resolved_run_id" not in payload, (
         "the pinned refusal carries pinned_run_id, never the unpinned payload's keys: "
         f"{payload}"

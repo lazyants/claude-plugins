@@ -4039,9 +4039,23 @@ def refuse_run_over_foreign_drafts(
         f"was dispatched."
     )
     if pinned:
+        # ped-ant, P2: "re-run without --resume-from-run-id" was an unqualified
+        # remedy for as long as the unpinned path had no gate of its own. #742
+        # gave it one, so dropping the pin now reaches this SAME comparison --
+        # and refuses again whenever ordinary resolution lands on any run other
+        # than the draft's owner, which includes the ordinary case of the pinned
+        # run being the newest digest-matching candidate. Offering a guaranteed
+        # second refusal as the FIRST action after a refusal is worse than
+        # offering nothing, so the route is qualified where it is printed.
         fatal(
             f"--resume-from-run-id {run_id!r}: {common} Name only the ids that belong to "
-            f"this run with --only-segs, or re-run without --resume-from-run-id.",
+            f"this run with --only-segs. Re-running WITHOUT --resume-from-run-id helps only "
+            f"if ordinary resolution then lands on the run that owns these drafts -- since "
+            f"#742 the unpinned path runs this same comparison, so if it resolves any other "
+            f"run it refuses again. Otherwise decide per segment, as the unpinned refusal "
+            f"spells out: delete the draft to accept the retranslation, or re-stamp its "
+            f"dispatch_token (only if the draft then passes draft_ready.py AND "
+            f"validate_draft.py).",
             exit_code=1,
             pinned_run_id=run_id,
             foreign_drafts=foreign_payload,
