@@ -188,7 +188,14 @@ _TAG_RE = re.compile(r"<[^>]+>")
 # and no collision with a `*` the source itself contains -- so those failure
 # modes stop EXISTING rather than being detected one at a time.
 # ---------------------------------------------------------------------------
-_EMPH_ANY_RE = re.compile(r"</?(?:i|em)\b", re.IGNORECASE)
+# HTML's OWN tag-name terminator set, ASCII only -- NOT Python's `\s` and NOT
+# `\b`. Both of those are wrong here, and each one shipped a defect: `\b`
+# matches inside `<i-foo>`/`<i:foo>` because `-` and `:` are non-word
+# characters, and `\s` matches U+00A0, so `<i\xa0>` -- an element whose name is
+# literally `i` + NBSP, not `i` -- read as italic. Either one INVENTS emphasis
+# the source does not have.
+_HTML_TAG_WS = r"[ \t\r\n\f]"
+_EMPH_ANY_RE = re.compile(r"</?(?:i|em)(?=" + _HTML_TAG_WS + r"|[/>])", re.IGNORECASE)
 # `(?![^>]*/\s*>)` excludes a SELF-CLOSING `<i/>`: it opens nothing, and
 # counting it as an open emphasised the rest of the definition.
 # `(?=[\s/>])` and NOT `\b`: `-` and `:` are non-word characters, so `\b`
@@ -196,8 +203,11 @@ _EMPH_ANY_RE = re.compile(r"</?(?:i|em)\b", re.IGNORECASE)
 # PREFIX `i` rather than the tag's own name -- inventing emphasis the source
 # does not have. `(?![^>]*/\s*>)` separately excludes a SELF-CLOSING `<i/>`,
 # which opens nothing.
-_EMPH_OPEN_RE = re.compile(r"<(i|em)(?=[\s/>])(?![^>]*/\s*>)[^>]*>", re.IGNORECASE)
-_EMPH_CLOSE_RE = re.compile(r"</(i|em)\s*>", re.IGNORECASE)
+_EMPH_OPEN_RE = re.compile(
+    r"<(i|em)(?=" + _HTML_TAG_WS + r"|[/>])(?![^>]*/" + _HTML_TAG_WS + r"*>)[^>]*>",
+    re.IGNORECASE,
+)
+_EMPH_CLOSE_RE = re.compile(r"</(i|em)" + _HTML_TAG_WS + r"*>", re.IGNORECASE)
 # The single spelling this script itself emits -- `<em>` and every attribute
 # are normalised away, so a consumer has exactly one form to recognise.
 _BARE_EMPH_RE = re.compile(r"</?i>")
@@ -403,6 +413,17 @@ def _footnote_source_text(def_block):
         " ", unescape(_BARE_EMPH_RE.sub("", marked))
     ).strip()
     if round_tripped != plain:
+        return plain
+    # NOTHING CARRIED => plain_text VERBATIM, as the field's contract promises.
+    # The round-trip gate above compares TEXT, so it happily accepts a string
+    # that carries no emphasis at all and merely re-encodes: `<i-foo>A &amp;
+    # B</i-foo>` has no emphasis, drops both tags as ordinary markup, and
+    # round-trips to `A & B` -- while `marked` is `A &amp; B`, which is not
+    # what plain_text says. Returning `marked` there would change a footnote's
+    # bytes (and its note_map_hash) for a definition the source never
+    # italicised. This is the check that makes "no emphasis => untouched" an
+    # enforced invariant rather than a promise.
+    if "<i>" not in marked:
         return plain
     return marked
 

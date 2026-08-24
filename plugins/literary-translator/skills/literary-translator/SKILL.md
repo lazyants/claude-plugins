@@ -1258,11 +1258,20 @@ Two consequences worth knowing:
   at an intra-word span, so it can queue a correct translation for reading.
   Both are pinned as characterizations in
   `tests/segpack_footnote_emphasis.test.py`.
-- **It never mangles the text.** One round-trip gate decides: removing the
-  emphasis tags and unescaping must reproduce `plain_text` exactly, and any tag
-  that survives must balance. Anything else falls back to `plain_text`
-  unchanged. So emphasis can be *lost* (markup the two regexes do not model, a
-  definition whose text spans several block tags, a hand-written extractor
+- **It never mangles the text, and never invents emphasis.** Three checks
+  decide, and any failure returns `plain_text` unchanged: removing the emphasis
+  tags and unescaping must reproduce `plain_text` exactly; every opener must be
+  closed by a tag of its **own name** (a numerically balanced
+  `<i>a</em>b<em>c</i>` is not balanced at all, and collapsing the names would
+  leave `b` roman); and if no `<i>` survives, the definition is returned
+  verbatim rather than re-encoded — which is what stops a footnote the source
+  never italicised from changing its bytes, and its `note_map_hash`, merely
+  because some other tag was dropped out of it. Tag names are matched with
+  HTML's own ASCII terminator set, never Python's `\s` or `\b`: `-` and `:` are
+  non-word characters and U+00A0 is `\s`, so `<i-foo>` and `<i` + NBSP + `>`
+  would otherwise both read as italic. So emphasis can be *lost* (markup the
+  two regexes do not model, a definition whose text spans several block tags,
+  a hand-written extractor
   emitting unbalanced HTML) but never invented or reordered.
 
 Markdown `*...*` was the first design and it is **not** what shipped: a

@@ -96,6 +96,10 @@ CARRY = SEGPACK._footnote_source_text
 # A literal U+2028 must never be typed into this file (project convention);
 # it is built from an escape so the byte is unambiguous in the source.
 U2028 = "\u2028"
+# U+00A0 is Python `\s` but is NOT one of HTML's tag-name terminators, so an
+# element spelled `<i` + NBSP + `>` is named `i\u00a0`, not `i`. Authored from
+# an escape, never a literal invisible character.
+NBSP = "\u00a0"
 
 
 def _blk(plain, html):
@@ -238,9 +242,17 @@ FALLBACK_CASES = [
     # pattern and its captured "name" was the PREFIX `i`. The tag is not an
     # emphasis tag at all, and treating it as one INVENTED italics the source
     # does not have. The opener now requires a real name terminator.
-    ("a tag whose name merely STARTS with i", "a", "<i-foo>a</i>"),
-    ("a namespaced tag starting with i", "a", "<i:foo>a</i>"),
-    ("a tag whose name starts with em", "a", "<em-dash>a</em>"),
+    # Each carries an ENTITY, so a helper that merely re-encoded the fragment
+    # instead of returning plain_text would produce `A &amp; B` and be caught.
+    # With a bare "a" both answers are the same string and the fixture proves
+    # nothing.
+    ("a tag whose name merely STARTS with i", "A & B", "<i-foo>A &amp; B</i-foo>"),
+    ("a namespaced tag starting with i", "A & B", "<i:foo>A &amp; B</i:foo>"),
+    ("a tag whose name starts with em", "A & B", "<em-dash>A &amp; B</em-dash>"),
+    # U+00A0 is Python `\s` but is NOT HTML tag whitespace, so this element's
+    # name is `i` + NBSP -- a different element, and treating it as italic
+    # INVENTED emphasis the source does not have.
+    ("NBSP is not a tag-name terminator", "x", "<p><i\u00a0>x</i\u00a0></p>"),
     ("close with no open at all", "ab", "<p>a</em>b</p>"),
     ("two opens, one close", "abc", "<p><i>a<em>b</em>c</p>"),
     # The text simply does not round-trip: a definition whose source spans two
@@ -267,11 +279,26 @@ def test_unconvertible_definition_falls_back_to_plain_text_byte_for_byte(label, 
     assert CARRY(_blk(plain, html)) == plain
 
 
-def test_no_emphasis_returns_the_very_same_object():
-    """The no-op path must not even rebuild the string -- a definition with no
-    emphasis is `plain_text` itself, not a normalized copy of it that could
-    differ (and move note_map_hash) for some whitespace the manifest kept."""
-    block = _blk(f"a{U2028}b   c", "<p>a b c</p>")
+@pytest.mark.parametrize(
+    "plain,html",
+    [
+        # Mismatched normalization: the early bail-out is what returns this.
+        ("a\u2028b   c", "<p>a b c</p>"),
+        # MATCHING text, but entity-bearing -- so a helper that fell through to
+        # the re-encoding path would return `A &amp; B` and this would fail.
+        # Without the entity both answers are the same string and deleting the
+        # no-emphasis guard leaves the suite green.
+        ("A & B", "<p>A &amp; B</p>"),
+        ("Th\u00e9\u00e2tre & Cie", "<p>Th&#233;&#226;tre &amp; Cie</p>"),
+    ],
+    ids=["mismatched-normalization", "entity-bearing", "numeric-entities"],
+)
+def test_a_definition_with_no_emphasis_is_plain_text_ITSELF(plain, html):
+    """`source_text` must be `plain_text` VERBATIM -- the same object, not a
+    re-encoded copy. A copy that differs by so much as an entity changes the
+    footnote's bytes and its note_map_hash for a definition the source never
+    italicised."""
+    block = _blk(plain, html)
     assert CARRY(block) is block["plain_text"]
 
 
