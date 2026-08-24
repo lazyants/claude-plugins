@@ -1584,11 +1584,13 @@ class CodexJob:
         except OSError as exc:
             self.error_detail = "staging setup failed: %r" % (exc,)
             return False
-        # Derived from self.preserved_attempt, never a second copy of the format string.
-        # The two names MUST be byte-identical -- _teardown_staging() relocates one onto the
-        # other, and two dispatch-scan fixtures build their `.att.*` case from the preserved
-        # one -- so the identity is structural here rather than a coincidence of two literals
-        # that could drift apart with nothing going red.
+        # Derived from self.preserved_attempt rather than spelling the `.att.*` format a
+        # second time. Nothing REQUIRES the two basenames to match -- _teardown_staging()
+        # renames one onto the other by explicit path, and the staged file is never in
+        # segdir for a dispatch scan to see -- so this is not an invariant being enforced,
+        # only the name shape being defined in one place. Deliberately stated that way:
+        # a mutation that drifts the two apart turns nothing red, and a comment claiming
+        # otherwise would be the same kind of overclaim #697 exists to correct.
         self.attempt = os.path.join(self.staging_dir, os.path.basename(self.preserved_attempt))
         return True
 
