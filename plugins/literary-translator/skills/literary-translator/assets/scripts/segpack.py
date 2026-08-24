@@ -195,16 +195,41 @@ _TAG_RE = re.compile(r"<[^>]+>")
 # literally `i` + NBSP, not `i` -- read as italic. Either one INVENTS emphasis
 # the source does not have.
 _HTML_TAG_WS = r"[ \t\r\n\f]"
-_EMPH_ANY_RE = re.compile(r"</?(?:i|em)(?=" + _HTML_TAG_WS + r"|[/>])", re.IGNORECASE)
+# `re.IGNORECASE | re.ASCII` on all three classifiers below, never IGNORECASE
+# alone. HTML element names are case-folded per ASCII, but Python's Unicode
+# case-insensitivity folds `i` together with U+0130 LATIN CAPITAL LETTER I WITH
+# DOT ABOVE and U+0131 LATIN SMALL LETTER DOTLESS I, so `<İ>Word</İ>` and
+# `<ı>Word</ı>` -- elements NAMED that, which no HTML parser italicises --
+# both read as emphasis and reached `<i>Word</i>`. Same class of error as `\s`
+# and `\b` above: a PYTHON character rule standing in for an HTML syntax rule,
+# INVENTING emphasis the source does not have. With re.ASCII a non-ASCII name
+# is not an emphasis tag, so it is dropped as ordinary markup and the
+# definition falls back to its plain_text.
+#
+# The flag on `em` is PROPHYLACTIC -- nothing non-ASCII folds to `e` or `m`,
+# and `<İm>` was measured not to match even under bare IGNORECASE. Only the
+# `i` alternative had a reachable case, which is why the test table carries
+# fixtures for `i` alone and says so.
+#
+# Also measured: backing the flag out of any ONE of the three leaves the suite
+# green, because a Unicode-loose opener with an ASCII-strict closer (or the
+# reverse) leaves the name stack unbalanced and falls back. The three are
+# mutually redundant in the SAFE direction; all three together is what goes
+# red, and that is the granularity the mutation was run at.
+_EMPH_ANY_RE = re.compile(
+    r"</?(?:i|em)(?=" + _HTML_TAG_WS + r"|[/>])", re.IGNORECASE | re.ASCII
+)
 # The name terminator is `_HTML_TAG_WS`, for the reason stated at its
 # definition above. Unique to this pattern: `(?![^>]*/<ws>*>)` excludes a
 # SELF-CLOSING `<i/>` -- it opens nothing, and counting it as an open
 # emphasised the rest of the definition.
 _EMPH_OPEN_RE = re.compile(
     r"<(i|em)(?=" + _HTML_TAG_WS + r"|[/>])(?![^>]*/" + _HTML_TAG_WS + r"*>)[^>]*>",
-    re.IGNORECASE,
+    re.IGNORECASE | re.ASCII,
 )
-_EMPH_CLOSE_RE = re.compile(r"</(i|em)" + _HTML_TAG_WS + r"*>", re.IGNORECASE)
+_EMPH_CLOSE_RE = re.compile(
+    r"</(i|em)" + _HTML_TAG_WS + r"*>", re.IGNORECASE | re.ASCII
+)
 # Both of the two patterns above CAPTURE which of the two names the tag used,
 # so a close is matched against the open it claims to close rather than
 # against a bare depth count.

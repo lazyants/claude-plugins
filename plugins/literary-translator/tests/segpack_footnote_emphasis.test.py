@@ -271,6 +271,23 @@ FALLBACK_CASES = [
     # name is `i` + NBSP -- a different element, and treating it as italic
     # INVENTED emphasis the source does not have.
     ("NBSP is not a tag-name terminator", "x", "<p><i\u00a0>x</i\u00a0></p>"),
+    # Python's UNICODE case-folding pairs `i` with U+0130 LATIN CAPITAL LETTER
+    # I WITH DOT ABOVE and U+0131 LATIN SMALL LETTER DOTLESS I, so under a bare
+    # re.IGNORECASE these two elements -- NAMED `\u0130` and `\u0131`, which no
+    # HTML parser italicises -- both reached `<i>A &amp; B</i>`. HTML case-folds
+    # element names per ASCII, hence re.ASCII. Third instance of the same class
+    # as `\b` and `\s` above: a PYTHON character rule standing in for an HTML
+    # syntax one, INVENTING emphasis. Entity-bearing text for the same reason
+    # as the `<i-foo>` cases above.
+    #
+    # `em` gets the same flag and has NO fixture, because no non-ASCII
+    # character folds to `e` or to `m` -- the flag is prophylactic there, and a
+    # fixture asserting otherwise would be vacuous. Measured: `<\u0130m>` never
+    # matched even under bare IGNORECASE, so it proves nothing about this
+    # defect and is not in this table.
+    ("dotted capital I is not the element i", "A & B",
+     "<\u0130>A &amp; B</\u0130>"),
+    ("dotless i is not the element i", "A & B", "<\u0131>A &amp; B</\u0131>"),
     ("close with no open at all", "ab", "<p>a</em>b</p>"),
     ("two opens, one close", "abc", "<p><i>a<em>b</em>c</p>"),
     # The text simply does not round-trip: a definition whose source spans two

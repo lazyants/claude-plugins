@@ -1267,9 +1267,12 @@ Two consequences worth knowing:
   verbatim rather than re-encoded — which is what stops a footnote the source
   never italicised from changing its bytes, and its `note_map_hash`, merely
   because some other tag was dropped out of it. Tag names are matched with
-  HTML's own ASCII terminator set, never Python's `\s` or `\b`: `-` and `:` are
-  non-word characters and U+00A0 is `\s`, so `<i-foo>` and `<i` + NBSP + `>`
-  would otherwise both read as italic. So emphasis can be *lost* (markup the
+  HTML's own syntax rules, never Python's character rules — never `\s` or `\b`
+  for the terminator (`-` and `:` are non-word characters and U+00A0 is `\s`,
+  so `<i-foo>` and `<i` + NBSP + `>` would both read as italic), and never a
+  bare `re.IGNORECASE` for the name (Python folds `i` with U+0130 and U+0131,
+  so `<İ>` and `<ı>` would too — HTML case-folds element names per ASCII, so
+  the classifiers carry `re.ASCII`). So emphasis can be *lost* (markup the
   two regexes do not model, a definition whose text spans several block tags, a
   hand-written extractor emitting unbalanced HTML) but never invented or
   reordered.
