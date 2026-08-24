@@ -449,9 +449,13 @@ SUBST_FIELDS = frozenset({
 # consumers compare an estimate against it and then refuse or proceed --
 # segment_dispatch_driver.py's check_volume_cap() and the mass template's
 # `estimatedCodexJobs > MAX_CODEX_JOBS_PER_BATCH` -- so it reaches no agent
-# prompt and no translation, review or ledger artifact. It is not invisible:
-# both the preflight's refusal result and the driver's durable session journal
-# record `codexJobsCap`. Those are diagnostics ABOUT the run, never a cached
+# prompt and no translation, review or ledger artifact. It is not invisible,
+# and the recording sites are three rather than the two first written here:
+# the preflight's refusal result and the driver's durable session journal both
+# record `codexJobsCap`, and EVERY successful driver result carries the cap as
+# well, under `engine.max_codex_jobs_per_batch` -- both the empty-selection and
+# the dispatched payload embed `engine_cfg` whole. Those are diagnostics ABOUT
+# the run, never a cached
 # agent result the next run could reuse, which is the only thing this digest
 # has to be able to tell apart. Hashing it
 # therefore never distinguished two states that differ in what a cached
