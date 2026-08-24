@@ -4008,19 +4008,10 @@ def test_pinned_run_refuses_before_dispatch_when_a_selected_segment_draft_belong
     pinned_run_id = first["effectiveRunId"]
 
     foreign_run_id = "20200101T000000Z"
-    # #409 Step 3 requires a digest for ANY run id carrying dispatch
-    # evidence (a draft's dispatch_token, here) -- same requirement
-    # from_cap_project() already satisfies for its own source_run_dir.
-    foreign_run_dir = root / "runs" / foreign_run_id
-    foreign_run_dir.mkdir(parents=True, exist_ok=True)
-    (foreign_run_dir / "input.digest").write_text("stub-foreign-run-digest\n", encoding="utf-8")
-    (root / "segments" / "seg01.draft.json").write_text(
-        json.dumps({
-            "seg": "seg01", "blocks": {"p1": "hola"},
-            "dispatch_token": f"{foreign_run_id}:seg01",
-        }, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    # Same fixture the #742 tests build -- including the runs/<id>/input.digest
+    # #409 Step 3 requires for any run id carrying dispatch evidence. Shared so
+    # the pinned and unpinned tests cannot describe one fixture two ways.
+    _foreign_draft(root, "seg01", foreign_run_id, "hola")
 
     dispatch_calls = []
 
@@ -4066,6 +4057,10 @@ def test_pinned_run_refuses_before_dispatch_when_a_selected_segment_draft_belong
 # ---------------------------------------------------------------------------
 
 
+def _draft_path(root, seg):
+    return root / "segments" / f"{seg}.draft.json"
+
+
 def _foreign_draft(root, seg, run_id, text):
     """A draft on disk stamped for `run_id`, plus the runs/<id>/input.digest
     that #409 Step 3 requires for ANY run id carrying dispatch evidence."""
@@ -4074,15 +4069,13 @@ def _foreign_draft(root, seg, run_id, text):
     digest = run_dir / "input.digest"
     if not digest.is_file():
         digest.write_text(f"stub-digest-{run_id}\n", encoding="utf-8")
-    path = root / "segments" / f"{seg}.draft.json"
-    path.write_text(
+    _draft_path(root, seg).write_text(
         json.dumps(
             {"seg": seg, "blocks": {"p1": text}, "dispatch_token": f"{run_id}:{seg}"},
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
-    return path
 
 
 def _draft_bytes(root, seg):
@@ -4094,7 +4087,7 @@ def _draft_bytes(root, seg):
     asserting agreement with itself. The raw bytes are strictly stronger for
     the one question these tests ask ("did this refusal touch the file at
     all?") and depend on nothing the fix could move."""
-    return (root / "segments" / f"{seg}.draft.json").read_bytes()
+    return _draft_path(root, seg).read_bytes()
 
 
 def test_unpinned_foreign_in_flight_drafts_refuse_naming_every_affected_id(tmp_path):
@@ -4325,7 +4318,7 @@ def test_unpinned_foreign_stale_draft_still_dispatches(tmp_path):
     # under this run, which is the behaviour the exemption exists to keep.
     assert payload["summary"]["converged"] == ["seg01"], payload
     assert payload["summary"]["failed"] == [], payload
-    draft = json.loads((root / "segments" / "seg01.draft.json").read_text(encoding="utf-8"))
+    draft = json.loads(_draft_path(root, "seg01").read_text(encoding="utf-8"))
     assert draft["dispatch_token"] == f"{payload['run_id']}:seg01", (
         f"an exempt `stale` draft must be retranslated and re-stamped for this run: {draft}"
     )
@@ -4342,6 +4335,59 @@ def test_unpinned_foreign_stale_draft_still_dispatches(tmp_path):
         "the exempt `stale` segment must actually be RE-TRANSLATED, not merely reach a "
         f"clean review over an untouched draft: {read_argv_log(root)}"
     )
+
+
+def test_pinned_run_refuses_over_a_stale_foreign_draft_the_unpinned_gate_exempts(tmp_path):
+    """The PINNED path carries NO category exemption, and this is the test that
+    says so.
+
+    #742 added `FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES` for the unpinned path
+    only; the pinned caller still passes every selected segment, which is
+    #458's own scope and was to stay unchanged. That claim was untested until
+    this test: a mutation applying the unpinned filter to BOTH callers left
+    every other test in this file green, because no other fixture combines a
+    pin with a `stale` foreign draft. It would silently relax a guard that has
+    shipped since #458.
+
+    The pin is this invocation's OWN freshly-resolved run, so its digest
+    matches and the pin's own gates pass -- leaving the foreign-draft
+    comparison as the only thing that can refuse. `--allow-retranslate-
+    converged` is required to get a previously-converged unit past W5 at all;
+    without it the refusal would come from the sentinel gate instead and this
+    test would prove nothing about the pin."""
+    root = make_durable_root(tmp_path, profile_yaml=FULL_PROFILE_YAML)
+    stage_phase2_scripts(root)
+    write_manifest(root, ["seg01"])
+    current_key = make_cache_key("current")
+    write_fixture_cache_keys(root, {"seg01": current_key})
+    write_fixture_segpack(root, "seg01")
+    stored = dict(current_key)
+    stored["style_contract_hash"] = "style_contract_hash-OLD"
+    write_fragment(root, "seg01", converged_fragment(stored, "0" * 40))
+    mark_ever_converged(root, "seg01")
+
+    driver_mod = _load_fixture_driver(root)
+    pinned_run_id = driver_mod.resolve_run_id(
+        driver_mod.resolve_dirs(None), translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
+        plugin_root_str=None, durable_root_str=None,
+    )["effectiveRunId"]
+    foreign_run_id = "20200101T000000Z"
+    _foreign_draft(root, "seg01", foreign_run_id, "the converged text")
+    before = _draft_bytes(root, "seg01")
+
+    proc = run_driver(
+        root, "--resume-from-run-id", pinned_run_id,
+        "--allow-retranslate-converged", timeout=90,
+    )
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload.get("pinned_run_id") == pinned_run_id, (
+        f"the refusal must be the PINNED one, not some other gate: {payload}"
+    )
+    assert [entry["seg"] for entry in payload["foreign_drafts"]] == ["seg01"], payload
+    assert _draft_bytes(root, "seg01") == before, "the draft was modified by a refusal"
+    assert read_argv_log(root) == [], payload
 
 
 def test_unpinned_in_flight_draft_owned_by_this_run_dispatches_normally(tmp_path):

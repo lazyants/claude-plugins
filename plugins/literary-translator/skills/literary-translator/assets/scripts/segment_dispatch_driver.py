@@ -3922,7 +3922,50 @@ def draft_token_owner(seg: str, segments_dir: Path) -> "str | None":
 # Exempting it would buy nothing in exchange: a genuinely new segment has no
 # draft at all, draft_token_owner() returns None for it, and the gate cannot
 # refuse over it either way.
+#
+# The member strings are select_segments.py's own category vocabulary
+# (its ALL_CATEGORIES), restated here per this project's "no shared lib
+# between self-contained scripts" convention -- the same way this file
+# already restates other cross-script literals. A rename on that side would
+# make this set exempt nothing, which is the SAFE direction of failure for
+# this particular set (more segments protected, never fewer).
 FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES = frozenset({"stale"})
+
+
+def segs_covered_by_foreign_draft_gate(segs: list, select_result: dict) -> list:
+    """The subset of `segs` the UNPINNED foreign-draft gate checks: everything
+    whose classification is not exempt, with an unrecognised or missing entry
+    treated as COVERED.
+
+    Lives beside the set it reads rather than inline at the call site so the
+    predicate, the set, and the reason for the set's direction are one thing
+    to read -- and so the two edge branches (a seg absent from
+    `classification`, an entry that is not a dict) are reachable without a
+    full CLI round trip."""
+    classification = select_result.get("classification")
+    if not isinstance(classification, dict):
+        # A CONTRACT break with the selector, not a known gap:
+        # select_segments.py builds `classification` over every manifest
+        # candidate and both selection branches index it, so every seg that
+        # reaches here has an entry. Exit 2 rather than returning an empty
+        # list, because an empty covered set is exactly what a CLEAN project
+        # looks like -- "the filter found nothing" and "the filter never ran"
+        # must not print the same verdict.
+        fatal(
+            "select_segments.py's JSON output has no 'classification' object -- "
+            "refusing rather than checking an empty set of drafts, which would be "
+            "indistinguishable from a project with no foreign drafts at all",
+            exit_code=2,
+        )
+
+    def _is_exempt(seg) -> bool:
+        entry = classification.get(seg)
+        return (
+            isinstance(entry, dict)
+            and entry.get("category") in FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES
+        )
+
+    return [seg for seg in segs if not _is_exempt(seg)]
 
 
 def refuse_run_over_foreign_drafts(
@@ -3983,6 +4026,11 @@ def refuse_run_over_foreign_drafts(
     if not foreign:
         return
     detail = ", ".join(f"{seg} (stamped for {owner})" for seg, owner in foreign)
+    # Built once for the same reason `detail` and `common` are: the two
+    # fatal() calls below carry a payload key two tests assert on by name,
+    # and a rename applied to one branch only is exactly the drift a single
+    # local prevents.
+    foreign_payload = [{"seg": seg, "run_id": owner} for seg, owner in foreign]
     common = (
         f"{len(foreign)} selected segment(s) carry a draft stamped for a DIFFERENT run: "
         f"{detail}. Dispatching them under {run_id!r} would retranslate those drafts and "
@@ -3996,7 +4044,7 @@ def refuse_run_over_foreign_drafts(
             f"this run with --only-segs, or re-run without --resume-from-run-id.",
             exit_code=1,
             pinned_run_id=run_id,
-            foreign_drafts=[{"seg": seg, "run_id": owner} for seg, owner in foreign],
+            foreign_drafts=foreign_payload,
         )
     # #742. Every clause below has to be TRUE on every path it can print on,
     # which is why the cause is READ from `resumed` rather than inferred: a
@@ -4042,7 +4090,7 @@ def refuse_run_over_foreign_drafts(
         exit_code=1,
         resolved_run_id=run_id,
         resumed=resumed,
-        foreign_drafts=[{"seg": seg, "run_id": owner} for seg, owner in foreign],
+        foreign_drafts=foreign_payload,
     )
 
 
@@ -6985,9 +7033,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "a fresh RUN_ID and claims every named segment under it -- except "
             "that since #742 a segment whose draft is stamped for another run is "
             "refused rather than claimed -- on this UNPINNED path every selected "
-            "segment except a `stale` one (see "
-            "FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES for why that one is exempt), "
-            "and under a pin every selected segment with no exemption at all. "
+            "segment whose classification is not one of: "
+            + ", ".join(sorted(FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES))
+            + " (see FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES for why); under a pin, "
+            "every selected segment, with no exemption at all. "
             "Refusals under a pin: exit 1 when runs/RUN_ID is not a "
             "directory or carries no regular input.digest (an established "
             "state, so a gate refusal), when the pinned run's digest does "
@@ -7407,43 +7456,21 @@ def run(args, dirs: dict) -> dict:
         # run_id is final for BOTH paths by now (the claim path resolved it
         # before the selector, the ordinary path just above), `segs` is the
         # final selected set, and nothing has been dispatched yet.
-        segments_dir = durable_root / "segments"
-        if args.resume_from_run_id is not None:
-            # Unchanged byte for byte: every selected segment, #458's own
-            # scope. `resumed` is irrelevant under a pin -- the pinned
-            # message names the flag as the cause, which is the true one.
-            refuse_run_over_foreign_drafts(
-                segs, run_id, segments_dir, pinned=True, resumed=False,
-            )
-        else:
-            classification = select_result.get("classification")
-            if not isinstance(classification, dict):
-                # A CONTRACT break with the selector, not a known gap:
-                # select_segments.py builds `classification` over every
-                # manifest candidate and both selection branches index it,
-                # so every seg that reaches here has an entry. Exit 2 rather
-                # than an empty `covered`, because an empty covered set is
-                # exactly what a CLEAN project looks like -- "the filter
-                # found nothing" and "the filter never ran" must not print
-                # the same verdict.
-                fatal(
-                    "select_segments.py's JSON output has no 'classification' object -- "
-                    "refusing rather than checking an empty set of drafts, which would be "
-                    "indistinguishable from a project with no foreign drafts at all",
-                    exit_code=2,
-                )
-            covered = [
-                seg for seg in segs
-                if not (
-                    isinstance(classification.get(seg), dict)
-                    and classification[seg].get("category")
-                    in FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES
-                )
-            ]
-            refuse_run_over_foreign_drafts(
-                covered, run_id, segments_dir,
-                pinned=False, resumed=bool(run_result.get("resume")),
-            )
+        #
+        # The branch decides only the SEGMENT SET -- pinned checks every
+        # selected segment, #458's own scope, unchanged byte for byte. The
+        # wording flags are passed the same way on both paths, including the
+        # real `resume` value: `resumed` is unread when `pinned` is true, and
+        # hardcoding a false one there would be a lie a future reader could
+        # start believing the moment the pinned message wants it.
+        pinned = args.resume_from_run_id is not None
+        refuse_run_over_foreign_drafts(
+            segs if pinned else segs_covered_by_foreign_draft_gate(segs, select_result),
+            run_id,
+            durable_root / "segments",
+            pinned=pinned,
+            resumed=bool(run_result.get("resume")),
+        )
 
         companion_path = resolve_companion_path(dirs, node_bin=args.node)
 
