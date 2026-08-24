@@ -191,11 +191,19 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _EMPH_ANY_RE = re.compile(r"</?(?:i|em)\b", re.IGNORECASE)
 # `(?![^>]*/\s*>)` excludes a SELF-CLOSING `<i/>`: it opens nothing, and
 # counting it as an open emphasised the rest of the definition.
-_EMPH_OPEN_RE = re.compile(r"<(?:i|em)\b(?![^>]*/\s*>)[^>]*>", re.IGNORECASE)
-_EMPH_CLOSE_RE = re.compile(r"</(?:i|em)\s*>", re.IGNORECASE)
+_EMPH_OPEN_RE = re.compile(r"<(i|em)\b(?![^>]*/\s*>)[^>]*>", re.IGNORECASE)
+_EMPH_CLOSE_RE = re.compile(r"</(i|em)\s*>", re.IGNORECASE)
 # The single spelling this script itself emits -- `<em>` and every attribute
 # are normalised away, so a consumer has exactly one form to recognise.
 _BARE_EMPH_RE = re.compile(r"</?i>")
+# Both patterns above CAPTURE which of the two names the tag used, so a close
+# is matched against the open it claims to close rather than against a bare
+# depth count.
+# Tag scanner for the walk below. `[^<>]*` and NOT `_TAG_RE`'s `[^>]+`: on
+# malformed markup (a long run of `<` with no `>`) the latter restarts its
+# end-of-string scan at every `<` and goes quadratic, and this is the one path
+# that walks raw source_html. Same linear form final_audit.py already uses.
+_EMPH_SCAN_RE = re.compile(r"<[^<>]*>")
 # The whitespace class the `gutenberg_epub` adapter's own extractor
 # (extract.py.template) normalizes a block's plain_text with -- its
 # `normalize_text`/`_WS`. DUPLICATED here rather than imported, the same
@@ -333,6 +341,16 @@ def _footnote_source_text(def_block):
     would be handed a dangling one.
     """
     plain = def_block.get("plain_text", "")
+    html_src = def_block.get("source_html", "")
+    # A manifest whose block fields are not strings is a SHAPE problem, and
+    # reporting it is validate_segpack()'s job, not this helper's: hand the
+    # value straight back so it reaches that check's own clean
+    # "missing/invalid 'source_text'" message instead of a traceback out of
+    # build_pack(). manifest.schema.json types both fields as strings, but a
+    # `custom` adapter's extractor is hand-written and this script is what
+    # meets its output first.
+    if not isinstance(plain, str):
+        return plain
     # An empty or whitespace-only definition is returned untouched, so the
     # property #397 relies on survives verbatim: source_text never invents text
     # where plain_text has none, and `<i></i>` must not become a definition
@@ -342,20 +360,36 @@ def _footnote_source_text(def_block):
     # consumers -- validate_draft's blank-translation refusal, verbatim_census.)
     if not plain.strip():
         return plain
-    html_src = def_block.get("source_html", "")
-    if not html_src or not _EMPH_ANY_RE.search(html_src):
+    if not isinstance(html_src, str) or not html_src:
+        return plain
+    if not _EMPH_ANY_RE.search(html_src):
         return plain
 
-    parts, pos = [], 0
-    for m in _TAG_RE.finditer(html_src):
+    # A LIFO stack holding each open tag's OWN NAME, never a bare depth count.
+    # `<i>a</em>b<em>c</i>` balances numerically and is not balanced at all:
+    # the `<i>` stays open across all three characters, so collapsing the
+    # names would emit `<i>a</i>b<i>c</i>` and leave `b` roman when the source
+    # has it italic. Text conservation cannot see that -- the characters are
+    # all present and in order -- so the STACK is the check that catches it,
+    # and it subsumes the plain balance check it replaced.
+    parts, stack, pos = [], [], 0
+    for m in _EMPH_SCAN_RE.finditer(html_src):
         if m.start() > pos:
             parts.append(html_src[pos:m.start()])
-        tag = m.group(0)
-        if _EMPH_OPEN_RE.fullmatch(tag):
-            parts.append("<i>")
-        elif _EMPH_CLOSE_RE.fullmatch(tag):
-            parts.append("</i>")
         pos = m.end()
+        tag = m.group(0)
+        opened = _EMPH_OPEN_RE.fullmatch(tag)
+        if opened:
+            stack.append(opened.group(1).lower())
+            parts.append("<i>")
+            continue
+        closed = _EMPH_CLOSE_RE.fullmatch(tag)
+        if closed:
+            if not stack or stack.pop() != closed.group(1).lower():
+                return plain
+            parts.append("</i>")
+    if stack:
+        return plain
     if pos < len(html_src):
         parts.append(html_src[pos:])
     marked = _MANIFEST_WS_RE.sub(" ", "".join(parts)).strip()
@@ -364,14 +398,6 @@ def _footnote_source_text(def_block):
         " ", unescape(_BARE_EMPH_RE.sub("", marked))
     ).strip()
     if round_tripped != plain:
-        return plain
-
-    depth = 0
-    for m in _BARE_EMPH_RE.finditer(marked):
-        depth += 1 if m.group(0) == "<i>" else -1
-        if depth < 0:
-            return plain
-    if depth != 0:
         return plain
     return marked
 

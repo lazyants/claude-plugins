@@ -228,6 +228,14 @@ FALLBACK_CASES = [
     ("raw unbalanced open", "a b", "<i>a b"),
     ("raw attribute containing an unescaped >", "x y", '<i title="a>b">x</i> y'),
     ("emphasis inside an HTML comment is not markup", "a <i> b", "<p>a <!-- x --><i> b</p>"),
+    # MISMATCHED NAMES. `<i>` stays open across all three characters and
+    # `</em>` cannot close it, but the tag COUNT balances and every character
+    # round-trips -- so a bare depth counter accepted this and emitted
+    # `<i>a</i>b<i>c</i>`, leaving `b` roman where the source has it italic.
+    # Text conservation cannot see that; only a name-keyed stack can.
+    ("mismatched tag names, numerically balanced", "abc", "<p><i>a</em>b<em>c</i></p>"),
+    ("close with no open at all", "ab", "<p>a</em>b</p>"),
+    ("two opens, one close", "abc", "<p><i>a<em>b</em>c</p>"),
     # The text simply does not round-trip: a definition whose source spans two
     # block tags concatenates differently from the extractor's block_text().
     ("multi-block definition", "un a deux", "<p>un <i>a</i></p><p>deux</p>"),
@@ -273,6 +281,35 @@ def test_missing_source_html_is_not_an_error():
 
 def test_missing_plain_text_is_not_an_error():
     assert CARRY({"source_html": "<p><i>a</i></p>"}) == ""
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"plain_text": None, "source_html": "<p><i>a</i></p>"},
+        {"plain_text": 5, "source_html": "<p><i>a</i></p>"},
+        {"plain_text": ["a"], "source_html": "<p><i>a</i></p>"},
+        {"plain_text": "a", "source_html": 123},
+        {"plain_text": "a", "source_html": None},
+        {"plain_text": "a", "source_html": ["<i>"]},
+    ],
+)
+def test_a_non_string_manifest_field_reaches_validate_segpack_not_a_traceback(block):
+    """manifest.schema.json types both fields as strings, but a `custom`
+    adapter's extractor is hand-written and this helper is what meets its
+    output first. Reporting a shape problem is validate_segpack()'s job, so
+    the value is handed straight back rather than raising out of build_pack()
+    -- which is what the pre-#725 `def_block.get("plain_text", "")` did."""
+    out = CARRY(block)
+    assert out == (block["plain_text"] if isinstance(block["plain_text"], str)
+                   else block["plain_text"])
+
+
+def test_a_non_string_plain_text_still_yields_the_validator_s_own_message():
+    pack = _build(FOOTNOTE_HTML)
+    pack["footnotes"][0]["source_text"] = None
+    errors = SEGPACK.validate_segpack(pack, "seg01")
+    assert any("footnotes[0]" in e and "source_text" in e for e in errors), errors
 
 
 # ---------------------------------------------------------------------------
@@ -558,19 +595,62 @@ def test_note_map_hash_does_not_move_for_a_definition_that_falls_back():
 # ---------------------------------------------------------------------------
 
 
-def test_verbatim_census_source_script_runs_are_unaffected_by_the_tags():
-    """verbatim_census reads footnotes[].source_text and extracts runs of
-    source-script letters. `<`, `i` and `>` are not Hebrew letters, and a tag
-    sits where a space already broke the run -- so the run list is unchanged."""
-    census = _load_module(
+def _census():
+    return _load_module(
         "verbatim_census_footnote_emphasis_under_test",
         SCRIPTS_DIR / "verbatim_census.py",
         SCRIPTS_DIR,
     )
-    plain = "שלום עולם"
-    carried = CARRY(_blk(plain, "<p><i>שלום</i> עולם</p>"))
-    assert carried == "<i>שלום</i> עולם", carried
-    assert census.hebrew_runs(carried) == census.hebrew_runs(plain)
+
+
+def test_verbatim_census_folds_emphasis_out_before_comparing_runs():
+    """verbatim_census reads footnotes[].source_text and extracts runs of
+    source-script letters. A tag WRAPPING A WHOLE WORD sits where a space
+    already broke the run, so that case would look fine either way -- the case
+    that matters is a span INSIDE a word: `<i>אב</i>גד` reads as two runs while
+    the correct draft carries one, and the census would queue an intact
+    translation as a tier-1 letter_diff. `_fold_emphasis` is what stops it."""
+    census = _census()
+    plain = "אבגד"
+    carried = CARRY(_blk(plain, "<p><i>אב</i>גד</p>"))
+    assert carried == "<i>אב</i>גד", carried
+    assert census.hebrew_runs(carried) == ["אב", "גד"], (
+        "fixture no longer splits the run -- this test would pass vacuously"
+    )
+    assert census.hebrew_runs(census._fold_emphasis(carried)) == census.hebrew_runs(plain)
+
+
+def test_verbatim_census_fold_also_undoes_the_preserved_escaping():
+    census = _census()
+    assert census._fold_emphasis("<i>Th&#233;</i>&amp;") == "Thé&"
+
+
+def test_final_audit_term_fold_sees_a_term_the_source_italicises_mid_word():
+    """W7's term-consistency check counts a pinned term inside each carrier.
+    With `Le pr<i>ésident</i>` the source count would drop to ZERO, and zero
+    can never exceed the target's count -- so a genuinely drifted footnote
+    would go unreported on a completely green run."""
+    audit = _load_module(
+        "final_audit_footnote_emphasis_under_test",
+        SCRIPTS_DIR / "final_audit.py",
+        SCRIPTS_DIR,
+    )
+    term = audit._fold_term_text("président")
+    assert term in audit._fold_term_text("Le pr<i>ésident</i> de la cour")
+    assert term in audit._fold_term_text("Le pr&#233;sident de la cour")
+    assert term in audit._fold_term_text("Le président de la cour")
+
+
+def test_a_malformed_definition_does_not_scan_quadratically():
+    """`<[^>]+>` restarts its end-of-string scan at every `<`, and this is the
+    one path that walks raw source_html. A definition that is a long run of
+    `<` with no `>` must stay linear."""
+    import time
+
+    block = _blk("x", "<" * 200_000 + "<i")
+    start = time.monotonic()
+    assert CARRY(block) == "x"
+    assert time.monotonic() - start < 2.0
 
 
 def test_validate_segpack_still_accepts_the_carried_shape():

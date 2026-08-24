@@ -225,6 +225,7 @@ import subprocess
 import sys
 import unicodedata
 from collections import defaultdict, namedtuple
+from html import unescape
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
@@ -1118,6 +1119,12 @@ DELIVERED_VERSE_FIELDS = ("rendered", "literal_gloss")
 _HTML_TAG_RE = re.compile(r"<[^<>]*>")
 
 
+# The bare emphasis spelling segpack.py emits into a footnote's source_text
+# (#725). Folded out of BOTH sides of the term-consistency comparison below,
+# so a pinned term interrupted by the source's own italics still matches.
+_EMPH_FOLD_RE = re.compile(r"</?i>")
+
+
 def _fold_term_text(text):
     """NFC, then casefold -- the one normalization both sides of this check go
     through, including the declared forms themselves.
@@ -1125,8 +1132,19 @@ def _fold_term_text(text):
     NFC is load-bearing, not decoration: extraction's own `normalize_text()`
     only collapses whitespace, so a decomposed `e` + COMBINING ACUTE and a
     precomposed one reach this script as different bytes and would silently
-    fail to match while looking identical to the operator who wrote the pin."""
-    return unicodedata.normalize("NFC", text).casefold()
+    fail to match while looking identical to the operator who wrote the pin.
+
+    The emphasis fold is load-bearing for the same reason (#725): since a
+    footnote's segpack `source_text` carries the source's own `<i>` and keeps
+    its entities escaped, a pinned term the source italicizes ACROSS its own
+    middle -- `Le pr<i>ésident</i>`, or `pr&eacute;sident` -- would otherwise
+    count ZERO occurrences in the source carrier. This check reports a carrier
+    whose SOURCE carries the term more often than its translation does, and
+    zero can never exceed the target's count, so the drift would go unreported
+    on a completely green run. Folding both sides identically keeps the
+    comparison on TEXT, which is what it was always about."""
+    text = _EMPH_FOLD_RE.sub("", text)
+    return unicodedata.normalize("NFC", unescape(text)).casefold()
 
 
 def declared_terms(profile):

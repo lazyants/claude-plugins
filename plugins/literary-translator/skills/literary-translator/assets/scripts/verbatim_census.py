@@ -98,8 +98,10 @@ own path. `--durable-root PATH` replaces that root for DATA, exactly as
 """
 import argparse
 import json
+import re
 import sys
 import unicodedata
+from html import unescape
 from pathlib import Path
 
 # Importing a sibling module writes scripts/__pycache__/*.pyc. Several
@@ -260,6 +262,18 @@ def mask_placeholders(text, verse_placeholders):
         return tok
 
     return _ANY_SENTINEL_RE.sub(_sub, text or "")
+
+
+# The bare emphasis spelling segpack.py emits into a footnote's source_text
+# (#725), plus the escaping that comes with it.
+_EMPH_FOLD_RE = re.compile(r"</?i>")
+
+
+def _fold_emphasis(text):
+    """A footnote source_text reduced back to its own plain text -- the
+    representation this census has always compared against (see
+    `_source_units`' own note on why blocks are read from `plain_text`)."""
+    return unescape(_EMPH_FOLD_RE.sub("", text))
 
 
 def hebrew_runs(text):
@@ -496,7 +510,15 @@ def _source_units(seg, src):
                 f"segpack {seg}: duplicate footnote number {f['n']!r} -- "
                 "the source text to compare against is ambiguous"
             )
-        units[label] = f.get("source_text") or ""
+        # #725: a footnote's source_text carries the source's own emphasis as
+        # a bare `<i>`, with its entities left escaped. Fold both back out
+        # before comparing: `hebrew_runs()` breaks a run at every non-letter,
+        # so `<i>אב</i>גד` reads as the two runs ["אב", "גד"] while the
+        # correct draft carries the single run `אבגד` -- which the census
+        # would then queue as a tier-1 `letter_diff` against a translation
+        # that is right. The comparison is about LETTERS, never markup, and
+        # this is the same reason blocks are read from plain_text above.
+        units[label] = _fold_emphasis(f.get("source_text") or "")
     return units, missing
 
 

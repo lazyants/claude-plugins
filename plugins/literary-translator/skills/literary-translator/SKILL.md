@@ -1236,13 +1236,19 @@ leaves it roman".
 (attributes dropped, `<em>` spelled `<i>`), and every other tag is removed.
 Two consequences worth knowing:
 
-- **`source_text` has two encodings, and which one is decidable.** A definition
-  whose emphasis was carried is an HTML fragment — its entities stay escaped,
-  exactly as `source_html` spells them, so a literal `<i>` in the text stays
-  `&lt;i&gt;` and is never confused with a real tag. A definition with no
-  emphasis, or one that could not be carried, is `plain_text` verbatim. The
-  presence of `<i>` tells them apart. This is the same encoding a body block's
-  `source_html` already uses.
+- **`source_text` has two encodings, and it does NOT say which one it is.** A
+  definition whose emphasis was carried is an HTML fragment — its entities stay
+  escaped, exactly as `source_html` spells them, so a literal `<i>` *inside a
+  carried definition* stays `&lt;i&gt;` and is never confused with a real tag.
+  A definition with no emphasis, or one that could not be carried, is
+  `plain_text` verbatim — and a `plain_text` may itself contain a literal
+  `<i>`, so the presence of that string proves nothing about which of the two
+  you are holding. Treat the field as the union: a consumer that must compare
+  TEXT should fold `</?i>` out and unescape (`final_audit.py`'s
+  `_fold_term_text` and `verbatim_census.py`'s `_fold_emphasis` both do), and
+  a consumer that must decide whether the SOURCE marks emphasis reads
+  `manifest.json`'s own `blocks{}` `source_html`, which is authoritative and
+  which the fix turn is already directed to.
 - **It never mangles the text.** One round-trip gate decides: removing the
   emphasis tags and unescaping must reproduce `plain_text` exactly, and any tag
   that survives must balance. Anything else falls back to `plain_text`
