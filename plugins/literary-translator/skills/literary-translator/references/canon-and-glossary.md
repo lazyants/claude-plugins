@@ -1367,10 +1367,17 @@ spends the extra call, taking the live ceiling from
 `2 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` (**20** at the shipped
 `WAIT_CALLS = 3`), when the wait itself stopped being reliably one agent call
 — `WAIT_CALLS` is its worst case, not its price (see
-**The chunked wait** above). What
+**The chunked wait** above). **#724** then took it to
+`1 + (2 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` (**16**): the resume precheck
+was deleted, and PREPARE's two commands now run inside whichever wait turn
+already saw `--check-batch` exit 0, so on the fresh path prepare is no longer
+a call of its own. What
 survives is the structural reason, which was always the stronger one — this
-is the ONE point both entry points into the review loop converge on. Putting
-the snapshot in the wait step instead would silently skip it on every
+is the ONE point both entry points into the review loop converge on, and the
+fold does not move it: the folded turn issues the SAME two commands, in the
+same order, that the standalone task states, and a resumed batch that runs no
+wait still spends the standalone call. Putting
+the snapshot in the wait step and NOWHERE ELSE would silently skip it on every
 resume-skipped batch, because that path runs neither the dispatch nor the
 wait, and a resumed, never-reviewed fragment is precisely the case this whole
 stage exists for. Prepare sits at that convergence point, so both entry
@@ -1577,8 +1584,11 @@ list is a deletion of the failure mode rather than of the remedy.
   falling through: a false hit on `EVIDENCE_FAILED` skips the judge call
   entirely, carries prepare's own reply forward as the next attempt's
   regeneration constraint, and still counts against `MAX_CITATION_RETRIES`,
-  so that attempt costs `2 + WAIT_CALLS` calls rather than the ladder's
-  `3 + WAIT_CALLS` — 5 rather than 6 at the shipped `WAIT_CALLS = 3`. Not a repair
+  so that attempt costs `1 + WAIT_CALLS` calls rather than the ladder's
+  `2 + WAIT_CALLS` — 4 rather than 5 at the shipped `WAIT_CALLS = 3`. Both terms
+  dropped by one in **#724**, which folded the prepare into the wait turn on the
+  fresh path; the saving is the JUDGE call in both cases, and that is what has
+  always made this attempt cheaper than a judged one. Not a repair
   either, and for the same reason as the review below — the ladder varies the
   FRAGMENT, while what tripped the guard was prepare's WORDING.
 - **Citation review — NOT RELIABLY self-recovering, however much its retry

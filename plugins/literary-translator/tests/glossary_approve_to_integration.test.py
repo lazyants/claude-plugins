@@ -157,7 +157,19 @@ async function agent(promptText, opts) {
     return Object.prototype.hasOwnProperty.call(p, "precheck") ? p.precheck : ("ABSENT " + idx);
   }
   if (kind === "dispatch") return "FRAGMENT " + idx;
-  if (kind === "wait") return "READY " + idx;
+  // #724 -- under live the wait turn that sees --check-batch exit 0 runs the two
+  // evidence-preparation commands itself, so its success reply is a PAIR:
+  // EVIDENCE_READY <i> ATTEMPT <n>, then READY <i>. The attempt is lifted from
+  // the prompt the template rendered rather than counted here, the same way the
+  // approval-record branch below does it. A bare READY would send this batch up
+  // the retry ladder to exhaustion and the approve command this file exists to
+  // LIFT would never be emitted -- silently, since an exhausted batch records no
+  // prompt to notice the absence in.
+  if (kind === "wait") {
+    const asked = /EVIDENCE_READY (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    if (!asked) return "READY " + idx;
+    return "EVIDENCE_READY " + asked[1] + " ATTEMPT " + asked[2] + "\nREADY " + idx;
+  }
   // 1.16.1 (#347) -- the citation review is two calls now, and the JUDGE runs
   // only after PREPARE reports EVIDENCE_READY. Leaving this label unanswered
   // does not fail loudly: the batch simply climbs the retry ladder to
@@ -167,11 +179,16 @@ async function agent(promptText, opts) {
     return nth(p.prepares, ordinal, "EVIDENCE_READY " + idx + " ATTEMPT " + ordinal);
   }
   if (kind === "citation-review") {
-    // Attempt derived from the prepare count rather than from this label's own
-    // ordinal: a failed prepare spends no judge call, so the two diverge. See
-    // tests/glossary_snapshot_ordering.test.py's copy of this harness.
-    const prepared = seenCount["glossary:citation-prepare:" + idx] || 1;
-    return nth(p.reviews, ordinal, "CITATIONS_OK " + idx + " ATTEMPT " + (prepared - 1));
+    // The attempt used to be derived from this batch's prepare COUNT rather than
+    // from this label's own ordinal, because a failed prepare spends no judge
+    // call and the two diverge. Since #724 that counter reads 0 on the fresh
+    // path -- the prepare has no call of its own there -- so the sentinel is
+    // lifted from the prompt instead, as the approval-record branch below
+    // already did. See tests/glossary_snapshot_ordering.test.py's copy of this
+    // harness.
+    const asked = /CITATIONS_OK (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    const fallback = asked ? ("CITATIONS_OK " + asked[1] + " ATTEMPT " + asked[2]) : "UNPARSEABLE_JUDGE_PROMPT";
+    return nth(p.reviews, ordinal, fallback);
   }
   if (kind === "approval-record") {
     // #723. Lifts the sentinel out of the prompt the template actually
@@ -291,22 +308,50 @@ def approve_cmd_for(check_cmd: str, root: Path, index: int, attempt: int) -> str
     return check_cmd + " --approve-to " + str(approved_path(root, index, attempt))
 
 
+def prepare_prompt(out: dict, index: int = 0, attempt: int = 0) -> str:
+    """The prompt carrying this attempt's evidence-preparation steps, from
+    whichever call renders them.
+
+    #724 gave that prompt two homes: on a RESUMED batch it is still the
+    standalone `glossary:citation-prepare:` call, and on a fresh one the wait turn
+    whose --check-batch exits 0 runs both commands itself. This file drives a
+    fresh batch, so today it always resolves to the wait -- the standalone branch
+    is kept because which home a run uses is a property of the PATH, and a
+    fixture here that later drives a resumed batch would otherwise fail with an
+    IndexError rather than an explanation.
+    """
+    standalone = prompts_for(out, f"glossary:citation-prepare:{index}")
+    if standalone:
+        return standalone[attempt]
+    marker = f"EVIDENCE_READY {index} ATTEMPT {attempt}"
+    hits = [p for p in prompts_for(out, f"glossary:wait:{index}") if marker in p]
+    assert hits, (
+        f"no call rendered the evidence preparation for batch {index} attempt "
+        f"{attempt} (marker {marker!r}); labels were "
+        f"{[c['label'] for c in out['calls']]}"
+    )
+    return hits[0]
+
+
 def emitted_approve_cmd(prepare: str) -> str:
-    """The approve command the template ACTUALLY emitted into the citation
-    PREPARE call's STEP 1 line -- lifted verbatim, not rebuilt, so the string
+    """The approve command the template ACTUALLY emitted into the evidence
+    preparation's STEP 1 line -- lifted verbatim, not rebuilt, so the string
     this test runs is the string the template produces.
 
-    Read off the prepare prompt since 1.16.1 (#347), where retrieval moved out of
-    the judging agent and the approve command moved with it into the new prepare
-    call; it used to be lifted from the citation-review prompt. The STEP 1 check
-    is not decoration: the whole seam only means anything if the snapshot is
-    still the first thing that happens, so lifting a command that had drifted to
-    some later step would run green while the ordering guarantee was gone.
+    Read off the prepare steps since 1.16.1 (#347), where retrieval moved out of
+    the judging agent and the approve command moved with it; it used to be lifted
+    from the citation-review prompt, and since #724 the steps themselves are
+    rendered into the WAIT prompt on the fresh path. What the lift depends on is
+    unchanged through both moves: the command sits on a line opening `STEP 1.`.
+    That check is not decoration -- the whole seam only means anything if the
+    snapshot is still the first thing that happens, so lifting a command that had
+    drifted to some later step would run green while the ordering guarantee was
+    gone.
     """
     step1 = [ln for ln in prepare.split("\n") if "--approve-to" in ln]
     assert len(step1) == 1, (
-        f"expected exactly one --approve-to line in the citation-prepare prompt, "
-        f"found {len(step1)}"
+        f"expected exactly one --approve-to line in the evidence-preparation "
+        f"prompt, found {len(step1)}"
     )
     line = step1[0]
     assert line.startswith("STEP 1."), (
@@ -365,7 +410,7 @@ def test_the_emitted_approve_command_snapshots_byte_identically_against_the_real
         tmp_path=tmp_path, durable_root=str(root),
         batches=[make_batch(0, [SOURCE_FORM])], plugin_root=real_plugin_root,
     )
-    prepare = prompts_for(out, "glossary:citation-prepare:0")[0]
+    prepare = prepare_prompt(out)
 
     # Lift the approve command the template ACTUALLY emitted. Cross-check it
     # against the wait poll's own --check-batch string plus the appended flag, so

@@ -530,7 +530,10 @@ replaced the single `batchWaitPrompt`), `citationPreparePrompt` and
 different eight: **#723** added `approvalRecordPrompt` and **#724** removed
 `batchPrecheckPrompt`, whose question `resume_setup.py` now answers before the
 Workflow starts — see
-`references/canon-and-glossary.md`. Since **1.16.2** its wait IS the shape
+`references/canon-and-glossary.md`. **#724** also added `foldedPrepareLines`,
+which is deliberately NOT a ninth: it builds no prompt of its own, it returns
+the block of lines both wait builders splice under `live`, which is what lets
+one description of the retrieval boundary serve both carriers. Since **1.16.2** its wait IS the shape
 W5's two waits use — chunks plus one authoritative non-polling re-check, over
 an elapsed-time loop — where before it was the odd one out; the sentinel sets
 and chunk counts still differ. See
@@ -1006,8 +1009,19 @@ pipeline(BATCHES, batchStep)
   longer a sentinel — a timeout is what the call site concludes when the
   re-check also answers `PENDING`. See `references/canon-and-glossary.md`'s
   **The chunked wait** for the full contract.
+- `foldedPrepareLines(batch, attempt)` (**#724**) — not a prompt of its own but
+  the block of lines both wait builders splice under `live`, carrying the two
+  evidence-preparation commands as `STEP 1.`/`STEP 2.` and ending in the pair
+  `EVIDENCE_READY|EVIDENCE_FAILED <index> ATTEMPT <n>` then `READY <index>`. The
+  turn whose `--check-batch` exits 0 runs them itself, so on the fresh path the
+  prepare costs no call of its own. **#347**'s boundary is untouched: the folded
+  turn is forbidden to open any file either command wrote and reads only the one
+  locally-generated JSON line each prints, so the agent that launches retrieval
+  is still not the agent that reads what came back.
 - `citationPreparePrompt(batch, attempt)` (**1.16.1**, replacing 1.16.0's single
-  `citationReviewPrompt`) — Claude, `effort:'low'`, `live` only; returns
+  `citationReviewPrompt`) — Claude, `effort:'low'`, `live` only; **since #724
+  spent ONLY by a resumed batch**, which runs no wait and so has nothing to fold
+  these steps into; returns
   `EVIDENCE_READY`/`EVIDENCE_FAILED <index> ATTEMPT <n>`. It opens by re-running
   the fragment's own `--check-batch` validation with `--approve-to`, which
   snapshots the exact bytes that invocation just validated to a create-once,
@@ -1039,9 +1053,11 @@ pipeline(BATCHES, batchStep)
   `1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` — **19** at the shipped
   `WAIT_CALLS = 3` — for an unrelated reason: not a new review step, but one
   wait becoming worth up to `WAIT_CALLS` agent calls instead of exactly 1.
-  **#723** then added the approval record (**20**) and **#724** removed the
+  **#723** then added the approval record (**20**), **#724** removed the
   per-batch precheck (**19** again, with a leading term that means something
-  else entirely — see the batch_agent_cap section). See
+  else entirely) and then folded the prepare into the wait, taking the
+  per-attempt term to `2 + WAIT_CALLS` and the ceiling to **16** — see the
+  batch_agent_cap section. See
   `references/canon-and-glossary.md`'s **Pre-merge citation review**.
 
 **All four of these verdicts are containment-guarded** — the wait,
@@ -1201,31 +1217,34 @@ inside it:
   one wait is no longer one agent call:
 
   ```
-  live    -- perBatchCalls = 1 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)
-             dispatch + wait + citation prepare + judge per
-             attempt, with attempts == MAX_CITATION_RETRIES + 1 in the worst
+  live    -- perBatchCalls = 1 + (2 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)
+             dispatch + wait + citation judge per attempt -- the wait's own
+             READY turn also runs the evidence prepare since #724, which is why
+             prepare is not a term of its own -- with attempts ==
+             MAX_CITATION_RETRIES + 1 in the worst
              case (every review rejects until the ladder is exhausted), PLUS one
              approval record (#723) spent once after the single approval a batch
              can have -- which is why there is a leading term at all and why
              the ceiling is the approved-on-the-last-attempt path rather than
              the exhausted one (an exhausted batch approves nothing, records
-             nothing, and costs 18)
+             nothing, and costs 15)
   offline -- perBatchCalls = 1 + WAIT_CALLS
              dispatch + wait, with no approval to record
   ```
 
   At the shipped `WAIT_CALLS = 3` and `MAX_CITATION_RETRIES = 2` that is
-  **`19 * BATCHES.length + 2` live** and **`4 * BATCHES.length + 2`
-  offline**, so a `batch_agent_cap` of 3500 admits ~184 live batches or ~874
+  **`16 * BATCHES.length + 2` live** and **`4 * BATCHES.length + 2`
+  offline**, so a `batch_agent_cap` of 3500 admits 218 live batches or 874
   offline ones. Substituting `WAIT_CALLS = 1` collapses the live branch to
-  `1 + 4*(MAX_CITATION_RETRIES+1) == 13`, which is exactly the 1.16.1 live
-  figure.
+  `1 + 3*(MAX_CITATION_RETRIES+1) == 10`.
 
-  **Nineteen is a colliding number, so do not read the total as the
-  composition.** 1.16.2 shipped 19 as `precheck 1 + 3*6`; **#723** made it 20
-  by adding the approval record; **#724** made it 19 again by deleting the
-  precheck. Today's leading `1` is the RECORD, and there is no per-batch call
-  before the ladder at all.
+  **Nineteen was a colliding number, and the collision is worth remembering
+  even though the total has moved past it — do not read a total as the
+  composition.** 1.16.2 shipped 19 as `precheck 1 + 3*6`; **#723** made it 20 by
+  adding the approval record; **#724** made it 19 AGAIN by deleting the precheck
+  — same figure, disjoint terms — before folding the prepare took it to 16.
+  Today's leading `1` is the RECORD, and there is no per-batch call before the
+  ladder at all.
 
   **The offline branch stays MODE-AWARE, but it is no longer the historical
   `3 * BATCHES.length + 2`.** Under `offline`, `canon_validate.py` makes
@@ -1248,13 +1267,14 @@ inside it:
   the gap between the two — a wait that finds its fragment on the FIRST chunk
   spends 1 call, not `WAIT_CALLS`, and only a wait that exhausts every chunk
   and still needs the re-check spends all 3. Under `live` a batch approved on
-  attempt 0 costs `1 + WAIT_CALLS + 2 + 1` = 7 calls, not the full ladder, and an
+  attempt 0 costs `1 + WAIT_CALLS + 1 + 1` = 6 calls, not the full ladder, and an
   attempt whose prepare fails short-circuits before the judge for
-  `2 + WAIT_CALLS` rather than `3 + WAIT_CALLS`. A resumed batch whose
+  `1 + WAIT_CALLS` rather than `2 + WAIT_CALLS`. A resumed batch whose
   fragment already passed `--check-batch` before the run started skips its
   attempt-0 dispatch + wait and so comes in strictly under the ceiling — but it
-  does NOT skip the citation review, which is why that saving is
-  `1 + WAIT_CALLS` calls and not `3 + WAIT_CALLS`. The count is over BATCHES, never candidates-per-batch, so
+  does NOT skip the citation review, and since **#724** it pays a STANDALONE
+  prepare call the fresh path no longer spends, so its saving on attempt 0 is
+  `WAIT_CALLS` calls rather than `1 + WAIT_CALLS`. The count is over BATCHES, never candidates-per-batch, so
   a co-located elision pair nudging one batch a candidate or two over its
   nominal `--batch-size` never trips it. A refused run re-plans smaller
   batches (`glossary_batch_plan.py --batch-size`).

@@ -975,6 +975,17 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
     and its false-GREEN cost is a merged run whose approved set nobody can
     reconstruct, which is the defect #723 exists to close.
 
+    #724 AGAIN: three became TWO, and again not because a guard was dropped --
+    the same move 1.16.2 made for the wait, for the same reason. The evidence
+    site now has TWO carriers (the folded wait turn and the standalone prepare
+    call on the resumed path), so its reading moved out into one named reader per
+    carrier: foldedEvidenceVerdict() and standaloneEvidenceVerdict(). Only the
+    second of those calls sentinelVerdict at all, which is why the count here
+    drops by one rather than by two. Both are proved by
+    test_glossary_evidence_verdict_readers_are_guarded_and_ordered below, and
+    that test is not optional: without it, this count dropping to two is
+    indistinguishable from the prepare guard being deleted.
+
     1.16.2 (#352): four became three, and NOT because a guard was dropped. The
     WAIT site's reply parse moved OUT of batchStep into waitChunkVerdict(), the
     single reader of every wait reply -- chunk and re-check alike. That is a
@@ -992,11 +1003,12 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
     code = _normalized_code(body)
 
     verdict_calls = _SENTINEL_VERDICT_CALL_RE.findall(code)
-    assert len(verdict_calls) == 3, (
-        f"expected batchStep to hold exactly the three sentinel sites (citation "
-        f"prepare, citation judge, and #723's approval record -- the wait's own "
-        f"parse lives in waitChunkVerdict since 1.16.2, and the resume precheck "
-        f"stopped existing in #724); found "
+    assert len(verdict_calls) == 2, (
+        f"expected batchStep to hold exactly the two sentinel sites (the citation "
+        f"judge and #723's approval record -- the wait's own parse lives in "
+        f"waitChunkVerdict since 1.16.2, the evidence verdict in the two named "
+        f"readers since #724, and the resume precheck stopped existing in #724); "
+        f"found "
         f"{len(verdict_calls)}: "
         f"{verdict_calls}. If a site was added or removed, guard it and update "
         f"this count -- do not relax the assertion"
@@ -1032,6 +1044,63 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
 # ---------------------------------------------------------------------------
 
 GLOSSARY_WAIT_PARSE_SITE = "waitChunkVerdict"
+
+# #724 -- the glossary EVIDENCE verdict, where the fold moved the reading to.
+#
+# Two readers rather than one, because the evidence sentinel now arrives in two
+# shapes: FINAL on a standalone prepare reply, and SECOND-TO-LAST on a folded
+# wait reply that ends with the wait's own READY line. Which reader applies is
+# decided by which PATH produced the reply, never by inspecting the reply -- so
+# they are separate named functions and neither is allowed to accept the other's
+# shape.
+#
+# Both must carry the containment guard, and the ORDER matters at both for the
+# same reason it does at the wait: a guard after the positive test is dead code
+# for every reply that test already accepts. The positive halves differ
+# (sentinelVerdict vs precedingLineIs) and that is exactly why one blanket
+# assertion will not do here.
+GLOSSARY_EVIDENCE_READERS = ("foldedEvidenceVerdict", "standaloneEvidenceVerdict")
+
+
+@pytest.mark.parametrize("reader", GLOSSARY_EVIDENCE_READERS)
+def test_glossary_evidence_verdict_readers_are_guarded_and_ordered(reader):
+    """Each evidence reader guards its OWN reply, before its own positive test.
+
+    A false ready at this site sends the judge to read a snapshot that may not
+    exist and evidence that was never fetched, so the guard is what stands
+    between a glued EVIDENCE_FAILED and a judged attempt. Proved per reader
+    rather than once over the file: the two have DIFFERENT positive halves, and a
+    file-wide "a guard appears somewhere" check would be satisfied by either one
+    of them alone.
+    """
+    code = _normalized_code(extract_function_body(GLOSSARY_SOURCE, reader))
+
+    guards = _GUARD_CALL_RE.findall(code)
+    assert len(guards) == 1, (
+        f"{reader} must hold exactly one {GUARD_HELPER}() containment guard; "
+        f"found {len(guards)}: {guards}"
+    )
+    guard_reply, guard_sentinel = guards[0]
+    assert (guard_reply, guard_sentinel) == ("reply", "failSentinel"), (
+        f"{reader}'s guard must watch the reply it was handed against the fail "
+        f"sentinel it was handed; got {GUARD_HELPER}({guard_reply}, "
+        f"{guard_sentinel})"
+    )
+
+    # ORDER IS THE PROPERTY, same as at the wait site above. The guard is the
+    # left operand of the && , so it must appear before the positive test.
+    positive = "sentinelVerdict(" if reader == "standaloneEvidenceVerdict" else "precedingLineIs("
+    assert positive in code, (
+        f"{reader} no longer performs its positive proof via {positive!r}; a "
+        f"reader that only checks for the ABSENCE of a failure sentinel accepts "
+        f"a reply that reported nothing at all"
+    )
+    assert code.index(GUARD_HELPER + "(") < code.index(positive), (
+        f"a {GUARD_HELPER}() containment guard runs AFTER the positive test in "
+        f"{reader}. Reversed, the guard is dead code for any reply the positive "
+        f"test already accepts, and an EVIDENCE_FAILED sentinel sharing its line "
+        f"with prose is never seen"
+    )
 
 
 def test_glossary_wait_chunk_verdict_is_guarded_and_ordered():

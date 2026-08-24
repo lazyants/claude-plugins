@@ -1793,10 +1793,20 @@ one, taking the live ceiling from `1 + 3*(MAX_CITATION_RETRIES+1)` to
 `1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` = **19**, the wait having
 stopped being a single agent call; **#723** then took it to
 `2 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` = **20** for the approval
-record, which sits outside the ladder and is spent once per approved batch. What survives is the structural reason —
+record, which sits outside the ladder and is spent once per approved batch;
+**#724** then took it to `1 + (2 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` =
+**16**, by deleting the resume precheck (the leading `2` back to `1`, now
+meaning the record) and folding PREPARE's two commands into whichever wait turn
+already saw `--check-batch` exit 0. What survives is the structural reason —
 prepare is the one point both entry points into the review loop converge on,
 so a resume-skipped batch, which runs neither the dispatch nor the wait,
-still gets a snapshot and its evidence.
+still gets a snapshot and its evidence. That batch is now the only one whose
+prepare is still a call of its own: there is no wait on that path to fold it
+into, which is why both prompt builders remain and `batchStep` chooses the
+reader by which path produced the reply, never by inspecting the reply. The
+fold moves neither side of **#347**'s boundary — the folded turn still opens
+nothing either command wrote, so the agent that launches retrieval is still not
+the agent that reads what came back.
 `offline` is the one exception: no citation, no reviewer, no snapshot, so the
 merge consumes the attempt path there.
 

@@ -116,26 +116,36 @@ EXPECTED_MAX_CITATION_RETRIES = 2
 # 900 s wait can no longer be one call.
 EXPECTED_WAIT_CALLS = 3
 # This file's copy of the live worst-case per-batch ceiling the preflight
-# charges: one (dispatch 1 + wait WAIT_CALLS + citation prepare 1 + citation
-# judge 1) group per attempt + the #723 approval record 1. It was a triple until
-# 1.16.1, when #347 split the single fetch-and-judge reviewer into a retrieving
-# prepare call and a judging call that never touches the network (10 -> 13, a
-# security boundary rather than new work); it grew again in 1.16.2 when one wait
-# stopped being one call (13 -> 19); #723 added the verdict record (19 -> 20);
-# and #724 removed the resume precheck (20 -> 19).
+# charges: one (dispatch 1 + wait WAIT_CALLS + citation judge 1) group per
+# attempt + the #723 approval record 1. It was a triple until 1.16.1, when #347
+# split the single fetch-and-judge reviewer into a retrieving prepare call and a
+# judging call that never touches the network (10 -> 13, a security boundary
+# rather than new work); it grew again in 1.16.2 when one wait stopped being one
+# call (13 -> 19); #723 added the verdict record (19 -> 20); #724 removed the
+# resume precheck (20 -> 19) and then folded the prepare into the wait
+# (19 -> 16).
+#
+# THE FOLD IS #347'S ARITHMETIC REVERSED AND ITS BOUNDARY KEPT. What #347 bought
+# was that the agent which reaches the network is not the agent which reads what
+# came back; the folded turn still reads nothing it retrieved, so the boundary is
+# where it was and only the call count moved. The per-attempt term is therefore
+# 2 + WAIT_CALLS, and the standalone prepare call survives on exactly one path --
+# a RESUMED batch, which spends no wait to fold it into.
 #
 # THE #723 TERM SITS OUTSIDE THE LADDER, and the leading 1 is where that shows.
 # The record is spent ONCE, after the single approval a batch can have, so the
-# worst case is no longer the exhausted batch (3*6 == 18, nothing approved, no
-# record) but the batch APPROVED ON ITS LAST ATTEMPT (that same 18 + 1).
+# worst case is no longer the exhausted batch (3*5 == 15, nothing approved, no
+# record) but the batch APPROVED ON ITS LAST ATTEMPT (that same 15 + 1).
 # Charging it per attempt would be a different, larger and wrong number.
 #
-# THAT LEADING 1 IS NOT THE ONE 1.16.2 HAD. The total is 19 in both, and the
-# terms are disjoint: 1.16.2's was the per-batch resume precheck, today's is the
+# THAT LEADING 1 IS STILL NOT THE ONE 1.16.2 HAD, and the collision is worth
+# keeping in mind even though the total has since moved on: the ceiling passed
+# back through 19 on #724's precheck deletion, with terms disjoint from 1.16.2's
+# 19 -- 1.16.2's leading 1 was the per-batch resume precheck, today's is the
 # approval record, and there is no per-batch call before the ladder at all any
 # more. A regression that reinstates the precheck and drops the record sums to
-# the same 19 -- which is why this file also asserts, separately, that the
-# template's own expression reads `1 + (3 + WAIT_CALLS) * ...`.
+# the same total -- which is why this file also asserts, separately, that the
+# template's own expression reads `1 + (2 + WAIT_CALLS) * ...`.
 #
 # tests/batch_size_estimator.test.py keeps its own independent copy
 # (GLOSSARY_LIVE_PER_BATCH_CEILING), and the two must move together. What makes
@@ -143,8 +153,8 @@ EXPECTED_WAIT_CALLS = 3
 # test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file
 # at the end of the formula-tightness section below.
 LIVE_PER_BATCH_CEILING = (
-    1 + (3 + EXPECTED_WAIT_CALLS) * (EXPECTED_MAX_CITATION_RETRIES + 1)
-)  # 19
+    1 + (2 + EXPECTED_WAIT_CALLS) * (EXPECTED_MAX_CITATION_RETRIES + 1)
+)  # 16
 
 RUN_DIR = f"{FIXTURE_DURABLE_ROOT}/glossary/runs/{FIXTURE_RUN_ID}"
 
@@ -272,7 +282,65 @@ function nth(list, i, fallback) {
   return (i < list.length) ? list[i] : fallback;
 }
 
+// #724 -- the evidence-preparation step folded INTO the wait turn that sees
+// --check-batch exit 0, so a live wait's success reply is no longer the bare
+// READY line: it ends with the attempt's evidence sentinel and THEN the READY.
+//
+// The fold is applied here rather than in every fixture, and it reuses the SAME
+// `prepares` plan key the standalone call reads. That is what keeps this file's
+// existing fixtures meaning what they meant: a fixture that scripts a prepare
+// failure, or a glued pair of prepare sentinels, still scripts exactly that --
+// it is now delivered through the wait's reply, because that is where the
+// template asks for it. A fixture that scripts nothing gets the same
+// EVIDENCE_READY default the standalone branch gives.
+//
+// SPLICED ONLY INTO A REPLY THAT SUCCEEDS, and by shape rather than judgement:
+// the prompt must actually render the evidence sentinel (offline renders none,
+// and there is nothing to prepare there), and the reply's last non-empty line
+// must be exactly this batch's READY. A PENDING chunk, a cut-short reply, a
+// wait for another batch -- none of them reached the fold in the template
+// either, so none of them is decorated here.
+function withPrepare(reply, promptText, idx, attempt, p) {
+  if (typeof reply !== "string") return reply;
+  // The ATTEMPT comes from the prompt the template rendered, never from the
+  // caller's wait ordinal. The two agree on the fresh path and DIVERGE on the
+  // resumed one, where attempt 0 spends no wait at all: the wait ordinal is then
+  // one behind the attempt for the rest of the batch's life, and splicing a
+  // stale sentinel makes the template reject an attempt the fixture meant to
+  // approve -- silently, since a stale-attempt rejection looks exactly like a
+  // scripted one.
+  const asked = /EVIDENCE_READY (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+  if (!asked) return reply;
+  attempt = parseInt(asked[2], 10);
+  const lines = reply.split("\n");
+  let last = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim().length > 0) last = i;
+  }
+  if (last === -1 || lines[last].trim() !== "READY " + idx) return reply;
+  const prepared = nth(p.prepares, attempt, "EVIDENCE_READY " + asked[1] + " ATTEMPT " + asked[2]);
+  if (typeof prepared !== "string") return reply;
+  lines.splice(last, 0, prepared);
+  return lines.join("\n");
+}
+
+
+// #724 -- the REPLY is recorded beside the label, not only the prompt. The
+// evidence verdict used to be identifiable by its own label
+// (glossary:citation-prepare:N fired once per attempt), and on the fresh path it
+// no longer has one: the turn that reports it is a wait. Its PROMPT is not the
+// discriminator either -- every chunk of an attempt's wait renders the same
+// folded instructions, including the chunks that time out and prepare nothing.
+// What identifies an actual evidence verdict is the reply that carried one, so
+// that is what is recorded and what prepare_verdicts() below counts.
 async function agent(promptText, opts) {
+  const reply = await agentReply(promptText, opts);
+  const last = callsLog[callsLog.length - 1];
+  if (last) last.reply = (typeof reply === "string") ? reply : null;
+  return reply;
+}
+
+async function agentReply(promptText, opts) {
   opts = opts || {};
   const label = opts.label || "";
   const ordinal = record(label, promptText);
@@ -320,15 +388,21 @@ async function agent(promptText, opts) {
     // cannot be written without it. Everything else keeps the symmetric
     // default.
     if (kind === "wait-recheck" && Array.isArray(p.waitRechecks)) {
-      return nth(p.waitRechecks, waitOrdinal, "READY " + idx);
+      return withPrepare(nth(p.waitRechecks, waitOrdinal, "READY " + idx), promptText, idx, waitOrdinal, p);
     }
-    return nth(p.waits, waitOrdinal, "READY " + idx);
+    return withPrepare(nth(p.waits, waitOrdinal, "READY " + idx), promptText, idx, waitOrdinal, p);
   }
   if (kind === "citation-prepare") {
     // Default: the two boundary commands both succeeded for THIS attempt. As
     // with the judge below, the attempt number is the ordinal -- prepare runs
     // exactly once per attempt that gets past the wait, including the
     // resume-skip path's attempt 0.
+    //
+    // SINCE #724 THIS BRANCH ANSWERS ONLY THE RESUMED PATH. On the fresh path
+    // the evidence preparation folds into the wait turn, and the SAME `prepares`
+    // fixture answers it there -- see withPrepare() above, which splices this
+    // very expression into the wait's reply. One fixture key, two carriers, so
+    // every `prepares` fixture in this file keeps meaning what it meant.
     return nth(p.prepares, ordinal, "EVIDENCE_READY " + idx + " ATTEMPT " + ordinal);
   }
   if (kind === "approval-record") {
@@ -419,6 +493,66 @@ def labels_of(out: dict) -> list:
 
 def count_label(out: dict, label: str) -> int:
     return sum(1 for c in out["calls"] if c["label"] == label)
+
+
+def prepare_verdicts(out: dict, index: int = 0) -> list:
+    """Every call that actually reported an EVIDENCE verdict for this batch, in
+    order -- whichever label carried it.
+
+    #724 gave the evidence-preparation step two carriers. On the RESUMED path it
+    is still its own `glossary:citation-prepare:<i>` call; on the fresh path it
+    folds into whichever wait turn saw --check-batch exit 0, and there is then no
+    label that means "a prepare happened". So the old `count_label(out,
+    "glossary:citation-prepare:0")` no longer counts what its call sites meant by
+    it, and it fails OPEN -- it returns 0 on a healthy run, which reads exactly
+    like a template with no prepare site at all, the very thing several of those
+    call sites were added to rule out.
+
+    Counted off the REPLY rather than the prompt, and that distinction is
+    load-bearing: an attempt's wait renders the folded instructions in every one
+    of its chunks, so counting prompts would report a prepare for each chunk that
+    timed out having prepared nothing. A reply carrying EVIDENCE_READY or
+    EVIDENCE_FAILED is a verdict that was actually reported.
+    """
+    marker_ok = f"EVIDENCE_READY {index} ATTEMPT "
+    marker_fail = f"EVIDENCE_FAILED {index} ATTEMPT "
+    return [
+        c for c in out["calls"]
+        if isinstance(c.get("reply"), str)
+        and (marker_ok in c["reply"] or marker_fail in c["reply"])
+    ]
+
+
+def prepare_prompt(out: dict, index: int = 0, attempt: int = 0) -> str:
+    """The rendered prompt that carried THIS attempt's evidence-preparation
+    steps, from whichever of the two carriers ran (see prepare_verdicts)."""
+    standalone = prompts_for(out, f"glossary:citation-prepare:{index}")
+    if standalone:
+        assert attempt < len(standalone), (
+            f"batch {index} spent only {len(standalone)} standalone prepare "
+            f"call(s); there is no attempt {attempt}"
+        )
+        return standalone[attempt]
+    marker = f"EVIDENCE_READY {index} ATTEMPT {attempt}"
+    hits = [
+        prompt
+        for label in (f"glossary:wait:{index}", f"glossary:wait-recheck:{index}")
+        for prompt in prompts_for(out, label)
+        if marker in prompt
+    ]
+    assert hits, (
+        f"no call rendered the folded evidence preparation for batch {index} "
+        f"attempt {attempt} (marker {marker!r}); the calls this run made were "
+        f"{labels_of(out)}"
+    )
+    # Every chunk of one attempt's wait splices the same builder, so any of them
+    # answers "what was this attempt told to do"; asserting they agree is what
+    # makes taking the first one well-defined.
+    assert len(set(hits)) == 1, (
+        f"the wait calls for batch {index} attempt {attempt} rendered DIFFERENT "
+        f"evidence-preparation instructions"
+    )
+    return hits[0]
 
 
 def prompts_for(out: dict, label: str) -> list:
@@ -1185,7 +1319,14 @@ def test_each_attempt_uses_its_own_fragment_path(tmp_path):
     assert res["ok"], res["stderr"]
     out = res["out"]
 
-    FRAGMENT_LABELS = ("glossary:dispatch:0", "glossary:wait:0", "glossary:citation-prepare:0")
+    # #724: the third member of this tuple used to be
+    # "glossary:citation-prepare:0". On the fresh path that call is gone -- its
+    # two commands are issued by the wait turn -- so its leg of this assertion is
+    # now the wait's own prompt, already covered by the second member. Dropping
+    # the label rather than routing it through prepare_prompt() is deliberate:
+    # prepare_prompt() would return that same wait prompt, and asserting the same
+    # string twice reads as two checks while being one.
+    FRAGMENT_LABELS = ("glossary:dispatch:0", "glossary:wait:0")
     for attempt in (0, 1):
         expected = attempt_path(0, attempt)
         for label in FRAGMENT_LABELS:
@@ -2077,21 +2218,33 @@ def test_citation_review_is_split_into_a_prepare_call_and_a_judge_call(tmp_path)
     addressed to it, so the property has to be that the judging call is a
     DIFFERENT call from the retrieving one -- and that the retrieving one comes
     first, since a judge that ran before its evidence existed would have to fetch
-    to have anything to look at."""
+    to have anything to look at.
+
+    #724 MOVED THE RETRIEVING CALL AND DID NOT REJOIN THE TWO. On the fresh path
+    the retrieval now happens in the wait turn that already saw the fragment
+    validate, so what this asserts is the SEPARATION, not the label: exactly one
+    call reported an evidence verdict, exactly one judged, and they are not the
+    same call. Asserting the label would now be asserting the carrier, and the
+    carrier is the part that changed."""
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])])
     assert res["ok"], res["stderr"]
     out = res["out"]
 
-    assert count_label(out, "glossary:citation-prepare:0") == 1, (
-        "retrieval must happen in its own prepare call, not inside the judging "
-        f"agent; calls were {labels_of(out)}"
+    prepared = prepare_verdicts(out)
+    assert len(prepared) == 1, (
+        "retrieval must happen in exactly one call of its own, not inside the "
+        f"judging agent; calls were {labels_of(out)}"
+    )
+    assert prepared[0]["label"] != "glossary:citation-review:0", (
+        "the call that retrieved must not be the call that judges -- that is the "
+        "single-agent shape #347 abolished"
     )
     assert count_label(out, "glossary:citation-review:0") == 1, (
         f"the judge must still run exactly once per attempt; calls were {labels_of(out)}"
     )
     order = labels_of(out)
-    assert order.index("glossary:citation-prepare:0") < order.index("glossary:citation-review:0"), (
-        f"the prepare call must precede the judge that reads its output; got {order}"
+    assert order.index(prepared[0]["label"]) < order.index("glossary:citation-review:0"), (
+        f"the retrieving call must precede the judge that reads its output; got {order}"
     )
     assert out["result"]["merged"] is True
     assert out["result"]["batches"][0]["citationReview"] == "approved"
@@ -2113,7 +2266,7 @@ def test_prepare_runs_only_the_two_boundary_commands_and_ingests_no_page_content
     """
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])])
     assert res["ok"], res["stderr"]
-    prompt = prompts_for(res["out"], "glossary:citation-prepare:0")[0]
+    prompt = prepare_prompt(res["out"])
 
     # Command 1 -- unchanged from 1.16.0: re-validate, and snapshot the exact
     # validated bytes. Asserted as the whole command string, because the
@@ -2191,7 +2344,7 @@ def test_prepare_write_restriction_names_the_agent_and_the_commands_separately(t
     nothing this pins."""
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])])
     assert res["ok"], res["stderr"]
-    prompt = prompts_for(res["out"], "glossary:citation-prepare:0")[0]
+    prompt = prepare_prompt(res["out"])
 
     assert PREPARE_WRITE_RESTRICTION_CLAUSE in prompt, (
         "the prepare prompt must forbid the AGENT's own writes explicitly; "
@@ -2396,8 +2549,9 @@ def test_prepare_failure_regenerates_rather_than_reaching_the_judge(tmp_path):
     out = res["out"]
 
     # Attempt 0 never reached a judge...
-    assert count_label(out, "glossary:citation-prepare:0") == 2, (
-        f"prepare must run once per attempt; calls were {labels_of(out)}"
+    assert len(prepare_verdicts(out)) == 2, (
+        f"an evidence verdict must be reported once per attempt; calls were "
+        f"{labels_of(out)}"
     )
     assert count_label(out, "glossary:citation-review:0") == 1, (
         "a failed prepare must not hand an unprepared attempt to the judge; "
@@ -2472,9 +2626,9 @@ def test_glued_evidence_failure_still_rejects_at_the_citation_prepare(tmp_path, 
     # judge is rejected on the attempt mismatch and attempt 1 approves -- the
     # same two dispatches, for an entirely unrelated reason. Verified: without
     # this line the whole 16-case parametrization was green before the split.
-    assert count_label(out, "glossary:citation-prepare:0") == 2, (
-        "the glued reply must have been judged by the PREPARE site, once per "
-        f"attempt; calls were {labels_of(out)}"
+    assert len(prepare_verdicts(out)) == 2, (
+        "the glued reply must have been judged by the evidence-preparation site, "
+        f"once per attempt; calls were {labels_of(out)}"
     )
     # THE discriminating assertion, and the reason it is a judge-call COUNT
     # rather than a dispatch count. Measured by scoped mutation: with the
@@ -2506,8 +2660,21 @@ def test_prepare_is_a_plain_low_effort_claude_call(tmp_path):
     can wedge the Workflow if the forwarder detaches (#97), and this sits on the
     critical path of every live batch. And it must not be a codex call, which
     would break tests/bounded_poll_present.test.py's "exactly one codex work-call
-    in this template" pin."""
-    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])])
+    in this template" pin.
+
+    DRIVEN DOWN THE RESUMED PATH SINCE #724, because that is the only path where
+    this call still exists: on a fresh batch the same two commands are run by the
+    wait turn, whose own effort/schema/agentType are pinned by the wait's tests.
+    The properties asserted here are about the STANDALONE call's dispatch
+    options, and a resumed batch is where those options are actually chosen --
+    the reason it is not simply deleted along with the fresh path's call is that
+    the resumed path is not a fallback here, it is the entry point that skips the
+    wait entirely and therefore has nothing to fold into."""
+    res = run(
+        tmp_path=tmp_path,
+        batches=[make_batch(0, ["Ninon"])],
+        resumed_batch_indices=[0],
+    )
     assert res["ok"], res["stderr"]
     calls = [c for c in res["out"]["calls"] if c["label"] == "glossary:citation-prepare:0"]
     assert len(calls) == 1

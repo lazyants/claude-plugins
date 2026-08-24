@@ -492,12 +492,15 @@ RETIRED = [
         "live -- perBatch = 1 + 4*(MAX_CITATION_RETRIES+1)",
         # #723 moved the leading term 1 -> 2 (the approval record sits OUTSIDE
         # the ladder); #724 moved it 2 -> 1 again by deleting the resume
-        # precheck. The successor is back to the same SHAPE it had before #723
-        # and the leading 1 means something else -- the record, not a precheck.
-        # The RETIRED needle is untouched throughout: it is a frozen fact about
-        # the baseline release, and only the successor moves, which is exactly
-        # what this table's replacement column is for.
-        "live -- perBatch = 1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)", 1,
+        # precheck, and then moved the PER-ATTEMPT term 3 -> 2 by folding the
+        # evidence prepare into the wait. The successor is back to the same
+        # SHAPE it had before #723 and both of its numbers mean something else --
+        # the leading 1 is the record rather than a precheck, and the 2 is
+        # dispatch + judge rather than dispatch + prepare + judge. The RETIRED
+        # needle is untouched throughout: it is a frozen fact about the baseline
+        # release, and only the successor moves, which is exactly what this
+        # table's replacement column is for.
+        "live -- perBatch = 1 + (2 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)", 1,
         "the 1.16.1 live ladder (13N+2), before one wait became WAIT_CALLS calls",
     ),
     (
@@ -515,12 +518,20 @@ RETIRED = [
     (
         BASELINE_RELEASE, GLOSSARY_TEMPLATE,
         'lines.push("for i in $(seq 1 45); do "',
-        'lines.push("Run EXACTLY ONE bash command. It does NOT poll and returns immediately:")', 1,
+        'lines.push("FIRST COMMAND. Run exactly this one bash command. It does '
+        'NOT poll and returns immediately:")', 1,
         "the EMITTED pre-#352 poll, glossary's copy. The replacement is the "
         "authoritative re-check's own command line, not the chunk poll's "
         "`end=$((SECONDS ...))` -- both are #352's replacement for the single-shot "
         "poll, but only this one lands in the SAME hunk that removes the needle, "
-        "and the hunk pairing is what this row has to survive. The two were in one "
+        "and the hunk pairing is what this row has to survive. RE-POINTED IN #724 "
+        "for a reason none of this row's earlier moves had: the line itself was "
+        "reworded. The fold gives that turn a second and third command, so "
+        "\"Run EXACTLY ONE bash command\" became false as written and is now "
+        "\"FIRST COMMAND. Run exactly this one bash command\" -- the successor "
+        "follows the wording, since a successor pinned to a sentence the template "
+        "no longer contains proves nothing about what replaced the needle. The two "
+        "were in one "
         "hunk until #353 edited the citation-review comment further down the file: "
         "no line either side of the pair changed, but git re-attached the added "
         "block to the neighbouring hunk, which is the added-line half of the "
