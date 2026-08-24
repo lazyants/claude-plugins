@@ -5,9 +5,10 @@ enum, nested with `threshold_lines`:
 
 ```yaml
 verse_policy:
-  mode: full_rhymed_plus_literal
+  mode: CHOOSE_full_rhymed_plus_literal_or_full_rhymed_only_or_rhythmic_approximation_or_mixed_by_length_or_literal_only_or_skip
+    # ships as an intentionally INVALID sentinel (#730) -- replace with one of:
     # full_rhymed_plus_literal | full_rhymed_only | rhythmic_approximation |
-    # mixed_by_length | literal_only | skip   -- see references/verse-policy.md
+    # mixed_by_length | literal_only | skip   -- see the six-mode table below
   threshold_lines: null
     # REQUIRED (fatal at Step 0 if null/absent) only when mode: mixed_by_length;
     # ignored (must stay null) for every other mode -- nested under verse_policy so
@@ -71,9 +72,29 @@ verse_policy_mode: verse_policy.mode, verse_policy_threshold_lines:
 verse_policy.threshold_lines, apparatus_policy: footnotes.apparatus_policy,
 untranslated_sentinel: validation.untranslated_sentinel}`. Because the exact
 hash keys include `verse_policy_mode` and `verse_policy_threshold_lines`, any
-edit to either source profile field flips every affected segment to `stale` —
-closing the "configurable but silently uncached" risk a configurable enum
-would otherwise create.
+edit to either source profile field flips segments to `stale` — closing the
+"configurable but silently uncached" risk a configurable enum would otherwise
+create.
+
+**How far that reaches, exactly (#730).** `profile_semantics_hash` is a
+GLOBAL cache-key field, not a per-segment one — `cache_key.py`'s
+`PER_SEGMENT_FIELDS` names the four that are — and
+`compute_full_cache_key()` writes every global field into EVERY segment's
+key. So a mode change does not touch "the verse-bearing segments": it moves
+every segment's key at once, and every healthy record currently materialized
+`converged` or `stale` reclassifies to `stale`, prose-only segments included.
+It is still not a silent re-translation. `select_segments.py` REFUSES an
+authorizing selection holding previously-converged or lost-sentinel segments
+until `--allow-retranslate-converged` is passed — and once it is, the same
+cache-key move mints a fresh `RUN_ID`, which orphans the dispatch token on
+every not-yet-converged draft in that same selection, so those retranslate
+too and any hand-applied fix goes with them. Records that were never
+converged do not restale at all: they classify `recoverable` or
+`human_escalation` on their own status, and a cache-key recompute FAILURE
+classifies `human_escalation`, never `stale`.
+This is why `verse_policy.mode` is an intake question (SKILL.md's intake step
+2) rather than a value the orchestrator picks: free to answer before the
+first dispatch, and this expensive afterwards.
 
 ## Ownership split (critical, don't get this wrong)
 

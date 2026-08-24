@@ -92,15 +92,16 @@ PLACEHOLDER_SUBSTRINGS = (
     "/ABS/PATH/TO/YOUR_PROJECT",
     "/ABS/PATH/TO/YOUR_SOURCE",
 )
-# #727: the shipped example now ships SEVEN CHOOSE_-prefixed sentinels, up
-# from three -- a hand-typed tuple here (as this used to be) freezes
-# whatever sentinels existed at authoring time and silently stops covering
-# the next one added. make_real_values_profile() below replaces every
-# individual sentinel it knows about by name (so a bad replacement is
-# attributed to a specific field, not a generic "CHOOSE_ survived
-# somewhere"), and then asserts the GENERIC `"CHOOSE_" not in text`
-# invariant as the actual completeness guard -- see the assertion at the
-# bottom of that function.
+# #727: the shipped example ships several CHOOSE_-prefixed sentinels, and
+# the set keeps growing (#730 added verse_policy.mode) -- a hand-typed tuple
+# here (as this used to be) freezes whatever sentinels existed at authoring
+# time and silently stops covering the next one added. Read the current set
+# off profile.example.yml, never off a count restated here.
+# make_real_values_profile() below replaces every individual sentinel it
+# knows about by name (so a bad replacement is attributed to a specific
+# field, not a generic "CHOOSE_ survived somewhere"), and then asserts the
+# GENERIC `"CHOOSE_" not in text` invariant as the actual completeness
+# guard -- see the assertion at the bottom of that function.
 # Must match profile_validate.py's own ALLOW_TMP_ROOT_ENV_VAR constant --
 # this file drives profile_validate.py as a subprocess (see module
 # docstring, Part A), so it can't import that constant, only mirror the
@@ -180,6 +181,13 @@ def make_real_values_profile(tmp_path):
         "CHOOSE_segment_drafts_and_audit_or_assembled_book", "segment_drafts_and_audit"
     )
     text = text.replace("CHOOSE_obsidian_or_epub_or_custom", "obsidian")
+    # #730. A non-mixed_by_length answer on purpose: that is the one mode the
+    # schema makes threshold_lines REQUIRED for, and the example ships it null.
+    text = text.replace(
+        "CHOOSE_full_rhymed_plus_literal_or_full_rhymed_only_or_rhythmic_approximation"
+        "_or_mixed_by_length_or_literal_only_or_skip",
+        "full_rhymed_plus_literal",
+    )
 
     # Defensive: fail loudly here, not with a confusing downstream schema
     # error, if this fixture builder ever drifts out of sync with
@@ -187,7 +195,7 @@ def make_real_values_profile(tmp_path):
     for placeholder in PLACEHOLDER_SUBSTRINGS:
         assert placeholder not in text, f"fixture still contains placeholder {placeholder!r}"
     # #727: generic completeness guard, replacing a hand-typed sentinel
-    # tuple -- a FUTURE eighth CHOOSE_-prefixed sentinel added to the shipped
+    # tuple -- any FURTHER CHOOSE_-prefixed sentinel added to the shipped
     # example must fail this assertion loudly, rather than silently surviving
     # because nobody remembered to add its literal string to a list here.
     # Checked over the PARSED document's own string VALUES, mirroring what

@@ -41,9 +41,15 @@ so there is exactly one place each rule can go stale.
   converged, and no back-sweep is owed to a newly written rule — `SKILL.md`.
 - **R10** A previous volume is not an input: mechanics come from the plugin,
   the general contract from the shipped template, and whatever outlives a book
-  from the series directory — `SKILL.md`. Scaffold into an EMPTY root;
-  `select_segments.py --classify-only` reporting anything but `not_started`
-  means state arrived from somewhere.
+  — including the user's own working decisions, in
+  `<series directory>/decisions.md` — from the series directory — `SKILL.md`.
+  Scaffold into an EMPTY root; `select_segments.py --classify-only` reporting
+  anything but `not_started` means state arrived from somewhere. The one
+  bounded exception, and the only read into a finished volume R10 grants:
+  ledger-first, and only when the ledger has no row for that field may the
+  immediately preceding volume's `profile.yml` be read for its
+  `# CHANGED by the user` markers alone — read-only, copying nothing, writing
+  what it finds back into the ledger.
 
 ## R1 — Role separation is a hard rule, never profile-configurable
 

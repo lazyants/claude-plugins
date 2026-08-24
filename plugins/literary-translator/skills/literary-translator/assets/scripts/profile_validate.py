@@ -250,11 +250,13 @@ PLACEHOLDER_SUBSTRINGS = (
     "/ABS/PATH/TO/YOUR_PROJECT",
     "/ABS/PATH/TO/YOUR_SOURCE",
 )
-# The example ships seven separate CHOOSE_-prefixed sentinels (verse_detection,
-# footnotes, glossary.enabled, glossary.research_mode, footnotes.apparatus_policy,
-# output.v1_scope, output.target) -- rather than enumerate each one by hand
-# (and silently miss a future eighth), any string value starting with this
-# prefix anywhere in the document is rejected.
+# The example ships several separate CHOOSE_-prefixed sentinels. Read WHICH,
+# and how many, off assets/profile.example.yml itself (or off KNOB_QUESTIONS
+# below, which a two-way drift guard holds equal to it) -- a name list and a
+# count restated here have now gone stale twice, once per release that added
+# one. Rather than enumerate them at all, any string value starting with this
+# prefix anywhere in the document is rejected, so a sentinel added tomorrow is
+# caught with no edit here.
 CHOOSE_PREFIX = "CHOOSE_"
 
 # #727. One plain-language question per intake knob that ships a CHOOSE_
@@ -306,6 +308,33 @@ KNOB_QUESTIONS = {
         "apparatus gets provisioned. `epub` has no renderer yet, so "
         "pairing it with `assembled_book` is refused at Step 0 itself; "
         "`custom` requires co-designing a renderer first."
+    ),
+    # #730. The six-value enum reaches the user as a real question, with what
+    # each mode costs, instead of being filled in from the orchestrator's own
+    # reading of the source -- which is how one series spent four review rounds
+    # on volume 2 rediscovering a decision its user had already made on volume 1.
+    "verse_policy.mode": (
+        "How is verse translated in this book? `full_rhymed_plus_literal` "
+        "requires a full rhymed rendering AND a mandatory literal gloss on "
+        "every verse; `full_rhymed_only` requires the rhymed rendering with no "
+        "literal safety net beside it; `rhythmic_approximation` keeps a "
+        "metrical line but does not require end-rhyme; `mixed_by_length` "
+        "applies the rhymed-plus-literal policy at or above "
+        "`verse_policy.threshold_lines` and the rhythmic one below it, and is "
+        "the one mode that REQUIRES that threshold; `literal_only` asks for a "
+        "faithful prose gloss only, no rhyme and no meter; `skip` leaves verse "
+        "untranslated and passed through. This is the field that decides what "
+        "a review is ALLOWED TO FAIL A SEGMENT ON, so a rhyme-requiring mode "
+        "against a source whose sense is dense makes rhyme and accuracy "
+        "collide at exactly the passages that matter most. Answer it now "
+        "rather than later: the mode is hashed into `profile_semantics_hash`, "
+        "a GLOBAL cache-key field, so changing it once work has started "
+        "RESTALES EVERY HEALTHY ALREADY-CONVERGED SEGMENT in the volume, "
+        "prose-only segments included; `select_segments.py` then REFUSES that "
+        "re-dispatch until you pass `--allow-retranslate-converged`; and "
+        "authorizing it mints a fresh RUN_ID, which ALSO ORPHANS EVERY "
+        "NOT-YET-CONVERGED DRAFT in the same selection, discarding fixes "
+        "already applied by hand."
     ),
     "source.adapter_config.plain_text.verse_detection": (
         "How the `plain_text` adapter finds verse: `none_confirmed` (you "

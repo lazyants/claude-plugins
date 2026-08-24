@@ -131,9 +131,16 @@ target:
     # informational; style_bible.md section B says "if not applicable, delete this section"
 
 verse_policy:
-  mode: full_rhymed_plus_literal
+  mode: CHOOSE_full_rhymed_plus_literal_or_full_rhymed_only_or_rhythmic_approximation_or_mixed_by_length_or_literal_only_or_skip
+    # Ships as an intentionally INVALID placeholder -- Step 0's whole-profile placeholder scan
+    # fatally rejects it until you consciously replace it with one of the six real values:
     # full_rhymed_plus_literal | full_rhymed_only | rhythmic_approximation |
-    # mixed_by_length | literal_only | skip   -- see references/verse-policy.md
+    # mixed_by_length | literal_only | skip   -- see references/verse-policy.md for the table.
+    # #730: this is an intake QUESTION for the user, never a value the orchestrator picks from
+    # its own reading of the source. It decides what a review is allowed to fail a segment on,
+    # and it is hashed into profile_semantics_hash -- a GLOBAL cache-key field -- so answering
+    # it now is free and changing it after translation starts restales every healthy converged
+    # segment in the volume, prose-only ones included.
   threshold_lines: null
     # REQUIRED (fatal at Step 0 if null/absent) only when mode: mixed_by_length;
     # ignored (must stay null) for every other mode -- nested under verse_policy so

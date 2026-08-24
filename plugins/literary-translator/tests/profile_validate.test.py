@@ -1358,7 +1358,17 @@ def test_knob_questions_carry_the_shared_contracts_frozen_substance():
     survive) -- pins them directly against KNOB_QUESTIONS's own values,
     independent of whether the generic per-path test above would catch a
     later edit that reworded away the substance while leaving the mapping's
-    keys and mechanics intact."""
+    keys and mechanics intact.
+
+    #730 added the rule these phrases now follow: a needle must BEGIN at the
+    subject its clause is about and END at that subject's consequence.
+    Substring membership cannot entail a mapping, because adjacency is what a
+    set of independent substrings discards -- so a phrase pinned without its
+    subject can have that subject swapped underneath it while this test stays
+    green. Two measured examples, both from review rounds on that issue: the
+    mandatory `threshold_lines` obligation moved from `mixed_by_length` to
+    `full_rhymed_only`, and the whole re-stale/refusal/orphaning cost moved
+    from the verse mode to `output.target`. Every fragment survived both."""
     assertions = {
         "glossary.enabled": ("W3 glossary pass", "EMPTY canon", "NEW:"),
         "glossary.research_mode": ('basis:"established"', "glossary.enabled` is false"),
@@ -1380,6 +1390,61 @@ def test_knob_questions_carry_the_shared_contracts_frozen_substance():
             # Pin the corrected TIMING specifically: #726 moved this refusal
             # all the way to Step 0 (check_output_target_shipped), never W9.
             "refused at Step 0",
+        ),
+        # #730. The clauses below COUPLE each mode to its own consequence
+        # rather than listing six detached tokens: a question that kept all six
+        # names while losing which cost belongs to which mode would otherwise
+        # stay green, and "the six-value enum reaches the user with what each
+        # mode costs" is the whole of what #730 asked for. The three
+        # invalidation clauses are separate strings on purpose -- each one can
+        # be reworded away independently, and each is a different fact
+        # (what restales, that re-dispatch is refused, what authorizing it
+        # additionally destroys). Asserted against the RUNTIME KNOB_QUESTIONS
+        # value, where adjacent string literals are already concatenated, so no
+        # physical line break in the source is pinned and a reflow cannot go red.
+        "verse_policy.mode": (
+            "`full_rhymed_plus_literal` requires a full rhymed rendering AND a "
+            "mandatory literal gloss on every verse",
+            "`full_rhymed_only` requires the rhymed rendering with no literal "
+            "safety net",
+            "`rhythmic_approximation` keeps a metrical line but does not "
+            "require end-rhyme",
+            # ONE CONTIGUOUS needle, not three fragments. Two review rounds
+            # each broke a decomposed version of this pin, and the second break
+            # is the one that names the rule: substring MEMBERSHIP cannot
+            # entail a MAPPING, because adjacency is exactly what a set of
+            # independent substrings throws away. Pinned as fragments, this
+            # clause admitted "...and the rhythmic one below it;
+            # `full_rhymed_only` is the one mode that REQUIRES that
+            # threshold..." -- every fragment present, the threshold obligation
+            # silently reassigned to the wrong mode. Every other entry in this
+            # tuple already couples one mode to its own consequence inside a
+            # single string; this one was the only exception, and it is why
+            # each of the six now names its mode and states that mode's cost in
+            # the SAME needle.
+            "`mixed_by_length` applies the rhymed-plus-literal policy at or "
+            "above `verse_policy.threshold_lines` and the rhythmic one below "
+            "it, and is the one mode that REQUIRES that threshold",
+            "`literal_only` asks for a faithful prose gloss only, no rhyme and "
+            "no meter",
+            "`skip` leaves verse untranslated",
+            "ALLOWED TO FAIL A SEGMENT ON",
+            # The whole cost sentence as ONE needle, starting at its SUBJECT.
+            # Pinned as detached fragments it survived swapping "the mode" for
+            # "`output.target`": every consequence still present, all of them
+            # attributed to a different field, and the user told the wrong
+            # thing about what answering THIS knob costs. Which is the same
+            # lesson the six mode needles already carry -- a needle has to
+            # begin at the thing the clause is about and end at that thing's
+            # consequence, or the subject in front of it is free to change.
+            "the mode is hashed into `profile_semantics_hash`, a GLOBAL "
+            "cache-key field, so changing it once work has started RESTALES "
+            "EVERY HEALTHY ALREADY-CONVERGED SEGMENT in the volume, prose-only "
+            "segments included; `select_segments.py` then REFUSES that "
+            "re-dispatch until you pass `--allow-retranslate-converged`; and "
+            "authorizing it mints a fresh RUN_ID, which ALSO ORPHANS EVERY "
+            "NOT-YET-CONVERGED DRAFT in the same selection, discarding fixes "
+            "already applied by hand.",
         ),
         "source.adapter_config.plain_text.verse_detection": (
             "none_confirmed", "regex", "source.format: plain_text",

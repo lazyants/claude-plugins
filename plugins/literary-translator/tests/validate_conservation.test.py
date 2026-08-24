@@ -1339,6 +1339,11 @@ def test_ratio_band_schema_rejects_deleted_absolute_threshold_keys(tmp_path):
     base_profile["footnotes"]["apparatus_policy"] = "translate_all"
     base_profile["output"]["v1_scope"] = "segment_drafts_and_audit"
     base_profile["output"]["target"] = "obsidian"
+    # #730. Deliberately NOT mixed_by_length: that is the one mode whose schema
+    # branch makes threshold_lines a required integer, and the example ships it
+    # null, so answering with it here would trade one base-invalid fixture for
+    # another instead of restoring the "base itself is valid" premise.
+    base_profile["verse_policy"]["mode"] = "full_rhymed_plus_literal"
     jsonschema.validate(instance=base_profile, schema=schema)  # sanity: base itself is valid
 
     for bad_key in ("cross_cohort_guard", "implausible_ratio_floor", "implausible_ratio_ceiling"):

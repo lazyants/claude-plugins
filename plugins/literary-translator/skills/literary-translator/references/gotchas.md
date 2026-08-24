@@ -337,7 +337,8 @@ site.
 
 ## 11. `profile.example.yml` is deliberately non-runnable — do not "fix" that either
 
-Every placeholder in the shipped file (`YOUR BOOK TITLE HERE`,
+Every placeholder in the shipped file (a non-exhaustive sample —
+`YOUR BOOK TITLE HERE`,
 `/ABS/PATH/TO/YOUR_PROJECT`, `/ABS/PATH/TO/YOUR_SOURCE.epub`,
 `CHOOSE_live_or_offline` (`glossary.research_mode`),
 `CHOOSE_true_or_false` (`glossary.enabled`, #727),
@@ -346,9 +347,12 @@ Every placeholder in the shipped file (`YOUR BOOK TITLE HERE`,
 `CHOOSE_translate_all_or_preserve_source_or_omit_apparatus_or_body_refs_only`
 (`footnotes.apparatus_policy`),
 `CHOOSE_segment_drafts_and_audit_or_assembled_book` (`output.v1_scope`),
-`CHOOSE_obsidian_or_epub_or_custom` (`output.target`) — seven sentinels in
-all) is an intentionally invalid sentinel that `profile_validate.py`
-fatally rejects by design. A profile can only pass Step 0 once every
+`CHOOSE_obsidian_or_epub_or_custom` (`output.target`), and the six-value
+verse sentinel on `verse_policy.mode` (#730) — read the shipped file, or
+`profile_validate.py`'s `KNOB_QUESTIONS`, for the current set; a count
+restated here has gone stale once per release that added one) is an
+intentionally invalid sentinel that `profile_validate.py` fatally rejects by
+design. A profile can only pass Step 0 once every
 placeholder is genuinely replaced with a real value.
 
 **Do not write a test that expects this file to pass Step 0 verbatim — it

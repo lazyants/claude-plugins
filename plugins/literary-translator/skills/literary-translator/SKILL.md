@@ -63,13 +63,26 @@ translate+gloss job ends up quietly provisioning apparatus it will never use.
    knob decides how much *output* apparatus gets provisioned: `output.target`
    (consulted only under `output.v1_scope: assembled_book`).
    `assets/profile.example.yml` ships every one of these except
-   `verse_policy.mode` and `engine.max_fix_rounds` as an invalid `CHOOSE_`
-   sentinel, so this is no longer a knob this section walks the user through
-   in the abstract before scaffolding proceeds: Step 0 (below) halts on a
-   freshly-copied profile and prints, in one pass, a questionnaire naming
-   every sentinel still unanswered. This section's job is to relay that
-   printed questionnaire to the user verbatim and fill in `profile.yml` with
-   their answers.
+   `engine.max_fix_rounds` as an invalid `CHOOSE_` sentinel, so this is no
+   longer a knob this section walks the user through in the abstract before
+   scaffolding proceeds: Step 0 (below) halts on a freshly-copied profile and
+   prints, in one pass, a questionnaire naming every sentinel still
+   unanswered. `verse_policy.mode` joined that set in #730 — it decides what a
+   review may fail a segment on and it is hashed, so it is a decision the user
+   makes, never one the orchestrator reads off the source material.
+   This section's job is to relay that printed questionnaire: **every printed
+   question and every cost it states reaches the user intact — none dropped,
+   none paraphrased away** — and then fill in `profile.yml` with their
+   answers. Intact is not the same as untouched: where the series decisions
+   ledger holds a row for one of these fields (R10), ATTACH that provenance to
+   the question rather than replacing it, so the user sees both what the knob
+   costs and what they already decided.
+   **Volume N>1 of a series does not gather these answers cold.** Read
+   `<series directory>/decisions.md` BEFORE relaying the questionnaire and
+   carry every recorded decision forward as a default-with-provenance, per
+   R10. A decision the user already made and a question they have never been
+   asked look identical in a freshly-copied profile, and only the ledger tells
+   them apart.
 3. **Default fast, offer thorough explicitly, through those same knobs.** The
    default posture for a new project is the lean end of every one of those
    knobs — offline research where live isn't required, the lightest
@@ -166,7 +179,7 @@ Order of operations:
    placeholder keep their existing message unchanged. Every remaining
    `CHOOSE_`-prefixed enum sentinel — `glossary.research_mode`,
    `glossary.enabled`, `footnotes.apparatus_policy`, `output.v1_scope`,
-   `output.target`, and the `plain_text` adapter's
+   `output.target`, `verse_policy.mode`, and the `plain_text` adapter's
    `verse_detection`/`footnotes` fields — gets an error naming that dotted
    path, plus, for every sentinel this skill documents a question for, that
    question appended verbatim (a sentinel with no documented question keeps
@@ -992,13 +1005,16 @@ here, follow the linked doc:
   the shipped `style_bible.template.md` says this under section E-traps; it
   holds for the whole marked span.
 - **R10 — A previous volume is not an input. A new volume takes from exactly
-  three places, and the finished book beside it is none of them.** When a series
-  gets its next volume, a completed durable root is usually sitting in the same
-  tree with working `scripts/`, a filled-in `style_bible.md`, a real
+  three places, and the finished book beside it is none of them** — with one
+  bounded, marker-only legacy read, defined at the end of this rule. When a
+  series gets its next volume, a completed durable root is usually sitting in
+  the same tree with working `scripts/`, a filled-in `style_bible.md`, a real
   `profile.yml` and a canon that took weeks. Copying it is the obvious way to
   start and it is the way a book inherits every defect the previous one already
   worked through — silently, because nothing downstream re-reads a decision that
-  was right for the last book and wrong for this one.
+  was COPIED and was right for the last book and wrong for this one. Copying is
+  what this rule refuses. Re-ASKING a decision, with its provenance shown, is
+  the opposite move, and it is what the ledger below exists for.
   **The three legitimate inputs:** (1) **mechanics** — `scripts/`, `schemas/`,
   workflow and seed templates — come from the PLUGIN: point `durable_root` at a
   NEW empty directory (never one emptied by hand beside a live book) and let
@@ -1008,9 +1024,75 @@ here, follow the linked doc:
   from the shipped `style_bible.template.md` and is then filled in by interview
   — which is what upstreaming a learned rule into the template is FOR; (3)
   **whatever outlives a book** — pending contract corrections, a cross-volume
-  name or person registry — comes from the series' own directory, the only place
-  whose contents are about the SERIES rather than about one book.
-  **Never copied, and what each one breaks:** the previous `style_bible.md`
+  name or person registry, and **the decisions the user has made about how to
+  work** — comes from the series' own directory, the only place whose contents
+  are about the SERIES rather than about one book.
+
+  **The series decisions ledger (#730), the third member of input (3).** A mode,
+  an effort tier, a policy the user changed in their own words is not source
+  material and it is not canon: R10 has no quarrel with it, and until this rule
+  existed R10 discarded it anyway, along with everything else in the finished
+  volume. The channel is one file at a MANDATORY relative path,
+  `<series directory>/decisions.md`, beside `contract_pending.md`. Not a
+  suggested name: a reader told to consult "the series ledger" without a fixed
+  path has a hint, not a channel.
+  - **Entry shape — five fields, and nothing else is a decision.** One row per
+    decision: the dotted `profile.yml` path, the value, the date, the user's own
+    words, and the volume it was made in. Anything a reader cannot get from
+    those five is a note, not a decision, and belongs elsewhere.
+  - **Append-only, and the LAST row for a dotted path is the current decision.**
+    A user may revise the same field across volumes — this series already has
+    one reading `rhythmic_approximation` in one volume and
+    `full_rhymed_plus_literal` in another — so one path accumulates rows, and
+    without this sentence volume N is handed two defaults and no rule for which
+    holds. Positional, not chronological, precisely because the file is
+    append-only: no date arithmetic and no tie-break to get wrong. Earlier rows
+    for that path
+    are its HISTORY and are never deleted or rewritten — a revision that
+    overwrote its predecessor would throw away the reason the decision changed,
+    which is the one thing this ledger exists to carry. Surface the current row;
+    reach for the earlier ones when the user asks why it changed.
+  - **The producer — writing the row is part of making the change.** The moment
+    the user changes one of these fields, the row is written; not at the end of
+    the volume, not when someone remembers. A ledger nobody writes to is inert,
+    and it fails silently: a series that recorded nothing looks exactly like a
+    series that decided nothing. The field itself also carries the volume-local
+    trace, in this repo's existing convention —
+    `# CHANGED by the user, <date>: "<their words>"` plus why it changed. The
+    marker is the trace; the ledger is the channel.
+  - **Lookup is ledger-first, and EVERY field the ledger holds is re-asked**,
+    each from its own current row. Intake reads `decisions.md` BEFORE it relays
+    the Step-0 questionnaire. Where the field
+    has a printed Step-0 question, the provenance attaches to that question.
+    Where it does NOT — `engine.effort` is the plain case, and it is one of the
+    fields this ledger most obviously holds — the row is put to the user as a
+    standalone provenance-bearing confirmation in the same breath. A row that is
+    read and then not surfaced because its field happens to have no sentinel is
+    the original defect wearing a ledger: recorded, carried, and silently
+    dropped one step later.
+  - **The one legacy read, and its exact bounds.** Only when the ledger has no
+    row for that field — the ordinary case for a series whose earlier volumes
+    predate this rule — may the IMMEDIATELY PRECEDING volume's `profile.yml` be
+    read, for its `# CHANGED by the user` markers ALONE. It is read-only, it
+    copies nothing into the new profile, and whatever it finds is written into
+    the ledger as a row, so it happens once per decision and never again. That
+    is the whole exception: not a licence to consult the old book, and not a
+    second channel.
+  - **What is carried is a question, never a value.** A ledger row must never be
+    written into a new `profile.yml` unasked, by a person or by a script. It is
+    surfaced by whichever of the two branches above applies to its field —
+    beside that field's own printed question where one exists, and otherwise as
+    the standalone ask — and it reads the same either way: "tome 1 set this to
+    `rhythmic_approximation` on 2026-08-13, at your request: '<their words>' —
+    keep it for this volume?" The user answers it again. Nothing is
+    inherited without being re-affirmed against THIS text, which is exactly
+    R10's own invariant: the reason a decision was right can be about the
+    previous book's material and wrong for this one. Showing the reason lets the
+    user see that in one line, instead of rediscovering it through review
+    findings on a volume already under way.
+  **Never copied — the ledger rule above changes nothing here, because its
+  legacy read copies nothing and only re-asks — and what each one breaks:** the
+  previous `style_bible.md`
   (template plus that book's accretions — rulings whose reasons are gone,
   enforced against a different text); `canon.json` (book-shaped: duplicate
   spellings that resolved to one target *in that book*, a `review_queue` left
@@ -1018,7 +1100,9 @@ here, follow the linked doc:
   `.ever_converged.*` sentinels, `.codex_job.*` (run state — a stray sentinel
   asserts that a unit converged once, a claim about a book that does not exist
   yet); `profile.yml` verbatim (it carries `v1_scope`, effort and the language
-  config of a different source).
+  config of a different source) — unchanged by the ledger rule: no VALUE from a
+  previous `profile.yml` is ever copied into a new one, and the marker-only
+  legacy read is the sole thing that may open that file at all.
   **The check, because a rule nobody can verify is a wish:** after Step 0a and
   before the first dispatch, `select_segments.py --classify-only` must report
   every unit `not_started`. Anything else means state arrived from somewhere.
