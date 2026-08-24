@@ -44,6 +44,7 @@ its own dedicated test file (`ledger_composite_key.test.py`); this keeps
 this file scoped to canon_validate.py's OWN two-pass validation, disposition
 routing, and offline-backstop logic.
 """
+import hashlib
 import json
 import shutil
 import subprocess
@@ -679,6 +680,12 @@ def test_merge_live_mode_allows_established_item_through_backstop(tmp_path):
     # rather than silently re-testing the new one. The new gate has its own
     # file (tests/canon_merge_citation_attestation.test.py), including the
     # unattested refusal this call would otherwise hit.
+    #
+    # #734 made that attestation require its evidence: --citations-reviewed is
+    # refused without --approval-records, one glossary-approval/1 record per
+    # merged fragment naming that fragment's sha256. So this test writes one --
+    # the minimum that keeps its OWN question askable. What a record means, and
+    # every way a wrong one is refused, stays in that same sibling file.
     root = make_durable_root(tmp_path)
     batch_path = write_batch(
         root,
@@ -693,9 +700,22 @@ def test_merge_live_mode_allows_established_item_through_backstop(tmp_path):
         ],
     )
 
+    record_path = root / "approval_0_attempt_0.json"
+    record_path.write_text(
+        json.dumps(
+            {
+                "schema": "glossary-approval/1",
+                "sha256": hashlib.sha256(batch_path.read_bytes()).hexdigest(),
+                "recorded_from": str(batch_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+
     proc = run_canon_validate_cli(
         root,
-        ["--research-mode", "live", "--batch", str(batch_path), "--citations-reviewed"],
+        ["--research-mode", "live", "--batch", str(batch_path), "--citations-reviewed",
+         "--approval-records", str(record_path)],
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     payload = parse_stdout(proc)

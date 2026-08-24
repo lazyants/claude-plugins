@@ -115,6 +115,20 @@ def _js_string_literal(value: object) -> str:
     return json.dumps(str(value))
 
 
+def _json_int_array(value: object) -> str:
+    """Token sits OUTSIDE quotes as a bare ARRAY literal
+    (`const RESUMED_BATCH_INDICES = {{RESUMED_BATCH_INDICES}}`).
+
+    A sorted list of ints, rendered as a JSON array -- which is legal JS. `int()`
+    per element for the same reason `_bare_int` does it, and `sorted(set(...))`
+    because the template builds a Set from this and a caller that hands over
+    duplicates or an arbitrary order must not make the rendered text depend on
+    it. A non-iterable value raises here rather than rendering something the
+    template's own Array.isArray guard would have to catch at run time.
+    """
+    return json.dumps(sorted({int(v) for v in value}))  # type: ignore[union-attr]
+
+
 ENCODERS: dict[str, Callable[[object], str]] = {
     # --- inside quotes, plain -------------------------------------------------
     "DURABLE_ROOT": _plain,
@@ -135,6 +149,8 @@ ENCODERS: dict[str, Callable[[object], str]] = {
     # --- outside quotes, supplies its own -------------------------------------
     "CODEX_COMPANION_PATH_JSON": _js_string_literal,
     "PLUGIN_ROOT": _js_string_literal,
+    # --- outside quotes, bare array literal -----------------------------------
+    "RESUMED_BATCH_INDICES": _json_int_array,
 }
 
 
@@ -235,6 +251,13 @@ GLOSSARY_PASS_DEFAULTS: dict[str, object] = {
     # below is therefore a real, non-empty path whose --allow-durable-sibling
     # guard resolves a genuine cache_key.py underneath it.
     "PLUGIN_ROOT": FIXTURE_GLOSSARY_PLUGIN_ROOT,
+    # #724 -- resume_setup.py's `resumed_batch_indices`: the batches whose
+    # attempt-0 fragment it re-checked with canon_validate.py --check-batch AFTER
+    # the stale-fragment wipe. EMPTY is the ordinary value, and the right default
+    # here: it is what a fresh run substitutes, and it keeps every file that has
+    # no opinion about resumption on the full dispatch path. Files exercising the
+    # resume-skip override it with the indices they seeded.
+    "RESUMED_BATCH_INDICES": [],
 }
 
 SKEPTIC_PASS_DEFAULTS: dict[str, object] = {

@@ -19,6 +19,20 @@ reimplementation and never a source-string grep.
 Site A -- batchStep's resume-skip precheck ("glossary:precheck:" + index).
 Site B -- batchStep's fragment-ready wait ("glossary:wait:" + index).
 
+SITE A NO LONGER EXISTS (#724), and its tests are gone rather than adapted.
+The resume-skip is not a reply any more: resume_setup.py re-checks each
+attempt-0 fragment before the Workflow starts and the answer is substituted as
+{{RESUMED_BATCH_INDICES}}, so there is no prose for a sentinel to be decorated,
+glued or quoted inside. Every site-A case below (#228's substring collision,
+#308's decorated accept, the fail-priority and non-terminal-quote regressions)
+was a property OF THAT PARSE and is retired with it -- not relocated, because
+nothing here has the shape they were about. What replaces them is narrower and
+about the new mechanism: the array decides, and no precheck call is made.
+Site B's own cases are untouched; the two sites never shared code, only shape.
+The skeptic template still has both sites, and skeptic_pipeline_e2e.test.py
+still exercises them -- so the retired properties are still under test where the
+mechanism they describe still runs.
+
 Mirrors skeptic_pipeline_e2e.test.py's own precheck/wait substring-collision
 tests for skeptic-pass-wf.template.js (the already-exact-match reference
 implementation this fix was modelled on).
@@ -65,7 +79,8 @@ FIXTURE_RESEARCH_MODE = "offline"
 FIXTURE_PLUGIN_ROOT = "/fixture/plugin/root/skills/literary-translator"
 
 
-def instantiate(*, batch_agent_cap: int, plugin_root: str = FIXTURE_PLUGIN_ROOT) -> str:
+def instantiate(*, batch_agent_cap: int, plugin_root: str = FIXTURE_PLUGIN_ROOT,
+                resumed_batch_indices: list | None = None) -> str:
     """The token map and renderer now live in _workflow_instantiation.py
     (#413); this stays a thin wrapper. FIXTURE_RESEARCH_MODE and plugin_root
     are the two overrides this file needs against the shared module's own
@@ -83,6 +98,7 @@ def instantiate(*, batch_agent_cap: int, plugin_root: str = FIXTURE_PLUGIN_ROOT)
         research_mode=FIXTURE_RESEARCH_MODE,
         batch_agent_cap=batch_agent_cap,
         plugin_root=plugin_root,
+        resumed_batch_indices=resumed_batch_indices or [],
     )
 
 
@@ -107,12 +123,14 @@ def make_batch(index: int, names: list) -> dict:
 
 # The mock records the ACTUAL rendered prompt text per label, counts calls,
 # and drives a happy-path run to merged:true by default. PLAN, keyed by each
-# batch's own string index ("0", "1", ...), overrides that batch's precheck/
-# wait reply; "merge"/"verify" keys override the two batch-level calls.
-# Every default matches the EXACT sentinel batchPrecheckPrompt/
-# batchWaitPrompt actually instruct the agent to return (see the template's
-# own comments at :232-233,284-285), so a test overriding only ONE call
+# batch's own string index ("0", "1", ...), overrides that batch's wait reply;
+# "merge"/"verify" keys override the two batch-level calls.
+# Every default matches the EXACT sentinel batchWaitChunkPrompt actually
+# instructs the agent to return, so a test overriding only ONE call
 # still gets an ordinary happy path for every other call in the sequence.
+# There is no "precheck" key since #724: the resume decision is a substituted
+# array, so a run selects ENTRY A through run(resumed_batch_indices=[...]),
+# never through a reply.
 HARNESS = r"""
 'use strict';
 __WRAPPED_SOURCE__
@@ -143,9 +161,6 @@ async function agent(promptText, opts) {
 
   const idx = indexFromLabel(label);
   const p = PLAN[idx] || {};
-  if (label.indexOf("glossary:precheck:") === 0) {
-    return Object.prototype.hasOwnProperty.call(p, "precheck") ? p.precheck : ("ABSENT " + idx);
-  }
   if (label.indexOf("glossary:dispatch:") === 0) {
     return "FRAGMENT " + idx;
   }
@@ -194,11 +209,18 @@ function log() {}
 
 def run(*, tmp_path: Path, batches: list, batch_agent_cap: int = 10_000,
         plan: dict | None = None, timeout: int = 30,
-        plugin_root: str = FIXTURE_PLUGIN_ROOT) -> dict:
+        plugin_root: str = FIXTURE_PLUGIN_ROOT,
+        resumed_batch_indices: list | None = None) -> dict:
     """Returns {ok, out, stderr}. ok=False (with stderr) when the template
-    threw before producing stdout (the batch-index guard throw path)."""
+    threw before producing stdout (the batch-index guard throw path).
+
+    `resumed_batch_indices` (#724) selects ENTRY A for the named batches. It is
+    a TOKEN, substituted before the run starts, which is the whole shape of the
+    change: a fixture can no longer make the resume decision come out differently
+    by phrasing a reply, because nothing reads a reply."""
     plan = plan or {}
-    src = instantiate(batch_agent_cap=batch_agent_cap, plugin_root=plugin_root)
+    src = instantiate(batch_agent_cap=batch_agent_cap, plugin_root=plugin_root,
+                      resumed_batch_indices=resumed_batch_indices)
     harness = (
         HARNESS.replace("__WRAPPED_SOURCE__", _wrap(src))
         .replace("__BATCHES_JSON__", json.dumps(batches))
@@ -231,12 +253,13 @@ def test_happy_path_merges(tmp_path):
     assert res["out"]["pipelineCalled"] is True
 
 
-def test_precheck_exact_present_resume_skips(tmp_path):
-    """Positive control paired with the substring-collision test below: a
-    genuine, EXACT "PRESENT <index>" reply DOES resume-skip -- proves the
-    collision test below is catching a real false negative, not asserting
-    against a mock that never resume-skips at all."""
-    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan={"0": {"precheck": "PRESENT 0"}})
+def test_a_batch_named_in_resumed_batch_indices_skips_dispatch_and_wait(tmp_path):
+    """ENTRY A, and the whole of what #724 left of site A: membership in the
+    substituted array -- not a reply -- decides the resume-skip.
+
+    Positive control for the negative one below: without it, "no dispatch call"
+    could just as well mean the harness never reaches batchStep at all."""
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], resumed_batch_indices=[0])
     assert res["ok"], res["stderr"]
     labels = [c["label"] for c in res["out"]["calls"]]
     assert "glossary:dispatch:0" not in labels
@@ -244,30 +267,81 @@ def test_precheck_exact_present_resume_skips(tmp_path):
     assert res["out"]["result"]["merged"] is True
 
 
-# ---------------------------------------------------------------------------
-# #228 P1 fixes: exact-match sentinels (content-matching-sentinel-fragility
-# class) at glossary-pass-wf.template.js's two sentinel sites -- A (batch
-# precheck) and B (batch wait).
-# ---------------------------------------------------------------------------
+def test_an_unlisted_batch_dispatches_and_the_resume_decision_costs_no_call(tmp_path):
+    """The other direction, plus the reason #724 exists: a batch the array does
+    not name takes the ordinary dispatch path, and NOTHING was asked.
 
-def test_precheck_substring_collision_does_not_falsely_resume_skip(tmp_path):
-    """RED before the #228 exact-match fix at site A (batchStep's
-    "glossary:precheck:" + batch.index): the OLD
-    `precheck.indexOf("PRESENT") !== -1` check falsely matched a FAILURE
-    reply that merely contains the literal substring "PRESENT" inside its
-    own explanatory prose (e.g. "ABSENT 0 (fragment missing; not
-    PRESENT)"), resume-skipping WITHOUT dispatching -- so a recoverable
-    missing/corrupt fragment would silently never be repaired on resume."""
-    plan = {"0": {"precheck": "ABSENT 0 (fragment missing; not PRESENT)"}}
-    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
+    The precheck-label assertion is the load-bearing one and is not redundant
+    with the parity suite's structural check: that one proves the template holds
+    no PRESENT/ABSENT parse, this one proves no agent call is spent on the
+    question under a real run. A reinstated precheck that answered correctly
+    would pass every other assertion in this file."""
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], resumed_batch_indices=[])
     assert res["ok"], res["stderr"]
     labels = [c["label"] for c in res["out"]["calls"]]
-    # A substring-collision bug would resume-skip straight from precheck to
-    # merge/verify, never calling dispatch/wait at all.
     assert "glossary:dispatch:0" in labels
     assert "glossary:wait:0" in labels
+    assert not [x for x in labels if x.startswith("glossary:precheck:")], (
+        "the resume decision must cost no agent call at all since #724; labels "
+        f"this run spent were {labels}"
+    )
     assert res["out"]["result"]["merged"] is True
 
+
+def test_a_partial_resumed_set_is_read_per_batch(tmp_path):
+    """Membership is per batch, not a run-wide mode -- the property a Set-based
+    read makes easy to get wrong in the direction that is invisible on a
+    single-batch fixture."""
+    res = run(
+        tmp_path=tmp_path,
+        batches=[make_batch(0, ["Jean"]), make_batch(1, ["Marie"])],
+        resumed_batch_indices=[1],
+    )
+    assert res["ok"], res["stderr"]
+    labels = [c["label"] for c in res["out"]["calls"]]
+    assert "glossary:dispatch:0" in labels and "glossary:wait:0" in labels
+    assert "glossary:dispatch:1" not in labels and "glossary:wait:1" not in labels
+    assert res["out"]["result"]["merged"] is True
+
+
+def test_a_non_array_resumed_batch_indices_throws_at_startup(tmp_path):
+    """The token's own guard. A scalar or string here means the instantiating
+    session substituted something other than resume_setup.py's array, and the
+    template refuses rather than building a Set whose `.has()` silently answers
+    false for every batch -- which would look exactly like a fresh run and cost
+    a full re-dispatch of work already done.
+
+    Mutated after instantiation rather than passed through it: the shared
+    encoder would coerce the value, which is the point -- this asserts the
+    TEMPLATE's own guard, not the fixture helper's."""
+    src = instantiate(batch_agent_cap=10_000).replace(
+        "const RESUMED_BATCH_INDICES = []", 'const RESUMED_BATCH_INDICES = "0"', 1
+    )
+    assert 'const RESUMED_BATCH_INDICES = "0"' in src, (
+        "the mutation did not apply -- the declaration's spelling moved"
+    )
+    harness = (
+        HARNESS.replace("__WRAPPED_SOURCE__", _wrap(src))
+        .replace("__BATCHES_JSON__", json.dumps([make_batch(0, ["Jean"])]))
+        .replace("__PLAN_JSON__", json.dumps({}))
+    )
+    path = tmp_path / "glossary_harness_bad_token.js"
+    path.write_text(harness, encoding="utf-8")
+    assert NODE is not None
+    proc = subprocess.run([NODE, str(path)], capture_output=True, text=True, timeout=30)
+    assert proc.returncode != 0, (
+        f"a non-array RESUMED_BATCH_INDICES must throw; the run instead exited 0 "
+        f"with {proc.stdout[:400]}"
+    )
+    assert "RESUMED_BATCH_INDICES must be a JSON array" in proc.stderr, proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# #228 P1 fixes: exact-match sentinels (content-matching-sentinel-fragility
+# class) at glossary-pass-wf.template.js's batch WAIT site. Site A (the batch
+# precheck) was the other half until #724 deleted it -- see the module
+# docstring; its cases are retired, not relocated.
+# ---------------------------------------------------------------------------
 
 def test_wait_substring_collision_reports_not_ready(tmp_path):
     """RED before the #228 exact-match fix at site B (batchStep's
@@ -286,7 +360,7 @@ def test_wait_substring_collision_reports_not_ready(tmp_path):
     emit -- asserted against PENDING because a fixture still saying TIMEOUT
     would be exercising a string no template site produces or reads, and would
     pass for the wrong reason (an unrecognized sentinel is PENDING by default)."""
-    plan = {"0": {"precheck": "ABSENT 0", "wait": "PENDING 0 (not READY)"}}
+    plan = {"0": {"wait": "PENDING 0 (not READY)"}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -302,7 +376,7 @@ def test_wait_substring_collision_in_one_of_two_batches(tmp_path):
     """Same as above but with a second, healthy batch alongside it -- proves
     the collision is caught per-batch, not just in a single-batch fixture,
     and that a healthy sibling batch does not mask the sick one."""
-    plan = {"0": {"precheck": "ABSENT 0", "wait": "PENDING 0 (not READY)"}}
+    plan = {"0": {"wait": "PENDING 0 (not READY)"}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"]), make_batch(1, ["Marie"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -313,31 +387,17 @@ def test_wait_substring_collision_in_one_of_two_batches(tmp_path):
 
 # ---------------------------------------------------------------------------
 # #308 P1 fixes: line-oriented sentinel verdicts (sentinelVerdict()) at
-# glossary-pass-wf.template.js's two sentinel sites -- A (batch precheck)
-# and B (batch wait). #228 (above) killed the substring false-POSITIVE;
+# glossary-pass-wf.template.js's batch WAIT site (site A, the batch precheck,
+# is gone since #724). #228 (above) killed the substring false-POSITIVE;
 # #308 is the false-NEGATIVE dual #228's own whole-string cure introduced --
 # a benign prose-decorated sentinel misclassified as absent/timed-out.
 # ---------------------------------------------------------------------------
-
-def test_precheck_decorated_present_still_resume_skips(tmp_path):
-    """Site A accept: a genuine PRESENT reply decorated with a prose
-    preamble (the observed real #308 shape) must still resume-skip, not
-    fall through to a full dispatch."""
-    plan = {"0": {"precheck": "The precheck command exited 0, confirming the existing fragment is already valid.\n\nPRESENT 0"}}
-    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
-    assert res["ok"], res["stderr"]
-    labels = [c["label"] for c in res["out"]["calls"]]
-    assert "glossary:dispatch:0" not in labels
-    assert "glossary:wait:0" not in labels
-    assert res["out"]["result"]["merged"] is True
-
 
 def test_wait_decorated_ready_is_accepted_not_timeout(tmp_path):
     """Site B accept: a genuine READY reply decorated with a prose preamble
     (the exact #308 evidence reply, journal-verbatim) must be accepted, not
     misclassified as a timeout."""
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "wait": "The poll confirmed the review artifact is ready (exit 0).\n\nREADY 0",
     }}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
@@ -347,21 +407,6 @@ def test_wait_decorated_ready_is_accepted_not_timeout(tmp_path):
     labels = [c["label"] for c in out["calls"]]
     assert "glossary:merge" in labels
     assert "glossary:verify" in labels
-
-
-def test_precheck_fail_priority_discriminating_order(tmp_path):
-    """Fail-priority, discriminating order (PLAN-308 sec3 item 3's round-3
-    codex finding): ABSENT before a trailing PRESENT line must still
-    regenerate -- proves the fail-sentinel scan runs over every line, not
-    just the last one (a last-line-only reader would wrongly accept this,
-    since PRESENT is the reply's own final line)."""
-    plan = {"0": {"precheck": "ABSENT 0\nPRESENT 0"}}
-    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
-    assert res["ok"], res["stderr"]
-    labels = [c["label"] for c in res["out"]["calls"]]
-    assert "glossary:dispatch:0" in labels
-    assert "glossary:wait:0" in labels
-    assert res["out"]["result"]["merged"] is True
 
 
 def test_wait_fail_priority_discriminating_order(tmp_path):
@@ -375,7 +420,7 @@ def test_wait_fail_priority_discriminating_order(tmp_path):
     scan. Same verdict, different mechanism -- which is why the assertion is
     kept rather than folded into the collision test above: the two now exercise
     different code."""
-    plan = {"0": {"precheck": "ABSENT 0", "wait": "PENDING 0\nREADY 0"}}
+    plan = {"0": {"wait": "PENDING 0\nREADY 0"}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -384,26 +429,11 @@ def test_wait_fail_priority_discriminating_order(tmp_path):
     assert out["result"]["notReady"] == [0]
 
 
-def test_precheck_non_terminal_quoted_present_still_regenerates(tmp_path):
-    """5a non-terminal quoted-success regression (required, not optional):
-    a reply that quotes the PRESENT sentinel on a non-final line, then
-    disavows it in later prose, must NOT resume-skip -- the sentinel must be
-    the reply's own final non-empty line, not merely present anywhere."""
-    plan = {"0": {"precheck": "The command failed; quoting the requested success form:\nPRESENT 0\nThat is not my verdict."}}
-    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
-    assert res["ok"], res["stderr"]
-    labels = [c["label"] for c in res["out"]["calls"]]
-    assert "glossary:dispatch:0" in labels
-    assert "glossary:wait:0" in labels
-    assert res["out"]["result"]["merged"] is True
-
-
 def test_wait_non_terminal_quoted_ready_still_times_out(tmp_path):
     """5a non-terminal quoted-success regression at site B (codex's own
     counter-example, reused verbatim): a reply that quotes READY on a
     non-final line, then disavows it, must still report a timeout."""
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "wait": "The command failed; quoting the requested success form:\nREADY 0\nThat is not my verdict.",
     }}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
@@ -458,22 +488,29 @@ def test_check_batch_and_verify_merged_commands_never_carry_plugin_root(tmp_path
     would be silent decoration in the CLI and would grow the population of
     the separate open #608 -- this pins the asymmetry so a future
     "consistency" edit that widens it is a RED, not a quiet drift.
-    checkBatchCmd() is issued character-identically at all four call sites
-    (precheck, dispatch self-check, wait chunk poll, wait re-check); this
-    asserts on the precheck site, which the ordinary happy path already
-    reaches."""
+    checkBatchCmd() is issued character-identically at all three call sites
+    (dispatch self-check, wait chunk poll, wait re-check -- a fourth, the
+    precheck, is gone since #724); this asserts on the WAIT CHUNK site, which
+    the ordinary happy path already reaches. The precheck used to be the one
+    read here, and it was the weakest choice of the four even then: its prompt
+    carried the command on a line of its own, so a --plugin-root leaking into
+    the poll's own gate line would not have shown up at all."""
     res = run(
         tmp_path=tmp_path,
         batches=[make_batch(0, ["Jean"])],
         plugin_root=PINNED_PLUGIN_ROOT,
     )
     assert res["ok"], res["stderr"]
-    precheck_prompt = res["out"]["promptByLabel"]["glossary:precheck:0"]
+    wait_prompt = res["out"]["promptByLabel"]["glossary:wait:0"]
     verify_prompt = res["out"]["promptByLabel"]["glossary:verify"]
-    assert "--plugin-root" not in precheck_prompt, (
+    assert "--check-batch" in wait_prompt, (
+        "the wait prompt must actually carry the --check-batch command for this "
+        "assertion to mean anything: " + wait_prompt
+    )
+    assert "--plugin-root" not in wait_prompt, (
         "checkBatchCmd()'s --check-batch command must never carry "
         "--plugin-root -- canon_validate.py's run_check_batch does not "
-        "accept it: " + precheck_prompt
+        "accept it: " + wait_prompt
     )
     assert "--plugin-root" not in verify_prompt, (
         "glossaryVerifyPrompt()'s --verify-merged command must never carry "

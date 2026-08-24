@@ -244,7 +244,18 @@ already parses this result needs no changes on the read side, only on how
 it BUILDS the request):
 
     {"success": true, "effectiveRunId": "...", "resume": true|false,
-     "run_dir": "...", "input_digest": "..."}
+     "run_dir": "...", "input_digest": "...",
+     "resumed_batch_indices": [0, 3, ...]}     # kind="glossary" ONLY (#724)
+
+`resumed_batch_indices` is the sixth key and the only one that is
+kind-conditional: it lists the batches whose `out_{i}_attempt_0.json` already
+passes `canon_validate.py --check-batch` against the manifest this call just
+wrote. It exists because that question is fully settled before the Workflow
+starts, and answering it inside the Workflow cost one subagent bootstrap per
+batch AND travelled as prose (the false-PRESENT class behind #228/#308/#371).
+The orchestrating session passes it straight into
+`glossary-pass-wf.template.js`'s `{{RESUMED_BATCH_INDICES}}` token. Absent for
+every other kind, and empty is the ordinary answer on a fresh run.
 
 `effectiveRunId` is the MATCHED candidate's own RUN_ID when `resume` is
 true (this doubles as the answer to "which one of `resume_from_run_ids`
@@ -906,6 +917,16 @@ def validate_plugin_root_field(payload: dict) -> None:
         )
 
 
+def glossary_manifest_path(glossary_run_dir: Path, index) -> Path:
+    """One batch's per-batch manifest, spelled in ONE place. This script WRITES
+    it (write_glossary_manifests) and then READS it back as the coverage
+    argument of the resume probe's --check-batch (probe_resumed_batches, #724).
+    Two copies of this filename is how the probe comes to check coverage
+    against a manifest this script never wrote -- the same one-derivation rule
+    glossary_run_dir_for() exists for, one level down."""
+    return glossary_run_dir / f"manifest_{index}.json"
+
+
 def write_glossary_manifests(glossary_run_dir: Path, batches) -> None:
     """Atomically writes manifest_{index}.json (per batch, deduped) and the
     aggregate manifest_all.json (union of every batch, deduped). Assumes
@@ -914,13 +935,86 @@ def write_glossary_manifests(glossary_run_dir: Path, batches) -> None:
     for batch in batches:
         index = batch["index"]
         names = batch["names"]
-        _atomic_write_json(glossary_run_dir / f"manifest_{index}.json", sorted(set(names)))
+        _atomic_write_json(glossary_manifest_path(glossary_run_dir, index), sorted(set(names)))
         all_names.extend(names)
 
     _atomic_write_json(glossary_run_dir / "manifest_all.json", sorted(set(all_names)))
 
 
-_GLOSSARY_FRAGMENT_RE = re.compile(r"^(out|approved)_(\d+)_attempt_(\d+)\.json$")
+def glossary_run_dir_for(dirs: dict, run_id: str) -> Path:
+    """The glossary run directory, derived in ONE place. write_run_dir() creates
+    and populates it; main() probes it afterwards (#724 A). Two copies of this
+    join is how the probe would come to read a directory the wipe never touched."""
+    return dirs["durable_root"] / "glossary" / "runs" / run_id
+
+
+def probe_resumed_batches(glossary_run_dir: Path, durable_root: Path, batches, research_mode: str) -> list:
+    """#724 A -- WHICH BATCHES ALREADY HAVE A VALID attempt-0 FRAGMENT, decided
+    HERE rather than by an agent inside the Workflow.
+
+    Until #724 the glossary pass spent one full subagent bootstrap per batch to
+    run this single deterministic command and report PRESENT/ABSENT in prose.
+    Measured on a live run: ~40k tokens per call, 21 calls per relaunch, for a
+    question whose whole input is disk state that is fully settled before the
+    Workflow starts. Worse than the cost, the ANSWER travelled as prose, which is
+    why #228, #308 and #371 all exist -- a reply merely MENTIONING "ABSENT 3"
+    could resume-skip or refuse to, depending on which character glued it to its
+    neighbour. A set computed here cannot be glued, decorated or contradicted.
+
+    THIS IS THE ONLY PLACE THE QUESTION CAN HONESTLY BE ASKED, and the ordering
+    is the reason: it must run AFTER _wipe_stale_glossary_fragments() (which
+    decides what survives) and AFTER write_glossary_manifests() (which is what a
+    fragment is checked FOR coverage against). glossary_batch_plan.py, which
+    #724 suggests as the host, runs strictly BEFORE this script -- at that point
+    neither the wipe nor the manifests have happened, so a probe there would read
+    pre-wipe state against a manifest that does not exist yet.
+
+    Runs the DURABLE ${durable_root}/scripts/canon_validate.py -- the same copy
+    checkBatchCmd() names in the template -- so the probe and the wait gate ask a
+    character-identical question. #412's trusted-sibling rule (resolve a checker
+    from the plugin root, never from the writable durable root) deliberately does
+    NOT apply: that rule protects a gate, and this probe is not one. A wrong
+    answer here costs at most a re-dispatch, because a batch reported present is
+    still handed to the citation review exactly like a fresh one.
+
+    FAIL-SAFE BY CONSTRUCTION: anything other than a clean exit 0 -- a missing
+    fragment, malformed JSON, wrong coverage, a missing interpreter, a timeout --
+    leaves the batch OUT of the returned set, which sends it down the ordinary
+    dispatch path. There is no failure mode here that wrongly trusts a fragment.
+    """
+    script = durable_root / "scripts" / "canon_validate.py"
+    resumed = []
+    for batch in batches:
+        index = batch["index"]
+        fragment = glossary_run_dir / f"out_{index}_attempt_0.json"
+        if not fragment.is_file():
+            continue
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable, str(script), "--check-batch", str(fragment),
+                    "--research-mode", research_mode,
+                    "--expect-source-forms-file", str(glossary_manifest_path(glossary_run_dir, index)),
+                ],
+                capture_output=True, text=True, timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0:
+            resumed.append(index)
+    return resumed
+
+# `approval` joined this alternation in #723. The verdict record follows the
+# `approved_*` rule rather than the `out_*` one, and for that rule's own reason:
+# it is an OUTPUT of the citation review, re-produced whenever the review
+# approves again, so a surviving copy is never useful and is potentially a
+# statement about a fragment this run has already rejected. Keeping it would be
+# worse than useless -- the record exists to be READ BY AN OPERATOR, and a
+# record of unknown age is exactly the guesswork #723 removed. Riding the
+# existing alternation rather than a second regex is deliberate: one pattern,
+# one keep rule, and a new artifact cannot be added to one and forgotten in the
+# other.
+_GLOSSARY_FRAGMENT_RE = re.compile(r"^(out|approved|approval)_(\d+)_attempt_(\d+)\.json$")
 
 # #347 -- the citation audit's prepare step writes a DIRECTORY per batch attempt
 # (fetched evidence bodies plus index.json), not a file, so the fragment regex
@@ -949,12 +1043,14 @@ def _wipe_stale_glossary_fragments(glossary_run_dir: Path, resume: bool) -> None
       uniqueness only checks runs/<id>, not this separate glossary/runs/<id>
       tree, so an orphaned glossary dir can survive and collide on the
       one-second timestamp; keeping a stale attempt 0 there is the bug.
-    - Resume (resume is True): wipe out_* for attempt >= 1 and ALL approved_*,
-      but KEEP out_{i}_attempt_0.json. The resume-skip optimisation depends
+    - Resume (resume is True): wipe out_* for attempt >= 1 and ALL approved_*
+      and ALL approval_* (#723's verdict records), but KEEP
+      out_{i}_attempt_0.json. The resume-skip optimisation depends
       wholly on attempt 0 surviving, and a resume-skipped attempt-0 fragment is
       still citation-reviewed, so keeping it is safe here because the run_id
       genuinely matches by digest. Approved snapshots are never kept: they are
-      re-produced by the fresh review of whatever fragment wins this run.
+      re-produced by the fresh review of whatever fragment wins this run, and
+      so are the verdict records that vouch for them.
 
     Cost of the fresh-run wipe is at most one re-dispatch per batch on the rare
     orphan collision, never a wrong result.
@@ -1027,7 +1123,7 @@ def write_run_dir(
         # a content no-op. If that derivation ever stops being deterministic,
         # gate this on a fresh run. (This subsystem is pilot-gated / not yet
         # source-proven end to end.)
-        glossary_run_dir = dirs["durable_root"] / "glossary" / "runs" / run_id
+        glossary_run_dir = glossary_run_dir_for(dirs, run_id)
         glossary_run_dir.mkdir(parents=True, exist_ok=True)
         _wipe_stale_glossary_fragments(glossary_run_dir, resume)
         write_glossary_manifests(glossary_run_dir, payload.get("batches"))
@@ -1124,6 +1220,20 @@ def main(argv=None) -> int:
             "run_dir": str(run_dir),
             "input_digest": input_digest,
         }
+        # #724 A -- the sixth key, glossary only. Reported rather than acted on
+        # here: the orchestrating session threads it into the Workflow's
+        # {{RESUMED_BATCH_INDICES}} token, which is where the batch loop reads
+        # it. Deliberately AFTER write_run_dir(), never inside it -- the probe
+        # must see the post-wipe, post-manifest directory, and keeping
+        # write_run_dir()'s return type unchanged keeps every existing direct
+        # caller (this script's own tests drive it as a plain function) working.
+        if kind == "glossary":
+            result["resumed_batch_indices"] = probe_resumed_batches(
+                glossary_run_dir_for(dirs, run_id),
+                dirs["durable_root"],
+                payload.get("batches"),
+                (payload.get("subst") or {}).get("research_mode", "offline"),
+            )
     except ResumeSetupError as e:
         print(dumps_line({"success": False, "error": str(e)}))
         return 1

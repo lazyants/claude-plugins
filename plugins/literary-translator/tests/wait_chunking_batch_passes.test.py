@@ -216,6 +216,35 @@ function waitKind(label) {
 const prepareCounts = {};
 const reviewCounts = {};
 
+// #724 folded the glossary pass's two evidence-preparation commands INTO
+// whichever wait turn sees --check-batch exit 0, so a live wait turn's success
+// reply is now a PAIR: EVIDENCE_READY <i> ATTEMPT <n>, then READY <i>. This file
+// measures the WAIT, not the citation review, and every one of its fixtures
+// spells its reply as the wait sentinel alone -- so a bare READY would now send
+// each of them up the retry ladder and turn a one-wait measurement into three.
+//
+// The pair is restored MECHANICALLY, by shape rather than by judgement: a reply
+// is decorated only when the rendered prompt actually asks for the evidence
+// sentinel AND the reply's last non-empty line is exactly this batch's READY.
+// Every fixture that means PENDING, a cut-short chunk, another batch's READY, or
+// a disavowed quotation fails that test and passes through untouched -- which is
+// the point, since those are the shapes this file exists to measure. The attempt
+// is LIFTED from the prompt rather than counted, for the reason the
+// approval-record branch below gives.
+function withEvidence(reply, promptText, idx) {
+  if (typeof reply !== "string") return reply;
+  const asked = /EVIDENCE_READY (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+  if (!asked) return reply;
+  const lines = reply.split("\n");
+  let last = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim().length > 0) last = i;
+  }
+  if (last === -1 || lines[last].trim() !== "READY " + idx) return reply;
+  lines.splice(last, 0, "EVIDENCE_READY " + asked[1] + " ATTEMPT " + asked[2]);
+  return lines.join("\n");
+}
+
 async function agent(promptText, opts) {
   opts = opts || {};
   const label = opts.label || "";
@@ -236,11 +265,11 @@ async function agent(promptText, opts) {
     // placeholder twice. A first-only substitution would leave the second one
     // literal, so the test would still run -- while exercising a reply shape it
     // never meant to.
-    return tmpl.split("<idx>").join(idx);
+    return withEvidence(tmpl.split("<idx>").join(idx), promptText, idx);
   }
   if (kind === "recheck") {
     if (RECHECK_REPLY === null) return null;
-    return RECHECK_REPLY.split("<idx>").join(idx);
+    return withEvidence(RECHECK_REPLY.split("<idx>").join(idx), promptText, idx);
   }
 
   if (label === PASS + ":merge") return "MERGED (mock)";
@@ -248,6 +277,9 @@ async function agent(promptText, opts) {
   if (label === PASS + ":frozen-check") return { frozen_input_mismatch: false };
 
   const step = parts[1];
+  // The SKELETON template still runs a precheck; the glossary one stopped in
+  // #724, where the resume decision became a substituted array. Kept here
+  // because this harness drives both.
   if (step === "precheck") return "ABSENT " + idx;
   if (step === "dispatch") {
     chunkOrdinal = 0;   // a new wait begins
@@ -262,6 +294,16 @@ async function agent(promptText, opts) {
     const attempt = reviewCounts[idx] || 0;
     reviewCounts[idx] = attempt + 1;
     return "CITATIONS_OK " + idx + " ATTEMPT " + attempt;
+  }
+  if (step === "approval-record") {
+    // #723. The sentinel is lifted from the prompt the template actually
+    // rendered rather than rebuilt from a counter: the record fires once per
+    // batch at whichever attempt the review approved, so a counter drifts on
+    // any ladder longer than one attempt. This file never wants the record to
+    // FAIL -- it measures the WAIT, and a refused merge would mask that.
+    const asked = /APPROVAL_RECORDED (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    if (!asked) return "UNPARSEABLE_RECORD_PROMPT";
+    return "APPROVAL_RECORDED " + asked[1] + " ATTEMPT " + asked[2];
   }
   throw new Error("mock agent(): unrecognized label " + label);
 }
@@ -1269,18 +1311,35 @@ def test_the_recheck_is_a_single_non_polling_check(target, tmp_path):
         f"authoritative re-check is once per wait, or it is just another chunk"
     )
     prompt = recheck_prompts[0]
+    command = recheck_command(prompt)
+    # SCOPED TO THE COMMAND IN #724, not to the whole prompt, and the scope is
+    # the point rather than a concession. This tuple is BARE WORDS: "while" and
+    # "sleep" are ordinary English, and the glossary re-check now carries the
+    # folded evidence-preparation prose, one sentence of which says a command may
+    # leave a temporary file "beside what it publishes while it writes". A
+    # bare-word scan over prose reports that as a polling re-check.
+    #
+    # Nothing structural is given up by narrowing it. The tuple was always
+    # documented as the CHEAPEST of three layers and explicitly not the primary
+    # defense; the whole-prompt job it was doing -- a loop construct emitted as
+    # its own separate line, never touching the recognised command -- belongs to
+    # _LOOP_CONSTRUCT_ANYWHERE_RE, which is STRUCTURAL (`while`/`until` match only
+    # with `do` and `done` later on the same line, so prose using those words
+    # never trips it) and is already run over this exact prompt, by
+    # test_no_emitted_poll_can_exceed_the_bash_call_cap. Widening a
+    # bare-word scan back over prose would not add a layer, it would only make
+    # the wording of an unrelated sentence able to fail this test.
     for forbidden in NON_POLLING_FORBIDDEN_TOKENS:
-        assert forbidden not in prompt, (
-            f"{target.name}'s re-check polls -- found {forbidden!r}:\n{prompt}"
+        assert forbidden not in command, (
+            f"{target.name}'s re-check polls -- found {forbidden!r} in its "
+            f"command:\n{command}"
         )
     # The command line itself, held to the SAME positive shape as the chunk's
     # own ACCEPT gate (test_no_emitted_poll_can_exceed_the_bash_call_cap) --
     # the token scan above catches the tokens it names, this closes the
-    # category regardless of spelling. Complementary, not redundant: the scan
-    # above covers the WHOLE prompt (a construct anywhere in the rendered
-    # text), this covers the command's own exact shape.
+    # category regardless of spelling.
     _assert_gate_command_cannot_hide_a_loop(
-        recheck_command(prompt), f"{target.name}'s re-check command"
+        command, f"{target.name}'s re-check command"
     )
 
 
@@ -1737,7 +1796,7 @@ def test_skeptic_setup_estimator_matches_the_template_and_the_shipped_ladder():
 
 @pytest.mark.parametrize(
     "research_mode,per_batch",
-    [("live", 19), ("offline", 5)],
+    [("live", 16), ("offline", 4)],
     ids=["live", "offline"],
 )
 def test_glossary_preflight_refuses_one_call_over_its_own_ladder(research_mode, per_batch, tmp_path):
@@ -1797,11 +1856,29 @@ def test_skeptic_preflight_refuses_one_call_over_its_own_ladder(tmp_path):
 # without touching either formula, which rescales every max-batch figure by
 # that same factor -- (10000-2)//per_batch, not a copy of what the code
 # happens to print today.
+#
+# #723/#724 then moved the two GLOSSARY rows again, and the skeptic row not at
+# all. THREE moves, and only the first raises the term: #723 added the approval
+# record (live 19 -> 20); #724 deleted the glossary resume precheck (live
+# 20 -> 19, offline 5 -> 4) and folded the evidence preparation into the wait
+# turn that already runs (live 19 -> 16). The skeptic template keeps its own
+# precheck and has no citation review at all, so its term is unchanged. That is
+# why "glossary offline" and "skeptic (both)" no longer share a formula -- they
+# did through 1.16.2, and the per-row needles below could not tell them apart
+# while they did.
+#
+# Note what the live row's arithmetic does NOT do: 19 -> 20 -> 19 -> 16 is not a
+# net -3 on one term. The record ADDS a per-batch call and the precheck deletion
+# REMOVES a per-batch call, so those two cancel in the total while touching
+# different terms; the fold then takes one call out of the PER-ATTEMPT term,
+# which the retry multiplier turns into -3. A test that only pinned the total
+# would pass on a build that got both halves of the cancellation wrong, which is
+# why the composition is pinned separately in batch_size_estimator.test.py.
 SHIPPED_BATCH_AGENT_CAP = 10000
 LADDER_MAX_BATCHES = {
-    "glossary live": (19, 526),      # (10000-2)//19 = 9998//19 = 526
-    "glossary offline": (5, 1999),   # (10000-2)//5  = 9998//5  = 1999
-    "skeptic (both)": (5, 1999),     # same 5N+2 formula as glossary offline
+    "glossary live": (16, 624),      # (10000-2)//16 = 9998//16 = 624
+    "glossary offline": (4, 2499),   # (10000-2)//4  = 9998//4  = 2499
+    "skeptic (both)": (5, 1999),     # (10000-2)//5  = 9998//5  = 1999
 }
 
 
@@ -1813,8 +1890,8 @@ def _ladder_row_needle(ladder: str, per_batch: int, documented_max: int) -> re.P
 
     Anchored on the row's own label because the figures alone do not identify a
     row (#416): "glossary offline" and "skeptic (both)" ship the SAME formula
-    and the SAME max, and 19N+2/5N+2 also occur in that file's prose below the
-    table. `(?!\\S)` rather than `(?!\\d)` -- a max may not merely START with
+    and the SAME max, and the live/offline figures also occur in that file's
+    prose below the table. `(?!\\S)` rather than `(?!\\d)` -- a max may not merely START with
     the right digits, or `-> 1999.5` would read as `-> 1999`. Stated at its
     real width rather than as "no false red": that guard makes the max column
     a BARE whitespace-delimited number, so a compact annotation on the figure

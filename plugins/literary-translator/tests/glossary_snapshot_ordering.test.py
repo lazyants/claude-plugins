@@ -50,7 +50,7 @@ than a source grep:
   * a prepare that reports failure spends no judge call, and its attempt's
     snapshot never reaches the merge;
   * the emitted approve command is checkBatchCmd() plus --approve-to APPENDED, so
-    the four character-identical --check-batch sites keep issuing that prefix
+    the three character-identical --check-batch sites keep issuing that prefix
     verbatim, and PREPARE is the only call in the file that carries --approve-to;
   * under LIVE the merge and verify consume approved_{i}_attempt_{n}.json for the
     approved attempt, and no rejected attempt's snapshot is ever named;
@@ -128,6 +128,56 @@ def evidence_dir(index: int, attempt: int) -> str:
     return f"{RUN_DIR}/evidence_{index}_attempt_{attempt}"
 
 
+# #724 -- every label whose prompt may carry this attempt's STEP 1/STEP 2
+# evidence-preparation commands. The wait pair is on the fresh path (the turn
+# whose --check-batch exits 0 runs both commands itself); the standalone prepare
+# is on the resumed path, where no wait runs.
+PREPARE_CARRYING_LABELS = frozenset({
+    "glossary:citation-prepare:0", "glossary:wait:0", "glossary:wait-recheck:0",
+})
+
+
+def prepare_prompt(out: dict, index: int = 0, attempt: int = 0) -> str:
+    """The prompt that carries THIS attempt's evidence-preparation steps.
+
+    #724 gave that prompt two possible homes, and which one a run uses is a
+    property of the PATH rather than of the prompt: on a fresh attempt the wait
+    turn that sees --check-batch exit 0 runs both prepare commands itself, so the
+    steps are rendered into `glossary:wait:` or `glossary:wait-recheck:`; on a
+    resumed attempt 0 no wait runs at all and the standalone
+    `glossary:citation-prepare:` call still carries them.
+
+    Every ordering and target assertion in this section is about the STEPS, not
+    about which call renders them, so they go through this helper and run
+    unchanged against either home. The two are held to the same `STEP 1.`/
+    `STEP 2.` grammar deliberately -- one description of the retrieval boundary,
+    two carriers -- which is what lets step_line() below serve both.
+
+    Selected by the attempt's own EVIDENCE sentinel, never by position: one
+    attempt can spend several wait calls and only one of them reaches the fold.
+    """
+    standalone = prompts_for(out, f"glossary:citation-prepare:{index}")
+    if standalone:
+        assert len(standalone) == 1, (
+            f"expected at most one standalone prepare call for batch {index}, "
+            f"got {len(standalone)}"
+        )
+        return standalone[0]
+    marker = f"EVIDENCE_READY {index} ATTEMPT {attempt}"
+    hits = [
+        prompt
+        for label in (f"glossary:wait:{index}", f"glossary:wait-recheck:{index}")
+        for prompt in prompts_for(out, label)
+        if marker in prompt
+    ]
+    assert len(hits) == 1, (
+        f"expected exactly one wait prompt carrying the folded prepare for batch "
+        f"{index} attempt {attempt} (marker {marker!r}), found {len(hits)}; the "
+        f"calls this run made were {labels_of(out)}"
+    )
+    return hits[0]
+
+
 def step_line(prompt: str, step: int) -> tuple:
     """The one `STEP <n>.` line of a rendered prompt, with its line index.
 
@@ -202,14 +252,47 @@ def check_cmd_from_wait(out: dict, index: int, attempt: int = 0) -> str:
     return hits[0]
 
 
-def check_cmd_from_precheck(out: dict, index: int) -> str:
-    """Same, from the PRECHECK -- the one site that still issues the contract on
-    the resume-skip path, where neither a dispatch nor a wait ever runs."""
-    prompt = prompts_for(out, f"glossary:precheck:{index}")[0]
-    lines = [ln.strip() for ln in prompt.split("\n")
-             if "--check-batch" in ln and ln.strip().startswith("python3")]
-    assert len(lines) == 1, f"expected one bare --check-batch command line, got {lines}"
-    return lines[0]
+# #724: a RESUMED run renders no --check-batch command anywhere before the
+# prepare call -- the precheck that used to issue one is gone, and the dispatch
+# and wait are exactly what ENTRY A skips. So the string the resume path's
+# snapshot command must be built on has to come from somewhere else, and the
+# choice matters: transcribing it into an f-string here is precisely what
+# check_cmd_from_wait()'s docstring forbids, because a local copy keeps agreeing
+# with itself after a contract change on either side.
+#
+# It is lifted from a FRESH run of the same batch and attempt instead. That makes
+# the assertion stronger than the one it replaces, not weaker: the old version
+# compared the resumed run's prepare against a command from that SAME run, so a
+# template that built a different command on the resume path would have compared
+# consistent-but-wrong strings. This compares across the two entry points, which
+# is the property the convergence design actually claims -- both entry points
+# snapshot the same bytes with the same command.
+
+
+def gate_cmd_of(prompt: str) -> str:
+    """The --check-batch command THIS prompt makes its accept gate, whichever of
+    the two shapes it uses.
+
+    A chunk poll renders the gate inside `while true; do <CMD> >/dev/null 2>&1 &&
+    exit 0;`; the re-check runs the same builder's output once, as a bare
+    `<CMD> >/dev/null 2>&1` line. Both are lifted here rather than transcribed,
+    for check_cmd_from_wait()'s reason: the comparison has to be against the
+    string the template really emitted.
+    """
+    hits = []
+    for line in prompt.split("\n"):
+        m = _CHUNK_ACCEPT_RE.search(line)
+        if m and "--check-batch" in m.group(1):
+            hits.append(m.group(1))
+            continue
+        stripped = line.strip()
+        if "--check-batch" in stripped and stripped.endswith(">/dev/null 2>&1"):
+            hits.append(stripped[: -len(" >/dev/null 2>&1")])
+    assert hits, f"this prompt renders no --check-batch accept gate:\n{prompt}"
+    assert len(set(hits)) == 1, (
+        f"this prompt renders DIFFERENT --check-batch gates: {sorted(set(hits))}"
+    )
+    return hits[0]
 
 
 def approve_cmd_for(check_cmd: str, index: int, attempt: int) -> str:
@@ -217,7 +300,8 @@ def approve_cmd_for(check_cmd: str, index: int, attempt: int) -> str:
     return check_cmd + " --approve-to " + approved_path(index, attempt)
 
 
-def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000) -> str:
+def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000,
+                resumed_batch_indices: list | None = None) -> str:
     """The token map and renderer now live in _workflow_instantiation.py
     (#413); this stays a thin wrapper preserving this file's own
     durable_root/run_id, which are spliced into RUN_DIR paths this file's
@@ -230,6 +314,10 @@ def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000) -
         run_id=FIXTURE_RUN_ID,
         research_mode=research_mode,
         batch_agent_cap=batch_agent_cap,
+        # #724 -- the resume-skip is no longer an agent reply this file's PLAN
+        # can answer; it is a substituted array. A test that wants ENTRY A
+        # names the batch here.
+        resumed_batch_indices=resumed_batch_indices or [],
     )
 
 
@@ -275,6 +363,22 @@ function record(label, promptText) {
   return seenCount[label] - 1;
 }
 
+// #724 -- the DEFAULT wait reply is now a PAIR under live. Whichever wait turn
+// sees --check-batch exit 0 also runs the two evidence-prepare commands, so its
+// reply ends with EVIDENCE_READY <i> ATTEMPT <n> and then READY <i>. The
+// attempt is LIFTED from the prompt the template actually rendered rather than
+// reconstructed from an ordinal: one attempt can spend several wait calls, so a
+// counter drifts the moment a fixture drives more than one chunk.
+//
+// An offline run renders no evidence sentinel at all (there is nothing to
+// prepare), and this returns the bare READY line for it -- which is what keeps
+// every offline fixture in this file meaning what it meant.
+function defaultWaitReply(promptText, idx) {
+  const m = /EVIDENCE_READY (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+  if (!m) return "READY " + idx;
+  return "EVIDENCE_READY " + m[1] + " ATTEMPT " + m[2] + "\nREADY " + idx;
+}
+
 function nth(list, i, fallback) {
   if (!Array.isArray(list)) return fallback;
   return (i < list.length) ? list[i] : fallback;
@@ -304,21 +408,18 @@ async function agent(promptText, opts) {
   const idx = parts[parts.length - 1];
   const p = PLAN[idx] || {};
 
-  if (kind === "precheck") {
-    return Object.prototype.hasOwnProperty.call(p, "precheck") ? p.precheck : ("ABSENT " + idx);
-  }
   if (kind === "dispatch") return "FRAGMENT " + idx;
   // 1.16.2 (#352): the wait poll is chunked, and every chunk of every attempt
   // shares this one label, so a plan-supplied reply is consumed POSITIONALLY --
   // one entry per call, not one per attempt. The default keeps every prior
   // caller's behaviour (READY on the first chunk, so the re-check below never
   // fires) while letting a plan force PENDING to reach it.
-  if (kind === "wait") return nth(p.waits, ordinal, "READY " + idx);
+  if (kind === "wait") return nth(p.waits, ordinal, defaultWaitReply(promptText, idx));
   // The authoritative re-check (#352) -- reached only when every chunk of an
   // attempt's wait answered something other than READY. Same default as
   // "wait" above: a plan that says nothing gets a READY re-check, so a run
   // that never forces PENDING waits never has to know this branch exists.
-  if (kind === "wait-recheck") return nth(p.rechecks, ordinal, "READY " + idx);
+  if (kind === "wait-recheck") return nth(p.rechecks, ordinal, defaultWaitReply(promptText, idx));
   // 1.16.1 (#347) -- the citation review became TWO calls, and this branch is
   // what the whole file's live path now hangs on: the JUDGE runs only if PREPARE
   // reported EVIDENCE_READY, so a harness that leaves this label unanswered
@@ -331,15 +432,32 @@ async function agent(promptText, opts) {
   if (kind === "citation-review") {
     // The judge's own ordinal counts JUDGED attempts, which stops being the
     // attempt NUMBER as soon as a prepare fails -- a failed prepare spends no
-    // judge call, so attempt 1's judge is still ordinal 0. The verdict sentinel
-    // carries the attempt and a stale one is rejected by design, so the DEFAULT
-    // verdict derives the attempt from how many prepares this batch has had:
-    // exactly one per attempt, always issued before that attempt's judge. A
-    // PLAN-supplied review is still taken by ordinal and spells its own
+    // judge call, so attempt 1's judge is still ordinal 0. Until #724 the
+    // DEFAULT verdict recovered the attempt by counting this batch's prepare
+    // CALLS (exactly one per attempt, always before that attempt's judge). That
+    // counter is gone on the fresh path: the prepare steps fold into the wait
+    // turn, so `glossary:citation-prepare:<i>` fires zero times and the count
+    // reads 0 for every attempt. Lifted out of the rendered prompt instead, the
+    // way the approval-record branch below already does it -- the judge prompt
+    // spells the exact sentinel it wants, so this needs no counter at all and
+    // stays correct on both entry points.
+    //
+    // A PLAN-supplied review is still taken by ordinal and spells its own
     // sentinel out, so a plan that exercises a prepare failure must count
-    // judged attempts, not attempts.
-    const prepared = seenCount["glossary:citation-prepare:" + idx] || 1;
-    return nth(p.reviews, ordinal, "CITATIONS_OK " + idx + " ATTEMPT " + (prepared - 1));
+    // JUDGED attempts, not attempts.
+    const asked = /CITATIONS_OK (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    const fallback = asked ? ("CITATIONS_OK " + asked[1] + " ATTEMPT " + asked[2]) : "UNPARSEABLE_JUDGE_PROMPT";
+    return nth(p.reviews, ordinal, fallback);
+  }
+  if (kind === "approval-record") {
+    // #723. Lifts the sentinel out of the prompt the template actually
+    // rendered, rather than rebuilding it from an ordinal: the record fires once
+    // per batch at whichever attempt the review approved, so a counter drifts on
+    // any ladder longer than one attempt. A fixture that wants the record to
+    // FAIL drives `records` explicitly.
+    const asked = /APPROVAL_RECORDED (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    const fallback = asked ? ("APPROVAL_RECORDED " + asked[1] + " ATTEMPT " + asked[2]) : "UNPARSEABLE_RECORD_PROMPT";
+    return nth(p.records, ordinal, fallback);
   }
   // Deliberately non-throwing: an unrecognized label must surface as a failed
   // ASSERTION with readable context, not an opaque harness crash. RED runs
@@ -370,10 +488,14 @@ function log(msg) { logLines.push(String(msg)); }
 
 
 def run(*, tmp_path: Path, batches: list, research_mode: str = "live",
-        plan: dict | None = None, timeout: int = 30) -> dict:
+        plan: dict | None = None, timeout: int = 30,
+        resumed_batch_indices: list | None = None) -> dict:
     plan = plan or {}
     harness = (
-        HARNESS.replace("__WRAPPED_SOURCE__", _wrap(instantiate(research_mode=research_mode)))
+        HARNESS.replace("__WRAPPED_SOURCE__", _wrap(instantiate(
+            research_mode=research_mode,
+            resumed_batch_indices=resumed_batch_indices,
+        )))
         .replace("__BATCHES_JSON__", json.dumps(batches))
         .replace("__PLAN_JSON__", json.dumps(plan))
     )
@@ -489,7 +611,7 @@ def test_the_retrieval_reads_the_snapshot_never_the_mutable_attempt_path(tmp_pat
     and no merge ever sees.
     """
     out = one_batch_run(tmp_path)
-    prepare = sole_prompt(out, "glossary:citation-prepare:0")
+    prepare = prepare_prompt(out)
     _, fetch_line = step_line(prepare, 2)
 
     assert "fetch_citation.py" in fetch_line, (
@@ -521,7 +643,7 @@ def test_the_snapshot_command_precedes_every_read_and_fetch_instruction(tmp_path
     before any snapshot exists looking perfectly healthy.
     """
     out = one_batch_run(tmp_path)
-    prepare = sole_prompt(out, "glossary:citation-prepare:0")
+    prepare = prepare_prompt(out)
     approve_cmd = approve_cmd_for(check_cmd_from_wait(out, 0), 0, 0)
     lines = prepare.split("\n")
 
@@ -545,9 +667,15 @@ def test_the_snapshot_command_precedes_every_read_and_fetch_instruction(tmp_path
     # by index so that it stays meaningful up the retry ladder, where several of
     # each label fire: at no point may a judge have run that its own attempt's
     # prepare had not already preceded.
+    # #724 -- the call that TAKES the snapshot is the wait turn on a fresh
+    # attempt and the standalone prepare on a resumed one, so the cross-call
+    # ordering is stated over both. Widening it to "any wait call counts" would
+    # not weaken it: a wait whose gate never exited 0 renders no prepare steps
+    # and cannot reach the judge at all, because batchStep returns
+    # glossary-pass-null before the review.
     seen_prepare = 0
     for i, label in enumerate(labels_of(out)):
-        if label == "glossary:citation-prepare:0":
+        if label in PREPARE_CARRYING_LABELS:
             seen_prepare += 1
         elif label == "glossary:citation-review:0":
             assert seen_prepare > 0, (
@@ -571,7 +699,7 @@ def test_the_prepare_step_is_told_to_stop_when_the_snapshot_command_fails(tmp_pa
     separately below, because prose alone cannot prove it.
     """
     out = one_batch_run(tmp_path)
-    prepare = sole_prompt(out, "glossary:citation-prepare:0")
+    prepare = prepare_prompt(out)
     lines = prepare.split("\n")
 
     fail_lines = [(i, ln) for i, ln in enumerate(lines) if "exits non-zero" in ln]
@@ -613,7 +741,7 @@ def test_the_approve_command_is_the_check_batch_contract_plus_approve_to(tmp_pat
     against a local transcription of it.
     """
     out = one_batch_run(tmp_path)
-    prepare = sole_prompt(out, "glossary:citation-prepare:0")
+    prepare = prepare_prompt(out)
     expected = approve_cmd_for(check_cmd_from_wait(out, 0), 0, 0)
     assert expected in prepare, (
         "the citation-prepare prompt must issue the wait poll's own --check-batch "
@@ -622,96 +750,202 @@ def test_the_approve_command_is_the_check_batch_contract_plus_approve_to(tmp_pat
     )
 
 
-# Round-8 sweep finding: PRECHECK and WAIT (chunk and re-check alike) are each
-# told "do nothing else" beyond their one read-only check -- unpinned, in this
-# file that already pins the --check-batch CONTRACT those same calls issue.
+# Round-8 sweep finding: the WAIT (chunk and re-check alike) is told "do nothing
+# else" beyond its one read-only check -- unpinned, in this file that already
+# pins the --check-batch CONTRACT that same call issues.
 # PRESENCE-ONLY: this file's mocked agent() cannot simulate an LLM doing
 # something extra with its bash tool, so this proves the instruction is still
 # WRITTEN, not that it is OBEYED -- see glossary_citation_review.test.py's
 # DISPATCH_NO_ACTION_CLAUSE pin for the same caveat spelled out at more length.
-PRECHECK_NOTHING_ELSE_CLAUSE = (
-    "do not create, modify, dispatch, or resolve any candidates yourself"
-)
+#
+# #724 removed the second holder of this pin, the PRECHECK, and with it the only
+# reason this suite ever had to reason about an agent handed a bash tool to
+# answer a question about disk state. The resume probe now runs in
+# resume_setup.py, which does not ask anything to be trusted not to do more --
+# it runs the command itself. That is the point of the move, and it is why this
+# pin shrank to one clause rather than being ported.
 WAIT_NOTHING_ELSE_CLAUSE = (
     "do not touch any files, and do not resolve any candidates yourself"
 )
+# #724 -- under LIVE the wait turn no longer "does nothing else": it runs the two
+# evidence-preparation commands itself. The blanket clause above is therefore
+# rendered only for OFFLINE, where there is nothing to prepare, and the live
+# prompt carries the narrower pair the standalone prepare has always carried --
+# the sanctioned-retrieval clause and, the load-bearing one, the clause that
+# keeps this agent from READING what fetch_citation.py just wrote. That second
+# one IS the #347 boundary: an agent that launches retrieval and never reads the
+# retrieved bytes cannot be argued out of anything by a hostile page.
+WAIT_FOLDED_ONLY_SANCTIONED_RETRIEVAL_CLAUSE = "Run NO other command."
+WAIT_FOLDED_NO_READ_CLAUSE = (
+    "Do not open, read, print, or quote any file either command wrote"
+)
 
 
-def test_precheck_and_wait_are_told_to_do_nothing_beyond_their_own_check(tmp_path):
-    """PRECHECK holds a bash tool to run its one read-only --check-batch probe;
-    WAIT holds one to run its bounded poll (and the re-check that backs it).
-    Neither is restricted by any tool-level sandbox -- confirmed in the round-8
-    sweep that NO agent() call anywhere in this plugin's templates carries a
-    tool-restriction option -- so the prompt's own "do nothing else" sentence
-    is the ONLY thing standing between "ran the one suggested command" and
-    "did whatever else its bash tool allows", for both of these mechanical,
-    supposedly read-only steps.
+def test_the_wait_is_told_to_do_nothing_beyond_its_own_check_under_offline(tmp_path):
+    """OFFLINE keeps the blanket clause, because offline keeps the bare wait.
 
-    All three call sites share one property (the SAME sentence, verbatim, at
-    the wait chunk and the wait re-check) but need two different runs: the
-    chunk fires under one_batch_run's default; the re-check only fires when
-    the chunk budget is exhausted (see pending_wait_run(), used above by this
-    file's own --check-batch roster test for the identical reason)."""
-    out = one_batch_run(tmp_path)
-    precheck = sole_prompt(out, "glossary:precheck:0")
-    assert PRECHECK_NOTHING_ELSE_CLAUSE in precheck, (
-        "the precheck prompt must forbid the agent from doing anything beyond "
-        f"its one read-only check; prompt was:\n{precheck}"
-    )
-    for prompt in prompts_for(out, "glossary:wait:0"):
+    WAIT holds a bash tool to run its bounded poll (and the re-check that backs
+    it), restricted by no tool-level sandbox -- confirmed in the round-8 sweep
+    that NO agent() call anywhere in this plugin's templates carries a
+    tool-restriction option -- so the prompt's own "do nothing else" sentence is
+    the ONLY thing standing between "ran the one suggested command" and "did
+    whatever else its bash tool allows".
+
+    Both call sites share one property (the SAME sentence, verbatim, at the wait
+    chunk and the wait re-check) but need two different runs: the chunk fires
+    under one_batch_run's default; the re-check only fires when the chunk budget
+    is exhausted (see pending_wait_run())."""
+    out = one_batch_run(tmp_path, research_mode="offline")
+    prompts = prompts_for(out, "glossary:wait:0")
+    assert prompts, f"fixture rendered no wait chunk; calls were {labels_of(out)}"
+    for prompt in prompts:
         assert WAIT_NOTHING_ELSE_CLAUSE in prompt, (
-            "every wait chunk prompt must forbid the agent from touching "
+            "every offline wait chunk prompt must forbid the agent from touching "
             f"files or resolving candidates itself; prompt was:\n{prompt}"
         )
 
-    recheck_out = pending_wait_run(tmp_path)
+    recheck_out = pending_wait_run(tmp_path, research_mode="offline")
     recheck_prompts = prompts_for(recheck_out, "glossary:wait-recheck:0")
     assert recheck_prompts, "pending_wait_run() must reach the wait re-check"
     for prompt in recheck_prompts:
         assert WAIT_NOTHING_ELSE_CLAUSE in prompt, (
-            "the wait re-check prompt must forbid the agent from touching "
+            "the offline wait re-check prompt must forbid the agent from touching "
             f"files or resolving candidates itself; prompt was:\n{prompt}"
         )
 
 
+def test_the_folded_wait_keeps_the_retrieval_boundary_clauses_under_live(tmp_path):
+    """LIVE replaces the blanket clause with the two that actually bound a turn
+    which DOES run commands -- and the substitution is the thing to check, in
+    both directions.
+
+    The blanket "do not touch any files" sentence would be false in a folded
+    turn: the snapshot command writes a file and the fetcher writes a directory
+    of them. Leaving it in beside instructions to run both would be an
+    instruction that contradicts itself, which is worse than either. What
+    replaces it is not weaker in the direction that matters: retrieval stays
+    confined to fetch_citation.py, and this agent still never READS what was
+    retrieved -- the #347 property, restated at its new carrier.
+
+    PRESENCE-ONLY, like its offline twin: this file's mocked agent() cannot
+    simulate an LLM doing something extra with its bash tool, so this proves the
+    instruction is still WRITTEN, not that it is OBEYED."""
+    out = one_batch_run(tmp_path)
+    prompts = prompts_for(out, "glossary:wait:0")
+    assert prompts, f"fixture rendered no wait chunk; calls were {labels_of(out)}"
+    recheck_prompts = prompts_for(pending_wait_run(tmp_path), "glossary:wait-recheck:0")
+    assert recheck_prompts, "pending_wait_run() must reach the wait re-check"
+
+    for prompt in list(prompts) + list(recheck_prompts):
+        assert WAIT_FOLDED_ONLY_SANCTIONED_RETRIEVAL_CLAUSE in prompt, (
+            "a folded wait turn must forbid every command but the ones it is "
+            f"given; prompt was:\n{prompt}"
+        )
+        assert WAIT_FOLDED_NO_READ_CLAUSE in prompt, (
+            "a folded wait turn must forbid reading what fetch_citation.py "
+            "wrote -- that is the #347 boundary, and it is the only thing "
+            "keeping a hostile citation page from reaching the agent that "
+            f"launches retrieval; prompt was:\n{prompt}"
+        )
+        assert WAIT_NOTHING_ELSE_CLAUSE not in prompt, (
+            "the blanket 'do not touch any files' clause must NOT survive into a "
+            "folded turn: that turn's own instructions tell it to run two "
+            "commands that write files, so the clause would contradict them and "
+            f"teach the agent to pick one. Prompt was:\n{prompt}"
+        )
+
+
 @pytest.mark.parametrize("label", [
-    "glossary:precheck:0", "glossary:dispatch:0", "glossary:wait:0",
-    "glossary:wait-recheck:0", "glossary:citation-review:0",
+    "glossary:dispatch:0", "glossary:citation-review:0",
+    "glossary:approval-record:0",
 ])
-def test_only_the_prepare_call_ever_issues_the_approve_command(tmp_path, label):
-    """PREPARE is the one call in the file that may snapshot, and the reasons
-    differ per label rather than being one rule repeated.
+def test_these_calls_never_issue_the_approve_command(tmp_path, label):
+    """Who may snapshot, and the reasons differ per label rather than being one
+    rule repeated.
 
-    The four --check-batch sites (precheck, dispatch self-check, wait chunk
-    poll, wait re-check -- the last added in 1.16.2, #352) must issue
-    checkBatchCmd() character-identically, so none of them may acquire the
-    flag: a precheck, wait chunk poll or re-check that snapshotted would write
-    an approved copy of bytes nobody has reviewed, and a dispatch self-check
-    that did it would let the producer approve its own output.
+    THE DISPATCH is a --check-batch site and must issue checkBatchCmd()
+    character-identically with the wait's, so it may not acquire the flag; and a
+    dispatch self-check that snapshotted would let the producer approve its own
+    output.
 
-    The JUDGE is here for a different reason and was added in 1.16.1 (the test was
-    named test_no_plain_check_batch_site_ever_issues_approve_to when it covered
-    only the first three). It is not a --check-batch site at all; what it must not
-    do is re-take the snapshot AFTER the evidence was retrieved from the first
-    one, which would leave the audited bytes and the fetched-from bytes as two
-    different objects -- the very split this file exists to prevent.
+    THE APPROVAL RECORD (#723) is here for the JUDGE's reason rather than a gate
+    site's: it runs AFTER the evidence was retrieved from the first snapshot, so
+    a second --approve-to there would leave the audited bytes and the
+    fetched-from bytes as two different objects. Its own command is built from
+    checkBatchCmdForPath() against the snapshot and carries
+    --record-approval-to, never --approve-to.
 
-    The re-check needs a different run from the other four labels: the default
-    fixture's wait answers READY on its very first chunk, so the re-check never
-    renders a prompt at all under it -- see pending_wait_run()'s docstring for
-    why a plan has to force the chunk budget to exhaust before this label ever
-    fires.
+    THE JUDGE was added to this roster in 1.16.1 (the test was named
+    test_no_plain_check_batch_site_ever_issues_approve_to when it covered only
+    the check-batch sites). It is not a --check-batch site at all; what it must
+    not do is re-take the snapshot AFTER the evidence was retrieved from the
+    first one -- the very split this file exists to prevent.
+
+    THE WAIT LABELS LEFT THIS ROSTER IN #724, and that is a deliberate retirement
+    rather than an oversight -- see
+    test_a_folded_wait_appends_approve_to_after_an_unchanged_accept_gate below,
+    which is what replaced it. The reason they were here was that a wait "that
+    snapshotted would write an approved copy of bytes nobody has reviewed". That
+    reason was never specific to the wait: it is equally true of PREPARE, where
+    the snapshot has always been taken BEFORE the judge by design -- which is
+    exactly why snapshot existence is not a verdict, and why #723 had to add a
+    record that is one. What the invariant actually protects is that the ACCEPT
+    GATE stays checkBatchCmd() character-identically at every site; the fold adds
+    a second command AFTER that gate exits 0 and leaves the gate string
+    untouched.
     """
+    out = one_batch_run(tmp_path)
+    prompts = prompts_for(out, label)
+    assert prompts, f"no prompt recorded for {label}"
+    for prompt in prompts:
+        assert "--approve-to" not in prompt, (
+            f"{label} must not carry --approve-to"
+        )
+
+
+@pytest.mark.parametrize("label", ["glossary:wait:0", "glossary:wait-recheck:0"])
+def test_a_folded_wait_appends_approve_to_after_an_unchanged_accept_gate(tmp_path, label):
+    """The replacement for the retired blanket ban (#724), and it asserts the
+    property the ban was standing in for.
+
+    Two things must hold and they are checked separately, because only the
+    second is about the fold. First: the ACCEPT GATE this turn polls on is
+    checkBatchCmd() byte-identically -- the same string the dispatch prompt tells
+    codex to re-run, with no flag spliced into it. Second: --approve-to appears
+    only AFTER that gate, on its own STEP 1 line, and the command it decorates is
+    that same gate string plus the flag APPENDED.
+
+    The negative half is the load-bearing one: a --approve-to that had leaked
+    INTO the polled command would mean every poll iteration published a snapshot,
+    including the iterations where the fragment was still being written. That is
+    the failure the old blanket ban was really guarding against, and it is now
+    stated directly instead of by proxy."""
     out = (
         pending_wait_run(tmp_path) if label == "glossary:wait-recheck:0"
         else one_batch_run(tmp_path)
     )
     prompts = prompts_for(out, label)
     assert prompts, f"no prompt recorded for {label}"
+
     for prompt in prompts:
-        assert "--approve-to" not in prompt, (
-            f"{label} must not carry --approve-to -- only the citation prepare "
-            "call snapshots"
+        gate = gate_cmd_of(prompt)
+        assert "--approve-to" not in gate, (
+            "the accept gate a wait turn polls on must stay checkBatchCmd() with "
+            f"no flag spliced into it; it was: {gate}"
+        )
+        step1_idx, step1 = step_line(prompt, 1)
+        assert step1.endswith(approve_cmd_for(gate, 0, 0)), (
+            "the folded turn's STEP 1 must be exactly the accept gate with "
+            f"--approve-to APPENDED:\n  expected tail: {approve_cmd_for(gate, 0, 0)}"
+            f"\n  STEP 1 was: {step1}"
+        )
+        approve_lines = [
+            i for i, ln in enumerate(prompt.split("\n")) if "--approve-to" in ln
+        ]
+        assert approve_lines == [step1_idx], (
+            "--approve-to may appear on the STEP 1 line and nowhere else in the "
+            f"prompt -- found it on line(s) {approve_lines}, STEP 1 is line "
+            f"{step1_idx}"
         )
 
 
@@ -897,9 +1131,8 @@ def test_each_attempt_snapshots_to_its_own_path(tmp_path):
         "bad source again\nCITATIONS_REJECTED 0 ATTEMPT 1",
         "CITATIONS_OK 0 ATTEMPT 2",
     ]}})
-    prepares = prompts_for(out, "glossary:citation-prepare:0")
+    prepares = [prepare_prompt(out, 0, attempt) for attempt in range(3)]
     reviews = prompts_for(out, "glossary:citation-review:0")
-    assert len(prepares) == 3, f"expected three prepare calls, got {len(prepares)}"
     assert len(reviews) == 3, f"expected three review calls, got {len(reviews)}"
 
     for attempt, prompt in enumerate(prepares):
@@ -948,11 +1181,12 @@ def test_a_failed_prepare_spends_no_judge_call_and_never_merges_its_attempt(tmp_
     "a rejected attempt's snapshot never reaches the merge" -- through the second
     door, and the door that did not exist before the split.
     """
-    out = one_batch_run(tmp_path, plan={"0": {"prepares": [
-        "step 1 exited 2: the fragment failed its coverage check\n"
-        "EVIDENCE_FAILED 0 ATTEMPT 0",
+    out = one_batch_run(tmp_path, plan={"0": {"waits": [
+        "the fragment validated, but step 1 exited 2: the coverage check failed\n"
+        "EVIDENCE_FAILED 0 ATTEMPT 0\n"
+        "READY 0",
     ]}})
-    prepares = prompts_for(out, "glossary:citation-prepare:0")
+    prepares = [prepare_prompt(out, 0, attempt) for attempt in range(2)]
     reviews = prompts_for(out, "glossary:citation-review:0")
     assert len(prepares) == 2, f"expected a second attempt to be prepared, got {len(prepares)}"
     assert len(reviews) == 1, (
@@ -1018,13 +1252,18 @@ def test_the_resume_skip_entry_point_still_produces_its_own_snapshot(tmp_path):
     snapshotted -- a prepare that ran while the judge was skipped would satisfy
     the snapshot half of this test and still merge unreviewed bytes.
     """
-    out = one_batch_run(tmp_path, plan={"0": {"precheck": "PRESENT 0"}})
+    out = one_batch_run(tmp_path, resumed_batch_indices=[0])
     order = labels_of(out)
     assert "glossary:dispatch:0" not in order, "fixture did not take the resume-skip path"
     assert "glossary:wait:0" not in order, "fixture did not take the resume-skip path"
 
-    prepare = sole_prompt(out, "glossary:citation-prepare:0")
-    expected = approve_cmd_for(check_cmd_from_precheck(out, 0), 0, 0)
+    # The command the FRESH path issues for this same batch and attempt (see the
+    # comment above check_cmd_from_wait's siblings): ENTRY A renders none of its
+    # own, and the claim under test is that both entry points snapshot the same
+    # bytes the same way.
+    fresh = one_batch_run(tmp_path)
+    prepare = prepare_prompt(out)
+    expected = approve_cmd_for(check_cmd_from_wait(fresh, 0, 0), 0, 0)
     assert expected in prepare, (
         "a resume-skipped batch must still snapshot its own fragment:\n"
         f"  expected: {expected}"

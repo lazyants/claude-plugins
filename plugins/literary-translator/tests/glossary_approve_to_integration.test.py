@@ -29,6 +29,7 @@ the real seam rather than within one script's own suite.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
@@ -157,7 +158,19 @@ async function agent(promptText, opts) {
     return Object.prototype.hasOwnProperty.call(p, "precheck") ? p.precheck : ("ABSENT " + idx);
   }
   if (kind === "dispatch") return "FRAGMENT " + idx;
-  if (kind === "wait") return "READY " + idx;
+  // #724 -- under live the wait turn that sees --check-batch exit 0 runs the two
+  // evidence-preparation commands itself, so its success reply is a PAIR:
+  // EVIDENCE_READY <i> ATTEMPT <n>, then READY <i>. The attempt is lifted from
+  // the prompt the template rendered rather than counted here, the same way the
+  // approval-record branch below does it. A bare READY would send this batch up
+  // the retry ladder to exhaustion and the approve command this file exists to
+  // LIFT would never be emitted -- silently, since an exhausted batch records no
+  // prompt to notice the absence in.
+  if (kind === "wait") {
+    const asked = /EVIDENCE_READY (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    if (!asked) return "READY " + idx;
+    return "EVIDENCE_READY " + asked[1] + " ATTEMPT " + asked[2] + "\nREADY " + idx;
+  }
   // 1.16.1 (#347) -- the citation review is two calls now, and the JUDGE runs
   // only after PREPARE reports EVIDENCE_READY. Leaving this label unanswered
   // does not fail loudly: the batch simply climbs the retry ladder to
@@ -167,11 +180,26 @@ async function agent(promptText, opts) {
     return nth(p.prepares, ordinal, "EVIDENCE_READY " + idx + " ATTEMPT " + ordinal);
   }
   if (kind === "citation-review") {
-    // Attempt derived from the prepare count rather than from this label's own
-    // ordinal: a failed prepare spends no judge call, so the two diverge. See
-    // tests/glossary_snapshot_ordering.test.py's copy of this harness.
-    const prepared = seenCount["glossary:citation-prepare:" + idx] || 1;
-    return nth(p.reviews, ordinal, "CITATIONS_OK " + idx + " ATTEMPT " + (prepared - 1));
+    // The attempt used to be derived from this batch's prepare COUNT rather than
+    // from this label's own ordinal, because a failed prepare spends no judge
+    // call and the two diverge. Since #724 that counter reads 0 on the fresh
+    // path -- the prepare has no call of its own there -- so the sentinel is
+    // lifted from the prompt instead, as the approval-record branch below
+    // already did. See tests/glossary_snapshot_ordering.test.py's copy of this
+    // harness.
+    const asked = /CITATIONS_OK (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    const fallback = asked ? ("CITATIONS_OK " + asked[1] + " ATTEMPT " + asked[2]) : "UNPARSEABLE_JUDGE_PROMPT";
+    return nth(p.reviews, ordinal, fallback);
+  }
+  if (kind === "approval-record") {
+    // #723. Lifts the sentinel out of the prompt the template actually
+    // rendered, rather than rebuilding it from an ordinal: the record fires once
+    // per batch at whichever attempt the review approved, so a counter drifts on
+    // any ladder longer than one attempt. A fixture that wants the record to
+    // FAIL drives `records` explicitly.
+    const asked = /APPROVAL_RECORDED (\d+) ATTEMPT (\d+)/.exec(String(promptText));
+    const fallback = asked ? ("APPROVAL_RECORDED " + asked[1] + " ATTEMPT " + asked[2]) : "UNPARSEABLE_RECORD_PROMPT";
+    return nth(p.records, ordinal, fallback);
   }
   return "UNEXPECTED_LABEL " + label;
 }
@@ -281,22 +309,50 @@ def approve_cmd_for(check_cmd: str, root: Path, index: int, attempt: int) -> str
     return check_cmd + " --approve-to " + str(approved_path(root, index, attempt))
 
 
+def prepare_prompt(out: dict, index: int = 0, attempt: int = 0) -> str:
+    """The prompt carrying this attempt's evidence-preparation steps, from
+    whichever call renders them.
+
+    #724 gave that prompt two homes: on a RESUMED batch it is still the
+    standalone `glossary:citation-prepare:` call, and on a fresh one the wait turn
+    whose --check-batch exits 0 runs both commands itself. This file drives a
+    fresh batch, so today it always resolves to the wait -- the standalone branch
+    is kept because which home a run uses is a property of the PATH, and a
+    fixture here that later drives a resumed batch would otherwise fail with an
+    IndexError rather than an explanation.
+    """
+    standalone = prompts_for(out, f"glossary:citation-prepare:{index}")
+    if standalone:
+        return standalone[attempt]
+    marker = f"EVIDENCE_READY {index} ATTEMPT {attempt}"
+    hits = [p for p in prompts_for(out, f"glossary:wait:{index}") if marker in p]
+    assert hits, (
+        f"no call rendered the evidence preparation for batch {index} attempt "
+        f"{attempt} (marker {marker!r}); labels were "
+        f"{[c['label'] for c in out['calls']]}"
+    )
+    return hits[0]
+
+
 def emitted_approve_cmd(prepare: str) -> str:
-    """The approve command the template ACTUALLY emitted into the citation
-    PREPARE call's STEP 1 line -- lifted verbatim, not rebuilt, so the string
+    """The approve command the template ACTUALLY emitted into the evidence
+    preparation's STEP 1 line -- lifted verbatim, not rebuilt, so the string
     this test runs is the string the template produces.
 
-    Read off the prepare prompt since 1.16.1 (#347), where retrieval moved out of
-    the judging agent and the approve command moved with it into the new prepare
-    call; it used to be lifted from the citation-review prompt. The STEP 1 check
-    is not decoration: the whole seam only means anything if the snapshot is
-    still the first thing that happens, so lifting a command that had drifted to
-    some later step would run green while the ordering guarantee was gone.
+    Read off the prepare steps since 1.16.1 (#347), where retrieval moved out of
+    the judging agent and the approve command moved with it; it used to be lifted
+    from the citation-review prompt, and since #724 the steps themselves are
+    rendered into the WAIT prompt on the fresh path. What the lift depends on is
+    unchanged through both moves: the command sits on a line opening `STEP 1.`.
+    That check is not decoration -- the whole seam only means anything if the
+    snapshot is still the first thing that happens, so lifting a command that had
+    drifted to some later step would run green while the ordering guarantee was
+    gone.
     """
     step1 = [ln for ln in prepare.split("\n") if "--approve-to" in ln]
     assert len(step1) == 1, (
-        f"expected exactly one --approve-to line in the citation-prepare prompt, "
-        f"found {len(step1)}"
+        f"expected exactly one --approve-to line in the evidence-preparation "
+        f"prompt, found {len(step1)}"
     )
     line = step1[0]
     assert line.startswith("STEP 1."), (
@@ -316,6 +372,27 @@ def emitted_merge_cmd(merge_prompt: str) -> str:
     )
     line = lines[0]
     assert "python3 " in line, f"the merge line does not begin a python3 command: {line}"
+    return line[line.index("python3 "):]
+
+
+def emitted_record_cmd(record_prompt: str) -> str:
+    """The --record-approval-to command the template ACTUALLY emitted into the
+    approval-record prompt (#723), lifted the same way for the same reason.
+
+    #734 made this leg part of the round-trip rather than an aside: the merge
+    command now carries --approval-records and canon_validate.py refuses the
+    attestation without a record whose sha256 matches the fragment. So the only
+    way the merge half of this test can pass is if the record the template asks
+    for is a record the merge accepts -- which is exactly the cross-language
+    agreement this file exists to prove, and which neither the Python unit tests
+    nor the mocked Node harness can reach on their own."""
+    lines = [ln for ln in record_prompt.split("\n") if "--record-approval-to" in ln]
+    assert len(lines) == 1, (
+        f"expected exactly one --record-approval-to line in the approval-record "
+        f"prompt, found {len(lines)}"
+    )
+    line = lines[0]
+    assert "python3 " in line, f"the record line does not begin a python3 command: {line}"
     return line[line.index("python3 "):]
 
 
@@ -355,7 +432,7 @@ def test_the_emitted_approve_command_snapshots_byte_identically_against_the_real
         tmp_path=tmp_path, durable_root=str(root),
         batches=[make_batch(0, [SOURCE_FORM])], plugin_root=real_plugin_root,
     )
-    prepare = prompts_for(out, "glossary:citation-prepare:0")[0]
+    prepare = prepare_prompt(out)
 
     # Lift the approve command the template ACTUALLY emitted. Cross-check it
     # against the wait poll's own --check-batch string plus the appended flag, so
@@ -418,7 +495,37 @@ def test_the_emitted_approve_command_snapshots_byte_identically_against_the_real
         f"  banked:       {banked_merge_path}\n  python wrote: {approved}"
     )
 
+    # #734 -- the record leg, run BEFORE the merge because the merge now refuses
+    # without it. Both commands are the template's own, so this asserts the two
+    # agree about the record's PATH (the template builds each independently)
+    # and about its CONTENT (the digest canon_validate.py writes here is the one
+    # it re-computes there, over bytes that crossed the JS/Python seam as CRLF).
+    record_cmd = emitted_record_cmd(prompts_for(out, "glossary:approval-record:0")[0])
+    rargv = shlex.split(record_cmd)
+    assert rargv[0] == "python3", f"unexpected interpreter token in record command: {rargv[0]!r}"
+    rargv[0] = sys.executable
+    rproc = subprocess.run(rargv, capture_output=True, text=True, timeout=120)
+    assert rproc.returncode == 0, (
+        "the template's emitted --record-approval-to command failed against the "
+        f"real canon_validate.py:\n{rproc.stdout}\n{rproc.stderr}"
+    )
+    rpayload = json.loads(rproc.stdout.strip().splitlines()[-1])
+    record_written = Path(rpayload["approval_record_path"])
+    assert record_written.is_file(), (
+        f"the record command exited 0 but wrote nothing at {record_written}"
+    )
+    # The record is about the SNAPSHOT, not the mutable attempt path -- the
+    # distinction the whole snapshot-ordering design rests on. Asserted here
+    # because this is the only place both files exist on a real disk.
+    assert json.loads(record_written.read_text(encoding="utf-8"))["sha256"] == (
+        hashlib.sha256(approved.read_bytes()).hexdigest()
+    ), "the record's digest is not the digest of the approved snapshot"
+
     merge_cmd = emitted_merge_cmd(prompts_for(out, "glossary:merge")[0])
+    assert str(record_written) in merge_cmd, (
+        "the merge command must carry the very record path the record command "
+        f"wrote:\n  wrote: {record_written}\n  merge: {merge_cmd}"
+    )
     assert str(approved) in merge_cmd, (
         f"the emitted merge command does not name the approved snapshot:\n{merge_cmd}"
     )

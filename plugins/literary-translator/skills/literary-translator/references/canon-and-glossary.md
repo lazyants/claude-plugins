@@ -77,7 +77,7 @@ Canon population is not "paste the whole book into context and ask for a glossar
    adjudicator is *told* the rule (it refuses to dispatch a durable prompt that lacks
    it), and `canon_validate._enforce_no_truncated_accepted()` refuses the answer if it
    comes back wrong — a marker-bearing item with `disposition: "accepted"` is rejected
-   on ALL THREE batch entry points: the `--check-batch` precheck, the
+   on ALL THREE batch entry points: the `--check-batch` gate, the
    `--merge-batches` write, and the legacy single-fragment `--batch` merge. They no
    longer each open-code the gate sequence; all three call one
    `_validate_and_enforce_batch()`, so a fourth entry point cannot silently miss a
@@ -132,7 +132,7 @@ Canon population is not "paste the whole book into context and ask for a glossar
    `glossary_TASK.md`'s bytes are not one of the resume digest's inputs (those are
    listed in `references/orchestration-and-batching.md` under **The resume-integrity
    gate and its digest inputs**), so a matching resume keeps each batch's
-   `out_{i}_attempt_0.json`, the precheck resume-skips it, and the merge takes what
+   `out_{i}_attempt_0.json`, `resume_setup.py`'s probe resume-skips it, and the merge takes what
    the OLD prompt already marked `accepted`. Recover with the stale-cached-result
    procedure in that same section — not restated here — plus the one step it does not
    cover: delete the attempt-0 fragments you want re-adjudicated before re-invoking,
@@ -382,7 +382,7 @@ suppresses the re-check, which is gated on the verdict rather than on the loop
 index. A fragment that validates in chunk 1 spends exactly 1 call; only a wait
 that exhausts every chunk and still needs the re-check spends all 3. The
 estimator computes the worst case, which is what a preflight gate should do —
-but do not read `19N + 2` or `5N + 2` as what a run will actually spend. In the
+but do not read `16N + 2` or `4N + 2` as what a run will actually spend. In the
 skeptic pass the early exit is an **economy** requirement rather than a
 correctness one: each extra chunk would spend another agent call re-running
 `--validate-fragment` over a fragment that has already validated. That gate is
@@ -641,9 +641,11 @@ requirement and now **#505**'s live citation attestation):
 ### `--check-batch PATH [--expect-source-forms-file M.json]` — one fragment, no write
 
 The self-check invocation issued character-identically by
-`batchPrecheckPrompt`, `batchDispatchPrompt`, `batchWaitChunkPrompt` and —
-since **1.16.2** — `batchWaitRecheckPrompt` (see
-`references/orchestration-and-batching.md`). Pass-1 per-item validation plus
+`batchDispatchPrompt`, `batchWaitChunkPrompt` and — since **1.16.2** —
+`batchWaitRecheckPrompt` (see `references/orchestration-and-batching.md`). A
+fourth issuer, `batchPrecheckPrompt`, was removed in **#724**: the same command
+is now run by `resume_setup.py` itself, before the Workflow starts, so it is no
+longer kept character-identical by construction and must not be assumed to be. Pass-1 per-item validation plus
 the offline backstop on the ONE fragment at `PATH` — never touches
 `canon.json`, never writes anything. When `--expect-source-forms-file` is
 given (a JSON array of candidate names, read from a **file**, never argv —
@@ -743,10 +745,25 @@ somebody has to know to perform, and an unaudited citation announces nothing.
 
 Three properties worth stating exactly, because each is a limit:
 
-- **It is an attestation, not a proof.** No artifact on disk records a
-  `CITATIONS_OK` verdict, and the approved snapshot the reviewer audits is
-  written by PREPARE *before* any evidence is fetched — so even "this path is
-  an `approved_*.json`" would say nothing about the verdict. What the refusal
+- **It is an attestation, not a proof.** The approved snapshot is written by
+  PREPARE *before* any evidence is fetched, so "this path is an
+  `approved_*.json`" says nothing about the verdict. **#723** narrowed the gap:
+  the pass writes `approval_{i}_attempt_{n}.json` naming the
+  sha256 of every APPROVED fragment, so the attesting operator can pick those
+  exact bytes by digest instead of guessing which snapshot won — the guess that
+  once merged a batch whose only recorded verdicts were rejections. **#734** then
+  made the script require it: `--citations-reviewed` is refused without
+  `--approval-records`, one record per merged fragment, each naming that
+  fragment's digest. **That reader can only REFUSE.** No record permits anything,
+  and none authorizes skipping the citation review — which stays unconditional on
+  both entry points — so a copy forged in the model-writable directory buys its
+  forger only the merge an honest record would have allowed, and the trusted
+  point stays the operator. What it removes is narrower than it looks and worth
+  stating exactly: until #734 the pass decided whether the record had been
+  written by reading the recording agent's own *sentence*, so a reply that
+  claimed a write that never happened merged anyway. The check moves that one
+  decision onto the filesystem; it cannot make the record HONEST, because the
+  same turn runs the command and reports on it. What the refusal
   converts is a SILENT freeze into a deliberate act, the same ceiling as
   `--plugin-root`/`--allow-durable-sibling` (#412) and `reject_review.py`'s
   attested `--reason` (#461).
@@ -1230,8 +1247,8 @@ approved.
 
 **Neither half is codex, and neither carries a schema** — the judge's
 `agentType` names the tool-restricted Claude agent above, never a codex
-dispatch, and both calls are sentinel-verdict shaped exactly like the precheck
-and wait steps (a schema-bearing call can wedge the Workflow if the
+dispatch, and both calls are sentinel-verdict shaped exactly like the
+wait step (a schema-bearing call can wedge the Workflow if the
 forwarder detaches, #97). Codex is what PRODUCED the citation, so a reviewer
 running under a different model is a genuinely separate opinion rather than
 the same reasoning re-run; `tests/bounded_poll_present.test.py` pins this
@@ -1240,7 +1257,7 @@ keeps it that way. This does not loosen R1/R4: the stage AUTHORS nothing and
 repairs nothing — its only two powers are approve and reject, every canon
 resolution still comes from codex, and a rejection's only effect is to make
 codex redo the batch. The two efforts differ deliberately: PREPARE takes the
-precheck's and wait's `"low"`, being mechanical — run two commands, relay
+the wait's `"low"`, being mechanical — run two commands, relay
 which succeeded — while the JUDGE keeps `"high"` as the one judgment call in
 the template. Neither is wired to `{{EFFORT}}`, which stays the codex
 dual-injection knob and nothing else.
@@ -1355,13 +1372,20 @@ its own, but since **1.16.1** the reason is no longer cost: the split already
 spends the extra call, taking the live ceiling from
 `1 + 3*(MAX_CITATION_RETRIES+1)` to `1 + 4*(MAX_CITATION_RETRIES+1)` — and
 **1.16.2** took it further still, to
-`1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` (**19** at the shipped
+`2 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` (**20** at the shipped
 `WAIT_CALLS = 3`), when the wait itself stopped being reliably one agent call
 — `WAIT_CALLS` is its worst case, not its price (see
-**The chunked wait** above). What
+**The chunked wait** above). **#724** then took it to
+`1 + (2 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` (**16**): the resume precheck
+was deleted, and PREPARE's two commands now run inside whichever wait turn
+already saw `--check-batch` exit 0, so on the fresh path prepare is no longer
+a call of its own. What
 survives is the structural reason, which was always the stronger one — this
-is the ONE point both entry points into the review loop converge on. Putting
-the snapshot in the wait step instead would silently skip it on every
+is the ONE point both entry points into the review loop converge on, and the
+fold does not move it: the folded turn issues the SAME two commands, in the
+same order, that the standalone task states, and a resumed batch that runs no
+wait still spends the standalone call. Putting
+the snapshot in the wait step and NOWHERE ELSE would silently skip it on every
 resume-skipped batch, because that path runs neither the dispatch nor the
 wait, and a resumed, never-reviewed fragment is precisely the case this whole
 stage exists for. Prepare sits at that convergence point, so both entry
@@ -1510,8 +1534,8 @@ The end state is identical either way: the fail scan skips the sentinel, a
 trailing clean OK line then approves the batch, and a reply carrying BOTH
 verdicts silently resolves to the approving one.
 
-Each of this template's four sites — precheck, wait, prepare and judge —
-therefore now short-circuits to REJECT when `rejectedAnywhere(reply,
+Each of this template's four sites — wait, prepare, judge and
+(**#723**) the approval record — therefore now short-circuits to REJECT when `rejectedAnywhere(reply,
 failSentinel)` finds the fail sentinel anywhere in the reply as a plain
 substring, evaluated BEFORE `sentinelVerdict()` is consulted
 at all. Substring containment is strictly easier to satisfy than line
@@ -1524,7 +1548,9 @@ direction and through a differently-named wrapper: there `DRAFT_MISSING` is the
 OK sentinel, so gluing hides a GENUINE missing-draft report rather than faking a
 pass, and `runRound` keys on `mentionedAnywhere()` — same containment test as
 `rejectedAnywhere()`, which it delegates to, but a hit biases toward ACTING on
-the sentinel instead of rejecting. Seven guarded sites over the two templates.
+the sentinel instead of rejecting. Six guarded sites over the two templates.
+(It was seven until **#724** deleted the glossary precheck; the count and its
+composition have both moved, so read the list, not the number.)
 `skeptic-pass-wf.template.js` mirrors this control flow and is deliberately NOT
 guarded — it sits in no `cache_key.py` bundle and carries its own
 `compute_skeptic_input_digest()`, so editing it would force a fresh skeptic
@@ -1536,9 +1562,11 @@ to below is the number of attempts, never the cause of the reject.
 
 - A reply that merely MENTIONS the fail sentinel while approving — "this is
   not a `CITATIONS_REJECTED 0 ATTEMPT 0` case" — now rejects.
-- A sentinel can be a substring of a longer-indexed sibling: `ABSENT 1` occurs
-  inside `ABSENT 10`. So a precheck or wait reply for batch 1 that quotes
-  batch 10's sentinel takes the reject branch. The citation verdict is NOT
+- A sentinel can be a substring of a longer-indexed sibling: `PENDING 1` occurs
+  inside `PENDING 10`. So a wait reply for batch 1 that quotes batch 10's
+  sentinel takes the reject branch. (First written down against the precheck's
+  `ABSENT 1`/`ABSENT 10`; **#724** deleted that site, and the collision is a
+  fact about substring containment rather than about any one sentinel.) The citation verdict is NOT
   exposed to this at shipped settings, because its sentinels end in
   ` ATTEMPT <n>`, which terminates the batch index —
   `CITATIONS_REJECTED 1 ATTEMPT 0` is not a substring of
@@ -1548,27 +1576,27 @@ to below is the number of attempts, never the cause of the reject.
   make it reachable.
 
 **A false REJECT does not cost the same at every site**, and the difference is
-what to read a failed run against. Of the seven, exactly ONE recovers
-DETERMINISTICALLY inside the run — the precheck. At every other site the
-trigger is the reply's PHRASING rather than the data, so whatever retry the
-site gets — the citation ladder's next attempt in-run, a later run for the
-other four — is another roll of the same die and not a repair:
+what to read a failed run against. At every remaining site the trigger is the
+reply's PHRASING rather than the data, so whatever retry the site gets — the
+citation ladder's next attempt in-run, a later run for the others — is another
+roll of the same die and not a repair.
 
-- **Precheck** — `resumed` stays false and the batch falls through to the
-  dispatch + wait it would have run had no fragment been on disk. Automatic,
-  same run, same batch; the whole cost is the forfeited resume-skip saving,
-  one codex dispatch plus one wait call — the fragment really is on disk and
-  valid, which is what made the rejection false, so the wait's FIRST chunk
-  validates it at once and returns `READY` without ever reaching a second
-  chunk or the re-check. This is the only genuine repair of the
-  seven, and it is genuine precisely because the fall-through path is correct
-  regardless of WHY the precheck reported `ABSENT`.
+**The one site that DID recover deterministically was the precheck, and #724
+removed it** — not by weakening it, but by removing the reply it read: the
+resume decision is now `resume_setup.py`'s own `--check-batch` run, substituted
+into the template as an array, so there is no phrasing to get wrong. That is
+worth stating rather than quietly dropping, because it is the only entry in
+this list ever to have been repaired in-run, and its disappearance from the
+list is a deletion of the failure mode rather than of the remedy.
 - **Evidence prepare (1.16.1)** — joins the citation ladder below rather than
   falling through: a false hit on `EVIDENCE_FAILED` skips the judge call
   entirely, carries prepare's own reply forward as the next attempt's
   regeneration constraint, and still counts against `MAX_CITATION_RETRIES`,
-  so that attempt costs `2 + WAIT_CALLS` calls rather than the ladder's
-  `3 + WAIT_CALLS` — 5 rather than 6 at the shipped `WAIT_CALLS = 3`. Not a repair
+  so that attempt costs `1 + WAIT_CALLS` calls rather than the ladder's
+  `2 + WAIT_CALLS` — 4 rather than 5 at the shipped `WAIT_CALLS = 3`. Both terms
+  dropped by one in **#724**, which folded the prepare into the wait turn on the
+  fresh path; the saving is the JUDGE call in both cases, and that is what has
+  always made this attempt cheaper than a judged one. Not a repair
   either, and for the same reason as the review below — the ladder varies the
   FRAGMENT, while what tripped the guard was prepare's WORDING.
 - **Citation review — NOT RELIABLY self-recovering, however much its retry

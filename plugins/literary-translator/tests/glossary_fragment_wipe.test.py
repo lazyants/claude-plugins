@@ -33,6 +33,7 @@ non-empty and nested.
 """
 
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,11 @@ _FRAGMENTS = (
     "out_2_attempt_3.json",
     "approved_0_attempt_0.json",
     "approved_1_attempt_2.json",
+    # #723 verdict records. They ride the approved_* rule, not the out_* one --
+    # see the wipe's own docstring for why a record of unknown age is worse than
+    # no record at all.
+    "approval_0_attempt_0.json",
+    "approval_1_attempt_2.json",
 )
 
 # The only two fragments a RESUME keeps.
@@ -87,6 +93,11 @@ _UNTOUCHED_FILES = (
     "input.digest",
     "evidence_0_attempt_0.json",
     "evidence_all.json",
+    # Near misses on the #723 record name, for the same reason the evidence_*
+    # near misses exist above: a pattern loosened to `approval_.*` would be
+    # indistinguishable from the anchored one.
+    "approval_all.json",
+    "approval_x_attempt_0.json",
 )
 _UNTOUCHED_DIRS = (
     "evidence_x_attempt_0",
@@ -127,8 +138,9 @@ def test_fresh_run_wipes_every_attempt_including_zero(rs, tmp_path):
     _seed(d)
     rs._wipe_stale_glossary_fragments(d, resume=False)
     assert _names(d) == list(_UNTOUCHED), (
-        "a fresh run must trust nothing on disk -- every out_*, approved_* and "
-        f"evidence_* attempt, including attempt 0, must go. Survivors: {_names(d)}"
+        "a fresh run must trust nothing on disk -- every out_*, approved_*, "
+        "approval_* and evidence_* attempt, including attempt 0, must go. "
+        f"Survivors: {_names(d)}"
     )
 
 
@@ -139,9 +151,36 @@ def test_resume_keeps_attempt_zero_but_wipes_the_rest(rs, tmp_path):
     assert _names(d) == sorted(_UNTOUCHED + _RESUME_SURVIVING_FRAGMENTS), (
         "a resume keeps out_{i}_attempt_0 (the resume-skip optimisation depends "
         "on it and it is still citation-reviewed) but must wipe every attempt "
-        ">=1, every approved_* snapshot and every evidence_* directory. "
-        f"Survivors: {_names(d)}"
+        ">=1, every approved_* snapshot, every approval_* verdict record and "
+        f"every evidence_* directory. Survivors: {_names(d)}"
     )
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_every_verdict_record_is_wiped_under_either_flag(rs, tmp_path, resume):
+    """#723. The record answers "batch i, these exact bytes, passed the citation
+    review", and an operator reads it to pick the attested snapshot by digest.
+    That is only true while it describes THIS run: a record inherited from an
+    earlier run would vouch for bytes this run may already have rejected and
+    re-generated, which is precisely the guesswork the record removes. So it
+    follows approved_*, wiped under either flag, rather than out_*.
+
+    Stated on its own rather than left to the exact-list assertions above: those
+    two would also stay green if the record were merely never SEEDED, and a
+    failure there prints a directory diff rather than the property."""
+    d = tmp_path / "glossary" / "runs" / "R"
+    _seed(d)
+    rs._wipe_stale_glossary_fragments(d, resume=resume)
+    survivors = [
+        n for n in _names(d) if re.fullmatch(r"approval_\d+_attempt_\d+\.json", n)
+    ]
+    assert survivors == [], (
+        "no verdict record may survive a wipe under either flag -- a record of "
+        f"unknown age is worse than none. Survivors: {survivors}"
+    )
+    # ...and the near miss is still there, so the pattern is anchored.
+    assert "approval_x_attempt_0.json" in _names(d)
+    assert "approval_all.json" in _names(d)
 
 
 # ---------------------------------------------------------------------------

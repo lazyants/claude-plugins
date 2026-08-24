@@ -242,7 +242,7 @@ def code_lines(body):
     trailing comment "// checkBatchCmd() -- the same command DISPATCH's
     self-check issues"; the dispatch could drop its self-check entirely and
     the assertion still passed. A body that happens to have no trailing
-    comment (batchPrecheckPrompt) hides that, which is exactly why the loop
+    comment (batchPrecheckPrompt, which #724 has since deleted) hides that, which is exactly why the loop
     below now runs this over ALL THREE sites rather than trusting the one
     site that was proved by mutation.
 
@@ -713,16 +713,24 @@ def test_glossary_batch_dispatch_is_codex_and_schema_less():
     assert not has_schema(options), f"glossary batch dispatch must be schema-less (fire-and-forget): {options}"
 
 
-# The FOUR sites that must issue the --check-batch command
+# The THREE sites that must issue the --check-batch command
 # character-identically (see checkBatchCmd()'s own comment in the template):
-# the resume precheck, the codex dispatch's own self-check, the wait poll's
-# chunk, and -- new in 1.16.2 (#352) -- the authoritative re-check that backs
-# the chunk budget. The wait was one site until #352 split it in two, and both
-# halves belong here for the reason the re-check exists at all: a re-check that
-# asked a WEAKER question than the poll it backs up would be a gate that opens
-# only on the path nobody watches.
+# the codex dispatch's own self-check, the wait poll's chunk, and -- new in
+# 1.16.2 (#352) -- the authoritative re-check that backs the chunk budget. The
+# wait was one site until #352 split it in two, and both halves belong here for
+# the reason the re-check exists at all: a re-check that asked a WEAKER question
+# than the poll it backs up would be a gate that opens only on the path nobody
+# watches.
+#
+# #724 removed a FOURTH, `batchPrecheckPrompt` -- the resume probe that asked
+# this same question of attempt 0. It did not become a fifth builder somewhere
+# else: it stopped being a prompt at all, and now runs in resume_setup.py before
+# the Workflow starts (tests/glossary_resume_probe.test.py). The
+# single-composition-site assertion below is what makes that checkable rather
+# than asserted -- a precheck quietly reinstated with its own hand-built command
+# fails there, not here.
 CHECK_BATCH_CALL_SITES = (
-    "batchPrecheckPrompt", "batchDispatchPrompt",
+    "batchDispatchPrompt",
     "batchWaitChunkPrompt", "batchWaitRecheckPrompt",
 )
 
@@ -771,8 +779,15 @@ def test_glossary_batch_wait_chunk_is_an_elapsed_bounded_poll_of_check_batch():
         f"itself (the exact `checkCmd` binding, not merely an identifier "
         f"containing that name), got: {poll}"
     )
+    # Follow the indirection ONE more level since #723: checkBatchCmd() now
+    # delegates to checkBatchCmdForPath(), which is the file's single
+    # composition site. The chain being asserted is unchanged -- poll ->
+    # checkBatchCmd -> the real canon_validate.py --check-batch command.
+    assert "checkBatchCmdForPath(" in code_lines(
+        extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd")
+    ), "checkBatchCmd must reach the single composition site"
     cmd_line = line_containing(
-        code_lines(extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd")),
+        code_lines(extract_function_body(GLOSSARY_SOURCE, "checkBatchCmdForPath")),
         "canon_validate.py",
     )
     assert "--check-batch" in cmd_line, (
@@ -839,12 +854,24 @@ def test_check_batch_command_is_composed_once_and_shared_by_all_four_sites():
     `"checkBatchCmd(" in body` on its own, so replacing the dispatch's real
     self-check line with "Then stop. Do not self-check." left this test GREEN --
     verified by mutation. The lock had been proved on batchPrecheckPrompt, which
-    happens to carry no trailing comment; that one site is not evidence about
-    the other two, so the assertions below are proved separately at each."""
-    check_cmd_body = code_lines(extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd"))
-    cmd_line = line_containing(check_cmd_body, "canon_validate.py")
+    happened to carry no trailing comment; that one site was not evidence about
+    the other two, so the assertions below are proved separately at each. #724
+    deleted that site, which is why the mutation is recorded here rather than
+    re-runnable: the reason it was needed outlived the function it was run on.
+
+    #723: the composition moved one level down, into checkBatchCmdForPath(), and
+    checkBatchCmd() became a two-line delegation to it. The reason is that the
+    approval record runs the same command against the approved SNAPSHOT rather
+    than against a fragment attempt path, and the alternative -- a second builder
+    -- is precisely what this test forbids. So the lock is unchanged in substance
+    and only moves which function must hold the one composition: still exactly
+    one site in the file, still reachable from checkBatchCmd(), and the
+    ACCEPT GATE sites still go through checkBatchCmd(index, attempt) itself."""
+    builder_body = code_lines(extract_function_body(GLOSSARY_SOURCE, "checkBatchCmdForPath"))
+    cmd_line = line_containing(builder_body, "canon_validate.py")
     assert "--check-batch" in cmd_line, (
-        f"checkBatchCmd must build the canon_validate.py --check-batch command, got: {cmd_line}"
+        f"checkBatchCmdForPath must build the canon_validate.py --check-batch "
+        f"command, got: {cmd_line}"
     )
 
     composition_sites = code_lines(GLOSSARY_SOURCE).count(COMPOSED_CHECK_BATCH_LITERAL)
@@ -852,8 +879,17 @@ def test_check_batch_command_is_composed_once_and_shared_by_all_four_sites():
         f"the --check-batch command must be composed in exactly ONE place, "
         f"found {composition_sites} composition site(s)"
     )
-    assert COMPOSED_CHECK_BATCH_LITERAL in check_cmd_body, (
-        "that single composition site must be checkBatchCmd itself"
+    assert COMPOSED_CHECK_BATCH_LITERAL in builder_body, (
+        "that single composition site must be checkBatchCmdForPath itself"
+    )
+    # ...and checkBatchCmd() must REACH it, rather than having quietly become a
+    # second builder wearing the old name.
+    check_cmd_body = code_lines(extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd"))
+    assert "checkBatchCmdForPath(" in check_cmd_body, (
+        "checkBatchCmd must delegate to the single composition site"
+    )
+    assert "/scripts/canon_validate.py" not in check_cmd_body, (
+        "checkBatchCmd must not compose the command itself once it delegates"
     )
 
     for name in CHECK_BATCH_CALL_SITES:
@@ -925,6 +961,31 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
     files, retrieves nothing), so prepare contributes its own
     EVIDENCE_READY/EVIDENCE_FAILED sentinel pair.
 
+    #724: four became three. The resume PRECHECK -- the oldest of the four --
+    is gone, and with it the sentinel pair (PRESENT/ABSENT) whose false-approval
+    cost was #228's and #308's whole subject. It was not moved the way the wait's
+    parse was moved in 1.16.2: nothing in this template parses a resume answer
+    any more, because the answer arrives as RESUMED_BATCHES, a substituted array.
+    A set cannot be decorated with prose, so there is nothing left to contain.
+
+    #723: three became four. The approval record contributes its own
+    APPROVAL_RECORDED/APPROVAL_RECORD_FAILED sentinel pair, read at the same
+    guard-then-verdict discipline as its three siblings. Its false-RED cost is
+    the cheapest of the four -- a refused merge and an operator re-invocation --
+    and its false-GREEN cost is a merged run whose approved set nobody can
+    reconstruct, which is the defect #723 exists to close.
+
+    #724 AGAIN: three became TWO, and again not because a guard was dropped --
+    the same move 1.16.2 made for the wait, for the same reason. The evidence
+    site now has TWO carriers (the folded wait turn and the standalone prepare
+    call on the resumed path), so its reading moved out into one named reader per
+    carrier: foldedEvidenceVerdict() and standaloneEvidenceVerdict(). Only the
+    second of those calls sentinelVerdict at all, which is why the count here
+    drops by one rather than by two. Both are proved by
+    test_glossary_evidence_verdict_readers_are_guarded_and_ordered below, and
+    that test is not optional: without it, this count dropping to two is
+    indistinguishable from the prepare guard being deleted.
+
     1.16.2 (#352): four became three, and NOT because a guard was dropped. The
     WAIT site's reply parse moved OUT of batchStep into waitChunkVerdict(), the
     single reader of every wait reply -- chunk and re-check alike. That is a
@@ -942,10 +1003,13 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
     code = _normalized_code(body)
 
     verdict_calls = _SENTINEL_VERDICT_CALL_RE.findall(code)
-    assert len(verdict_calls) == 3, (
-        f"expected batchStep to hold exactly the three sentinel sites (precheck, "
-        f"citation prepare, citation judge -- the wait's own parse lives in "
-        f"waitChunkVerdict since 1.16.2); found {len(verdict_calls)}: "
+    assert len(verdict_calls) == 2, (
+        f"expected batchStep to hold exactly the two sentinel sites (the citation "
+        f"judge and #723's approval record -- the wait's own parse lives in "
+        f"waitChunkVerdict since 1.16.2, the evidence verdict in the two named "
+        f"readers since #724, and the resume precheck stopped existing in #724); "
+        f"found "
+        f"{len(verdict_calls)}: "
         f"{verdict_calls}. If a site was added or removed, guard it and update "
         f"this count -- do not relax the assertion"
     )
@@ -980,6 +1044,63 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
 # ---------------------------------------------------------------------------
 
 GLOSSARY_WAIT_PARSE_SITE = "waitChunkVerdict"
+
+# #724 -- the glossary EVIDENCE verdict, where the fold moved the reading to.
+#
+# Two readers rather than one, because the evidence sentinel now arrives in two
+# shapes: FINAL on a standalone prepare reply, and SECOND-TO-LAST on a folded
+# wait reply that ends with the wait's own READY line. Which reader applies is
+# decided by which PATH produced the reply, never by inspecting the reply -- so
+# they are separate named functions and neither is allowed to accept the other's
+# shape.
+#
+# Both must carry the containment guard, and the ORDER matters at both for the
+# same reason it does at the wait: a guard after the positive test is dead code
+# for every reply that test already accepts. The positive halves differ
+# (sentinelVerdict vs precedingLineIs) and that is exactly why one blanket
+# assertion will not do here.
+GLOSSARY_EVIDENCE_READERS = ("foldedEvidenceVerdict", "standaloneEvidenceVerdict")
+
+
+@pytest.mark.parametrize("reader", GLOSSARY_EVIDENCE_READERS)
+def test_glossary_evidence_verdict_readers_are_guarded_and_ordered(reader):
+    """Each evidence reader guards its OWN reply, before its own positive test.
+
+    A false ready at this site sends the judge to read a snapshot that may not
+    exist and evidence that was never fetched, so the guard is what stands
+    between a glued EVIDENCE_FAILED and a judged attempt. Proved per reader
+    rather than once over the file: the two have DIFFERENT positive halves, and a
+    file-wide "a guard appears somewhere" check would be satisfied by either one
+    of them alone.
+    """
+    code = _normalized_code(extract_function_body(GLOSSARY_SOURCE, reader))
+
+    guards = _GUARD_CALL_RE.findall(code)
+    assert len(guards) == 1, (
+        f"{reader} must hold exactly one {GUARD_HELPER}() containment guard; "
+        f"found {len(guards)}: {guards}"
+    )
+    guard_reply, guard_sentinel = guards[0]
+    assert (guard_reply, guard_sentinel) == ("reply", "failSentinel"), (
+        f"{reader}'s guard must watch the reply it was handed against the fail "
+        f"sentinel it was handed; got {GUARD_HELPER}({guard_reply}, "
+        f"{guard_sentinel})"
+    )
+
+    # ORDER IS THE PROPERTY, same as at the wait site above. The guard is the
+    # left operand of the && , so it must appear before the positive test.
+    positive = "sentinelVerdict(" if reader == "standaloneEvidenceVerdict" else "precedingLineIs("
+    assert positive in code, (
+        f"{reader} no longer performs its positive proof via {positive!r}; a "
+        f"reader that only checks for the ABSENCE of a failure sentinel accepts "
+        f"a reply that reported nothing at all"
+    )
+    assert code.index(GUARD_HELPER + "(") < code.index(positive), (
+        f"a {GUARD_HELPER}() containment guard runs AFTER the positive test in "
+        f"{reader}. Reversed, the guard is dead code for any reply the positive "
+        f"test already accepts, and an EVIDENCE_FAILED sentinel sharing its line "
+        f"with prose is never seen"
+    )
 
 
 def test_glossary_wait_chunk_verdict_is_guarded_and_ordered():
