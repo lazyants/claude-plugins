@@ -411,13 +411,11 @@ def test_shipped_example_batch_agent_cap_is_the_409_step2_default(pv):
     #732 correction: this test used to compute the pre-#607 per-segment 86
     (`max_fix_rounds * (6 + WAIT_CALLS)`) and assert 116 -- both sides
     hard-coded, so it agreed with ITSELF while the shipped comment it claims
-    to pin had moved to 94/106, and its docstring's "the same boundary
-    profile.example.yml states" was simply false. The authoritative source is
-    the template's own estimator, `mass-translate-wf.template.js`'s
-    `const estimatedCalls = 1 + SEGS.length * (8 + 2 * WAIT_CALLS + MAXFIX *
-    (8 + WAIT_CALLS));`; #607 moved the normal-round term 6 -> 8 by adding
-    the fix-scope audit plus the one retry a CONTINUING round may spend on
-    it. Never re-derive either number from memory -- read that line.
+    to pin had moved to 94/106. Correcting those two constants would have
+    fixed the value and left the class, so the boundary no longer lives here
+    at all: it is driven from the real, executed estimator in
+    batch_size_estimator.test.py (which already instantiates the template),
+    and this test keeps only what it owns -- the shipped cap constant itself.
 
     This test does not re-derive 10000 itself (there is no formula
     that produces a cap from nothing); it pins the shipped constant and
@@ -436,22 +434,17 @@ def test_shipped_example_batch_agent_cap_is_the_409_step2_default(pv):
         "profile.example.yml's engine.batch_agent_cap must be 10000 (the "
         f"#409 step 2 default); found {shipped_cap!r}"
     )
-    # The boundary this cap draws for mass-translate (94 calls/segment at the
-    # shipped max_fix_rounds:4 -- see profile.example.yml's own derivation).
-    max_fix_rounds = example["engine"]["max_fix_rounds"]
-    wait_calls = 9  # 1.16.1/#348's shipped WAIT_CHUNKS(8) + 1 authoritative re-check
-    # #607 moved the normal-round term 6 -> 8; the template's own
-    # `estimatedCalls` line is the authority, not this expression.
-    per_segment = 8 + 2 * wait_calls + max_fix_rounds * (8 + wait_calls)
-    admitted = (shipped_cap - 1) // per_segment
-    assert 1 + admitted * per_segment <= shipped_cap
-    assert 1 + (admitted + 1) * per_segment > shipped_cap
-    assert admitted == 106, (
-        f"at the shipped max_fix_rounds:{max_fix_rounds} (per-segment cost "
-        f"{per_segment}), batch_agent_cap:{shipped_cap} admits {admitted} "
-        f"mass-translate segments, not the 106 profile.example.yml's own "
-        f"comment documents -- either the cap, max_fix_rounds, or the "
-        f"documented figure has drifted from the other two"
+    # The 94-calls/segment and 106-segment figures the comment states are NOT
+    # re-derived here. A second copy of the estimator's formula is exactly what
+    # let this test agree with itself across #607 while the template moved; the
+    # boundary is driven from the real, executed estimator in
+    # batch_size_estimator.test.py::test_shipped_cap_boundary_comes_from_the_real_estimator,
+    # which reads the per-segment cost back out of the gate's own reported
+    # estimatedCalls and names this comment as the thing to update.
+    assert example["engine"]["max_fix_rounds"] == 4, (
+        "the shipped max_fix_rounds moved; profile.example.yml's batch_agent_cap "
+        "comment states its boundary AT max_fix_rounds:4, so both it and the "
+        "estimator-driven boundary test must be revisited together"
     )
 
 
