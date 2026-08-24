@@ -100,11 +100,14 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 #   - .att_superseded.*  -- a preserved copy kept for hand recovery (#429).
 # The disposable scratch -- the .pub.*.tmp / .codex_job.*.tmp / .prev_review_tmp.*.json
 # temporaries and the .codex_ledger_payload.* payload -- is removed by the invocation that
-# created it, by EXACT path, never a wildcard. self.attempt is USUALLY in that group, with
-# one deliberate exception: finalize() skips the removal when self.canonical_unreadable is
-# set, so validated bytes survive at the .att.* path for a later run rather than being
-# discarded into an unreadable canonical. Which group an entry is in is stated where it is
-# built; do not read a blanket lifetime into the shared prefix, in either direction.
+# created it, by EXACT path, never a wildcard. Which group an entry is in is stated where it
+# is built; do not read a blanket lifetime into the shared prefix, in either direction.
+#
+# self.attempt is NOT in this segdir list at all since #697 -- see the block below. What can
+# still appear here under a `.att.*` name is self.preserved_attempt, which is not scratch: it
+# is where _teardown_staging() RELOCATES validated bytes on the two refusals that must not
+# destroy them (canonical_unreadable, rename_failed). Nothing re-adopts it; it exists for
+# HAND recovery, like .att_superseded.*.
 #
 # The namespace splits in two and the split is load-bearing -- it is the very distinction
 # #665 turns on, so do not let "private staging slot" blur it. A RULE, deliberately not a
@@ -118,13 +121,13 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 # It does NOT mean secret, unguessable or unwritable, and no decision in this file may rest
 # on reading it that way. self.inv is os.urandom(8).hex() (see __init__), and THIS DRIVER
 # publishes that nonce into segdir itself, in EVERY per-invocation name it builds there
-# (the rule below says which those are -- deliberately no list, see #697), and in plaintext
+# (the rule above says which those are -- deliberately no list, see #697), and in plaintext
 # inside the joblog's own JSON body, whose `inv` field both the launched and the terminal
 # record carry. No single run creates all of them; one is enough.
 #
-# So the property that actually holds is: anything that can LIST segments/ can discover the
-# name, and anything that can WRITE segments/ can overwrite it. Those are two separate
-# permissions and the second does not follow from the first.
+# So the property that actually holds for the entries in segdir is: anything that can LIST
+# segments/ can discover the name, and anything that can WRITE segments/ can overwrite it.
+# Those are two separate permissions and the second does not follow from the first.
 #
 # WHO that is depends on segments/'s OWN mode, which this driver does not set: run()
 # creates it with a bare os.makedirs(self.segdir, exist_ok=True), so the mode is whatever
@@ -146,12 +149,46 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 # others here: three review rounds each added an actor that a roster had missed, so the
 # property is stated instead of the population.
 #
-# The residual this leaves is real and is not closed anywhere: a TERMINAL verdict
-# (validate_draft.py exit 1, which that script also returns for a missing or malformed
-# candidate) rests on an artifact that is neither private nor immutable. Its consequence is
-# bounded -- the segment lands `blocked`, classifies human_escalation, and --only-segs is
-# the documented retry -- and its measured population is zero. See #697, which stays open
-# and parked for the staging relocation that would close it.
+# ---- where the GATED candidate lives, and what that buys (#697) -------------
+# The artifact a terminal verdict is taken on -- self.attempt, the `--candidate-file` every
+# gate is handed on BOTH terminal-verdict paths (validate_attempt() for a fresh attempt,
+# adopt_pending() for a deferred one) -- is NOT in segdir. _ensure_staging() creates a
+# per-invocation mkdtemp directory OUTSIDE durable_root, on the same device (enforced live
+# by _preflight_same_device(), refused before any paid turn), and names it there.
+#
+# EXACTLY ONE CHANNEL CLOSES, and it is the one #697 is about: discovery by LISTING
+# segments/. Before this, a foreign writer found the candidate with
+# glob(".att.<seg>.*.json") over segdir -- the nonce is published there in other filenames
+# and in the joblog body, as the paragraphs above say -- and validate_draft.py answers a
+# missing or malformed candidate with exit 1, the code its contract reserves for a content
+# verdict, so an ordinary overwrite in the gating window was indistinguishable from one.
+# The mkdtemp component is written into segments/ by no success path, so that move returns
+# nothing.
+#
+# THREE THINGS IT DOES NOT BUY. State them wherever this is described; the history of this
+# issue is prose claiming more than the mechanism delivers, corrected three times:
+#   * argv is a PRE-VERDICT channel and is untouched. Both paths append `--candidate-file
+#     <path>` BEFORE _gate() runs the subprocess, and the verdict exists only when that
+#     subprocess returns, so the full path sits in the process table for the whole gating
+#     window.
+#   * it excludes NO same-uid process. A directory move is not a permission boundary
+#     against something that can already read the filesystem and ps.
+#   * it is NOT outside every codex write root. codex-companion resolves workspace-write by
+#     walking UP to the enclosing Git root (see the top of this docstring), and the
+#     sanctioned manual W5 drive runs with --write and cwd = durable_root; with a
+#     durable_root inside a repository, that write root is an ANCESTOR of the directory
+#     _ensure_staging() creates. NOTHING in this file may claim write-root escape.
+#
+# The residual that therefore remains -- a terminal verdict resting on an artifact a
+# same-uid actor can still reach by another route -- is bounded exactly as before: the
+# segment lands `blocked`, classifies human_escalation, and --only-segs is the documented
+# retry. Measured population zero.
+#
+# The joblog carries no staging key and no success path prints the directory. That is a
+# statement about what this driver ADDS, not a secrecy claim: a rejecting gate's own output
+# can echo the candidate path into error_detail (_capture_gate_rejection), and
+# _teardown_staging() deliberately writes the surviving path there when a preservation
+# fails, because bytes nobody can find are worse.
 
 import argparse
 import fcntl
@@ -369,8 +406,22 @@ class CodexJob:
         self.inv = os.urandom(8).hex()
         self.segdir = os.path.join(self.root, "segments")
         ext = "draft" if kind == "translate" else "review"
+        self.ext = ext
         self.canonical = canonical_path(self.root, seg, kind)
-        self.attempt = os.path.join(self.segdir, ".att.%s.%s.%s.json" % (seg, self.inv, ext))
+        # #697: the GATED candidate no longer lives in segdir. self.attempt is built by
+        # _ensure_staging() inside a per-invocation mkdtemp directory OUTSIDE durable_root,
+        # so it stays None until that runs -- see _ensure_staging() for why the three
+        # consumers call it themselves rather than relying on run() alone.
+        self.staging_dir = None
+        self.attempt = None
+        # The segdir name a REFUSAL preserves validated bytes under, for HAND recovery only
+        # (finalize()/_teardown_staging()). Byte-identical to the name self.attempt itself
+        # carried before #697, which is what keeps the two dispatch-scan fixtures that build
+        # it from the real producer meaningful: the dot-prefixed namespace those scans skip
+        # (#428) is still where a preserved attempt lands. Pure string building -- __init__
+        # creates and reads nothing, and several white-box suites depend on that.
+        self.preserved_attempt = os.path.join(
+            self.segdir, ".att.%s.%s.%s.json" % (seg, self.inv, ext))
         self.pending = os.path.join(self.segdir, ".att_pending.%s.%s.json" % (seg, ext))
         # #429: the name a displaced pending occupant is PRESERVED under (see
         # _defer_attempt()). It carries `ext` and `seg` because hand recovery cannot read
@@ -416,6 +467,11 @@ class CodexJob:
         self.poll_deadline = now + deadline_sec
         self.abs_ceiling = self.poll_deadline + CODEX_FINALIZE_BUDGET_SEC
 
+        # #697: a promote os.replace() raised OSError. Two readers: run() STOPS on it
+        # instead of launching a fresh paid turn, and _teardown_staging() PRESERVES the
+        # validated bytes rather than discarding them. Set only at the two promote sites;
+        # _defer_attempt()'s own replace failure deliberately keeps its existing trade.
+        self.rename_failed = False
         # Outcome state (also consumed by finalize()).
         self.ok = False
         self.promoted = False
@@ -1214,7 +1270,11 @@ class CodexJob:
             # O_EXCL|O_NOFOLLOW|O_NONBLOCK, not a plain open(..., "w"): this file is
             # created inside segments/, a directory this driver does not own exclusively --
             # anything that can write it can plant a name here, and the module header states
-            # who that is and who it is not. (#697 corrected this sentence: it used to name
+            # who that is and who it is not. It deliberately STAYS in segdir while #697
+            # moved the gated candidate out: this payload is not a verdict on candidate
+            # content but an input to ledger_update.py, which re-validates it against a
+            # schema derived with additionalProperties:false and REFUSES anything else --
+            # so a foreign write here is rejected rather than mistaken for a verdict. (#697 corrected this sentence: it used to name
             # the codex process THIS driver launches, which the #409 sandbox is the one
             # actor to exclude. The justification never depended on that actor -- it is any
             # directory writer -- but the wrong version was quoted downstream as if it
@@ -1380,8 +1440,10 @@ class CodexJob:
     # ---- step 6b: fd-pinned, digest-verified sandbox -> staging copy --------
     def _publish_from_sandbox(self, src_path, dst_path):
         """Copy `src_path` (inside the per-job sandbox, NEVER trusted directly) to
-        `dst_path` (the private staging file in segdir) with every step bound to a file
-        descriptor, never re-resolved by path -- a path re-checked-then-reused is exactly
+        `dst_path` (the private staging file -- since #697 that is in this invocation's own
+        mkdtemp directory outside durable_root, not segdir; the destination directory is
+        derived from `dst_path` and pinned by fd, so this method follows it either way) with
+        every step bound to a file descriptor, never re-resolved by path -- a path re-checked-then-reused is exactly
         what a symlink swapped in between defeats.
 
           1. Open src_path O_NOFOLLOW: a symlink (even one that, at open time, still
@@ -1480,16 +1542,143 @@ class CodexJob:
             if segdir_fd is not None:
                 os.close(segdir_fd)
 
+    # ---- #697: the gated candidate stages OUTSIDE durable_root ---------------
+    def _append_detail(self, text):
+        """Add one bounded diagnostic to self.error_detail WITHOUT discarding what is
+        already there. A set-if-None guard would be wrong at the only site that calls
+        this: by the time _teardown_staging() runs, every path reaching its preserve arm
+        has ALREADY written error_detail (the promote handlers below do it themselves),
+        so a None-conditioned write would silently drop the one record of where surviving
+        bytes ended up."""
+        text = text[:400]
+        self.error_detail = text if self.error_detail is None \
+            else "%s | %s" % (self.error_detail, text)
+
+    def _ensure_staging(self):
+        """Create this invocation's private staging directory and name self.attempt inside
+        it. INITIALIZES AT MOST ONCE WHILE THE DIRECTORY REMAINS PRESENT -- deliberately not
+        a stronger idempotence claim: the fast path tests self.staging_dir alone, so if the
+        directory is removed underneath a live run the second call still returns True with a
+        stale self.attempt. That fails CLOSED -- _publish_from_sandbox() cannot open the
+        destination directory and returns False, wasting the turn rather than judging bytes
+        nothing verified -- and the actor able to do it is one the module header already
+        declares NOT excluded, so there is no recovery machinery here.
+
+        WHAT THE LOCATION BUYS, and it is exactly one thing (#697): the gated candidate stops
+        being discoverable by LISTING segments/. Before this, a foreign writer found it with
+        glob(".att.<seg>.*.json") over segdir -- this driver publishes the same inv nonce into
+        that directory in other filenames and in the joblog body, so the name was derivable
+        from inside the very directory the pipeline's other passes are pointed at. The
+        mkdtemp component below is written into segments/ by no success path.
+
+        WHAT IT DOES NOT BUY -- three things, all still true, none of them narrowed by this
+        method:
+          * argv is a PRE-VERDICT channel. Both gate paths append `--candidate-file
+            self.attempt` BEFORE _gate() runs the subprocess, and the verdict exists only
+            when that subprocess returns, so the full path sits in the process table for the
+            whole gating window.
+          * it excludes no same-uid process. A directory move is not a permission boundary
+            against something that can already read the filesystem and ps.
+          * it is NOT outside every codex write root. codex-companion resolves workspace-write
+            by walking UP to the enclosing Git root (see this file's header), and the
+            sanctioned manual W5 drive runs with --write and cwd = durable_root; with a
+            durable_root inside a repository that write root is an ANCESTOR of the directory
+            created here. No claim of write-root escape is made anywhere in this file.
+
+        The durable root's PARENT keeps the same filesystem in every realistic layout, and
+        _preflight_same_device() verifies that live and refuses rather than assuming it.
+
+        Called from run() (early, so an unwritable parent refuses before a paid turn) AND
+        from validate_attempt()/_defer_attempt()/adopt_pending(). In production those three
+        are always no-ops, because run() has already succeeded by the time any of them is
+        reached; they are there so a white-box test constructing CodexJob directly -- nine
+        sites across six suites -- needs no opt-in. Not dead code: the alternative is every
+        construction site having to know about staging."""
+        if self.staging_dir is not None:
+            return True
+        try:
+            self.staging_dir = tempfile.mkdtemp(
+                prefix=".ltcj-stg.%s.%s." % (self.seg, self.inv),
+                dir=os.path.dirname(self.root))
+        except OSError as exc:
+            self.error_detail = "staging setup failed: %r" % (exc,)
+            return False
+        self.attempt = os.path.join(
+            self.staging_dir, ".att.%s.%s.%s.json" % (self.seg, self.inv, self.ext))
+        return True
+
+    def _teardown_staging(self):
+        """Dispose of this invocation's staging directory, PRESERVING validated bytes into
+        segdir on the two refusals that must not destroy them.
+
+        canonical_unreadable is set on THREE branches and only ONE of them has an attempt on
+        disk (run()'s post-validate refusal); run()'s pre-dispatch canonical preflight fires
+        before anything is published, and adopt_pending()'s refusal removes its snapshot
+        deliberately. Hence the existence test: preserving unconditionally would write a
+        lying diagnostic on two branches and leak an empty staging directory on every retry.
+
+        Absence is proved by FileNotFoundError alone, never by a falsy lexists() -- an EIO or
+        EACCES from the lookup is INDETERMINATE, and this file already refuses to read any
+        other errno as absence (see _defer_attempt()'s os.link() clause). An indeterminate
+        lookup takes the preserve arm, which reports where the bytes are instead of silently
+        skipping them.
+
+        Removal is exact names then rmdir, never shutil.rmtree: this path is outside
+        durable_root, and refuse-and-leave is the bias every other disposal here applies. A
+        failing rmdir is best-effort -- a transient EBUSY/EIO leaves an empty dot-prefixed
+        directory beside the durable root, which is litter, not a defect worth retry
+        machinery."""
+        if self.staging_dir is None:
+            return
+        attempt_exists = False
+        if self.attempt is not None:
+            try:
+                os.lstat(self.attempt)
+                attempt_exists = True
+            except FileNotFoundError:
+                attempt_exists = False
+            except OSError:
+                attempt_exists = True      # indeterminate -> preserve, never discard
+        if attempt_exists and (self.canonical_unreadable or self.rename_failed):
+            try:
+                os.replace(self.attempt, self.preserved_attempt)
+            except OSError as exc:
+                # The bytes stay where they are and the joblog records WHERE. Publishing the
+                # staging path here is deliberate and disclosed: the gating window is long
+                # over, and the alternative is a candidate nobody can find.
+                self._append_detail("staging preserve failed: %r; candidate survives at %s"
+                                    % (exc, self.attempt))
+                return
+        elif attempt_exists:
+            _silent_remove(self.attempt)
+        _silent_remove(os.path.join(
+            self.staging_dir, ".pub.%s.%s.tmp" % (self.seg, self.inv)))
+        try:
+            os.rmdir(self.staging_dir)
+        except OSError:
+            pass
+
     # ---- preflight: staging and canonical must share a device (#409) --------
     def _preflight_same_device(self):
         """The FINAL step of every promote path is os.replace(staging_file, self.canonical)
         -- a cross-device rename is NOT atomic on POSIX (falls back to copy+unlink, which
         can observably leave a partial destination on a crash mid-rename). Refuse BEFORE
-        any dispatch if the private staging directory (segdir, where attempt/pending
-        live) is not on the same filesystem as segments/ itself, rather than discovering
-        it at promote time with a real codex turn already spent. Checked fresh every run
-        via real stat() calls, not hardcoded -- segdir/attempt/pending are ONE directory
-        today, so this is a live regression guard against that ever silently changing."""
+        any dispatch if the private staging directory is not on the same filesystem as
+        segments/ itself, rather than discovering it at promote time with a real codex turn
+        already spent. Checked fresh every run via real stat() calls, not hardcoded.
+
+        #697 made this a LIVE check rather than the regression guard it used to be: the
+        gated attempt now stages in a mkdtemp directory outside durable_root, so
+        dirname(self.attempt) and segdir are genuinely two directories and can genuinely be
+        two filesystems. It therefore requires _ensure_staging() to have run -- run() calls
+        that first, and passing None here would be a lookup failure, i.e. a refusal.
+
+        It compares st_dev, which is the strongest cheap test available and not a total
+        one: a bind mount can present an equal st_dev while rename still returns EXDEV. The
+        promote sites do not rely on this check alone -- each catches OSError and preserves
+        the candidate (see _teardown_staging())."""
+        if self.attempt is None:
+            return False          # _ensure_staging() has not run -> nothing to compare
         try:
             seg_dev = os.stat(self.segdir).st_dev
             staging_dev = os.stat(os.path.dirname(self.attempt)).st_dev
@@ -1763,12 +1952,15 @@ class CodexJob:
         by is self.poll_remaining -- a poll-window operation, per this method's own name and
         docstring -- never self.abs_remaining(), the WHOLE JOB's ceiling: sharing that wider
         ceiling would let this method eat into the 150s finalize budget while holding the lease."""
+        if not self._ensure_staging():     # #697: a no-op after run(); see its docstring
+            return False
         if not self._is_regular(self.pending, self.poll_remaining):
             self._clear_nonregular(self.pending)
             return False
         # #665: gate a PER-INVOCATION SNAPSHOT, never the deterministic slot itself.
-        # (#697: "snapshot" is the module header's private staging slot -- per-invocation and
-        # dot-prefixed. It is NOT immutable, and the paragraph below no longer claims it is.)
+        # (#697: "snapshot" is the module header's private staging slot -- per-invocation,
+        # dot-prefixed, and since #697 outside durable_root. It is NOT immutable, and the
+        # paragraph below does not claim it is.)
         #
         # Every gate re-OPENS its --candidate-file BY PATH, so gating self.pending directly
         # means two independent opens, with a window in between, of a name that persists
@@ -1780,8 +1972,9 @@ class CodexJob:
         # human_escalation, which drops it from the default dispatch set until an operator
         # names it in --only-segs -- terminal by default, not unrecoverable (#697).
         #
-        # WHO could write it: the module header's property, which this slot inherits -- and
-        # NOT a roster, which is what stood here until #697 and was wrong three times over.
+        # WHO could write the SLOT: the module header's property -- and NOT a roster, which
+        # is what stood here until #697 and was wrong three times over. (self.pending stays
+        # in segdir by design: a LATER invocation consumes it. Only the SNAPSHOT moved.)
         # (_record_translate_rejected()'s O_EXCL|O_NOFOLLOW is justified against the same
         # property, since #697 corrected that comment too; the file states one actor model,
         # in one place.) The snapshot is therefore weaker than "an artifact no one else
@@ -1795,17 +1988,16 @@ class CodexJob:
         # So: copy once, through the same fd-pinned, digest-verified primitive
         # validate_attempt() already uses (identity + digest BOTH before and after -- it
         # refuses outright if a writer is still mutating the source underneath the read),
-        # into self.attempt: a per-invocation .att.<seg>.<inv>... name carrying
-        # os.urandom(8).hex(). What that buys is precise and limited -- the judged artifact
-        # is no longer the DETERMINISTIC slot that persists across runs and is trivially
-        # derivable, so the ordinary cross-run collision stops being a verdict. It does NOT
-        # buy privacy: this driver publishes the same nonce into segdir in other filenames
-        # and in the joblog body (see the module header). Every gate then judges that
-        # snapshot, and the promote moves the very bytes that were judged. This makes
-        # adopt_pending() the same shape as validate_attempt(), which is the point: the
-        # deferred path had no reason to be the weaker of the two. The residual both paths
-        # share -- a terminal verdict resting on an enumerable, writable artifact -- is #697,
-        # open and parked; nothing here closes it.
+        # into self.attempt: a per-invocation .att.<seg>.<inv>... name that, since #697,
+        # lives in this invocation's own mkdtemp directory OUTSIDE durable_root rather than
+        # in segdir. What that buys is precise and limited, and the module header states it
+        # in full: the judged artifact is no longer the DETERMINISTIC slot that persists
+        # across runs, AND it is no longer discoverable by listing segments/. It still does
+        # NOT buy privacy -- argv carries the path for the whole gating window, and no
+        # same-uid actor is excluded. Every gate then judges that snapshot, and the promote
+        # moves the very bytes that were judged. This makes adopt_pending() the same shape
+        # as validate_attempt(), which is the point: the deferred path had no reason to be
+        # the weaker of the two, and both moved together.
         if not self._publish_from_sandbox(self.pending, self.attempt):
             # Could not take a trustworthy snapshot (unreadable, non-regular, or mutating
             # under the read). Nothing has been judged, so nothing is discarded: keep the
@@ -1827,8 +2019,9 @@ class CodexJob:
                     # #665: the SAME exit-1 contract _validate_candidate() reads for a fresh
                     # attempt, read here for a DEFERRED one, and now on the same footing --
                     # a per-invocation artifact rather than the cross-run slot. Same footing
-                    # is the whole claim: not that the artifact is unreachable (#697 -- it is
-                    # enumerable and writable, see the module header), only that the deferred
+                    # is the whole claim: not that the artifact is unreachable (it is not --
+                    # see the module header for the three channels #697 leaves open), only
+                    # that the deferred
                     # path is no weaker than the fresh one. That this is a same-token
                     # verdict on CONTENT, and never a stale cross-run token, is guaranteed by
                     # the gate ORDER _adoption_gates() owns: draft_ready.py carries
@@ -1871,7 +2064,7 @@ class CodexJob:
             # invocation's own lifecycle and no LATER RUN OF THIS DRIVER consults it (a
             # fresh invocation mints its own nonce and reads only self.canonical and
             # self.pending) -- not because nothing else could name it, which #697 records is
-            # false; self.pending STAYS, because the
+            # still false even after the relocation; self.pending STAYS, because the
             # candidate passed every gate and what changed is who owns the slot it would
             # land in -- a future dispatch under the CURRENT authorization re-gates it
             # (the gates' own --expect-token check rejects it if it no longer belongs),
@@ -1881,8 +2074,37 @@ class CodexJob:
             self.reason = "authorization-moved"
             self.error_detail = moved
             return False
-        self._archive_outgoing_review(self.poll_remaining)  # #541, advisory; never gates this promote
-        os.replace(self.attempt, self.canonical)   # every gate passed -- and judged THESE bytes
+        try:
+            # #541's archive and the promote share ONE try body deliberately: the archive
+            # must remain the statement IMMEDIATELY preceding the os.replace() in the same
+            # AST block (prev_review_archive.test.py asserts that over this file's own
+            # tree), and splitting them across a try boundary would break that structural
+            # invariant while leaving runtime order untouched -- exactly the silent kind of
+            # regression that test exists to catch.
+            self._archive_outgoing_review(self.poll_remaining)  # #541, advisory; never gates this promote
+            os.replace(self.attempt, self.canonical)   # every gate passed -- and judged THESE bytes
+        except OSError as exc:
+            # #697: the promote is a CROSS-DIRECTORY rename now (staging lives outside
+            # durable_root), so it can fail for causes the st_dev preflight cannot see --
+            # EXDEV across a bind mount presenting an equal st_dev is the concrete one.
+            #
+            # RETURN FALSE, never fall through. The two statements below this block are
+            # _silent_remove(self.pending) and `return True`, and run() reads that True as
+            # `adopted`: falling through would report exit 0 and reason "adopted-pending"
+            # having promoted nothing AND having just deleted the pending that still held
+            # the bytes. run() then stops on self.rename_failed rather than launching a
+            # fresh paid turn (see its own branch).
+            #
+            # The snapshot goes, on the same reasoning its sibling refusals above give: the
+            # pending is intact and holds the same bytes, is re-gateable by a later run, and
+            # is the copy a later run actually consults -- keeping a second copy at a
+            # per-invocation name nothing reads would be storage with no consumer. (Best
+            # effort, as everywhere else here: if _silent_remove() cannot do it,
+            # _teardown_staging() preserves the snapshot instead of losing it.)
+            self.rename_failed = True
+            self.error_detail = "adopt promote replace failed: %r" % (exc,)
+            _silent_remove(self.attempt)
+            return False
         # The slot is moot now: its content is the canonical. Two steps rather than the one
         # os.replace() that used to consume the pending directly, so a crash between them
         # leaves a valid canonical plus a stale pending -- which the NEXT run self-heals at
@@ -1985,6 +2207,8 @@ class CodexJob:
         # #409: PUBLISH first -- codex's raw output never left the sandbox until this
         # fd-pinned, digest-verified copy lands it in the private staging slot. Only
         # THEN do the existing candidate gates (unchanged) get to see it.
+        if not self._ensure_staging():     # #697: a no-op after run(); see its docstring
+            return False
         if not self._publish_from_sandbox(self.sandbox_attempt, self.attempt):
             return False
         if not self._is_regular(self.attempt, self.finalize_timeout):
@@ -2020,6 +2244,8 @@ class CodexJob:
         nothing has validated the candidate yet, but the sandbox->staging copy is not itself
         a trust decision, only a relocation; adopt_pending() on the NEXT run still runs the
         real candidate gates before anything is promoted."""
+        if not self._ensure_staging():     # #697: a no-op after run(); see its docstring
+            return False
         if not self._publish_from_sandbox(self.sandbox_attempt, self.attempt):
             return False
         # abs_remaining here is deliberate, not an oversight against the phase-budget
@@ -2094,15 +2320,18 @@ class CodexJob:
         if not self.ok:
             self._write_fail_sentinel()
         # Clean ONLY this invocation's own scratch, by EXACT path (never a wildcard).
-        if not self.promoted and not self.canonical_unreadable:
-            _silent_remove(self.attempt)  # the os.replace consumed it iff promoted; a
-            # canonical-unreadable refusal is a data-safety refusal, not a candidate
-            # defect (see _canonical_replaceable()'s own docstring) -- the validated
-            # attempt is left in place rather than discarded. self.canonical_unreadable,
-            # not self.reason: reason is reassigned by whatever this run does NEXT (a
-            # later launch-failed/validate-failed/job-completed/etc reaching THIS
-            # finalize() call), so a string comparison here would stop protecting the
-            # file the moment anything downstream narrates a different outcome.
+        # #697: the attempt no longer lives in segdir, so its disposal is the staging
+        # teardown. Same two-way decision as before -- the os.replace consumed it iff
+        # promoted, and a data-safety refusal must not discard validated bytes -- but the
+        # KEEP arm now RELOCATES them into segdir under self.preserved_attempt, because a
+        # per-invocation mkdtemp path outside durable_root is not somewhere an operator
+        # would ever look. Gated on self.canonical_unreadable / self.rename_failed, never
+        # on self.reason: reason is reassigned by whatever this run does NEXT (a later
+        # launch-failed/validate-failed/job-completed/etc reaching THIS finalize() call),
+        # so a string comparison here would stop protecting the file the moment anything
+        # downstream narrates a different outcome. Runs BEFORE the joblog write below, so
+        # a failed preservation is reported rather than lost.
+        self._teardown_staging()
         if self.sandbox_dir:
             # Abandon the WHOLE sandbox unconditionally -- on every path (success,
             # validate-failure, timeout) we are done reading from it by this point
@@ -2173,10 +2402,18 @@ class CodexJob:
                 os.makedirs(self.segdir, exist_ok=True)
             except OSError:
                 pass
+            if not self._ensure_staging():
+                # #697: no private staging directory beside durable_root means the gated
+                # candidate would have to live in segments/ again. Refuse loudly BEFORE the
+                # flock and before a paid turn, the same shape as the device check below --
+                # never fall back into segdir, which would silently un-ship this fix.
+                self.reason = "staging-unavailable"
+                return 1
             if not self._preflight_same_device():
-                # #409 property 3: staging (segdir) and the canonical segments/ tree must
-                # share a device, or the final promote os.replace() is not atomic. Refuse
-                # BEFORE spending a real codex turn.
+                # #409 property 3: the staging directory and the canonical segments/ tree
+                # must share a device, or the final promote os.replace() is not atomic.
+                # Refuse BEFORE spending a real codex turn. Since #697 these are genuinely
+                # two directories, so this is a live check rather than a regression guard.
                 self.reason = "device-mismatch"
                 return 1
             if not self._canonical_replaceable(self.finalize_timeout):
@@ -2307,6 +2544,15 @@ class CodexJob:
                 self.adopted = True
                 self.reason = "adopted-pending"
                 return 0
+            if self.rename_failed:
+                # #697: adopt_pending() promoted nothing because the os.replace() itself
+                # failed. STOP for the same reason the canonical-unreadable branch below
+                # stops, and it is the stronger case: self.pending is intact and still holds
+                # the fully gated bytes, while falling through to launch() spends a paid
+                # turn whose completion can land in the no-budget defer branch and overwrite
+                # that pending under _defer_attempt()'s documented last-writer-wins.
+                self.reason = "promote-failed"
+                return 1
             if self.canonical_unreadable:
                 # adopt_pending() found a candidate that passed every gate, but its own
                 # canonical guard refused the promotion -- neither "no usable pending" nor
@@ -2368,16 +2614,16 @@ class CodexJob:
                         # -- promoting over it would destroy bytes nothing has read.
                         self.canonical_unreadable = True
                         self.reason = "canonical-unreadable"
-                        # self.attempt lives at this invocation's own random
-                        # .att.<seg>.<inv>... path -- nothing ever revisits that path on a
-                        # later run (only self.canonical and self.pending are consulted),
-                        # so a validated candidate refused here is unreachable by any
-                        # future dispatch: the bytes survive on disk (finalize() never
-                        # discards self.attempt while canonical_unreadable is set -- see
-                        # its own comment), but nothing will ever find or promote them,
-                        # and the next dispatch pays to regenerate the same work. This is
-                        # a disclosed limit, not a defect this release closes: see the
-                        # release's own "Known limits" text.
+                        # The bytes survive: _teardown_staging() RELOCATES them out of the
+                        # staging directory into segdir under self.preserved_attempt, a
+                        # `.att.<seg>.<inv>...` name, precisely because the mkdtemp path
+                        # #697 introduced is somewhere no operator would ever look. What
+                        # does NOT change is that nothing revisits either path on a later
+                        # run (only self.canonical and self.pending are consulted), so a
+                        # validated candidate refused here is still unreachable by any
+                        # future dispatch and the next one pays to regenerate the same
+                        # work. A disclosed limit, not a defect this release closes: see
+                        # the release's own "Known limits" text.
                     else:
                         # #483 above the #541 archive -- see adopt_pending()'s own copy
                         # of this ordering for why that way round is forced, and what it
@@ -2405,8 +2651,25 @@ class CodexJob:
                             # costs one assignment; the asymmetry would cost a bug.
                             self.authorization_moved = True
                         else:
-                            self._archive_outgoing_review(self.finalize_timeout)  # #541
-                            os.replace(self.attempt, self.canonical)
+                            try:
+                                # ONE try body for both, for the reason adopt_pending()'s
+                                # copy of this block states: #541's archive must stay the
+                                # immediately preceding statement in the same AST block.
+                                self._archive_outgoing_review(self.finalize_timeout)  # #541
+                                os.replace(self.attempt, self.canonical)
+                            except OSError as exc:
+                                # #697: cross-directory rename, so new failure causes the
+                                # st_dev preflight cannot see. self.attempt is the only
+                                # GATE-JUDGED, promotion-eligible copy at this point (the
+                                # sandbox source may still be byte-identical until
+                                # finalize() drops the sandbox, but nothing judged it and
+                                # nothing may promote it), so it must NOT be discarded:
+                                # _teardown_staging() preserves it into segdir under
+                                # self.preserved_attempt for hand recovery.
+                                self.rename_failed = True
+                                self.reason = "promote-failed"
+                                self.error_detail = "promote replace failed: %r" % (exc,)
+                                return 1
                             self.promoted = True
                             self.reason = "promoted"
                             return 0

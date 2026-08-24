@@ -1164,7 +1164,10 @@ def _slot_paths(root, seg):
         effort="high",
         node="node",
     )
-    slots = (Path(job.attempt), Path(job.pending))
+    # #697: the GATED attempt stages outside durable_root now; job.preserved_attempt is
+    # the `.att.*` name that can still land in segments/ (a refusal moves validated bytes
+    # there for hand recovery). Same producer, same string, same property under test.
+    slots = (Path(job.preserved_attempt), Path(job.pending))
     for slot in slots:
         assert slot.name.startswith("."), f"producer precondition: {slot.name}"
         assert slot.name.endswith(".draft.json"), (

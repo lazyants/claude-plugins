@@ -216,13 +216,19 @@ called out below and must not be swept with the rest:
 - `.codex_task.*.<DISP>` — the per-dispatch codex task-file (the drive agent
   writes it; the driver is its sole consumer and deletes it),
 - the driver's own final-prompt temp (deleted on every path),
-- `.att.<seg>.<INV>.<draft|review>.json` — the ISOLATED attempt the driver
-  validates before it `os.replace`-promotes it to the canonical
-  `draft_path(seg)`/`review_path(seg)` (deleted if unpromoted, with one deliberate
-  exception: a canonical-unreadable refusal keeps it rather than destroying validated
-  bytes. It is then unreachable by any later run — the name embeds a per-invocation
-  random component — and it is inert: since #428 the dispatch scans skip the whole
-  dot-prefixed namespace, so a surviving attempt no longer perturbs their counts),
+- `.att.<seg>.<INV>.<draft|review>.json` — since #697 this name is **no longer where the
+  candidate is gated**. The ISOLATED attempt the driver validates before it
+  `os.replace`-promotes it to the canonical `draft_path(seg)`/`review_path(seg)` now lives
+  in a per-invocation `mkdtemp` directory OUTSIDE `durable_root`, on the same device
+  (`_preflight_same_device()` enforces that live and refuses before any paid turn). What can
+  still appear here under this name is what `_teardown_staging()` RELOCATES back into
+  `segments/` on the two refusals that must not destroy validated bytes — a
+  canonical-unreadable refusal, and a promote whose `os.replace` itself failed. It is then
+  unreachable by any later run — the name embeds a per-invocation random component — and it
+  is inert: since #428 the dispatch scans skip the whole dot-prefixed namespace, so a
+  surviving attempt no longer perturbs their counts. It is kept for HAND recovery, which is
+  the whole reason it is relocated into `segments/` rather than left in a `mkdtemp` path
+  nobody would look in,
 - `.att_pending.<seg>.<draft|review>.json` — the deterministic per-seg/kind PENDING
   slot `_defer_attempt()` writes when a job runs out of budget mid-flight, consumed by
   the next run's `adopt_pending()` (which re-validates it through the same candidate
@@ -1184,15 +1190,24 @@ alike, neither of which is changed to get it:
   taken is not a verdict: the pending survives and the run launches fresh,
   exactly as when a gate could not run.
 
-  **What the snapshot buys, stated at its real strength (#697).** It is no
-  longer the DETERMINISTIC slot that persists across runs and is trivially
+  **What the snapshot buys, stated at its real strength (#697, now closed).** It
+  is no longer the DETERMINISTIC slot that persists across runs and is trivially
   derivable, so an ordinary cross-run collision stops being able to decide a
-  verdict, and the deferred path becomes exactly as strong as the fresh one.
-  It is **not** private and **not** immutable: the driver publishes the same
-  nonce into `segments/` in several other per-invocation filenames and in the
-  joblog's own JSON body, so the name is discoverable by anything that can list
-  that directory and writable by anything that can write it. Who that is comes
-  from `segments/`'s own mode, which the driver never sets (a bare
+  verdict, and the deferred path is exactly as strong as the fresh one. Since
+  #697 it also no longer lives in `segments/` at all: both terminal-verdict
+  paths gate a candidate inside a per-invocation `mkdtemp` directory outside
+  `durable_root`, so **discovery by listing `segments/` — the one channel that
+  issue is about — is closed**. Exactly three things that move does NOT buy, and
+  they are stated wherever it is described because the history of this issue is
+  prose claiming more than the mechanism delivers: `argv` still carries the path
+  to every gate subprocess for the whole gating window, so it is a *pre-verdict*
+  channel; no same-uid process is excluded by a directory move; and the staging
+  directory is not outside every codex write root, because codex-companion
+  resolves `workspace-write` by walking up to the enclosing Git root while the
+  sanctioned manual W5 drive runs with `--write` and `cwd = durable_root`. The
+  paragraph below describes what the OLD in-`segments/` location depended on and
+  is kept because `.att_pending.*` and the joblog still live there. Who can write
+  `segments/` comes from its own mode, which the driver never sets (a bare
   `os.makedirs`, so the operator's umask decides), **not** from these
   entries' `0600` — a process with write on the directory can unlink and
   recreate any of them whatever the file mode says. A terminal verdict still

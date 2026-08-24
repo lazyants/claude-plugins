@@ -795,37 +795,59 @@ def test_gate_forwards_durable_root_to_all_three_contract_scripts(tmp_path, monk
 
 
 def test_preflight_same_device_passes_on_real_layout(tmp_path):
-    """Positive control: segdir/attempt/pending are ONE directory today, so the real
-    os.stat()-based check must pass on an ordinary checkout."""
+    """Positive control: on an ordinary checkout the real os.stat()-based check passes.
+
+    #697 changed what it is checking. segdir and dirname(attempt) used to be ONE directory,
+    which made this a regression guard against a hypothetical; the gated attempt now stages
+    in a mkdtemp directory beside durable_root, so the two are genuinely different paths
+    that merely happen to share a filesystem. The check is live from here on."""
     job = _mkjob(tmp_path)
+    assert job._ensure_staging() is True
+    assert os.path.dirname(job.attempt) != job.segdir, (
+        "fixture precondition: after #697 the staging directory must not be segdir, "
+        "otherwise this test silently returns to guarding a hypothetical"
+    )
     assert job._preflight_same_device() is True
+
+
+def test_preflight_same_device_refuses_before_staging_exists(tmp_path):
+    """_ensure_staging() has not run, so there is no staging directory to compare. A
+    refusal, never a TypeError out of os.path.dirname(None) past every caller's own
+    "False means do not proceed" check."""
+    job = _mkjob(tmp_path)
+    assert job.attempt is None
+    assert job._preflight_same_device() is False
 
 
 def test_preflight_same_device_refuses_on_mismatch(tmp_path, monkeypatch):
     """#409 property 3: a private-staging directory on a DIFFERENT filesystem than
     segments/ must refuse before any dispatch -- a cross-device os.replace() at promote
     time is not atomic. Hard to fabricate two REAL filesystems in a portable unit test, so
-    this pins the check's own logic by mocking os.stat's st_dev. segdir and
-    dirname(attempt)/dirname(pending) are literally the SAME path string in this fixture
-    (attempt/pending live directly in segdir), so the three os.stat() calls inside
-    _preflight_same_device cannot be told apart by PATH -- distinguish by CALL ORDER
-    instead (the method's own source stats segdir first, then attempt's dir, then
-    pending's dir) and bump only the first."""
+    this pins the check's own logic by mocking os.stat's st_dev.
+
+    #697: the mismatch is injected on the STAGING directory by PATH, which is the layout
+    that is now real -- the gated attempt stages outside durable_root while the canonical
+    it is renamed onto lives in segments/. Before #697 the three stat() targets were one
+    path string and could only be told apart by CALL ORDER, which pinned the method's
+    statement order rather than its subject."""
     job = _mkjob(tmp_path)
+    assert job._ensure_staging() is True
+    staging = os.path.dirname(job.attempt)
+    assert staging != job.segdir
     real_stat = os.stat
-    calls = {"n": 0}
+    seen = {"staging": 0}
 
     def fake_stat(path, *a, **kw):
         st = real_stat(path, *a, **kw)
-        calls["n"] += 1
-        if calls["n"] == 1:   # the segdir stat, per _preflight_same_device's own order
+        if os.fspath(path) == staging:
+            seen["staging"] += 1
             return os.stat_result((st.st_mode, st.st_ino, st.st_dev + 1, st.st_nlink,
                                    st.st_uid, st.st_gid, st.st_size, st.st_atime,
                                    st.st_mtime, st.st_ctime))
         return st
     monkeypatch.setattr(os, "stat", fake_stat)
     assert job._preflight_same_device() is False
-    assert calls["n"] >= 1, "the check must actually call os.stat"
+    assert seen["staging"] >= 1, "the check must actually stat the staging directory"
 
 
 def test_run_refuses_dispatch_on_device_mismatch(tmp_path, monkeypatch):
@@ -2591,6 +2613,7 @@ def test_escape_A_naive_copy_follows_symlink_out_of_sandbox(tmp_path):
     GREEN: the real `_publish_from_sandbox` refuses outright (O_NOFOLLOW on the open),
     and no destination file is ever created."""
     job = _mkjob(tmp_path)
+    assert job._ensure_staging() is True   # #697: names job.attempt; see its docstring
     sbx = tmp_path / "sandbox"
     sbx.mkdir()
     job.sandbox_dir = str(sbx)
@@ -2627,6 +2650,7 @@ def test_escape_A_publish_refuses_mutation_between_fstats(tmp_path, monkeypatch)
     _publish_from_sandbox report a different size than the first (a writer appended/
     truncated between the two checks), and require the publish refuse."""
     job = _mkjob(tmp_path)
+    assert job._ensure_staging() is True   # #697: names job.attempt; see its docstring
     sbx = tmp_path / "sandbox"
     sbx.mkdir()
     job.sandbox_dir = str(sbx)
@@ -3565,9 +3589,10 @@ def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, m
     after the preflight already passed it, and confirming the SECOND observation (not
     just the preflight's first one) correctly sees that and refuses. The real
     _canonical_replaceable() -- not a stub -- must still refuse, and the validated
-    candidate must survive at its own random path -- finalize() keeps self.attempt
-    whenever canonical_unreadable is set; nothing later ever revisits that path, which
-    is a disclosed limit, not a defect this release closes.
+    candidate must survive: since #697 _teardown_staging() relocates it out of the staging
+    directory into segments/ under self.preserved_attempt, because the mkdtemp path it was
+    gated in is not somewhere an operator would look. Nothing later revisits either path,
+    which is a disclosed limit, not a defect this release closes.
 
     NOT a test of the check-then-replace race (the guard observing safe, then a writer
     publishing something new in the window before os.replace() acts): the mutation here
@@ -3609,11 +3634,14 @@ def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, m
     assert rc == 1
     assert job.reason == "canonical-unreadable"
     assert job.canonical_unreadable is True
-    assert os.path.exists(job.attempt), (
+    assert os.path.exists(job.preserved_attempt), (
         "os.replace() must never fire when the canonical it would overwrite could not "
-        "be observed -- the validated candidate survives at its own random path "
-        "instead (finalize() keeps self.attempt whenever canonical_unreadable is set)"
+        "be observed -- the validated candidate survives instead. #697: it survives in "
+        "segments/ under job.preserved_attempt, because the staging directory it was "
+        "gated in is a mkdtemp path outside durable_root that no operator would look in"
     )
+    assert not os.path.exists(job.attempt)
+    assert not os.path.exists(job.staging_dir), "staging is torn down once the bytes moved"
 
 
 def test_canonical_replaceable_check_then_replace_window_is_a_known_unclosed_race(
@@ -3886,13 +3914,14 @@ def test_promote_refuses_when_stderr_raises_an_arbitrary_unenumerated_exception(
     assert rc == 1
     assert job.reason == "canonical-unreadable"
     assert job.canonical_unreadable is True
-    assert os.path.exists(job.attempt), (
+    assert os.path.exists(job.preserved_attempt), (
         "os.replace() must never fire when the canonical it would overwrite could not "
-        "be observed -- the validated candidate survives at its own random path "
-        "instead (finalize() keeps self.attempt whenever canonical_unreadable is set), "
-        "even when the diagnostic write that reaches this refusal itself fails with a "
-        "type nothing in codex_job.py specifically enumerates"
+        "be observed -- the validated candidate survives in segments/ under "
+        "job.preserved_attempt (#697), even when the diagnostic write that reaches this "
+        "refusal itself fails with a type nothing in codex_job.py specifically enumerates"
     )
+    assert not os.path.exists(job.attempt)
+    assert not os.path.exists(job.staging_dir)
 
 
 
@@ -4408,8 +4437,9 @@ def test_a_concurrent_write_to_the_pending_cannot_change_what_the_gates_judge(
     SCOPE, and read this before trusting it (#697). These three rows pin isolation from
     `self.pending` ONLY. The race callback below writes `job.pending`, never the `.att.*`
     snapshot the gates are actually handed, so nothing here attacks that snapshot -- and
-    the snapshot is itself enumerable and writable. The residual is pinned separately, by
-    test_a_write_to_the_gated_snapshot_still_decides_a_terminal_verdict below.
+    the snapshot the gates are actually handed. That snapshot is no longer reachable the
+    way this test's callback works either: since #697 it stages outside durable_root, which
+    test_the_gated_snapshot_is_not_discoverable_by_listing_segments below pins.
 
     The three rows are a history of guards that did not hold, kept because each still
     describes a real concurrent write and the design has to survive all three:
@@ -4464,78 +4494,71 @@ def test_a_concurrent_write_to_the_pending_cannot_change_what_the_gates_judge(
     )
 
 
-def test_a_write_to_the_gated_snapshot_still_decides_a_terminal_verdict(tmp_path, monkeypatch):
-    """KNOWN LIMIT, pinning #697's OPEN residual -- this asserts the defect, not a fix.
+def test_the_gated_snapshot_is_not_discoverable_by_listing_segments(tmp_path, monkeypatch):
+    """#697 CLOSED. This REPLACES the known-limit test that pinned it open, as that test's
+    own docstring instructed -- it asserted the defect (a foreign write at the gating seam
+    decided a terminal verdict), and it was written to go RED on exactly this relocation.
 
-    The sibling test above pins isolation from `self.pending`. It does NOT attack the
-    artifact the gates are actually handed, and that artifact is not out of reach: the
-    `.att.<seg>.<inv>...` snapshot is dot-prefixed and per-invocation, but the driver
-    publishes the same nonce into segments/ in other filenames and in the joblog body, so
-    anything that can list that directory discovers the name and anything that can write
-    the directory can overwrite it (see codex_job.py's module header). #409 excludes
-    exactly one actor -- the codex process this driver launches -- and nothing else.
+    What changed: the gated candidate no longer lives in segments/. It stages in a
+    per-invocation mkdtemp directory beside durable_root, so the discovery move a foreign
+    writer must actually make -- LIST the directory it is pointed at and overwrite what it
+    finds -- returns nothing. The stub below performs that move rather than reading the path
+    it was handed, which is the whole point: taking args[--candidate-file] would corrupt the
+    relocated path too and this test would pass while proving nothing about enumerability.
 
-    So the same seam the snapshot was introduced to close is still open one level down:
-    every gate re-OPENS --candidate-file BY PATH, and validate_draft.py answers a MISSING
-    OR MALFORMED candidate with exit 1, the code its contract reserves for a content
-    verdict. A write landing between the two opens is therefore indistinguishable from a
-    verdict on the candidate's own content, and adopt_pending() acts on it TERMINALLY.
-
-    This test drives exactly that and asserts CURRENT behaviour: the segment is rejected
-    terminally on bytes no validator ever approved. When #697 is closed, this test goes
-    RED -- that is its purpose, and the fix should replace it rather than delete it.
-
-    Bounded consequence, so this is a known limit rather than a stop-ship: `blocked`
-    classifies human_escalation and --only-segs is the documented retry. Measured
-    population is zero.
-    """
+    SCOPE, stated because #697's prior rounds all died on prose claiming more than the
+    mechanism delivers. Exactly ONE channel is closed here: discovery by listing segments/.
+    The path still travels in the gate subprocess's argv for the whole gating window, and
+    nothing about a directory move excludes a same-uid process or a codex pass whose
+    workspace-write root resolves to an ancestor of durable_root. codex_job.py's module
+    header states all three; this test pins the one that is closed."""
     job = _mkjob(tmp_path, kind="translate")
     original = json.dumps({"draft": "the bytes a prior run deferred"})
     Path(job.pending).write_text(original, encoding="utf-8")
+    job.canonical_authority = job._canonical_authority(job.poll_remaining)
+    assert job.canonical_authority == (True, None), "premise: absent reads as no token"
     seen = {}
 
     def racing_gate(args, timeout):
         if args[0] != "validate_draft.py":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        # ENUMERATE, never read the handed argument. Taking args[--candidate-file] would
-        # corrupt whatever path the gate is given -- including a RELOCATED one -- so this
-        # test would stay green under the very fix #697 is parked for, while claiming to go
-        # red. Discovering the snapshot by listing segdir is the residual itself: it is what
-        # a foreign writer must do, and it stops working the moment staging leaves segments/.
-        found = sorted(Path(job.segdir).glob(".att.%s.*.json" % job.seg))
-        seen["found"] = [p.name for p in found]
-        assert len(found) == 1, (
-            "the gated snapshot is no longer discoverable by listing segments/ -- if #697's "
-            "relocation shipped, replace this known-limit test with one asserting refusal"
-        )
-        candidate = str(found[0])
-        # The bytes must be sampled INSIDE the stub: adopt_pending() removes the snapshot
-        # on this branch, so nothing after the call returns can read them.
-        seen["handed"] = args[args.index("--candidate-file") + 1]
-        seen["candidate"] = candidate
-        seen["before"] = Path(candidate).read_text(encoding="utf-8")
-        Path(candidate).write_text("{", encoding="utf-8")   # a foreign write at the seam
-        seen["after"] = Path(candidate).read_text(encoding="utf-8")
-        return SimpleNamespace(returncode=1, stdout="FAIL: candidate missing", stderr="")
+        handed = args[args.index("--candidate-file") + 1]
+        seen["handed"] = handed
+        # ENUMERATE, exactly as the replaced test did. This is the residual's own move.
+        seen["found"] = sorted(
+            p.name for p in Path(job.segdir).glob(".att.%s.*.json" % job.seg))
+        seen["before"] = Path(handed).read_text(encoding="utf-8")
+        # The writer has nothing to overwrite, so its write lands on the name the OLD
+        # layout used -- job.preserved_attempt is byte-identical to the string self.attempt
+        # carried before #697. Doing the write for real is what keeps the final assertion
+        # from being satisfiable by a stub that merely returned success.
+        decoy = Path(job.preserved_attempt)
+        decoy.write_text("{", encoding="utf-8")
+        seen["decoy"] = str(decoy)
+        seen["after"] = Path(handed).read_text(encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
     monkeypatch.setattr(job, "_gate", racing_gate)
 
-    assert job.adopt_pending() is False
+    assert job.adopt_pending() is True
 
-    # The path found by ENUMERATION is the very path the gate was handed -- that identity is
-    # the residual in one line. Plus: the write landed on the snapshot, not on the
-    # deterministic slot the sibling test covers. Without these the final assertion would
-    # pass for an ordinary content rejection and pin nothing.
-    assert seen["candidate"] == seen["handed"]
-    assert seen["candidate"] != job.pending
-    assert seen["before"] == original
-    assert seen["after"] != seen["before"]
-
-    # ... and the driver treated it as a verdict on the candidate's own content. THIS is
-    # the open residual: no validator ever approved the bytes that decided the segment.
-    assert job.translate_content_rejected is True, (
-        "#697 closed? Then this known-limit test has done its job and should be replaced "
-        "by one asserting the write is refused instead."
+    # (a) nothing to find by listing segments/ -- the closed channel, in one assertion.
+    assert seen["found"] == [], (
+        "a .att.* candidate is discoverable by listing segments/ again; #697's relocation "
+        "has been undone: %r" % (seen["found"],)
     )
+    # (b) the foreign write really happened, and (c) it did not reach the judged bytes.
+    assert Path(seen["decoy"]).read_text(encoding="utf-8") == "{"
+    assert seen["decoy"] != seen["handed"]
+    assert seen["before"] == original
+    assert seen["after"] == original, "the bytes the gate judged were mutated underneath it"
+    # (d) the judged artifact is outside the durable root entirely.
+    assert not seen["handed"].startswith(job.root + os.sep), (
+        "the gated candidate is still inside durable_root: %s" % seen["handed"]
+    )
+    # (e) ... so this is an ordinary PASS, not a verdict manufactured by a foreign write.
+    assert job.translate_content_rejected is False
+    assert json.loads(Path(job.canonical).read_text(encoding="utf-8")) == json.loads(original)
+    assert not os.path.exists(job.pending)
 
 
 def test_a_pending_that_cannot_be_snapshotted_is_recoverable(tmp_path, monkeypatch):
@@ -5296,3 +5319,244 @@ def test_an_unestablished_baseline_refuses_before_spending_a_codex_turn(tmp_path
     assert job.reason == "authorization-unestablished"
     assert job.canonical in job.error_detail
     assert Path(job.canonical).read_text(encoding="utf-8").startswith("{ truncated")
+
+
+# ---- #697: the gated candidate stages OUTSIDE durable_root -------------------
+#
+# The relocation closes exactly ONE channel -- discovery by listing segments/ -- and the
+# tests below split along the two things that actually had to be got right for it:
+# WHERE the judged artifact lives, and what happens to it when a now-CROSS-DIRECTORY
+# os.replace() fails. The second half is the expensive half: making a same-directory
+# rename a cross-directory one adds failure causes the st_dev preflight cannot see, and
+# the candidate at stake has already been paid for and gated.
+
+
+def _staging_dirs(tmp_path):
+    """Every staging directory this driver could have left beside the durable root.
+    _mkjob() roots the job at tmp_path/durable, so dirname(root) is tmp_path."""
+    return sorted(p.name for p in Path(tmp_path).glob(".ltcj-stg.*"))
+
+
+def test_the_fresh_path_hands_its_gates_a_candidate_outside_durable_root(tmp_path, monkeypatch):
+    """validate_attempt() is the other terminal-verdict path (adopt_pending() is pinned by
+    test_the_gated_snapshot_is_not_discoverable_by_listing_segments). Both had to move or
+    the weaker one still decides terminally, which is the whole reason #697 names both."""
+    job = _mkjob(tmp_path, kind="translate")
+    _seed_sandbox(tmp_path, job)
+    handed = []
+
+    def recording_gate(args, timeout):
+        handed.append(args[args.index("--candidate-file") + 1])
+        return SimpleNamespace(returncode=0, stdout="")
+    monkeypatch.setattr(job, "_gate", recording_gate)
+
+    assert job.validate_attempt() is True
+    assert handed, "no gate was handed a candidate at all -- this test would prove nothing"
+    for path in handed:
+        assert not path.startswith(job.root + os.sep), (
+            "a gate is still judging a candidate inside durable_root: %s" % path)
+        assert os.path.dirname(path) == job.staging_dir
+    assert not job.staging_dir.startswith(job.root + os.sep)
+
+
+def test_run_refuses_when_no_staging_directory_can_be_created(tmp_path, monkeypatch):
+    """An unwritable parent means the candidate would have to be gated in segments/ again.
+    Refuse loudly BEFORE the flock and before a paid turn -- never fall back into segdir,
+    which would silently un-ship this fix while every other test stayed green."""
+    parent = tmp_path / "readonly-parent"
+    (parent / "durable" / "segments").mkdir(parents=True)
+    job = codex_job.CodexJob(
+        kind="translate", seg="c001", tok="RUN:c001", disp="d1",
+        root=str(parent / "durable"), companion=_companion_file(tmp_path),
+        prompt_text=PROMPT_ONE, prompt_file=_prompt_file(tmp_path), deadline_sec=100,
+        poll_sec=1, effort="high", node="node")
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    launched = {"n": 0}
+    monkeypatch.setattr(job, "launch", lambda: launched.__setitem__("n", launched["n"] + 1) or True)
+
+    os.chmod(parent, 0o500)
+    try:
+        rc = job.run()
+    finally:
+        os.chmod(parent, 0o755)
+
+    assert rc == 1
+    assert job.reason == "staging-unavailable"
+    assert job.attempt is None
+    assert launched["n"] == 0, "a paid codex turn was spent with nowhere safe to gate its output"
+    assert not job.holds_lock, "refused before the flock lease -- same shape as device-mismatch"
+    assert job.error_detail and "staging setup failed" in job.error_detail
+
+
+def test_a_promoted_run_leaves_no_staging_directory_behind(tmp_path, monkeypatch):
+    """The directory is WITNESSED while the run is in flight, from inside the gate stub that
+    is handed the candidate. Without that, this test would pass just as well against a build
+    that never created a staging directory at all -- which is exactly what it must not do."""
+    job = _mkjob(tmp_path, kind="translate")
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    Path(job.pending).write_text(json.dumps({"draft": "deferred"}), encoding="utf-8")
+    witness = {}
+
+    def witnessing_gate(args, timeout):
+        handed = args[args.index("--candidate-file") + 1]
+        witness["dir_live"] = os.path.isdir(job.staging_dir)
+        witness["candidate_inside"] = os.path.dirname(handed) == job.staging_dir
+        witness["candidate_present"] = os.path.exists(handed)
+        return SimpleNamespace(returncode=0, stdout="")
+    monkeypatch.setattr(job, "_gate", witnessing_gate)
+    monkeypatch.setattr(job, "launch", lambda: pytest.fail("adoption should have promoted"))
+
+    assert job.run() == 0
+    assert witness == {"dir_live": True, "candidate_inside": True, "candidate_present": True}
+    assert job.adopted is True
+    assert _staging_dirs(tmp_path) == []
+    assert not list(Path(job.segdir).glob(".att.*")), "no candidate left inside segments/"
+
+
+def test_a_failed_fresh_promote_preserves_the_validated_candidate(tmp_path, monkeypatch):
+    """The promote is a CROSS-DIRECTORY rename since #697, so it can fail for causes the
+    st_dev preflight cannot see (EXDEV across a bind mount presenting an equal st_dev). The
+    bytes at stake passed every gate and were paid for, so they are relocated into segments/
+    under preserved_attempt rather than discarded with the staging directory."""
+    job = _mkjob(tmp_path, kind="translate")
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    payload = json.dumps({"draft": "gated and paid for"})
+
+    def fake_validate_attempt():
+        assert job._ensure_staging() is True
+        Path(job.attempt).write_text(payload, encoding="utf-8")
+        return True
+    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
+    monkeypatch.setattr(job, "launch", lambda: setattr(job, "jobId", "J") or True)
+    monkeypatch.setattr(job, "poll", lambda: setattr(job, "job_status", "completed"))
+
+    real_replace = os.replace
+
+    def exdev(src, dst, *a, **kw):
+        if src == job.attempt and dst == job.canonical:
+            raise OSError(18, "Invalid cross-device link")
+        return real_replace(src, dst, *a, **kw)
+    monkeypatch.setattr(os, "replace", exdev)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.reason == "promote-failed"
+    assert job.rename_failed is True
+    assert job.promoted is False
+    assert not os.path.exists(job.canonical), "nothing may land in the canonical"
+    assert Path(job.preserved_attempt).read_text(encoding="utf-8") == payload, (
+        "a fully gated candidate was discarded because its promote rename failed")
+    assert _staging_dirs(tmp_path) == []
+
+
+def test_a_failed_adoption_promote_stops_the_run_and_keeps_the_pending(tmp_path, monkeypatch):
+    """adopt_pending()'s tail deletes self.pending and returns True, and run() reads that
+    True as `adopted`. A promote failure that merely recorded a flag and fell through would
+    therefore report exit 0 / reason adopted-pending having promoted nothing AND having just
+    deleted the bytes -- so the handler returns False, and run() STOPS on rename_failed
+    rather than spending a fresh turn whose completion could overwrite the intact pending."""
+    job = _mkjob(tmp_path, kind="translate")
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    deferred = json.dumps({"draft": "a prior run's completed attempt"})
+    Path(job.pending).write_text(deferred, encoding="utf-8")
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "_gate", gate)
+    monkeypatch.setattr(job, "launch", lambda: pytest.fail("no fresh turn may be launched"))
+
+    real_replace = os.replace
+
+    def exdev(src, dst, *a, **kw):
+        if src == job.attempt and dst == job.canonical:
+            raise OSError(18, "Invalid cross-device link")
+        return real_replace(src, dst, *a, **kw)
+    monkeypatch.setattr(os, "replace", exdev)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.adopted is False and job.ok is False
+    assert job.reason == "promote-failed"
+    assert job.rename_failed is True
+    assert calls == ["draft_ready.py", "validate_draft.py"]
+    assert not os.path.exists(job.canonical)
+    assert Path(job.pending).read_text(encoding="utf-8") == deferred, (
+        "the pending is the copy a later run consults; a failed promote must not consume it")
+    assert _staging_dirs(tmp_path) == []
+
+
+def test_a_failed_preservation_reports_where_the_bytes_survived(tmp_path, monkeypatch):
+    """Every path that reaches the preserve arm has ALREADY written error_detail -- the
+    promote handler does it itself -- so a set-if-None diagnostic would silently drop the
+    one record of where the surviving candidate is. It appends instead, and names the path,
+    which is the one place this driver deliberately publishes a staging location."""
+    job = _mkjob(tmp_path, kind="translate")
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    payload = json.dumps({"draft": "gated and paid for"})
+
+    def fake_validate_attempt():
+        assert job._ensure_staging() is True
+        Path(job.attempt).write_text(payload, encoding="utf-8")
+        return True
+    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
+    monkeypatch.setattr(job, "launch", lambda: setattr(job, "jobId", "J") or True)
+    monkeypatch.setattr(job, "poll", lambda: setattr(job, "job_status", "completed"))
+
+    real_replace = os.replace
+
+    def exdev(src, dst, *a, **kw):
+        if src == job.attempt:            # BOTH the promote and the preservation
+            raise OSError(18, "Invalid cross-device link")
+        return real_replace(src, dst, *a, **kw)
+    monkeypatch.setattr(os, "replace", exdev)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert Path(job.attempt).read_text(encoding="utf-8") == payload, "bytes must not be destroyed"
+    assert "promote replace failed" in job.error_detail, "the earlier detail survived"
+    assert "staging preserve failed" in job.error_detail
+    assert job.attempt in job.error_detail, "the surviving path must be recoverable by hand"
+    record = json.loads(Path(job.joblog).read_text(encoding="utf-8"))
+    assert record["status"] == "terminal"
+    assert job.attempt in record["error_detail"], "the joblog is the only durable carrier"
+    assert _staging_dirs(tmp_path) == [os.path.basename(job.staging_dir)], (
+        "the directory holding surviving bytes must NOT be removed")
+
+
+def test_the_two_refusals_with_no_candidate_on_disk_leave_no_staging_litter(tmp_path, monkeypatch):
+    """canonical_unreadable is set on three branches and only ONE has an attempt on disk.
+    Preserving unconditionally would write a lying diagnostic on the other two and leak an
+    empty staging directory on every retry -- a per-dispatch accumulation beside the
+    operator's durable root."""
+    # Branch 1: run()'s pre-dispatch canonical preflight, before anything is published.
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    locked_dir = tmp_path / "locked_pre"
+    locked_dir.mkdir()
+    (locked_dir / "canonical.json").write_text('{"marker":"locked"}', encoding="utf-8")
+    job.canonical = str(locked_dir / "canonical.json")
+    os.chmod(locked_dir, 0o000)
+    monkeypatch.setattr(job, "launch", lambda: pytest.fail("no turn may be spent"))
+    try:
+        rc = job.run()
+    finally:
+        os.chmod(locked_dir, 0o755)
+    assert rc == 1 and job.canonical_unreadable is True
+    assert not os.path.exists(job.attempt), "premise: nothing was ever published here"
+    assert "staging preserve failed" not in (job.error_detail or "")
+    assert _staging_dirs(tmp_path) == []
+
+    # Branch 2: adopt_pending()'s own refusal, which removes its snapshot deliberately.
+    job2 = _mkjob(tmp_path, kind="translate")
+    Path(job2.pending).write_text(json.dumps({"draft": "deferred"}), encoding="utf-8")
+    job2.canonical_authority = job2._canonical_authority(job2.poll_remaining)
+    gate, _ = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job2, "_gate", gate)
+    monkeypatch.setattr(job2, "_canonical_replaceable", lambda remaining_fn: False)
+    assert job2.adopt_pending() is False
+    assert job2.canonical_unreadable is True
+    assert not os.path.exists(job2.attempt), "premise: the snapshot is removed by that branch"
+    job2.finalize()
+    assert "staging preserve failed" not in (job2.error_detail or "")
+    assert _staging_dirs(tmp_path) == []

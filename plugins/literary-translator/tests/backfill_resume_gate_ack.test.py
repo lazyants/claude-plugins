@@ -471,7 +471,12 @@ def test_slot_files_are_not_counted_or_attributed_as_drafts(tmp_path):
         node="node",
     )
     slot_doc = json.dumps({"seg": "seg01", "dispatch_token": "RUN20260804T090001Z:seg01"})
-    for slot in (Path(job.attempt), Path(job.pending)):
+    # #697: the GATED attempt stages outside durable_root now, so the `.att.*` name that
+    # can still appear in segments/ is job.preserved_attempt -- the one a canonical-
+    # unreadable or promote-failed refusal moves validated bytes to for hand recovery.
+    # Same producer, same string the attempt itself carried before #697, so the property
+    # under test (the dispatch scans skip it) is unchanged and still built, never typed.
+    for slot in (Path(job.preserved_attempt), Path(job.pending)):
         assert slot.name.startswith("."), f"fixture precondition: {slot.name}"
         assert slot.name.endswith(".draft.json"), (
             "fixture precondition: the slot must collide with the globbed "
