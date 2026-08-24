@@ -3729,6 +3729,29 @@ Report what you find rather than fixing it reflexively: a converged unit goes
 stale the moment you touch it, and that is the operator's call to make
 deliberately.
 
+**Having made that call, know which of the two routes back you are on, because
+one of them destroys the edit you just made.** A hand edit moves `draft_sha1`,
+which drops the unit out of `reusable` into `stale` — and `stale` is one of the
+three default-eligible categories, so the segment is selected again. It is not
+dispatched again: Step 1's previously-converged gate refuses the whole
+invocation on the `.ever_converged` sentinel first, whatever the ledger status
+says. That refusal leaves exactly two ways forward, and they are not variants of
+each other. `--allow-retranslate-converged` authorizes RE-TRANSLATION: the
+workflow translates the segment from scratch, overwriting the draft you edited,
+and its fresh `RUN_ID` orphans every not-yet-converged draft in the same
+selection. A **claim** authorizes re-review only and never re-translates, and a
+hand-edited draft is precisely what its drift branch admits — so naming those
+ids under `--from-converged` is what carries your edit into a confirming review
+rather than over it. See *Claiming a segment for re-review (#438)* and *A claim
+never re-translates* below for the mechanics; the two flags are mutually
+exclusive for the same id and rejected outright if both are given for it.
+
+A site this sweep adjudicated as NOT needing an edit needs neither route. Its
+draft is untouched, and with a section-G edit behind it no content-affecting
+cache-key field has moved either, so `--from-converged` refuses it — *"there is
+no re-review to authorize"*. That refusal is the adjudication's own answer
+reaching the tooling, not an obstacle to work around.
+
 **Where a decision goes is a question nothing asks today, and the destinations
 are not interchangeable.** Ask it while you are writing the item down. There
 are five outcomes:

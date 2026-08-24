@@ -16,9 +16,11 @@ dispatch happens:
    input+version digest, never by merely reusing a RUN_ID. Every input
    that can change what a cached agent result MEANS -- the raw args, the
    resolved profile-derived substitution values burned into the
-   instantiated Workflow template (a `live`->`offline` research_mode flip
-   changes agent policy without changing any single hashed byte
-   otherwise), each segment's own composite cache_key (mass) or the
+   instantiated Workflow template that can change one (a `live`->`offline`
+   research_mode flip changes agent policy without changing any single
+   hashed byte otherwise; a preflight volume cap that only refuses or
+   admits the batch cannot, and since #735 is not hashed -- see
+   DIGEST_SUBST_FIELDS), each segment's own composite cache_key (mass) or the
    pinned glossary rule + canon.json state (glossary), and every durable
    byte that can invalidate a cached result (plugin_bundle_hash,
    orchestration_bundle_hash, and a hash of schemas/ itself) -- is folded
@@ -69,7 +71,9 @@ path. Payload shape:
         "source_lang": "...", "target_lang": "...",
         "max_fix_rounds": N, "batch_agent_cap": N,
         "max_codex_jobs_per_batch": N,            # engine.max_codex_jobs_per_batch,
-                                                  # or 400 when the profile omits it
+                                                  # or 400 when the profile omits it.
+                                                  # REQUIRED but NOT hashed (#735) --
+                                                  # see DIGEST_SUBST_FIELDS
         "effort": "low|medium|high|xhigh",       # #197; NOT "model" (see SUBST_FIELDS)
         "citation_content_types": "text/,application/pdf"   # 1.16.1 (#347);
                                                  # "" when the profile key is
@@ -196,8 +200,13 @@ operator, not a shim here.
 `subst` carries the RESOLVED profile-derived substitution values the
 orchestrating session already computed to render the Workflow template --
 this script trusts them as given rather than re-deriving them from
-profile.yml itself, since the whole point is to hash exactly what got
-burned into THIS instantiation. For kind="mass", each segment's 15-field
+profile.yml itself, since the point is to hash what got burned into THIS
+instantiation rather than what profile.yml says today. It is not quite
+"exactly what got burned in", and has not been since #735: every field
+listed above is REQUIRED and type-checked, while DIGEST_SUBST_FIELDS is the
+subset actually hashed -- `max_codex_jobs_per_batch` is burned into the
+template and deliberately left out of the digest, for the reasons recorded
+at that constant. For kind="mass", each segment's 15-field
 composite cache_key is instead computed HERE, fresh, by shelling out to
 cache_key.py --seg <id> (the one shared hashing implementation) -- never
 trusted from the caller, closing a staleness/TOCTOU gap a pre-computed
@@ -425,6 +434,49 @@ SUBST_FIELDS = frozenset({
 # spuriously non-portable across two operators' otherwise-identical
 # checkouts. plugin_bundle_hash (below) already owns "did the plugin's
 # actual content change".
+
+
+# #735. The set compute_input_digest() actually PROJECTS, which since this
+# release is no longer the same object as the set every payload must supply.
+# SUBST_FIELDS above stays the producer-side contract -- a payload omitting
+# max_codex_jobs_per_batch is still refused by name -- and this narrower set
+# is what gets hashed. The two were one object until a knob turned up that
+# every payload legitimately carries and no cached result can depend on.
+#
+# NOT "max_codex_jobs_per_batch": it is a preflight VOLUME CAP. Its only two
+# consumers compare an estimate against it and then refuse or proceed --
+# segment_dispatch_driver.py's check_volume_cap() and the mass template's
+# `estimatedCodexJobs > MAX_CODEX_JOBS_PER_BATCH` -- so it reaches no
+# translator, no reviewer, no fix turn and no produced artifact. Hashing it
+# therefore never distinguished two states that differ in what a cached
+# result MEANS; what it did instead was make the one knob most likely to
+# need adjusting once a book's real shape is known also the one that
+# punished adjusting it, since a moved digest mints a fresh RUN_ID and every
+# draft in flight then fails its dispatch_token check with
+# DRAFT_TOKEN_MISMATCH and re-translates. Same reasoning cache_key.py's
+# compute_agent_config_hash already applies to batch_agent_cap ("a pure
+# orchestration/scheduling knob with zero effect on translator/reviewer
+# output semantics").
+#
+# STILL HASHED, and deliberately, though it is a scheduling knob by the same
+# description: "batch_agent_cap". Excluding it was not asked for by the issue
+# this release closes, and the asymmetry is recorded here rather than left
+# for a reader to discover -- it is the only such knob left in the
+# projection.
+#
+# STILL HASHED for a reason that is NOT about scheduling: "max_fix_rounds".
+# It looks like a pure round-budget knob and is not one. The cap decides
+# which review point is labelled "final" rather than a number
+# (mass-translate-wf.template.js's runRound), that label is literal reviewer
+# prompt text and is spliced into the review dispatch token as `:r<label>`,
+# and segment_dispatch_driver.py recognizes a stored review's token against
+# the CURRENT cap (_matched_review_round_label) and computes the next round
+# from it (_next_round_label). So resuming one RUN_ID under a changed cap
+# leaves an existing "rfinal" artifact absorbing, or makes an "r5" token
+# unrecognized and silently restarts review at round 1. Two runs that differ
+# here differ in prompt text and in round bookkeeping, which is exactly what
+# this digest exists to tell apart.
+DIGEST_SUBST_FIELDS = SUBST_FIELDS - {"max_codex_jobs_per_batch"}
 
 # ${durable_root}/runs/<RUN_ID>/ -- the same hardened allowlist the
 # {{RUN_ID}} substitution token itself is validated against (references/
@@ -784,7 +836,9 @@ def compute_input_digest(
     digest_input = {
         "kind": kind,
         "args": payload.get("args"),
-        "subst": {k: subst[k] for k in SUBST_FIELDS},
+        # DIGEST_SUBST_FIELDS, never SUBST_FIELDS (#735): the accepted set and
+        # the hashed set diverged this release. See that constant's own comment.
+        "subst": {k: subst[k] for k in DIGEST_SUBST_FIELDS},
         "domain": domain,
         "version": version,
     }

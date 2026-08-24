@@ -636,9 +636,14 @@ input_digest = sha256(canonical_json({
   args: mass: {}  // LT-409: PINNED — see below, never the invocation's own args
       | glossary: <the full ordered args this invocation was given>,
   subst: {research_mode, verse_policy, source_lang, target_lang,
-          max_fix_rounds, batch_agent_cap, max_codex_jobs_per_batch, effort,
+          max_fix_rounds, batch_agent_cap, effort,
           citation_content_types},   // resolved profile substitutions
                                      // (#197: effort added; #347: citation_content_types added)
+                                     // #735: max_codex_jobs_per_batch is still a
+                                     // REQUIRED payload field and is no longer hashed
+                                     // here — read the membership off
+                                     // resume_setup.py's DIGEST_SUBST_FIELDS, never
+                                     // off this list or off SUBST_FIELDS beside it
   domain: mass: {seg: <cache_key.py's 15-field composite per seg>}
                 // LT-409: seg ids come from manifest.json's own segments[]
                 // (the FULL candidate set), never from a caller-supplied list

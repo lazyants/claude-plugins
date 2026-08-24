@@ -1538,6 +1538,118 @@ def test_payload_plugin_root_absent_and_empty_produce_the_same_digest(tmp_path):
     assert parsed_a["input_digest"] == parsed_b["input_digest"]
 
 
+# ---------------------------------------------------------------------------
+# #735: subst['max_codex_jobs_per_batch'] -- a REQUIRED payload field that is
+# deliberately NOT hashed. Unlike `plugin_root` above (a TOP-LEVEL field), this
+# one lives INSIDE `subst`, so the accepted set and the hashed set are no longer
+# the same object: SUBST_FIELDS stays the producer-side contract every payload
+# must satisfy, and DIGEST_SUBST_FIELDS is the subset compute_input_digest()
+# actually projects. The knob is a preflight VOLUME CAP -- it decides whether a
+# batch is refused before any dispatch and reaches no translator, no reviewer
+# and no produced artifact -- so hashing it made the ONE knob most likely to
+# need adjusting once a book's real shape is known also the one that punished
+# adjusting it (fresh RUN_ID -> DRAFT_TOKEN_MISMATCH on every draft in flight).
+# Same reasoning `agent_config_hash` already applies to batch_agent_cap.
+# ---------------------------------------------------------------------------
+
+# Every member DIGEST_SUBST_FIELDS still projects, each mapped to a value that
+# differs from BASE_SUBST's. Deliberately NOT a hand-picked sample: the drift
+# pin below asserts this table's key set EQUALS the projection, so a field
+# added to SUBST_FIELDS later cannot slip past the behavioural test by simply
+# not having been thought of here.
+_HASHED_SUBST_PROBES = {
+    "research_mode": "offline",
+    "verse_policy": "prose",
+    "source_lang": "de",
+    "target_lang": "es",
+    "max_fix_rounds": 9,
+    "batch_agent_cap": 7,
+    "effort": "xhigh",
+    "citation_content_types": "text/,application/pdf",
+}
+
+
+def _mass_digest_with_subst(tmp_path, name, subst_overrides):
+    """One INDEPENDENT digest computation, in its own durable root. A fresh
+    root per call for the same reason the plugin_root pair above uses one: a
+    second resolve_run() against a root that already recorded an identical
+    input.digest would RESUME rather than recompute, and this file's digest
+    comparisons need two genuine computations."""
+    root = make_resume_setup_root(tmp_path, name=name)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["subst"] = {**payload["subst"], **subst_overrides}
+    proc, parsed = run_resume_setup(root, payload)
+    parsed = assert_setup_success(proc, parsed)
+    return parsed["input_digest"]
+
+
+def test_max_codex_jobs_per_batch_never_changes_input_digest(tmp_path):
+    """The load-bearing property of the #735 exclusion: two payloads
+    identical in every other respect, differing ONLY in the volume cap, must
+    produce the EXACT SAME input_digest -- so raising the cap mid-book neither
+    mints a fresh RUN_ID nor orphans a draft in flight."""
+    low = _mass_digest_with_subst(tmp_path, "durable_root_cap_low", {"max_codex_jobs_per_batch": 400})
+    high = _mass_digest_with_subst(tmp_path, "durable_root_cap_high", {"max_codex_jobs_per_batch": 4000})
+
+    assert low == high, (
+        "engine.max_codex_jobs_per_batch must never affect input_digest -- got "
+        f"{low!r} vs {high!r}"
+    )
+
+
+def test_max_codex_jobs_per_batch_is_still_a_required_payload_field(tmp_path):
+    """Narrowed at the DIGEST, never deleted from the contract. A payload
+    omitting the field must still be refused BY NAME -- otherwise this change
+    would have silently turned a required producer-side field optional."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    del payload["subst"]["max_codex_jobs_per_batch"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+    assert "max_codex_jobs_per_batch" in (parsed.get("error") or ""), (
+        f"the refusal must name the missing field; got: {parsed}"
+    )
+
+
+@pytest.mark.parametrize("field", sorted(_HASHED_SUBST_PROBES))
+def test_every_other_subst_field_still_moves_the_input_digest(tmp_path, field):
+    """The other side of the guard, and the reason it is parametrized over the
+    WHOLE projection rather than a chosen few: a mutation that narrows the
+    projection too far -- dropping a second field along with the volume cap --
+    must turn something red here. A hand-picked subset would let exactly the
+    unlisted field through."""
+    base = _mass_digest_with_subst(tmp_path, f"durable_root_base_{field}", {})
+    moved = _mass_digest_with_subst(
+        tmp_path, f"durable_root_moved_{field}", {field: _HASHED_SUBST_PROBES[field]}
+    )
+
+    assert moved != base, (
+        f"subst[{field!r}] is still a hashed digest field -- changing it must "
+        f"change input_digest, got {moved!r} for both"
+    )
+
+
+def test_digest_projection_is_subst_fields_minus_exactly_the_volume_cap(tmp_path):
+    """The drift pin, DERIVED rather than hand-typed: a literal expected set
+    would freeze the very membership it exists to detect. Two properties, and
+    the second is what keeps the parametrized test above honest -- a field
+    added to SUBST_FIELDS in a later release enters DIGEST_SUBST_FIELDS
+    automatically and immediately fails this assertion until it is given a
+    probe value, rather than being silently untested."""
+    root = make_resume_setup_root(tmp_path)
+    module = _load_resume_setup_module(root)
+
+    assert module.DIGEST_SUBST_FIELDS == module.SUBST_FIELDS - {"max_codex_jobs_per_batch"}
+    assert set(_HASHED_SUBST_PROBES) == set(module.DIGEST_SUBST_FIELDS), (
+        "every hashed subst field needs a probe value in _HASHED_SUBST_PROBES"
+    )
+
+
 # ===========================================================================
 # LT-409: the manifest-derived mass digest domain, `args={}` pinning, and
 # the plural `resume_from_run_ids` field. See resume_setup.py's own module
