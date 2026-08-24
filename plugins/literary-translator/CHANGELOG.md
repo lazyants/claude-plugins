@@ -1,5 +1,101 @@
 # Changelog
 
+## 1.70.0 — 2026-08-24
+
+The second batch fold: every merge that landed on `main` after the 1.69.0 cut (`b9b20d6`)
+without a version of its own. Folded here are #697, #723, #724, #725, #726, #727, #730 and
+#735, plus PR #737, which closed no issue. Each is described below in its own right; what a
+fold owes beyond that is one release-level statement of what the whole range costs, and it is
+the section directly under this paragraph.
+
+### What this release costs, measured across the whole range
+
+Three separate invalidations, with three separate consumers. They are stated together because
+a reader planning a refresh needs the union, not eight per-merge costs:
+
+- **`derivation_bundle_hash` moves** — `segpack.py` changed (#725). This is the strongest of
+  the three: it is the field that exists precisely so a fix to `segpack.py`/`bootstrap_names.py`
+  forces the segpack to REGENERATE before anything retranslates against it, rather than flipping
+  segments to an ordinary `stale` that would retranslate against stale segpack data.
+- **`plugin_bundle_hash` moves** — four of its members carry a diff: `canon_validate.py` and
+  `glossary-pass-wf.template.js` (#723/#724), `codex_job.py` (#697), `resume_setup.py` (#735).
+  Every converged segment flips to `stale` once on the next Step 0a refresh.
+- **`${durable_root}/schemas/`'s hash, and therefore `resume_setup.py`'s `input_digest`, moves**
+  — `profile.schema.json` gained keys in #727 and #735. A one-time resume-identity reset on the
+  first Step 0a refresh after this release.
+
+Bundle MEMBERSHIP did not change in this range: `PLUGIN_BUNDLE_MEMBERS` still holds 19 entries
+and `ORCHESTRATION_BUNDLE_MEMBERS` still holds 6 — the same tuples 1.69.0 cut. What moved is the
+BYTES of four members, not the list.
+
+One breaking CLI change, from #723: `canon_validate.py --citations-reviewed` is now refused
+without `--approval-records`, in `--merge-batches` and the legacy bare `--batch` alike.
+
+### #730 — `verse_policy.mode` is put to the user, and a series decision outlives its volume
+
+`verse_policy.mode` decides what a review is allowed to fail a segment on, and nothing made the
+orchestrator put it to the user; it shipped as an already-decided value, so #727's questionnaire
+never named it. It now ships as an invalid `CHOOSE_` sentinel with a question stating what each of
+the six modes costs — including the invalidation, at its real scope: the mode feeds a GLOBAL
+cache-key field, so changing it once work has started restales every healthy already-converged
+segment in the volume, prose-only ones included, `select_segments.py` then refuses that
+re-dispatch until `--allow-retranslate-converged` is passed, and authorizing it mints a fresh
+`RUN_ID` that also orphans every not-yet-converged draft in the same selection.
+
+`SKILL.md`'s R10 gains the other half. A previous volume is not an input — right about source
+material and canon, but a user's decision about how to WORK is neither, and R10 discarded it with
+everything else. Input (3) gains it: one append-only ledger at `<series directory>/decisions.md`,
+five fields per row, the LAST row for a dotted path current and superseded rows never rewritten,
+lookup ledger-first, and one bounded marker-only read of the immediately preceding `profile.yml`
+when the ledger has no row yet. What is carried forward is a question, never a value.
+
+### #735 — the codex-job volume cap stops re-minting the run
+
+`engine.max_codex_jobs_per_batch` left `resume_setup.py`'s `input_digest`, so changing it
+mid-book no longer mints a fresh `RUN_ID`. The user-facing line is the opposite of a cost: from
+this release the cap can be changed mid-book for free.
+
+PR #738 also carried its own review-round corrections, each a commit in its own right rather
+than a footnote to the one above: a guard that covered only one digest kind, five false
+sentences in one round's prose, a W6 pointer aimed the wrong way, an invented citation beside a
+list that disclaimed itself, and an enumeration of the cap's recording sites that named two of
+three. PR #737 separately corrected #734's defence-in-depth, which had been written for the
+harmless direction.
+
+### #723, #724 — the citation review's verdict is on disk, and two calls per batch go away
+
+After a `CITATIONS_OK` verdict the pass writes an approval record naming the batch, the attempt
+and the digest of the snapshot bytes the judge audited, and `canon_validate.py` enforces one
+record per merged fragment over the bytes it reads at merge — the pass previously decided this by
+reading the recording agent's own sentence. The record may refuse and may never permit, kept
+structurally: its enforcer has no return statement, so no call site can branch on it to skip work.
+Separately, the per-batch resume precheck is read off disk instead of asked, and the wait turn
+that finds a fragment now prepares its evidence too. The live per-batch ladder moves `13N+2` to
+`16N+2` and the batch cap `769` to `624`.
+
+### #725 — a footnote's own emphasis reaches the translator
+
+`segpack.py` handed body blocks as raw `source_html` but footnote definitions as markup-stripped
+`plain_text`, so under the two policies that exist to translate the apparatus the translator was
+asked to preserve italics it had never been shown. Emphasis now reaches it as tags, which have no
+flanking rule, no escape sequence and no collision with a `*` the source contains.
+
+### #727 — the intake questions are enforced, and "no glossary" is answerable
+
+Three more intake knobs ship as `CHOOSE_` sentinels, and Step 0's placeholder scan runs before
+schema validation so one run names every unanswered decision instead of dying on the first
+schema-blocking one. `glossary.enabled` makes "no researched canon at all" expressible.
+
+### #726 — `output.target: epub` halts at Step 0 instead of at W9
+
+`epub` mapped to a renderer that was never written. The refusal moved from the end of the
+pipeline to its beginning, keyed on the module FILE rather than a hardcoded denylist.
+
+### #697 — the gated candidate stages outside `durable_root`
+
+The gated candidate is written outside the durable root, so a root that must stay clean stays
+clean.
+
 ## 1.69.0 — 2026-08-23
 
 **A batch fold.** Every merge below landed on `main` on its own reviewed PR without a version bump, under this file's standing convention that a release commit folds the batch in later rather than cutting a version per issue. Nothing here is new work: the code has been on `main` since each PR merged, and this entry is the version label that finally makes it deliverable to an already-installed copy. The convention exists because a per-issue cut prices every one-line fix at a four-surface sync; its cost, paid here, is that a single entry has to account for a large batch, so the items are enumerated by issue rather than narrated one by one, and the release-level cost paragraph below is written once for all of them.

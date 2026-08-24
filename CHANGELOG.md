@@ -2,6 +2,37 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [ai-cli-optout 1.1.3] — 2026-08-24
+
+### Changed
+
+- **The Anthropic tradeoff notes say what the build actually gates, and name the build they were
+  measured against.** The previous notes attributed the breakage to a shared "GrowthBook
+  kill-switch with feature entitlements" and cited a specific model version as a casualty.
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and `DISABLE_TELEMETRY` each disable the remote
+  feature-flag FETCH, so every capability delivered behind a flag stops being offered and the
+  client's built-in defaults are what remain. Measured against Claude Code 2.1.241 on 2026-08-24:
+  that build gates `/remote-control`, `/feedback`, `/design-sync`, Projects and
+  `--enable-live-preview` on either variable. A note that cites a model version goes stale on the
+  next model release while the gate it describes does not, so the notes now name capabilities
+  instead.
+- **Either variable is sufficient on its own**, isolated by bisection 2026-04-24 — settling a
+  question an earlier revision of the note left open as "NOT TESTED".
+- **`DO_NOT_TRACK` and `DISABLE_GROWTHBOOK` are named as being in the same set** and must not be
+  shipped as opt-outs for the same reason.
+- Upstream `anthropics/claude-code#34178` is recorded as closed 2026-04-12 without the behaviour
+  changing; it still reproduces. `CONTRIBUTING.md` carries the authoring rule this produced.
+
+## [enduser-handbook 1.18.2] — 2026-08-24
+
+### Changed
+
+- **`tests/reference-assets.test.sh` only.** No shipped skill, adapter or documentation byte
+  changed, so nothing a user of this plugin can observe is different from 1.18.1. The version is
+  cut anyway because merge-to-`main` is the publish here: leaving `plugins/` content unbumped
+  makes one version label mean two different payloads — the cached copy on a machine that already
+  installed 1.18.1, and a fresh install resolving from current `main`.
+
 ## [enduser-handbook 1.18.1] — 2026-08-18
 
 Four sentences cited issues that had just been closed as decisions, describing them as work still

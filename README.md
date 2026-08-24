@@ -6,12 +6,12 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 
 | Plugin | Version | What it does |
 |---|---|---|
-| [`ai-cli-optout`](#ai-cli-optout--v112) | 1.1.2 | Opt out of telemetry across every locally installed AI CLI / AI-enabled IDE, plus Vercel CLI and macOS / Windows OS-level privacy surfaces. |
+| [`ai-cli-optout`](#ai-cli-optout--v113) | 1.1.3 | Opt out of telemetry across every locally installed AI CLI / AI-enabled IDE, plus Vercel CLI and macOS / Windows OS-level privacy surfaces. |
 | [`db-guardrails`](#db-guardrails--v100) | 1.0.0 | Stop AI coding agents from accidentally emptying your database — an always-on hook that blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for deeper safety layers. |
 | [`obsidian-project-vault`](#obsidian-project-vault--v100) | 1.0.0 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
 | [`cc-usage-coach`](#cc-usage-coach--v100) | 1.0.0 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
-| [`enduser-handbook`](#enduser-handbook--v1181) | 1.18.1 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
-| [`literary-translator`](#literary-translator--v1690) | 1.69.0 | High-fidelity literary book translation over a Gutenberg-style EPUB source (expert-mode `custom` extractor also supported) — a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability, plus optional book assembly into an Obsidian glossary-wiki behind a deterministic render/diff gate. |
+| [`enduser-handbook`](#enduser-handbook--v1182) | 1.18.2 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
+| [`literary-translator`](#literary-translator--v1700) | 1.70.0 | High-fidelity literary book translation over a Gutenberg-style EPUB source (expert-mode `custom` extractor also supported) — a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability, plus optional book assembly into an Obsidian glossary-wiki behind a deterministic render/diff gate. |
 | [`multi-profile-plugins`](#multi-profile-plugins--v100) | 1.0.0 | Understand and diagnose Claude Code plugin behavior across multiple `CLAUDE_CONFIG_DIR` profiles — why profiles that share a plugins store hit recurring "corrupted installLocation" errors and cross-profile plugin deletion, with a read-only health-check script and the reverse-engineered CLI validation/GC mechanism behind it. |
 
 > **Changelogs.** Every plugin's release notes are in the root [`CHANGELOG.md`](CHANGELOG.md) — except `literary-translator`, which keeps its own at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md). The root file is frozen for that plugin at its `1.1.0` entry, so its later releases and its Known limitations are only in the per-plugin file. The per-plugin sections below describe what each plugin does and deliberately carry no per-release history — the changelog is the only place it lives.
@@ -30,7 +30,7 @@ claude plugin update <plugin-name>@lazyants
 claude plugin uninstall <plugin-name>@lazyants
 ```
 
-## `ai-cli-optout` — v1.1.2
+## `ai-cli-optout` — v1.1.3
 
 Opts out of telemetry, error reporting, analytics, feedback surveys, and related data collection across every locally installed AI CLI and AI-enabled IDE, plus Vercel CLI (adjacent developer tooling) and macOS / Windows OS-level privacy surfaces. One skill, thirteen vendors, data-driven. 369 test assertions guard vendor-schema invariants and script behavior.
 
@@ -128,7 +128,7 @@ The **scripts** are local-first: they read local logs only and make no network c
 - `CC_COACH_CONFIG_DIRS` — comma-separated extra config dirs to scan (default scans only the standard `.claude`).
 - `CC_COACH_OUT` — output location. Precedence: `$CC_COACH_OUT` if set, else next to the scripts if writable, else `${XDG_CACHE_HOME:-~/.cache}/cc-usage-coach/`.
 
-## `enduser-handbook` — v1.18.1
+## `enduser-handbook` — v1.18.2
 
 Author, capture, and publish a Diátaxis-structured end-user handbook (tutorials, how-tos, reference, explanation) for any project. The methodology — pre-read mandate, anti-fabrication rules, capture safety, page identity, manifest discipline, glossary and tone consistency, completeness gate, "running UI is the primary source" — ships as a reusable skill. Project-specific bindings (language, register, stack globs, capture engine, publish target, glossary) live in `.claude/handbook/profile.yml` so the same skill produces a German shopkeeper-register handbook for one project and an English developer-register handbook for the next without forking the workflow.
 
@@ -156,17 +156,19 @@ Trigger phrases: "write the end-user handbook", "update the user manual", "add a
 - **Review from more than one perspective.** Have several agents read the drafted chapter, each from a different angle (a first-time user, a power user, a skeptic hunting for fabricated or undocumented behavior). More viewpoints beat one — no single pass catches everything.
 - **Rerun and validate coverage.** When a chapter (or the whole handbook) is done, run the skill again as a completeness pass: walk the actual feature surface and confirm every feature is described. The first pass always misses some.
 
-## `literary-translator` — v1.69.0
+## `literary-translator` — v1.70.0
 
 High-fidelity literary **book translation** over a Gutenberg-style EPUB source (or, in expert mode, a hand-co-designed `custom` extractor for any other source shape; a `plain_text` adapter is specified but not yet implemented, #62). A `codex-translate → deterministic false-green gate → codex-review → Claude-fix` loop runs to convergence per segment / per novella — never per book — with a frozen name/realia **canon**, a configurable **verse policy**, and **ledger-based resumability**. The canon freeze is one-way, so under `live` research mode a glossary batch's source citations are reviewed *before* it is allowed to merge, while its fragment is still rewritable. Once every in-scope segment converges, the drafts optionally assemble into an Obsidian glossary-wiki (keyed on the frozen canon) behind a deterministic render/diff acceptance gate.
+
+Step 0 refuses a freshly-copied `profile.yml` and prints, in one pass, a questionnaire naming every intake decision still unanswered — the glossary, the footnote apparatus, the output shape and the verse policy — each with what that choice costs, so none of them is filled in silently on the operator's behalf.
 
 Trigger phrases: "translate this book", "set up a literary translation pipeline", "new book translation project", "translate this EPUB/story collection from X to Y", "Gutenberg EPUB translation", "resume book translation" — full list in `plugins/literary-translator/skills/literary-translator/SKILL.md`.
 
 ### What it covers
 
 - **Engine loop** — per segment: codex translates, a deterministic false-green gate (`validate_draft.py`) rejects placeholder / empty / policy-violating drafts, codex reviews, Claude applies fixes, looped until converged. The scripts surface candidates and enforce schemas; the accuracy / identity calls are codex's, never a script's.
-- **Frozen name/realia canon** — a 1:1 `source_form → canonical_target_form` dictionary (`canon.json`) with a validation gate (`canon_validate.py`) and an opt-in human-adjudication gate (`canon_adjudication_audit.py`) that turns duplicate / merge / missed-pair / unresolved-queue review requirements into a persisted, machine-checkable record.
-- **Verse policy** — configurable handling of verse vs prose (`rendered` / `literal_gloss` fields, per-mode validation).
+- **Frozen name/realia canon** — a 1:1 `source_form → canonical_target_form` dictionary (`canon.json`) with a validation gate (`canon_validate.py`) and an opt-in human-adjudication gate (`canon_adjudication_audit.py`) that turns duplicate / merge / missed-pair / unresolved-queue review requirements into a persisted, machine-checkable record. The whole researched canon is opt-out (`glossary.enabled: false`, 1.70.0) for a project that does not want it; an existing `canon.json` is never discarded. Under `live` research a batch's citation review now leaves an approval record on disk naming the batch, the attempt and the digest of the bytes the judge audited, and the merge enforces one record per merged fragment instead of trusting the recording agent's own sentence.
+- **Verse policy** — configurable handling of verse vs prose (`rendered` / `literal_gloss` fields, per-mode validation). Since 1.70.0 the six-value `verse_policy.mode` is a mandatory intake question rather than a value the orchestrator picks from its own reading of the source: it decides what a review may fail a segment on, and it is hashed, so answering it before the first dispatch is free and changing it afterwards restales every already-converged segment in the volume.
 - **Ledger-based resumability** — a `ledger.json` with a composite cache key so an interrupted run resumes safely and re-applies any style-bible / canon edit rather than shipping stale drafts.
 - **Source adapters** — `gutenberg_epub` (the one working built-in adapter) plus an expert-mode `custom` extractor (supported, experimental); `plain_text` is specified but not yet implemented (#62). Scripts are self-anchored and stdlib-first; each emits one JSON line to stdout, human detail to stderr, exit 0 / 1 / 2.
 - **Book assembly + output rendering** — once every in-scope segment is converged, `assemble.py` joins the manifest + per-segment drafts + verse map (ledger-gated on `converged` + sha1 match) into a target-agnostic NodeStream, and an output adapter renders it. The shipped `obsidian` adapter produces a vault of chapter notes with folder-qualified `[[wikilinks]]`, footnotes, and verse blocks, plus one entity note per canon entry (canon IS the entity registry). `diff_rendered_output.py` is a deterministic render/diff acceptance gate (`--accept-baseline`, then re-render must match). All fail-closed against symlink data-loss.
