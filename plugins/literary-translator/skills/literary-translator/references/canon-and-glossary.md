@@ -1106,6 +1106,27 @@ environment actually had working web/research access on this run — so the plug
 makes that precondition an explicit, human-declared profile setting rather than
 something a script silently probes (and potentially gets wrong).
 
+- **`glossary.enabled: true | false`** (`profile.yml`, default `true`) is the
+  PARENT master switch everything else on this page sits under — #727. Set
+  to `false`, it skips the research and adjudication this whole reference
+  document is about: no `glossary_batch_plan.py`, no `resume_setup.py`, no
+  glossary Workflow, no canon merge, and the skeptic pass below is
+  suppressed outright (Step 0 fatally refuses a profile that sets
+  `glossary.enabled: false` alongside `glossary.skeptic_pass.enabled: true`,
+  rather than silently letting the parent switch win). It does NOT skip the
+  mandatory language smoke test: W3a's `segpack.py` re-runs
+  `bootstrap_names.py`'s own candidate extractor over every segment
+  regardless, and W5 acts on the resulting `new_names`, so name detection
+  stays load-bearing even against an empty canon. `research_mode` below
+  stays REQUIRED and is validated the same either way — it is simply inert
+  while `glossary.enabled` is false, since no research ever runs to need it.
+  An existing `canon.json` is never discarded: `canon_validate.py --init` is
+  create-only, so a project that already has a canon keeps it and keeps
+  injecting its entries into every segpack even with the glossary pass
+  turned off. Turning it back on later is not free: canonizing a name that
+  was previously left to each segment's own `NEW:` rendering changes every
+  affected segment's `used_terms_hash`, which makes those already-translated
+  segments dispatch-eligible again (`references/ledger-and-resumability.md`).
 - **`glossary.research_mode: live | offline`** (`profile.yml`, REQUIRED, no
   default) is the explicit, human-set precondition for whether THIS run's
   glossary-pass agent has real web/research access. The orchestrating Claude

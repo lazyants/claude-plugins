@@ -84,9 +84,13 @@ is the orchestration-level summary of what each stage hands to the next):
   `plain_text` — see `false-green-gate.md`).
 - **W3 Bootstrap** — style bible by hand/interview, plus the mandatory
   language smoke test, plus the codex glossary-pass (its own, smaller
-  Workflow pipeline — see below) that freezes `canon.json`.
-- **Mandatory homonym-split evidence gate** — runs after W3's two rejoining
-  branches (the codex glossary-pass and the `no_new_candidates` skip alike),
+  Workflow pipeline — see below) that freezes `canon.json` — or, when
+  `glossary.enabled: false` (#727), an empty-but-stamped `canon.json`
+  bootstrapped via `canon_validate.py --init` instead of the glossary pass,
+  with the smoke test still mandatory either way.
+- **Mandatory homonym-split evidence gate** — runs after W3's THREE
+  rejoining branches (the codex glossary-pass, the `no_new_candidates` skip,
+  and the `glossary.enabled: false` disabled branch alike),
   strictly before W3a: `scripts/canon_adjudication_audit.py --check
   --particle-config <literal value> --advisory` against the resolved
   `canon_senses.json` sidecar (default path, never overridden here). Not the

@@ -65,21 +65,36 @@ Order of operations (numbered to match SKILL.md's Step 0 list exactly):
   4. Unknown top-level keys are FATAL by default, naming the exact key --
      except keys under the reserved ``x_*`` namespace (forward-compat
      extension point), which are silently allowed.
-  5. Validate whole-file shape via
+  5. Whole-profile placeholder-substring scan, run BEFORE schema validation
+     (#727): every string value anywhere in the parsed document, not a named
+     subset of fields, is checked against every literal placeholder
+     ``assets/profile.example.yml`` ships (the book-title placeholder, the
+     two ``/ABS/PATH/TO/...`` path placeholders, and every ``CHOOSE_*``-
+     prefixed enum sentinel) -- FATAL if any survive, HALTING right here.
+     Running this before jsonschema (not after, as it used to) matters: a
+     ``CHOOSE_*`` sentinel left in an inactive adapter sub-block (e.g.
+     ``plain_text.verse_detection`` while ``source.format: gutenberg_epub``
+     is active) is validated for basic shape only by the schema, so
+     jsonschema alone never reports it -- only this scan does, and it must
+     run before jsonschema would otherwise halt the whole run on some
+     unrelated, unconditionally-required field's own sentinel (e.g.
+     ``glossary.research_mode``) and hide every other still-open intake
+     decision from the operator in the same breath. Each surviving
+     ``CHOOSE_*`` sentinel's error line is enriched with a plain-language
+     question (``KNOB_QUESTIONS``, keyed by dotted path) naming what the
+     choice costs, when that path is a known knob; a one-line header
+     precedes the whole group of sentinel errors, once, only when at least
+     one sentinel survived.
+  6. Validate whole-file shape via
      ``jsonschema.Draft202012Validator(profile.schema.json,
      format_checker=jsonschema.FormatChecker())``.
-  6. Only once schema validation passes, run the procedural checks a schema
+  7. Only once schema validation passes, run the procedural checks a schema
      alone cannot express: ``source.path`` existence; ``project.durable_root``'s
      PARENT existence/writability/not-under-tmp-or-scratchpad;
      ``output.destination``'s parent, checked only when it resolves OUTSIDE
      durable_root. (``source.language.particle_config``'s file existence is
      deliberately NOT checked here -- deferred to the end of Step 0a, since
      the preset hasn't been copied into the project yet on a fresh project.)
-  7. Whole-profile placeholder-substring scan: every string value anywhere in
-     the parsed document, not a named subset of fields, is checked against
-     every literal placeholder ``assets/profile.example.yml`` ships (the
-     book-title placeholder, the two ``/ABS/PATH/TO/...`` path placeholders,
-     and every ``CHOOSE_*``-prefixed enum sentinel) -- FATAL if any survive.
   8. ``adapter_config.plain_text.segmentation.heading_regex``: compilability
      check (``re.compile`` in try/except) whenever ``method: heading_regex``
      is the active segmentation method -- FATAL on ``re.error``. Non-fatal
@@ -127,6 +142,15 @@ Order of operations (numbered to match SKILL.md's Step 0 list exactly):
       condition. Runs at Step 0, i.e. before Step 0a has created a durable
       root, which is the whole point: the same failure otherwise surfaces at
       W9 assembly with the book already translated and converged (#726).
+  15. NEW (#727): ``glossary.enabled`` exactly ``False`` together with
+      ``glossary.skeptic_pass.enabled`` exactly ``True`` is FATAL, naming
+      both fields -- they state two different intentions (the skeptic pass
+      has nothing to audit once the glossary pass itself is skipped; see
+      SKILL.md's W3 third branch). Tests ``is False``/``is True``
+      explicitly, never a falsy ``.get()``: an ABSENT ``glossary.enabled``
+      means ``true`` (the schema's own default), so every profile written
+      before this key existed -- including one with
+      ``skeptic_pass.enabled: true`` -- must keep validating unchanged.
 
 Every violation is printed as its own field-named, actionable line. The
 script exits non-zero if ANY fatal violation was found (across every step
@@ -201,7 +225,7 @@ CURRENT_EXTRACTOR_CONTRACT_VERSION = 2
 # The exact top-level keys profile.schema.json's own `required` list names --
 # kept as a plain constant here (rather than re-derived from the schema at
 # runtime) so the "unknown top-level key" check (step 4) can run, with a
-# friendly field-named message, BEFORE the heavier jsonschema pass (step 5).
+# friendly field-named message, BEFORE the heavier jsonschema pass (step 6).
 KNOWN_TOP_LEVEL_KEYS = frozenset({
     "profile_version",
     "project",
@@ -226,11 +250,75 @@ PLACEHOLDER_SUBSTRINGS = (
     "/ABS/PATH/TO/YOUR_PROJECT",
     "/ABS/PATH/TO/YOUR_SOURCE",
 )
-# The example ships three separate CHOOSE_-prefixed sentinels
-# (verse_detection, footnotes, glossary.research_mode) -- rather than
-# enumerate each one by hand (and silently miss a future fourth), any string
-# value starting with this prefix anywhere in the document is rejected.
+# The example ships seven separate CHOOSE_-prefixed sentinels (verse_detection,
+# footnotes, glossary.enabled, glossary.research_mode, footnotes.apparatus_policy,
+# output.v1_scope, output.target) -- rather than enumerate each one by hand
+# (and silently miss a future eighth), any string value starting with this
+# prefix anywhere in the document is rejected.
 CHOOSE_PREFIX = "CHOOSE_"
+
+# #727. One plain-language question per intake knob that ships a CHOOSE_
+# sentinel in assets/profile.example.yml, keyed by the exact dotted path
+# _walk_strings() yields for that field. Appended to that field's sentinel
+# error line (see _scan_choose_sentinels()) so the operator sees what the
+# choice actually costs, not just that a value is missing. A dotted path
+# with NO entry here still errors -- it just loses the question, never the
+# error itself -- so a future sentinel added to the example without a
+# matching entry here fails loudly (see the drift-guard test asserting set
+# equality both directions between this mapping's keys and the example's own
+# shipped CHOOSE_ paths) rather than silently shipping a mute questionnaire
+# line.
+KNOB_QUESTIONS = {
+    "glossary.enabled": (
+        "Does this project want a researched name/realia canon at all? "
+        "`true` runs the W3 glossary pass -- name research plus "
+        "per-candidate adjudication, one of the most expensive stages in "
+        "this pipeline. `false` skips that pass and translates against an "
+        "EMPTY canon: each segment's translator then chooses its own "
+        "rendering for every detected name and records it as `NEW:`, so "
+        "cross-segment name consistency is no longer frozen up front and "
+        "shows up only as an advisory warning in the final audit. Enabling "
+        "it later can re-stale and re-dispatch already-translated segments "
+        "once names get canonized. An existing `canon.json` is never "
+        "discarded: `false` keeps injecting the entries it already holds."
+    ),
+    "glossary.research_mode": (
+        "Does the glossary-pass agent have real web access on this run? "
+        "`live` admits cited `basis:\"established\"` entries and pays "
+        "research round-trips; `offline` forbids them outright. Inert when "
+        "`glossary.enabled` is false, but still required."
+    ),
+    "footnotes.apparatus_policy": (
+        "What happens to the source's footnote apparatus: `translate_all` "
+        "(translate every note -- the most expensive), `preserve_source` "
+        "(keep the source-language notes), `omit_apparatus` (drop them), or "
+        "`body_refs_only` (keep only the in-body reference marks)."
+    ),
+    "output.v1_scope": (
+        "What v1 delivers: `segment_drafts_and_audit` (converged, audited "
+        "per-segment drafts -- the lean default) or `assembled_book` (also "
+        "runs the whole assembly/render stage)."
+    ),
+    "output.target": (
+        "How an assembled book is rendered: `obsidian` (a wiki vault), "
+        "`epub`, or `custom` (a renderer you co-design). Consulted only "
+        "under `v1_scope: assembled_book`, but it decides how much output "
+        "apparatus gets provisioned. `epub` has no renderer yet, so "
+        "pairing it with `assembled_book` is refused at Step 0 itself; "
+        "`custom` requires co-designing a renderer first."
+    ),
+    "source.adapter_config.plain_text.verse_detection": (
+        "How the `plain_text` adapter finds verse: `none_confirmed` (you "
+        "have confirmed the source has none) or `regex` (you supply the "
+        "pattern). Consulted only when `source.format: plain_text`, but it "
+        "must still be answered."
+    ),
+    "source.adapter_config.plain_text.footnotes": (
+        "How the `plain_text` adapter finds footnotes: `none_confirmed`, "
+        "`markdown_ref`, or `custom_regex`. Consulted only when "
+        "`source.format: plain_text`, but it must still be answered."
+    ),
+}
 
 TMP_OR_SCRATCHPAD_MARKERS = frozenset({"tmp", "temp", "scratchpad"})
 # Narrow, default-off override for check_durable_root()'s tmp/scratchpad
@@ -376,7 +464,109 @@ def check_unknown_top_level_keys(profile: dict):
 
 
 # ---------------------------------------------------------------------------
-# Step 5: whole-file jsonschema validation
+# Step 5: whole-profile placeholder-substring scan (#727: moved here, ahead
+# of jsonschema -- see this file's own module docstring for the fuller "why")
+# ---------------------------------------------------------------------------
+
+def _walk_strings(obj, path="", _stack=None):
+    """Yields (dotted_path, string_value) for every string leaf anywhere in a
+    parsed YAML/JSON-like structure (dicts, lists, scalars).
+
+    #727: tracks the CURRENT RECURSION STACK, not a whole-walk visited set --
+    a container's `id()` is added right before descending into it and
+    removed right after (on unwind, via try/finally), so it is only
+    "on stack" while one of ITS OWN ancestors-to-descendants chains is being
+    walked. That distinguishes a true CYCLE (a container that is its own
+    ancestor -- e.g. `title: &loop [*loop]`) from a shared, non-cyclic YAML
+    alias reached via two sibling paths (e.g. `x_alias: &g {...}` /
+    `glossary: *g`): the alias's `id()` is off the stack again by the time
+    the second, sibling path reaches it, so it is walked -- and every
+    dotted path it legitimately occurs at gets reported, each with its own
+    CHOOSE_ sentinel question intact. An earlier version of this guard used
+    a whole-walk set instead, which over-collapsed the alias case: the
+    second path to the same shared object was silently skipped even though
+    it isn't a cycle, so that path's own sentinel lost its questionnaire
+    line (the sentinel still failed the run -- nothing was silently
+    accepted -- but the questionnaire degraded). This scan runs at step 5,
+    before jsonschema's own shape check would otherwise have rejected a
+    cyclic document on TYPE grounds alone; without the stack guard, a true
+    cycle recurses forever and dies with a raw RecursionError traceback
+    instead of the ordinary, field-named ERROR line every other malformed
+    value gets."""
+    if _stack is None:
+        _stack = set()
+    if isinstance(obj, (dict, list)):
+        obj_id = id(obj)
+        if obj_id in _stack:
+            return
+        _stack.add(obj_id)
+        try:
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    child_path = f"{path}.{key}" if path else str(key)
+                    yield from _walk_strings(value, child_path, _stack)
+            else:
+                for index, value in enumerate(obj):
+                    yield from _walk_strings(value, f"{path}[{index}]", _stack)
+        finally:
+            _stack.discard(obj_id)
+    elif isinstance(obj, str):
+        yield path, obj
+
+
+def _scan_placeholder_substrings(profile: dict):
+    """Half of step 5: every literal PLACEHOLDER_SUBSTRINGS hit, anywhere in
+    the document. Message text unchanged by #727 -- only the CHOOSE_-sentinel
+    half (`_scan_choose_sentinels()` below) gained a question."""
+    errors = []
+    for location, value in _walk_strings(profile):
+        for placeholder in PLACEHOLDER_SUBSTRINGS:
+            if placeholder in value:
+                errors.append(
+                    f"{location}: still contains the unreplaced placeholder "
+                    f"{placeholder!r} (current value: {value!r}) -- copy the "
+                    f"shipped assets/profile.example.yml's comment for this "
+                    f"field and replace it with a real value."
+                )
+    return errors
+
+
+def _scan_choose_sentinels(profile: dict):
+    """The other half of step 5: every surviving CHOOSE_-prefixed enum
+    sentinel. #727 enriches the message with KNOB_QUESTIONS' plain-language
+    question when the dotted path is a known knob, appended after the
+    original message -- a path with NO entry keeps today's message
+    unchanged (a future sentinel loses its question, never its error)."""
+    errors = []
+    for location, value in _walk_strings(profile):
+        if value.startswith(CHOOSE_PREFIX):
+            message = (
+                f"{location}: still has the shipped placeholder sentinel "
+                f"{value!r} -- consciously choose one of its documented "
+                f"real values before proceeding."
+            )
+            question = KNOB_QUESTIONS.get(location)
+            if question:
+                message = f"{message} {question}"
+            errors.append(message)
+    return errors
+
+
+def scan_placeholders(profile: dict):
+    """Step 5. Scans EVERY field, not a named subset -- FATAL if any value
+    anywhere still contains a shipped profile.example.yml placeholder
+    substring, or is still exactly one of the CHOOSE_-prefixed enum
+    sentinels. A flat, combined list -- callers that only care whether the
+    profile is clean (`scan_placeholders(profile) == []`) don't need to know
+    about the split below. main() itself calls `_scan_placeholder_substrings()`
+    and `_scan_choose_sentinels()` directly rather than this wrapper, so it
+    can print the intake-questionnaire header immediately before only the
+    sentinel half (see main()'s own step 5 block)."""
+    return _scan_placeholder_substrings(profile) + _scan_choose_sentinels(profile)
+
+
+# ---------------------------------------------------------------------------
+# Step 6: whole-file jsonschema validation
 # ---------------------------------------------------------------------------
 
 def load_profile_schema():
@@ -400,7 +590,7 @@ def validate_against_schema(profile: dict, schema: dict):
 
 
 # ---------------------------------------------------------------------------
-# Step 6: procedural checks a schema alone cannot express
+# Step 7: procedural checks a schema alone cannot express
 # ---------------------------------------------------------------------------
 
 def check_source_path(profile: dict):
@@ -472,48 +662,6 @@ def check_output_destination(profile: dict):
         )
     elif not os.access(parent, os.W_OK):
         errors.append(f"output.destination: parent directory is not writable: {parent}")
-    return errors
-
-
-# ---------------------------------------------------------------------------
-# Step 7: whole-profile placeholder-substring scan
-# ---------------------------------------------------------------------------
-
-def _walk_strings(obj, path=""):
-    """Yields (dotted_path, string_value) for every string leaf anywhere in a
-    parsed YAML/JSON-like structure (dicts, lists, scalars)."""
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            child_path = f"{path}.{key}" if path else str(key)
-            yield from _walk_strings(value, child_path)
-    elif isinstance(obj, list):
-        for index, value in enumerate(obj):
-            yield from _walk_strings(value, f"{path}[{index}]")
-    elif isinstance(obj, str):
-        yield path, obj
-
-
-def scan_placeholders(profile: dict):
-    """Step 7. Scans EVERY field, not a named subset -- FATAL if any value
-    anywhere still contains a shipped profile.example.yml placeholder
-    substring, or is still exactly one of the CHOOSE_-prefixed enum
-    sentinels."""
-    errors = []
-    for location, value in _walk_strings(profile):
-        for placeholder in PLACEHOLDER_SUBSTRINGS:
-            if placeholder in value:
-                errors.append(
-                    f"{location}: still contains the unreplaced placeholder "
-                    f"{placeholder!r} (current value: {value!r}) -- copy the "
-                    f"shipped assets/profile.example.yml's comment for this "
-                    f"field and replace it with a real value."
-                )
-        if value.startswith(CHOOSE_PREFIX):
-            errors.append(
-                f"{location}: still has the shipped placeholder sentinel "
-                f"{value!r} -- consciously choose one of its documented "
-                f"real values before proceeding."
-            )
     return errors
 
 
@@ -629,6 +777,45 @@ def check_smoke_test_report_path(profile: dict):
             f"'..' path-traversal segment anywhere (got {value!r})"
         ]
     return []
+
+
+# ---------------------------------------------------------------------------
+# Step 15 (NEW, #727): glossary.enabled vs glossary.skeptic_pass.enabled
+# cross-field contradiction
+# ---------------------------------------------------------------------------
+
+def check_glossary_disabled_conflicts_with_skeptic_pass(profile: dict):
+    """`glossary.enabled: false` and `glossary.skeptic_pass.enabled: true`
+    state two different intentions -- the skeptic pass is an ADVISORY audit
+    over the glossary research pass's own output (RFC #215 Phase 2), and
+    there is nothing for it to audit once the glossary pass itself is
+    skipped (SKILL.md's W3 third branch refuses to run the skeptic pass on
+    the `glossary.enabled: false` branch no matter what this field says).
+
+    Tests `glossary.enabled is False` explicitly, NEVER a falsy `.get()`: an
+    ABSENT `glossary.enabled` means `true` (profile.schema.json's own
+    default), so every profile written before this key existed -- including
+    one with `skeptic_pass.enabled: true` -- must keep validating unchanged.
+    Symmetrically checks `is True` on the skeptic_pass side, since an absent
+    or explicit-false `skeptic_pass.enabled` is never a conflict.
+
+    House style for a mutually-exclusive-intent refusal: canon_validate.py's
+    --plugin-root/--allow-durable-sibling check."""
+    glossary = profile.get("glossary") or {}
+    if glossary.get("enabled") is not False:
+        return []
+    skeptic_pass = glossary.get("skeptic_pass") or {}
+    if skeptic_pass.get("enabled") is not True:
+        return []
+    return [
+        "glossary.enabled: false and glossary.skeptic_pass.enabled: true "
+        "state two different intentions -- skipping the glossary research "
+        "pass entirely versus running an advisory skeptic pass over its own "
+        "output. The skeptic pass has nothing to review once the glossary "
+        "pass itself is skipped (see glossary.enabled's own schema "
+        "description). Disable glossary.skeptic_pass.enabled too, or set "
+        "glossary.enabled back to true."
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -829,7 +1016,30 @@ def main(argv=None):
             print(f"ERROR: {err}", file=sys.stderr)
         sys.exit(1)
 
-    # --- Step 5: whole-file schema validation ----------------------------
+    # --- Step 5: whole-profile placeholder scan, BEFORE jsonschema (#727) ---
+    # Runs here, not after schema validation, so an unanswered CHOOSE_
+    # sentinel in a currently-inactive adapter sub-block (never load-bearing
+    # for jsonschema's own enum check) still gets reported, and every open
+    # intake decision surfaces together in one pass rather than jsonschema
+    # halting the run on the first unconditionally-required field's own
+    # sentinel and hiding the rest. See scan_placeholders()'s own docstring.
+    substring_errors = _scan_placeholder_substrings(profile)
+    sentinel_errors = _scan_choose_sentinels(profile)
+    if substring_errors or sentinel_errors:
+        for err in substring_errors:
+            print(f"ERROR: {err}", file=sys.stderr)
+        if sentinel_errors:
+            print(
+                f"ERROR: Step 0 needs these intake decisions answered in "
+                f"{profile_path} before scaffolding can proceed -- relay "
+                f"this list to the user and fill in their answers:",
+                file=sys.stderr,
+            )
+            for err in sentinel_errors:
+                print(f"ERROR: {err}", file=sys.stderr)
+        sys.exit(1)
+
+    # --- Step 6: whole-file schema validation ----------------------------
     schema = load_profile_schema()
     schema_errors = validate_against_schema(profile, schema)
     if schema_errors:
@@ -837,7 +1047,7 @@ def main(argv=None):
             print(f"ERROR: {err}", file=sys.stderr)
         sys.exit(1)
 
-    # --- Steps 6-14: procedural checks (schema already passed) -----------
+    # --- Steps 7-15: procedural checks (schema already passed) -----------
     fatal_errors = []
     warnings = []
 
@@ -845,8 +1055,6 @@ def main(argv=None):
     fatal_errors += check_durable_root(profile)
     fatal_errors += check_output_destination(profile)
     fatal_errors += check_output_target_shipped(profile)
-
-    fatal_errors += scan_placeholders(profile)
 
     seg_errors, seg_warnings = check_plain_text_segmentation(profile)
     fatal_errors += seg_errors
@@ -856,6 +1064,8 @@ def main(argv=None):
 
     fatal_errors += check_particle_config(profile)
     fatal_errors += check_smoke_test_report_path(profile)
+
+    fatal_errors += check_glossary_disabled_conflicts_with_skeptic_pass(profile)
 
     durable_root = Path(profile["project"]["durable_root"]).expanduser()
     fatal_errors += check_resumed_contract_versions(

@@ -72,6 +72,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_ROOT = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 PROFILE_VALIDATE_SCRIPT = ASSETS_ROOT / "scripts" / "profile_validate.py"
@@ -83,19 +85,22 @@ assert SCAFFOLD_VALIDATE_SCRIPT.is_file(), f"scaffold_validate.py not found at {
 assert EXAMPLE_PROFILE_PATH.is_file(), f"profile.example.yml not found at {EXAMPLE_PROFILE_PATH}"
 
 # Every literal placeholder profile.example.yml ships, transcribed from
-# profile_validate.py's own PLACEHOLDER_SUBSTRINGS + the three CHOOSE_
-# sentinels it names in its module docstring -- see that script's own
-# constant if this list ever needs re-deriving.
+# profile_validate.py's own PLACEHOLDER_SUBSTRINGS constant -- see that
+# script's own constant if this list ever needs re-deriving.
 PLACEHOLDER_SUBSTRINGS = (
     "YOUR BOOK TITLE HERE",
     "/ABS/PATH/TO/YOUR_PROJECT",
     "/ABS/PATH/TO/YOUR_SOURCE",
 )
-CHOOSE_SENTINELS = (
-    "CHOOSE_none_confirmed_or_regex",
-    "CHOOSE_none_confirmed_or_markdown_ref_or_custom_regex",
-    "CHOOSE_live_or_offline",
-)
+# #727: the shipped example now ships SEVEN CHOOSE_-prefixed sentinels, up
+# from three -- a hand-typed tuple here (as this used to be) freezes
+# whatever sentinels existed at authoring time and silently stops covering
+# the next one added. make_real_values_profile() below replaces every
+# individual sentinel it knows about by name (so a bad replacement is
+# attributed to a specific field, not a generic "CHOOSE_ survived
+# somewhere"), and then asserts the GENERIC `"CHOOSE_" not in text`
+# invariant as the actual completeness guard -- see the assertion at the
+# bottom of that function.
 # Must match profile_validate.py's own ALLOW_TMP_ROOT_ENV_VAR constant --
 # this file drives profile_validate.py as a subprocess (see module
 # docstring, Part A), so it can't import that constant, only mirror the
@@ -115,6 +120,22 @@ def _load_module(name, path):
 
 
 scaffold_validate = _load_module("scaffold_validate_under_test", SCAFFOLD_VALIDATE_SCRIPT)
+
+
+def _iter_string_values(obj):
+    """Yields every string LEAF value anywhere in a parsed YAML/JSON-like
+    structure -- deliberately values only, never the raw text, so a
+    CHOOSE_-prefix search over this iterator cannot be tripped by a prose
+    comment that merely discusses a sentinel by name (comments never survive
+    yaml.safe_load in the first place)."""
+    if isinstance(obj, dict):
+        for value in obj.values():
+            yield from _iter_string_values(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            yield from _iter_string_values(value)
+    elif isinstance(obj, str):
+        yield obj
 
 
 # ---------------------------------------------------------------------------
@@ -149,15 +170,41 @@ def make_real_values_profile(tmp_path):
     text = text.replace(
         "CHOOSE_none_confirmed_or_markdown_ref_or_custom_regex", "none_confirmed"
     )
+    text = text.replace("CHOOSE_true_or_false", "true")
     text = text.replace("CHOOSE_live_or_offline", "offline")
+    text = text.replace(
+        "CHOOSE_translate_all_or_preserve_source_or_omit_apparatus_or_body_refs_only",
+        "translate_all",
+    )
+    text = text.replace(
+        "CHOOSE_segment_drafts_and_audit_or_assembled_book", "segment_drafts_and_audit"
+    )
+    text = text.replace("CHOOSE_obsidian_or_epub_or_custom", "obsidian")
 
     # Defensive: fail loudly here, not with a confusing downstream schema
     # error, if this fixture builder ever drifts out of sync with
     # profile_validate.py's own placeholder list.
     for placeholder in PLACEHOLDER_SUBSTRINGS:
         assert placeholder not in text, f"fixture still contains placeholder {placeholder!r}"
-    for sentinel in CHOOSE_SENTINELS:
-        assert sentinel not in text, f"fixture still contains CHOOSE_ sentinel {sentinel!r}"
+    # #727: generic completeness guard, replacing a hand-typed sentinel
+    # tuple -- a FUTURE eighth CHOOSE_-prefixed sentinel added to the shipped
+    # example must fail this assertion loudly, rather than silently surviving
+    # because nobody remembered to add its literal string to a list here.
+    # Checked over the PARSED document's own string VALUES, mirroring what
+    # profile_validate.py's real placeholder scan actually walks -- a raw
+    # substring search over the YAML text would also trip on the shipped
+    # example's own prose COMMENTS discussing the sentinel by name (e.g. the
+    # plain_text.verse_detection comment block, which says "this CHOOSE_
+    # sentinel" without ever being one), which is not the property this
+    # guard exists to check.
+    survivors = [
+        v for v in _iter_string_values(yaml.safe_load(text)) if v.startswith("CHOOSE_")
+    ]
+    assert survivors == [], (
+        f"fixture still contains an unreplaced CHOOSE_ sentinel value -- a "
+        f"new sentinel was added to profile.example.yml without a matching "
+        f"replacement here: {survivors!r}"
+    )
 
     profile_path = tmp_path / ".claude" / "literary-translator" / "profile.yml"
     profile_path.parent.mkdir(parents=True)

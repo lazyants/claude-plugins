@@ -22,39 +22,34 @@ exactly THREE cases (per the plugin's own test enumeration):
      blank_line_threshold is REQUIRED to be a non-null integer") are gated
      off, never the field's own type.
 
-NOTE on case 2's architecture (verified against the real script, not
-assumed): Step 0 is fail-fast across steps 1-5 (existence -> dependency
-preflight -> parse/profile_version -> unknown-top-level-keys -> whole-file
-jsonschema validation) and only becomes a "collect everything, then report
-everything" validator across steps 6-13 (the procedural checks), which is
-where ``scan_placeholders()`` (step 7) lives. Direct inspection of
-``profile.schema.json`` shows exactly ONE placeholder-bearing field with an
-*unconditional* schema-level restriction: ``glossary.research_mode``'s
-top-level ``enum: ["live", "offline"]`` is not gated behind any
-``source.format`` conditional. Every OTHER shipped placeholder (the two
-``/ABS/PATH/TO/...`` paths, the book-title placeholder, and the
-``adapter_config.plain_text`` CHOOSE_-sentinels) sits inside either a plain
-``minLength: 1`` string field or a format-gated sub-block -- so while the
-shipped example's active format is ``gutenberg_epub``, those fields are
-merely well-typed, non-empty strings from the schema's point of view (this
-is the very loosening case 3 above regression-locks) and never independently
-fail schema.
-
-The practical consequence, confirmed by running the real script against the
-verbatim shipped example: a single end-to-end CLI invocation halts at Step 5
-having named only ``glossary.research_mode`` -- it never reaches Step 7's
-``scan_placeholders()``, so it does NOT enumerate every placeholder in one
-run. That is genuine, documented behavior (see profile_validate.py's own
-module docstring: "Only once schema validation passes, run the procedural
-checks..."), not a test artifact. So this file asserts BOTH halves honestly:
-the real CLI-level outcome (exit 1, exactly the one schema-blocking field
-named) via ``test_verbatim_shipped_example_is_fatally_rejected_by_cli``, and
-a direct exercise of ``scan_placeholders()`` against the same verbatim,
-unmodified parsed document via
-``test_verbatim_shipped_example_scan_placeholders_names_every_placeholder``,
-which is the actual mechanism responsible for the "names every placeholder"
-guarantee and is what would fire for every remaining placeholder once a user
-fixes ``glossary.research_mode`` and re-runs.
+NOTE on case 2's architecture (#727 -- superseding the pre-#727 note this
+replaces, see git history for the earlier "only glossary.research_mode is
+unconditionally schema-enforced" reasoning, which #727 made moot by
+reordering Step 0 itself): Step 0's order is now existence -> dependency
+preflight -> parse/profile_version -> unknown-top-level-keys -> **the
+placeholder scan (step 5), which now runs BEFORE whole-file jsonschema
+validation (step 6)** and exits 1 on its own the instant any placeholder or
+``CHOOSE_``-sentinel survives -- schema validation and the procedural checks
+never run at all on that exit path. This is precisely #727's fix: before it,
+a fresh copy of the shipped example only ever reported the ONE
+placeholder-bearing field profile.schema.json happens to restrict
+unconditionally (``glossary.research_mode``), because the OLD numbering's
+jsonschema validation (then step 5) halted the whole run before the OLD
+numbering's placeholder scan (then step 7) ever got a turn -- every other
+shipped placeholder (the two ``/ABS/PATH/TO/...`` paths, the book-title
+placeholder, and the remaining ``CHOOSE_``-sentinels, several of which sit
+behind a format-gated conditional or were previously not sentinels at all)
+went unmentioned until the operator fixed that one field and reran, only to
+be told about the next single field, and so on one at a time. Moving the
+placeholder scan ahead of schema validation is what makes a single CLI
+invocation against the verbatim shipped example enumerate EVERY surviving
+sentinel and placeholder in one run, which
+``test_verbatim_shipped_example_is_fatally_rejected_by_cli`` now asserts
+directly against the real CLI entry point (not just against
+``scan_placeholders()`` in isolation, which
+``test_verbatim_shipped_example_scan_placeholders_names_every_placeholder``
+below still separately exercises as the actual mechanism responsible for the
+guarantee).
 """
 import importlib.util
 from pathlib import Path
@@ -66,6 +61,25 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 SCRIPT_PATH = ASSETS_DIR / "scripts" / "profile_validate.py"
 EXAMPLE_PATH = ASSETS_DIR / "profile.example.yml"
+
+# Every CHOOSE_-prefixed sentinel assets/profile.example.yml actually ships,
+# named once here rather than transcribed separately into each of the two
+# case-2 tests below (the CLI-level one and the scan_placeholders()-level
+# one) -- two hand-maintained copies of the same list drift apart silently,
+# since both tests only assert PRESENCE and so stay green when the example
+# grows an eighth sentinel neither list names. The authoritative, both-ways
+# drift guard against profile_validate.py's own KNOB_QUESTIONS lives in
+# tests/profile_validate.test.py
+# (test_knob_questions_matches_shipped_sentinels_set_equality).
+SHIPPED_CHOOSE_SENTINELS = (
+    "CHOOSE_none_confirmed_or_regex",
+    "CHOOSE_none_confirmed_or_markdown_ref_or_custom_regex",
+    "CHOOSE_true_or_false",
+    "CHOOSE_live_or_offline",
+    "CHOOSE_translate_all_or_preserve_source_or_omit_apparatus_or_body_refs_only",
+    "CHOOSE_segment_drafts_and_audit_or_assembled_book",
+    "CHOOSE_obsidian_or_epub_or_custom",
+)
 
 
 def _load_profile_validate():
@@ -168,7 +182,14 @@ def _build_filled_profile(durable_root: Path, source_path: Path) -> dict:
             "batch_agent_cap": 3500,
         },
         "footnotes": {"apparatus_policy": "translate_all"},
-        "glossary": {"research_mode": "offline"},
+        # #727: glossary.enabled and the three fields below were previously
+        # shipped as real, already-decided values in profile.example.yml and
+        # needed no filling-in here at all -- they are transcribed here now
+        # only because #727 turned them into CHOOSE_-sentinels, so this
+        # fixture's claim of "structurally identical to the shipped example,
+        # every placeholder replaced" would otherwise silently go false the
+        # moment the example shipped a fourth/fifth/sixth/seventh sentinel.
+        "glossary": {"enabled": True, "research_mode": "offline"},
         "validation": {
             "untranslated_sentinel": "нет перевода",
             # #533. Carried here because this helper's own docstring claims
@@ -191,6 +212,7 @@ def _build_filled_profile(durable_root: Path, source_path: Path) -> dict:
         },
         "output": {
             "v1_scope": "segment_drafts_and_audit",
+            "target": "obsidian",
             "destination": str(durable_root / "out"),
         },
     }
@@ -243,6 +265,18 @@ def test_missing_profile_autocopy_does_not_touch_an_existing_profile(pv, tmp_pat
 # ---------------------------------------------------------------------------
 
 def test_verbatim_shipped_example_is_fatally_rejected_by_cli(pv, tmp_path, capsys):
+    """#727's actual fix, asserted at the real CLI entry point: a single
+    invocation against the verbatim shipped example -- which carries SEVEN
+    surviving CHOOSE_-sentinels across source.adapter_config.plain_text
+    (verse_detection, footnotes), glossary (enabled, research_mode), footnotes
+    (apparatus_policy), and output (v1_scope, target) -- must name EVERY one of
+    them in that ONE run, not just the single field schema.py happens to
+    restrict unconditionally. Before #727, Step 5 (whole-file jsonschema
+    validation) ran before Step 7 (scan_placeholders) and halted the whole
+    run on the first schema-level violation it hit
+    (glossary.research_mode's unconditional enum), so an operator only ever
+    learned about one missing decision per re-run. #727 moves the placeholder
+    scan ahead of schema validation specifically so this no longer happens."""
     profile_path = tmp_path / ".claude" / "literary-translator" / "profile.yml"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_bytes(EXAMPLE_PATH.read_bytes())
@@ -250,16 +284,26 @@ def test_verbatim_shipped_example_is_fatally_rejected_by_cli(pv, tmp_path, capsy
     exit_code, _out, err = _run_main(pv, profile_path, capsys)
 
     assert exit_code != 0, "the verbatim shipped example must never pass Step 0"
-    # glossary.research_mode is the ONE placeholder-bearing field with an
-    # unconditional (non-format-gated) schema enum restriction, confirmed by
-    # direct inspection of profile.schema.json -- Step 5's schema validation
-    # halts on it before Step 7 (scan_placeholders) ever runs.
-    assert "glossary.research_mode" in err, err
-    assert "CHOOSE_live_or_offline" in err, err
+    assert "Step 0 needs these intake decisions answered" in err, (
+        "the questionnaire header must be printed once the placeholder scan "
+        f"finds any surviving sentinel:\n{err}"
+    )
+    for sentinel in SHIPPED_CHOOSE_SENTINELS:
+        assert sentinel in err, f"expected sentinel {sentinel!r} named in ONE run; got:\n{err}"
+    for field in (
+        "source.adapter_config.plain_text.verse_detection",
+        "source.adapter_config.plain_text.footnotes",
+        "glossary.enabled",
+        "glossary.research_mode",
+        "footnotes.apparatus_policy",
+        "output.v1_scope",
+        "output.target",
+    ):
+        assert field in err, f"expected field {field!r} named in ONE run; got:\n{err}"
 
 
 def test_verbatim_shipped_example_scan_placeholders_names_every_placeholder(pv):
-    """Exercises scan_placeholders() -- the actual Step 7 mechanism behind
+    """Exercises scan_placeholders() -- the actual Step 5 mechanism behind
     the "names every placeholder" guarantee -- directly against the
     verbatim, unmodified shipped example. This is what fires in full once a
     user has fixed the one schema-blocking field (glossary.research_mode)
@@ -276,11 +320,7 @@ def test_verbatim_shipped_example_scan_placeholders_names_every_placeholder(pv):
             f"expected placeholder {placeholder!r} to be named; got:\n{joined}"
         )
     # ...plus every CHOOSE_-prefixed sentinel actually shipped in the example.
-    for sentinel in (
-        "CHOOSE_none_confirmed_or_regex",
-        "CHOOSE_none_confirmed_or_markdown_ref_or_custom_regex",
-        "CHOOSE_live_or_offline",
-    ):
+    for sentinel in SHIPPED_CHOOSE_SENTINELS:
         assert sentinel in joined, f"expected sentinel {sentinel!r} to be named; got:\n{joined}"
 
     # ...and each violation is attributed to its own field, by dotted path.
@@ -290,7 +330,11 @@ def test_verbatim_shipped_example_scan_placeholders_names_every_placeholder(pv):
         "source.path",
         "source.adapter_config.plain_text.verse_detection",
         "source.adapter_config.plain_text.footnotes",
+        "glossary.enabled",
         "glossary.research_mode",
+        "footnotes.apparatus_policy",
+        "output.v1_scope",
+        "output.target",
         "output.destination",
     ):
         assert any(err.startswith(f"{field}:") for err in errors), (

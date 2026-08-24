@@ -533,6 +533,11 @@
           "type": "string",
           "enum": ["live", "offline"]
         },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch for the W3 glossary/canon RESEARCH pass. When false, W3 still runs the mandatory language smoke test (W3a's segpack.py re-runs that same extractor over every segment and W5 acts on its new_names, so name detection stays load-bearing), but skips glossary_batch_plan.py, resume_setup.py, the glossary Workflow, the canon merge, and the skeptic pass; it bootstraps an empty, fully stamped canon.json with canon_validate.py --init and rejoins at the mandatory homonym-split evidence gate exactly as the no_new_candidates SKIP branch does. An existing canon.json is NOT discarded -- --init is create-only, so its entries keep reaching every segpack. Absent means true, so every existing profile keeps validating unchanged. Outside compute_profile_semantics_hash()'s named-six allowlist (cache_key.py:514), so adding or flipping this key never re-translates a converged segment on its own -- but enabling it later and canonizing names does change affected segments' used_terms_hash and makes them dispatch-eligible again. Adding this property to profile.schema.json itself moves resume_setup.py's own _schemas_dir_hash() (it hashes every top-level *.schema.json file's raw bytes under durable_root/schemas/ into input_digest), so the FIRST Step 0a refresh after this release is a one-time resume-identity reset: any in-flight mass-translate or glossary run cannot resume across it -- it starts a fresh run_id and re-dispatches from scratch, including any partial glossary batch."
+        },
         "min_candidate_freq": {
           "type": "integer",
           "minimum": 1
