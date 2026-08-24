@@ -3751,8 +3751,8 @@ and never re-translates, and a hand-edited draft is exactly what its drift
 branch admits, so naming those ids carries the edit into a confirming review
 rather than leaving its survival to whether the digest happened to move. See
 *Claiming a segment for re-review (#438)* and *A claim never re-translates*
-below for the mechanics; the two are mutually exclusive for the same id and
-rejected outright if both are given for it.
+above, under W5, for the mechanics; the two are mutually exclusive for the same
+id and rejected outright if both are given for it.
 
 A site this sweep adjudicated as NOT needing an edit needs neither route. Its
 draft is untouched, and with a section-G edit behind it no content-affecting
