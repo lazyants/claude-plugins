@@ -130,8 +130,9 @@ unconditional — the segment-drafts handoff. This increment ships exactly one
 working target, `obsidian`. `epub` does NOT resolve: `render_epub.py` has never
 been written, so Step 0 and Step 0d both HALT on it, naming the missing module
 and the alternatives (see "Why `build_epub.py` hasn't been generalized" below).
-`custom` resolves as far as its path shape and then halts for co-design, per
-project (see `references/output-target-adapters/README.md`).
+`custom` is unchanged: a null `adapter_config.custom.renderer_path` halts for
+co-design, while a non-null, path-safe value resolves to that project's own
+renderer and renders (see `references/output-target-adapters/README.md`).
 
 #### Step 0d — resolving the target, early
 

@@ -1170,6 +1170,31 @@ def test_assembled_book_with_unshipped_epub_target_is_fatal():
     assert "output.target: obsidian" in message
 
 
+def test_step_0_main_actually_reports_the_unshipped_epub_halt(tmp_path, capsys):
+    """The WIRING, not the checker. Every other case here calls
+    `check_output_target_shipped` directly, so deleting its one line in
+    `main()`'s procedural block would leave them all green while the real
+    Step 0 CLI silently accepted an assembled EPUB -- acceptance criterion 1
+    lost with nothing red. This drives the real entry point instead.
+
+    The fixture's `source.path` and `durable_root` are the baseline's
+    non-existent placeholders, so main() collects their own fatal lines too;
+    that is fine and deliberate (it is a collect-everything validator, and a
+    filesystem fixture would add nothing this assertion needs). The line that
+    can only come from step 14 is the one asserted."""
+    profile = _output_profile("assembled_book", "epub")
+    profile_path = tmp_path / "profile.yml"
+    profile_path.write_text(pv.yaml.safe_dump(profile), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        pv.main(["--profile", str(profile_path)])
+
+    stderr = capsys.readouterr().err
+    assert excinfo.value.code == 1
+    assert "render_epub.py" in stderr
+    assert "output.target" in stderr
+
+
 def test_inert_epub_target_under_the_default_scope_is_accepted():
     """The over-catch guard. Under `segment_drafts_and_audit` nothing ever
     reads output.target -- Step 0d is a no-op and W9 does not run -- so a
