@@ -609,7 +609,11 @@ def test_verbatim_census_folds_emphasis_out_before_comparing_runs():
     already broke the run, so that case would look fine either way -- the case
     that matters is a span INSIDE a word: `<i>אב</i>גד` reads as two runs while
     the correct draft carries one, and the census would queue an intact
-    translation as a tier-1 letter_diff. `_fold_emphasis` is what stops it."""
+    translation as a tier-1 letter_diff.
+
+    Drives `_source_units()`, the real CALL SITE, not `_fold_emphasis()` -- a
+    test of the helper alone stays green when the call site stops using it,
+    which is exactly the mutation this pins."""
     census = _census()
     plain = "אבגד"
     carried = CARRY(_blk(plain, "<p><i>אב</i>גד</p>"))
@@ -617,7 +621,13 @@ def test_verbatim_census_folds_emphasis_out_before_comparing_runs():
     assert census.hebrew_runs(carried) == ["אב", "גד"], (
         "fixture no longer splits the run -- this test would pass vacuously"
     )
-    assert census.hebrew_runs(census._fold_emphasis(carried)) == census.hebrew_runs(plain)
+
+    pack = {"blocks": [], "footnotes": [{"n": 1, "source_text": carried}]}
+    units, _missing = census._source_units("seg01", pack)
+    assert census.hebrew_runs(units["footnotes:1"]) == census.hebrew_runs(plain), (
+        "the census's own unit still carries the markup: an intact draft run "
+        f"would be queued as a letter_diff. unit={units['footnotes:1']!r}"
+    )
 
 
 def test_verbatim_census_fold_also_undoes_the_preserved_escaping():
