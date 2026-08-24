@@ -367,13 +367,17 @@ def _local_dict_len(filename, funcname, varname):
 # would make this file the third copy of one number, which is the shape #580 was
 # filed about.
 FIGURES = [
+    # Rotated to 1.70.0's own phrases. Both tuples are UNCHANGED across that
+    # release's range, and the entry says so -- a "membership did not move"
+    # claim is exactly as re-derivable as a "moved to N" one, and exactly as
+    # capable of going stale if a later edit in the same release adds a member.
     Figure(
-        phrase="gained two entries and is now 19",
+        phrase="still holds 19 entries",
         value=19,
         derive=lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
     ),
     Figure(
-        phrase="too and is now 6",
+        phrase="still holds 6",
         value=6,
         derive=lambda: _tuple_len(
             "scaffold_setup.py", "ORCHESTRATION_BUNDLE_MEMBERS"
