@@ -86,6 +86,7 @@ import argparse
 import json
 import re
 import sys
+from html import unescape
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -170,6 +171,102 @@ FNREF_RE = re.compile(r"⟦FNREF_(\d+)⟧")
 LITERAL_MARKER_RE = re.compile(r"\[\d+\]")
 
 _TAG_RE = re.compile(r"<[^>]+>")
+
+# ---------------------------------------------------------------------------
+# #725 -- a footnote definition's own <i>/<em> emphasis, carried into its
+# source_text. A BODY block reaches the translator as raw source_html, `<i>`
+# and all; a footnote carried markup-stripped plain_text alone, so the
+# translator was asked to preserve italics it was never shown.
+#
+# The emphasis is carried in the SOURCE's OWN NOTATION, not converted to
+# markdown `*...*`. Markdown was the first design and it died three times over:
+# `<i>a</i><em>b</em>` conserves every character and still emits `*a**b*`;
+# a source backslash before a span escapes the delimiter (`\*word*`); and
+# CommonMark's punctuation-aware left/right flanking makes `<i>mot,</i>x` ->
+# `*mot,*x` render as literal asterisks, as it does for the equivalent CJK and
+# Hebrew shapes. A tag has no flanking rule, no escape sequence, no doubling,
+# and no collision with a `*` the source itself contains -- so those failure
+# modes stop EXISTING rather than being detected one at a time.
+# ---------------------------------------------------------------------------
+# HTML's OWN tag-name terminator set, ASCII only -- NOT Python's `\s` and NOT
+# `\b`. Both of those are wrong here, and each one shipped a defect: `\b`
+# matches inside `<i-foo>`/`<i:foo>` because `-` and `:` are non-word
+# characters, and `\s` matches U+00A0, so `<i\xa0>` -- an element whose name is
+# literally `i` + NBSP, not `i` -- read as italic. Either one INVENTS emphasis
+# the source does not have.
+_HTML_TAG_WS = r"[ \t\r\n\f]"
+# `re.IGNORECASE | re.ASCII` on all three classifiers below, never IGNORECASE
+# alone. HTML element names are case-folded per ASCII, but Python's Unicode
+# case-insensitivity folds `i` together with U+0130 LATIN CAPITAL LETTER I WITH
+# DOT ABOVE and U+0131 LATIN SMALL LETTER DOTLESS I, so `<İ>Word</İ>` and
+# `<ı>Word</ı>` -- elements NAMED that, which no HTML parser italicises --
+# both read as emphasis and reached `<i>Word</i>`. Same class of error as `\s`
+# and `\b` above: a PYTHON character rule standing in for an HTML syntax rule,
+# INVENTING emphasis the source does not have. With re.ASCII a non-ASCII name
+# is not an emphasis tag, so it is dropped as ordinary markup and the
+# definition falls back to its plain_text.
+#
+# The flag on `em` is PROPHYLACTIC -- nothing non-ASCII folds to `e` or `m`,
+# and `<İm>` was measured not to match even under bare IGNORECASE. Only the
+# `i` alternative had a reachable case, which is why the test table carries
+# fixtures for `i` alone and says so.
+#
+# Also measured: backing the flag out of any ONE of the three leaves the suite
+# green, because a Unicode-loose opener with an ASCII-strict closer (or the
+# reverse) leaves the name stack unbalanced and falls back. The three are
+# mutually redundant in the SAFE direction; all three together is what goes
+# red, and that is the granularity the mutation was run at.
+_EMPH_ANY_RE = re.compile(
+    r"</?(?:i|em)(?=" + _HTML_TAG_WS + r"|[/>])", re.IGNORECASE | re.ASCII
+)
+# The name terminator is `_HTML_TAG_WS`, for the reason stated at its
+# definition above. Unique to this pattern: `(?![^>]*/<ws>*>)` excludes a
+# SELF-CLOSING `<i/>` -- it opens nothing, and counting it as an open
+# emphasised the rest of the definition.
+_EMPH_OPEN_RE = re.compile(
+    r"<(i|em)(?=" + _HTML_TAG_WS + r"|[/>])(?![^>]*/" + _HTML_TAG_WS + r"*>)[^>]*>",
+    re.IGNORECASE | re.ASCII,
+)
+_EMPH_CLOSE_RE = re.compile(
+    r"</(i|em)" + _HTML_TAG_WS + r"*>", re.IGNORECASE | re.ASCII
+)
+# Both of the two patterns above CAPTURE which of the two names the tag used,
+# so a close is matched against the open it claims to close rather than
+# against a bare depth count.
+#
+# The single spelling this script itself emits -- `<em>` and every attribute
+# are normalised away, so a consumer has exactly one form to recognise.
+_BARE_EMPH_RE = re.compile(r"</?i>")
+#
+# Scanner for EVERY tag in the walk below, not only the emphasis ones -- the
+# `_EMPH_*` family above classifies what this one finds. `[^<>]*` and NOT `_TAG_RE`'s `[^>]+`: on
+# malformed markup (a long run of `<` with no `>`) the latter restarts its
+# end-of-string scan at every `<` and goes quadratic, and this is the one path
+# that walks raw source_html. Same linear form final_audit.py already uses.
+_HTML_TAG_SCAN_RE = re.compile(r"<[^<>]*>")
+# The whitespace class the `gutenberg_epub` adapter's own extractor
+# (extract.py.template) normalizes a block's plain_text with -- its
+# `normalize_text`/`_WS`. DUPLICATED here rather than imported, the same
+# convention _split_lf_lines above follows: that template imports bs4, which
+# references/source-format-adapters/plain-text.md forbids the `plain_text`
+# adapter's path from doing, and segpack.py serves every adapter.
+#
+# DELIBERATELY narrower than `\s`, which also matches U+000B/U+000C/U+0085/
+# U+2028/U+2029: a source's own U+2028 survives that extractor's
+# normalize_text, so collapsing it here would make the round-trip gate below
+# reject a definition whose text is in fact intact.
+#
+# For an adapter that normalizes DIFFERENTLY, nothing breaks and nothing is
+# assumed: the gate simply does not match, and the definition falls back to
+# its plain_text -- the same safe outcome as any other unmodelled shape.
+_MANIFEST_WS_RE = re.compile(r"[ \t\r\n\xa0]+")
+
+
+def _manifest_norm(s):
+    """Normalize `s` the way the manifest's own extractor normalized
+    plain_text. Both sides of the round-trip gate in _footnote_source_text()
+    go through this, so the comparison is one idea spelled once."""
+    return _MANIFEST_WS_RE.sub(" ", s).strip()
 
 
 def _split_lf_lines(s):
@@ -270,6 +367,105 @@ def _scan_text(entry):
     return _TAG_RE.sub(" ", entry.get("source_html", "") or "")
 
 
+def _footnote_source_text(def_block):
+    """A footnote definition's source_text, carrying the source's OWN
+    `<i>`/`<em>` emphasis (#725) -- normalised to a bare `<i>`, with every
+    other tag dropped.
+
+    Returns `plain_text` UNCHANGED whenever the emphasis cannot be carried
+    faithfully. That is the whole safety story: this can LOSE emphasis (markup
+    these two regexes do not model, a definition whose text spans several block
+    tags so its text-node concatenation differs from the extractor's own
+    block_text()) but it can never invent, reorder or mangle a character of the
+    footnote's text.
+
+    ONE round-trip gate decides that: strip `</?i>` back out, unescape, and the
+    result must equal `plain_text` exactly under the manifest's own whitespace
+    normalization. `unescape` runs AFTER tag removal, never before -- a text
+    node holding `&lt;i&gt;` must stay escaped so it is never confused with a
+    real tag, and after-not-before is also exactly how the extractor produced
+    `plain_text`. A surviving tag must additionally BALANCE, or the translator
+    would be handed a dangling one.
+    """
+    plain = def_block.get("plain_text", "")
+    html_src = def_block.get("source_html", "")
+    # A manifest whose block fields are not strings is a SHAPE problem, and
+    # reporting it is validate_segpack()'s job, not this helper's: hand the
+    # value straight back so it reaches that check's own clean
+    # "missing/invalid 'source_text'" message instead of a traceback out of
+    # build_pack(). manifest.schema.json types both fields as strings, but a
+    # `custom` adapter's extractor is hand-written and this script is what
+    # meets its output first.
+    if not isinstance(plain, str):
+        return plain
+    # An empty or whitespace-only definition is returned untouched, so the
+    # property #397 relies on survives verbatim: source_text never invents text
+    # where plain_text has none, and `<i></i>` must not become a definition
+    # that reads as real. (validate_extraction.py's own
+    # no_empty_footnote_definitions gate reads the MANIFEST block and fires
+    # independently of this; what this guard protects is the downstream
+    # consumers -- validate_draft's blank-translation refusal, verbatim_census.)
+    if not plain.strip():
+        return plain
+    if not isinstance(html_src, str) or not html_src:
+        return plain
+    # A cheap SHORT-CIRCUIT, not a correctness guard: the "nothing carried"
+    # invariant at the end returns plain_text for these anyway. It exists so
+    # the common case -- most definitions have no emphasis at all -- skips the
+    # walk entirely, and no test can kill it on its own for exactly that
+    # reason.
+    if not _EMPH_ANY_RE.search(html_src):
+        return plain
+
+    # A LIFO stack holding each open tag's OWN NAME, never a bare depth count.
+    # `<i>a</em>b<em>c</i>` balances numerically and is not balanced at all:
+    # the `<i>` stays open across all three characters, so collapsing the
+    # names would emit `<i>a</i>b<i>c</i>` and leave `b` roman when the source
+    # has it italic. Text conservation cannot see that -- the characters are
+    # all present and in order -- so the STACK is the check that catches it,
+    # and it subsumes the plain balance check it replaced.
+    parts, stack, pos = [], [], 0
+    for m in _HTML_TAG_SCAN_RE.finditer(html_src):
+        if m.start() > pos:
+            parts.append(html_src[pos:m.start()])
+        pos = m.end()
+        tag = m.group(0)
+        opened = _EMPH_OPEN_RE.fullmatch(tag)
+        if opened:
+            stack.append(opened.group(1).lower())
+            parts.append("<i>")
+            continue
+        closed = _EMPH_CLOSE_RE.fullmatch(tag)
+        if closed:
+            if not stack or stack.pop() != closed.group(1).lower():
+                return plain
+            parts.append("</i>")
+        # Any OTHER tag falls off the bottom here: dropped, contributing no
+        # text of its own. The round-trip gate below is what checks that the
+        # drop lost nothing the extractor had kept.
+    if stack:
+        return plain
+    if pos < len(html_src):
+        parts.append(html_src[pos:])
+    marked = _manifest_norm("".join(parts))
+
+    round_tripped = _manifest_norm(unescape(_BARE_EMPH_RE.sub("", marked)))
+    if round_tripped != plain:
+        return plain
+    # NOTHING CARRIED => plain_text VERBATIM, as the field's contract promises.
+    # The round-trip gate above compares TEXT, so it happily accepts a string
+    # that carries no emphasis at all and merely re-encodes: `<i-foo>A &amp;
+    # B</i-foo>` has no emphasis, drops both tags as ordinary markup, and
+    # round-trips to `A & B` -- while `marked` is `A &amp; B`, which is not
+    # what plain_text says. Returning `marked` there would change a footnote's
+    # bytes (and its note_map_hash) for a definition the source never
+    # italicised. This is the check that makes "no emphasis => untouched" an
+    # enforced invariant rather than a promise.
+    if "<i>" not in marked:
+        return plain
+    return marked
+
+
 def _def_blocks_for(fn_ns, fn_entries_by_n):
     """The set of def_block ids for the given footnote numbers, skipping any
     number with no manifest.footnotes[] entry or no def_block. Feeds the
@@ -348,6 +544,9 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
     #      for it. Under omit_apparatus, no apparatus and no markers exist at
     #      all. ----
     footnotes_out = []
+    # #725: the definition texts the name-candidate scan below reads -- always
+    # the PLAIN spelling, never the emphasis-carrying one. See its own comment.
+    footnote_plain_texts = []
     footnote_def_block_ids = set()
 
     if apparatus_policy in FOOTNOTE_CARRYING_POLICIES:
@@ -435,7 +634,15 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
                     file=sys.stderr,
                 )
                 continue
-            footnotes_out.append({"n": n, "source_text": def_block.get("plain_text", "")})
+            fn_plain = def_block.get("plain_text", "")
+            footnotes_out.append({"n": n, "source_text": _footnote_source_text(def_block)})
+            # Only a real string reaches the candidate scan. A malformed
+            # manifest's non-string plain_text is carried into source_text
+            # unchanged (see _footnote_source_text) so validate_segpack()
+            # reports the shape problem -- but extract_candidates() would
+            # raise on it first, turning that clean diagnostic back into a
+            # traceback out of build_pack().
+            footnote_plain_texts.append(fn_plain if isinstance(fn_plain, str) else "")
             footnote_def_block_ids.add(fe.get("def_block"))
     else:
         for b in seg_blocks:
@@ -512,7 +719,16 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
     # the candidate's own content, never from the marker.
     name_stats = {}
     scan_texts = [_scan_text(entry) for entry in blocks_out]
-    scan_texts += [fo["source_text"] for fo in footnotes_out]
+    # #725: scan the PLAIN definition text, NEVER the emphasis-carrying
+    # source_text. A tag's characters are not token characters, but `>` IS the
+    # `preceding_char` tokenize() records for the token after it, and WRAPPERS
+    # (which the back-scan skips) contains neither `>` nor `*` -- so a name
+    # standing first in a sentence inside an emphasis span would read as
+    # mid-sentence, enter strong_names for the wrong reason, and change
+    # names[]/new_names[]/canon_names[]/split_names{}. Keeping the scan on
+    # plain_text makes this change provably inert for every name channel
+    # rather than merely probably harmless.
+    scan_texts += footnote_plain_texts
     for raw_text in scan_texts:
         for name, mid_sentence in extract_candidates(raw_text, lang_config):
             multiword = len(_strip_capped_marker(name).split()) > 1
