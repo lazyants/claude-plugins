@@ -1668,13 +1668,15 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
 #     with attempts == MAX_CITATION_RETRIES + 1 == 3 in the worst case, so:
 #
 #         live    -- perBatch = 1 + (2 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)
-#                            = 1 + 6*3 = 19
+#                            = 1 + 5*3 = 16
 #         offline -- perBatch = 1 + WAIT_CALLS == 4
 #         estimatedCalls = perBatch * BATCHES.length + 2
 #
 #     The leading 1 in the live branch is #723's APPROVAL RECORD, not the
-#     resume precheck that led it until #724. The total is the same 19 the
-#     1.16.2 ladder gave, and it is not the same nineteen -- see
+#     resume precheck that led it until #724. Those two moves cancel, so the
+#     total passed back through the same 19 the 1.16.2 ladder gave -- and it
+#     was not the same nineteen -- before #724's prepare fold took the
+#     PER-ATTEMPT term 6 -> 5 and the total to 16. See
 #     test_glossary_preflight_live_formula_is_16_batches_plus_2 for why a
 #     matching total proves nothing about the composition here.
 #
@@ -2288,12 +2290,15 @@ def test_glossary_preflight_live_formula_is_16_batches_plus_2(tmp_path, n_batche
     """Locks the LIVE formula (1 + (2+WAIT_CALLS)*(MAX_CITATION_RETRIES+1))*N + 2
     == 16*N + 2.
 
-    NINETEEN IS A COLLIDING NUMBER, and that is the first thing to know about
-    this test rather than a footnote. 1.16.2 shipped 19 as `precheck 1 + 3*6`;
-    #723 made it 20 by adding the approval record; #724 made it 19 again by
-    deleting the precheck. So the pre-#723 total and today's are equal and
-    share no term. A regression that reinstates the precheck and drops the
-    record -- or any other pair that sums to 19 -- passes this assertion. What
+NINETEEN WAS A COLLIDING NUMBER, and that is the first thing to know about
+    this test rather than a footnote -- the total has since moved past it, but
+    the lesson is why this assertion is not proof of anything. 1.16.2 shipped 19
+    as `precheck 1 + 3*6`; #723 made it 20 by adding the approval record; #724
+    made it 19 AGAIN by deleting the precheck, so two consecutive releases gave
+    equal totals sharing no term; then #724's prepare fold took the per-attempt
+    term 6 -> 5 and the total to 16. A regression that reinstates the precheck
+    and drops the record -- or any other combination that sums to 16 -- passes
+    this assertion. What
     catches that is not the total but
     test_glossary_live_per_attempt_term_is_the_template_own_multiplier's divmod
     (which subtracts the record specifically) plus
@@ -2317,20 +2322,25 @@ def test_glossary_preflight_live_formula_is_16_batches_plus_2(tmp_path, n_batche
         3*(dispatch + wait + prepare + judge) = 3*4           = 12 -> 12*N + 2
       * #352's chunks charged but its authoritative re-check not (WAIT_CALLS
         read as WAIT_CHUNKS): 3*(1 + 2 + 2) = 3*5             = 15 -> 15*N + 2
+      * #724's FOLD left un-re-derived -- the prepare still charged as its own
+        per-attempt call, which is the 1.16.2/#723-era ladder and lands exactly
+        on the colliding total above:
+        1 + 3*6                                               = 19 -> 19*N + 2
       * the full chunked ladder, but #723's approval record uncharged, which is
         the one term that sits OUTSIDE the ladder:
-        3*6                                                   = 18 -> 18*N + 2
+        3*5                                                   = 15 -> 15*N + 2
       * the record charged PER ATTEMPT rather than once, which is the natural
-        wrong reading of "after every approval": 3*7          = 21 -> 21*N + 2
-      * #724 left un-re-derived -- the precheck still charged alongside the
-        record: 2 + 3*6                                       = 20 -> 20*N + 2
-    Only the chunked ladder with its re-check and ONE record, and no precheck,
-    gives 19. Cheap: the gate trips before pipeline() ever runs, so no PLAN and
+        wrong reading of "after every approval": 3*6          = 18 -> 18*N + 2
+      * #724's PRECHECK DELETION left un-re-derived -- the precheck still
+        charged alongside the record: 2 + 3*5                 = 17 -> 17*N + 2
+    Only the chunked ladder with its re-check, its FOLDED prepare, and ONE
+    record, with no precheck, gives 16. Cheap: the gate trips before pipeline()
+    ever runs, so no PLAN and
     zero agent calls are needed."""
     batches = _glossary_batches(n_batches)
-    # Derivation: perBatch = 3 attempts * (dispatch 1 + wait 3 +
-    # citation prepare 1 + citation judge 1) 6 + approval record 1 = 19, plus the
-    # fixed merge + verify pair 2.
+    # Derivation: perBatch = 3 attempts * (dispatch 1 + wait 3, which also runs
+    # the evidence prepare since #724, + citation judge 1) 5 + approval record 1
+    # = 16, plus the fixed merge + verify pair 2.
     expected = GLOSSARY_LIVE_PER_BATCH_CEILING * n_batches + GLOSSARY_FIXED_MERGE_VERIFY
     assert expected == {1: 18, 2: 34, 5: 82, 13: 210}[n_batches]
 

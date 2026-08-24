@@ -38,7 +38,7 @@ further cases cover the structural traps a naive insertion hits:
     human resolving unsourceable candidates).
 
 SCOPE, vs tests/batch_size_estimator.test.py. That file owns the COST
-ESTIMATOR: the live 19*N+2 and offline 4*N+2 preflight formulas, the
+ESTIMATOR: the live 16*N+2 and offline 4*N+2 preflight formulas, the
 exactly-at-cap boundary, and the shape of the over-cap refusal. This file owns
 the STATE MACHINE the estimate is a model of -- what the review actually does
 to the control flow. The one place the two touch on purpose is formula
@@ -1680,7 +1680,7 @@ def test_offline_mode_spends_no_review_call(tmp_path):
 #
 # The preflight REFUSAL tests (does an over-cap run return
 # reason:"batch-too-large" without dispatching, and is estimatedCalls exactly
-# 19*N+2 live / 4*N+2 offline) live in tests/batch_size_estimator.test.py --
+# 16*N+2 live / 4*N+2 offline) live in tests/batch_size_estimator.test.py --
 # that file's subject is the cost estimator, so the ladder arithmetic belongs
 # there and is not duplicated here.
 #
@@ -1860,7 +1860,8 @@ def test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file
 
     # 1.16.2 (#352): the ladder's per-attempt term is no longer a bare integer.
     # One wait became WAIT_CALLS agent calls, and the template writes the term
-    # SYMBOLICALLY (`3 + WAIT_CALLS`) rather than rendering it, so this seam has
+    # SYMBOLICALLY (`2 + WAIT_CALLS` since #724's fold, `3 + WAIT_CALLS` before
+    # it) rather than rendering it, so this seam has
     # to resolve WAIT_CALLS out of the template's own wait constants before it
     # can evaluate anything. Resolving it here rather than substituting this
     # file's EXPECTED_WAIT_CALLS is the point: it means a template that changes

@@ -1864,7 +1864,7 @@ function precedingLineIs(reply, sentinel) {
 //     EVIDENCE_FAILED verbatim in its own instructions. One difference worth
 //     stating rather than assuming symmetry: a false RED here costs LESS within
 //     the attempt, because the judge call is skipped -- that attempt spends
-//     2 + WAIT_CALLS calls instead of 3 + WAIT_CALLS. It costs exactly the same
+//     1 + WAIT_CALLS calls instead of 2 + WAIT_CALLS. It costs exactly the same
 //     at the ladder's end, since an attempt lost to a mis-phrased prepare is an
 //     attempt lost either way.
 //   approval record (#723) -- the cheapest false RED of the four, and the only
