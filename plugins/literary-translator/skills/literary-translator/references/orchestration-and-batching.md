@@ -520,12 +520,16 @@ sequence, per `references/workflow-schema-validation.md`.
 `verifyReviewArtifactPrompt` keeps its pre-1.2.0 name but is now dispatched as
 a separate call after `readReviewPrompt` returns, rather than immediately after
 the old single `reviewPrompt` call.) `glossary-pass-wf.template.js` defines its own,
-smaller set of eight: `batchPrecheckPrompt`, `batchDispatchPrompt`,
+smaller set of eight: `batchDispatchPrompt`,
 `batchWaitChunkPrompt` and `batchWaitRecheckPrompt` (**1.16.2**, the pair that
 replaced the single `batchWaitPrompt`), `citationPreparePrompt` and
 `citationJudgePrompt` (1.16.1,
 `live` only — the pair that replaced 1.16.0's single `citationReviewPrompt`),
-`mergeBatchesPrompt`, and `glossaryVerifyPrompt` (`CANON_VERIFY_SCHEMA`) — see
+`approvalRecordPrompt` (**#723**, `live` only), `mergeBatchesPrompt`, and
+`glossaryVerifyPrompt` (`CANON_VERIFY_SCHEMA`). It is still eight and it is a
+different eight: **#723** added `approvalRecordPrompt` and **#724** removed
+`batchPrecheckPrompt`, whose question `resume_setup.py` now answers before the
+Workflow starts — see
 `references/canon-and-glossary.md`. Since **1.16.2** its wait IS the shape
 W5's two waits use — chunks plus one authoritative non-polling re-check, over
 an elapsed-time loop — where before it was the odd one out; the sentinel sets
@@ -683,15 +687,18 @@ prior digest** → launch a **fresh run**, a fresh `RUN_ID`, and explicitly
 digest reasons about INPUTS; it cannot see that a cached result records a
 batch that never became ready. When the previous glossary pass returned
 `merged: false`, `reason: "fragment-check-failed"` with any batch at
-`reason: "glossary-pass-null"`, resuming replays that batch's cached precheck
-and wait replies instead of calling anything, so the identical verdict comes
+`reason: "glossary-pass-null"`, resuming replays that batch's cached wait
+replies instead of calling anything, so the identical verdict comes
 back — which reads as "it failed again" rather than "it never ran". Recover
 by offering the prior `RUN_ID` to `resume_setup.py` in `resume_from_run_ids`
 exactly as usual — the failed pass merged nothing, so the digest normally
 still matches, and `resume_setup.py`'s own `resume: true` answer is the
-authority — but invoke the Workflow WITHOUT `resumeFromRunId`. That re-runs
-each batch's precheck against what is actually on disk: a valid attempt-0
-fragment is resume-skipped, a missing or invalid one is dispatched again.
+authority — but invoke the Workflow WITHOUT `resumeFromRunId`. That re-runs the
+dispatch and wait for whatever `resume_setup.py` did NOT report in
+`resumed_batch_indices`: a valid attempt-0 fragment is resume-skipped, a missing
+or invalid one is dispatched again. **#724:** re-run `resume_setup.py` for this
+too, and substitute the array it reports NOW — the one from the failed pass is a
+statement about the disk as it was before that pass wrote anything.
 Before re-invoking, confirm the previous run's codex jobs are terminal — a
 dispatch job outlives the `agent()` call that awaited it, so a late one can
 still rewrite its attempt path after `write_run_dir()`'s wipe.
@@ -863,7 +870,8 @@ the same refusal shape. **1.16.0:** that formula is now MODE-DEPENDENT — an
 a `live` run additionally pays for the citation-review retry ladder. See the
 glossary-pass template section below for both branches. **1.16.2:** the
 offline branch no longer matches that historical figure, and deliberately so —
-it is now `5 * BATCHES.length + 2`. Holding offline byte-identical to `3N + 2`
+it became `5 * BATCHES.length + 2`, and **#724** then took it to
+`4 * BATCHES.length + 2` by deleting the per-batch resume precheck. Holding offline byte-identical to `3N + 2`
 was only ever possible because the extra 1.16.0/1.16.1 cost sat entirely in
 the live-only citation ladder; the chunked wait (#352) is mode-INDEPENDENT, so
 **an `offline` project whose cap was tuned to the old formula can now be
@@ -945,21 +953,33 @@ scaffold pre-creates `glossary/runs/` itself.
 pipeline(BATCHES, batchStep)
 ```
 
-- `batchPrecheckPrompt(batch)` — Claude, `effort:'low'`, no `agentType`, no
-  schema, **run FIRST (resume-skip, 1.3.5 #101)**: a single-shot, read-only
-  run of the same `--check-batch` invocation `batchWaitChunkPrompt` polls. If a
-  prior interrupted run of this SAME `{{RUN_ID}}` already left a valid
-  `out_{index}_attempt_0.json` fragment on disk (the precheck is hard-wired to
-  attempt 0 — `checkBatchCmd(batch.index, 0)`), the precheck returns `PRESENT`
-  and the batch skips its codex dispatch + wait entirely — but NOT, since
-  1.16.0, the `live`-mode citation review below, which a resumed batch still
-  pays exactly like a fresh one; any non-`PRESENT` answer (a
-  missing, malformed, or wrong-coverage fragment, or a failed precheck) falls
-  THROUGH to the normal dispatch + wait, so a bad fragment is never wrongly
-  trusted. Safe because any plugin update flips `plugin_bundle_hash` (this
-  template is itself a `PLUGIN_BUNDLE_MEMBERS` entry) → a fresh `RUN_ID` with
-  no old fragments on disk, so a fragment that still passes `--check-batch`
+- **Resume-skip (1.3.5 #101, re-plumbed in #724) — NO agent call.** `batchStep`
+  reads `RESUMED_BATCHES`, a `Set` built from the `{{RESUMED_BATCH_INDICES}}`
+  array that `resume_setup.py` reports as `resumed_batch_indices` and the
+  instantiating session substitutes. That script runs the same `--check-batch`
+  invocation `batchWaitChunkPrompt` polls, against attempt 0's own path, AFTER
+  its stale-fragment wipe and AFTER writing this run's manifests — the earliest
+  point at which the answer is a fact rather than a question. A named batch
+  skips its codex dispatch + wait entirely — but NOT, since 1.16.0, the
+  `live`-mode citation review below, which a resumed batch still pays exactly
+  like a fresh one. Any failure at all (a missing, malformed, or wrong-coverage
+  fragment, an unusable validator, a timeout) leaves the batch OUT of the array,
+  so it falls THROUGH to the normal dispatch + wait and a bad fragment is never
+  wrongly trusted. Safe because any plugin update flips `plugin_bundle_hash`
+  (this template is itself a `PLUGIN_BUNDLE_MEMBERS` entry) → a fresh `RUN_ID`
+  with no old fragments on disk, so a fragment that still passes `--check-batch`
   against the CURRENT manifest is genuinely current, never stale.
+
+  Until #724 this was `batchPrecheckPrompt(batch)`, one Claude call per batch
+  answering `PRESENT`/`ABSENT` in prose. Moving it is a correctness change and
+  not only a cost one: #228, #308 and #371 are all the same class — a reply
+  merely MENTIONING `ABSENT <i>`, or gluing `PRESENT <i>` to a word with any of
+  sixteen measured characters, decided whether a codex dispatch was spent. A
+  substituted array has no prose to decorate, so both layers of containment
+  machinery that site carried are deleted rather than relocated. It also stops
+  being a `--check-batch` issuer kept character-identical by construction: the
+  script builds its own command line (see `resume_setup.py`'s
+  `probe_resumed_batches()`).
 - `batchDispatchPrompt(batch, attempt, rejectionReason)` — codex,
   `agentType:'codex:codex-rescue'`,
   `effort: EFFORT` (`engine.effort`, #197), **schema-less**, fire-and-forget: writes the run-scoped
@@ -1018,13 +1038,19 @@ pipeline(BATCHES, batchStep)
   batch_agent_cap section above. **1.16.2 (#352)** then moved it again, to
   `1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` — **19** at the shipped
   `WAIT_CALLS = 3` — for an unrelated reason: not a new review step, but one
-  wait becoming worth up to `WAIT_CALLS` agent calls instead of exactly 1. See
+  wait becoming worth up to `WAIT_CALLS` agent calls instead of exactly 1.
+  **#723** then added the approval record (**20**) and **#724** removed the
+  per-batch precheck (**19** again, with a leading term that means something
+  else entirely — see the batch_agent_cap section). See
   `references/canon-and-glossary.md`'s **Pre-merge citation review**.
 
-**All five of these verdicts are containment-guarded** — the precheck, the wait,
+**All four of these verdicts are containment-guarded** — the wait,
 (1.16.1) both halves of the citation pair, and (#723) the approval record — as
 are mass-translate's `waitChunkVerdict()` and its `DRAFT_MISSING` fix check,
-**seven sites over the two templates**. The total is unchanged from 1.16.0 but its composition is not: the
+**six sites over the two templates**. It was seven, and had been since 1.16.0,
+until **#724** deleted the glossary precheck — which is worth stating as a
+DELETION rather than as a new number, because the composition has moved twice
+more than the total has: the
 glossary side went from three to four when the citation reviewer split in two,
 and the mass-translate side went from three to two when 1.16.1 (#348) collapsed
 the two separate wait verdicts into the single `waitChunkVerdict()` parse site
@@ -1056,12 +1082,13 @@ the opposite direction, through `mentionedAnywhere()`: there the sentinel is the
 OK one, so gluing hid a genuine missing-draft report and the loop silently
 carried on reviewing an absent draft.
 
-A false hit recovers in-run DETERMINISTICALLY at exactly ONE of the six: the
-precheck, which falls through to the dispatch it would have run anyway —
-correct whatever made it report `ABSENT`. Of the other five, only the citation
-review gets a further attempt inside the run — its ladder's — and the remaining
-four cost a later run; since the trigger is the reply's phrasing rather than the
-data, either retry is a re-roll rather than a fix. The **citation review is
+No remaining site recovers in-run DETERMINISTICALLY. Exactly one used to — the
+glossary precheck, which fell through to the dispatch it would have run anyway,
+correct whatever made it report `ABSENT` — and **#724** removed it along with
+the reply it read. Of the six that remain, only the citation review gets a
+further attempt inside the run — its ladder's — and the other five cost a later
+run; since the trigger is the reply's phrasing rather than the data, either
+retry is a re-roll rather than a fix. The **citation review is
 not** among the DETERMINISTIC recoverers, despite its retry ladder: the ladder
 regenerates the fragment while the reviewer's wording is what tripped the guard,
 so a regenerated attempt merges only if its fresh reply happens not to re-trip
@@ -1175,25 +1202,30 @@ inside it:
 
   ```
   live    -- perBatchCalls = 1 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)
-             1 precheck, then dispatch + wait + citation prepare + judge per
+             dispatch + wait + citation prepare + judge per
              attempt, with attempts == MAX_CITATION_RETRIES + 1 in the worst
              case (every review rejects until the ladder is exhausted), PLUS one
              approval record (#723) spent once after the single approval a batch
-             can have -- which is why the leading term is 2 and why the ceiling
-             is the approved-on-the-last-attempt path rather than the exhausted
-             one (an exhausted batch approves nothing, records nothing, and
-             costs 19)
-  offline -- perBatchCalls = 1 + (1 + WAIT_CALLS) == 2 + WAIT_CALLS
-             precheck + dispatch + wait
+             can have -- which is why there is a leading term at all and why
+             the ceiling is the approved-on-the-last-attempt path rather than
+             the exhausted one (an exhausted batch approves nothing, records
+             nothing, and costs 18)
+  offline -- perBatchCalls = 1 + WAIT_CALLS
+             dispatch + wait, with no approval to record
   ```
 
   At the shipped `WAIT_CALLS = 3` and `MAX_CITATION_RETRIES = 2` that is
-  **`20 * BATCHES.length + 2` live** and **`5 * BATCHES.length + 2`
-  offline**, so a `batch_agent_cap` of 3500 admits ~184 live batches or ~699
-  offline ones. The parameterized form is **provably a generalisation rather
-  than a rewrite**: substituting `WAIT_CALLS = 1` collapses the two branches
-  to `1 + 4*(MAX_CITATION_RETRIES+1) == 13` and to `3`, which are exactly the
-  1.16.1 formulas.
+  **`19 * BATCHES.length + 2` live** and **`4 * BATCHES.length + 2`
+  offline**, so a `batch_agent_cap` of 3500 admits ~184 live batches or ~874
+  offline ones. Substituting `WAIT_CALLS = 1` collapses the live branch to
+  `1 + 4*(MAX_CITATION_RETRIES+1) == 13`, which is exactly the 1.16.1 live
+  figure.
+
+  **Nineteen is a colliding number, so do not read the total as the
+  composition.** 1.16.2 shipped 19 as `precheck 1 + 3*6`; **#723** made it 20
+  by adding the approval record; **#724** made it 19 again by deleting the
+  precheck. Today's leading `1` is the RECORD, and there is no per-batch call
+  before the ladder at all.
 
   **The offline branch stays MODE-AWARE, but it is no longer the historical
   `3 * BATCHES.length + 2`.** Under `offline`, `canon_validate.py` makes
@@ -1207,26 +1239,28 @@ inside it:
   What changed in 1.16.2 is the wait alone, `3N + 2 → 5N + 2`, and that is a
   real increase in the CEILING in BOTH modes rather than a bookkeeping one: unlike the
   1.16.0/1.16.1 moves, it is not confined to the live ladder, so an offline
-  project whose cap was tuned to the old formula will now be refused.
+  project whose cap was tuned to the old formula will now be refused. **#724**
+  then moved it the other way, `5N + 2 → 4N + 2`: the precheck it removed was
+  also mode-independent, and dropping an OVER-count only ever admits runs that
+  were always affordable.
 
   This is a worst-case CEILING, not a typical-run estimate, and 1.16.2 widens
   the gap between the two — a wait that finds its fragment on the FIRST chunk
   spends 1 call, not `WAIT_CALLS`, and only a wait that exhausts every chunk
   and still needs the re-check spends all 3. Under `live` a batch approved on
-  attempt 0 costs `2 + WAIT_CALLS + 2` = 7 calls, not the full ladder, and an
+  attempt 0 costs `1 + WAIT_CALLS + 2 + 1` = 7 calls, not the full ladder, and an
   attempt whose prepare fails short-circuits before the judge for
   `2 + WAIT_CALLS` rather than `3 + WAIT_CALLS`. A resumed batch whose
-  fragment already passes `--check-batch` skips its attempt-0 dispatch + wait
-  and so comes in strictly under the ceiling — but it does NOT skip the
-  citation review, which is why that saving is `1 + WAIT_CALLS` calls and not
-  `3 + WAIT_CALLS`. The count is over BATCHES, never candidates-per-batch, so
+  fragment already passed `--check-batch` before the run started skips its
+  attempt-0 dispatch + wait and so comes in strictly under the ceiling — but it
+  does NOT skip the citation review, which is why that saving is
+  `1 + WAIT_CALLS` calls and not `3 + WAIT_CALLS`. The count is over BATCHES, never candidates-per-batch, so
   a co-located elision pair nudging one batch a candidate or two over its
   nominal `--batch-size` never trips it. A refused run re-plans smaller
   batches (`glossary_batch_plan.py --batch-size`).
-- **Resume-skip precheck** — the `batchPrecheckPrompt` bullet above; a valid
-  pre-existing fragment for this `{{RUN_ID}}` is trusted and its dispatch +
-  wait skipped, so a resumed run never re-pays the codex dispatch for a batch
-  already done.
+- **Resume-skip** — the `RESUMED_BATCHES` bullet above; a valid pre-existing
+  fragment for this `{{RUN_ID}}` is trusted and its dispatch + wait skipped, so
+  a resumed run never re-pays the codex dispatch for a batch already done.
 
 ## Skeptic pass dispatch (opt-in, RFC #215 Phase 2)
 

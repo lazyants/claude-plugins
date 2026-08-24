@@ -54,7 +54,11 @@ written; this revision drives their REAL, on-disk interfaces instead
     --seg <id>`, never trusting a caller-supplied composite) or
     `glossary_rule` + `batches` (glossary). Prints
     `{"success": true, "effectiveRunId": ..., "resume": true|false,
-    "run_dir": ..., "input_digest": ...}` on success or
+    "run_dir": ..., "input_digest": ...}` on success -- plus, for
+    `kind="glossary"` only, a sixth `resumed_batch_indices` key (#724 A: the
+    batches whose attempt-0 fragment already passes `--check-batch`, decided
+    here because the Workflow's own precheck agent cost one subagent bootstrap
+    per batch to answer it in prose) -- or
     `{"success": false, "error": ...}` on failure; exit 0/1 respectively,
     but the script's own docstring says to read stdout, not rely on the
     exit code alone -- a digest MISMATCH (fresh run launched) is still

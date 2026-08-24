@@ -491,20 +491,26 @@ RETIRED = [
         BASELINE_RELEASE, GLOSSARY_TEMPLATE,
         "live -- perBatch = 1 + 4*(MAX_CITATION_RETRIES+1)",
         # #723 moved the leading term 1 -> 2 (the approval record sits OUTSIDE
-        # the ladder). The RETIRED needle is untouched -- it is a frozen fact
-        # about the baseline release -- only the successor moves, which is
-        # exactly what this table's replacement column is for.
-        "live -- perBatch = 2 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)", 1,
+        # the ladder); #724 moved it 2 -> 1 again by deleting the resume
+        # precheck. The successor is back to the same SHAPE it had before #723
+        # and the leading 1 means something else -- the record, not a precheck.
+        # The RETIRED needle is untouched throughout: it is a frozen fact about
+        # the baseline release, and only the successor moves, which is exactly
+        # what this table's replacement column is for.
+        "live -- perBatch = 1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)", 1,
         "the 1.16.1 live ladder (13N+2), before one wait became WAIT_CALLS calls",
     ),
     (
         BASELINE_RELEASE, GLOSSARY_TEMPLATE,
         "The offline branch is therefore EXACTLY the historical 3*BATCHES.length + 2",
-        "5*BATCHES.length + 2 is the // TRUE offline cost, where 3*BATCHES.length + "
-        "2 has become an under-count", 1,
+        "So 4*BATCHES.length + 2 is the TRUE // offline cost today", 1,
         "the claim that offline keeps its historical figure. What survives #352 is "
-        "the LADDER-FREE guarantee, not the number: offline pays 5N+2 now, because "
-        "the Bash clamp is indifferent to research_mode",
+        "the LADDER-FREE guarantee, not the number: offline went to 5N+2 because "
+        "the Bash clamp is indifferent to research_mode, and to 4N+2 in #724 "
+        "because the per-batch precheck it charged for no longer runs in either "
+        "mode. The successor has been re-pointed twice for that reason and the "
+        "retired needle never moves -- which is the whole point of pinning the "
+        "CLAIM rather than the figure that happened to accompany it",
     ),
     (
         BASELINE_RELEASE, GLOSSARY_TEMPLATE,
@@ -550,16 +556,26 @@ RETIRED = [
     (
         BASELINE_FIX_ROUND, GLOSSARY_TEMPLATE,
         "this release's CHANGELOG // promises that file is untouched",
-        # Anchored on the ENFORCING TEST the corrected note now cites, not on
-        # the note's prose. Deliberate, and learned the hard way: this row first
-        # pinned the correction's opening sentence, and a concurrent lane
-        # rewrote that sentence within the hour -- correctly, because the
-        # replacement note had itself gone stale. A file path is the stable part
-        # of a comment that keeps being reworded, and it is also the SUBSTANCE
-        # of what changed here: the note stopped asserting a remembered fact
-        # about another file and started citing a check that fails loudly when
-        # the fact stops holding.
-        "tests/rejected_anywhere_parity.test.py", 1,
+        # Anchored on the enforcing test the surviving text cites, which is the
+        # substance of what changed: the note stopped resting on a remembered
+        # claim about a sibling file and started resting on a check that fails
+        # loudly when the fact stops holding.
+        #
+        # This anchor has been re-pointed twice, and both moves teach the same
+        # lesson. It first pinned the correction's opening sentence, and a
+        # concurrent lane rewrote that sentence within the hour -- correctly,
+        # because the replacement note had itself gone stale. It then pinned
+        # `tests/rejected_anywhere_parity.test.py`, the enforcing test the note
+        # cited, on the reasoning that a file path is the stable part of a
+        # comment that keeps being reworded; #724 then deleted the resume
+        # precheck that note sat on, and the surviving half of it moved to
+        # waitChunkVerdict -- a different hunk, so the pairing broke even though
+        # both strings still exist in the file. The anchor is now a line from the
+        # hunk that ACTUALLY retired the needle, per this file's authoring rule,
+        # and it happens to be the same KIND of thing the previous anchor was:
+        # a citation of a test that enforces the claim rather than a restatement
+        # of it.
+        "tests/glossary_resume_probe.test.py, which makes the ordering executable", 1,
         "a justification resting on a CHANGELOG promise the same release broke: "
         "1.16.2 changed 234 lines in the very file it claimed was untouched. "
         "TWO successive versions of that note were false in the same way, which is "

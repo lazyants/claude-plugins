@@ -38,7 +38,7 @@ further cases cover the structural traps a naive insertion hits:
     human resolving unsourceable candidates).
 
 SCOPE, vs tests/batch_size_estimator.test.py. That file owns the COST
-ESTIMATOR: the live 20*N+2 and offline 5*N+2 preflight formulas, the
+ESTIMATOR: the live 19*N+2 and offline 4*N+2 preflight formulas, the
 exactly-at-cap boundary, and the shape of the over-cap refusal. This file owns
 the STATE MACHINE the estimate is a model of -- what the review actually does
 to the control flow. The one place the two touch on purpose is formula
@@ -116,19 +116,26 @@ EXPECTED_MAX_CITATION_RETRIES = 2
 # 900 s wait can no longer be one call.
 EXPECTED_WAIT_CALLS = 3
 # This file's copy of the live worst-case per-batch ceiling the preflight
-# charges: precheck 1 + one (dispatch 1 + wait WAIT_CALLS + citation prepare 1 +
-# citation judge 1) group per attempt + the #723 approval record 1. It was a
-# triple until 1.16.1, when #347 split the single fetch-and-judge reviewer into a
-# retrieving prepare call and a judging call that never touches the network
-# (10 -> 13, a security boundary rather than new work); it grew again in 1.16.2
-# when one wait stopped being one call (13 -> 19); and #723 added the verdict
-# record (19 -> 20).
+# charges: one (dispatch 1 + wait WAIT_CALLS + citation prepare 1 + citation
+# judge 1) group per attempt + the #723 approval record 1. It was a triple until
+# 1.16.1, when #347 split the single fetch-and-judge reviewer into a retrieving
+# prepare call and a judging call that never touches the network (10 -> 13, a
+# security boundary rather than new work); it grew again in 1.16.2 when one wait
+# stopped being one call (13 -> 19); #723 added the verdict record (19 -> 20);
+# and #724 removed the resume precheck (20 -> 19).
 #
-# THE #723 TERM SITS OUTSIDE THE LADDER, and the leading 2 is where that shows.
+# THE #723 TERM SITS OUTSIDE THE LADDER, and the leading 1 is where that shows.
 # The record is spent ONCE, after the single approval a batch can have, so the
-# worst case is no longer the exhausted batch (1 + 3*6 == 19, nothing approved,
-# no record) but the batch APPROVED ON ITS LAST ATTEMPT (that same 19 + 1).
+# worst case is no longer the exhausted batch (3*6 == 18, nothing approved, no
+# record) but the batch APPROVED ON ITS LAST ATTEMPT (that same 18 + 1).
 # Charging it per attempt would be a different, larger and wrong number.
+#
+# THAT LEADING 1 IS NOT THE ONE 1.16.2 HAD. The total is 19 in both, and the
+# terms are disjoint: 1.16.2's was the per-batch resume precheck, today's is the
+# approval record, and there is no per-batch call before the ladder at all any
+# more. A regression that reinstates the precheck and drops the record sums to
+# the same 19 -- which is why this file also asserts, separately, that the
+# template's own expression reads `1 + (3 + WAIT_CALLS) * ...`.
 #
 # tests/batch_size_estimator.test.py keeps its own independent copy
 # (GLOSSARY_LIVE_PER_BATCH_CEILING), and the two must move together. What makes
@@ -136,8 +143,8 @@ EXPECTED_WAIT_CALLS = 3
 # test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file
 # at the end of the formula-tightness section below.
 LIVE_PER_BATCH_CEILING = (
-    2 + (3 + EXPECTED_WAIT_CALLS) * (EXPECTED_MAX_CITATION_RETRIES + 1)
-)  # 20
+    1 + (3 + EXPECTED_WAIT_CALLS) * (EXPECTED_MAX_CITATION_RETRIES + 1)
+)  # 19
 
 RUN_DIR = f"{FIXTURE_DURABLE_ROOT}/glossary/runs/{FIXTURE_RUN_ID}"
 
@@ -170,13 +177,14 @@ def evidence_index_path(index: int, attempt: int) -> str:
 
 # Reads the ATTEMPT number back out of any fragment path a rendered prompt
 # names. Lets one prompt's attempt number be compared against another's --
-# which is how the precheck's probe is tied to the retry loop's entry attempt
-# below, without either side being asserted against its own local literal.
+# which is how the retry loop's entry attempt is read back out of a rendered
+# dispatch prompt, rather than asserted against a local literal.
 ATTEMPT_IN_PATH_RE = re.compile(r"/out_\d+_attempt_(\d+)\.json")
 
 
 def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000,
-                citation_content_types: str = "") -> str:
+                citation_content_types: str = "",
+                resumed_batch_indices: list | None = None) -> str:
     """The token map and renderer now live in _workflow_instantiation.py
     (#413); this stays a thin wrapper preserving this file's own
     durable_root/run_id, which are spliced into RUN_DIR paths this file's
@@ -190,6 +198,8 @@ def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000,
         research_mode=research_mode,
         batch_agent_cap=batch_agent_cap,
         citation_content_types=citation_content_types,
+        # #724 -- ENTRY A is selected by this array, not by a scripted reply.
+        resumed_batch_indices=resumed_batch_indices or [],
     )
 
 
@@ -287,9 +297,6 @@ async function agent(promptText, opts) {
   const idx = parts[parts.length - 1];
   const p = planFor(label);
 
-  if (kind === "precheck") {
-    return Object.prototype.hasOwnProperty.call(p, "precheck") ? p.precheck : ("ABSENT " + idx);
-  }
   if (kind === "dispatch") {
     waitsStarted[idx] = (waitsStarted[idx] || 0) + 1;
     return "FRAGMENT " + idx;
@@ -380,11 +387,16 @@ function log(msg) { logLines.push(String(msg)); }
 
 def run(*, tmp_path: Path, batches: list, research_mode: str = "live",
         batch_agent_cap: int = 10_000, plan: dict | None = None,
-        timeout: int = 30) -> dict:
+        timeout: int = 30, resumed_batch_indices: list | None = None) -> dict:
     """Returns {ok, out, stderr}. ok=False (with stderr) when the template threw
-    before producing stdout (e.g. the batch-index guard's throw path)."""
+    before producing stdout (e.g. the batch-index guard's throw path).
+
+    `resumed_batch_indices` (#724) is how a fixture takes ENTRY A. It is a
+    substituted array, so unlike every other knob here it is fixed before the run
+    starts and no reply can change it."""
     plan = plan or {}
-    src = instantiate(research_mode=research_mode, batch_agent_cap=batch_agent_cap)
+    src = instantiate(research_mode=research_mode, batch_agent_cap=batch_agent_cap,
+                      resumed_batch_indices=resumed_batch_indices)
     harness = (
         HARNESS.replace("__WRAPPED_SOURCE__", _wrap(src))
         .replace("__BATCHES_JSON__", json.dumps(batches))
@@ -444,7 +456,6 @@ def test_rejected_citation_regenerates_then_approves_then_merges(tmp_path):
     ->  notReadyBatches -> reason:"fragment-check-failed" path), which is why
     every leg of the cycle is asserted individually here."""
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "reviews": [
             "Item 1: source_form 'Ninon' cites https://example.invalid/nope which 404s.\n"
             "CITATIONS_REJECTED 0 ATTEMPT 0",
@@ -513,7 +524,6 @@ def test_rejection_reason_is_carried_into_the_regeneration_prompt(tmp_path):
     candidates and very likely reproduce the same unverifiable URL. The
     reviewer's own findings must reach the regenerating agent."""
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "reviews": [
             "source_form 'Ninon' cites https://example.invalid/nope which does not resolve.\n"
             "CITATIONS_REJECTED 0 ATTEMPT 0",
@@ -603,7 +613,6 @@ def _glued_rejection_plan(glue: str) -> dict:
     followed by an ordinary approval so the run still converges and the
     regeneration prompt -- the thing under inspection -- actually gets built."""
     return {"0": {
-        "precheck": "ABSENT 0",
         "reviews": [
             _FINDING + glue + _REJECTED_SENTINEL,
             "CITATIONS_OK 0 ATTEMPT 1",
@@ -700,6 +709,13 @@ def test_a_whitespace_char_that_is_not_a_line_terminator_does_not_split(tmp_path
 #     precheck        : 15/16 falsely resume-skip
 #     wait            : 15/16 falsely report READY
 #
+# THE PRECHECK ROW IS HISTORY (#724). It was measured, and it is the reason the
+# guard exists at all -- but that site no longer reads a reply: the resume
+# decision is a substituted array now, so there is nothing to glue a sentinel
+# onto. The row stays because deleting it would make this block read as though
+# the guard had only ever been about two sites. The parametrization below covers
+# the two that still run.
+#
 # LF is the only one of the sixteen that behaves. The shape is a dual-sentinel
 # reply -- prose, then the FAIL sentinel welded onto it, then the OK sentinel on
 # its own final line:
@@ -761,7 +777,7 @@ def test_glued_rejection_still_rejects_at_the_citation_review(tmp_path, glue):
     """The highest-stakes of the three sites: a false approval here freezes a
     fabricated citation into canon permanently."""
     reply = _dual_sentinel(glue, "CITATIONS_REJECTED 0 ATTEMPT 0", "CITATIONS_OK 0 ATTEMPT 0")
-    plan = {"0": {"precheck": "ABSENT 0", "reviews": [reply, "CITATIONS_OK 0 ATTEMPT 1"]}}
+    plan = {"0": {"reviews": [reply, "CITATIONS_OK 0 ATTEMPT 1"]}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -777,21 +793,15 @@ def test_glued_rejection_still_rejects_at_the_citation_review(tmp_path, glue):
     )
 
 
-@pytest.mark.parametrize("glue", GLUE_VALUES, ids=GLUE_IDS)
-def test_glued_absent_still_falls_through_at_the_precheck(tmp_path, glue):
-    """A false resume-skip here trusts a fragment whose precheck actually said
-    ABSENT -- i.e. one that never passed --check-batch at all."""
-    reply = _dual_sentinel(glue, "ABSENT 0", "PRESENT 0")
-    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan={"0": {"precheck": reply}})
-    assert res["ok"], res["stderr"]
-    out = res["out"]
-
-    assert "glossary:dispatch:0" in labels_of(out), (
-        "a precheck reply carrying ABSENT anywhere in it must fall through to a "
-        "real dispatch, however the sentinel is glued to the prose -- "
-        "resume-skipping here trusts a fragment the precheck did not vouch for; "
-        f"calls were {labels_of(out)}"
-    )
+# The third member of this parametrized family -- the PRECHECK's glued ABSENT --
+# is gone with the site (#724), not silently dropped. The measurement it was
+# built on stands in the block above; what no longer exists is a reply for the
+# glue to attach to. The equivalent case still runs against the skeptic
+# template, which kept its precheck: see
+# tests/rejected_anywhere_parity.test.py's
+# test_precheck_decisions_never_resume_across_the_full_glue_chars_population,
+# which drives the same GLUE_CHARS population through that template's real
+# decision expression.
 
 
 @pytest.mark.parametrize("glue", GLUE_VALUES, ids=GLUE_IDS)
@@ -799,7 +809,7 @@ def test_glued_timeout_still_times_out_at_the_wait(tmp_path, glue):
     """A false READY here sends a fragment that may not exist on to the citation
     review and then the merge."""
     reply = _dual_sentinel(glue, "PENDING 0", "READY 0")
-    plan = {"0": {"precheck": "ABSENT 0", "waits": [reply]}}
+    plan = {"0": {"waits": [reply]}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -842,22 +852,25 @@ def test_guard_leaves_every_ordinary_verdict_alone(tmp_path):
         f"{out['result']['batches'][0]}"
     )
 
-    # Clean PRESENT still resume-skips (the precheck's own ordinary path).
+    # A resumed batch still resume-skips. Since #724 that is decided by the
+    # substituted array rather than by a reply, so this is no longer a statement
+    # about the guard -- it is kept because the OTHER half of the claim still
+    # is: the guard must not turn a legitimate skip into a dispatch by way of
+    # some later verdict.
     resumed = run(
         tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])],
-        plan={"0": {"precheck": "PRESENT 0"}},
+        resumed_batch_indices=[0],
     )
     assert resumed["ok"], resumed["stderr"]
     assert "glossary:dispatch:0" not in labels_of(resumed["out"]), (
-        "a clean PRESENT must still resume-skip -- the guard must not turn every "
-        f"precheck into a dispatch; calls were {labels_of(resumed['out'])}"
+        "a batch named in RESUMED_BATCHES must still resume-skip; calls were "
+        f"{labels_of(resumed['out'])}"
     )
 
     # A prose-decorated approval (#308) still approves on attempt 0.
     decorated = run(
         tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])],
         plan={"0": {
-            "precheck": "ABSENT 0",
             "reviews": ["I fetched both cited pages and each attests the claimed "
                         "form.\n\nCITATIONS_OK 0 ATTEMPT 0"],
         }},
@@ -908,7 +921,6 @@ def test_an_approval_that_merely_mentions_the_fail_sentinel_now_rejects(tmp_path
         "CITATIONS_OK 0 ATTEMPT 0"
     )
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "reviews": [narrating_approval, "CITATIONS_OK 0 ATTEMPT 1"],
     }}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
@@ -938,35 +950,49 @@ def test_a_fail_sentinel_index_prefix_over_matches_and_that_is_accepted(tmp_path
     """The guard's SECOND documented cost, pinned for the same reason as the
     first: plain substring containment over-matches an index prefix.
 
-    Batch 1's fail sentinel is "ABSENT 1", and "ABSENT 10" contains it. So a
-    precheck reply naming batch 10 makes batch 1 fall through to a dispatch it
-    did not need. Bounded and fail-safe -- the cost is one redundant codex
-    dispatch, against an unbounded false GREEN (trusting a fragment that never
-    passed --check-batch) -- but it is real, and it grows with batch count
-    rather than being a curiosity: every index that is a prefix of another has
-    it, so a run with 10+ batches has several such pairs.
+    IT ONLY BITES WHERE THE INDEX IS THE SENTINEL'S LAST TOKEN, and that is the
+    whole reason this test now names the WAIT rather than the citation review.
+    "PENDING 1" is a prefix of "PENDING 10", so a chunk reply about batch 10
+    reads as batch 1's own PENDING. The judge's sentinels are NOT vulnerable:
+    "CITATIONS_REJECTED 1 ATTEMPT 0" is not a substring of
+    "CITATIONS_REJECTED 10 ATTEMPT 0" -- the trailing " ATTEMPT <n>" self-delimits
+    the index. Checked, not assumed, and it is why the obvious relocation of this
+    case after #724 (which deleted the precheck, where it was first pinned at
+    "ABSENT 1"/"ABSENT 10") would have quietly asserted nothing.
+
+    Bounded and fail-safe. A chunk that falsely reads PENDING resolves to
+    "pending", so the poll simply continues; an exhausted chunk budget still
+    falls to the authoritative re-check, which answers READY if the fragment is
+    genuinely there. The cost is the remaining chunk budget of one wait, against
+    an unbounded false GREEN (a fragment that may not exist reaching the review
+    and then the merge). It is still real, and it grows with batch count rather
+    than being a curiosity: every index that is a prefix of another has it, so a
+    run with 10+ batches has several such pairs.
 
     Pinned as INTENDED so a future reader meets a decision rather than a
     surprise. If it ever needs closing, the fix is to make the sentinel
-    self-delimiting (a trailing marker, or matching on a whole-line-with-
-    boundaries basis) -- NOT to weaken containment back toward equality, which
-    is what reopens the 15-of-16 false approvals counted over GLUE_CHARS in the
-    prose shape (prose shares the sentinel's line).
+    self-delimiting the way the judge's already is -- NOT to weaken containment
+    back toward equality, which is what reopens the 15-of-16 false approvals
+    counted over GLUE_CHARS in the prose shape (prose shares the sentinel's
+    line).
 
     The fixture has to be built with care to MEAN anything. A reply of bare
-    "ABSENT 10" would dispatch with or without the guard -- sentinelVerdict
-    rejects it too, since its last line is not the PRESENT sentinel -- so it
-    would pin nothing. The reply below therefore ends with a valid PRESENT
-    sentinel on its own final line: sentinelVerdict alone APPROVES it and
-    resume-skips, and only the containment guard's prefix over-match turns it
-    into a dispatch. That makes this test discriminating in the one direction
-    that matters."""
+    "PENDING 10" would poll on with or without the guard -- sentinelVerdict
+    rejects it too, since its last line is not batch 1's READY sentinel -- so it
+    would pin nothing. The reply below therefore ends with a valid "READY 1" on
+    its own final line: sentinelVerdict alone ACCEPTS it on the first chunk, and
+    only the containment guard's prefix over-match keeps the poll going. Batch 0
+    runs the same reply shape WITHOUT the colliding mention, as the control that
+    makes the difference attributable to the collision rather than to the shape.
+    """
+    colliding = (
+        "Batch 10 is the one still PENDING 10; this batch's fragment is on disk.\n"
+        "READY 1"
+    )
+    clean = "Batch 4 is the one still pending; this batch's fragment is on disk.\nREADY 0"
     plan = {
-        "0": {"precheck": "ABSENT 0"},
-        # A legitimate PRESENT verdict for batch 1 that happens to mention batch
-        # 10. "ABSENT 1" is a prefix of "ABSENT 10", so containment sees batch
-        # 1's own fail sentinel inside a sentence about a different batch.
-        "1": {"precheck": "Batch 10's fragment is ABSENT 10, but this one is complete.\nPRESENT 1"},
+        "0": {"waits": [clean]},
+        "1": {"waits": [colliding], "waitRechecks": ["READY 1"]},
     }
     res = run(
         tmp_path=tmp_path,
@@ -976,21 +1002,40 @@ def test_a_fail_sentinel_index_prefix_over_matches_and_that_is_accepted(tmp_path
     assert res["ok"], res["stderr"]
     out = res["out"]
 
-    assert "glossary:dispatch:1" in labels_of(out), (
-        "batch 1's precheck reply ends with a valid 'PRESENT 1' final line, so "
-        "sentinelVerdict alone would resume-skip it; the containment guard sees "
-        "its own fail sentinel 'ABSENT 1' inside the words 'ABSENT 10' and "
-        "dispatches instead. That over-match is the accepted fail-safe "
-        f"direction -- if this fails, the guard changed shape. Calls: {labels_of(out)}"
+    # The CONTROL: no colliding mention, so the very first chunk is accepted.
+    assert count_label(out, "glossary:wait:0") == 1, (
+        "the control batch's wait must be answered by its first chunk -- without "
+        f"that, the colliding batch's extra chunks prove nothing. Calls: {labels_of(out)}"
     )
-    # The over-match costs a dispatch, never correctness: the run still merges.
+    assert count_label(out, "glossary:wait-recheck:0") == 0
+
+    # The COLLISION: the same reply shape, plus a mention of batch 10, spends the
+    # whole chunk budget and falls to the re-check.
+    assert count_label(out, "glossary:wait:1") == EXPECTED_WAIT_CALLS - 1, (
+        "batch 1's chunk reply ends with a valid 'READY 1' final line, so "
+        "sentinelVerdict alone would accept it on chunk 1; the containment guard "
+        "sees its own fail sentinel 'PENDING 1' inside the words 'PENDING 10' and "
+        "keeps polling. That over-match is the accepted fail-safe direction -- if "
+        f"this fails, the guard changed shape. Calls: {labels_of(out)}"
+    )
+    assert count_label(out, "glossary:wait-recheck:1") == 1, (
+        f"the exhausted chunk budget must fall to the authoritative re-check; "
+        f"calls were {labels_of(out)}"
+    )
+
+    # The over-match costs poll calls, never correctness: the run still merges,
+    # and batch 1 still merges its FIRST attempt -- the fragment was there all
+    # along, which is exactly what makes this a false RED and not a real one.
     assert out["result"]["merged"] is True, f"got {out['result']}"
+    assert out["result"]["batches"][1]["attempt"] == 0, (
+        f"batch 1 must still merge attempt 0; got {out['result']['batches'][1]}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # rejectedAnywhere() as a UNIT.
 #
-# All three call sites always hand the guard a non-empty string sentinel, so no
+# Every call site always hands the guard a non-empty string sentinel, so no
 # amount of end-to-end driving reaches its own argument check. That is a reason
 # to test the function DIRECTLY, not a reason to leave it unpinned: slice it out
 # of the real template and execute it under Node. This is the shipped code's
@@ -1134,7 +1179,6 @@ def test_each_attempt_uses_its_own_fragment_path(tmp_path):
     property rather than an omission. So the judge's leg is asserted on the
     snapshot, which is attempt-scoped for exactly the same reason."""
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "reviews": ["CITATIONS_REJECTED 0 ATTEMPT 0", "CITATIONS_OK 0 ATTEMPT 1"],
     }}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
@@ -1197,7 +1241,6 @@ def test_stale_attempt_verdict_cannot_approve_a_later_attempt(tmp_path):
     0") this would approve, and the fragment written for attempt 1 would merge on
     the strength of a judgment made about different bytes."""
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "reviews": [
             "CITATIONS_REJECTED 0 ATTEMPT 0",
             "CITATIONS_OK 0 ATTEMPT 0",   # stale: judged attempt 0, not attempt 1
@@ -1222,15 +1265,14 @@ def test_stale_attempt_verdict_cannot_approve_a_later_attempt(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Trap: the PRESENT resume-skip path returns early, before dispatch and wait.
+# Trap: the resume-skip path (ENTRY A) runs neither dispatch nor wait.
 # ---------------------------------------------------------------------------
 
 def test_resume_skipped_fragment_is_still_citation_reviewed(tmp_path):
     """A review inserted only after dispatch/wait is bypassed on every resumed
     batch -- exactly the run where a stale, never-reviewed fragment is already
     on disk. The resume-skip must still reach the review."""
-    plan = {"0": {"precheck": "PRESENT 0"}}
-    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], resumed_batch_indices=[0])
     assert res["ok"], res["stderr"]
     out = res["out"]
 
@@ -1269,13 +1311,13 @@ def test_resume_skipped_fragment_with_bad_citation_is_regenerated(tmp_path):
     joins the SAME retry ladder rather than dead-ending in a review whose
     verdict has nowhere to go."""
     plan = {"0": {
-        "precheck": "PRESENT 0",
         "reviews": [
             "stale fragment cites https://example.invalid/gone\nCITATIONS_REJECTED 0 ATTEMPT 0",
             "CITATIONS_OK 0 ATTEMPT 1",
         ],
     }}
-    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan,
+              resumed_batch_indices=[0])
     assert res["ok"], res["stderr"]
     out = res["out"]
 
@@ -1293,79 +1335,57 @@ def test_resume_skipped_fragment_with_bad_citation_is_regenerated(tmp_path):
     assert approved_path(0, 1) in prompts_for(out, "glossary:merge")[0]
 
 
-def test_precheck_probes_the_attempt_the_retry_loop_actually_enters_at(tmp_path):
-    """The precheck's probe argument must equal the retry loop's ENTRY attempt.
+def test_the_retry_loop_enters_at_attempt_zero_which_is_what_the_probe_assumes(tmp_path):
+    """The JS half of a cross-language coupling, and all this file can see of it.
 
-    ``batchPrecheckPrompt`` calls ``checkBatchCmd(batch.index, 0)``. That literal
-    ``0`` is the only site-specific argument in the whole 1.16.0 extraction, and
-    nothing observed it: a mutant probing attempt 1 instead left the ENTIRE
-    suite green.
+    resume_setup.py's probe_resumed_batches() checks ONE path per batch,
+    `out_{index}_attempt_0.json`, and reports the batch resumed only if that
+    file passes --check-batch. Probe any other attempt and it asks about a file
+    no run ever wrote, so it always reports nothing resumed -- silently killing
+    #101's resume-skip and re-dispatching every codex batch on every resumed
+    run. Nothing goes red anywhere, because the fragment is simply regenerated.
 
-    The coupling is with ``batchStep``: the retry loop enters at ``attempt = 0``
-    and the resume path therefore merges ``fragmentPath(index, 0)``. Probe any
-    other attempt and the precheck asks about a file no resumed run ever wrote,
-    so it always answers ABSENT -- silently killing #101's resume-skip and
-    re-dispatching every codex batch on every resumed run. Nothing goes red
-    anywhere, because the fragment is simply regenerated.
+    So the assumption the probe rests on is a fact about THIS file: the retry
+    loop enters at attempt 0, and a resumed batch therefore merges
+    fragmentPath(index, 0). Read from BEHAVIOUR, never from a source grep -- the
+    fresh run's first dispatch prompt is what reveals which attempt the loop
+    actually enters at.
+
+    Until #724 this coupling was internal (the precheck prompt and the loop were
+    both in this template) and this test compared the two rendered prompts. It
+    is now a JS-to-Python seam, and the OTHER end is asserted in
+    tests/glossary_resume_probe.test.py::
+    test_the_probe_reads_the_path_the_template_dispatch_writes, which drives the
+    real probe against a fragment named from this template's own rendered
+    dispatch prompt. Neither half is sufficient alone: this one proves the entry
+    attempt is 0, that one proves the probe looks where the entry attempt puts
+    its file.
 
     What this is NOT, and the reason it is a medium and not a blocker: it is not
     a merge-integrity hole. ``--merge-batches`` and ``--verify-merged`` fresh-read
     every named fragment, so a fragment that is missing or unvalidated fails at
     merge rather than slipping into canon. The damage is wasted codex dispatches
     -- exactly the class of failure no assertion notices unless one is written
-    for it.
-
-    Both ends are read from BEHAVIOUR, never from a source grep. The absolute
-    value is pinned first (the precheck names attempt 0's own path and no
-    other), and then the coupling itself: on a fresh run, the attempt numbers
-    the precheck PROBES must be exactly the attempt numbers the loop's first
-    dispatch WRITES. Deriving both sides from rendered prompts is what makes the
-    second assertion survive a refactor of the loop header while still failing
-    the moment the two numbers stop being the same number."""
-    plan = {"0": {"precheck": "PRESENT 0"}}
-    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
-    assert res["ok"], res["stderr"]
-    out = res["out"]
-
-    precheck = prompts_for(out, "glossary:precheck:0")[0]
-    assert attempt_path(0, 0) in precheck, (
-        f"the resume precheck must probe ATTEMPT 0's own fragment path "
-        f"({attempt_path(0, 0)}) -- the one path a resumed run's retry loop "
-        f"enters at; prompt was:\n{precheck}"
-    )
-    assert attempt_path(0, 1) not in precheck, (
-        "the resume precheck must not probe any attempt other than 0: a probe "
-        "of a later attempt always answers ABSENT on a resumed run, silently "
-        f"disabling the #101 resume-skip; prompt was:\n{precheck}"
-    )
-
-    # ...and that the probe is answerable at all is what the resume-skip rides
-    # on: PRESENT here really did suppress the dispatch.
-    assert "glossary:dispatch:0" not in labels_of(out), (
-        f"a PRESENT precheck must suppress the codex dispatch; calls were {labels_of(out)}"
-    )
-
-    # The coupling itself, both sides measured. On a fresh (ABSENT) run the
-    # loop's first dispatch reveals which attempt it actually enters at, so the
-    # two numbers can be compared instead of each being asserted against a
-    # local literal that could drift together with neither test noticing.
-    fresh = run(
-        tmp_path=tmp_path,
-        batches=[make_batch(0, ["Ninon"])],
-        plan={"0": {"precheck": "ABSENT 0"}},
-    )
+    for it."""
+    fresh = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], resumed_batch_indices=[])
     assert fresh["ok"], fresh["stderr"]
-    probed = set(ATTEMPT_IN_PATH_RE.findall(prompts_for(fresh["out"], "glossary:precheck:0")[0]))
     entered = set(ATTEMPT_IN_PATH_RE.findall(prompts_for(fresh["out"], "glossary:dispatch:0")[0]))
-    assert probed and entered, (
-        "expected both the precheck and the first dispatch to name a fragment "
-        f"path; probed={probed} entered={entered}"
+    assert entered == {"0"}, (
+        f"the retry loop's first dispatch writes attempt(s) {sorted(entered)}, "
+        f"not attempt 0 -- resume_setup.py's probe only ever checks attempt 0, "
+        f"so a resumed run would never find the fragment it is looking for and "
+        f"would re-dispatch every batch"
     )
-    assert probed == entered, (
-        f"the resume precheck probes attempt(s) {sorted(probed)} but the retry "
-        f"loop's first dispatch writes attempt(s) {sorted(entered)} -- a resumed "
-        f"run would never find the fragment it is looking for, so it would "
-        f"always answer ABSENT and re-dispatch every batch"
+
+    # ...and a resumed batch really does merge that same attempt-0 path, which
+    # is the half that makes the entry attempt load-bearing rather than
+    # incidental.
+    resumed = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], resumed_batch_indices=[0])
+    assert resumed["ok"], resumed["stderr"]
+    assert "glossary:dispatch:0" not in labels_of(resumed["out"])
+    assert resumed["out"]["result"]["batches"][0]["attempt"] == 0, (
+        "a resumed batch must merge attempt 0 -- the attempt the probe checked; "
+        f"got {resumed['out']['result']['batches'][0]}"
     )
 
 
@@ -1393,7 +1413,7 @@ def test_exhaustion_is_distinguishable_from_fragment_failure(tmp_path):
         "source_form 'Ninon' cites https://example.invalid/gone which 404s.\n"
         + rejections[-1]
     )
-    plan = {"0": {"precheck": "ABSENT 0", "reviews": rejections}}
+    plan = {"0": {"reviews": rejections}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -1431,7 +1451,7 @@ def test_timeout_still_reports_fragment_check_failed(tmp_path):
     still report reason:"fragment-check-failed". Without this, a template that
     relabelled EVERY not-ready batch as citation-exhausted would pass the
     exhaustion test while destroying the existing signal."""
-    plan = {"0": {"precheck": "ABSENT 0", "waits": ["PENDING 0"]}}
+    plan = {"0": {"waits": ["PENDING 0"]}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -1453,10 +1473,7 @@ def test_one_exhausted_batch_does_not_hide_a_healthy_sibling(tmp_path):
         f"CITATIONS_REJECTED 1 ATTEMPT {n}"
         for n in range(EXPECTED_MAX_CITATION_RETRIES + 1)
     ]
-    plan = {
-        "0": {"precheck": "ABSENT 0"},
-        "1": {"precheck": "ABSENT 1", "reviews": rejections},
-    }
+    plan = {"1": {"reviews": rejections}}
     res = run(
         tmp_path=tmp_path,
         batches=[make_batch(0, ["Ninon"]), make_batch(1, ["Scudery"])],
@@ -1508,9 +1525,10 @@ def test_offline_mode_spends_no_review_call(tmp_path):
     )
     assert out["result"]["merged"] is True
     assert out["result"]["batches"][0]["citationReview"] == "skipped-offline"
-    # Exactly the historical cost: precheck + dispatch + wait per batch, plus
-    # the fixed merge + verify pair.
-    assert len(out["calls"]) == 3 * 2 + 2
+    # Exactly the historical cost: dispatch + one answered wait chunk per batch,
+    # plus the fixed merge + verify pair. It was 3 per batch until #724 removed
+    # the precheck call.
+    assert len(out["calls"]) == 2 * 2 + 2
 
     # Attempt-scoped paths still apply offline -- the naming is not conditional.
     assert attempt_path(0, 0) in prompts_for(out, "glossary:merge")[0]
@@ -1521,7 +1539,7 @@ def test_offline_mode_spends_no_review_call(tmp_path):
 #
 # The preflight REFUSAL tests (does an over-cap run return
 # reason:"batch-too-large" without dispatching, and is estimatedCalls exactly
-# 20*N+2 live / 5*N+2 offline) live in tests/batch_size_estimator.test.py --
+# 19*N+2 live / 4*N+2 offline) live in tests/batch_size_estimator.test.py --
 # that file's subject is the cost estimator, so the ladder arithmetic belongs
 # there and is not duplicated here.
 #
@@ -1535,8 +1553,8 @@ def test_offline_mode_spends_no_review_call(tmp_path):
 # batch approved on attempt 0) is deliberately NOT repeated here -- it is
 # first-attempt arithmetic, which the scope note above assigns to the estimator
 # file, and that file already asserts the identical one-batch run as a strict
-# superset (test_glossary_resume_precheck_absent_falls_through_to_real_dispatch
-# asserts the same 6 calls AND the dispatch/wait call labels).
+# superset (test_glossary_an_unresumed_batch_falls_through_to_real_dispatch
+# asserts the same 7 calls AND the dispatch/wait call labels).
 #
 # The second test closes the seam BETWEEN the two files, which the measurement
 # above cannot: it makes the ceiling this file measures against, the ceiling
@@ -1578,7 +1596,6 @@ def test_live_worst_case_run_does_not_exceed_its_own_estimate(tmp_path):
     verdicts = [f"CITATIONS_REJECTED 0 ATTEMPT {n}" for n in range(attempts - 1)]
     verdicts.append(f"CITATIONS_OK 0 ATTEMPT {attempts - 1}")
     plan = {"0": {
-        "precheck": "ABSENT 0",
         # One entry per WAIT (not per wait call): every chunk of that wait sees
         # this reply, and `waitRechecks` overrides only the re-check.
         "waits": ["PENDING 0"] * attempts,
@@ -1619,7 +1636,6 @@ def test_live_worst_case_run_does_not_exceed_its_own_estimate(tmp_path):
     # so that a future release moving the record back inside the ladder fails
     # here instead of quietly making the two paths equal again.
     exhausted_plan = {"0": {
-        "precheck": "ABSENT 0",
         "waits": ["PENDING 0"] * attempts,
         "waitRechecks": ["READY 0"] * attempts,
         "reviews": [f"CITATIONS_REJECTED 0 ATTEMPT {n}" for n in range(attempts)],
@@ -1762,9 +1778,10 @@ def test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file
         "offline run has no reviewer, so it can never reach attempt 1 and must "
         "never be charged for a ladder"
     )
-    assert int(offline_match.group(1)) + wait_calls_from_template == 2 + EXPECTED_WAIT_CALLS, (
+    assert int(offline_match.group(1)) + wait_calls_from_template == 1 + EXPECTED_WAIT_CALLS, (
         f"the template charges {offline_match.group(1)} + WAIT_CALLS per offline "
-        f"batch, not the precheck + dispatch + wait this file expects"
+        f"batch, not the ONE dispatch + wait this file expects (it was 2 + "
+        f"WAIT_CALLS until #724 removed the per-batch resume precheck)"
     )
 
     retries = int(retries_match.group(1))
@@ -1837,7 +1854,6 @@ def test_malformed_review_reply_rejects_rather_than_approves(tmp_path):
     asymmetry still points at rejecting -- an unmergeable run can be re-run, a
     frozen fabricated citation cannot be repaired."""
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "reviews": ["I was unable to check the sources.", "CITATIONS_OK 0 ATTEMPT 1"],
     }}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
@@ -1856,7 +1872,6 @@ def test_decorated_approval_is_accepted(tmp_path):
     an explanatory preamble must not be misread as a rejection, or every live
     run would burn its whole retry ladder on well-behaved replies."""
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "reviews": ["I fetched both cited pages and each attests the claimed form.\n\nCITATIONS_OK 0 ATTEMPT 0"],
     }}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
@@ -1951,7 +1966,6 @@ def test_regeneration_prompt_marks_the_relayed_rejection_as_data(tmp_path):
     resisting) an embedded instruction, so nothing here proves compliance --
     only that the instruction is still in the prompt, in the right place."""
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "reviews": [
             _FINDING + "\n" + _REJECTED_SENTINEL,
             "CITATIONS_OK 0 ATTEMPT 1",
@@ -2348,7 +2362,6 @@ def test_judge_never_names_the_mutable_fragment_path(tmp_path):
     snapshot instead, which
     test_each_attempt_uses_its_own_fragment_path asserts directly."""
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "reviews": ["CITATIONS_REJECTED 0 ATTEMPT 0", "CITATIONS_OK 0 ATTEMPT 1"],
     }}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
@@ -2372,7 +2385,6 @@ def test_prepare_failure_regenerates_rather_than_reaching_the_judge(tmp_path):
     default, because the skipped attempt-0 judge call shifts every later judge
     ordinal (see the PLAN note on the harness)."""
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "prepares": [
             "the snapshot command exited 3: fragment failed its coverage check\n"
             "EVIDENCE_FAILED 0 ATTEMPT 0"
@@ -2419,7 +2431,7 @@ def test_prepare_failure_can_exhaust_the_ladder_under_its_own_reason(tmp_path):
         f"snapshot command exited non-zero\nEVIDENCE_FAILED 0 ATTEMPT {n}"
         for n in range(EXPECTED_MAX_CITATION_RETRIES + 1)
     ]
-    plan = {"0": {"precheck": "ABSENT 0", "prepares": failures}}
+    plan = {"0": {"prepares": failures}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -2447,7 +2459,6 @@ def test_glued_evidence_failure_still_rejects_at_the_citation_prepare(tmp_path, 
     exist and an evidence directory that was never written."""
     reply = _dual_sentinel(glue, "EVIDENCE_FAILED 0 ATTEMPT 0", "EVIDENCE_READY 0 ATTEMPT 0")
     plan = {"0": {
-        "precheck": "ABSENT 0",
         "prepares": [reply],
         "reviews": ["CITATIONS_OK 0 ATTEMPT 1"],
     }}
@@ -2490,7 +2501,7 @@ def test_glued_evidence_failure_still_rejects_at_the_citation_prepare(tmp_path, 
 
 def test_prepare_is_a_plain_low_effort_claude_call(tmp_path):
     """The prepare step runs two commands and relays one line -- mechanical work,
-    exactly like the precheck and wait steps, so it takes their effort:"low" and
+    exactly like the wait step, so it takes that step's effort:"low" and
     not the judge's "high". It must also stay schema-less: a schema-bearing call
     can wedge the Workflow if the forwarder detaches (#97), and this sits on the
     critical path of every live batch. And it must not be a codex call, which
@@ -2513,9 +2524,9 @@ def test_offline_spends_neither_a_prepare_nor_a_judge_call(tmp_path):
     """offline forbids basis:"established" outright, so there is no citation to
     review and nothing to fetch. The split must not have smuggled a second
     always-on call into the mode whose whole point is being the cheap
-    alternative -- precheck + dispatch + a single-chunk wait per batch, 3*N+2
+    alternative -- dispatch + a single-chunk wait per batch, 2*N+2
     here since the default (non-exhausted) wait resolves in one call; the
-    estimator charges the worst case (an exhausted wait) at 5*N+2 instead."""
+    estimator charges the worst case (an exhausted wait) at 4*N+2 instead."""
     res = run(
         tmp_path=tmp_path,
         batches=[make_batch(0, ["Ninon"]), make_batch(1, ["Scudery"])],
@@ -2526,7 +2537,7 @@ def test_offline_spends_neither_a_prepare_nor_a_judge_call(tmp_path):
     assert [lbl for lbl in labels_of(out) if "citation" in lbl] == [], (
         f"offline must spend no citation call of either kind; calls were {labels_of(out)}"
     )
-    assert len(out["calls"]) == 3 * 2 + 2
+    assert len(out["calls"]) == 2 * 2 + 2
 
 
 if __name__ == "__main__":

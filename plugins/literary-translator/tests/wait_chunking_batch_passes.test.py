@@ -248,6 +248,9 @@ async function agent(promptText, opts) {
   if (label === PASS + ":frozen-check") return { frozen_input_mismatch: false };
 
   const step = parts[1];
+  // The SKELETON template still runs a precheck; the glossary one stopped in
+  // #724, where the resume decision became a substituted array. Kept here
+  // because this harness drives both.
   if (step === "precheck") return "ABSENT " + idx;
   if (step === "dispatch") {
     chunkOrdinal = 0;   // a new wait begins
@@ -1747,7 +1750,7 @@ def test_skeptic_setup_estimator_matches_the_template_and_the_shipped_ladder():
 
 @pytest.mark.parametrize(
     "research_mode,per_batch",
-    [("live", 20), ("offline", 5)],
+    [("live", 19), ("offline", 4)],
     ids=["live", "offline"],
 )
 def test_glossary_preflight_refuses_one_call_over_its_own_ladder(research_mode, per_batch, tmp_path):
@@ -1808,14 +1811,17 @@ def test_skeptic_preflight_refuses_one_call_over_its_own_ladder(tmp_path):
 # that same factor -- (10000-2)//per_batch, not a copy of what the code
 # happens to print today.
 #
-# #723 then moved the glossary LIVE row again, and only that one: the approval
-# record sits outside the retry ladder, so it adds exactly one call to a live
-# batch and none to an offline or skeptic one.
+# #723/#724 then moved the two GLOSSARY rows again, and the skeptic row not at
+# all: #723 added the approval record (live 19 -> 20), #724 deleted the glossary
+# resume precheck (live 20 -> 19, offline 5 -> 4). The skeptic template keeps its
+# own precheck, so its term is unchanged. That is why "glossary offline" and
+# "skeptic (both)" no longer share a formula -- they did through 1.16.2, and the
+# per-row needles below could not tell them apart while they did.
 SHIPPED_BATCH_AGENT_CAP = 10000
 LADDER_MAX_BATCHES = {
-    "glossary live": (20, 499),      # (10000-2)//20 = 9998//20 = 499
-    "glossary offline": (5, 1999),   # (10000-2)//5  = 9998//5  = 1999
-    "skeptic (both)": (5, 1999),     # same 5N+2 formula as glossary offline
+    "glossary live": (19, 526),      # (10000-2)//19 = 9998//19 = 526
+    "glossary offline": (4, 2499),   # (10000-2)//4  = 9998//4  = 2499
+    "skeptic (both)": (5, 1999),     # (10000-2)//5  = 9998//5  = 1999
 }
 
 

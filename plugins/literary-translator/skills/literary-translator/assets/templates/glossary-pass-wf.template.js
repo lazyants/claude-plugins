@@ -38,7 +38,7 @@
 //     and only EXHAUSTION is terminal, under its own distinct reason. See the
 //     exhaustion return in batchStep() for why those two must not share a shape.
 //   * The review sits after BOTH entry points into batchStep -- the
-//     resume-skip PRESENT path as well as dispatch+wait. A resumed
+//     resume-skip path as well as dispatch+wait. A resumed
 //     fragment is precisely
 //     the unreviewed-fragment-already-on-disk case, so exempting it would have
 //     inverted the fix.
@@ -132,12 +132,31 @@
 //                        mass-translate-wf.template.js makes for its own
 //                        oversized batch (#95). That estimate is
 //                        RESEARCH-MODE-DEPENDENT (1.16.0) and moved again in
-//                        1.16.2 when one wait became WAIT_CALLS agent calls:
-//                        offline is 5*BATCHES.length + 2 (it was the historical
-//                        3*BATCHES.length + 2 through 1.16.1), and live pays the
-//                        citation-review retry ladder on top of that, reaching
-//                        19*BATCHES.length + 2. See the preflight block below
-//                        for the derivation.
+//                        1.16.2 when one wait became WAIT_CALLS agent calls,
+//                        and again in #723/#724: offline is
+//                        4*BATCHES.length + 2 (it was the historical
+//                        3*BATCHES.length + 2 through 1.16.1, then 5 with the
+//                        chunked wait, then 4 once #724 deleted the per-batch
+//                        resume precheck), and live pays the citation-review
+//                        retry ladder plus one approval record on top of that,
+//                        reaching 19*BATCHES.length + 2. See the preflight block
+//                        below for the derivation, and read it before trusting
+//                        that 19: it is not the 19 of 1.16.2.
+//   {{RESUMED_BATCH_INDICES}} -- a BARE JSON array literal (never quoted),
+//                        copied verbatim from the `resumed_batch_indices` key
+//                        resume_setup.py reports for this glossary run: the
+//                        batches whose attempt-0 fragment it re-checked with
+//                        canon_validate.py --check-batch and found valid, so
+//                        their codex dispatch and wait may be skipped. `[]` is
+//                        the ordinary value on a fresh run. REQUIRED, and
+//                        REQUIRED TO BE AN ARRAY -- this file throws at startup
+//                        otherwise, because a scalar would build a Set whose
+//                        .has() answers false for every batch, which looks
+//                        exactly like a fresh run and silently costs a full
+//                        re-dispatch. It is the one token whose value is not
+//                        known until resume_setup.py has run, which is why the
+//                        instantiation happens after it -- the same ordering
+//                        {{RUN_ID}} already forces (#724).
 //   {{CITATION_CONTENT_TYPES}}
 //                     -- 1.16.1: glossary.citation_content_types, a
 //                        COMMA-SEPARATED list of Content-Type prefixes the
@@ -493,13 +512,53 @@ const CANON_VERIFY_SCHEMA = {
 const BATCHES = Array.isArray(args) ? args : JSON.parse(args)
 
 // ---------------------------------------------------------------------------
+// #724 A -- WHICH BATCHES ALREADY HAVE A VALID attempt-0 FRAGMENT, decided
+// before this file ever ran.
+//
+// Until #724 this was a per-batch agent call: one bash command, effort:"low",
+// a PRESENT/ABSENT reply. It cost a full subagent bootstrap per batch (~40k
+// tokens measured, 21 per relaunch) to answer a question whose entire input is
+// disk state that resume_setup.py has already settled -- it wipes what must not
+// survive and writes the manifests a fragment is checked against, so by the
+// time this Workflow starts the answer is a fact, not an inquiry.
+//
+// THE COST THAT MATTERED WAS NOT THE TOKENS. The answer travelled as agent
+// PROSE, and #228, #308 and #371 are all that class: a reply merely MENTIONING
+// "ABSENT 3", or carrying "PRESENT 3" glued to a word by any of sixteen
+// measured characters, decided whether a codex dispatch was spent. A set
+// computed by a script and substituted here cannot be glued, decorated, or
+// contradicted by a later sentence. That is why this is a correctness change
+// and not only a cost one, and it is why the containment-guard machinery this
+// file carries for the precheck is DELETED rather than relocated.
+//
+// STILL NOT A REVIEW SKIP, and that distinction is the whole design. Membership
+// here skips a batch's DISPATCH and WAIT. It has never skipped, and does not
+// skip, the citation review: a resumed fragment is exactly as unreviewed as a
+// freshly dispatched one, so it converges on the same PREPARE -> JUDGE ladder
+// (see batchStep). #723 considered and refused letting a disk artifact skip the
+// review itself; read approvalRecordPath()'s comment before proposing it again.
+//
+// Resolved ONCE at instantiation from resume_setup.py's own
+// `resumed_batch_indices`, exactly like {{RUN_ID}} -- which is possible because
+// the template is instantiated AFTER resume_setup.py runs (it needs
+// effectiveRunId). An empty array is the ordinary value on a fresh run.
+// ---------------------------------------------------------------------------
+const RESUMED_BATCH_INDICES = {{RESUMED_BATCH_INDICES}}
+if (!Array.isArray(RESUMED_BATCH_INDICES)) {
+  throw new Error("RESUMED_BATCH_INDICES must be a JSON array of batch indices, got " +
+    JSON.stringify(RESUMED_BATCH_INDICES) + " -- resume_setup.py reports it as " +
+    "`resumed_batch_indices`, and a scalar or a string here means the " +
+    "instantiating session substituted something else (#724)")
+}
+const RESUMED_BATCHES = new Set(RESUMED_BATCH_INDICES)
+
+// ---------------------------------------------------------------------------
 // Preflight cost cap (#95, re-derived in 1.16.0 for the citation-review
-// ladder, again in 1.16.1 for the prepare/judge split, and again in 1.16.2 when
-// one wait stopped being one call).
+// ladder, again in 1.16.1 for the prepare/judge split, again in 1.16.2 when
+// one wait stopped being one call, and again in #723/#724).
 // Worst-case agent-call count for a FRESH run. Per batch:
 //
-//   1 precheck                                          (always, exactly one)
-// + (dispatch + wait)               per attempt         (1 + WAIT_CALLS each)
+//   (dispatch + wait)               per attempt         (1 + WAIT_CALLS each)
 // + (citation prepare + judge)      per attempt         (2 each, live only)
 // + 1 approval record               once, after the one approval a batch can
 //                                   have                (live only, #723)
@@ -507,29 +566,41 @@ const BATCHES = Array.isArray(args) ? args : JSON.parse(args)
 // with attempts == MAX_CITATION_RETRIES + 1 in the worst case (every review
 // rejects until the ladder is exhausted). So:
 //
-//   live    -- perBatch = 2 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)
-//   offline -- perBatch = 1 + (1 + WAIT_CALLS) == 2 + WAIT_CALLS, since
-//              CITATION_REVIEW_ENABLED is false, which makes the review a no-op
-//              AND removes the only thing that can reject an attempt -- so the
-//              ladder can never advance past attempt 0 and there is exactly one
-//              dispatch + wait.
+//   live    -- perBatch = 1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)
+//   offline -- perBatch = 1 + WAIT_CALLS, since CITATION_REVIEW_ENABLED is
+//              false, which makes the review a no-op AND removes the only thing
+//              that can reject an attempt -- so the ladder can never advance
+//              past attempt 0 and there is exactly one dispatch + wait, with no
+//              approval to record.
 //
 // plus the fixed merge + verify pair == 2 either way. At the shipped
-// WAIT_CALLS = 3 that is 20*BATCHES.length + 2 live and 5*BATCHES.length + 2
+// WAIT_CALLS = 3 that is 19*BATCHES.length + 2 live and 4*BATCHES.length + 2
 // offline.
 //
-// #723 MOVED THE LIVE CEILING 19 -> 20, AND THE MAXIMUM IS NO LONGER THE
-// EXHAUSTION PATH -- read that before "simplifying" the leading term back to 1.
-// An exhausted batch spends 1 + 3*6 == 19 and writes NO record, because nothing
-// was ever approved. A batch APPROVED on its last attempt spends that same 19
-// plus the one record call == 20. So the ceiling is the approved-late path, and
-// the two differ by exactly the term this release adds. The record is charged
-// ONCE rather than per attempt because approval is terminal: the return that
-// writes it is the return that leaves batchStep().
+// THERE IS NO LONGER A PER-BATCH PRECHECK TERM (#724). The resume probe that
+// used to cost one agent call per batch now runs in resume_setup.py, before this
+// Workflow starts, and arrives as RESUMED_BATCHES. It is not charged here
+// because it is not an agent() call at all -- and it must not be added back as
+// "1 +" out of symmetry with the two sibling templates, which still dispatch
+// their own.
 //
-// PROVABLY A GENERALISATION, not a rewrite: substitute WAIT_CALLS = 1 and the
-// two branches collapse to 1 + 4*(MAX_CITATION_RETRIES+1) == 13 and to 3, which
-// are exactly the 1.16.1 formulas.
+// THE LIVE CEILING IS 19 AGAIN, AND IT IS NOT THE 1.16.2 NINETEEN. Read this
+// before "reverting" anything to a remembered figure. 1.16.2 shipped
+// 1 + (3 + WAIT_CALLS)*(R+1) where the leading 1 was the PRECHECK; #723 added
+// the approval record (19 -> 20); #724 removed the precheck (20 -> 19). The two
+// moves cancel in the total and share nothing in composition: today's leading 1
+// is the record, charged ONCE outside the ladder, and the ladder itself is
+// unchanged. A diff that restores the precheck call and leaves the arithmetic
+// alone therefore looks correct and silently under-charges by one call per
+// batch.
+//
+// THE MAXIMUM IS STILL NOT THE EXHAUSTION PATH (#723) -- read that before
+// "simplifying" the leading term away. An exhausted batch spends 3*6 == 18 and
+// writes NO record, because nothing was ever approved. A batch APPROVED on its
+// last attempt spends that same 18 plus the one record call == 19. So the
+// ceiling is the approved-late path, and the two differ by exactly the record
+// term. The record is charged once rather than per attempt because approval is
+// terminal: the return that writes it is the return that leaves batchStep().
 //
 // The offline branch is deliberately still MODE-AWARE rather than mode-blind.
 // Making it mode-blind would charge every offline project for a retry ladder it
@@ -539,26 +610,27 @@ const BATCHES = Array.isArray(args) ? args : JSON.parse(args)
 // preflight that refuses runs it should permit is a worse failure than one that
 // is slightly loose.
 //
-// 1.16.2 MOVES THE OFFLINE THRESHOLD ANYWAY, and that is the principle being
-// APPLIED rather than abandoned -- the distinction is what the whole paragraph
-// above turns on, so read it before "restoring" the old number. The rule is
-// never "offline must keep its historical figure"; it is "charge offline only
-// for work an offline run can actually perform". A retry ladder is work offline
-// can NEVER perform, so charging for it was always a false refusal. The extra
-// wait calls are cost every offline run must be preflight-CHARGED for on every
-// batch, as a worst-case CEILING -- not a claim that every batch actually
-// spends it (see the CEILING paragraph below: a wait whose first chunk finds
-// the fragment still spends only 1 call, not WAIT_CALLS, offline exactly as
-// live). The wait was budgeted at one agent call and the ceiling is now
-// WAIT_CALLS of them, in both modes alike, because the Bash clamp is
-// indifferent to research_mode. So 5*BATCHES.length + 2 is the
-// TRUE offline cost, where 3*BATCHES.length + 2 has become an under-count -- and
-// an under-count is the dangerous direction, since it lets a run start and then
-// blow engine.batch_agent_cap mid-flight rather than refusing it early and
-// loudly. A project sized near the old ceiling genuinely can no longer afford
-// the same batch count (at engine.batch_agent_cap 3500: 1166 offline batches
-// before, 699 now, and 184 live), and being told so at preflight is the correct
-// outcome, not a regression.
+// THE OFFLINE THRESHOLD KEEPS MOVING, and that is the principle being APPLIED
+// rather than abandoned -- the distinction is what the paragraph above turns
+// on, so read it before "restoring" an old number. The rule is never "offline
+// must keep its historical figure"; it is "charge offline only for work an
+// offline run can actually perform". A retry ladder is work offline can NEVER
+// perform, so charging for it was always a false refusal; the extra wait calls
+// 1.16.2 added ARE work every offline run must be charged for, because the Bash
+// clamp is indifferent to research_mode; and the precheck #724 deleted is work
+// no run performs any more, in either mode. So 4*BATCHES.length + 2 is the TRUE
+// offline cost today. Note the direction of each move: 3 -> 5 in 1.16.2 closed
+// an UNDER-count, which is the dangerous direction, since an under-count lets a
+// run start and then blow engine.batch_agent_cap mid-flight rather than
+// refusing it early and loudly; 5 -> 4 here removes an OVER-count, which merely
+// refused runs that were always affordable. At engine.batch_agent_cap 3500 that
+// is 874 offline batches and 184 live.
+//
+// PROVABLY A GENERALISATION of the pre-1.16.2 live formula, not a rewrite:
+// substitute WAIT_CALLS = 1 and the live branch collapses to
+// 1 + 4*(MAX_CITATION_RETRIES+1) == 13, which is exactly 1.16.1's live figure.
+// That the leading 1 means something different now (record, not precheck) is
+// precisely why the collapse is worth checking rather than assuming.
 //
 // The live term went 10 -> 13 in 1.16.1, and the reason is #347's security
 // boundary rather than any new work: the single fetch-and-judge reviewer became
@@ -566,27 +638,28 @@ const BATCHES = Array.isArray(args) ? args : JSON.parse(args)
 // 13 -> 19 in 1.16.2, and that reason is #352's Bash per-call clamp: one wait is
 // now WAIT_CALLS agent calls (WAIT_CHUNKS chunks plus one authoritative
 // re-check), spent per attempt, so the ladder multiplies it. Any live project
-// whose engine.batch_agent_cap was tuned near an earlier figure will now be
-// refused at preflight and must raise the cap or re-plan smaller batches -- a
-// loud, early refusal, which is the direction this gate is supposed to fail in.
-// It went 19 -> 20 in #723, and that move is different in KIND from the two
-// before it: 1.16.1 and 1.16.2 each multiplied an EXISTING per-attempt step by
-// the ladder, while #723 adds one call that sits OUTSIDE the ladder entirely --
-// the verdict record, spent once, after the single approval a batch can have.
-// assets/profile.example.yml documents the live ladder and moves with it.
+// whose engine.batch_agent_cap was tuned near an earlier figure will be refused
+// at preflight and must raise the cap or re-plan smaller batches -- a loud,
+// early refusal, which is the direction this gate is supposed to fail in.
+// #723's 19 -> 20 was different in KIND from those two: they each multiplied an
+// EXISTING per-attempt step by the ladder, while the verdict record sits OUTSIDE
+// the ladder entirely, spent once. #724's 20 -> 19 is different again -- it
+// removes a call rather than re-pricing one, and it is the first move in this
+// series that LOWERS both branches. assets/profile.example.yml documents the
+// live ladder and moves with it.
 //
-// This is a CEILING, not a per-attempt cost, and 1.16.2 widens the gap between
+// This is a CEILING, not a per-attempt cost, and 1.16.2 widened the gap between
 // the two: a wait that finds its fragment on the FIRST chunk spends 1 call, not
 // WAIT_CALLS, and only a wait that exhausts every chunk and still needs the
 // re-check spends all 3. Likewise an attempt whose prepare fails short-circuits
 // before the judge and spends 2 + WAIT_CALLS, not 3 + WAIT_CALLS. Only an
 // attempt that reaches a judged verdict spends the full 3 + WAIT_CALLS, and only
-// a batch that reaches exhaustion spends the full ceiling.
+// a batch approved on its last attempt spends the full ceiling.
 //
-// A resumed batch whose fragment already passes --check-batch skips its
-// attempt-0 dispatch + wait, so it is strictly cheaper than this ceiling --
-// note it does NOT skip the review (see batchStep), which is why the precheck
-// saving is 1 + WAIT_CALLS calls and not 3 + WAIT_CALLS. If the estimate
+// A resumed batch (RESUMED_BATCHES) skips its attempt-0 dispatch + wait, so it
+// is strictly cheaper than this ceiling -- by exactly 1 + WAIT_CALLS calls, and
+// note it does NOT skip the review (see batchStep), which is why the saving is
+// not 3 + WAIT_CALLS. If the estimate
 // exceeds engine.batch_agent_cap,
 // refuse the whole run WITHOUT dispatching anything, the same refusal shape
 // mass-translate-wf.template.js emits for its own oversized batch -- the
@@ -597,8 +670,8 @@ const BATCHES = Array.isArray(args) ? args : JSON.parse(args)
 // dispatches nothing, so there is no unsafe index to guard against yet.
 // ---------------------------------------------------------------------------
 const perBatchCalls = CITATION_REVIEW_ENABLED
-  ? 2 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)
-  : 2 + WAIT_CALLS
+  ? 1 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)
+  : 1 + WAIT_CALLS
 const estimatedCalls = perBatchCalls * BATCHES.length + 2
 if (estimatedCalls > BATCH_AGENT_CAP) {
   log(
@@ -682,10 +755,14 @@ function manifestPath(index) {
 }
 const MANIFEST_ALL_PATH = RUN_DIR + "/manifest_all.json"
 
-// The --check-batch command, built ONCE here and used at all four sites that
-// have to issue it character-identically: the precheck (which probes attempt 0
-// specifically), the dispatch call's own self-check, every chunk of the wait
-// poll, and -- since 1.16.2 -- the wait's authoritative re-check. Their only
+// The --check-batch command, built ONCE here and used at all three sites that
+// have to issue it character-identically: the dispatch call's own self-check,
+// every chunk of the wait poll, and -- since 1.16.2 -- the wait's authoritative
+// re-check. (A fourth, the resume precheck, was deleted in #724: the same
+// question is now answered by resume_setup.py before this Workflow starts, and
+// that script builds its own command line rather than being handed one from
+// here -- so the two spellings are no longer kept identical by construction and
+// must not be assumed to be.) Their only
 // difference is which fragment path they hold, which is exactly what the two
 // arguments carry. Argument order is part of the contract rather than
 // style -- the dispatch prompt tells the agent to re-run "exactly the command
@@ -739,8 +816,8 @@ function approvedPath(index, attempt) {
   return RUN_DIR + "/approved_" + index + "_attempt_" + attempt + ".json"
 }
 
-// checkBatchCmd() plus --approve-to, appended -- never interleaved. The four
-// character-identical --check-batch sites (precheck, dispatch self-check, wait
+// checkBatchCmd() plus --approve-to, appended -- never interleaved. The three
+// character-identical --check-batch sites (dispatch self-check, wait
 // chunk poll, wait re-check -- tests/bounded_poll_present.test.py's
 // CHECK_BATCH_CALL_SITES is the count's own authority, extracted from this
 // file's real source rather than restated as prose) keep issuing
@@ -874,42 +951,29 @@ function fetchCitationsCmd(index, attempt) {
 // literal quotes).
 // ---------------------------------------------------------------------------
 
-// PRECHECK -- Claude, effort:low, no agentType, no schema. Resume-skip
-// (#101): a prior, possibly-interrupted run of this SAME {{RUN_ID}} may have
-// already written a valid out_{index}_attempt_{n}.json fragment (the
-// attempt-scoped name, since 1.16.0 -- the next paragraph of this same
-// comment already said so while this line still named the old fixed path).
-// Because any plugin
+// RESUME-SKIP (#101) is no longer a prompt at all -- see RESUMED_BATCHES near
+// the top of this file. The reasoning that used to live here, kept because it
+// is about the SKIP and not about the vanished agent:
+//
+// A prior, possibly-interrupted run of this SAME {{RUN_ID}} may have already
+// written a valid out_{index}_attempt_0.json fragment. Because any plugin
 // update flips plugin_bundle_hash (this template is itself a
 // PLUGIN_BUNDLE_MEMBERS entry) and so forces a fresh run_id with no old
-// fragments on disk, ANY fragment that still passes --check-batch against
-// the CURRENT manifest is genuinely current, never stale -- so it can be
-// trusted and the (expensive) codex dispatch skipped. A single-shot run of
-// checkBatchCmd() (see that helper -- all four sites issue it identically);
-// any failure at all (missing file, malformed JSON, wrong coverage, offline
-// backstop) makes this return ABSENT, so the batch falls THROUGH to a normal
-// dispatch + wait and a bad or absent fragment is never wrongly trusted.
+// fragments on disk, ANY fragment that still passes --check-batch against the
+// CURRENT manifest is genuinely current, never stale -- so it can be trusted
+// and the (expensive) codex dispatch skipped. Any failure at all (missing file,
+// malformed JSON, wrong coverage, offline backstop) leaves the batch OUT of
+// RESUMED_BATCHES, so it falls THROUGH to a normal dispatch + wait and a bad or
+// absent fragment is never wrongly trusted.
 //
-// Probes ATTEMPT 0's path specifically (1.16.0). A prior interrupted run may
-// have climbed further up the retry ladder than that, and this deliberately
-// does not go looking: probing every attempt would cost MAX_CITATION_RETRIES+1
-// precheck calls to save at most one dispatch, and it is unnecessary for
-// CORRECTNESS because a resume-skipped fragment is still handed to the
-// citation review like any other (see batchStep). The worst case is therefore
-// that a resumed run re-reviews, and if need be re-generates, a fragment a
-// previous run had already rejected -- rework, up to and including burning the
-// ladder to exhaustion and merging nothing, but never a bad citation slipping
-// through.
-function batchPrecheckPrompt(batch) {
-  const checkCmd = checkBatchCmd(batch.index, 0)
-  const lines = []
-  lines.push("A prior run of glossary-pass batch " + batch.index + " may already have written a valid fragment to disk. Check ONCE, read-only, whether it is already present and valid: run exactly this one bash command (a single invocation, NOT a polling loop):")
-  lines.push(checkCmd)
-  lines.push("If that command exits successfully (exit code 0), the fragment is already complete and valid -- return exactly the line: PRESENT " + batch.index)
-  lines.push("If it exits non-zero for ANY reason (the file is missing, is not valid JSON, or fails its shape/offline/coverage checks), return exactly the line: ABSENT " + batch.index)
-  lines.push("Do nothing else -- do not create, modify, dispatch, or resolve any candidates yourself; this is purely a read-only presence check.")
-  return lines.join("\n")
-}
+// ATTEMPT 0's path specifically. A prior interrupted run may have climbed
+// further up the retry ladder than that, and the probe deliberately does not go
+// looking: it is unnecessary for CORRECTNESS because a resume-skipped fragment
+// is still handed to the citation review like any other (see batchStep). The
+// worst case is therefore that a resumed run re-reviews, and if need be
+// re-generates, a fragment a previous run had already rejected -- rework, up to
+// and including burning the ladder to exhaustion and merging nothing, but never
+// a bad citation slipping through.
 
 // DISPATCH -- codex, schema-less, fire-and-forget (see
 // references/workflow-schema-validation.md's "shared codex work-call
@@ -1082,7 +1146,7 @@ function batchWaitRecheckPrompt(batch, attempt) {
 // CITATION REVIEW (1.16.0), SPLIT INTO PREPARE + JUDGE (1.16.1, #347),
 // JUDGE TOOL-RESTRICTED (#353).
 // Neither half is codex and neither carries a schema -- sentinel-verdict shaped
-// exactly like the precheck and wait steps above, for the same reason they are:
+// exactly like the wait step above, for the same reason it is:
 // a schema-bearing call can wedge the Workflow if the forwarder detaches (#97),
 // and this stage sits on the critical path of every live run.
 //
@@ -1187,8 +1251,7 @@ function batchWaitRecheckPrompt(batch, attempt) {
 // model is a genuinely separate opinion rather than the same reasoning re-run.
 //
 // The two efforts differ, and deliberately. Prepare is mechanical -- run two
-// commands, relay which succeeded -- so it takes the "low" the precheck and wait
-// steps take. The judge keeps "high": it is the only judgment call in the file,
+// commands, relay which succeeded -- so it takes the "low" the wait step takes. The judge keeps "high": it is the only judgment call in the file,
 // deciding whether a retrieved page actually supports a specific claim, and it
 // is the last gate before an immutable canon row. Neither is wired to EFFORT:
 // that token is documented as the codex dual-injection knob (dispatch opener +
@@ -1552,6 +1615,14 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 // number were taken at different times against different site sets, and
 // collapsing them into one undated "60 of 64" would hide that.
 //
+// ONE OF THOSE FOUR SITES NO LONGER EXISTS (#724): the PRECHECK. Its 15-of-16
+// stands as a measurement -- it was taken, and it is why the guard was written
+// -- but nothing in this file reads a PRESENT/ABSENT reply any more, so the
+// live site set is the other three plus #723's approval record. Do not re-derive
+// a smaller total from that and write it here as though it had been measured:
+// the deletion removes a site from the population, it does not re-measure the
+// three that remain. tests/bounded_poll_present.test.py holds the live count.
+//
 // ONE OF THOSE FOUR SITES HAS SINCE MOVED, and saying so is the point of this
 // paragraph rather than a footnote. The WAIT site's figure above was taken
 // against the pre-1.16.2 shape: the "TIMEOUT <index>" sentinel, guarded inline
@@ -1603,10 +1674,17 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 // fail sentinel while approving -- "I considered emitting CITATIONS_REJECTED 0
 // ATTEMPT 0 but every citation resolves" -- now takes the fail branch. Plain
 // substring containment also over-matches an index prefix: with failSentinel
-// "ABSENT 1", a reply saying "ABSENT 10" matches. Both are false REDs, the
-// fail-safe direction at all four sites -- but what a false RED COSTS differs
-// per site, and the four are NOT alike. Traced through the control flow rather
-// than assumed:
+// "CITATIONS_REJECTED 1 ATTEMPT 0", a reply saying "CITATIONS_REJECTED 10
+// ATTEMPT 0" matches. (The prefix collision was first written down against the
+// precheck's "ABSENT 1" / "ABSENT 10"; #724 deleted that site, and the property
+// is a fact about substring containment rather than about any one sentinel, so
+// the example is restated at a site that still exists rather than dropped.)
+// Both are false REDs, the fail-safe direction at all four sites -- but what a
+// false RED COSTS differs per site, and the four are NOT alike. (The four have
+// been a DIFFERENT four since #724: the resume precheck left and #723's approval
+// record arrived, so the count is unchanged and its composition is not. Read the
+// bullets, never the number.) Traced through the control flow rather than
+// assumed:
 //   citation review -- automatic retry, same run, but NOT RELIABLY
 //     self-recovering, and the difference matters. The verdict falls through to
 //     rejectionDetail() and the enclosing `for (let attempt = 0; ; attempt++)`
@@ -1634,9 +1712,19 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 //     2 + WAIT_CALLS calls instead of 3 + WAIT_CALLS. It costs exactly the same
 //     at the ladder's end, since an attempt lost to a mis-phrased prepare is an
 //     attempt lost either way.
-//   precheck -- automatic, same run. `resumed` simply goes false, so the loop
-//     body dispatches this batch instead of resume-skipping it. The cost is
-//     redoing work whose fragment was already valid on disk.
+//   approval record (#723) -- the cheapest false RED of the four, and the only
+//     one that costs nothing already spent. The batch has been APPROVED; only
+//     the record of that verdict failed to be written. Note where the refusal
+//     is taken, because it is NOT this batch's own return: batchStep still
+//     returns ready:true, carrying approvalRecorded:false, and the PASS refuses
+//     -- the unrecordedBatches filter below returns merged:false,
+//     reason:"approval-record-failed" for the whole run rather than merging an
+//     approval nobody can reconstruct afterwards. A batch-level ready:false
+//     would have been the weaker shape: it would have let the other batches
+//     merge, which is exactly the outcome the record exists to prevent. Nothing is lost but the run: the approved snapshot
+//     is still on disk and still valid, so the operator's re-invocation
+//     resume-skips straight back to it. Refusing here rather than merging
+//     silently is the whole point of the record -- see approvalRecordPath().
 //   wait -- TWO sites since 1.16.2, and they are NOT alike. The guard now lives
 //     inside waitChunkVerdict(), which reads both a CHUNK reply and the
 //     authoritative RE-CHECK reply.
@@ -1653,8 +1741,8 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 //         notReadyBatches, and the pass as a whole returns merged:false,
 //         reason:"fragment-check-failed", with the merge never attempted.
 //         "Recovery" here means the OPERATOR re-invokes the workflow; the
-//         precheck's resume-skip is what makes the untouched batches cheap on
-//         that second run.
+//         resume-skip (RESUMED_BATCHES) is what makes the untouched batches
+//         cheap on that second run.
 //     So the pre-1.16.2 cost -- one mis-phrased wait reply ending the batch --
 //     now requires the mis-phrasing to land on the ONE reply that is read last,
 //     rather than on any of them.
@@ -1721,6 +1809,21 @@ function rejectedAnywhere(reply, failSentinel) {
 // batch 1 could abandon its remaining chunk budget early; the authoritative
 // re-check still runs, so a genuinely-landed fragment is still found.
 // Unreachable in practice: a wait agent's prompt names only its own batch.
+//
+// MIRRORED IN skeptic-pass-wf.template.js, AND THAT AGREEMENT IS ENFORCED
+// RATHER THAN DESCRIBED: tests/rejected_anywhere_parity.test.py drives a table
+// of reply shapes through all three templates' real waitChunkVerdict()
+// functions and asserts they return identical verdicts, and separately asserts
+// the skeptic template defines the guard helper at all. Cite that test, which
+// fails loudly if it stops being true, rather than a remembered state.
+//
+// A claim about ANOTHER file rots by construction: no edit to THIS file can
+// invalidate it, so neither this file's diff nor any reviewer reading this file
+// will ever catch it going stale. Name a mechanism, or name a test that enforces
+// the agreement; never record what another file currently contains. (This note
+// lived on the resume precheck until #724 deleted that site. It is about the
+// WAIT, and always was -- the precheck half of it was the part that could not
+// be enforced, which is why only this half survived the move.)
 function waitChunkVerdict(reply, index) {
   if (rejectedAnywhere(reply, "PENDING " + index)) return "pending"
   if (sentinelVerdict(reply, "READY " + index, null)) return "ready"
@@ -1728,8 +1831,7 @@ function waitChunkVerdict(reply, index) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-batch precheck -> (dispatch -> wait -> citation prepare -> judge)*
-// sequence.
+// Per-batch (dispatch -> wait -> citation prepare -> judge)* sequence.
 // pipeline() runs these concurrently; each batch writes only its own fragment
 // files, so concurrent batches never collide on shared bytes the way a single
 // shared canon.json used to (#90). The dispatch call's own return is never
@@ -1740,8 +1842,8 @@ function waitChunkVerdict(reply, index) {
 // The control flow is a small state machine rather than a straight line
 // (1.16.0), with TWO entry points into the same review loop:
 //
-//   ENTRY A (resumed):  precheck PRESENT ------------------\
-//   ENTRY B (fresh):    precheck ABSENT -> dispatch -> wait -+-> PREPARE -> JUDGE
+//   ENTRY A (resumed):  index in RESUMED_BATCHES ----------\
+//   ENTRY B (fresh):    index NOT in it -> dispatch -> wait -+-> PREPARE -> JUDGE
 //
 //   WAIT (1.16.2, #352)            -> not one call: up to WAIT_CHUNKS bounded
 //                                     chunk polls, left the instant any chunk
@@ -1780,60 +1882,34 @@ function waitChunkVerdict(reply, index) {
 // be skipped on exactly the resumed batches this gate exists for.
 // ---------------------------------------------------------------------------
 async function batchStep(batch) {
-  // Resume-skip precheck (#101): if this batch's fragment already exists and
-  // passes --check-batch, trust it and skip the codex dispatch + wait. Any
-  // non-PRESENT answer -- including a null/failed precheck, or a corrupt or
-  // missing fragment (both of which the precheck reports as ABSENT) -- falls
-  // through to a full dispatch, so a bad fragment is never wrongly skipped.
-  const precheck = await agent(batchPrecheckPrompt(batch), {
-    effort: "low", phase: "GlossaryPass", label: "glossary:precheck:" + batch.index,
-  })
-  // Line-oriented sentinel verdict (#308), replacing the whole-string EXACT
-  // match this site used before (content-matching-sentinel-fragility,
-  // #228): a failure reply like "ABSENT 0 (fragment missing; not PRESENT)"
-  // contains the literal substring "PRESENT" and would falsely resume-skip
-  // under a naive `.indexOf(...) !== -1` check -- #228's whole-string exact
-  // match closed that direction, but then rejected a benign prose-decorated
-  // PRESENT reply as ABSENT (#308). sentinelVerdict() keeps BOTH directions
-  // closed at once: a decorated PRESENT (prose preamble, the sentinel as
-  // the reply's own final line) now resume-skips, while a plain ABSENT or a
-  // contradictory reply regenerates. sentinelVerdict()'s own fail-priority scan
-  // catches the contradictory case only when an LF puts ABSENT on a line of its
-  // own; the rejectedAnywhere() guard on this call catches it whatever glued it
-  // there -- measured over GLUE_CHARS (16 items,
-  // tests/glossary_citation_review.test.py), shape: ABSENT sharing its line
-  // with prose -- 15 of 16 glue characters falsely resume-SKIPPED before the
-  // guard, 0 of 16
-  // after. The cost is a false RED that recovers automatically within this same
-  // run: a reply merely MENTIONING "ABSENT <i>" while reporting the fragment
-  // present just sends the batch down the ordinary dispatch path below instead
-  // of resume-skipping it. See rejectedAnywhere()'s comment.
-  // NOTE: skeptic-pass-wf.template.js's batchStep precheck mirrors this control
-  // flow. Whether it carries this containment guard is a fact about THAT file --
-  // read its own precheck, and never infer it from here.
+  // Resume-skip (#101): if this batch's fragment already exists and passes
+  // --check-batch, trust it and skip the codex dispatch + wait. The answer is
+  // read from RESUMED_BATCHES -- a set resume_setup.py computed by RUNNING
+  // --check-batch per batch, after the stale-fragment wipe and after this run's
+  // manifests were written, which is the only point at which the answer is a
+  // fact (see that script's probe_resumed_batches(), and
+  // tests/glossary_resume_probe.test.py, which makes the ordering executable).
   //
-  // For the WAIT verdict -- not this precheck -- that agreement is ENFORCED
-  // rather than described: tests/rejected_anywhere_parity.test.py drives a table
-  // of reply shapes through all three templates' real waitChunkVerdict()
-  // functions and asserts they return identical verdicts, and separately asserts
-  // the skeptic template defines the guard helper at all. Cite that test, which
-  // fails loudly if it stops being true, rather than a remembered state.
+  // Until 1.69.x this was an agent call per batch answering PRESENT/ABSENT in
+  // prose, and the whole of #228, #308 and #371 is what that cost: a reply
+  // merely MENTIONING "ABSENT <i>", or gluing "PRESENT <i>" to a word with any
+  // of sixteen measured characters, decided whether a codex dispatch was spent.
+  // Two layers of containment machinery (a rejectedAnywhere() guard plus a
+  // line-oriented sentinelVerdict()) held that closed. Both are DELETED here
+  // rather than relocated, because a set substituted at instantiation has no
+  // reply to decorate. That is why #724 is a correctness change and not only a
+  // cost one.
   //
-  // A claim about ANOTHER file rots by construction: no edit to THIS file can
-  // invalidate it, so neither this file's diff nor any reviewer reading this
-  // file will ever catch it going stale. Name a mechanism, or name a test that
-  // enforces the agreement; never record what another file currently contains.
-  // 1.16.0 -- the resume-skip no longer RETURNS; it sets the state machine's
+  // 1.16.0 -- the resume-skip does not RETURN; it sets the state machine's
   // entry condition. This is the whole reason the citation review is a loop
   // with two entry points rather than a step bolted on after the wait: a
   // review reachable only from the dispatch path would be silently bypassed
   // on every resumed batch, which is precisely the run where a stale,
   // never-reviewed fragment is already sitting on disk. The resumed fragment
-  // is exactly as unreviewed as a freshly dispatched one -- the precheck
-  // proves it passes --check-batch, and --check-batch is the check that
-  // cannot see a fabricated citation in the first place.
-  const resumed = !rejectedAnywhere(precheck, "ABSENT " + batch.index) &&
-    sentinelVerdict(precheck, "PRESENT " + batch.index, "ABSENT " + batch.index)
+  // is exactly as unreviewed as a freshly dispatched one -- the probe proves it
+  // passes --check-batch, and --check-batch is the check that cannot see a
+  // fabricated citation in the first place.
+  const resumed = RESUMED_BATCHES.has(batch.index)
   if (resumed) {
     log("batch " + batch.index + ": resume-skip -- existing attempt-0 fragment already passed --check-batch, not re-dispatching (it is still citation-reviewed below)")
   }

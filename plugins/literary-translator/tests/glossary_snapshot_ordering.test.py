@@ -50,7 +50,7 @@ than a source grep:
   * a prepare that reports failure spends no judge call, and its attempt's
     snapshot never reaches the merge;
   * the emitted approve command is checkBatchCmd() plus --approve-to APPENDED, so
-    the four character-identical --check-batch sites keep issuing that prefix
+    the three character-identical --check-batch sites keep issuing that prefix
     verbatim, and PREPARE is the only call in the file that carries --approve-to;
   * under LIVE the merge and verify consume approved_{i}_attempt_{n}.json for the
     approved attempt, and no rejected attempt's snapshot is ever named;
@@ -202,14 +202,21 @@ def check_cmd_from_wait(out: dict, index: int, attempt: int = 0) -> str:
     return hits[0]
 
 
-def check_cmd_from_precheck(out: dict, index: int) -> str:
-    """Same, from the PRECHECK -- the one site that still issues the contract on
-    the resume-skip path, where neither a dispatch nor a wait ever runs."""
-    prompt = prompts_for(out, f"glossary:precheck:{index}")[0]
-    lines = [ln.strip() for ln in prompt.split("\n")
-             if "--check-batch" in ln and ln.strip().startswith("python3")]
-    assert len(lines) == 1, f"expected one bare --check-batch command line, got {lines}"
-    return lines[0]
+# #724: a RESUMED run renders no --check-batch command anywhere before the
+# prepare call -- the precheck that used to issue one is gone, and the dispatch
+# and wait are exactly what ENTRY A skips. So the string the resume path's
+# snapshot command must be built on has to come from somewhere else, and the
+# choice matters: transcribing it into an f-string here is precisely what
+# check_cmd_from_wait()'s docstring forbids, because a local copy keeps agreeing
+# with itself after a contract change on either side.
+#
+# It is lifted from a FRESH run of the same batch and attempt instead. That makes
+# the assertion stronger than the one it replaces, not weaker: the old version
+# compared the resumed run's prepare against a command from that SAME run, so a
+# template that built a different command on the resume path would have compared
+# consistent-but-wrong strings. This compares across the two entry points, which
+# is the property the convergence design actually claims -- both entry points
+# snapshot the same bytes with the same command.
 
 
 def approve_cmd_for(check_cmd: str, index: int, attempt: int) -> str:
@@ -217,7 +224,8 @@ def approve_cmd_for(check_cmd: str, index: int, attempt: int) -> str:
     return check_cmd + " --approve-to " + approved_path(index, attempt)
 
 
-def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000) -> str:
+def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000,
+                resumed_batch_indices: list | None = None) -> str:
     """The token map and renderer now live in _workflow_instantiation.py
     (#413); this stays a thin wrapper preserving this file's own
     durable_root/run_id, which are spliced into RUN_DIR paths this file's
@@ -230,6 +238,10 @@ def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000) -
         run_id=FIXTURE_RUN_ID,
         research_mode=research_mode,
         batch_agent_cap=batch_agent_cap,
+        # #724 -- the resume-skip is no longer an agent reply this file's PLAN
+        # can answer; it is a substituted array. A test that wants ENTRY A
+        # names the batch here.
+        resumed_batch_indices=resumed_batch_indices or [],
     )
 
 
@@ -304,9 +316,6 @@ async function agent(promptText, opts) {
   const idx = parts[parts.length - 1];
   const p = PLAN[idx] || {};
 
-  if (kind === "precheck") {
-    return Object.prototype.hasOwnProperty.call(p, "precheck") ? p.precheck : ("ABSENT " + idx);
-  }
   if (kind === "dispatch") return "FRAGMENT " + idx;
   // 1.16.2 (#352): the wait poll is chunked, and every chunk of every attempt
   // shares this one label, so a plan-supplied reply is consumed POSITIONALLY --
@@ -380,10 +389,14 @@ function log(msg) { logLines.push(String(msg)); }
 
 
 def run(*, tmp_path: Path, batches: list, research_mode: str = "live",
-        plan: dict | None = None, timeout: int = 30) -> dict:
+        plan: dict | None = None, timeout: int = 30,
+        resumed_batch_indices: list | None = None) -> dict:
     plan = plan or {}
     harness = (
-        HARNESS.replace("__WRAPPED_SOURCE__", _wrap(instantiate(research_mode=research_mode)))
+        HARNESS.replace("__WRAPPED_SOURCE__", _wrap(instantiate(
+            research_mode=research_mode,
+            resumed_batch_indices=resumed_batch_indices,
+        )))
         .replace("__BATCHES_JSON__", json.dumps(batches))
         .replace("__PLAN_JSON__", json.dumps(plan))
     )
@@ -632,42 +645,40 @@ def test_the_approve_command_is_the_check_batch_contract_plus_approve_to(tmp_pat
     )
 
 
-# Round-8 sweep finding: PRECHECK and WAIT (chunk and re-check alike) are each
-# told "do nothing else" beyond their one read-only check -- unpinned, in this
-# file that already pins the --check-batch CONTRACT those same calls issue.
+# Round-8 sweep finding: the WAIT (chunk and re-check alike) is told "do nothing
+# else" beyond its one read-only check -- unpinned, in this file that already
+# pins the --check-batch CONTRACT that same call issues.
 # PRESENCE-ONLY: this file's mocked agent() cannot simulate an LLM doing
 # something extra with its bash tool, so this proves the instruction is still
 # WRITTEN, not that it is OBEYED -- see glossary_citation_review.test.py's
 # DISPATCH_NO_ACTION_CLAUSE pin for the same caveat spelled out at more length.
-PRECHECK_NOTHING_ELSE_CLAUSE = (
-    "do not create, modify, dispatch, or resolve any candidates yourself"
-)
+#
+# #724 removed the second holder of this pin, the PRECHECK, and with it the only
+# reason this suite ever had to reason about an agent handed a bash tool to
+# answer a question about disk state. The resume probe now runs in
+# resume_setup.py, which does not ask anything to be trusted not to do more --
+# it runs the command itself. That is the point of the move, and it is why this
+# pin shrank to one clause rather than being ported.
 WAIT_NOTHING_ELSE_CLAUSE = (
     "do not touch any files, and do not resolve any candidates yourself"
 )
 
 
-def test_precheck_and_wait_are_told_to_do_nothing_beyond_their_own_check(tmp_path):
-    """PRECHECK holds a bash tool to run its one read-only --check-batch probe;
-    WAIT holds one to run its bounded poll (and the re-check that backs it).
-    Neither is restricted by any tool-level sandbox -- confirmed in the round-8
+def test_the_wait_is_told_to_do_nothing_beyond_its_own_check(tmp_path):
+    """WAIT holds a bash tool to run its bounded poll (and the re-check that
+    backs it), restricted by no tool-level sandbox -- confirmed in the round-8
     sweep that NO agent() call anywhere in this plugin's templates carries a
     tool-restriction option -- so the prompt's own "do nothing else" sentence
     is the ONLY thing standing between "ran the one suggested command" and
-    "did whatever else its bash tool allows", for both of these mechanical,
-    supposedly read-only steps.
+    "did whatever else its bash tool allows", for this mechanical, supposedly
+    read-only step.
 
-    All three call sites share one property (the SAME sentence, verbatim, at
-    the wait chunk and the wait re-check) but need two different runs: the
-    chunk fires under one_batch_run's default; the re-check only fires when
-    the chunk budget is exhausted (see pending_wait_run(), used above by this
+    Both call sites share one property (the SAME sentence, verbatim, at the
+    wait chunk and the wait re-check) but need two different runs: the chunk
+    fires under one_batch_run's default; the re-check only fires when the
+    chunk budget is exhausted (see pending_wait_run(), used above by this
     file's own --check-batch roster test for the identical reason)."""
     out = one_batch_run(tmp_path)
-    precheck = sole_prompt(out, "glossary:precheck:0")
-    assert PRECHECK_NOTHING_ELSE_CLAUSE in precheck, (
-        "the precheck prompt must forbid the agent from doing anything beyond "
-        f"its one read-only check; prompt was:\n{precheck}"
-    )
     for prompt in prompts_for(out, "glossary:wait:0"):
         assert WAIT_NOTHING_ELSE_CLAUSE in prompt, (
             "every wait chunk prompt must forbid the agent from touching "
@@ -685,7 +696,7 @@ def test_precheck_and_wait_are_told_to_do_nothing_beyond_their_own_check(tmp_pat
 
 
 @pytest.mark.parametrize("label", [
-    "glossary:precheck:0", "glossary:dispatch:0", "glossary:wait:0",
+    "glossary:dispatch:0", "glossary:wait:0",
     "glossary:wait-recheck:0", "glossary:citation-review:0",
     "glossary:approval-record:0",
 ])
@@ -693,12 +704,13 @@ def test_only_the_prepare_call_ever_issues_the_approve_command(tmp_path, label):
     """PREPARE is the one call in the file that may snapshot, and the reasons
     differ per label rather than being one rule repeated.
 
-    The four --check-batch sites (precheck, dispatch self-check, wait chunk
-    poll, wait re-check -- the last added in 1.16.2, #352) must issue
-    checkBatchCmd() character-identically, so none of them may acquire the
-    flag: a precheck, wait chunk poll or re-check that snapshotted would write
-    an approved copy of bytes nobody has reviewed, and a dispatch self-check
-    that did it would let the producer approve its own output.
+    The three --check-batch sites (dispatch self-check, wait chunk poll, wait
+    re-check -- the last added in 1.16.2, #352; a fourth, the resume precheck,
+    was deleted in #724) must issue checkBatchCmd() character-identically, so
+    none of them may acquire the flag: a wait chunk poll or re-check that
+    snapshotted would write an approved copy of bytes nobody has reviewed, and a
+    dispatch self-check that did it would let the producer approve its own
+    output.
 
     The APPROVAL RECORD (#723) is here for the JUDGE's reason rather than the
     four gate sites': it runs AFTER the evidence was retrieved from the first
@@ -1036,13 +1048,18 @@ def test_the_resume_skip_entry_point_still_produces_its_own_snapshot(tmp_path):
     snapshotted -- a prepare that ran while the judge was skipped would satisfy
     the snapshot half of this test and still merge unreviewed bytes.
     """
-    out = one_batch_run(tmp_path, plan={"0": {"precheck": "PRESENT 0"}})
+    out = one_batch_run(tmp_path, resumed_batch_indices=[0])
     order = labels_of(out)
     assert "glossary:dispatch:0" not in order, "fixture did not take the resume-skip path"
     assert "glossary:wait:0" not in order, "fixture did not take the resume-skip path"
 
+    # The command the FRESH path issues for this same batch and attempt (see the
+    # comment above check_cmd_from_wait's siblings): ENTRY A renders none of its
+    # own, and the claim under test is that both entry points snapshot the same
+    # bytes the same way.
+    fresh = one_batch_run(tmp_path)
     prepare = sole_prompt(out, "glossary:citation-prepare:0")
-    expected = approve_cmd_for(check_cmd_from_precheck(out, 0), 0, 0)
+    expected = approve_cmd_for(check_cmd_from_wait(fresh, 0, 0), 0, 0)
     assert expected in prepare, (
         "a resume-skipped batch must still snapshot its own fragment:\n"
         f"  expected: {expected}"

@@ -242,7 +242,7 @@ def code_lines(body):
     trailing comment "// checkBatchCmd() -- the same command DISPATCH's
     self-check issues"; the dispatch could drop its self-check entirely and
     the assertion still passed. A body that happens to have no trailing
-    comment (batchPrecheckPrompt) hides that, which is exactly why the loop
+    comment (batchPrecheckPrompt, which #724 has since deleted) hides that, which is exactly why the loop
     below now runs this over ALL THREE sites rather than trusting the one
     site that was proved by mutation.
 
@@ -713,16 +713,24 @@ def test_glossary_batch_dispatch_is_codex_and_schema_less():
     assert not has_schema(options), f"glossary batch dispatch must be schema-less (fire-and-forget): {options}"
 
 
-# The FOUR sites that must issue the --check-batch command
+# The THREE sites that must issue the --check-batch command
 # character-identically (see checkBatchCmd()'s own comment in the template):
-# the resume precheck, the codex dispatch's own self-check, the wait poll's
-# chunk, and -- new in 1.16.2 (#352) -- the authoritative re-check that backs
-# the chunk budget. The wait was one site until #352 split it in two, and both
-# halves belong here for the reason the re-check exists at all: a re-check that
-# asked a WEAKER question than the poll it backs up would be a gate that opens
-# only on the path nobody watches.
+# the codex dispatch's own self-check, the wait poll's chunk, and -- new in
+# 1.16.2 (#352) -- the authoritative re-check that backs the chunk budget. The
+# wait was one site until #352 split it in two, and both halves belong here for
+# the reason the re-check exists at all: a re-check that asked a WEAKER question
+# than the poll it backs up would be a gate that opens only on the path nobody
+# watches.
+#
+# #724 removed a FOURTH, `batchPrecheckPrompt` -- the resume probe that asked
+# this same question of attempt 0. It did not become a fifth builder somewhere
+# else: it stopped being a prompt at all, and now runs in resume_setup.py before
+# the Workflow starts (tests/glossary_resume_probe.test.py). The
+# single-composition-site assertion below is what makes that checkable rather
+# than asserted -- a precheck quietly reinstated with its own hand-built command
+# fails there, not here.
 CHECK_BATCH_CALL_SITES = (
-    "batchPrecheckPrompt", "batchDispatchPrompt",
+    "batchDispatchPrompt",
     "batchWaitChunkPrompt", "batchWaitRecheckPrompt",
 )
 
@@ -846,8 +854,10 @@ def test_check_batch_command_is_composed_once_and_shared_by_all_four_sites():
     `"checkBatchCmd(" in body` on its own, so replacing the dispatch's real
     self-check line with "Then stop. Do not self-check." left this test GREEN --
     verified by mutation. The lock had been proved on batchPrecheckPrompt, which
-    happens to carry no trailing comment; that one site is not evidence about
-    the other two, so the assertions below are proved separately at each.
+    happened to carry no trailing comment; that one site was not evidence about
+    the other two, so the assertions below are proved separately at each. #724
+    deleted that site, which is why the mutation is recorded here rather than
+    re-runnable: the reason it was needed outlived the function it was run on.
 
     #723: the composition moved one level down, into checkBatchCmdForPath(), and
     checkBatchCmd() became a two-line delegation to it. The reason is that the
@@ -855,7 +865,7 @@ def test_check_batch_command_is_composed_once_and_shared_by_all_four_sites():
     than against a fragment attempt path, and the alternative -- a second builder
     -- is precisely what this test forbids. So the lock is unchanged in substance
     and only moves which function must hold the one composition: still exactly
-    one site in the file, still reachable from checkBatchCmd(), and the four
+    one site in the file, still reachable from checkBatchCmd(), and the
     ACCEPT GATE sites still go through checkBatchCmd(index, attempt) itself."""
     builder_body = code_lines(extract_function_body(GLOSSARY_SOURCE, "checkBatchCmdForPath"))
     cmd_line = line_containing(builder_body, "canon_validate.py")
@@ -951,7 +961,14 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
     files, retrieves nothing), so prepare contributes its own
     EVIDENCE_READY/EVIDENCE_FAILED sentinel pair.
 
-    #723: three became four again. The approval record contributes its own
+    #724: four became three. The resume PRECHECK -- the oldest of the four --
+    is gone, and with it the sentinel pair (PRESENT/ABSENT) whose false-approval
+    cost was #228's and #308's whole subject. It was not moved the way the wait's
+    parse was moved in 1.16.2: nothing in this template parses a resume answer
+    any more, because the answer arrives as RESUMED_BATCHES, a substituted array.
+    A set cannot be decorated with prose, so there is nothing left to contain.
+
+    #723: three became four. The approval record contributes its own
     APPROVAL_RECORDED/APPROVAL_RECORD_FAILED sentinel pair, read at the same
     guard-then-verdict discipline as its three siblings. Its false-RED cost is
     the cheapest of the four -- a refused merge and an operator re-invocation --
@@ -975,10 +992,11 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
     code = _normalized_code(body)
 
     verdict_calls = _SENTINEL_VERDICT_CALL_RE.findall(code)
-    assert len(verdict_calls) == 4, (
-        f"expected batchStep to hold exactly the four sentinel sites (precheck, "
-        f"citation prepare, citation judge, and #723's approval record -- the "
-        f"wait's own parse lives in waitChunkVerdict since 1.16.2); found "
+    assert len(verdict_calls) == 3, (
+        f"expected batchStep to hold exactly the three sentinel sites (citation "
+        f"prepare, citation judge, and #723's approval record -- the wait's own "
+        f"parse lives in waitChunkVerdict since 1.16.2, and the resume precheck "
+        f"stopped existing in #724); found "
         f"{len(verdict_calls)}: "
         f"{verdict_calls}. If a site was added or removed, guard it and update "
         f"this count -- do not relax the assertion"

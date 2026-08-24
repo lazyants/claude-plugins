@@ -200,10 +200,21 @@ def _guard_comment(source: str, template_path: Path) -> str:
 # a paste of prose, so the fragility is paid for with the guard, not avoided by
 # picking weaker needles.
 GLOSSARY_ONLY_CLAIMS = [
-    # #347/1.16.1 -- glossary guards FOUR sites (precheck, wait, citation
-    # prepare, citation judge); mass-translate guards two waits. Verified
-    # against both comments, not inferred from the site count.
+    # #347/1.16.1 -- glossary guards FOUR sites; mass-translate guards two
+    # waits. Verified against both comments, not inferred from the site count.
+    # The FOUR are not the same four they were: #723 added the approval record
+    # and #724 removed the resume precheck, so the number survived a change of
+    # composition. That is a warning about this needle rather than a reason to
+    # relax it -- a count needle can go on matching while the thing it counts is
+    # replaced, which is why the comment it quotes now spells the composition
+    # out and tells its reader to read the bullets instead.
     "at all four sites",
+    # #724 -- the fail sentinel this template's prefix-collision example is
+    # written against. It was "ABSENT 1"/"ABSENT 10" until the precheck was
+    # deleted; a sentinel mass-translate does not have keeps the needle doing
+    # its job (detecting a paste of glossary's prose) rather than merely
+    # counting.
+    "CITATIONS_REJECTED 1 ATTEMPT 0",
     "notReadyBatches",
     "MAX_CITATION_RETRIES",
 ]
@@ -1386,14 +1397,86 @@ def test_wait_chunk_verdict_call_sites_sum_to_the_measured_total():
 
 # ---------------------------------------------------------------------------
 # THE PRECHECK GUARD -- work item 1's own gap, locked the same way so it
-# cannot silently reopen. Glossary and skeptic both resume-skip a batch on a
+# cannot silently reopen. The skeptic pass resume-skips a batch on a
 # PRESENT/ABSENT precheck reply; only the ABSENT direction needs the
 # containment guard (the PRESENT direction is sentinelVerdict()'s own
-# whole-line test). mass-translate has no PRESENT/ABSENT precheck at all, so
-# it is not part of this pair.
+# whole-line test).
+#
+# #724 LEFT ONE TEMPLATE IN THIS SECTION, and that changes what these tests can
+# prove -- stated here rather than left to be discovered from a green run.
+# Glossary used to be the second member, and the AGREEMENT property (its guard
+# predates the branch; skeptic's was this release's fix, so a disagreement was
+# the historical gap made executable) was the stronger half of the pair. That
+# half is gone with glossary's precheck: agreement between one thing and itself
+# is not a property. What survives is CONTAINMENT -- a reply mentioning ABSENT
+# anywhere must never resume-skip -- which was always the independently-reasoned
+# half, and is not vacuous at n=1.
+#
+# So the two things a reader must NOT conclude: that these tests still catch a
+# cross-template divergence (they cannot -- there is nothing to diverge from),
+# and that glossary is merely absent by oversight (it is asserted absent, by
+# test_templates_without_a_precheck_hold_no_precheck_decision_site above).
 # ---------------------------------------------------------------------------
 
-PRECHECK_GUARD_TEMPLATES = (GLOSSARY_PASS_TEMPLATE, SKEPTIC_PASS_TEMPLATE)
+PRECHECK_GUARD_TEMPLATES = (SKEPTIC_PASS_TEMPLATE,)
+
+# The INVERTED row (#724), and the reason this file does not simply drop
+# glossary from the tuple above and move on. Glossary carried the precheck guard
+# first -- it is where the shape was proved -- and #724 deleted the precheck
+# itself, not the guard: the resume answer now arrives as a substituted array
+# (RESUMED_BATCHES) that resume_setup.py computed, so there is no reply to
+# contain. A deletion recorded only by a shrunken tuple is invisible; a
+# reinstated precheck would silently rejoin a suite that no longer expects one.
+# So the absence is asserted, exactly the way this file already asserts skeptic's
+# guard PRESENCE: mass-translate never had a PRESENT/ABSENT precheck, glossary no
+# longer does, and both must have ZERO of either half of the decision.
+NO_PRECHECK_TEMPLATES = (MASS_TRANSLATE_TEMPLATE, GLOSSARY_PASS_TEMPLATE)
+
+
+@pytest.mark.parametrize("template", NO_PRECHECK_TEMPLATES, ids=[p.name for p in NO_PRECHECK_TEMPLATES])
+def test_templates_without_a_precheck_hold_no_precheck_decision_site(template):
+    """Neither half of the PRESENT/ABSENT resume decision may exist in these
+    templates -- checked as two independent counts rather than one, because
+    either half alone is already a defect.
+
+    A sentinelVerdict() reading PRESENT/ABSENT means a prose reply is deciding
+    the resume-skip again, which is what #228, #308 and #371 each cost a release
+    to close and what #724 removed the possibility of. A rejectedAnywhere()
+    guarding ABSENT with no verdict site to guard is the other direction: dead
+    machinery that reads as protection, and the shape an incomplete revert
+    leaves behind.
+
+    RED on the pre-#724 tree for glossary: it held exactly one of each. Green on
+    mass-translate throughout -- included deliberately, as the control that shows
+    the assertion is satisfiable by a template that genuinely never had one, and
+    so is not merely asserting that a file is small."""
+    source = template.read_text(encoding="utf-8")
+    verdict_sites = [
+        offset
+        for offset in js_call_sites(source, "sentinelVerdict")
+        if "PRESENT " in js_call_args(source, offset) and "ABSENT " in js_call_args(source, offset)
+    ]
+    assert not verdict_sites, (
+        f"{template.name}: found {len(verdict_sites)} sentinelVerdict() call "
+        f"site(s) reading a PRESENT/ABSENT precheck reply, at offsets "
+        f"{verdict_sites}. This template has no precheck: since #724 the resume "
+        f"decision is RESUMED_BATCHES, an array substituted at instantiation "
+        f"from resume_setup.py's own re-check of each fragment. Reinstating a "
+        f"prose reply here reopens #228/#308/#371 -- a decorated or merely "
+        f"MENTIONED sentinel deciding whether a dispatch is spent"
+    )
+    absent_guard_sites = [
+        offset
+        for offset in js_call_sites(source, GUARD_HELPER)
+        if "ABSENT " in js_call_args(source, offset)
+    ]
+    assert not absent_guard_sites, (
+        f"{template.name}: found {len(absent_guard_sites)} {GUARD_HELPER}() "
+        f"call site(s) guarding an ABSENT sentinel, at offsets "
+        f"{absent_guard_sites}, with no PRESENT/ABSENT verdict site for them to "
+        f"guard. A guard with nothing behind it is not harmless: it reads as "
+        f"protection in review and protects nothing"
+    )
 
 
 @pytest.mark.parametrize("template", PRECHECK_GUARD_TEMPLATES, ids=[p.name for p in PRECHECK_GUARD_TEMPLATES])
@@ -1422,7 +1505,7 @@ def test_precheck_absent_direction_is_containment_guarded_at_a_real_call_site(te
     `!rejectedAnywhere(...) && sentinelVerdict(...)`, negated and `&&`-joined
     with nothing else between the guard's own closing paren and the verdict
     call's own opening paren. See
-    test_precheck_decision_expressions_agree_and_never_resume_on_a_mentioned_absent
+    test_precheck_decision_expression_never_resumes_on_a_mentioned_absent
     below for the complementary BEHAVIOURAL lock: this test proves the wiring
     is textually right; that one proves it actually DECIDES right by running
     it."""
@@ -1578,7 +1661,7 @@ def _run_precheck_decision(template: Path, source: str, shape: str, reply: str, 
 
 @pytest.mark.skipif(NODE is None, reason="node not found on PATH")
 @pytest.mark.parametrize("shape", sorted(PRECHECK_REPLY_SHAPES), ids=sorted(PRECHECK_REPLY_SHAPES))
-def test_precheck_decision_expressions_agree_and_never_resume_on_a_mentioned_absent(shape, tmp_path):
+def test_precheck_decision_expression_never_resumes_on_a_mentioned_absent(shape, tmp_path):
     """BEHAVIOURAL lock for work item 1's own gap (C1) -- the complement to
     test_precheck_absent_direction_is_containment_guarded_at_a_real_call_site
     above, the same way test_all_three_wait_verdicts_agree_on_every_reply_shape
@@ -1591,41 +1674,33 @@ def test_precheck_decision_expressions_agree_and_never_resume_on_a_mentioned_abs
     expression (verbatim, via extract_precheck_decision_expression) and
     drives it under node for every shape in PRECHECK_REPLY_SHAPES.
 
-    Two properties are checked, deliberately different in what they can
-    prove:
+    ONE property is checked, and it used to be two -- say so rather than
+    letting a shorter test read as a simpler one. The retired half was
+    AGREEMENT between glossary's decision and skeptic's: glossary's guard
+    predated this branch (verified back to the merge base, 4343994) while
+    skeptic's was this release's own fix (absent through 190ac36 -- `git show
+    190ac36:<path to skeptic's template>` has no `!rejectedAnywhere(precheck,
+    "ABSENT " + ...)` anywhere), so requiring them to agree went RED against
+    190ac36 on every ABSENT-mentioning shape. #724 deleted glossary's precheck
+    outright, and agreement needs two parties.
 
-    1. AGREEMENT. glossary's precheck guard predates this branch and every
-       commit on it (verified back to the merge base, 4343994); skeptic's
-       is this release's own fix (absent through 190ac36, the last commit
-       before it landed -- `git show 190ac36:<path to skeptic's template>`
-       has no `!rejectedAnywhere(precheck, "ABSENT " + ...)` anywhere). So
-       requiring the two templates' real decisions to agree is a genuine
-       regression lock: it goes RED against 190ac36's skeptic template on
-       every ABSENT-mentioning shape below, because glossary correctly
-       refuses to resume-skip while pre-fix skeptic's un-guarded
-       sentinelVerdict() whole-line test resume-skips on the shape's
-       trailing clean PRESENT line. It goes GREEN on the current tree.
-    2. CONTAINMENT, independent of agreement and NOT a reimplementation of
-       sentinelVerdict()'s own fail-priority scan: a reply that mentions
-       "ABSENT" anywhere must never resume-skip, full stop. That is the
-       guarantee this guard exists to provide, and it is statable without
-       re-deriving sentinelVerdict()'s line-splitting algorithm -- so a
-       second, independently-reasoned property, not merely a restatement of
-       the first."""
+    What remains is CONTAINMENT, which was never derived from agreement and is
+    NOT a reimplementation of sentinelVerdict()'s own fail-priority scan: a
+    reply that mentions "ABSENT" anywhere must never resume-skip, full stop.
+    That is the guarantee this guard exists to provide, and it is statable
+    without re-deriving sentinelVerdict()'s line-splitting algorithm."""
     reply = PRECHECK_REPLY_SHAPES[shape].replace("<idx>", "0")
+    # A shrunken population would make every assertion below pass by having
+    # nothing to run. #724 already took this from two templates to one; the next
+    # deletion must be loud.
+    assert PRECHECK_GUARD_TEMPLATES, (
+        "PRECHECK_GUARD_TEMPLATES is empty -- this test would then assert "
+        "nothing at all while reporting a clean pass"
+    )
     resumed = {}
     for template in PRECHECK_GUARD_TEMPLATES:
         source = template.read_text(encoding="utf-8")
         resumed[template.name] = _run_precheck_decision(template, source, shape, reply, tmp_path)
-
-    assert len(set(resumed.values())) == 1, (
-        f"the precheck decision expressions in "
-        f"{[t.name for t in PRECHECK_GUARD_TEMPLATES]} DISAGREE on reply shape "
-        f"{shape!r}: {resumed}\nReply: {reply!r}\n"
-        f"glossary's guard predates this branch; skeptic's is this release's "
-        f"own fix. A disagreement here is exactly the historical gap: skeptic "
-        f"resume-skipping a reply glossary correctly rejects"
-    )
 
     if "ABSENT" in reply:
         resuming = [name for name, v in resumed.items() if v]
@@ -1892,10 +1967,12 @@ def test_precheck_decisions_never_resume_across_the_full_glue_chars_population(s
     """The claim this release's own notes make ("15 of the 16 characters ...
     over the shared GLUE_CHARS set") is about ALL 16 members of the real,
     shipped population, not the 6-character sample
-    test_precheck_decision_expressions_agree_and_never_resume_on_a_mentioned_absent
+    test_precheck_decision_expression_never_resumes_on_a_mentioned_absent
     above happens to cover. This test locks the claim against the population
-    it actually names: 0 of 16 resume-skips on the current (guarded) tree,
-    and agreement between glossary and skeptic on all 16.
+    it actually names: 0 of 16 resume-skips on the current (guarded) tree.
+    (It also checked glossary/skeptic agreement on all 16 until #724 removed
+    glossary's precheck; see this section's own header for why that half is
+    gone and why containment is not weakened by its going.)
 
     RED evidence (measured once against 190ac36, the last commit before
     skeptic's precheck guard landed, via `git show`; not re-run here as an
@@ -1910,16 +1987,15 @@ def test_precheck_decisions_never_resume_across_the_full_glue_chars_population(s
     not re-derive it at run time, only locks that the CURRENT tree resumes
     zero times, whatever the historical count was."""
     reply = PRECHECK_GLUE_REPLY_SHAPES[shape].replace("<idx>", "0")
+    assert PRECHECK_GUARD_TEMPLATES, (
+        "PRECHECK_GUARD_TEMPLATES is empty -- this test would then assert "
+        "nothing at all while reporting a clean pass"
+    )
     resumed = {}
     for template in PRECHECK_GUARD_TEMPLATES:
         source = template.read_text(encoding="utf-8")
         resumed[template.name] = _run_precheck_decision(template, source, shape, reply, tmp_path)
 
-    assert len(set(resumed.values())) == 1, (
-        f"the precheck decision expressions in "
-        f"{[t.name for t in PRECHECK_GUARD_TEMPLATES]} DISAGREE on GLUE_CHARS "
-        f"shape {shape!r}: {resumed}\nReply: {reply!r}"
-    )
     assert not any(resumed.values()), (
         f"a precheck reply with ABSENT glued to prose by GLUE_CHARS member "
         f"{shape!r} ({reply!r}) resume-skipped. The release notes' \"0 of 16\" "
@@ -1954,7 +2030,7 @@ def test_precheck_decisions_never_resume_across_the_full_glue_chars_population(s
 
 SENTINEL_VERDICT_TOTAL_COUNTS = {
     MASS_TRANSLATE_TEMPLATE: 1,   # the wait's own single parse site (waitChunkVerdict); runRound's DRAFT_MISSING site uses mentionedAnywhere(), not a direct call
-    GLOSSARY_PASS_TEMPLATE: 5,    # batchStep: precheck + citation prepare + citation judge + #723's approval record (4), plus waitChunkVerdict's own wait site (1)
+    GLOSSARY_PASS_TEMPLATE: 4,    # batchStep: citation prepare + citation judge + #723's approval record (3; #724 removed the precheck), plus waitChunkVerdict's own wait site (1)
     SKEPTIC_PASS_TEMPLATE: 2,     # batchStep: precheck (1), plus waitChunkVerdict's own wait site (1)
 }
 

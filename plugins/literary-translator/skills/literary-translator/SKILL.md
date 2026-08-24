@@ -1606,6 +1606,25 @@ codex-tampered `cache_key.py` in `${durable_root}/scripts/` would forge the
 provenance hashes that later gate canon reuse, and nothing downstream would
 catch it. Always substitute it.
 
+**#724:** that token list gained `{{RESUMED_BATCH_INDICES}}` — a BARE JSON array
+literal (`[]`, `[0, 3, 7]`), outside any quotes — copied verbatim from the
+`resumed_batch_indices` key `resume_setup.py` reports for a glossary run. It is
+the batches whose attempt-0 fragment that script re-checked with
+`canon_validate.py --check-batch` and found valid, so the pass may skip their
+codex dispatch and wait. `[]` is the ordinary value on a fresh run, and copying
+it is REQUIRED: the template refuses a non-array, and substituting `[]` where
+the script reported indices does not corrupt anything — it just re-dispatches
+batches that were already done, which is the expense this token exists to
+avoid. This is the one token whose value is not known before `resume_setup.py`
+runs, which is why the instantiation happens after it, not before — the same
+ordering `{{RUN_ID}}` already forces. It replaces a per-batch `glossary:precheck`
+agent call that asked the same question in prose; nothing in the pass answers it
+at run time any more.
+
+**A resumed batch is still citation-reviewed.** The skip is over DISPATCH and
+WAIT only: both entry points converge on the same PREPARE → JUDGE ladder before
+anything merges. Do not read this token as an approval record.
+
 The resolved `effort` value also
 belongs in the `subst` object of the payload this session writes for
 `resume_setup.py` below — `resume_setup.py`'s own `SUBST_FIELDS` now
@@ -1651,7 +1670,12 @@ calling `pipeline()`, a deterministic pre-workflow step invokes
 resume-integrity digest gate, creates `glossary/runs/<RUN_ID>/`, and
 atomically writes each batch's `manifest_{index}.json` plus the aggregate
 `manifest_all.json`, aborting before any dispatch if any of that fails (see
-`references/orchestration-and-batching.md`). Only then does each batch run
+`references/orchestration-and-batching.md`). **#724:** it then reports
+`resumed_batch_indices` — the batches whose attempt-0 fragment it re-checked
+with `canon_validate.py --check-batch` and found valid. That happens LAST, after
+the stale-attempt wipe and after the manifests exist, because those are what
+make the answer a fact; copy it into `{{RESUMED_BATCH_INDICES}}` when you
+instantiate the template (see above). Only then does each batch run
 the shared fire-and-forget dispatch → bounded poll → disk-truth pattern:
 `agent(batchDispatchPrompt(batch, attempt, rejectionReason),
 {agentType:'codex:codex-rescue',
@@ -1776,14 +1800,17 @@ still gets a snapshot and its evidence.
 `offline` is the one exception: no citation, no reviewer, no snapshot, so the
 merge consumes the attempt path there.
 
-The judge's verdict is containment-guarded, as are the precheck's, the
-wait's, and prepare's own: a reply carrying the failure sentinel ANYWHERE in
-it rejects, because matching whole lines alone let a fail sentinel glued to
-prose slip past and a trailing clean OK line then approve. The cost is a
-false REJECT on a reply that only *discusses* its own fail sentinel, and
-only ONE of the guarded sites recovers from that DETERMINISTICALLY inside
-the run — the precheck, which falls through to the dispatch it would have
-run anyway. **The citation review does not recover RELIABLY**, however much
+The judge's verdict is containment-guarded, as are the wait's, prepare's own
+and (**#723**) the approval record's: a reply carrying the failure sentinel
+ANYWHERE in it rejects, because matching whole lines alone let a fail sentinel
+glued to prose slip past and a trailing clean OK line then approve. The cost is
+a false REJECT on a reply that only *discusses* its own fail sentinel, and no
+remaining site recovers from that DETERMINISTICALLY inside the run. One used
+to — the resume precheck, which fell through to the dispatch it would have run
+anyway — and **#724** removed it, along with the reply it read: the resume
+decision is now computed by `resume_setup.py` and substituted as
+`{{RESUMED_BATCH_INDICES}}`, so there is no phrasing left to misread.
+**The citation review does not recover RELIABLY**, however much
 its retry ladder looks like it should: the ladder regenerates the fragment,
 while what tripped the guard is the phrasing of prepare's or the judge's own
 reply, so a regenerated attempt clears only if its fresh reply happens not
