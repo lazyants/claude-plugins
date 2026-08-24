@@ -5295,10 +5295,14 @@ def run(args, dirs: dict) -> dict:
                 f"({', '.join(not_yet_converged)}). If this dispatch also mints "
                 f"a fresh RUN_ID -- which it will whenever a cache-key field has "
                 f"moved, the same cause that made the segments above stale -- "
-                f"their existing drafts are orphaned by the new dispatch token "
-                f"and they retranslate from scratch as well, discarding any fix "
-                f"already applied by hand. This flag does not ask about those, "
-                f"and nothing else will."
+                f"their existing drafts are orphaned by the new dispatch token. "
+                f"This flag does not ask about those. Since #742 something else "
+                f"does: segment_dispatch_driver.py REFUSES the dispatch (exit 1) "
+                f"over every selected draft whose dispatch_token names another "
+                f"run, naming each id and its owner, so the second loss is a HALT "
+                f"you must answer per segment rather than a silent re-translation "
+                f"over a hand-applied fix. That refusal is the driver's; a run "
+                f"driven by pipeline() instead has no such gate."
             )
 
         # #442: two populations, ONE refusal. Both are cleared by the same

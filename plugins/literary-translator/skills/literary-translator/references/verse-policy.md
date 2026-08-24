@@ -87,8 +87,9 @@ It is still not a silent re-translation. `select_segments.py` REFUSES an
 authorizing selection holding previously-converged or lost-sentinel segments
 until `--allow-retranslate-converged` is passed — and once it is, the same
 cache-key move mints a fresh `RUN_ID`, which orphans the dispatch token on
-every not-yet-converged draft in that same selection, so those retranslate
-too and any hand-applied fix goes with them. Records that were never
+every not-yet-converged draft in that same selection — and since #742 the
+driver REFUSES the dispatch over those drafts by name (exit 1) rather than
+retranslating them over a hand-applied fix. Records that were never
 converged do not restale at all: they classify `recoverable` or
 `human_escalation` on their own status, and a cache-key recompute FAILURE
 classifies `human_escalation`, never `stale`.

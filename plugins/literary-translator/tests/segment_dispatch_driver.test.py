@@ -1555,6 +1555,18 @@ def test_the_over_sentinel_field_is_not_required_without_from_cap(tmp_path):
     (root / "scripts" / "select_segments.py").write_text(
         _SELECT_SEGMENTS_FROM_CAP_WITHOUT_OVER_SENTINEL, encoding="utf-8"
     )
+    # #742. from_cap_project() stamps its draft for CLAIM_SOURCE_RUN_ID,
+    # because a claim's whole shape is a draft belonging to an EARLIER run.
+    # This invocation passes no --from-cap, so nothing re-stamps it, and the
+    # foreign-draft gate now refuses before dispatch -- correctly: an
+    # unclaimed hand-edited draft belonging to another run is exactly what it
+    # protects, and before #742 this path silently overwrote it. That is a
+    # different subject from this test's own (whether the driver REQUIRES the
+    # selector's over_sentinel field without --from-cap), so the draft is
+    # removed rather than the assertion weakened: with no draft on disk the
+    # segment reaches the same translate path it reached before, and the
+    # payload field this test is about is unaffected.
+    (root / "segments" / "seg01.draft.json").unlink()
 
     proc = run_driver(root, "--only-segs", "seg01", "--allow-empty", timeout=60)
 
@@ -3505,7 +3517,7 @@ def test_resumable_run_id_candidates_excludes_a_glossary_sibling_directly(tmp_pa
 # #458 -- --resume-from-run-id pins WHICH candidate is offered to
 # resume_setup.py's own digest authority; it never bypasses that
 # authority's own comparison. See resolve_run_id()'s own "#458." comment
-# block and refuse_pinned_run_over_foreign_drafts()'s docstring for the
+# block and refuse_run_over_foreign_drafts()'s docstring for the
 # full design this pins.
 # ===========================================================================
 
@@ -4027,39 +4039,302 @@ def test_pinned_run_refuses_before_dispatch_when_a_selected_segment_draft_belong
     assert payload["success"] is False
     assert "seg01" in payload["error"], payload
     assert payload.get("pinned_run_id") == pinned_run_id, payload
-
-
-def test_unpinned_foreign_token_draft_dispatches_normally_unchanged(tmp_path):
-    """Change 1b is PINNED-ONLY (acceptance criterion 4): the identical
-    foreign-token-draft fixture must behave EXACTLY as it did before this
-    release when no pin is given -- the draft is silently overwritten by a
-    fresh translate dispatch, same as any pre-#458 invocation. The control
-    direction for the test above, pinning acceptance criterion 4 against
-    Change 1b leaking onto the default path."""
-    root = phase2_project(tmp_path, n=1)
-    foreign_run_id = "20200101T000000Z"
-    foreign_run_dir = root / "runs" / foreign_run_id
-    foreign_run_dir.mkdir(parents=True, exist_ok=True)
-    (foreign_run_dir / "input.digest").write_text("stub-foreign-run-digest\n", encoding="utf-8")
-    (root / "segments" / "seg01.draft.json").write_text(
-        json.dumps({
-            "seg": "seg01", "blocks": {"p1": "hola vieja"},
-            "dispatch_token": f"{foreign_run_id}:seg01",
-        }, ensure_ascii=False),
-        encoding="utf-8",
+    # #742: the PINNED-specific half of the wording contract. Without this,
+    # only one direction of the "ignore `pinned`" mutation is killed -- the
+    # unpinned regression test below catches "always print the pinned text",
+    # but "always print the UNPINNED text" would survive every assertion in
+    # this test, which otherwise reads only the exit code, the segment and
+    # `pinned_run_id`.
+    assert "--resume-from-run-id" in payload["error"], payload
+    assert "re-run without --resume-from-run-id" in payload["error"], payload
+    assert "resolved_run_id" not in payload, (
+        "the pinned refusal carries pinned_run_id, never the unpinned payload's keys: "
+        f"{payload}"
     )
 
+
+# ---------------------------------------------------------------------------
+# #742 -- the UNPINNED foreign-draft refusal.
+#
+# #458 shipped the foreign-draft gate PINNED-ONLY, and the test that used to
+# sit here ("test_unpinned_foreign_token_draft_dispatches_normally_unchanged")
+# pinned that scope: it asserted the draft WAS overwritten when no pin was
+# given. #742 revisits the scope with a measured consequence -- on a live
+# 74-segment volume three hand-fixed drafts were re-translated and about
+# twenty hand edits destroyed, reported as success -- so that test is replaced
+# rather than kept: its assertion is now the defect.
+# ---------------------------------------------------------------------------
+
+
+def _foreign_draft(root, seg, run_id, text):
+    """A draft on disk stamped for `run_id`, plus the runs/<id>/input.digest
+    that #409 Step 3 requires for ANY run id carrying dispatch evidence."""
+    run_dir = root / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    digest = run_dir / "input.digest"
+    if not digest.is_file():
+        digest.write_text(f"stub-digest-{run_id}\n", encoding="utf-8")
+    path = root / "segments" / f"{seg}.draft.json"
+    path.write_text(
+        json.dumps(
+            {"seg": seg, "blocks": {"p1": text}, "dispatch_token": f"{run_id}:{seg}"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _draft_bytes(root, seg):
+    """The draft file's RAW BYTES.
+
+    Deliberately not draft_content_sha1()'s projection recomputed here. That
+    projection EXCLUDES `dispatch_token`, so a re-stamp would leave it
+    unchanged -- and a hand-rolled copy of it would also be a reimplementation
+    asserting agreement with itself. The raw bytes are strictly stronger for
+    the one question these tests ask ("did this refusal touch the file at
+    all?") and depend on nothing the fix could move."""
+    return (root / "segments" / f"{seg}.draft.json").read_bytes()
+
+
+def test_unpinned_foreign_in_flight_drafts_refuse_naming_every_affected_id(tmp_path):
+    """#742, the regression test. Unpinned, a selected segment whose draft is
+    stamped for another run must refuse the WHOLE invocation before anything
+    is dispatched, naming EVERY affected id with its owner.
+
+    Deliberately MULTI-segment and MULTI-owner, and deliberately mixing
+    `in_progress` with `pending`:
+
+    - two distinct foreign owners kill a `break`-after-the-first-foreign-draft
+      implementation, which a single-segment fixture cannot see. The reported
+      corpus was itself multi-draft (three lost, 61 more exposed);
+    - `pending` as well as `in_progress` kills a filter narrowed to status
+      `in_progress`. Both are non-terminal and both classify `recoverable`
+      (select_segments.py's classify_segment fallthrough), so a filter keyed
+      on the STATUS rather than the CATEGORY would leave `pending` unprotected
+      while every other assertion here still passed;
+    - one segment with NO draft at all proves the refusal is about foreign
+      OWNERSHIP, not about a draft merely existing.
+
+    The empty argv log is not redundant with the unchanged draft hashes: a
+    hash proves no draft was REWRITTEN, while the log proves no codex job was
+    LAUNCHED at all -- a job can start and be killed before it writes."""
+    root = phase2_project(tmp_path, n=3)
+    owner_a = "20200101T000000Z"
+    owner_b = "20200202T000000Z"
+    _foreign_draft(root, "seg01", owner_a, "hand-fixed one")
+    _foreign_draft(root, "seg02", owner_b, "hand-fixed two")
+    write_fragment(root, "seg01", {"timestamp": "2026-01-01T00:00:00Z", "status": "in_progress"})
+    write_fragment(root, "seg02", {"timestamp": "2026-01-01T00:00:00Z", "status": "pending"})
+    before = {seg: _draft_bytes(root, seg) for seg in ("seg01", "seg02")}
+
     proc = run_driver(root, timeout=60)
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False, payload
+    affected = {entry["seg"]: entry["run_id"] for entry in payload["foreign_drafts"]}
+    assert affected == {"seg01": owner_a, "seg02": owner_b}, (
+        "every affected id must be named with its OWN owner -- a gate that stopped at the "
+        f"first foreign draft would report only one of them: {payload}"
+    )
+    assert "seg03" not in payload["error"], (
+        f"seg03 carries no draft at all and must not be named: {payload}"
+    )
+    # The unpinned wording contract (kills "always print the pinned text").
+    assert "--resume-from-run-id" in payload["error"], payload
+    assert "DELETE the draft" in payload["error"], payload
+    assert payload.get("pinned_run_id") is None, payload
+    for seg, raw in before.items():
+        assert _draft_bytes(root, seg) == raw, (
+            f"{seg}'s draft was modified by an invocation that refused"
+        )
+    assert read_argv_log(root) == [], (
+        "nothing may be dispatched once the gate refuses -- an unchanged draft hash proves "
+        "no draft was rewritten, only an empty argv log proves no job was launched"
+    )
+
+
+@pytest.mark.parametrize("resumed", [False, True])
+def test_the_unpinned_refusal_explains_the_run_id_it_actually_resolved(tmp_path, resumed):
+    """#742: the explanation is READ from the resolution result, never
+    inferred from the presence of a foreign draft.
+
+    A foreign draft does NOT prove a fresh RUN_ID was minted. resolve_run_id()
+    hands resume_setup.py a candidate list and the NEWEST digest-matching
+    entry wins, so a draft stamped for an OLDER run reaches this gate on a
+    perfectly ordinary resume -- where announcing a mint would diagnose the
+    wrong thing entirely.
+
+    Both directions are exercised because a constant implementation of
+    `resumed` is green under every other test in this file: tests that refuse
+    for another property, or do not refuse at all, never read this sentence.
+
+    `resumed=True` is established by calling resolve_run_id() ONCE in-process
+    -- which writes runs/<ID>/input.digest for this invocation's inputs -- so
+    the driver's own resolution then MATCHES that candidate and resumes it,
+    while the draft still names a third, older id. Deliberately NOT by
+    running the driver once end to end: that converges the segment and raises
+    its .ever_converged sentinel, and select_segments.py then refuses the
+    whole selection upstream, so the gate under test is never reached (the
+    first draft of this test did exactly that and failed for that reason)."""
+    root = phase2_project(tmp_path, n=1)
+    older = "20200101T000000Z"
+
+    if resumed:
+        driver_mod = _load_fixture_driver(root)
+        established = driver_mod.resolve_run_id(
+            driver_mod.resolve_dirs(None), translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
+            plugin_root_str=None, durable_root_str=None,
+        )
+        assert established.get("resume") is False, established
+
+    _foreign_draft(root, "seg01", older, "hand-fixed")
+    write_fragment(root, "seg01", {"timestamp": "2026-01-01T00:00:00Z", "status": "in_progress"})
+
+    proc = run_driver(root, timeout=90)
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload.get("resumed") is resumed, payload
+    if resumed:
+        assert "RESUMED run" in payload["error"], payload
+        assert "MINTED a fresh RUN_ID" not in payload["error"], payload
+    else:
+        assert "MINTED a fresh RUN_ID" in payload["error"], payload
+        assert "RESUMED run" not in payload["error"], payload
+    assert read_argv_log(root) == [], payload
+
+
+def test_unpinned_foreign_human_escalation_draft_refuses(tmp_path):
+    """#742 (codex plan review round 2, MAJOR). `--only-segs` force-selects a
+    `human_escalation` id -- the flag's sole explicit override -- so a capped,
+    hand-edited draft reaches the dispatch set without ever being
+    `recoverable`. That is the exact population the issue was reported from
+    (`--from-cap seg24` while 61 healthy hand-fixed drafts sat in the tree),
+    and a gate keyed on `category == "recoverable"` would leave it
+    destructible.
+
+    from_cap_project(sentinel_present=False) is the fixture that makes this
+    test non-vacuous. With the `.ever_converged` sentinel PRESENT the unit
+    enters `previously_converged` and select_segments.py refuses the whole
+    invocation upstream -- exit 1, for a completely different reason -- so a
+    test asserting only the exit code would stay green with this gate deleted
+    outright. Asserting `foreign_drafts`, which only THIS gate emits, is what
+    makes the assertion about this gate."""
+    root = from_cap_project(tmp_path, sentinel_present=False)
+    before = _draft_bytes(root, "seg01")
+
+    proc = run_driver(root, "--only-segs", "seg01", timeout=60)
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert [entry["seg"] for entry in payload["foreign_drafts"]] == ["seg01"], payload
+    assert _draft_bytes(root, "seg01") == before, "the hand-edited draft was modified"
+    assert read_argv_log(root) == [], payload
+
+
+def test_unpinned_foreign_not_started_draft_refuses(tmp_path):
+    """#742 (codex plan review round 2, BLOCKER). classify_segment() calls a
+    segment `not_started` on an ABSENT ledger record alone -- it never looks
+    at whether a draft exists. A partial restore that keeps
+    segments/<seg>.draft.json and loses runs/ledger.d/<seg>.json therefore
+    lands surviving editorial work in that category, and an earlier draft of
+    this fix exempted it.
+
+    This is the state the DELETED test on this spot used to build, and used to
+    assert was overwritten -- the same fixture, with the verdict reversed."""
+    root = phase2_project(tmp_path, n=1)
+    _foreign_draft(root, "seg01", "20200101T000000Z", "hand-fixed")
+    before = _draft_bytes(root, "seg01")
+
+    proc = run_driver(root, timeout=60)
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert [entry["seg"] for entry in payload["foreign_drafts"]] == ["seg01"], payload
+    assert _draft_bytes(root, "seg01") == before, "the surviving draft was overwritten"
+    assert read_argv_log(root) == [], payload
+
+
+def test_unpinned_foreign_stale_draft_still_dispatches(tmp_path):
+    """#742, the OVER-CATCH control, and the test that makes the exemption
+    list load-bearing: `stale` is exempt, so a previously-converged segment
+    whose cache key drifted still retranslates under a fresh RUN_ID.
+
+    Deleting the exemption filter -- i.e. protecting every selected segment
+    the way the pinned path does -- turns THIS test red, and it is the only
+    one that does: a `stale` draft carries, by definition, the token of the
+    run that converged it, and the same cache-key move is what mints the
+    fresh id, so an unexempted gate would refuse every input-drift
+    retranslation the cache-key design exists to perform.
+
+    Two guards against vacuity, both learned from the review:
+
+    - `--allow-retranslate-converged` is REQUIRED. Without it
+      select_segments.py refuses this selection upstream on the
+      `.ever_converged` sentinel, the driver never reaches this gate at all,
+      and the test would pass with the gate deleted outright;
+    - the draft's owner is asserted to genuinely DIFFER from the run this
+      invocation resolved. Without that assertion the fixture might simply
+      hold no foreign draft, and "the gate did not refuse" would prove
+      nothing about the exemption."""
+    root = make_durable_root(tmp_path, profile_yaml=FULL_PROFILE_YAML)
+    stage_phase2_scripts(root)
+    write_manifest(root, ["seg01"])
+    current_key = make_cache_key("current")
+    write_fixture_cache_keys(root, {"seg01": current_key})
+    write_fixture_segpack(root, "seg01")
+    stored = dict(current_key)
+    stored["style_contract_hash"] = "style_contract_hash-OLD"
+    write_fragment(root, "seg01", converged_fragment(stored, "0" * 40))
+    mark_ever_converged(root, "seg01")
+    foreign_run_id = "20200101T000000Z"
+    _foreign_draft(root, "seg01", foreign_run_id, "the converged text")
+
+    proc = run_driver(root, "--allow-retranslate-converged", timeout=90)
 
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     payload = parse_stdout(proc)
     assert payload["success"] is True, payload
-    assert payload["summary"]["converged"] == ["seg01"], payload
-    draft = json.loads((root / "segments" / "seg01.draft.json").read_text(encoding="utf-8"))
-    assert draft["dispatch_token"] != f"{foreign_run_id}:seg01", (
-        "unpinned, a foreign-token draft is retranslated (overwritten) exactly as before -- "
-        f"the dispatch_token must now name THIS run, not the stale foreign one: {draft}"
+    assert "foreign_drafts" not in payload, (
+        f"a `stale` unit is exempt from the #742 gate and must dispatch: {payload}"
     )
+    # The driver's success payload carries `counts`, not the per-segment
+    # `classification` map -- assert the category through the surface that
+    # actually reaches the operator, so this control cannot pass because the
+    # unit was never `stale` to begin with.
+    assert payload["counts"]["stale"] == 1, payload
+    assert payload["run_id"] != foreign_run_id, (
+        "the fixture must present a genuinely FOREIGN draft, else this control proves "
+        f"nothing about the exemption: {payload}"
+    )
+
+
+def test_unpinned_in_flight_draft_owned_by_this_run_dispatches_normally(tmp_path):
+    """#742, the under-catch control and the unpinned sibling of
+    test_pinned_run_id_matching_the_drafts_own_owner_dispatches_normally: a
+    draft stamped for the run this invocation actually resolved is not
+    foreign to it. The gate must compare `owner != run_id`, never merely
+    `owner is not None` -- a mutation dropping the `!= run_id` half would
+    refuse the operator's own in-progress draft on every ordinary resume,
+    which is every run of a resumed book."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    own_run_id = driver_mod.resolve_run_id(
+        dirs, translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
+        plugin_root_str=None, durable_root_str=None,
+    )["effectiveRunId"]
+    _foreign_draft(root, "seg01", own_run_id, "mine")
+    write_fragment(root, "seg01", {"timestamp": "2026-01-01T00:00:00Z", "status": "in_progress"})
+
+    proc = run_driver(root, timeout=90)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True, payload
+    assert "foreign_drafts" not in payload, payload
 
 
 def test_pinned_run_id_matching_the_drafts_own_owner_dispatches_normally(tmp_path):
@@ -4121,7 +4396,7 @@ def test_draft_token_owner_and_pin_gate_ignore_a_malformed_dispatch_token(tmp_pa
     has anything to do with #458's pin gate, and both would refuse the
     invocation for reasons this test is not about, making a CLI-level
     assertion about draft_token_owner()'s OWN contract impossible to
-    isolate. Calling draft_token_owner()/refuse_pinned_run_over_foreign_drafts()
+    isolate. Calling draft_token_owner()/refuse_run_over_foreign_drafts()
     directly tests exactly the function code review flagged.
 
     Mutation to kill: drop the `validate_run_id(run_id) is not None` guard,
@@ -4139,7 +4414,9 @@ def test_draft_token_owner_and_pin_gate_ignore_a_malformed_dispatch_token(tmp_pa
     )
     # Must not raise: "no owner established" is "no contradiction found",
     # never a foreign draft for the pin gate to refuse over.
-    driver_mod.refuse_pinned_run_over_foreign_drafts(["seg01"], "20260101T000000Z", segments_dir)
+    driver_mod.refuse_run_over_foreign_drafts(
+        ["seg01"], "20260101T000000Z", segments_dir, pinned=True, resumed=False,
+    )
 
 
 def test_draft_token_owner_and_pin_gate_ignore_a_non_utf8_draft(tmp_path):
@@ -4161,7 +4438,9 @@ def test_draft_token_owner_and_pin_gate_ignore_a_non_utf8_draft(tmp_path):
     (segments_dir / "seg01.draft.json").write_bytes(b"\xff\xfe not utf8")
 
     assert driver_mod.draft_token_owner("seg01", segments_dir) is None
-    driver_mod.refuse_pinned_run_over_foreign_drafts(["seg01"], "20260101T000000Z", segments_dir)
+    driver_mod.refuse_run_over_foreign_drafts(
+        ["seg01"], "20260101T000000Z", segments_dir, pinned=True, resumed=False,
+    )
 
 
 def test_dedupe_segs_is_order_preserving_first_occurrence_wins():

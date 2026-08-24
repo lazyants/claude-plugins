@@ -333,8 +333,10 @@ KNOB_QUESTIONS = {
         "prose-only segments included; `select_segments.py` then REFUSES that "
         "re-dispatch until you pass `--allow-retranslate-converged`; and "
         "authorizing it mints a fresh RUN_ID, which ALSO ORPHANS EVERY "
-        "NOT-YET-CONVERGED DRAFT in the same selection, discarding fixes "
-        "already applied by hand."
+        "NOT-YET-CONVERGED DRAFT in the same selection -- since #742 the "
+        "driver REFUSES the dispatch over those by name rather than "
+        "retranslating them over fixes already applied by hand, so answering "
+        "this late costs you a halt per orphaned draft."
     ),
     "source.adapter_config.plain_text.verse_detection": (
         "How the `plain_text` adapter finds verse: `none_confirmed` (you "

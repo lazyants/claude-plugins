@@ -788,10 +788,15 @@ carve-out a judgement that the release changed nothing a translator was told —
 `PLUGIN_BUNDLE_MEMBERS` includes the two workflow templates, and their text is
 where the translate and review prompts are built — and no gate makes that
 judgement. Running these units against a changed instruction therefore means
-authorizing `--allow-retranslate-converged`, which costs two things rather than
-one: the converged units retranslate, AND every not-yet-converged draft in the
-same selection is orphaned by the fresh RUN_ID and retranslates too, discarding
-any fix applied by hand. The flag's own refusal text states both.
+authorizing `--allow-retranslate-converged`, and since 1.70.x that costs one
+thing rather than two. The converged units retranslate — that is what the flag
+authorizes. Every not-yet-converged draft in the same selection is still
+orphaned by the fresh RUN_ID, but since #742 `segment_dispatch_driver.py`
+REFUSES the whole invocation over those drafts (exit 1) instead of
+retranslating them, naming each one and the run its `dispatch_token` belongs
+to. The flag's own refusal text states both numbers; the second one is now a
+warning about a dispatch that will refuse, not about work that will be
+destroyed.
 
 `select_segments.py`'s classification report does not split the bucket — its
 `counts`/`ids_by_category` are keyed by the six flat categories — so on that
@@ -799,6 +804,23 @@ surface the distinction lives in each entry's `stale_reason` and
 `mismatched_fields`, read together. A unit stale for draft drift alone carries
 an EMPTY `mismatched_fields`, which satisfies "every moved field is
 machinery-only" vacuously while being exactly the population assembly refuses.
+
+**Recovering a draft the refusal named (#742).** The refusal leaves the
+decision with the operator, so there are exactly two moves per segment and
+neither is automatic. DELETE the draft to accept the retranslation — that is
+also the only way an unfinished draft picks up a style-bible or canon edit,
+since the driver routes a same-run draft to review rather than re-translating
+it. Or KEEP the work by rewriting that draft's `dispatch_token` to the RUN_ID
+the refusal reports, leaving every other byte untouched: assert per file, before
+and after, that `draft_content_sha1()`'s projection is unchanged (it excludes
+`dispatch_token` by design — see `scripts/draft_sha1.py`'s own module
+docstring, and do not re-implement the projection by hand). A re-stamped draft
+is adoptable again, and the observable proof is the next dispatch's journal —
+`"kind": "review"` with no translate job for that segment. Re-stamp only a
+draft that then passes `draft_ready.py` AND `validate_draft.py`: one that fails
+validation is not resumed into review, it either halts the segment as
+`invalid_post_fix_draft` or is re-translated anyway, so back it up first and
+repair it until both gates pass.
 
 `resumeFromRunId` is explicitly scoped to continuing the same interrupted
 batch run. It is never the same mechanism as the ledger-driven
