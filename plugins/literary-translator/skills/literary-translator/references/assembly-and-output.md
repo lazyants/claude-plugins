@@ -359,11 +359,11 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     { "written": [relative_path, ...], "kind": "vault"|"file" } for the diff tool."""
 ```
 
-`assemble.py` resolves `output.target` to either a flat sibling module name
-it imports directly from `assets/scripts/` (`render_obsidian` — `render_epub`
-is mapped but unwritten, and halts at resolution rather than being returned),
-or — for `target: custom` — a `Path` loaded via
-`importlib` from the fixed `${durable_root}/scripts/custom_renderers/`
+`assemble.py` resolves `output.target` to either a flat sibling module name it
+imports directly from `assets/scripts/` (`render_obsidian` — `render_epub` is
+mapped but unwritten, and halts at resolution rather than being returned), or —
+for `target: custom` — a `Path` loaded via `importlib` from the fixed
+`${durable_root}/scripts/custom_renderers/`
 subtree (see `references/output-target-adapters/README.md` for the full
 resolution/path-safety rules). `out_dir` defaults under
 `${durable_root}/out/`, respecting `output.destination` when it is set —

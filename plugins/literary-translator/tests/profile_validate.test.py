@@ -1156,18 +1156,16 @@ def _output_profile(v1_scope, target=_NO_TARGET_KEY):
 
 
 def test_assembled_book_with_unshipped_epub_target_is_fatal():
+    """Asserts DELEGATION, not a second copy of the message contract. The
+    halt text has one home -- output_resolve -- and output_resolve.test.py
+    pins its content (the missing filename plus all three ways out); pinning
+    the same four strings here too would red two files for one reword."""
     errors = pv.check_output_target_shipped(_output_profile("assembled_book", "epub"))
 
     assert len(errors) == 1
-    message = errors[0]
-    assert "output.target" in message
-    # The actionable half: WHICH file is missing, and at least one way out.
-    # A bare "epub is not supported" would pass a laxer assertion and leave an
-    # operator with a converged book and nowhere to go.
-    assert "render_epub.py" in message
-    assert "segment_drafts_and_audit" in message
-    assert "output.target: custom" in message
-    assert "output.target: obsidian" in message
+    with pytest.raises(pv.output_resolve.OutputResolveError) as excinfo:
+        pv.output_resolve.assert_builtin_adapter_shipped("epub")
+    assert errors[0] == str(excinfo.value)
 
 
 def test_step_0_main_actually_reports_the_unshipped_epub_halt(tmp_path, capsys):
@@ -1200,7 +1198,8 @@ def test_inert_epub_target_under_the_default_scope_is_accepted():
     reads output.target -- Step 0d is a no-op and W9 does not run -- so a
     declared `epub` is inert. Refusing it would reject profiles that validate
     today, for a target they never use."""
-    assert pv.check_output_target_shipped(_output_profile("segment_drafts_and_audit", "epub")) == []
+    profile = _output_profile("segment_drafts_and_audit", "epub")
+    assert pv.check_output_target_shipped(profile) == []
 
 
 def test_absent_output_target_under_the_default_scope_is_accepted():

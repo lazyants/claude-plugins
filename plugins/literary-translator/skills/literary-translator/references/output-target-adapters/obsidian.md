@@ -3,8 +3,8 @@
 **Status: shipped this increment.** This is the only working
 `output.target` value so far — `epub` has no renderer behind it and therefore
 does not resolve at all (Step 0 and Step 0d both HALT on it), and `custom` is
-always co-designed per project. See [`README.md`](./README.md) for the full three-target table and
-why v1 ships no generic framework above them.
+always co-designed per project. See [`README.md`](./README.md) for the full
+three-target table and why v1 ships no generic framework above them.
 
 Selected via `output.target: obsidian` in `profile.yml`, only ever consulted
 when `output.v1_scope: assembled_book` (`SKILL.md`'s Step 0d). Renders the

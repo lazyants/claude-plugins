@@ -46,8 +46,8 @@ is always invoked directly from the plugin's own install path:
 workflow script. For the exact same reason, it loads
 ``assets/profile.example.yml`` and ``assets/schemas/profile.schema.json``
 straight out of the plugin's own ``assets/`` directory (self-anchored via
-``Path(__file__).resolve().parents[1]`` -- one level up from this script's
-own ``assets/scripts/`` directory, giving ``assets/``) rather than a
+``SCRIPTS_DIR.parent`` -- one level up from this script's own
+``assets/scripts/`` directory, giving ``assets/``) rather than a
 durable-root copy of either.
 
 Order of operations (numbered to match SKILL.md's Step 0 list exactly):
@@ -155,8 +155,11 @@ from pathlib import Path
 # exception here too, on a reason since found false; it is copied like every
 # other self-anchored script now, see this file's own module docstring) -- it
 # lives at the PLUGIN'S OWN ``assets/scripts/`` directory and is never copied to
-# durable_root, so its parents[1] gives the plugin's ``assets/`` root instead
-# of a durable_root. It never assumes cwd and never takes a --plugin-root flag.
+# durable_root, so ``SCRIPTS_DIR.parent`` gives the plugin's ``assets/`` root
+# instead of a durable_root (the convention names it ``parents[1]``; this file
+# spells the same value in two named steps because SCRIPTS_DIR is itself needed
+# below, for the flat sibling import).
+# It never assumes cwd and never takes a --plugin-root flag.
 # ---------------------------------------------------------------------------
 SCRIPTS_DIR = Path(__file__).resolve().parent
 ASSETS_ROOT = SCRIPTS_DIR.parent
@@ -749,22 +752,10 @@ def check_resumed_contract_versions(durable_root: Path, source_format=None):
 # ---------------------------------------------------------------------------
 
 def check_output_target_shipped(profile: dict):
-    """Step 14: refuse an `output.target` naming a BUILT-IN adapter whose
-    module has not shipped -- at Step 0, not at W9 assembly.
-
-    Fires only under `v1_scope: assembled_book`. The default
-    `segment_drafts_and_audit` never consults `output.target` at all (Step
-    0d is a deliberate no-op and W9 does not run), so a target declared
-    there is inert and refusing it would reject profiles that validate
-    today.
-
-    `output.target` is optional in the schema -- `.get`, never `[...]`.
-    An absent target is not this check's concern: `resolve_output_adapter`
-    already halts on it at Step 0d, and nothing here should widen that.
-    `custom` is likewise untouched -- its `renderer_path: null` HALT is the
-    documented co-design starting state, and pulling it forward to Step 0
-    would block a project from translating at all while the renderer is
-    still being designed.
+    """Step 14 -- see this module's docstring item 14 for the gating and
+    why each arm of it is drawn where it is. Both reads are `.get`
+    deliberately: `output.target` is optional in the schema, and an absent
+    one is a Step 0d condition, not this check's.
     """
     output = profile["output"]
     if output.get("v1_scope") != "assembled_book":

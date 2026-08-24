@@ -136,8 +136,6 @@ def test_epub_target_halts_because_its_adapter_module_has_not_shipped(tmp_path):
 
 
 def _load_output_resolve_copy_in(scripts_dir: Path):
-    """Loads a copy of the real output_resolve.py placed at
-    `scripts_dir/output_resolve.py`, so its SCRIPTS_DIR is that directory."""
     copied = scripts_dir / "output_resolve.py"
     shutil.copy2(OUTPUT_RESOLVE_SRC, copied)
     spec = importlib.util.spec_from_file_location(
