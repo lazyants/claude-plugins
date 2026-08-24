@@ -5,8 +5,11 @@ This is NOT the workflow-template token map. `tests/_workflow_instantiation.py`
 owns that: what `{{TOKEN}}` a shipped `*-wf.template.js` takes, and how each one
 is encoded into JavaScript. This file owns a different contract on the other
 side of the same step -- `resume_setup.SUBST_FIELDS`, the lowercase, resolved
-profile values that go into the run's INPUT DIGEST, so a resumed run can prove
-it was set up under the same parameters as the run it resumes.
+profile values every payload must SUPPLY, so a resumed run can prove it was set
+up under the same parameters as the run it resumes. Supplying them is not the
+same as hashing them, and has not been since #735: `resume_setup` projects the
+narrower `DIGEST_SUBST_FIELDS` into the digest, so `max_codex_jobs_per_batch`
+below is required here and deliberately unhashed there.
 
 The two contracts overlap in what they describe and diverge in what they
 require (`verse_policy` is a digest field with no template token of its own;

@@ -1538,6 +1538,146 @@ def test_payload_plugin_root_absent_and_empty_produce_the_same_digest(tmp_path):
     assert parsed_a["input_digest"] == parsed_b["input_digest"]
 
 
+# ---------------------------------------------------------------------------
+# #735: subst['max_codex_jobs_per_batch'] -- a REQUIRED payload field that is
+# deliberately NOT hashed. Unlike `plugin_root` above (a TOP-LEVEL field), this
+# one lives INSIDE `subst`, so the accepted set and the hashed set are no longer
+# the same object: SUBST_FIELDS stays the producer-side contract every payload
+# must satisfy, and DIGEST_SUBST_FIELDS is the subset compute_input_digest()
+# actually projects. See DIGEST_SUBST_FIELDS's own comment for WHY the knob is
+# excluded -- which consumers it has, and what does and does not record it.
+# Enumerating that here too is how the third copy comes to disagree with the
+# other two.
+# ---------------------------------------------------------------------------
+
+# Every member DIGEST_SUBST_FIELDS still projects, each mapped to a value that
+# differs from BASE_SUBST's. Deliberately NOT a hand-picked sample: the drift
+# pin below asserts this table's key set EQUALS the projection, so a field
+# added to SUBST_FIELDS later cannot slip past the behavioural test by simply
+# not having been thought of here.
+_HASHED_SUBST_PROBES = {
+    "research_mode": "offline",
+    "verse_policy": "prose",
+    "source_lang": "de",
+    "target_lang": "es",
+    "max_fix_rounds": 9,
+    "batch_agent_cap": 7,
+    "effort": "xhigh",
+    "citation_content_types": "text/,application/pdf",
+}
+
+
+def _glossary_base_payload():
+    """The glossary twin of mass_base_payload(). Both digest KINDS share one
+    `subst` projection, so every property below is asserted against both."""
+    return {
+        "kind": "glossary",
+        "args": {"candidates": [{"name": "Alice Smith"}]},
+        "subst": dict(BASE_SUBST),
+        "glossary_rule": "strict",
+        "batches": [{"index": 0, "names": ["Alice Smith"]}],
+    }
+
+
+def _digest_with_subst(tmp_path, name, kind, subst_overrides):
+    """One INDEPENDENT digest computation, in its own durable root. A fresh
+    root per call, so no two computations here can interact through a root's
+    recorded run dirs at all -- this file's digest comparisons want two
+    genuine computations and nothing else. (These payloads offer no resume
+    candidate, so neither call could resume in any case; the isolation is what
+    makes that irrelevant rather than something to reason about.)"""
+    root = make_resume_setup_root(tmp_path, name=name)
+    if kind == "mass":
+        # Only the mass branch shells out to cache_key.py, so only it needs these.
+        write_fixture_cache_keys(root, mass_base_cache_keys())
+        payload = mass_base_payload()
+    else:
+        payload = _glossary_base_payload()
+    payload["subst"] = {**payload["subst"], **subst_overrides}
+    proc, parsed = run_resume_setup(root, payload)
+    parsed = assert_setup_success(proc, parsed)
+    return parsed["input_digest"]
+
+
+@pytest.mark.parametrize("kind", ["mass", "glossary"])
+def test_max_codex_jobs_per_batch_never_changes_input_digest(tmp_path, kind):
+    """The load-bearing property of the #735 exclusion: two payloads identical
+    in every other respect, differing ONLY in the volume cap, must produce the
+    EXACT SAME input_digest -- so raising the cap mid-book neither mints a
+    fresh RUN_ID nor orphans a draft in flight.
+
+    Parametrized over BOTH kinds because `subst` is projected once, AFTER the
+    mass/glossary domain split: an implementation projecting a different set
+    per kind would satisfy a mass-only test and still collide on the other
+    branch."""
+    low = _digest_with_subst(
+        tmp_path, f"durable_root_cap_low_{kind}", kind, {"max_codex_jobs_per_batch": 400}
+    )
+    high = _digest_with_subst(
+        tmp_path, f"durable_root_cap_high_{kind}", kind, {"max_codex_jobs_per_batch": 4000}
+    )
+
+    assert low == high, (
+        f"engine.max_codex_jobs_per_batch must never affect a {kind} input_digest -- got "
+        f"{low!r} vs {high!r}"
+    )
+
+
+def test_max_codex_jobs_per_batch_is_still_a_required_payload_field(tmp_path):
+    """Narrowed at the DIGEST, never deleted from the contract. A payload
+    omitting the field must still be refused BY NAME -- otherwise this change
+    would have silently turned a required producer-side field optional."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    del payload["subst"]["max_codex_jobs_per_batch"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+    assert "max_codex_jobs_per_batch" in (parsed.get("error") or ""), (
+        f"the refusal must name the missing field; got: {parsed}"
+    )
+
+
+@pytest.mark.parametrize("kind", ["mass", "glossary"])
+@pytest.mark.parametrize("field", sorted(_HASHED_SUBST_PROBES))
+def test_every_other_subst_field_still_moves_the_input_digest(tmp_path, field, kind):
+    """The other side of the guard, over the WHOLE projection and BOTH kinds
+    rather than a chosen few of either. Both axes exist because of a specific
+    mutation that would otherwise stay green: narrowing the projection by one
+    extra field is invisible to a hand-picked subset that happens not to list
+    it, and narrowing it for one KIND only is invisible to a mass-only test --
+    and `target_lang` reaches the glossary template too, so that second
+    mutation is a real collision rather than a theoretical one."""
+    base = _digest_with_subst(tmp_path, f"durable_root_base_{kind}_{field}", kind, {})
+    moved = _digest_with_subst(
+        tmp_path, f"durable_root_moved_{kind}_{field}", kind, {field: _HASHED_SUBST_PROBES[field]}
+    )
+
+    assert moved != base, (
+        f"subst[{field!r}] is still a hashed digest field -- changing it must "
+        f"change a {kind} input_digest, got {moved!r} for both"
+    )
+
+
+def test_digest_projection_is_subst_fields_minus_exactly_the_volume_cap(tmp_path):
+    """The drift pin, DERIVED rather than hand-typed: a literal expected set
+    would freeze the very membership it exists to detect. Two properties, and
+    the second is what keeps the parametrized test above honest -- a field
+    added to SUBST_FIELDS in a later release enters DIGEST_SUBST_FIELDS
+    automatically and immediately fails this assertion until it is given a
+    probe value, rather than being silently untested."""
+    root = make_resume_setup_root(tmp_path)
+    module = _load_resume_setup_module(root)
+
+    assert module.DIGEST_SUBST_FIELDS == module.SUBST_FIELDS - {"max_codex_jobs_per_batch"}
+    assert set(_HASHED_SUBST_PROBES) == set(module.DIGEST_SUBST_FIELDS), (
+        "every hashed subst field needs a probe value in _HASHED_SUBST_PROBES"
+    )
+
+
 # ===========================================================================
 # LT-409: the manifest-derived mass digest domain, `args={}` pinning, and
 # the plural `resume_from_run_ids` field. See resume_setup.py's own module

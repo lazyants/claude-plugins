@@ -504,8 +504,9 @@ Exact byte-scope per field:
   per-segment cache key of its own, so it can't see an `engine.effort`
   change through `agent_config_hash` at all — its own resume-integrity
   digest instead gets `effort` directly via `resume_setup.py`'s
-  `SUBST_FIELDS` (see `references/orchestration-and-batching.md`'s digest
-  definition); `model` is deliberately **not** added there, since the
+  `DIGEST_SUBST_FIELDS` (the hashed projection; `SUBST_FIELDS` beside it is
+  the wider set every payload must SUPPLY — since #735 the two differ, see
+  `references/orchestration-and-batching.md`'s digest definition); `model` is deliberately **not** added there, since the
   glossary pass has no model knob to begin with.
 - **`profile_semantics_hash`** (global) — sha1 of canonical JSON
   `{source_lang: source.language.code, target_lang: target.language.code,
