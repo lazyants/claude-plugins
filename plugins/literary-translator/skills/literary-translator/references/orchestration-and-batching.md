@@ -720,6 +720,13 @@ first-class digest input alongside `args`/`domain`/`version`, not folded
 into one of them. **#197:** `subst` gains `effort` for the identical
 reason — an `engine.effort` tier change (e.g. `high`→`xhigh`) changes what
 the codex/fix calls actually do without changing any hashed content byte.
+The digest is **direction-blind**, and that is a deliberate accepted cost
+rather than an oversight: a LOWERED tier (`xhigh`→`high`) moves it
+identically, even though the drafts on disk were produced at the higher tier
+and are not worse than what the new setting would produce. A hash cannot
+express an ordinal. #732 filed exactly that asymmetry and it was descoped —
+disclosed at the knob (`profile.example.yml`'s `engine.effort` change-cost
+paragraph) rather than removed.
 The mass path already sees an `engine.effort` (and `engine.model`) change
 per-segment via `agent_config_hash` (see
 `references/ledger-and-resumability.md`), but the glossary pass has no

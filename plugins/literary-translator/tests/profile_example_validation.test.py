@@ -86,6 +86,17 @@ SHIPPED_CHOOSE_SENTINELS = (
 )
 
 
+def _load_module(name, path):
+    """One importlib shim for every shipped script this file drives --
+    ``assets/scripts/`` is not a package on sys.path, so a plain ``import``
+    won't reach it."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None, f"could not load spec for {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_profile_validate():
     """Imports profile_validate.py fresh from its real, shipped install
     path -- ``assets/scripts/`` is not a package on sys.path, so a plain
@@ -93,13 +104,7 @@ def _load_profile_validate():
     fixture below) avoids any cross-test state leakage through the
     module-level ``yaml``/``jsonschema`` handles ``dependency_preflight()``
     populates."""
-    spec = importlib.util.spec_from_file_location(
-        "profile_validate_under_test", SCRIPT_PATH
-    )
-    assert spec is not None and spec.loader is not None, f"could not load spec for {SCRIPT_PATH}"
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _load_module("profile_validate_under_test", SCRIPT_PATH)
 
 
 @pytest.fixture()
@@ -398,10 +403,21 @@ def test_shipped_example_batch_agent_cap_is_the_409_step2_default(pv):
     10000 is a policy CHOICE (an operator-sized cap), not a value derivable
     from the formula alone -- but its CONSEQUENCE for the binding consumer
     (mass-translate, the highest per-unit-cost gate this cap protects) is:
-    `1 + 116*86 = 9977 <= 10000` admits a 116-segment book batch, while
-    `1 + 117*86 = 10063 > 10000` refuses a 117-segment one -- the same
+    `1 + 106*94 = 9965 <= 10000` admits a 106-segment book batch, while
+    `1 + 107*94 = 10059 > 10000` refuses a 107-segment one -- the same
     boundary profile.example.yml's own engine.batch_agent_cap comment
-    states. This test does not re-derive 10000 itself (there is no formula
+    states.
+
+    #732 correction: this test used to compute the pre-#607 per-segment 86
+    (`max_fix_rounds * (6 + WAIT_CALLS)`) and assert 116 -- both sides
+    hard-coded, so it agreed with ITSELF while the shipped comment it claims
+    to pin had moved to 94/106. Correcting those two constants would have
+    fixed the value and left the class, so the boundary no longer lives here
+    at all: it is driven from the real, executed estimator in
+    batch_size_estimator.test.py (which already instantiates the template),
+    and this test keeps only what it owns -- the shipped cap constant itself.
+
+    This test does not re-derive 10000 itself (there is no formula
     that produces a cap from nothing); it pins the shipped constant and
     documents, via that boundary arithmetic, what choosing it actually
     means -- so a future bump has the same obligation to update this
@@ -418,20 +434,17 @@ def test_shipped_example_batch_agent_cap_is_the_409_step2_default(pv):
         "profile.example.yml's engine.batch_agent_cap must be 10000 (the "
         f"#409 step 2 default); found {shipped_cap!r}"
     )
-    # The boundary this cap draws for mass-translate (86 calls/segment at the
-    # shipped max_fix_rounds:4 -- see profile.example.yml's own derivation).
-    max_fix_rounds = example["engine"]["max_fix_rounds"]
-    wait_calls = 9  # 1.16.1/#348's shipped WAIT_CHUNKS(8) + 1 authoritative re-check
-    per_segment = 8 + 2 * wait_calls + max_fix_rounds * (6 + wait_calls)
-    admitted = (shipped_cap - 1) // per_segment
-    assert 1 + admitted * per_segment <= shipped_cap
-    assert 1 + (admitted + 1) * per_segment > shipped_cap
-    assert admitted == 116, (
-        f"at the shipped max_fix_rounds:{max_fix_rounds} (per-segment cost "
-        f"{per_segment}), batch_agent_cap:{shipped_cap} admits {admitted} "
-        f"mass-translate segments, not the 116 profile.example.yml's own "
-        f"comment documents -- either the cap, max_fix_rounds, or the "
-        f"documented figure has drifted from the other two"
+    # The 94-calls/segment and 106-segment figures the comment states are NOT
+    # re-derived here. A second copy of the estimator's formula is exactly what
+    # let this test agree with itself across #607 while the template moved; the
+    # boundary is driven from the real, executed estimator in
+    # batch_size_estimator.test.py::test_shipped_cap_boundary_comes_from_the_real_estimator,
+    # which reads the per-segment cost back out of the gate's own reported
+    # estimatedCalls and names this comment as the thing to update.
+    assert example["engine"]["max_fix_rounds"] == 4, (
+        "the shipped max_fix_rounds moved; profile.example.yml's batch_agent_cap "
+        "comment states its boundary AT max_fix_rounds:4, so both it and the "
+        "estimator-driven boundary test must be revisited together"
     )
 
 
@@ -448,3 +461,156 @@ def test_fully_filled_fixture_no_placeholders_survive(pv, tmp_path):
     errors = pv.scan_placeholders(profile_data)
 
     assert errors == [], f"the case-3 fixture must be placeholder-free; got:\n{errors}"
+
+
+# ---------------------------------------------------------------------------
+# #732 -- every DIGEST_SUBST_FIELDS engine knob discloses its change cost
+# ---------------------------------------------------------------------------
+#
+# The class this closes: an operator deciding to change engine.effort or
+# engine.max_fix_rounds was told nothing about what the change costs, while
+# engine.batch_agent_cap -- three lines below, in the same block -- spelled its
+# own cost out in detail. #732 measured the population of the event it was
+# originally filed about (a LOWERED engine.effort discarding drafts) at zero
+# across all five version-controlled durable roots, so the asymmetry is
+# DISCLOSED rather than removed; this guard is what keeps the disclosure honest.
+#
+# Both sides of the assertion are derived live -- the example's own engine keys
+# and resume_setup.py's own DIGEST_SUBST_FIELDS -- so a future knob added to the
+# hashed projection turns this red until it discloses, and a heading on a knob
+# outside that projection turns it red too. A hand-typed membership list here
+# would freeze exactly what the guard exists to detect.
+#
+# WHY THE AXIS IS DIGEST_SUBST_FIELDS AND NOT "is hashed at all". There are TWO
+# cost mechanisms and they do not select the same fields: compute_agent_config_hash
+# (cache_key.py) folds effort/max_fix_rounds/MODEL, while DIGEST_SUBST_FIELDS
+# folds effort/max_fix_rounds/batch_agent_cap/... and explicitly NOT model. So
+# `engine.model` costs a converged-segment invalidation without minting a fresh
+# RUN_ID of its own, and this guard does not reach it -- deliberately, because it
+# is not a live YAML key: it ships COMMENTED OUT at `# model: gpt-5.3-codex`, and
+# a commented-out key cannot carry an annotation block. Its cost is disclosed in
+# that line's own comment instead. Naming the axis DIGEST_SUBST_FIELDS rather
+# than "hashed" also keeps the assertion honest if the shipped example ever
+# uncomments `model`: it would then be a live engine key that legitimately DOES
+# carry a cost, and a guard calling itself "hashed" would demand the opposite.
+
+CHANGE_COST_HEADING = "Change cost:"
+
+RESUME_SETUP_PATH = ASSETS_DIR / "scripts" / "resume_setup.py"
+
+
+def _collapse_comment_block(lines):
+    """The repository's own comment-normalization shape (see
+    canon_category_disclosure.test.py): strip indentation, drop ONE leading
+    '#', join, then collapse whitespace. Normalizing raw comment lines
+    without dropping the '#' is NOT sufficient -- a re-wrap inserts another
+    '#' into the joined string and would break an assertion that is supposed
+    to be wrap-insensitive. removeprefix, NOT lstrip('#'): lstrip strips a
+    RUN, so it would eat the '#' of an issue reference like '#732' the moment
+    one opened a line, silently changing the text being asserted against."""
+    return " ".join(
+        " ".join(line.strip().removeprefix("#") for line in lines).split()
+    )
+
+
+def _engine_comment_blocks():
+    """{engine key -> collapsed text of its own annotation block}.
+
+    A key's block is the run of comment lines at indent >= 4 following its
+    `  key:` line -- the file's own convention for a field's annotation. A
+    blank line does not close the run (the engine block currently contains
+    none); a non-comment line at indent 2 does. Indent 4 is load-bearing, not incidental: `# model:
+    gpt-5.3-codex` is a commented-out KEY at indent 2 sitting between
+    `effort` and `max_fix_rounds`, and an indent-agnostic reader would
+    swallow it into effort's block."""
+    lines = EXAMPLE_PATH.read_text(encoding="utf-8").splitlines()
+    engine_idx = [i for i, line in enumerate(lines) if line.rstrip() == "engine:"]
+    assert len(engine_idx) == 1, (
+        f"expected exactly one top-level 'engine:' line in {EXAMPLE_PATH.name}, "
+        f"found {len(engine_idx)} -- this test's anchor is stale"
+    )
+
+    blocks = {}
+    current = None
+    for line in lines[engine_idx[0] + 1 :]:
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            break  # the next top-level key ends the engine block
+        stripped = line.strip()
+        if indent >= 4 and stripped.startswith("#"):
+            if current is not None:
+                blocks[current].append(stripped)
+            continue
+        if indent == 2 and not stripped.startswith("#") and ":" in stripped:
+            current = stripped.split(":", 1)[0].strip()
+            blocks.setdefault(current, [])
+            continue
+        # anything else (an indent-2 comment, a nested sub-block) closes the
+        # current key's own annotation run without opening a new one
+        current = None
+    return {key: _collapse_comment_block(body) for key, body in blocks.items()}
+
+
+def _digest_subst_engine_keys():
+    """Live engine keys that are ALSO members of resume_setup.py's
+    DIGEST_SUBST_FIELDS -- read from that module itself, never
+    transcribed. See this section's header for why this is the axis."""
+    module = _load_module("resume_setup_for_change_cost", RESUME_SETUP_PATH)
+    example = yaml.safe_load(EXAMPLE_PATH.read_text(encoding="utf-8"))
+    return set(example["engine"]) & set(module.DIGEST_SUBST_FIELDS)
+
+
+def test_every_digest_subst_engine_knob_discloses_its_change_cost():
+    """Set equality, both directions. A knob in DIGEST_SUBST_FIELDS costs a
+    fresh RUN_ID to change and must say so at the knob; a knob outside it
+    (engine.max_codex_jobs_per_batch, which #735 removed from the hashed
+    projection and which costs nothing to change) must NOT claim a cost it
+    does not have."""
+    blocks = _engine_comment_blocks()
+    disclosed = {key for key, text in blocks.items() if CHANGE_COST_HEADING in text}
+    expected = _digest_subst_engine_keys()
+
+    assert expected, (
+        "no engine key intersects resume_setup.py's DIGEST_SUBST_FIELDS -- either "
+        "the example's engine block or that frozenset has moved, and this guard is "
+        "now vacuous rather than passing"
+    )
+    assert disclosed == expected, (
+        f"engine keys carrying a '# {CHANGE_COST_HEADING}' paragraph: {sorted(disclosed)}; "
+        f"engine keys in resume_setup.py's DIGEST_SUBST_FIELDS: {sorted(expected)}. "
+        f"Missing a disclosure: {sorted(expected - disclosed)}. Claiming a cost it does "
+        f"not have: {sorted(disclosed - expected)}."
+    )
+
+
+def test_change_cost_paragraphs_still_carry_their_load_bearing_claims():
+    """The heading alone is not the contract -- it can survive while the
+    paragraph beneath it is emptied or reversed, which is the precise
+    regression the heading-only check cannot catch. Asserted against the
+    block's NORMALIZED text, so a re-wrap does not break it."""
+    blocks = _engine_comment_blocks()
+
+    for key in ("effort", "max_fix_rounds"):
+        text = blocks.get(key, "")
+        assert CHANGE_COST_HEADING in text, (
+            f"engine.{key} lost its change-cost paragraph entirely -- a PRECONDITION "
+            f"for the substance checks below; the set-equality test above reports the "
+            f"same event as the real finding"
+        )
+        for mechanism in ("agent_config_hash", "DIGEST_SUBST_FIELDS"):
+            assert mechanism in text, (
+                f"engine.{key}'s change-cost paragraph no longer names {mechanism} -- "
+                f"changing this knob costs BOTH a converged-segment invalidation and a "
+                f"fresh RUN_ID, and an operator told only one of the two is mispriced"
+            )
+
+    # #732's own finding, and the one an operator is most likely to guess
+    # wrong: the two directions are NOT priced differently.
+    assert "LOWERING costs exactly the same as raising" in blocks.get("effort", ""), (
+        "engine.effort's change-cost paragraph lost the #732 lowering clause -- that a "
+        "LOWERED tier costs exactly what raising costs is the whole reason this "
+        "disclosure exists, and without it the paragraph reads as if only raising is "
+        "expensive"
+    )

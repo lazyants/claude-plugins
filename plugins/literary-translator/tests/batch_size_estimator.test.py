@@ -2587,3 +2587,93 @@ def test_glossary_resume_skip_is_decided_per_batch(tmp_path):
         + GLOSSARY_FIXED_MERGE_VERIFY
     )
     assert len(out["calls"]) == 9
+
+
+# ---------------------------------------------------------------------------
+# #732 (ped-ant on PR #743) -- the SHIPPED cap's own documented boundary, taken
+# from the real estimator instead of a second copy of its formula.
+# ---------------------------------------------------------------------------
+#
+# profile.example.yml's engine.batch_agent_cap comment states a boundary in
+# numbers ("at 94 the shipped 10000 admits at most 106 segments"). That claim
+# used to be pinned in profile_example_validation.test.py by a hand-written
+# `8 + 2*wait_calls + max_fix_rounds*(6 + wait_calls)`, which is how it went on
+# passing for the whole life of #607: the copy and the assertion moved together
+# and agreed with each other, while the template they both claimed to describe
+# had moved to `(8 + WAIT_CALLS)`. Correcting those constants fixes one value
+# and leaves the class.
+#
+# So the boundary is asserted HERE, in the file that already instantiates and
+# EXECUTES the real workflow, and the per-segment cost is read back out of the
+# estimator's own reported `estimatedCalls` rather than recomputed. One refusal
+# run is enough: the gate reports the number it refused on, and that single
+# value determines the per-segment cost exactly.
+
+SHIPPED_PROFILE_EXAMPLE = (
+    PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "profile.example.yml"
+)
+
+
+def _shipped_engine_knobs() -> dict:
+    import yaml  # local: every other consumer in this file is Node-driven
+
+    return yaml.safe_load(SHIPPED_PROFILE_EXAMPLE.read_text(encoding="utf-8"))["engine"]
+
+
+def test_shipped_cap_boundary_comes_from_the_real_estimator(tmp_path):
+    """Drives the REAL template at the values profile.example.yml actually
+    ships and derives the per-segment cost from what the gate reports, so a
+    future change to the estimator's own coefficients (or to the WAIT_CALLS
+    chain feeding them, e.g. the #402 CODEX_DEADLINE_SEC coupling) turns this
+    red instead of leaving a stale figure in operator-facing prose.
+
+    Uses the REFUSAL side deliberately: `estimatedCalls > BATCH_AGENT_CAP`
+    returns before `pipeline()` is ever called, so this costs one Node run and
+    no simulated segment work, while still reporting the estimator's true
+    output for a batch of known size."""
+    engine = _shipped_engine_knobs()
+    shipped_cap = engine["batch_agent_cap"]
+    shipped_max_fix_rounds = engine["max_fix_rounds"]
+
+    # One segment past whatever the cap admits, computed from the gate's own
+    # reported estimate below -- so this fixture size is the only thing this
+    # test needs to guess, and guessing it wrong shows up as a failed refusal
+    # rather than as a silently agreeing number.
+    segs = [f"seg{i:03d}" for i in range(1, 108)]
+    out = run_workflow(
+        tmp_path=tmp_path,
+        max_fix_rounds=shipped_max_fix_rounds,
+        batch_agent_cap=shipped_cap,
+        segs=segs,
+        plan={},
+    )
+
+    assert out["pipelineCalled"] is False, (
+        f"{len(segs)} segments at the shipped cap {shipped_cap} must be REFUSED before "
+        f"dispatch -- if this now dispatches, the shipped cap admits more segments than "
+        f"profile.example.yml's own comment documents"
+    )
+    result = out["result"]
+    assert result["reason"] == "batch-too-large", result
+
+    # The estimator's shape is `1 + N * per_segment`, so its own reported total
+    # for a known N yields per_segment exactly. Nothing here re-derives it.
+    estimated = result["estimatedCalls"]
+    per_segment, remainder = divmod(estimated - 1, len(segs))
+    assert remainder == 0, (
+        f"estimatedCalls={estimated} for {len(segs)} segments is not of the form "
+        f"1 + N*per_segment -- the estimator's SHAPE has changed, and this derivation "
+        f"(not just its numbers) is stale"
+    )
+
+    admitted = (shipped_cap - 1) // per_segment
+    assert 1 + admitted * per_segment <= shipped_cap < 1 + (admitted + 1) * per_segment
+
+    # The two figures profile.example.yml's own comment states, now anchored to
+    # the real estimator rather than to a copy of its formula.
+    assert (per_segment, admitted) == (94, 106), (
+        f"the real estimator now costs {per_segment} calls/segment at the shipped "
+        f"max_fix_rounds:{shipped_max_fix_rounds}, so batch_agent_cap:{shipped_cap} "
+        f"admits {admitted} segments -- profile.example.yml's engine.batch_agent_cap "
+        f"comment still documents 94/106 and must be updated with this change"
+    )
