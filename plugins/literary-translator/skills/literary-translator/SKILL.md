@@ -52,15 +52,24 @@ translate+gloss job ends up quietly provisioning apparatus it will never use.
    whether verse or front/back matter is present — the same reconnaissance
    `PLAN.md` section 1 (Source) eventually records; do it now, before any
    scope commitment.
-2. **Confirm output shape through existing knobs, never a new mode.** This
-   plugin has no separate "fast mode"/"thorough mode" switch — proportionality
-   is expressed entirely through profile knobs that already exist:
+2. **Confirm output shape through existing knobs — ENFORCED at Step 0, not
+   walked through as free-form prose.** This plugin has no separate "fast
+   mode"/"thorough mode" switch — proportionality is expressed entirely
+   through profile knobs that already exist: `glossary.enabled` (does this
+   project want a researched name/realia canon at all?),
    `glossary.research_mode` (`live` vs `offline`), `footnotes.apparatus_policy`,
-   `verse_policy.mode` (the six-value enum in
+   `output.v1_scope`, `verse_policy.mode` (the six-value enum in
    `references/verse-policy.md`), and `engine.max_fix_rounds`. One further
-   knob decides how much *output* apparatus gets provisioned:
-   `output.target` (defaults `obsidian`). Walk the user through what that
-   knob currently resolves to for this project before scaffolding proceeds.
+   knob decides how much *output* apparatus gets provisioned: `output.target`
+   (consulted only under `output.v1_scope: assembled_book`).
+   `assets/profile.example.yml` ships every one of these except
+   `verse_policy.mode` and `engine.max_fix_rounds` as an invalid `CHOOSE_`
+   sentinel, so this is no longer a knob this section walks the user through
+   in the abstract before scaffolding proceeds: Step 0 (below) halts on a
+   freshly-copied profile and prints, in one pass, a questionnaire naming
+   every sentinel still unanswered. This section's job is to relay that
+   printed questionnaire to the user verbatim and fill in `profile.yml` with
+   their answers.
 3. **Default fast, offer thorough explicitly, through those same knobs.** The
    default posture for a new project is the lean end of every one of those
    knobs — offline research where live isn't required, the lightest
@@ -148,10 +157,32 @@ Order of operations:
 4. Unknown top-level keys are FATAL by default, naming the exact key —
    except keys under a reserved `x_*` namespace, silently allowed
    (forward-compat extension point).
-5. Validate whole-file shape via
+5. **Whole-profile placeholder scan — moved here, strictly BEFORE schema
+   validation, exactly so a fresh profile HALTS naming every unanswered
+   intake decision instead of one schema-enum error (#727).** Every string
+   value anywhere in the parsed document, not a named subset of fields, is
+   checked against every literal placeholder `assets/profile.example.yml`
+   ships. The two `/ABS/PATH/TO/...` path placeholders and the book-title
+   placeholder keep their existing message unchanged. Every remaining
+   `CHOOSE_`-prefixed enum sentinel — `glossary.research_mode`,
+   `glossary.enabled`, `footnotes.apparatus_policy`, `output.v1_scope`,
+   `output.target`, and the `plain_text` adapter's
+   `verse_detection`/`footnotes` fields — gets an error naming that dotted
+   path, plus, for every sentinel this skill documents a question for, that
+   question appended verbatim (a sentinel with no documented question keeps
+   the base message, never loses the error). Before the first sentinel
+   error, print one header line to stderr naming the profile path and
+   instructing: relay this list to the user and fill in their answers.
+   FATALLY reject (exit non-zero) if any placeholder or sentinel survives —
+   this now happens before jsonschema validation ever runs, so a
+   freshly-copied profile reports every unanswered intake decision in ONE
+   pass instead of the single schema-enum error on whichever field the
+   schema happens to gate unconditionally (previously
+   `glossary.research_mode` alone — the defect #727 fixes).
+6. Validate whole-file shape via
    `jsonschema.Draft202012Validator(profile.schema.json, format_checker=jsonschema.FormatChecker())`,
    loaded from the plugin's own `assets/schemas/profile.schema.json`.
-6. Only once schema passes, run procedural checks: `source.path` must exist
+7. Only once schema passes, run procedural checks: `source.path` must exist
    (for every format including `custom`; for `custom`, this is the
    primary/representative sanity-anchor input, while `manifest.json`'s
    `source_inputs[]` remains the authoritative full file list);
@@ -161,10 +192,6 @@ Order of operations:
    `output.destination`'s parent is checked only when it resolves outside
    `durable_root`; `source.language.particle_config`'s file existence is
    NOT checked here (deferred to end of Step 0a).
-7. Whole-profile placeholder-substring scan (every field, not a named
-   subset): FATALLY reject if any value anywhere still contains
-   `/ABS/PATH/TO/YOUR_PROJECT`, `/ABS/PATH/TO/YOUR_SOURCE`, or
-   `YOUR BOOK TITLE HERE`.
 8. `adapter_config.plain_text.segmentation.heading_regex`: when
    `method: heading_regex`, wrap `re.compile(heading_regex)` in try/except,
    FATAL on `re.error`. Cross-field WARNING (non-fatal) if the unselected
@@ -1397,7 +1424,37 @@ inventory-canonical spelling. See
 `.local.json` + `name_inventory` example" for a generic worked walkthrough
 of setting up a project-local override.
 
-Then run `bootstrap_names.py` (configured from
+**`glossary.enabled: false` — the project declared it wants no researched
+name/realia canon at all.** The mandatory language smoke test above still
+runs: W3a's `segpack.py` re-runs `bootstrap_names.py`'s own candidate
+extractor over every segment and W5 acts on the `new_names` it produces, so
+name detection stays load-bearing even against an empty canon. What this
+branch skips is the research and adjudication that follow the smoke test
+below: no `glossary_batch_plan.py`, no `resume_setup.py`, no glossary
+Workflow, no canon merge — and the skeptic pass documented further below
+does not run on this branch whatever `glossary.skeptic_pass.enabled` says,
+because Step 0 fatally refuses that contradictory combination outright
+before scaffolding ever reaches here. Bootstrap the canon exactly as the
+`no_new_candidates` SKIP branch further below does:
+
+```
+python3 ${durable_root}/scripts/canon_validate.py \
+  --research-mode <profile's glossary.research_mode> --init \
+  --plugin-root {{PLUGIN_ROOT}}
+```
+
+then rejoin at the mandatory homonym-split evidence gate below, exactly
+like every other branch. `--init` is create-only: a project whose
+`canon.json` already exists keeps it byte-untouched and keeps injecting its
+entries — `glossary.enabled: false` never discards a canon a prior run
+already built. On a rerun after a plugin upgrade moved a
+`derivation_bundle_hash` member, use the sanctioned restamp route —
+`canon_validate.py --restamp-derivation` FIRST, then re-run `segpack.py`
+(that order, never reversed: `segpack.py` copies `canon.json`'s stamp
+forward, so running it first only re-copies the stale value) — exactly as
+`references/ledger-and-resumability.md` documents for the SKIP branch.
+
+Otherwise (`glossary.enabled` not false, the default), run `bootstrap_names.py` (configured from
 `${durable_root}/languages/<particle_config's literal value>` — never
 rebuilt from `source.language.code` alone) to get frequency-ranked name
 candidates. **1.3.5:** curate and batch those raw candidates with
@@ -1413,10 +1470,10 @@ that line is `{"no_new_candidates": true, "batches": []}`, every candidate is
 already in canon — or, on an uncased-script source whose preset ships no
 `name_inventory`, there were never any candidates to begin with — so SKIP
 `resume_setup.py` and the glossary Workflow entirely this run, nothing to
-research. **#290:** that SKIP branch is the one W3 path that never reaches the
-glossary merge — and apart from the bootstrap command below, the merge is the
-only thing that ever CREATES `canon.json` — so bootstrap it explicitly here,
-or W3a below dies with `FATAL: canon.json not found`:
+research. **#290:** that SKIP branch is the one GLOSSARY-ENABLED W3 path that
+never reaches the glossary merge — and apart from the bootstrap command below,
+the merge is the only thing that ever CREATES `canon.json` — so bootstrap it
+explicitly here, or W3a below dies with `FATAL: canon.json not found`:
 
 ```
 python3 ${durable_root}/scripts/canon_validate.py \
@@ -1790,8 +1847,9 @@ queue's role is narrower than it once was, not eliminated).
 **Mandatory homonym-split evidence gate (category 5, always runs)** — unlike
 the categories-1-4 gate above, this invocation of the SAME
 `canon_adjudication_audit.py --check` is never opt-in and never waits for
-Deliver. Run it immediately after **both** W3-rejoin branches above — the
-`{"no_new_candidates": true, "batches": []}` SKIP path and the "Otherwise
+Deliver. Run it immediately after **all three** W3-rejoin branches above —
+the `glossary.enabled: false` disabled branch, the
+`{"no_new_candidates": true, "batches": []}` SKIP path, and the "Otherwise
 run the codex-glossary-pass" path alike — and strictly before **W3a Segpack
 generation** below, on every project unconditionally:
 
@@ -1835,9 +1893,14 @@ report's `homonym_split` row reads `NOT ENUMERATED` and the summary carries
 enumerated-clean one.
 
 **Skeptic pass (RFC #215 Phase 2, opt-in + advisory)** — if
-`glossary.skeptic_pass.enabled` is true in `profile.yml`, run the
-structural-risk triage + adverse-only skeptic pass immediately after the
-mandatory homonym-split gate above and before W3a. Every enabled pass
+`glossary.enabled` is not false AND `glossary.skeptic_pass.enabled` is true
+in `profile.yml`, run the structural-risk triage + adverse-only skeptic
+pass immediately after the mandatory homonym-split gate above and before
+W3a. The parent switch is not a formality: Step 0 fatally refuses the
+contradictory combination — `glossary.enabled: false` with
+`glossary.skeptic_pass.enabled: true` — outright, naming both fields, so
+this pass never reaches a project that declared it wants no glossary at
+all (see the `glossary.enabled: false` branch above). Every enabled pass
 re-derives its own worklist fresh (never trusts a stale one):
 `suspicion_scan.py --canon ${durable_root}/canon.json --manifest
 ${durable_root}/manifest.json --particle-config <literal value>

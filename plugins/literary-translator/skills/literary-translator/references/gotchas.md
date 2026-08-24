@@ -339,11 +339,17 @@ site.
 
 Every placeholder in the shipped file (`YOUR BOOK TITLE HERE`,
 `/ABS/PATH/TO/YOUR_PROJECT`, `/ABS/PATH/TO/YOUR_SOURCE.epub`,
-`CHOOSE_live_or_offline`, `CHOOSE_none_confirmed_or_regex`,
-`CHOOSE_none_confirmed_or_markdown_ref_or_custom_regex`) is an
-intentionally invalid sentinel that `profile_validate.py` fatally rejects
-by design. A profile can only pass Step 0 once every placeholder is
-genuinely replaced with a real value.
+`CHOOSE_live_or_offline` (`glossary.research_mode`),
+`CHOOSE_true_or_false` (`glossary.enabled`, #727),
+`CHOOSE_none_confirmed_or_regex`,
+`CHOOSE_none_confirmed_or_markdown_ref_or_custom_regex`,
+`CHOOSE_translate_all_or_preserve_source_or_omit_apparatus_or_body_refs_only`
+(`footnotes.apparatus_policy`),
+`CHOOSE_segment_drafts_and_audit_or_assembled_book` (`output.v1_scope`),
+`CHOOSE_obsidian_or_epub_or_custom` (`output.target`) — seven sentinels in
+all) is an intentionally invalid sentinel that `profile_validate.py`
+fatally rejects by design. A profile can only pass Step 0 once every
+placeholder is genuinely replaced with a real value.
 
 **Do not write a test that expects this file to pass Step 0 verbatim — it
 must not.** A prior mistake in this plan's own review process made exactly
@@ -351,7 +357,17 @@ this error once. The correct test discipline needs three separate
 fixtures, not one:
 
 1. Missing profile → auto-copy the example into place + halt.
-2. The verbatim shipped example → fatal rejection, naming every placeholder.
+2. The verbatim shipped example → fatal rejection, naming every placeholder
+   in ONE pass (#727: the whole-profile placeholder/sentinel scan now runs
+   BEFORE jsonschema validation, precisely so this is true end-to-end —
+   before #727, a straight CLI run instead died on the FIRST schema-enum
+   error it reached (`glossary.research_mode`'s bare `CHOOSE_live_or_offline`
+   was the one sentinel sitting behind an unconditional schema `enum`) and
+   never got as far as reporting the rest; only a direct, in-process call to
+   the scan function saw every sentinel at once. That split test shape is
+   now stale — a single end-to-end CLI invocation against the verbatim
+   example is sufficient, and the questionnaire header it prints is what a
+   test should assert on).
 3. A fully-filled-in-but-otherwise-structurally-identical copy → clean pass.
 
 (`tests/profile_example_validation.test.py` is this exact 3-case split.)

@@ -100,11 +100,21 @@ def manifest_doc() -> dict:
     }
 
 
-def make_project(tmp_path) -> Path:
+def make_project(tmp_path, particle_config: str = PARTICLE_CONFIG, manifest=None) -> Path:
     """Stages an isolated durable_root the way Step 0a stages a real project:
     every script self-anchors off its own location, so all of them resolve
     canon.json / schemas/ / languages/ against THIS fixture rather than the
-    repo's assets tree."""
+    repo's assets tree.
+
+    #727: `particle_config`/`manifest` are optional overrides -- every
+    existing call site (`make_project(tmp_path)`) keeps building the exact
+    same zero-candidate Hebrew project it always has (`particle_config`
+    defaults to the module's own `PARTICLE_CONFIG`, `manifest` defaults to
+    `manifest_doc()`). A sibling suite that needs a project whose source
+    genuinely produces a strong candidate (glossary_disabled_real_candidate_
+    bootstrap.test.py) passes a different, Latin-script particle_config plus
+    its own manifest instead of hand-rolling a second copy of everything
+    else this function stages."""
     root = tmp_path / "durable_root"
     stage_consumer(root, "canon_validate.py")
 
@@ -121,12 +131,12 @@ def make_project(tmp_path) -> Path:
 
     languages_dir = root / "languages"
     languages_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(LANGUAGES_SRC / PARTICLE_CONFIG, languages_dir / PARTICLE_CONFIG)
+    shutil.copy2(LANGUAGES_SRC / particle_config, languages_dir / particle_config)
 
     profile_path = root / "profile.yml"
     profile_path.write_text(
         yaml.safe_dump(
-            {"source": {"language": {"particle_config": PARTICLE_CONFIG}}},
+            {"source": {"language": {"particle_config": particle_config}}},
             sort_keys=False,
         ),
         encoding="utf-8",
@@ -136,7 +146,8 @@ def make_project(tmp_path) -> Path:
     )
 
     (root / "manifest.json").write_text(
-        json.dumps(manifest_doc(), ensure_ascii=False), encoding="utf-8"
+        json.dumps(manifest if manifest is not None else manifest_doc(), ensure_ascii=False),
+        encoding="utf-8",
     )
     return root
 
@@ -213,13 +224,13 @@ def load_canon_validate_module():
         sys.path.remove(str(SCRIPTS_SRC))
 
 
-def run_segpack(root: Path):
+def run_segpack(root: Path, particle_config: str = PARTICLE_CONFIG):
     return run_script(
         root,
         "segpack.py",
         "--all",
         "--particle-config",
-        PARTICLE_CONFIG,
+        particle_config,
         "--apparatus-policy",
         "omit_apparatus",
     )

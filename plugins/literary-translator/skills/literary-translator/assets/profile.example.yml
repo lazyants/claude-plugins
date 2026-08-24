@@ -277,14 +277,28 @@ engine:
     # smaller ones is the operator's call, not automated in v1 (same policy as batch_agent_cap).
 
 footnotes:
-  apparatus_policy: translate_all
-    # translate_all | preserve_source | omit_apparatus | body_refs_only
-    # -- see references/source-format-adapters/ (each adapter defines its own
-    # behavior for all four values) and references/engine-loop.md.
-    # This project's choice: translate 100% of the 19th-c. critical apparatus too
-    # (translate_all).
+  apparatus_policy: CHOOSE_translate_all_or_preserve_source_or_omit_apparatus_or_body_refs_only
+    # Ships as an intentionally INVALID placeholder -- Step 0's whole-profile placeholder scan
+    # fatally rejects it until you consciously replace it with one of the four real values:
+    # translate_all (translate every note -- the most expensive), preserve_source (keep the
+    # source-language notes), omit_apparatus (drop them), or body_refs_only (keep only the
+    # in-body reference marks). See references/source-format-adapters/ (each adapter defines its
+    # own behavior for all four values) and references/engine-loop.md.
 
 glossary:
+  enabled: CHOOSE_true_or_false
+    # Ships as an intentionally INVALID placeholder -- Step 0 fatally rejects it until you
+    # consciously replace it with `true` or `false`. Does this project want a researched
+    # name/realia canon at all? `true` runs the W3 glossary pass -- name research plus
+    # per-candidate adjudication, one of the most expensive stages in this pipeline. `false`
+    # skips that pass and translates against an EMPTY canon: each segment's translator then
+    # chooses its own rendering for every detected name and records it as `NEW:`, so
+    # cross-segment name consistency is no longer frozen up front and shows up only as an
+    # advisory warning in the final audit. Enabling it later can re-stale and re-dispatch
+    # already-translated segments once names get canonized. An existing canon.json is never
+    # discarded: `false` keeps injecting the entries it already holds. Absent means `true` (see
+    # profile.schema.json's own default), but this example ships the sentinel so every fresh
+    # project answers the question consciously rather than inheriting the default silently.
   research_mode: CHOOSE_live_or_offline  # Ships as an intentionally INVALID placeholder.
                                           # REQUIRED, no default -- live | offline. The explicit, human-set
                                           # precondition for whether THIS run's glossary-pass codex agent actually
@@ -298,7 +312,8 @@ glossary:
                                           # candidate needing basis:"sense_translated" (a deliberate,
                                           # project-specific sense-rendering of a speaking name -- see
                                           # style_bible.md section G) is unaffected either way: it never claims
-                                          # a citable source, in live or offline mode alike. Replace
+                                          # a citable source, in live or offline mode alike. Inert when
+                                          # glossary.enabled is false, but still required. Replace
                                           # with `live` or `offline`, consciously, matching THIS run's own actual
                                           # environment.
 
@@ -414,23 +429,29 @@ validation:
     # could set status: converged, which skips both carve-outs outright.)
 
 output:
-  v1_scope: segment_drafts_and_audit
-    # segment_drafts_and_audit | assembled_book -- the default, segment_drafts_and_audit, delivers converged
-    # per-segment drafts + ledger + each draft's own validate_draft.py per-segment audit trail + a whole-book
-    # final_audit.py summary/WARN report -- NOT a single assembled book file. destination below is where the
-    # audit/handoff package (not a book) is written. Setting this to `assembled_book` is LOAD-BEARING: it turns
-    # on Step 0d + W9 Assemble, which reconstruct the converged drafts into one rendered book via the
-    # `target` adapter below (see references/assembly-and-output.md) -- gated on W7's project_complete: true.
+  v1_scope: CHOOSE_segment_drafts_and_audit_or_assembled_book
+    # Ships as an intentionally INVALID placeholder -- Step 0's whole-profile placeholder scan
+    # fatally rejects it until you consciously replace it with one of the two real values.
+    # segment_drafts_and_audit (the lean default) delivers converged per-segment drafts + ledger +
+    # each draft's own validate_draft.py per-segment audit trail + a whole-book final_audit.py
+    # summary/WARN report -- NOT a single assembled book file. destination below is where the
+    # audit/handoff package (not a book) is written. Choosing `assembled_book` is LOAD-BEARING: it
+    # turns on Step 0d + W9 Assemble, which reconstruct the converged drafts into one rendered book
+    # via the `target` adapter below (see references/assembly-and-output.md) -- gated on W7's
+    # project_complete: true, and also runs the whole assembly/render stage.
   destination: "/ABS/PATH/TO/YOUR_PROJECT/out/"   # matches durable_root's placeholder above + /out/ (the default,
                                           # resolving inside durable_root); e.g. a real project:
                                           # "/Users/you/dev/your-book-project/out/"
-  target: obsidian
-    # obsidian | epub | custom -- which output-target adapter renders the assembled book; only ever consulted
-    # when v1_scope: assembled_book. `obsidian` is the one target this increment actually ships and renders,
-    # via scripts/render_obsidian.py -- a vault of narrative pages plus one cross-linked entity note per
-    # canon.json entry. `epub` has no renderer behind it yet, so it does NOT resolve: Step 0 and Step 0d both
-    # HALT on it, naming the missing render_epub.py and the alternatives (see references/assembly-and-output.md's
-    # "Why build_epub.py hasn't been generalized"). `custom` resolves its path shape but always requires this
+  target: CHOOSE_obsidian_or_epub_or_custom
+    # Ships as an intentionally INVALID placeholder -- Step 0's whole-profile placeholder scan
+    # fatally rejects it until you consciously replace it with one of the three real values, even
+    # though it is only ever consulted when v1_scope: assembled_book -- it still decides how much
+    # output apparatus gets provisioned. `obsidian` is the one target this increment actually ships
+    # and renders, via scripts/render_obsidian.py -- a vault of narrative pages plus one
+    # cross-linked entity note per canon.json entry. `epub` has no renderer behind it yet, so it does
+    # NOT resolve: Step 0 and Step 0d both HALT on it (#726), naming the missing render_epub.py and
+    # the alternatives (see references/assembly-and-output.md's "Why build_epub.py hasn't been
+    # generalized"). `custom` resolves its path shape but always requires this
     # project to co-design its own renderer first (adapter_config.custom.renderer_path).
   name_display:
     parenthetical_originals: never

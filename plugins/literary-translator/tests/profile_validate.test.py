@@ -51,6 +51,7 @@ SCRIPT_PATH = (
     / "scripts"
     / "profile_validate.py"
 )
+EXAMPLE_PATH = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "profile.example.yml"
 
 
 def _load_profile_validate_module():
@@ -73,7 +74,7 @@ SCHEMA = pv.load_profile_schema()
 
 def schema_errors(profile):
     """Runs the real Draft202012Validator + FormatChecker pass exactly as
-    ``main()``'s step 5 does."""
+    ``main()``'s step 6 does."""
     return pv.validate_against_schema(profile, SCHEMA)
 
 
@@ -770,7 +771,7 @@ def test_choose_sentinel_rejected_in_an_unconditionally_enforced_field():
 
 
 def test_choose_sentinel_in_inactive_format_block_still_fatally_scanned():
-    """profile_validate.py's placeholder scan (step 7) walks EVERY string
+    """profile_validate.py's placeholder scan (step 5) walks EVERY string
     leaf regardless of which source.format is active -- a CHOOSE_ sentinel
     left in the currently-INACTIVE plain_text sub-block still fails Step 0,
     even though the schema's own enum restriction for that field is
@@ -948,7 +949,7 @@ def test_mentions_section_enabled_boolean_values_are_schema_valid():
 # validates against profile.schema.json. So a W7-side assertion about what the
 # schema accepts passes whether or not the schema says so, and would stay
 # green if a constraint were reintroduced that Step 0 actually refuses. This
-# file runs the REAL validate_against_schema() pass main()'s step 5 runs.
+# file runs the REAL validate_against_schema() pass main()'s step 6 runs.
 # ---------------------------------------------------------------------------
 
 
@@ -1235,6 +1236,347 @@ def test_custom_target_is_untouched_at_step_0():
         "custom": {"renderer_path": None},
     }
     assert pv.check_output_target_shipped(profile) == []
+# ===========================================================================
+# #727 -- glossary.enabled: boolean master switch, schema-level cases
+# ===========================================================================
+
+
+def test_glossary_enabled_boolean_true_passes_schema():
+    profile = make_base_profile()
+    profile["glossary"]["enabled"] = True
+    assert schema_errors(profile) == []
+
+
+def test_glossary_enabled_boolean_false_passes_schema():
+    profile = make_base_profile()
+    profile["glossary"]["enabled"] = False
+    assert schema_errors(profile) == []
+
+
+def test_glossary_enabled_string_rejected_by_schema():
+    profile = make_base_profile()
+    profile["glossary"]["enabled"] = "true"  # a string, not the boolean the schema demands
+    errors = schema_errors(profile)
+    assert errors != []
+    assert any("enabled" in e and "boolean" in e for e in errors), errors
+
+
+def test_glossary_enabled_absent_still_valid():
+    # make_base_profile() already omits glossary.enabled -- absent means
+    # true (glossary.enabled's own schema description), so every profile
+    # predating #727 keeps validating unchanged.
+    profile = make_base_profile()
+    assert "enabled" not in profile["glossary"]
+    assert schema_errors(profile) == []
+
+
+# ===========================================================================
+# #727 -- the placeholder scan now runs BEFORE jsonschema (main()'s step 5,
+# ahead of step 6): a profile carrying BOTH an unanswered CHOOSE_ sentinel
+# AND an unrelated, genuine schema violation must report the questionnaire,
+# never the schema error -- schema validation must never even run.
+# ===========================================================================
+
+
+def _write_profile_yaml(path, profile: dict) -> None:
+    import yaml as real_yaml
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(real_yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+
+
+def test_sentinel_and_schema_violation_together_report_questionnaire_not_schema_error(tmp_path, capsys):
+    """The naive ("schema-first") ordering would halt on
+    verse_policy.mode's own enum violation and never mention the sentinel at
+    all -- or, depending on which error jsonschema's own validator happens
+    to sort first, might report both mixed together. #727's fix makes the
+    placeholder/sentinel scan its own fail-fast step, strictly before
+    schema validation, so this profile must halt naming ONLY the sentinel,
+    with no trace of the schema violation anywhere in the output."""
+    profile = make_base_profile()
+    profile["glossary"]["research_mode"] = "CHOOSE_live_or_offline"
+    # An unrelated, genuine, UNCONDITIONAL schema violation -- nothing to do
+    # with any placeholder or sentinel.
+    profile["verse_policy"] = {"mode": "not_a_real_verse_policy_mode", "threshold_lines": None}
+
+    profile_path = tmp_path / ".claude" / "literary-translator" / "profile.yml"
+    _write_profile_yaml(profile_path, profile)
+
+    with pytest.raises(SystemExit) as exc_info:
+        pv.main(["--profile", str(profile_path)])
+    captured = capsys.readouterr()
+
+    assert exc_info.value.code == 1
+    assert "Step 0 needs these intake decisions answered" in captured.err, captured.err
+    assert "glossary.research_mode" in captured.err
+    assert "CHOOSE_live_or_offline" in captured.err
+    assert "not_a_real_verse_policy_mode" not in captured.err, (
+        f"schema validation must never run once a placeholder sentinel "
+        f"survives the earlier scan:\n{captured.err}"
+    )
+    assert "verse_policy" not in captured.err, captured.err
+
+
+# ===========================================================================
+# #727 -- KNOB_QUESTIONS: per-knob question appended to the sentinel's own
+# error line, a path with no entry keeps the OLD message verbatim, and the
+# shipped-sentinel-set <-> KNOB_QUESTIONS-key-set drift guard (both
+# directions, derived by walking the parsed example -- never a hand-typed
+# list, which would freeze whatever the two sets happened to be at authoring
+# time and stop detecting drift).
+# ===========================================================================
+
+
+def _set_dotted(d: dict, dotted_path: str, value) -> dict:
+    parts = dotted_path.split(".")
+    cursor = d
+    for part in parts[:-1]:
+        cursor = cursor.setdefault(part, {})
+    cursor[parts[-1]] = value
+    return d
+
+
+@pytest.mark.parametrize("dotted_path", sorted(pv.KNOB_QUESTIONS.keys()))
+def test_knob_question_appears_on_its_own_sentinel_error_line(dotted_path):
+    """Every dotted path with a KNOB_QUESTIONS entry gets its plain-language
+    question appended to THAT field's own sentinel error line -- not merely
+    present somewhere in the scan's output, which a per-field reader would
+    never see if it were attached to some OTHER field's line instead."""
+    profile = _set_dotted({}, dotted_path, f"CHOOSE_{dotted_path.replace('.', '_')}_placeholder")
+    errors = pv.scan_placeholders(profile)
+    matching = [e for e in errors if e.startswith(f"{dotted_path}:")]
+    assert len(matching) == 1, f"expected exactly one error for {dotted_path!r}; got:\n{errors}"
+    assert pv.KNOB_QUESTIONS[dotted_path] in matching[0], (
+        f"expected the KNOB_QUESTIONS text for {dotted_path!r} to appear on "
+        f"its own sentinel error line; got:\n{matching[0]}"
+    )
+
+
+def test_knob_questions_carry_the_shared_contracts_frozen_substance():
+    """The shared #727 plan-review contract froze specific substantive
+    clauses per knob (wording may be reflowed, but the substance must
+    survive) -- pins them directly against KNOB_QUESTIONS's own values,
+    independent of whether the generic per-path test above would catch a
+    later edit that reworded away the substance while leaving the mapping's
+    keys and mechanics intact."""
+    assertions = {
+        "glossary.enabled": ("W3 glossary pass", "EMPTY canon", "NEW:"),
+        "glossary.research_mode": ('basis:"established"', "glossary.enabled` is false"),
+        "footnotes.apparatus_policy": (
+            "translate_all", "preserve_source", "omit_apparatus", "body_refs_only",
+        ),
+        "output.v1_scope": ("segment_drafts_and_audit", "assembled_book"),
+        "output.target": (
+            "obsidian", "epub", "custom", "assembled_book",
+            # Codex review follow-up: pins the substantive availability
+            # clause itself, not merely the three enum names -- a test that
+            # only pinned the names would stay green if this cost/caveat
+            # disappeared from the question entirely.
+            "has no renderer yet", "co-designing a renderer",
+            # #726 rebase: "has no renderer yet" alone survived BOTH the
+            # pre-#726 wording (which only claimed epub "halts at assembly",
+            # i.e. at W9) and the corrected post-#726 wording -- it would not
+            # by itself catch a regression back to the stale W9-timing claim.
+            # Pin the corrected TIMING specifically: #726 moved this refusal
+            # all the way to Step 0 (check_output_target_shipped), never W9.
+            "refused at Step 0",
+        ),
+        "source.adapter_config.plain_text.verse_detection": (
+            "none_confirmed", "regex", "source.format: plain_text",
+        ),
+        "source.adapter_config.plain_text.footnotes": (
+            "none_confirmed", "markdown_ref", "custom_regex",
+        ),
+    }
+    assert set(assertions.keys()) == set(pv.KNOB_QUESTIONS.keys()), (
+        "this pinning test itself has drifted out of sync with KNOB_QUESTIONS's "
+        "own key set -- update the assertions table above, not just the code"
+    )
+    for dotted_path, phrases in assertions.items():
+        question = pv.KNOB_QUESTIONS[dotted_path]
+        for phrase in phrases:
+            assert phrase in question, (
+                f"KNOB_QUESTIONS[{dotted_path!r}] dropped the frozen contract "
+                f"clause {phrase!r}; got:\n{question}"
+            )
+
+
+def test_sentinel_with_no_knob_questions_entry_still_errors_without_a_question():
+    """A dotted path with NO KNOB_QUESTIONS entry must still FATAL on a
+    surviving CHOOSE_ sentinel -- it just loses the appended question, never
+    the error itself. Pins the OLD message verbatim (scan_placeholders() /
+    the CHOOSE_-sentinel half keeps its pre-#727 wording exactly when there
+    is no question to append)."""
+    dotted_path = "target.language.register_notes"
+    assert dotted_path not in pv.KNOB_QUESTIONS, (
+        f"{dotted_path!r} is now a real knob -- pick a different unmapped "
+        f"path for this negative control"
+    )
+    profile = _set_dotted({}, dotted_path, "CHOOSE_some_hypothetical_choice")
+    errors = pv.scan_placeholders(profile)
+    assert errors == [
+        f"{dotted_path}: still has the shipped placeholder sentinel "
+        f"'CHOOSE_some_hypothetical_choice' -- consciously choose one of its "
+        f"documented real values before proceeding."
+    ], errors
+
+
+def test_recursive_yaml_alias_errors_instead_of_recursion_error():
+    """#727: `_walk_strings()` gained a per-walk RECURSION-STACK guard (an
+    `id()` added right before descending into a dict/list and removed again
+    in a `finally` on unwind -- not a whole-walk visited SET, see the
+    shared-alias test below for why that distinction matters) because the
+    placeholder scan now runs ahead of jsonschema's own shape check, which
+    would otherwise have rejected a cyclic document on TYPE grounds before
+    this scan ever saw it. `title: &loop [*loop]` is exactly the shape a
+    hand-authored profile.yml cannot construct on its own but a YAML
+    anchor/alias can -- PyYAML parses it into a list that contains itself.
+
+    Verified red against the pre-#727 profile_validate.py (git rev b9b20d6,
+    before this branch's own changes): the unguarded `_walk_strings()`
+    recurses forever and dies with a raw RecursionError, never an ordinary
+    Step 0 ERROR line -- confirmed by loading that revision's module
+    directly and driving this exact fixture through it."""
+    import yaml as real_yaml
+
+    profile = real_yaml.safe_load("title: &loop [*loop]\n")
+    assert isinstance(profile["title"], list)
+    assert profile["title"][0] is profile["title"], (
+        "fixture is not genuinely self-referential -- PyYAML's alias "
+        "resolution did not produce the cycle this test needs"
+    )
+
+    # Must not raise RecursionError -- the whole point of the guard.
+    errors = pv.scan_placeholders(profile)
+    assert errors == [], (
+        "a cyclic alias carries no string leaves of its own -- scan_placeholders "
+        "must return cleanly, not raise, and must not report a phantom "
+        "violation for a structure with no actual string content"
+    )
+
+
+def test_shared_non_cyclic_alias_is_reported_at_every_path_it_occurs():
+    """Companion to the cyclic-alias test above, pinning the actual reason
+    #727 moved from a whole-walk visited SET to a per-walk recursion STACK: a
+    shared, non-cyclic YAML alias reached via two SIBLING paths (never an
+    ancestor-descendant chain) is not a cycle at all, and a whole-walk set
+    would have silently under-reported it -- the alias's id() would already
+    be marked visited by the time the SECOND path reached it, so that path's
+    own sentinel would lose its questionnaire line even though nothing about
+    it is cyclic.
+
+    Codex's own fixture: `x_alias: &g {enabled: CHOOSE_true_or_false,
+    research_mode: offline}` aliased a second time as `glossary: *g` --
+    `glossary.enabled` and `x_alias.enabled` are the SAME underlying dict
+    entry, reached via two unrelated top-level keys. Both dotted paths must
+    be reported, each with its own KNOB_QUESTIONS text intact (glossary.enabled
+    has a KNOB_QUESTIONS entry; x_alias.enabled does not, so that path keeps
+    the plain, question-less message -- see the no-entry negative control
+    above)."""
+    import yaml as real_yaml
+
+    profile = real_yaml.safe_load(
+        "x_alias: &g {enabled: CHOOSE_true_or_false, research_mode: offline}\n"
+        "glossary: *g\n"
+    )
+    assert profile["glossary"] is profile["x_alias"], (
+        "fixture is not genuinely a shared alias -- PyYAML did not resolve "
+        "both keys to the SAME underlying mapping object"
+    )
+
+    errors = pv.scan_placeholders(profile)
+    matching_glossary = [e for e in errors if e.startswith("glossary.enabled:")]
+    matching_alias = [e for e in errors if e.startswith("x_alias.enabled:")]
+    assert len(matching_glossary) == 1, (
+        f"expected exactly one error for glossary.enabled (reached via the "
+        f"SECOND sibling path to the shared alias); got:\n{errors}"
+    )
+    assert len(matching_alias) == 1, (
+        f"expected exactly one error for x_alias.enabled (reached via the "
+        f"FIRST sibling path to the shared alias); got:\n{errors}"
+    )
+    assert pv.KNOB_QUESTIONS["glossary.enabled"] in matching_glossary[0], (
+        f"glossary.enabled has a KNOB_QUESTIONS entry -- its own error line "
+        f"must carry the question; got:\n{matching_glossary[0]}"
+    )
+    assert "x_alias.enabled" not in pv.KNOB_QUESTIONS, (
+        "x_alias.enabled is now a real knob -- pick a different unmapped "
+        "alias name for this negative half of the fixture"
+    )
+    assert matching_alias[0] == (
+        "x_alias.enabled: still has the shipped placeholder sentinel "
+        "'CHOOSE_true_or_false' -- consciously choose one of its documented "
+        "real values before proceeding."
+    ), matching_alias[0]
+
+
+def test_knob_questions_matches_shipped_sentinels_set_equality():
+    """Drift guard: the set of dotted paths carrying a CHOOSE_ sentinel in
+    the REAL shipped assets/profile.example.yml must equal KNOB_QUESTIONS's
+    own key set, in BOTH directions -- derived by WALKING the parsed
+    example, never a hand-typed list (which would freeze whatever the two
+    sets happened to be at authoring time and stop detecting drift). A
+    KNOB_QUESTIONS entry for a sentinel the example no longer ships is dead
+    weight; a shipped sentinel with no KNOB_QUESTIONS entry silently loses
+    its question (still errors, per the no-entry negative control above,
+    but the operator gets no guidance for that ONE decision)."""
+    import yaml as real_yaml
+
+    example = real_yaml.safe_load(EXAMPLE_PATH.read_text(encoding="utf-8"))
+    shipped_sentinel_paths = {
+        location
+        for location, value in pv._walk_strings(example)
+        if value.startswith(pv.CHOOSE_PREFIX)
+    }
+    knob_question_paths = set(pv.KNOB_QUESTIONS.keys())
+    assert shipped_sentinel_paths == knob_question_paths, (
+        f"shipped-but-unmapped: {shipped_sentinel_paths - knob_question_paths}\n"
+        f"mapped-but-not-shipped: {knob_question_paths - shipped_sentinel_paths}"
+    )
+
+
+# ===========================================================================
+# #727 -- glossary.enabled: false vs glossary.skeptic_pass.enabled: true
+# cross-field contradiction, plus its two negative controls.
+# ===========================================================================
+
+
+def test_glossary_disabled_conflicts_with_active_skeptic_pass_is_fatal():
+    profile = {"glossary": {"enabled": False, "skeptic_pass": {"enabled": True}}}
+    errors = pv.check_glossary_disabled_conflicts_with_skeptic_pass(profile)
+    assert len(errors) == 1
+    assert "glossary.enabled" in errors[0]
+    assert "glossary.skeptic_pass.enabled" in errors[0]
+
+
+def test_glossary_enabled_absent_with_skeptic_pass_enabled_stays_valid():
+    """Negative control (the point of the finding that produced it): an
+    ABSENT glossary.enabled means true (the schema's own default) -- every
+    profile written before this key existed, including one with
+    skeptic_pass.enabled: true, must keep validating unchanged. A falsy
+    `.get()` implementation (treating absence the same as an explicit
+    False) would break this and every existing skeptic-enabled profile in
+    the wild."""
+    profile = {"glossary": {"skeptic_pass": {"enabled": True}}}
+    assert pv.check_glossary_disabled_conflicts_with_skeptic_pass(profile) == []
+
+
+def test_glossary_enabled_explicit_true_with_skeptic_pass_enabled_stays_valid():
+    """Second negative control: an EXPLICIT glossary.enabled: true beside
+    skeptic_pass.enabled: true is the ordinary, fully-enabled configuration
+    and must never be flagged."""
+    profile = {"glossary": {"enabled": True, "skeptic_pass": {"enabled": True}}}
+    assert pv.check_glossary_disabled_conflicts_with_skeptic_pass(profile) == []
+
+
+def test_glossary_disabled_with_skeptic_pass_absent_is_not_a_conflict():
+    profile = {"glossary": {"enabled": False}}
+    assert pv.check_glossary_disabled_conflicts_with_skeptic_pass(profile) == []
+
+
+def test_glossary_disabled_with_skeptic_pass_explicitly_false_is_not_a_conflict():
+    profile = {"glossary": {"enabled": False, "skeptic_pass": {"enabled": False}}}
+    assert pv.check_glossary_disabled_conflicts_with_skeptic_pass(profile) == []
 
 
 if __name__ == "__main__":

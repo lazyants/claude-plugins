@@ -1325,11 +1325,20 @@ def test_ratio_band_schema_rejects_deleted_absolute_threshold_keys(tmp_path):
 
     schema = json.loads(PROFILE_SCHEMA_SRC.read_text(encoding="utf-8"))
     base_profile = yaml.safe_load(PROFILE_EXAMPLE_SRC.read_text(encoding="utf-8"))
-    # The shipped example carries a placeholder enum sentinel by design
-    # (see tests/profile_example_validation.test.py) -- fill in the one
-    # field schema itself unconditionally restricts, so the base fixture is
-    # genuinely schema-valid before this test mutates it.
+    # The shipped example carries placeholder enum sentinels by design (see
+    # tests/profile_example_validation.test.py). Fill in every one whose
+    # schema restriction is NOT gated behind source.format -- i.e. every
+    # sentinel EXCEPT the two source.adapter_config.plain_text fields, which
+    # stay inert here since this profile's active format stays
+    # gutenberg_epub -- so the base fixture is genuinely schema-valid before
+    # this test mutates it. (Restating how many that is here would go stale
+    # the next time a sentinel is added or removed -- see profile_validate.py's
+    # own KNOB_QUESTIONS for the authoritative, drift-guarded set.)
+    base_profile["glossary"]["enabled"] = True
     base_profile["glossary"]["research_mode"] = "offline"
+    base_profile["footnotes"]["apparatus_policy"] = "translate_all"
+    base_profile["output"]["v1_scope"] = "segment_drafts_and_audit"
+    base_profile["output"]["target"] = "obsidian"
     jsonschema.validate(instance=base_profile, schema=schema)  # sanity: base itself is valid
 
     for bad_key in ("cross_cohort_guard", "implausible_ratio_floor", "implausible_ratio_ceiling"):
