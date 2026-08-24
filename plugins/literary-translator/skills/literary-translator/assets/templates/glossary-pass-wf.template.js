@@ -1191,6 +1191,31 @@ function foldedPrepareLines(batch, attempt) {
   return lines
 }
 
+// #724 -- HOW A WAIT TURN IS TOLD TO REPLY, shared verbatim by both wait prompt
+// builders exactly as foldedPrepareLines() is, and holding the live/offline fork
+// in ONE place.
+//
+// Under LIVE the turn that finds the fragment also prepares its evidence, so the
+// tail IS the folded prepare block above. Under OFFLINE there is nothing to
+// prepare -- no snapshot, no retrieval -- so the wait keeps the bare READY reply
+// and the blanket "do nothing else" clause that is the only thing standing
+// between the one suggested command and whatever else its bash tool allows
+// (tests/glossary_snapshot_ordering.test.py pins that clause at both rendered
+// call sites, and pins the narrower live pair that replaces it).
+//
+// The chunk poll and the re-check must agree on the reply grammar for the same
+// reason they must splice the identical checkBatchCmd(): the gate that declares
+// a timeout and the gate that declares readiness ask one question. Rendering
+// both tails from here makes that true by construction rather than by the two
+// builders happening to carry the same sentences.
+function waitReplyTailLines(batch, attempt) {
+  if (CITATION_REVIEW_ENABLED) return foldedPrepareLines(batch, attempt)
+  return [
+    "If it exits 0 (the fragment validated), return exactly the line: READY " + batch.index,
+    "Do nothing else -- do not touch any files, and do not resolve any candidates yourself.",
+  ]
+}
+
 function batchWaitChunkPrompt(batch, attempt, chunkIndex) {
   const checkCmd = checkBatchCmd(batch.index, attempt)
   const lines = []
@@ -1198,12 +1223,7 @@ function batchWaitChunkPrompt(batch, attempt, chunkIndex) {
   lines.push("FIRST COMMAND. Run exactly this one bash command, passing a bash tool timeout of " + WAIT_CHUNK_TOOL_TIMEOUT_MS + " ms -- an elapsed-time poll that re-validates this batch's own fragment directly:")
   lines.push("end=$((SECONDS + " + waitChunkSec(chunkIndex) + ")); while true; do " + checkCmd + " >/dev/null 2>&1 && exit 0; [ $SECONDS -ge $end ] && break; slp=$((end-SECONDS)); [ $slp -gt 20 ] && slp=20; [ $slp -gt 0 ] && sleep $slp; done; echo LT_CHUNK_BOUND; exit 1")
   lines.push("If it did NOT exit 0 -- it printed LT_CHUNK_BOUND, or the call was cut short for any reason at all -- stop here and return exactly the single line: PENDING " + batch.index)
-  if (CITATION_REVIEW_ENABLED) {
-    for (const line of foldedPrepareLines(batch, attempt)) lines.push(line)
-  } else {
-    lines.push("If it exits 0 (the fragment validated), return exactly the line: READY " + batch.index)
-    lines.push("Do nothing else -- do not touch any files, and do not resolve any candidates yourself.")
-  }
+  for (const line of waitReplyTailLines(batch, attempt)) lines.push(line)
   return lines.join("\n")
 }
 
@@ -1229,12 +1249,7 @@ function batchWaitRecheckPrompt(batch, attempt) {
   lines.push("FIRST COMMAND. Run exactly this one bash command. It does NOT poll and returns immediately:")
   lines.push(checkCmd + " >/dev/null 2>&1")
   lines.push("If it did NOT exit 0, stop here and return exactly the single line: PENDING " + batch.index)
-  if (CITATION_REVIEW_ENABLED) {
-    for (const line of foldedPrepareLines(batch, attempt)) lines.push(line)
-  } else {
-    lines.push("If it exits 0 (the fragment validated), return exactly the line: READY " + batch.index)
-    lines.push("Do nothing else -- do not touch any files, and do not resolve any candidates yourself.")
-  }
+  for (const line of waitReplyTailLines(batch, attempt)) lines.push(line)
   return lines.join("\n")
 }
 

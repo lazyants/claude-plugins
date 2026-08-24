@@ -917,6 +917,16 @@ def validate_plugin_root_field(payload: dict) -> None:
         )
 
 
+def glossary_manifest_path(glossary_run_dir: Path, index) -> Path:
+    """One batch's per-batch manifest, spelled in ONE place. This script WRITES
+    it (write_glossary_manifests) and then READS it back as the coverage
+    argument of the resume probe's --check-batch (probe_resumed_batches, #724).
+    Two copies of this filename is how the probe comes to check coverage
+    against a manifest this script never wrote -- the same one-derivation rule
+    glossary_run_dir_for() exists for, one level down."""
+    return glossary_run_dir / f"manifest_{index}.json"
+
+
 def write_glossary_manifests(glossary_run_dir: Path, batches) -> None:
     """Atomically writes manifest_{index}.json (per batch, deduped) and the
     aggregate manifest_all.json (union of every batch, deduped). Assumes
@@ -925,7 +935,7 @@ def write_glossary_manifests(glossary_run_dir: Path, batches) -> None:
     for batch in batches:
         index = batch["index"]
         names = batch["names"]
-        _atomic_write_json(glossary_run_dir / f"manifest_{index}.json", sorted(set(names)))
+        _atomic_write_json(glossary_manifest_path(glossary_run_dir, index), sorted(set(names)))
         all_names.extend(names)
 
     _atomic_write_json(glossary_run_dir / "manifest_all.json", sorted(set(all_names)))
@@ -984,7 +994,7 @@ def probe_resumed_batches(glossary_run_dir: Path, durable_root: Path, batches, r
                 [
                     sys.executable, str(script), "--check-batch", str(fragment),
                     "--research-mode", research_mode,
-                    "--expect-source-forms-file", str(glossary_run_dir / f"manifest_{index}.json"),
+                    "--expect-source-forms-file", str(glossary_manifest_path(glossary_run_dir, index)),
                 ],
                 capture_output=True, text=True, timeout=120,
             )

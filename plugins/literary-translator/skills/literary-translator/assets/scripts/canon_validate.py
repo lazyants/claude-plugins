@@ -3678,7 +3678,7 @@ def main(argv=None) -> int:
             # so honoring either flag would vouch for bytes nothing reviewed.
             parser.error(
                 f"validate-only (no mode flag) does not accept {flag_name} -- "
-                f"it reviews no single fragment. Pass --check-batch."
+                "it reviews no single fragment. Pass --check-batch."
             )
     # #505 -- every mode that refuses --citations-reviewed, with its own
     # reason. Same table-driven shape as --approve-to above: the attestation
