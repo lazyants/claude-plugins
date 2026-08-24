@@ -127,7 +127,8 @@ accidentally omit declaring the precondition):
     validation while silently omitting a candidate name.
 
 --merge-batches P1 P2 ... [--expect-source-forms-file M.json is NOT
-accepted here -- see --verify-merged] [--citations-reviewed]
+accepted here -- see --verify-merged] [--citations-reviewed
+--approval-records R1 R2 ... (required together, one record per fragment)]
     ONE process, single canon.json load: validates ALL given fragments
     (Pass 1 + offline backstop + #505's live citation attestation) FIRST,
     before merging any of them, so a later fragment's failure never leaves
@@ -169,8 +170,8 @@ M.json]
     "missing": [...]}` -- the exact relay shape the glossary-pass
     Workflow's disk-verify agent (`CANON_VERIFY_SCHEMA`) returns.
 
---batch PATH [--citations-reviewed] (legacy, single-fragment merge -- KEPT
-for existing callers)
+--batch PATH [--citations-reviewed --approval-records R (required
+together)] (legacy, single-fragment merge -- KEPT for existing callers)
     The pre-1.2.0 merge path: Pass 1 + offline backstop + #505's live
     citation attestation on the one fragment, merge, stamp
     generation_hashes, in-memory Pass 2, one atomic write, disk-re-read
