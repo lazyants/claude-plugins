@@ -16,7 +16,7 @@ dispatch happens:
    input+version digest, never by merely reusing a RUN_ID. Every input
    that can change what a cached agent result MEANS -- the raw args, the
    resolved profile-derived substitution values burned into the
-   instantiated Workflow template that can change one (a `live`->`offline`
+   instantiated Workflow template that can change that meaning (a `live`->`offline`
    research_mode flip changes agent policy without changing any single
    hashed byte otherwise; a preflight volume cap that only refuses or
    admits the batch cannot, and since #735 is not hashed -- see
@@ -459,10 +459,11 @@ SUBST_FIELDS = frozenset({
 # need adjusting once a book's real shape is known also the one that
 # punished adjusting it, since a moved digest mints a fresh RUN_ID and every
 # draft in flight then fails its dispatch_token check with
-# DRAFT_TOKEN_MISMATCH and re-translates. Same reasoning cache_key.py's
-# compute_agent_config_hash already applies to batch_agent_cap ("a pure
-# orchestration/scheduling knob with zero effect on translator/reviewer
-# output semantics").
+# DRAFT_TOKEN_MISMATCH and re-translates. compute_agent_config_hash already
+# applies that same reasoning to batch_agent_cap, which references/gotchas.md
+# prices as "a pure orchestration/scheduling knob with zero effect on
+# translator/reviewer output semantics" -- that wording is the doc's, not a
+# comment in cache_key.py, which carries none at that function.
 #
 # STILL HASHED, and deliberately, though it is a scheduling knob by the same
 # description: "batch_agent_cap". Excluding it was not asked for by the issue

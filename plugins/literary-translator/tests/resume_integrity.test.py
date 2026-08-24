@@ -1544,15 +1544,10 @@ def test_payload_plugin_root_absent_and_empty_produce_the_same_digest(tmp_path):
 # one lives INSIDE `subst`, so the accepted set and the hashed set are no longer
 # the same object: SUBST_FIELDS stays the producer-side contract every payload
 # must satisfy, and DIGEST_SUBST_FIELDS is the subset compute_input_digest()
-# actually projects. The knob is a preflight VOLUME CAP -- it decides whether a
-# batch is refused before any dispatch and reaches no agent prompt and no
-# translation, review or ledger artifact (the preflight's own refusal result
-# and the driver's session journal do record it, as diagnostics ABOUT the run
-# rather than a cached result a later run could reuse) -- so hashing it made
-# the ONE knob most likely to
-# need adjusting once a book's real shape is known also the one that punished
-# adjusting it (fresh RUN_ID -> DRAFT_TOKEN_MISMATCH on every draft in flight).
-# Same reasoning `agent_config_hash` already applies to batch_agent_cap.
+# actually projects. See DIGEST_SUBST_FIELDS's own comment for WHY the knob is
+# excluded -- which consumers it has, and what does and does not record it.
+# Enumerating that here too is how the third copy comes to disagree with the
+# other two.
 # ---------------------------------------------------------------------------
 
 # Every member DIGEST_SUBST_FIELDS still projects, each mapped to a value that
@@ -1592,8 +1587,12 @@ def _digest_with_subst(tmp_path, name, kind, subst_overrides):
     candidate, so neither call could resume in any case; the isolation is what
     makes that irrelevant rather than something to reason about.)"""
     root = make_resume_setup_root(tmp_path, name=name)
-    write_fixture_cache_keys(root, mass_base_cache_keys())
-    payload = mass_base_payload() if kind == "mass" else _glossary_base_payload()
+    if kind == "mass":
+        # Only the mass branch shells out to cache_key.py, so only it needs these.
+        write_fixture_cache_keys(root, mass_base_cache_keys())
+        payload = mass_base_payload()
+    else:
+        payload = _glossary_base_payload()
     payload["subst"] = {**payload["subst"], **subst_overrides}
     proc, parsed = run_resume_setup(root, payload)
     parsed = assert_setup_success(proc, parsed)
