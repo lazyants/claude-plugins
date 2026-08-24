@@ -1144,11 +1144,18 @@ depends on wholly and which is citation-reviewed either way.
 1. **Final merge** — Claude, `effort:'low'`, **no** `agentType`, **no**
    `schema`: runs `canon_validate.py --merge-batches <frag1> <frag2> …
    --research-mode X --plugin-root {{PLUGIN_ROOT}}` — plus, under `live` only,
-   `--citations-reviewed` (**#505**: the writer refuses to freeze a
+   `--citations-reviewed` **and `--approval-records <rec1> <rec2> …`**
+   (**#505**: the writer refuses to freeze a
    `basis:"established"` citation nobody attested a review for, and under
    `live` every batch reaching this call has passed a `CITATIONS_OK` verdict;
-   under `offline` no review runs and none is needed, so the flag is correctly
-   absent) — the single serialized writer that closes #90 (see
+   under `offline` no review runs and none is needed, so both flags are
+   correctly absent. **#734**: the attestation no longer travels alone — one
+   `glossary-approval/1` record per fragment, in the SAME ORDER, each naming
+   that fragment's sha256, and the merge refuses without them. The pairing is
+   positional rather than derived from the filenames, so a rename on either side
+   cannot silently pair a fragment with a record that is not its own. The reader
+   can only REFUSE: no record authorizes skipping the review) — the single
+   serialized writer that closes #90 (see
    `references/canon-and-glossary.md` for the merge algorithm). **1.16.0:**
    under `live` those `<frag>` paths are each batch's approved SNAPSHOT
    (`approved_{index}_attempt_{n}.json`), not the mutable attempt fragment, so

@@ -54,6 +54,7 @@ isolated tmp_path durable_root (via the sanctioned _senses_fixture helper),
 with a stub cache_key.py, so the script's self-anchoring resolves against the
 fixture and never this repo's assets tree.
 """
+import hashlib
 import json
 import shutil
 import subprocess
@@ -114,6 +115,29 @@ def make_durable_root(tmp_path):
 def write_batch(root, batch, name="batch.json"):
     path = root / name
     path.write_text(json.dumps(batch, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def write_approval_record(root, batch_path, name=None, sha256=None,
+                          schema="glossary-approval/1"):
+    """The #734 verdict record for `batch_path`, digested from the bytes ON
+    DISK -- never from the object that produced them, so a test that writes a
+    fragment and then a record is asserting about the same bytes the script
+    will read.
+
+    `sha256` and `schema` are overridable so a fixture can build a record that
+    is well-formed but WRONG, which is the only kind this file's refusal tests
+    are about; the default is the honest one."""
+    raw = Path(batch_path).read_bytes()
+    path = root / (name or (Path(batch_path).stem + "_approval.json"))
+    path.write_text(
+        json.dumps({
+            "schema": schema,
+            "sha256": sha256 if sha256 is not None else hashlib.sha256(raw).hexdigest(),
+            "recorded_from": str(batch_path),
+        }),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -201,6 +225,10 @@ def test_live_merge_batches_refuses_an_unattested_established_item(tmp_path):
 def test_live_merge_batches_accepts_an_attested_established_item(tmp_path):
     root = make_durable_root(tmp_path)
     batch_path = write_batch(root, [accepted_established("Roi Soleil")])
+    # #734: the attestation no longer travels alone. Every call in this file
+    # that expects the merge to SUCCEED now carries the record the flag rests
+    # on; the calls that expect a refusal deliberately do not, and say so.
+    record_path = write_approval_record(root, batch_path)
 
     proc = run_cli(
         root,
@@ -210,6 +238,8 @@ def test_live_merge_batches_accepts_an_attested_established_item(tmp_path):
             "--merge-batches",
             str(batch_path),
             "--citations-reviewed",
+            "--approval-records",
+            str(record_path),
         ],
     )
 
@@ -317,12 +347,15 @@ def test_non_merge_modes_refuse_the_attestation(
 def test_a_second_attested_merge_of_the_same_bytes_moves_nothing(tmp_path):
     root = make_durable_root(tmp_path)
     batch_path = write_batch(root, [accepted_established("Roi Soleil")])
+    record_path = write_approval_record(root, batch_path)
     args = [
         "--research-mode",
         "live",
         "--merge-batches",
         str(batch_path),
         "--citations-reviewed",
+        "--approval-records",
+        str(record_path),
     ]
 
     first = run_cli(root, args)
@@ -369,3 +402,214 @@ def test_offline_established_item_still_fails_through_the_backstop(tmp_path):
         "never displace that message, or an operator is told to attest a "
         "review that offline has no way to run"
     )
+
+
+# ---------------------------------------------------------------------------
+# 9. #734 -- the attestation must rest on a record, and the record must be
+#    about THESE bytes.
+#
+# WHY THIS SECTION EXISTS AT ALL, since #723 shipped the record deliberately
+# unread. The pass already decided whether to merge on whether the record had
+# been written -- and it decided it by reading an AGENT'S SENTENCE claiming so.
+# That is not "no consumer"; it is a consumer trusting an unverified claim. The
+# reviewer on #734 pointed at it and the fix moves the decision onto the
+# filesystem.
+#
+# What these tests do NOT claim, because the check cannot deliver it: that the
+# record is HONEST. The same agent turn runs the write command and reports on
+# it, so a turn willing to fabricate the sentinel can equally run a command that
+# writes a well-formed record. What is closed is the case that happens without
+# malice -- the command never ran, or failed -- and every test below is written
+# against that case rather than against an adversary.
+# ---------------------------------------------------------------------------
+
+
+def test_live_attested_merge_refuses_without_a_record(tmp_path):
+    """The direction that closes the hole. A caller that attests and offers no
+    evidence is halted before anything is merged, and the message names the
+    flag it must add rather than only the flag it may not use."""
+    root = make_durable_root(tmp_path)
+    batch_path = write_batch(root, [accepted_established("Roi Soleil")])
+    before = canon_bytes(root)
+
+    proc = run_cli(
+        root,
+        ["--research-mode", "live", "--merge-batches", str(batch_path),
+         "--citations-reviewed"],
+    )
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "--approval-records" in proc.stderr
+    assert canon_bytes(root) == before, "the refusal must precede every write"
+
+
+def test_a_record_for_other_bytes_refuses_the_merge(tmp_path):
+    """THE test of this section, and the only one that fails an implementation
+    which merely checks the record EXISTS.
+
+    The record is well-formed and its schema is right; it simply attests to a
+    different fragment. That is exactly the shape a stale record takes -- a
+    batch regenerated to a later attempt while an earlier attempt's record sits
+    beside it -- and it is the shape #723's own motivating incident had: a batch
+    merged under an attestation whose only recorded verdicts belonged to other
+    bytes."""
+    root = make_durable_root(tmp_path)
+    batch_path = write_batch(root, [accepted_established("Roi Soleil")])
+    other_path = write_batch(root, [accepted_established("Vert Galant")],
+                             name="other.json")
+    stale_record = write_approval_record(root, other_path)
+    before = canon_bytes(root)
+
+    proc = run_cli(
+        root,
+        ["--research-mode", "live", "--merge-batches", str(batch_path),
+         "--citations-reviewed", "--approval-records", str(stale_record)],
+    )
+
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "sha256" in payload["error"]
+    assert canon_bytes(root) == before, "the refusal must precede every write"
+
+
+def test_a_record_of_the_wrong_schema_refuses_the_merge(tmp_path):
+    """A record whose digest is RIGHT but whose schema is not this one. Worth
+    its own case rather than folding into the digest test: the digest is the
+    interesting field, so an implementation that checked only the digest would
+    accept any JSON object that happened to carry a matching sha256 -- including
+    one written by a future, differently-meaning record format."""
+    root = make_durable_root(tmp_path)
+    batch_path = write_batch(root, [accepted_established("Roi Soleil")])
+    wrong = write_approval_record(root, batch_path, schema="glossary-approval/2")
+    before = canon_bytes(root)
+
+    proc = run_cli(
+        root,
+        ["--research-mode", "live", "--merge-batches", str(batch_path),
+         "--citations-reviewed", "--approval-records", str(wrong)],
+    )
+
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "schema" in payload["error"]
+    assert canon_bytes(root) == before
+
+
+def test_a_missing_record_file_refuses_the_merge(tmp_path):
+    """The literal case the sentinel could lie about: the write command never
+    ran, so there is no file at all."""
+    root = make_durable_root(tmp_path)
+    batch_path = write_batch(root, [accepted_established("Roi Soleil")])
+    before = canon_bytes(root)
+
+    proc = run_cli(
+        root,
+        ["--research-mode", "live", "--merge-batches", str(batch_path),
+         "--citations-reviewed", "--approval-records",
+         str(root / "approval_that_was_never_written.json")],
+    )
+
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert canon_bytes(root) == before
+
+
+def test_records_are_paired_positionally_and_the_counts_must_match(tmp_path):
+    """One record per fragment, same order. A count mismatch is refused rather
+    than zipped short -- Python's zip() would silently drop the unpaired tail,
+    merging a fragment nothing attested to while every check that DID run
+    passed."""
+    root = make_durable_root(tmp_path)
+    first = write_batch(root, [accepted_established("Roi Soleil")], name="a.json")
+    second = write_batch(root, [accepted_established("Vert Galant")], name="b.json")
+    only_one = write_approval_record(root, first)
+    before = canon_bytes(root)
+
+    proc = run_cli(
+        root,
+        ["--research-mode", "live", "--merge-batches", str(first), str(second),
+         "--citations-reviewed", "--approval-records", str(only_one)],
+    )
+
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "one record per merged fragment" in payload["error"]
+    assert canon_bytes(root) == before
+
+
+def test_a_later_fragments_bad_record_refuses_before_the_first_is_merged(tmp_path):
+    """The all-or-nothing property #505 already claims for the attestation,
+    extended to its evidence. Pinned because the loop that enforces it is the
+    same pre-merge loop, and moving the record check into the merge loop would
+    leave fragment 0 merged and fragment 1 refused -- a canon.json nobody
+    intended and no mode reports."""
+    root = make_durable_root(tmp_path)
+    first = write_batch(root, [accepted_established("Roi Soleil")], name="a.json")
+    second = write_batch(root, [accepted_established("Vert Galant")], name="b.json")
+    good = write_approval_record(root, first)
+    bad = write_approval_record(root, second, name="b_bad.json",
+                                sha256="0" * 64)
+    before = canon_bytes(root)
+
+    proc = run_cli(
+        root,
+        ["--research-mode", "live", "--merge-batches", str(first), str(second),
+         "--citations-reviewed", "--approval-records", str(good), str(bad)],
+    )
+
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert canon_bytes(root) == before, (
+        "the FIRST fragment must not have been merged -- a later fragment's "
+        "unbacked attestation has to refuse the whole call"
+    )
+
+
+def test_records_without_the_attestation_are_refused(tmp_path):
+    """The other direction. --approval-records alone verifies something the
+    caller then does not claim, so it changes no outcome -- the shape a reader
+    mistakes for a guarantee."""
+    root = make_durable_root(tmp_path)
+    batch_path = write_batch(root, [accepted_transliterated("Guerin")])
+    record_path = write_approval_record(root, batch_path)
+
+    proc = run_cli(
+        root,
+        ["--research-mode", "live", "--merge-batches", str(batch_path),
+         "--approval-records", str(record_path)],
+    )
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "unrecognized arguments" not in proc.stderr
+    assert "--citations-reviewed" in proc.stderr
+
+
+def test_the_legacy_single_batch_merge_enforces_the_record_too(tmp_path):
+    """The mode that historically escaped every table-driven guard. A record
+    check present only on --merge-batches would be bypassable by one different
+    CLI spelling of the same merge."""
+    root = make_durable_root(tmp_path)
+    batch_path = write_batch(root, [accepted_established("Roi Soleil")])
+    stale = write_approval_record(root, batch_path, name="stale.json",
+                                  sha256="1" * 64)
+    before = canon_bytes(root)
+
+    refused = run_cli(
+        root,
+        ["--research-mode", "live", "--batch", str(batch_path),
+         "--citations-reviewed", "--approval-records", str(stale)],
+    )
+    assert refused.returncode != 0, refused.stdout + refused.stderr
+    assert canon_bytes(root) == before
+
+    # ...and the honest record is accepted by that same mode, so the assertion
+    # above is about the RECORD and not about --batch refusing the flag outright.
+    good = write_approval_record(root, batch_path)
+    accepted = run_cli(
+        root,
+        ["--research-mode", "live", "--batch", str(batch_path),
+         "--citations-reviewed", "--approval-records", str(good)],
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert canon_bytes(root) != before

@@ -864,19 +864,31 @@ function approveBatchCmd(index, attempt) {
 // and cannot: it re-checks shape and coverage off disk, not verdicts.
 //
 // THE ONE THING IT IS NOT, and this is load-bearing rather than a caveat.
-// NOTHING IN THIS FILE READS IT BACK. It is written here and consumed by a
-// PERSON -- the operator who holds --citations-reviewed, from outside the
-// directory the dispatch agent can write. The moment anything in this pass
-// reads it to skip work, it stops being evidence and becomes a review-skip
-// CREDENTIAL sitting inside a model-writable directory, and every agent in this
-// pass holds unrestricted Bash. That design was considered for #723 and
-// deliberately refused: a disk-based skip is already permitted for dispatch
-// (see the resume-skip) and already REFUSED for the review (see this file's
-// header), and the bindings that would "harden" such a credential -- batch
-// index, run id, manifest and byte digests -- are all values the dispatch agent
-// legitimately holds, so they defend against MOVING an honest record, never
-// against forging one. tests/canon_approval_record.test.py asserts the absence
-// of any reader rather than trusting this comment.
+// IT MAY REFUSE, AND IT MAY NEVER PERMIT. #723 shipped it with no reader at
+// all; #734 gave it exactly one -- canon_validate.py's --approval-records, which
+// the merge now carries and which refuses --citations-reviewed unless a record
+// names the sha256 of every fragment being merged. That reader can only make
+// the merge FAIL. The moment anything reads it to SKIP work it stops being
+// evidence and becomes a review-skip CREDENTIAL sitting inside a model-writable
+// directory, and every agent in this pass holds unrestricted Bash. That design
+// was considered for #723 and deliberately refused: a disk-based skip is
+// already permitted for dispatch (see the resume-skip) and already REFUSED for
+// the review (see this file's header), and the bindings that would "harden"
+// such a credential -- batch index, run id, manifest and byte digests -- are all
+// values the dispatch agent legitimately holds, so they defend against MOVING
+// an honest record, never against forging one.
+//
+// WHY THE ONE READER IS STILL WORTH ITS LINES, given that. It buys no defence
+// against a hostile agent: the same turn that runs the write command reports on
+// it, so a turn willing to fabricate the sentinel can equally run a command that
+// writes a well-formed record. What it closes is the case that happens WITHOUT
+// malice -- the command never ran, or failed, and the reply said otherwise --
+// which the pass previously decided by reading that reply. #734's reviewer
+// pointed out that "nothing reads it" was already untrue in the weakest possible
+// way: unrecordedBatches below gated the merge on an agent's sentence. This
+// moves that decision onto the filesystem and leaves its DIRECTION alone.
+// tests/canon_approval_record.test.py asserts refuse-never-permit structurally
+// rather than trusting this comment.
 //
 // ATTEMPT-scoped, beside the snapshot it vouches for, and wiped by
 // resume_setup.py under BOTH flags exactly like approved_* -- a record is an
@@ -1608,7 +1620,7 @@ function approvalRecordPrompt(batch, attempt) {
 // producing codex job has since written to the attempt path. Under offline they
 // are the attempt paths, because no review and therefore no snapshot exists
 // there. See batchStep()'s two ready-returns.
-function mergeBatchesPrompt(fragments) {
+function mergeBatchesPrompt(fragments, approvalRecords) {
   const lines = []
   lines.push("Effort: low. Mechanical glossary batch-merge only -- no canonicalization judgment.")
   lines.push("Durable root: " + ROOT + ".")
@@ -1626,7 +1638,30 @@ function mergeBatchesPrompt(fragments) {
   // mergePath above). Under offline no review runs -- and none is needed,
   // since basis:"established" is forbidden outright there -- so the flag is
   // correctly absent rather than asserted vacuously.
-  if (CITATION_REVIEW_ENABLED) cmdParts.push("--citations-reviewed")
+  if (CITATION_REVIEW_ENABLED) {
+    cmdParts.push("--citations-reviewed")
+    // #734 -- the attestation now travels with the evidence it rests on, and
+    // canon_validate.py REFUSES --citations-reviewed without it. One record per
+    // fragment, in the SAME ORDER as the fragments above, because the script
+    // pairs them positionally: it will not derive approval_{i}_attempt_{n}.json
+    // from approved_{i}_attempt_{n}.json, deliberately, since that would teach
+    // the script this template's private filename convention and let a rename
+    // on either side silently pair a fragment with a record that is not its own.
+    //
+    // WHAT CHANGED, AND WHAT DID NOT. #723 wrote this record for the operator
+    // and gave it no reader, on the reasoning that a record nothing consults
+    // cannot be forged into an authorization. But the pass ALREADY refused the
+    // merge when the record was missing (see unrecordedBatches below) -- and it
+    // decided that by reading the recording agent's own SENTENCE. This moves
+    // that one decision onto the filesystem. It grants the record nothing: a
+    // record can only cause a REFUSAL here, never permit anything the review
+    // did not already permit, and the citation review itself is still
+    // unconditional for every batch on both entry points.
+    for (let i = 0; i < approvalRecords.length; i++) {
+      if (i === 0) cmdParts.push("--approval-records")
+      cmdParts.push(approvalRecords[i])
+    }
+  }
   // #412: --merge-batches is one of canon_validate.py's STAMPING modes (it
   // calls _stamp_generation_hash via run_merge_batches), so it is the one
   // command this template threads PLUGIN_ROOT_ARG into -- see the header
@@ -2429,9 +2464,15 @@ if (notReadyBatches.length > 0) {
 // matches the merge's own: one serialized --merge-batches call over every
 // fragment, so there is no partial outcome to express here either.
 //
-// This does NOT make the record an in-band gate. Nothing reads its CONTENTS;
-// only the write command's own success is consumed, so a forged record grants
-// nobody anything -- see approvalRecordPath()'s comment.
+// THIS gate still consumes only the write command's reported success, and it is
+// deliberately kept as the CHEAP, EARLY half: it fails the run before the merge
+// call is even dispatched, with an operator message naming the command to re-run
+// by hand. Since #734 it is no longer the only thing standing there -- the merge
+// command carries --approval-records, and canon_validate.py re-decides the same
+// question off disk, over the bytes it is about to merge. So a reply that lies
+// here no longer reaches a merge; it reaches a refusal one step later, with a
+// worse message. Both directions are refusals, and neither lets a record permit
+// anything -- see approvalRecordPath()'s comment.
 const unrecordedBatches = readyBatches.filter((r) => r.citationReview === "approved" && !r.approvalRecorded)
 if (unrecordedBatches.length > 0) {
   log(
@@ -2458,7 +2499,14 @@ const fragments = readyBatches.map((r) => r.mergePath)
 // ONE serialized merge call (never concurrent with itself, and never run
 // until every batch's own fragment has independently passed --check-batch
 // above) -- this is the fix for #90's shared-canon.json race.
-await agent(mergeBatchesPrompt(fragments), {
+// #734 -- built from the SAME readyBatches list, in the same order, so the
+// positional pairing canon_validate.py requires holds by construction rather
+// than by two maps happening to agree. Under offline there is no review, no
+// approval and no record, and CITATION_REVIEW_ENABLED keeps the flag off the
+// command entirely.
+const approvalRecords = readyBatches.map((r) => approvalRecordPath(r.batchIndex, r.attempt))
+
+await agent(mergeBatchesPrompt(fragments, approvalRecords), {
   effort: "low", phase: "Merge", label: "glossary:merge",
 })
 

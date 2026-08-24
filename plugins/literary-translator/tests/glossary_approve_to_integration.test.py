@@ -29,6 +29,7 @@ the real seam rather than within one script's own suite.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
@@ -374,6 +375,27 @@ def emitted_merge_cmd(merge_prompt: str) -> str:
     return line[line.index("python3 "):]
 
 
+def emitted_record_cmd(record_prompt: str) -> str:
+    """The --record-approval-to command the template ACTUALLY emitted into the
+    approval-record prompt (#723), lifted the same way for the same reason.
+
+    #734 made this leg part of the round-trip rather than an aside: the merge
+    command now carries --approval-records and canon_validate.py refuses the
+    attestation without a record whose sha256 matches the fragment. So the only
+    way the merge half of this test can pass is if the record the template asks
+    for is a record the merge accepts -- which is exactly the cross-language
+    agreement this file exists to prove, and which neither the Python unit tests
+    nor the mocked Node harness can reach on their own."""
+    lines = [ln for ln in record_prompt.split("\n") if "--record-approval-to" in ln]
+    assert len(lines) == 1, (
+        f"expected exactly one --record-approval-to line in the approval-record "
+        f"prompt, found {len(lines)}"
+    )
+    line = lines[0]
+    assert "python3 " in line, f"the record line does not begin a python3 command: {line}"
+    return line[line.index("python3 "):]
+
+
 def _crlf_fragment_bytes() -> bytes:
     """One accepted item, pretty-printed, terminated with CRLF. JSON permits
     CR/CRLF as inter-token whitespace, so this stays valid while carrying bytes
@@ -473,7 +495,37 @@ def test_the_emitted_approve_command_snapshots_byte_identically_against_the_real
         f"  banked:       {banked_merge_path}\n  python wrote: {approved}"
     )
 
+    # #734 -- the record leg, run BEFORE the merge because the merge now refuses
+    # without it. Both commands are the template's own, so this asserts the two
+    # agree about the record's PATH (the template builds each independently)
+    # and about its CONTENT (the digest canon_validate.py writes here is the one
+    # it re-computes there, over bytes that crossed the JS/Python seam as CRLF).
+    record_cmd = emitted_record_cmd(prompts_for(out, "glossary:approval-record:0")[0])
+    rargv = shlex.split(record_cmd)
+    assert rargv[0] == "python3", f"unexpected interpreter token in record command: {rargv[0]!r}"
+    rargv[0] = sys.executable
+    rproc = subprocess.run(rargv, capture_output=True, text=True, timeout=120)
+    assert rproc.returncode == 0, (
+        "the template's emitted --record-approval-to command failed against the "
+        f"real canon_validate.py:\n{rproc.stdout}\n{rproc.stderr}"
+    )
+    rpayload = json.loads(rproc.stdout.strip().splitlines()[-1])
+    record_written = Path(rpayload["approval_record_path"])
+    assert record_written.is_file(), (
+        f"the record command exited 0 but wrote nothing at {record_written}"
+    )
+    # The record is about the SNAPSHOT, not the mutable attempt path -- the
+    # distinction the whole snapshot-ordering design rests on. Asserted here
+    # because this is the only place both files exist on a real disk.
+    assert json.loads(record_written.read_text(encoding="utf-8"))["sha256"] == (
+        hashlib.sha256(approved.read_bytes()).hexdigest()
+    ), "the record's digest is not the digest of the approved snapshot"
+
     merge_cmd = emitted_merge_cmd(prompts_for(out, "glossary:merge")[0])
+    assert str(record_written) in merge_cmd, (
+        "the merge command must carry the very record path the record command "
+        f"wrote:\n  wrote: {record_written}\n  merge: {merge_cmd}"
+    )
     assert str(approved) in merge_cmd, (
         f"the emitted merge command does not name the approved snapshot:\n{merge_cmd}"
     )

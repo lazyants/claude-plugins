@@ -302,46 +302,123 @@ def test_the_refusal_column_is_one_column_governing_both_flags():
 
 
 # ---------------------------------------------------------------------------
-# The record has no in-band consumer, and must not grow one.
+# The record may REFUSE, and may never PERMIT.
+#
+# #723 shipped this record with no reader at all, and this section asserted
+# exactly that. #734 changed it: --citations-reviewed now REQUIRES a matching
+# record, because the pass was already refusing the merge when the record was
+# missing and was deciding that by reading the recording agent's own sentence.
+#
+# So the invariant this section pins is narrower than "nothing reads it", and it
+# is the one that was actually load-bearing. The danger was never reading; it
+# was reading to AUTHORIZE. The record lives in a directory the dispatch agent
+# can write, so a gate that let its presence PERMIT work would be a forgeable
+# credential -- specifically a review-skip credential, which is the design #723
+# was deliberately descoped away from. A gate that can only REFUSE grants a
+# forger nothing: the best a forged record achieves is the merge an honest one
+# would have allowed, and the citation review still runs unconditionally for
+# every batch on both entry points.
 # ---------------------------------------------------------------------------
 
-def test_no_shipped_caller_reads_the_record_back():
-    """The record sits in a directory the dispatch agent can write. That is safe
-    for exactly as long as nothing reads it to authorize work -- at which point
-    it becomes a forgeable review-skip credential, which is the design #723 was
-    deliberately descoped away from (the trusted point stays the operator, who
-    holds --citations-reviewed from outside the writable zone).
+def test_the_record_check_can_only_refuse():
+    """The enforcer raises or returns None -- it never yields a value a caller
+    could branch on to take a shortcut.
 
-    So: canon_validate.py may WRITE the record and must never READ one, and the
-    glossary template may name the record path in exactly one emitted command --
-    the write. A reading flag, or a second mention, is this property breaking.
-    """
+    Asserted on the function's own body rather than on behaviour because that is
+    where the property is: a check that returned True/False would invite a call
+    site to write `if record_ok: skip_review()`, and no runtime test of today's
+    call sites would notice the day someone did."""
     script = (SCRIPTS_DIR / "canon_validate.py").read_text(encoding="utf-8")
-    assert "--record-approval-to" in script
-    for reading_flag in ("--approved-record", "--require-approval", "--verify-approval"):
-        assert reading_flag not in script, (
-            f"{reading_flag} would make the audit record an in-band gate"
-        )
-    assert "_read_approval_record" not in script and "_load_approval_record" not in script
+    assert "def _enforce_approval_record(" in script
 
-    template = (TEMPLATES_DIR / "glossary-pass-wf.template.js").read_text(encoding="utf-8")
-    # The COMMAND-BUILDING form specifically -- ` --record-approval-to ` spliced
-    # into a concatenation -- not every mention of the flag's name. The operator
-    # message on the merge-refusal path names the command in prose so a human can
-    # run it by hand, and counting that as a consumer would be the assertion
-    # misreading its own subject. A SECOND builder is what this forbids.
-    builder_sites = template.count('" --record-approval-to "')
-    assert builder_sites == 1, (
-        f"the record path must be spliced into exactly ONE emitted command -- the "
-        f"write. Found {builder_sites} command-building sites; a second one is "
-        f"something starting to consume the record."
+    body = script[script.index("def _enforce_approval_record("):]
+    body = body[: body.index("\ndef ", 1)]
+    returns = [ln.strip() for ln in body.split("\n") if ln.strip().startswith("return")]
+    assert returns == [], (
+        f"_enforce_approval_record must only raise, never return a verdict a "
+        f"caller can branch on; found {returns}"
     )
-    assert "approvalRecordPath(" in template
-    # And nothing may read it: no emitted command may pass the record path to a
-    # flag that consumes it, under any spelling.
-    for reading_flag in ("--approved-record", "--require-approval", "--verify-approval"):
-        assert reading_flag not in template, (
-            f"{reading_flag} in the template would make the audit record an "
-            f"in-band gate -- the review-skip credential #723 was descoped away "
-            f"from"
+    assert "raise CanonValidationError" in body
+
+
+def test_the_record_never_gates_whether_the_citation_review_runs():
+    """The property #723's descope was really about, and the only one #734 could
+    have broken.
+
+    The review's own decision must not mention the record: no branch anywhere in
+    the template may consult approvalRecordPath() before the judge, or a batch
+    could arrive with a record already on disk and skip the audit. The record is
+    built in exactly two places -- the command that WRITES it, and the list handed
+    to the merge, which is downstream of an approval that already happened."""
+    template = (TEMPLATES_DIR / "glossary-pass-wf.template.js").read_text(encoding="utf-8")
+    # COMMENT LINES STRIPPED FIRST. This template discusses approvalRecordPath()
+    # by name at length -- the design note, the merge-refusal comment, the
+    # false-RED table -- and counting those would make the assertion a measure of
+    # how much prose the file carries. Measured: 7 raw occurrences, 3 of them
+    # code.
+    code = "\n".join(
+        ln for ln in template.split("\n") if not ln.strip().startswith("//")
+    )
+
+    # Its definition, the write command, and the merge's record list. Every one
+    # after the verdict; a fourth is something new consulting the record.
+    call_sites = code.count("approvalRecordPath(")
+    assert call_sites == 3, (
+        f"expected approvalRecordPath() at exactly three CODE sites -- its own "
+        f"definition, the --record-approval-to command, and the merge's record "
+        f"list -- found {call_sites}. A further site is something starting to "
+        f"consult the record."
+    )
+
+    # The decisive one: the review must be reached without reference to the
+    # record. batchStep() decides whether to prepare and judge; the record is
+    # written only after CITATIONS_OK, so nothing naming it may appear before
+    # that verdict is dispatched. batchStep reaches the record through
+    # recordApprovalCmd()/approvalRecordPrompt() rather than the path builder
+    # directly, so those are the names checked here -- checking the path builder
+    # would pass vacuously, never appearing in this function at all.
+    step = code[code.index("async function batchStep("):]
+    verdict_at = step.index("citationJudgePrompt(")
+    for name in ("approvalRecordPrompt(", "recordApprovalCmd("):
+        if name not in step:
+            continue
+        assert step.index(name) > verdict_at, (
+            f"{name} is reached BEFORE the judge is dispatched in batchStep() "
+            f"-- that is the record deciding whether the review happens, which "
+            f"is exactly the forgeable review-skip credential this design "
+            f"refuses"
         )
+    assert "approvalRecordPrompt(" in step, (
+        "batchStep no longer dispatches the record at all -- the assertion "
+        "above would then hold vacuously"
+    )
+
+
+def test_no_reading_flag_authorizes_skipping_the_review():
+    """--approval-records is the ONE reader, and it hangs off the merge's
+    attestation. Any flag that reads a record in a mode which does not merge
+    would be a record buying something, and this is the cheap tripwire for it."""
+    script = (SCRIPTS_DIR / "canon_validate.py").read_text(encoding="utf-8")
+    for skipping_flag in ("--skip-citation-review", "--review-recorded",
+                          "--trust-approval-record"):
+        assert skipping_flag not in script, (
+            f"{skipping_flag} would make the record authorize work rather than "
+            f"only refuse it"
+        )
+    template = (TEMPLATES_DIR / "glossary-pass-wf.template.js").read_text(encoding="utf-8")
+    for skipping_flag in ("--skip-citation-review", "--review-recorded",
+                          "--trust-approval-record"):
+        assert skipping_flag not in template
+
+
+def _retired_no_consumer_test_kept_as_prose():
+    """RETIRED IN #734: test_no_shipped_caller_reads_the_record_back.
+
+    It asserted that canon_validate.py never reads a record and that the
+    template splices the record path into exactly one emitted command. Both are
+    now false ON PURPOSE -- --approval-records reads one, and the merge command
+    carries the paths -- so the test was removed rather than loosened. What it
+    was protecting is not lost: it is re-stated above as "may refuse, may never
+    permit", which is the half of the old assertion that was ever load-bearing.
+    Kept as a named stub so a reader who greps for the old name finds out what
+    happened to it instead of concluding the coverage was dropped."""

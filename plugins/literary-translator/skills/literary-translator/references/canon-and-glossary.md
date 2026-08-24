@@ -747,15 +747,23 @@ Three properties worth stating exactly, because each is a limit:
 
 - **It is an attestation, not a proof.** The approved snapshot is written by
   PREPARE *before* any evidence is fetched, so "this path is an
-  `approved_*.json`" says nothing about the verdict, and `canon_validate.py`
-  reads nothing that does. **#723** narrowed the gap without closing it from
-  this side: the pass now writes `approval_{i}_attempt_{n}.json` naming the
+  `approved_*.json`" says nothing about the verdict. **#723** narrowed the gap:
+  the pass writes `approval_{i}_attempt_{n}.json` naming the
   sha256 of every APPROVED fragment, so the attesting operator can pick those
   exact bytes by digest instead of guessing which snapshot won — the guess that
-  once merged a batch whose only recorded verdicts were rejections. The record
-  is read by a PERSON and by nothing else: it lives in a directory the dispatch
-  agent can write, so a gate that trusted it would be a forgeable gate, and the
-  trusted point stays the operator. What the refusal
+  once merged a batch whose only recorded verdicts were rejections. **#734** then
+  made the script require it: `--citations-reviewed` is refused without
+  `--approval-records`, one record per merged fragment, each naming that
+  fragment's digest. **That reader can only REFUSE.** No record permits anything,
+  and none authorizes skipping the citation review — which stays unconditional on
+  both entry points — so a copy forged in the model-writable directory buys its
+  forger only the merge an honest record would have allowed, and the trusted
+  point stays the operator. What it removes is narrower than it looks and worth
+  stating exactly: until #734 the pass decided whether the record had been
+  written by reading the recording agent's own *sentence*, so a reply that
+  claimed a write that never happened merged anyway. The check moves that one
+  decision onto the filesystem; it cannot make the record HONEST, because the
+  same turn runs the command and reports on it. What the refusal
   converts is a SILENT freeze into a deliberate act, the same ceiling as
   `--plugin-root`/`--allow-durable-sibling` (#412) and `reject_review.py`'s
   attested `--reason` (#461).
