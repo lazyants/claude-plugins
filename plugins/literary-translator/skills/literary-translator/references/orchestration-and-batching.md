@@ -1245,7 +1245,8 @@ inside it:
   even though the total has moved past it — do not read a total as the
   composition.** 1.16.2 shipped 19 as `precheck 1 + 3*6`; **#723** made it 20 by
   adding the approval record; **#724** made it 19 AGAIN by deleting the precheck
-  — same figure, disjoint terms — before folding the prepare took it to 16.
+  — same figure, same `3*6` ladder, and a leading `1` that changed identity from
+  the precheck to the approval record — before folding the prepare took it to 16.
   Today's leading `1` is the RECORD, and there is no per-batch call before the
   ladder at all.
 

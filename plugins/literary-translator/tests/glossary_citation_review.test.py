@@ -140,10 +140,10 @@ EXPECTED_WAIT_CALLS = 3
 #
 # THAT LEADING 1 IS STILL NOT THE ONE 1.16.2 HAD, and the collision is worth
 # keeping in mind even though the total has since moved on: the ceiling passed
-# back through 19 on #724's precheck deletion, with terms disjoint from 1.16.2's
-# 19 -- 1.16.2's leading 1 was the per-batch resume precheck, today's is the
-# approval record, and there is no per-batch call before the ladder at all any
-# more. A regression that reinstates the precheck and drops the record sums to
+# back through 19 on #724's precheck deletion, carrying the SAME 3*6 ladder as
+# 1.16.2's 19 under a leading 1 that had changed identity -- 1.16.2's was the
+# per-batch resume precheck, today's is the approval record, and there is no
+# per-batch call before the ladder at all any more. A regression that reinstates the precheck and drops the record sums to
 # the same total -- which is why this file also asserts, separately, that the
 # template's own expression reads `1 + (2 + WAIT_CALLS) * ...`.
 #

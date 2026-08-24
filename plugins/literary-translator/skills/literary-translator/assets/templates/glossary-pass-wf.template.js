@@ -144,9 +144,12 @@
 //                        reaching 16*BATCHES.length + 2. See the preflight block
 //                        below for the derivation, and read it before trusting
 //                        any figure in this series: the live term passed through
-//                        19 TWICE with disjoint terms (1.16.2's precheck 1 + 3*6,
-//                        then #724's record 1 + 3*6) before the prepare fold took
-//                        it to 16.
+//                        19 TWICE with the SAME 3*6 ladder and a different
+//                        leading 1 (1.16.2's was the resume precheck, #724's is
+//                        #723's approval record) before the prepare fold took
+//                        it to 16. It is the identity of that leading term that
+//                        differs, not the arithmetic -- which is exactly why a
+//                        matching total is no evidence about the composition.
 //   {{RESUMED_BATCH_INDICES}} -- a BARE JSON array literal (never quoted),
 //                        copied verbatim from the `resumed_batch_indices` key
 //                        resume_setup.py reports for this glossary run: the

@@ -1674,8 +1674,9 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
 #
 #     The leading 1 in the live branch is #723's APPROVAL RECORD, not the
 #     resume precheck that led it until #724. Those two moves cancel, so the
-#     total passed back through the same 19 the 1.16.2 ladder gave -- and it
-#     was not the same nineteen -- before #724's prepare fold took the
+#     total passed back through the same 19 the 1.16.2 ladder gave, under the
+#     same 3*6 ladder with a leading 1 that had changed identity -- before
+#     #724's prepare fold took the
 #     PER-ATTEMPT term 6 -> 5 and the total to 16. See
 #     test_glossary_preflight_live_formula_is_16_batches_plus_2 for why a
 #     matching total proves nothing about the composition here.
@@ -2051,7 +2052,8 @@ GLOSSARY_APPROVAL_RECORD = 1
 # lead this expression as a bare `1 +`. That deletion and #723's record cancel
 # in the TOTAL while touching different terms: the ceiling was 19 before #723,
 # 20 after it, and passed back through 19 on the precheck deletion before the
-# prepare fold took it to 16. THAT INTERMEDIATE 19 IS NOT THE SAME 19, and a
+# prepare fold took it to 16. THAT INTERMEDIATE 19 CARRIES A DIFFERENT LEADING
+# TERM UNDER THE SAME LADDER, and a
 # diff that restores a precheck call while leaving this constant alone would
 # look right and under-charge by one call per batch -- the leading term today is
 # the RECORD, and there is no per-batch call before the ladder at all. Which is
@@ -2294,9 +2296,11 @@ NINETEEN WAS A COLLIDING NUMBER, and that is the first thing to know about
     this test rather than a footnote -- the total has since moved past it, but
     the lesson is why this assertion is not proof of anything. 1.16.2 shipped 19
     as `precheck 1 + 3*6`; #723 made it 20 by adding the approval record; #724
-    made it 19 AGAIN by deleting the precheck, so two consecutive releases gave
-    equal totals sharing no term; then #724's prepare fold took the per-attempt
-    term 6 -> 5 and the total to 16. A regression that reinstates the precheck
+    made it 19 AGAIN by deleting the precheck, so the term passed through the
+    same figure twice carrying the same 3*6 ladder under a leading 1 that had
+    changed identity -- the second 19 was never released, it is an intermediate
+    state of this branch; then #724's prepare fold took the per-attempt term
+    6 -> 5 and the total to 16. A regression that reinstates the precheck
     and drops the record -- or any other combination that sums to 16 -- passes
     this assertion. What
     catches that is not the total but
@@ -2305,36 +2309,53 @@ NINETEEN WAS A COLLIDING NUMBER, and that is the first thing to know about
     tests/glossary_pipeline_e2e.test.py's assertion that no precheck LABEL is
     ever spent. Do not treat this number as proof of the composition.
 
-    Wrong variants this discriminates against, each a plausible partial
-    implementation, with the per-batch term spelled out so the arithmetic can be
-    checked rather than taken on faith:
-      * the historical pre-1.16.0 estimate, review and ladder both uncharged:
-        1 dispatch + 1 wait                                   = 2  -> 2*N + 2
-      * the retry ladder charged but the review itself not:
-        (MAX_CITATION_RETRIES+1) * (dispatch + wait) = 3*2     = 6  -> 6*N + 2
-      * the review charged ONCE rather than per attempt:
-        3*2 + 1                                               = 7  -> 7*N + 2
-      * the 1.16.0 shape -- the full ladder, but the reviewer still counted as
-        ONE call per attempt rather than #347's prepare + judge pair:
-        3*(dispatch + wait + review) = 3*3                    = 9  -> 9*N + 2
-      * the 1.16.1 shape -- the split reviewer, but the wait still counted as
-        ONE call rather than #352's WAIT_CALLS:
-        3*(dispatch + wait + prepare + judge) = 3*4           = 12 -> 12*N + 2
+    Wrong variants this discriminates against, every one of them a build of
+    TODAY'S template that got one thing wrong, with the per-batch term spelled
+    out so the arithmetic can be checked rather than taken on faith. Framed that
+    way on purpose: an earlier version of this table mixed HISTORICAL estimates
+    in among them and its rows silently disagreed with each other about whether a
+    per-batch precheck was present, which produced two different rows claiming
+    the same total and one row whose arithmetic did not match its own
+    description. Today's template has no precheck, so no row carries one unless
+    reinstating it IS the error being described.
+
+    Correct: attempts 3 * (dispatch 1 + wait WAIT_CALLS 3 + judge 1) 5, plus the
+    one approval record = 16.
+
+      * the ladder not charged at all -- one attempt's cost plus the record:
+        5 + 1                                                 = 6  -> 6*N + 2
+      * the wait charged as ONE agent call, as it was through 1.16.1:
+        1 + 3*(1 + 1 + 1)                                     = 10 -> 10*N + 2
       * #352's chunks charged but its authoritative re-check not (WAIT_CALLS
-        read as WAIT_CHUNKS): 3*(1 + 2 + 2) = 3*5             = 15 -> 15*N + 2
+        read as WAIT_CHUNKS): 1 + 3*(1 + 2 + 1)               = 13 -> 13*N + 2
+      * the judge uncharged, i.e. the review counted as free because the fold
+        made its prepare half free: 1 + 3*(1 + 3)             = 13 -> 13*N + 2
+        (the same total as the row above -- this test cannot tell those two
+        apart, and does not claim to)
+      * #723's approval record uncharged, the one term that sits OUTSIDE the
+        ladder: 3*5                                           = 15 -> 15*N + 2
+      * the record charged PER ATTEMPT rather than once, the natural wrong
+        reading of "after every approval": 3*6                = 18 -> 18*N + 2
       * #724's FOLD left un-re-derived -- the prepare still charged as its own
-        per-attempt call, which is the 1.16.2/#723-era ladder and lands exactly
-        on the colliding total above:
-        1 + 3*6                                               = 19 -> 19*N + 2
-      * the full chunked ladder, but #723's approval record uncharged, which is
-        the one term that sits OUTSIDE the ladder:
-        3*5                                                   = 15 -> 15*N + 2
-      * the record charged PER ATTEMPT rather than once, which is the natural
-        wrong reading of "after every approval": 3*6          = 18 -> 18*N + 2
-      * #724's PRECHECK DELETION left un-re-derived -- the precheck still
-        charged alongside the record: 2 + 3*5                 = 17 -> 17*N + 2
-    Only the chunked ladder with its re-check, its FOLDED prepare, and ONE
-    record, with no precheck, gives 16. Cheap: the gate trips before pipeline()
+        per-attempt call: 1 + 3*6                             = 19 -> 19*N + 2
+      * #724's PRECHECK DELETION left un-re-derived -- the precheck charged
+        alongside the record: 2 + 3*5                         = 17 -> 17*N + 2
+
+    ONE KNOWN COLLISION, and it is stated rather than left for the next reader
+    to find: a build that reinstates the precheck AND leaves the fold
+    un-re-derived AND reads WAIT_CALLS as WAIT_CHUNKS spends
+    1 + 3*(1 + 2 + 2) = 16, exactly the asserted total. Three simultaneous
+    errors, so it is not a near-miss -- but it is the reason this assertion is
+    not evidence about the COMPOSITION, only about the total. What actually
+    catches it is
+    test_glossary_live_per_attempt_term_is_the_template_own_multiplier, which
+    requires the template's own expression to read
+    `1 + (2 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)` literally -- a
+    precheck-bearing, unfolded template cannot match that string -- plus
+    tests/glossary_pipeline_e2e.test.py's assertion that no precheck LABEL is
+    ever spent by a real run.
+
+    Cheap: the gate trips before pipeline()
     ever runs, so no PLAN and
     zero agent calls are needed."""
     batches = _glossary_batches(n_batches)
