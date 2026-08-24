@@ -1252,7 +1252,7 @@ Two consequences worth knowing:
   source marks emphasis reads that block's `source_html` — authoritative, one
   encoding each, and where the fix turn is already directed.
   Two report-only checks accept a small, recorded loss rather than fold:
-  `final_audit.py`'s W7 term-consistency counts no source occurrence of a
+  `final_audit.py`'s term-consistency check (WARN 6) counts no source occurrence of a
   pinned term the source italicises across its own middle
   (`Le pr<i>ésident</i>`), and `verbatim_census.py` splits a source-script run
   at an intra-word span, so it can queue a correct translation for reading.
@@ -1270,9 +1270,9 @@ Two consequences worth knowing:
   HTML's own ASCII terminator set, never Python's `\s` or `\b`: `-` and `:` are
   non-word characters and U+00A0 is `\s`, so `<i-foo>` and `<i` + NBSP + `>`
   would otherwise both read as italic. So emphasis can be *lost* (markup the
-  two regexes do not model, a definition whose text spans several block tags,
-  a hand-written extractor
-  emitting unbalanced HTML) but never invented or reordered.
+  two regexes do not model, a definition whose text spans several block tags, a
+  hand-written extractor emitting unbalanced HTML) but never invented or
+  reordered.
 
 Markdown `*...*` was the first design and it is **not** what shipped: a
 delimiter has flanking rules a tag does not. `<i>a</i><em>b</em>` conserves

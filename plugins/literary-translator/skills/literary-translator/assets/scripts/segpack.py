@@ -196,29 +196,29 @@ _TAG_RE = re.compile(r"<[^>]+>")
 # the source does not have.
 _HTML_TAG_WS = r"[ \t\r\n\f]"
 _EMPH_ANY_RE = re.compile(r"</?(?:i|em)(?=" + _HTML_TAG_WS + r"|[/>])", re.IGNORECASE)
-# `(?![^>]*/\s*>)` excludes a SELF-CLOSING `<i/>`: it opens nothing, and
-# counting it as an open emphasised the rest of the definition.
-# `(?=[\s/>])` and NOT `\b`: `-` and `:` are non-word characters, so `\b`
-# matches inside `<i-foo>` / `<i:foo>` and the captured "name" would be the
-# PREFIX `i` rather than the tag's own name -- inventing emphasis the source
-# does not have. `(?![^>]*/\s*>)` separately excludes a SELF-CLOSING `<i/>`,
-# which opens nothing.
+# The name terminator is `_HTML_TAG_WS`, for the reason stated at its
+# definition above. Unique to this pattern: `(?![^>]*/<ws>*>)` excludes a
+# SELF-CLOSING `<i/>` -- it opens nothing, and counting it as an open
+# emphasised the rest of the definition.
 _EMPH_OPEN_RE = re.compile(
     r"<(i|em)(?=" + _HTML_TAG_WS + r"|[/>])(?![^>]*/" + _HTML_TAG_WS + r"*>)[^>]*>",
     re.IGNORECASE,
 )
 _EMPH_CLOSE_RE = re.compile(r"</(i|em)" + _HTML_TAG_WS + r"*>", re.IGNORECASE)
+# Both of the two patterns above CAPTURE which of the two names the tag used,
+# so a close is matched against the open it claims to close rather than
+# against a bare depth count.
+#
 # The single spelling this script itself emits -- `<em>` and every attribute
 # are normalised away, so a consumer has exactly one form to recognise.
 _BARE_EMPH_RE = re.compile(r"</?i>")
-# Both patterns above CAPTURE which of the two names the tag used, so a close
-# is matched against the open it claims to close rather than against a bare
-# depth count.
-# Tag scanner for the walk below. `[^<>]*` and NOT `_TAG_RE`'s `[^>]+`: on
+#
+# Scanner for EVERY tag in the walk below, not only the emphasis ones -- the
+# `_EMPH_*` family above classifies what this one finds. `[^<>]*` and NOT `_TAG_RE`'s `[^>]+`: on
 # malformed markup (a long run of `<` with no `>`) the latter restarts its
 # end-of-string scan at every `<` and goes quadratic, and this is the one path
 # that walks raw source_html. Same linear form final_audit.py already uses.
-_EMPH_SCAN_RE = re.compile(r"<[^<>]*>")
+_HTML_TAG_SCAN_RE = re.compile(r"<[^<>]*>")
 # The whitespace class the `gutenberg_epub` adapter's own extractor
 # (extract.py.template) normalizes a block's plain_text with -- its
 # `normalize_text`/`_WS`. DUPLICATED here rather than imported, the same
@@ -235,6 +235,13 @@ _EMPH_SCAN_RE = re.compile(r"<[^<>]*>")
 # assumed: the gate simply does not match, and the definition falls back to
 # its plain_text -- the same safe outcome as any other unmodelled shape.
 _MANIFEST_WS_RE = re.compile(r"[ \t\r\n\xa0]+")
+
+
+def _manifest_norm(s):
+    """Normalize `s` the way the manifest's own extractor normalized
+    plain_text. Both sides of the round-trip gate in _footnote_source_text()
+    go through this, so the comparison is one idea spelled once."""
+    return _MANIFEST_WS_RE.sub(" ", s).strip()
 
 
 def _split_lf_lines(s):
@@ -393,7 +400,7 @@ def _footnote_source_text(def_block):
     # all present and in order -- so the STACK is the check that catches it,
     # and it subsumes the plain balance check it replaced.
     parts, stack, pos = [], [], 0
-    for m in _EMPH_SCAN_RE.finditer(html_src):
+    for m in _HTML_TAG_SCAN_RE.finditer(html_src):
         if m.start() > pos:
             parts.append(html_src[pos:m.start()])
         pos = m.end()
@@ -408,15 +415,16 @@ def _footnote_source_text(def_block):
             if not stack or stack.pop() != closed.group(1).lower():
                 return plain
             parts.append("</i>")
+        # Any OTHER tag falls off the bottom here: dropped, contributing no
+        # text of its own. The round-trip gate below is what checks that the
+        # drop lost nothing the extractor had kept.
     if stack:
         return plain
     if pos < len(html_src):
         parts.append(html_src[pos:])
-    marked = _MANIFEST_WS_RE.sub(" ", "".join(parts)).strip()
+    marked = _manifest_norm("".join(parts))
 
-    round_tripped = _MANIFEST_WS_RE.sub(
-        " ", unescape(_BARE_EMPH_RE.sub("", marked))
-    ).strip()
+    round_tripped = _manifest_norm(unescape(_BARE_EMPH_RE.sub("", marked)))
     if round_tripped != plain:
         return plain
     # NOTHING CARRIED => plain_text VERBATIM, as the field's contract promises.
@@ -511,8 +519,8 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
     #      for it. Under omit_apparatus, no apparatus and no markers exist at
     #      all. ----
     footnotes_out = []
-    # #725: the PLAIN definition text, kept in step with footnotes_out purely
-    # for the name-candidate scan below -- see its own comment.
+    # #725: the definition texts the name-candidate scan below reads -- always
+    # the PLAIN spelling, never the emphasis-carrying one. See its own comment.
     footnote_plain_texts = []
     footnote_def_block_ids = set()
 
@@ -601,8 +609,8 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
                     file=sys.stderr,
                 )
                 continue
-            footnotes_out.append({"n": n, "source_text": _footnote_source_text(def_block)})
             fn_plain = def_block.get("plain_text", "")
+            footnotes_out.append({"n": n, "source_text": _footnote_source_text(def_block)})
             # Only a real string reaches the candidate scan. A malformed
             # manifest's non-string plain_text is carried into source_text
             # unchanged (see _footnote_source_text) so validate_segpack()

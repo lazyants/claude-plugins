@@ -41,6 +41,9 @@ What this suite locks down:
      into `strong_names`).
   4. `cache_key.compute_note_map_hash` moves for a carried footnote and does
      NOT move for one that fell back.
+  5. The OTHER consumers of `footnotes[].source_text` -- verbatim_census.py
+     and final_audit.py -- pinned as inert, including the two residuals this
+     change accepts, recorded as characterization tests.
 
 Loads the real, shipped `segpack.py` via importlib, mirroring tests/
 segpack_verse_mount.test.py's own `_load_module` helper -- segpack.py's
@@ -50,7 +53,13 @@ inserted onto sys.path around the in-process load.
 """
 import importlib.util
 import json
+import re
 import sys
+import time
+# Imported by NAME, not as `import html`: several tests below take the source
+# markup in a parameter spelled `html`, and a module of that name would be
+# shadowed inside exactly the functions that read it.
+from html import escape as html_escape, unescape as html_unescape
 from pathlib import Path
 
 import pytest
@@ -343,9 +352,7 @@ def test_a_non_string_manifest_field_reaches_validate_segpack_not_a_traceback(bl
     output first. Reporting a shape problem is validate_segpack()'s job, so
     the value is handed straight back rather than raising out of build_pack()
     -- which is what the pre-#725 `def_block.get("plain_text", "")` did."""
-    out = CARRY(block)
-    assert out == (block["plain_text"] if isinstance(block["plain_text"], str)
-                   else block["plain_text"])
+    assert CARRY(block) == block["plain_text"]
 
 
 @pytest.mark.parametrize("bad", [None, 5, ["a"]], ids=["none", "int", "list"])
@@ -363,8 +370,10 @@ def test_a_non_string_plain_text_reaches_validate_segpack_through_build_pack(bad
 
 
 def test_a_non_string_plain_text_does_not_poison_the_name_channels():
-    """The malformed footnote contributes nothing to the candidate scan, and
-    the segment's own blocks are still scanned normally."""
+    """The malformed footnote contributes nothing to the candidate scan: the
+    scan runs to completion over the segment's own blocks and build_pack()
+    still produces a name channel, instead of raising a TypeError out of
+    extract_candidates()."""
     pack = _build(FOOTNOTE_HTML, def_plain=None)
     assert isinstance(pack["names"], list)
 
@@ -374,16 +383,12 @@ def test_a_non_string_plain_text_does_not_poison_the_name_channels():
 #    every fixture above. A case added later cannot quietly skip them.
 # ---------------------------------------------------------------------------
 
-_ALL_FIXTURES = [(c[1], c[2]) for c in CARRIED_CASES] + [
-    (c[1], c[2]) for c in FALLBACK_CASES
-]
+_ALL_FIXTURES = [c[1:3] for c in CARRIED_CASES + FALLBACK_CASES]
 
 
 def _norm(text):
     """The manifest's OWN whitespace normalization -- extract.py.template's
     `_WS`, deliberately narrower than `\\s`."""
-    import re
-
     return re.sub(r"[ \t\r\n\xa0]+", " ", text).strip()
 
 
@@ -392,40 +397,40 @@ def _strip_emphasis(text):
     emits, THEN unescape. Never call this on a `plain_text` -- a plain text may
     legitimately contain a literal `<i>` that this would eat, which is the
     whole reason the helper leaves entities escaped."""
-    import re
-    from html import unescape
+    return _norm(html_unescape(re.sub(r"</?i>", "", text)))
 
-    return _norm(unescape(re.sub(r"</?i>", "", text)))
+
+def _carried_outputs():
+    """Every fixture that actually carried emphasis, as `(plain, src, out)`.
+    ONE walk shared by both whole-set invariants below, so the non-vacuity
+    counts are asserted once for both: a loop that runs zero times prints
+    exactly what a passing one prints, and so does one that silently carried
+    nothing."""
+    out_rows, fell_back = [], 0
+    for plain, src in _ALL_FIXTURES:
+        out = CARRY(_blk(plain, src))
+        if out == plain:
+            fell_back += 1
+        else:
+            out_rows.append((plain, src, out))
+    assert len(out_rows) + fell_back == len(_ALL_FIXTURES)
+    assert len(out_rows) >= 18, f"only {len(out_rows)} fixtures carried emphasis"
+    assert fell_back >= 8, f"only {fell_back} fixtures fell back"
+    return out_rows
 
 
 def test_every_fixture_either_round_trips_or_is_plain_text_itself():
     """The one property that makes this safe, over every fixture at once:
     either the definition fell back to `plain_text` unchanged, or removing the
     emphasis tags and unescaping reproduces `plain_text` exactly."""
-    carried = fell_back = 0
-    for plain, html in _ALL_FIXTURES:
-        out = CARRY(_blk(plain, html))
-        if out == plain:
-            fell_back += 1
-            continue
+    for plain, src, out in _carried_outputs():
         assert _strip_emphasis(out) == _norm(plain), (
-            f"source_text does not reduce back to plain_text for {html!r}: {out!r}"
+            f"source_text does not reduce back to plain_text for {src!r}: {out!r}"
         )
-        carried += 1
-    # Both counts asserted: a loop that runs zero times prints exactly what a
-    # passing one prints, and so does one that silently carried nothing.
-    assert carried + fell_back == len(_ALL_FIXTURES)
-    assert carried >= 18, f"only {carried} fixtures carried emphasis"
-    assert fell_back >= 8, f"only {fell_back} fixtures fell back"
 
 
 def test_every_emitted_tag_is_balanced_and_is_the_bare_spelling():
-    import re
-
-    for plain, html in _ALL_FIXTURES:
-        out = CARRY(_blk(plain, html))
-        if out == plain:
-            continue
+    for plain, _src, out in _carried_outputs():
         assert out.count("<i>") == out.count("</i>"), out
         depth = 0
         for m in re.finditer(r"</?i>", out):
@@ -436,10 +441,8 @@ def test_every_emitted_tag_is_balanced_and_is_the_bare_spelling():
         # attributes and every non-emphasis tag are normalised away. Compared
         # against the STILL-ESCAPED reduction, so a literal `<i>` that the
         # source spelled `&lt;i&gt;` is not counted as a surviving tag.
-        import html as _html
-
         assert re.sub(r"</?i>", "", out).count("<") == _norm(
-            _html.escape(plain, quote=False)
+            html_escape(plain, quote=False)
         ).count("<"), out
 
 
@@ -731,8 +734,6 @@ def test_a_malformed_definition_does_not_scan_quadratically():
     """`<[^>]+>` restarts its end-of-string scan at every `<`, and this is the
     one path that walks raw source_html. A definition that is a long run of
     `<` with no `>` must stay linear."""
-    import time
-
     block = _blk("x", "<" * 200_000 + "<i")
     start = time.monotonic()
     assert CARRY(block) == "x"
