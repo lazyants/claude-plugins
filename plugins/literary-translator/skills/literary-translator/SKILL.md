@@ -1236,19 +1236,28 @@ leaves it roman".
 (attributes dropped, `<em>` spelled `<i>`), and every other tag is removed.
 Two consequences worth knowing:
 
-- **`source_text` has two encodings, and it does NOT say which one it is.** A
-  definition whose emphasis was carried is an HTML fragment — its entities stay
-  escaped, exactly as `source_html` spells them, so a literal `<i>` *inside a
-  carried definition* stays `&lt;i&gt;` and is never confused with a real tag.
-  A definition with no emphasis, or one that could not be carried, is
-  `plain_text` verbatim — and a `plain_text` may itself contain a literal
-  `<i>`, so the presence of that string proves nothing about which of the two
-  you are holding. Treat the field as the union: a consumer that must compare
-  TEXT should fold `</?i>` out and unescape (`final_audit.py`'s
-  `_fold_term_text` and `verbatim_census.py`'s `_fold_emphasis` both do), and
-  a consumer that must decide whether the SOURCE marks emphasis reads
-  `manifest.json`'s own `blocks{}` `source_html`, which is authoritative and
-  which the fix turn is already directed to.
+- **`source_text` is an UNDECIDABLE UNION of two encodings — do not try to
+  fold it back.** A definition whose emphasis was carried is an HTML fragment:
+  its entities stay escaped, exactly as `source_html` spells them, so a literal
+  `<i>` *inside a carried definition* stays `&lt;i&gt;` and is never confused
+  with a real tag. A definition with no emphasis, or one that could not be
+  carried, is `plain_text` **verbatim** — and a `plain_text` may itself contain
+  a literal `<i>` or a bare `&`. Nothing in the string says which of the two you
+  are holding, so a consumer that strips `</?i>` and unescapes gets the carried
+  case right and **corrupts the fallback case**, inventing text that was never
+  there. Both such folds were written for this change and both were reverted
+  for exactly that reason.
+  **A consumer that needs the definition's exact, unambiguous text reads
+  `manifest.json`'s own `blocks{}` `plain_text`**, and one deciding whether the
+  source marks emphasis reads that block's `source_html` — authoritative, one
+  encoding each, and where the fix turn is already directed.
+  Two report-only checks accept a small, recorded loss rather than fold:
+  `final_audit.py`'s W7 term-consistency counts no source occurrence of a
+  pinned term the source italicises across its own middle
+  (`Le pr<i>ésident</i>`), and `verbatim_census.py` splits a source-script run
+  at an intra-word span, so it can queue a correct translation for reading.
+  Both are pinned as characterizations in
+  `tests/segpack_footnote_emphasis.test.py`.
 - **It never mangles the text.** One round-trip gate decides: removing the
   emphasis tags and unescaping must reproduce `plain_text` exactly, and any tag
   that survives must balance. Anything else falls back to `plain_text`

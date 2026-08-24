@@ -191,7 +191,12 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _EMPH_ANY_RE = re.compile(r"</?(?:i|em)\b", re.IGNORECASE)
 # `(?![^>]*/\s*>)` excludes a SELF-CLOSING `<i/>`: it opens nothing, and
 # counting it as an open emphasised the rest of the definition.
-_EMPH_OPEN_RE = re.compile(r"<(i|em)\b(?![^>]*/\s*>)[^>]*>", re.IGNORECASE)
+# `(?=[\s/>])` and NOT `\b`: `-` and `:` are non-word characters, so `\b`
+# matches inside `<i-foo>` / `<i:foo>` and the captured "name" would be the
+# PREFIX `i` rather than the tag's own name -- inventing emphasis the source
+# does not have. `(?![^>]*/\s*>)` separately excludes a SELF-CLOSING `<i/>`,
+# which opens nothing.
+_EMPH_OPEN_RE = re.compile(r"<(i|em)(?=[\s/>])(?![^>]*/\s*>)[^>]*>", re.IGNORECASE)
 _EMPH_CLOSE_RE = re.compile(r"</(i|em)\s*>", re.IGNORECASE)
 # The single spelling this script itself emits -- `<em>` and every attribute
 # are normalised away, so a consumer has exactly one form to recognise.
@@ -571,7 +576,14 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
                 )
                 continue
             footnotes_out.append({"n": n, "source_text": _footnote_source_text(def_block)})
-            footnote_plain_texts.append(def_block.get("plain_text", ""))
+            fn_plain = def_block.get("plain_text", "")
+            # Only a real string reaches the candidate scan. A malformed
+            # manifest's non-string plain_text is carried into source_text
+            # unchanged (see _footnote_source_text) so validate_segpack()
+            # reports the shape problem -- but extract_candidates() would
+            # raise on it first, turning that clean diagnostic back into a
+            # traceback out of build_pack().
+            footnote_plain_texts.append(fn_plain if isinstance(fn_plain, str) else "")
             footnote_def_block_ids.add(fe.get("def_block"))
     else:
         for b in seg_blocks:

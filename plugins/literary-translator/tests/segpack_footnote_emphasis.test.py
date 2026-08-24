@@ -234,6 +234,13 @@ FALLBACK_CASES = [
     # `<i>a</i>b<i>c</i>`, leaving `b` roman where the source has it italic.
     # Text conservation cannot see that; only a name-keyed stack can.
     ("mismatched tag names, numerically balanced", "abc", "<p><i>a</em>b<em>c</i></p>"),
+    # `\b` matches between `i` and `-`, so `<i-foo>` full-matched the opener
+    # pattern and its captured "name" was the PREFIX `i`. The tag is not an
+    # emphasis tag at all, and treating it as one INVENTED italics the source
+    # does not have. The opener now requires a real name terminator.
+    ("a tag whose name merely STARTS with i", "a", "<i-foo>a</i>"),
+    ("a namespaced tag starting with i", "a", "<i:foo>a</i>"),
+    ("a tag whose name starts with em", "a", "<em-dash>a</em>"),
     ("close with no open at all", "ab", "<p>a</em>b</p>"),
     ("two opens, one close", "abc", "<p><i>a<em>b</em>c</p>"),
     # The text simply does not round-trip: a definition whose source spans two
@@ -305,11 +312,25 @@ def test_a_non_string_manifest_field_reaches_validate_segpack_not_a_traceback(bl
                    else block["plain_text"])
 
 
-def test_a_non_string_plain_text_still_yields_the_validator_s_own_message():
-    pack = _build(FOOTNOTE_HTML)
-    pack["footnotes"][0]["source_text"] = None
+@pytest.mark.parametrize("bad", [None, 5, ["a"]], ids=["none", "int", "list"])
+def test_a_non_string_plain_text_reaches_validate_segpack_through_build_pack(bad):
+    """Drives the SHIPPED path, not a hand-patched pack: a previous version of
+    this test built a valid segpack and replaced `source_text` afterwards, so
+    it never exercised `build_pack()` at all -- and `build_pack()` raised a
+    TypeError out of the candidate scan long before `validate_segpack()` could
+    say anything. The malformed value must survive INTO the pack and be
+    reported there."""
+    pack = _build(FOOTNOTE_HTML, def_plain=bad)
+    assert pack["footnotes"][0]["source_text"] == bad
     errors = SEGPACK.validate_segpack(pack, "seg01")
     assert any("footnotes[0]" in e and "source_text" in e for e in errors), errors
+
+
+def test_a_non_string_plain_text_does_not_poison_the_name_channels():
+    """The malformed footnote contributes nothing to the candidate scan, and
+    the segment's own blocks are still scanned normally."""
+    pack = _build(FOOTNOTE_HTML, def_plain=None)
+    assert isinstance(pack["names"], list)
 
 
 # ---------------------------------------------------------------------------
@@ -603,52 +624,71 @@ def _census():
     )
 
 
-def test_verbatim_census_folds_emphasis_out_before_comparing_runs():
-    """verbatim_census reads footnotes[].source_text and extracts runs of
-    source-script letters. A tag WRAPPING A WHOLE WORD sits where a space
-    already broke the run, so that case would look fine either way -- the case
-    that matters is a span INSIDE a word: `<i>אב</i>גד` reads as two runs while
-    the correct draft carries one, and the census would queue an intact
-    translation as a tier-1 letter_diff.
+def test_census_is_unaffected_when_a_span_wraps_a_whole_word():
+    """The ordinary shape. `hebrew_runs()` breaks a run at every non-letter,
+    and a tag wrapping a whole word sits where a space already broke it -- so
+    the run list the census compares is unchanged."""
+    census = _census()
+    plain = "שלום עולם"
+    carried = CARRY(_blk(plain, "<p><i>שלום</i> עולם</p>"))
+    assert carried == "<i>שלום</i> עולם", carried
+    pack = {"blocks": [], "footnotes": [{"n": 1, "source_text": carried}]}
+    units, _ = census._source_units("seg01", pack)
+    assert census.hebrew_runs(units["footnotes:1"]) == census.hebrew_runs(plain)
 
-    Drives `_source_units()`, the real CALL SITE, not `_fold_emphasis()` -- a
-    test of the helper alone stays green when the call site stops using it,
-    which is exactly the mutation this pins."""
+
+def test_census_splits_a_run_at_an_INTRA_WORD_span_characterization():
+    """CHARACTERIZATION of an accepted residual, not a fix.
+
+    A span INSIDE a word does split the run: `<i>אב</i>גד` reads as
+    ["אב", "גד"] while a correct draft carries the single run `אבגד`, so this
+    report-only census can queue an intact translation as a tier-1 letter_diff.
+
+    Folding the tags back out in the census was written and then REVERTED: the
+    field is an undecidable union (see the module docstring and SKILL.md), so
+    a consumer that strips `</?i>` and unescapes CORRUPTS a fallback footnote
+    whose own plain text contains `<i>` or `&` -- inventing a source run in
+    exactly the same report. The narrower, honest position is that a consumer
+    needing the definition's exact text reads `manifest.json`'s own
+    `blocks{}` `plain_text`, which is authoritative and unambiguous.
+
+    Pinned so the residual is a recorded decision rather than an accident, and
+    so a future fold cannot be added without meeting this test."""
     census = _census()
     plain = "אבגד"
     carried = CARRY(_blk(plain, "<p><i>אב</i>גד</p>"))
     assert carried == "<i>אב</i>גד", carried
-    assert census.hebrew_runs(carried) == ["אב", "גד"], (
-        "fixture no longer splits the run -- this test would pass vacuously"
-    )
-
     pack = {"blocks": [], "footnotes": [{"n": 1, "source_text": carried}]}
-    units, _missing = census._source_units("seg01", pack)
-    assert census.hebrew_runs(units["footnotes:1"]) == census.hebrew_runs(plain), (
-        "the census's own unit still carries the markup: an intact draft run "
-        f"would be queued as a letter_diff. unit={units['footnotes:1']!r}"
-    )
+    units, _ = census._source_units("seg01", pack)
+    assert census.hebrew_runs(units["footnotes:1"]) == ["אב", "גד"]
+    assert census.hebrew_runs(plain) == ["אבגד"]
 
 
-def test_verbatim_census_fold_also_undoes_the_preserved_escaping():
-    census = _census()
-    assert census._fold_emphasis("<i>Th&#233;</i>&amp;") == "Thé&"
+def test_final_audit_term_fold_is_left_alone_characterization():
+    """CHARACTERIZATION of the second accepted residual.
 
+    `_fold_term_text()` is NFC + casefold and nothing else, deliberately.
+    Teaching it to strip `</?i>` and unescape was written and REVERTED for the
+    same reason as the census fold: that helper also folds the DECLARED terms
+    and every body and target carrier, where the values are plain text -- a
+    declared pin of `<i>` would fold to the empty string and `str.count("")`
+    reports a hit at every character boundary, and a visible `A&amp;B` would
+    stop being distinguishable from `A&B`.
 
-def test_final_audit_term_fold_sees_a_term_the_source_italicises_mid_word():
-    """W7's term-consistency check counts a pinned term inside each carrier.
-    With `Le pr<i>ésident</i>` the source count would drop to ZERO, and zero
-    can never exceed the target's count -- so a genuinely drifted footnote
-    would go unreported on a completely green run."""
+    The residual it leaves: WARN 6 counts zero source occurrences of a pinned
+    term the source italicises across its own middle (`Le pr<i>ésident</i>`),
+    and zero can never exceed the target's count, so that one carrier is not
+    reported. Report-only, and the authoritative text is in manifest.json."""
     audit = _load_module(
         "final_audit_footnote_emphasis_under_test",
         SCRIPTS_DIR / "final_audit.py",
         SCRIPTS_DIR,
     )
+    assert audit._fold_term_text("A&amp;B") == "a&amp;b"
+    assert audit._fold_term_text("<i>") == "<i>"
     term = audit._fold_term_text("président")
-    assert term in audit._fold_term_text("Le pr<i>ésident</i> de la cour")
-    assert term in audit._fold_term_text("Le pr&#233;sident de la cour")
     assert term in audit._fold_term_text("Le président de la cour")
+    assert term not in audit._fold_term_text("Le pr<i>ésident</i> de la cour")
 
 
 def test_a_malformed_definition_does_not_scan_quadratically():
