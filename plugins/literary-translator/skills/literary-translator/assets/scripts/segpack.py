@@ -86,6 +86,7 @@ import argparse
 import json
 import re
 import sys
+from html import unescape
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -170,6 +171,47 @@ FNREF_RE = re.compile(r"⟦FNREF_(\d+)⟧")
 LITERAL_MARKER_RE = re.compile(r"\[\d+\]")
 
 _TAG_RE = re.compile(r"<[^>]+>")
+
+# ---------------------------------------------------------------------------
+# #725 -- a footnote definition's own <i>/<em> emphasis, carried into its
+# source_text. A BODY block reaches the translator as raw source_html, `<i>`
+# and all; a footnote carried markup-stripped plain_text alone, so the
+# translator was asked to preserve italics it was never shown.
+#
+# The emphasis is carried in the SOURCE's OWN NOTATION, not converted to
+# markdown `*...*`. Markdown was the first design and it died three times over:
+# `<i>a</i><em>b</em>` conserves every character and still emits `*a**b*`;
+# a source backslash before a span escapes the delimiter (`\*word*`); and
+# CommonMark's punctuation-aware left/right flanking makes `<i>mot,</i>x` ->
+# `*mot,*x` render as literal asterisks, as it does for the equivalent CJK and
+# Hebrew shapes. A tag has no flanking rule, no escape sequence, no doubling,
+# and no collision with a `*` the source itself contains -- so those failure
+# modes stop EXISTING rather than being detected one at a time.
+# ---------------------------------------------------------------------------
+_EMPH_ANY_RE = re.compile(r"</?(?:i|em)\b", re.IGNORECASE)
+# `(?![^>]*/\s*>)` excludes a SELF-CLOSING `<i/>`: it opens nothing, and
+# counting it as an open emphasised the rest of the definition.
+_EMPH_OPEN_RE = re.compile(r"<(?:i|em)\b(?![^>]*/\s*>)[^>]*>", re.IGNORECASE)
+_EMPH_CLOSE_RE = re.compile(r"</(?:i|em)\s*>", re.IGNORECASE)
+# The single spelling this script itself emits -- `<em>` and every attribute
+# are normalised away, so a consumer has exactly one form to recognise.
+_BARE_EMPH_RE = re.compile(r"</?i>")
+# The whitespace class the `gutenberg_epub` adapter's own extractor
+# (extract.py.template) normalizes a block's plain_text with -- its
+# `normalize_text`/`_WS`. DUPLICATED here rather than imported, the same
+# convention _split_lf_lines above follows: that template imports bs4, which
+# references/source-format-adapters/plain-text.md forbids the `plain_text`
+# adapter's path from doing, and segpack.py serves every adapter.
+#
+# DELIBERATELY narrower than `\s`, which also matches U+000B/U+000C/U+0085/
+# U+2028/U+2029: a source's own U+2028 survives that extractor's
+# normalize_text, so collapsing it here would make the round-trip gate below
+# reject a definition whose text is in fact intact.
+#
+# For an adapter that normalizes DIFFERENTLY, nothing breaks and nothing is
+# assumed: the gate simply does not match, and the definition falls back to
+# its plain_text -- the same safe outcome as any other unmodelled shape.
+_MANIFEST_WS_RE = re.compile(r"[ \t\r\n\xa0]+")
 
 
 def _split_lf_lines(s):
@@ -270,6 +312,70 @@ def _scan_text(entry):
     return _TAG_RE.sub(" ", entry.get("source_html", "") or "")
 
 
+def _footnote_source_text(def_block):
+    """A footnote definition's source_text, carrying the source's OWN
+    `<i>`/`<em>` emphasis (#725) -- normalised to a bare `<i>`, with every
+    other tag dropped.
+
+    Returns `plain_text` UNCHANGED whenever the emphasis cannot be carried
+    faithfully. That is the whole safety story: this can LOSE emphasis (markup
+    these two regexes do not model, a definition whose text spans several block
+    tags so its text-node concatenation differs from the extractor's own
+    block_text()) but it can never invent, reorder or mangle a character of the
+    footnote's text.
+
+    ONE round-trip gate decides that: strip `</?i>` back out, unescape, and the
+    result must equal `plain_text` exactly under the manifest's own whitespace
+    normalization. `unescape` runs AFTER tag removal, never before -- a text
+    node holding `&lt;i&gt;` must stay escaped so it is never confused with a
+    real tag, and after-not-before is also exactly how the extractor produced
+    `plain_text`. A surviving tag must additionally BALANCE, or the translator
+    would be handed a dangling one.
+    """
+    plain = def_block.get("plain_text", "")
+    # An empty or whitespace-only definition is returned untouched, so the
+    # property #397 relies on survives verbatim: source_text never invents text
+    # where plain_text has none, and `<i></i>` must not become a definition
+    # that reads as real. (validate_extraction.py's own
+    # no_empty_footnote_definitions gate reads the MANIFEST block and fires
+    # independently of this; what this guard protects is the downstream
+    # consumers -- validate_draft's blank-translation refusal, verbatim_census.)
+    if not plain.strip():
+        return plain
+    html_src = def_block.get("source_html", "")
+    if not html_src or not _EMPH_ANY_RE.search(html_src):
+        return plain
+
+    parts, pos = [], 0
+    for m in _TAG_RE.finditer(html_src):
+        if m.start() > pos:
+            parts.append(html_src[pos:m.start()])
+        tag = m.group(0)
+        if _EMPH_OPEN_RE.fullmatch(tag):
+            parts.append("<i>")
+        elif _EMPH_CLOSE_RE.fullmatch(tag):
+            parts.append("</i>")
+        pos = m.end()
+    if pos < len(html_src):
+        parts.append(html_src[pos:])
+    marked = _MANIFEST_WS_RE.sub(" ", "".join(parts)).strip()
+
+    round_tripped = _MANIFEST_WS_RE.sub(
+        " ", unescape(_BARE_EMPH_RE.sub("", marked))
+    ).strip()
+    if round_tripped != plain:
+        return plain
+
+    depth = 0
+    for m in _BARE_EMPH_RE.finditer(marked):
+        depth += 1 if m.group(0) == "<i>" else -1
+        if depth < 0:
+            return plain
+    if depth != 0:
+        return plain
+    return marked
+
+
 def _def_blocks_for(fn_ns, fn_entries_by_n):
     """The set of def_block ids for the given footnote numbers, skipping any
     number with no manifest.footnotes[] entry or no def_block. Feeds the
@@ -348,6 +454,9 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
     #      for it. Under omit_apparatus, no apparatus and no markers exist at
     #      all. ----
     footnotes_out = []
+    # #725: the PLAIN definition text, kept in step with footnotes_out purely
+    # for the name-candidate scan below -- see its own comment.
+    footnote_plain_texts = []
     footnote_def_block_ids = set()
 
     if apparatus_policy in FOOTNOTE_CARRYING_POLICIES:
@@ -435,7 +544,8 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
                     file=sys.stderr,
                 )
                 continue
-            footnotes_out.append({"n": n, "source_text": def_block.get("plain_text", "")})
+            footnotes_out.append({"n": n, "source_text": _footnote_source_text(def_block)})
+            footnote_plain_texts.append(def_block.get("plain_text", ""))
             footnote_def_block_ids.add(fe.get("def_block"))
     else:
         for b in seg_blocks:
@@ -512,7 +622,16 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
     # the candidate's own content, never from the marker.
     name_stats = {}
     scan_texts = [_scan_text(entry) for entry in blocks_out]
-    scan_texts += [fo["source_text"] for fo in footnotes_out]
+    # #725: scan the PLAIN definition text, NEVER the emphasis-carrying
+    # source_text. A tag's characters are not token characters, but `>` IS the
+    # `preceding_char` tokenize() records for the token after it, and WRAPPERS
+    # (which the back-scan skips) contains neither `>` nor `*` -- so a name
+    # standing first in a sentence inside an emphasis span would read as
+    # mid-sentence, enter strong_names for the wrong reason, and change
+    # names[]/new_names[]/canon_names[]/split_names{}. Keeping the scan on
+    # plain_text makes this change provably inert for every name channel
+    # rather than merely probably harmless.
+    scan_texts += footnote_plain_texts
     for raw_text in scan_texts:
         for name, mid_sentence in extract_candidates(raw_text, lang_config):
             multiword = len(_strip_capped_marker(name).split()) > 1

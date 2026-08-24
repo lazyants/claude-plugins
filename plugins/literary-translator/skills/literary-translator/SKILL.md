@@ -1201,8 +1201,13 @@ job had already run:
   carries no text (whitespace-only included). Runs only under
   `footnotes.apparatus_policy: translate_all | preserve_source`, the two
   policies where footnote text is carried into a segpack at all. A footnote's
-  `source_text` is taken from `plain_text` alone, with no `source_html`
-  fallback, and a blank footnote translation is refused unconditionally.
+  `source_text` gets its TEXT from `plain_text` alone — `source_html` never
+  supplies text of its own, so a definition with no `plain_text` yields no
+  `source_text` — and a blank footnote translation is refused unconditionally.
+  Since #725, a definition whose `plain_text` is **non-empty** additionally
+  carries that block's own `<i>`/`<em>` emphasis over from `source_html`,
+  normalised to a bare `<i>`; see “Footnote emphasis” below. That never
+  reaches an empty definition, so this gate is unaffected by it.
   This check has **no reachability filter by design**: an empty definition is
   refused even if no segpack would have carried it. That over-catch is
   deliberate — the remedy is the same either way, and both attempts to model
@@ -1213,6 +1218,58 @@ footnote numbers. Adapt `${durable_root}/extract.py` so the node is not emitted
 as a content block (or so the empty definition is not emitted), then re-extract.
 Do NOT edit the check: the failure is real, and it is cheaper here than after a
 translation round.
+
+### Footnote emphasis reaches the translator in the source's own notation (#725)
+
+A **body** block reaches the translator as raw `source_html`, so the source's
+own `<i>`/`<em>` is visible to it. A **footnote definition** carried
+markup-stripped `plain_text` only, so under the two apparatus policies that
+exist precisely to translate the apparatus, the translator was asked to
+preserve italics it had never been shown — while the same span sat in a body
+block one field away. Measured on a live volume: 214 of 493 definition blocks
+carried emphasis, 370 spans, every one dropped, and on one segment 13 of 31
+first-round review findings were "the source italicizes X, the translation
+leaves it roman".
+
+`segpack.py` now carries that emphasis into `footnotes[].source_text`, in the
+**source's own notation**: `<i>`/`<em>` survive, normalised to a bare `<i>`
+(attributes dropped, `<em>` spelled `<i>`), and every other tag is removed.
+Two consequences worth knowing:
+
+- **`source_text` has two encodings, and which one is decidable.** A definition
+  whose emphasis was carried is an HTML fragment — its entities stay escaped,
+  exactly as `source_html` spells them, so a literal `<i>` in the text stays
+  `&lt;i&gt;` and is never confused with a real tag. A definition with no
+  emphasis, or one that could not be carried, is `plain_text` verbatim. The
+  presence of `<i>` tells them apart. This is the same encoding a body block's
+  `source_html` already uses.
+- **It never mangles the text.** One round-trip gate decides: removing the
+  emphasis tags and unescaping must reproduce `plain_text` exactly, and any tag
+  that survives must balance. Anything else falls back to `plain_text`
+  unchanged. So emphasis can be *lost* (markup the two regexes do not model, a
+  definition whose text spans several block tags, a hand-written extractor
+  emitting unbalanced HTML) but never invented or reordered.
+
+Markdown `*...*` was the first design and it is **not** what shipped: a
+delimiter has flanking rules a tag does not. `<i>a</i><em>b</em>` conserves
+every character and still emits `*a**b*`; a source backslash before a span
+escapes the delimiter; and CommonMark's punctuation-aware flanking makes
+`<i>mot,</i>x` → `*mot,*x` render as literal asterisks, as it does for the
+equivalent CJK and Hebrew shapes.
+
+**Name candidates are unaffected.** The candidate scan still reads the
+definition's `plain_text`, never the emphasis-carrying `source_text` — `>` is
+the `preceding_char` `tokenize()` records for the token after it and `WRAPPERS`
+does not skip it, so scanning the marked text would read a sentence-initial
+name as mid-sentence and promote it into `names[]` for the wrong reason.
+
+**Migration.** `segpack.py` is a `derivation_bundle_hash` member, so at the
+next Step 0a refresh existing segments are classified
+`blocked_needs_regeneration` and the mass-run resume digest moves. Regenerating
+the segpacks then moves `note_map_hash` for every segment whose emphasis was
+carried, and the `canon.json` restamp that clearing the derivation mismatch
+requires also moves the glossary resume digest and any existing skeptic /
+suspicion state. Cheapest for a project that has not started W5.
 
 ### Oversized source block — the census this gate always prints (#504)
 
