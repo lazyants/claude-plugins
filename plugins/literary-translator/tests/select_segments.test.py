@@ -1875,9 +1875,15 @@ def test_the_refusal_names_the_SECOND_loss_the_flag_does_not_ask_about(tmp_path)
     two. The same cache-key move that made the converged segments stale also
     moves the resume digest, minting a fresh RUN_ID that orphans the
     dispatch_token on every NOT-yet-converged draft in the same selection --
-    so those retranslate too, discarding any hand-applied fix. On a live
-    project that was 21 authorized and 21 unmentioned, the silent half
-    exactly the size of the half being asked about.
+    so those are orphaned too. On a live project that was 21 authorized and 21
+    unmentioned, the silent half exactly the size of the half being asked
+    about.
+
+    #742 changed what the orphaning COSTS, not whether this refusal must name
+    it: the driver now refuses over those drafts instead of retranslating
+    them, so the clause asserted below moved from "and nothing else will" to
+    naming the driver's gate. The count and the exact id set are what this
+    test is about and neither moved.
 
     Asserted against the specific numbers and the exact id set, not against
     the refusal firing at all: the refusal already fired before this text
@@ -1922,6 +1928,19 @@ def test_the_refusal_names_the_SECOND_loss_the_flag_does_not_ask_about(tmp_path)
     # an unchanged bundle) and an overstated warning is one people skip.
     assert "If this dispatch also mints a fresh RUN_ID" in out["error"], (
         "the second loss must be stated WITH its condition, never as a certainty"
+    )
+    # #742. The clause that used to close this paragraph -- "This flag does
+    # not ask about those, and nothing else will" -- became false the moment
+    # the driver grew its own foreign-draft refusal. Pinned as a POSITIVE
+    # assertion on the replacement plus a NEGATIVE one on the retired
+    # sentence: without the negative half, restoring the old wording beside
+    # the new would satisfy the positive half and say two contradictory
+    # things to the same operator.
+    assert "REFUSES the dispatch" in out["error"], (
+        "the second loss must name what now answers it, not claim nothing does"
+    )
+    assert "nothing else will" not in out["error"], (
+        "the retired claim must be GONE, not merely outweighed by the new sentence"
     )
 
 

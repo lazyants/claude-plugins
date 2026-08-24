@@ -3079,7 +3079,7 @@ exit 1 when the named run's directory or its `input.digest` is missing or
 the wrong kind, when its recorded digest does not match this invocation, or
 when a selected segment's own draft is stamped for a different run (not reachable for a segment an admission just claimed — `select_segments.py` re-stamps an admitted draft to this run before the gate runs, which is what admission IS; and a token naming no recognizable owner is not "different"); exit 2
 for an unsafe id or a filesystem state this script cannot establish. Left
-unpinned, the only change is that a fresh mint now prints one stderr line
+unpinned, resolution itself is unchanged and a fresh mint prints one stderr line
 naming the new RUN_ID and how many eligible candidates were offered — in
 the driver's own log file for the documented detached launch above, at the
 terminal for a foreground run), `--max-concurrent-codex-jobs N` (default
@@ -3829,7 +3829,12 @@ resumes under the same `RUN_ID` finds the draft's `dispatch_token` still
 matching: `codex_job.py` then ADOPTS that draft instead of launching codex, and
 the edit survives into a review. Let any independently hashed input move as
 well, and the fresh `RUN_ID` orphans that token — the segment retranslates over
-the edit, and so does every not-yet-converged draft in the same selection. A
+the edit. #742's foreign-draft refusal does NOT save this one: the unit is
+previously-converged, so it classifies `stale`, the single category that
+refusal exempts — refusing it would refuse the cache-key-drift retranslation
+`--allow-retranslate-converged` has just authorized. It covers the REST of the
+selection: every NOT-yet-converged draft whose token belongs to another run
+halts the dispatch by name instead of being retranslated over a hand fix. A
 **claim** removes that dependence: `--from-converged` authorizes re-review only
 and never re-translates, and a hand-edited draft is exactly what its drift
 branch admits, so naming those ids carries the edit into a confirming review

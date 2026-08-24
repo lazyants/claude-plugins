@@ -398,13 +398,20 @@ driver refuses (exit 1) rather than dispatching under a run the operator
 did not name: when `runs/RUN_ID` is not a directory or carries no regular
 `input.digest`, when the pinned run's digest does not match this
 invocation, and when a SELECTED segment's draft is stamped for a
-different run (`refuse_pinned_run_over_foreign_drafts()`). An unsafe id,
+different run (`refuse_run_over_foreign_drafts()`). An unsafe id,
 or a filesystem state this script could not establish, is exit 2 instead.
-When the flag is ABSENT nothing above applies and resolution is unchanged
-in every respect but one: an unpinned invocation that mints a fresh
-RUN_ID now says so on stderr, with the number of ELIGIBLE candidates that
-were offered (a number no other artifact carries -- `"resume": false`
-itself already reaches both the printed JSON and the journal).
+When the flag is ABSENT resolution itself is unchanged, in every respect
+but one: an unpinned invocation that mints a fresh RUN_ID says so on
+stderr, with the number of ELIGIBLE candidates that were offered (a number
+no other artifact carries -- `"resume": false` itself already reaches both
+the printed JSON and the journal). The foreign-draft refusal is NOT
+pinned-only, though: since #742 an unpinned invocation refuses too (exit 1)
+when a selected segment whose classification is not in
+`FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES` carries a draft stamped for another
+run -- naming every affected id and its owner. A resolved run id can differ
+from a draft's owner without any pin (a fresh mint, or a resume that
+matched a NEWER candidate), and re-translating such a draft destroys
+editorial work already on disk.
 
 Exit 0 = every gate passed and the per-segment loop ran to completion
 (a completion that reports EVERY segment converged, needs_fix, or failed
@@ -3219,16 +3226,37 @@ def run_resume_literal(run_result: dict) -> str:
     missing or non-bool `resume` silently coerced to False would relay a
     verdict this driver never actually received into a security gate --
     the one place a plausible default is worse than a refusal."""
+    return "true" if run_resumed(run_result) else "false"
+
+
+def run_resumed(run_result: dict) -> bool:
+    """resolve_run_id()'s `resume` field as a REAL bool, refusing anything else.
+
+    Extracted from run_resume_literal() (ped-ant, P2) once #742 gave the field
+    a SECOND consumer. That consumer -- the unpinned foreign-draft refusal --
+    used a plain truth test, which turns exactly the two shapes this function
+    exists to reject into confident wrong answers in OPPOSITE directions: a
+    missing field reads as "minted", and the JSON string "false" reads as
+    "resumed". The refusal then tells an operator the wrong reason their run
+    id was selected, in the one message whose whole job is telling them why.
+
+    A truth test at either call site is not a smaller version of this check;
+    it is the absence of it. Sibling-script skew must fail loudly here rather
+    than become a guessed verdict -- see run_resume_literal()'s own docstring
+    for what the relayed literal does downstream."""
     resume = run_result.get("resume")
     if not isinstance(resume, bool):
         fatal(
             f"resume_setup.py's 'resume' field is {resume!r}, not a JSON boolean -- "
             f"select_segments.py's --run-resume relays exactly this field into its "
-            f"#409 Step 3 fresh-evidence check, and a guessed value there would be a "
-            f"claim about the resume-integrity gate that nothing actually made.",
+            f"#409 Step 3 fresh-evidence check, and the #742 foreign-draft refusal "
+            f"reads it to tell the operator WHY this run id was selected. A guessed "
+            f"value would be a claim about the resume-integrity gate that nothing "
+            f"actually made, and a wrong diagnosis in the message meant to explain "
+            f"a halt.",
             exit_code=2,
         )
-    return "true" if resume else "false"
+    return resume
 
 
 # ---------------------------------------------------------------------------
@@ -3889,42 +3917,123 @@ def draft_token_owner(seg: str, segments_dir: Path) -> "str | None":
     return run_id
 
 
-def refuse_pinned_run_over_foreign_drafts(segs: list, run_id: str, segments_dir: Path) -> None:
-    """#458 (codex plan round 3, MAJOR). Under a pin ONLY, refuse the whole
-    invocation when any SELECTED segment's draft is stamped for a different
-    run -- before a single segment is dispatched.
+# #742. The categories whose foreign-token drafts the UNPINNED gate below
+# deliberately does NOT protect. An EXEMPTION list rather than an inclusion
+# list, and the direction is the point: a category added to
+# select_segments.py's ALL_CATEGORIES later defaults to PROTECTED (the gate
+# refuses and the operator decides) rather than to silently destroyed, which
+# is the only safe default for a guard whose false-GREEN destroys human work.
+#
+# `stale` alone is exempt, and its exemption is bounded by a SECOND gate
+# rather than granted outright: a `stale` unit is one that WAS converged and
+# whose cache key has drifted, so its draft carries -- by definition -- the
+# token of the run that converged it, and the same cache-key move is what
+# mints the fresh RUN_ID. Refusing over it would refuse EVERY
+# input-change-driven retranslation the cache-key design exists to perform.
+# What keeps that from being a hole is that dispatching a previously-converged
+# unit already requires an explicit --allow-retranslate-converged
+# (select_segments.py's own previously_converged refusal), so the destruction
+# this exemption permits is one the operator authorised in as many words.
+#
+# `not_started` is deliberately NOT exempt (codex plan review round 2,
+# BLOCKER). classify_segment() calls a segment `not_started` on an ABSENT
+# ledger record alone -- it never looks at whether a draft exists -- so a
+# partial restore that keeps segments/<seg>.draft.json and loses
+# runs/ledger.d/<seg>.json lands surviving editorial work in that category.
+# Exempting it would buy nothing in exchange: a genuinely new segment has no
+# draft at all, draft_token_owner() returns None for it, and the gate cannot
+# refuse over it either way.
+#
+# The member strings are select_segments.py's own category vocabulary
+# (its ALL_CATEGORIES), restated here per this project's "no shared lib
+# between self-contained scripts" convention -- the same way this file
+# already restates other cross-script literals. A rename on that side would
+# make this set exempt nothing, which is the SAFE direction of failure for
+# this particular set (more segments protected, never fewer).
+FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES = frozenset({"stale"})
 
-    The branch this closes is pre-existing and was reachable long before the
-    pin: derive_next_action() gates the draft with `draft_ready.py
-    --expect-token translate_dispatch_token(run_id, seg)`, and a token
-    naming another run fails that gate and falls through to
+
+def segs_covered_by_foreign_draft_gate(segs: list, select_result: dict) -> list:
+    """The subset of `segs` the UNPINNED foreign-draft gate checks: everything
+    whose classification is not exempt, with an unrecognised or missing entry
+    treated as COVERED.
+
+    Lives beside the set it reads rather than inline at the call site so the
+    predicate, the set, and the reason for the set's direction are one thing
+    to read -- and so the two edge branches (a seg absent from
+    `classification`, an entry that is not a dict) are reachable without a
+    full CLI round trip."""
+    classification = select_result.get("classification")
+    if not isinstance(classification, dict):
+        # A CONTRACT break with the selector, not a known gap:
+        # select_segments.py builds `classification` over every manifest
+        # candidate and both selection branches index it, so every seg that
+        # reaches here has an entry. Exit 2 rather than returning an empty
+        # list, because an empty covered set is exactly what a CLEAN project
+        # looks like -- "the filter found nothing" and "the filter never ran"
+        # must not print the same verdict.
+        fatal(
+            "select_segments.py's JSON output has no 'classification' object -- "
+            "refusing rather than checking an empty set of drafts, which would be "
+            "indistinguishable from a project with no foreign drafts at all",
+            exit_code=2,
+        )
+
+    def _is_exempt(seg) -> bool:
+        entry = classification.get(seg)
+        return (
+            isinstance(entry, dict)
+            and entry.get("category") in FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES
+        )
+
+    return [seg for seg in segs if not _is_exempt(seg)]
+
+
+def refuse_run_over_foreign_drafts(
+    segs: list, run_id: str, segments_dir: Path, *, pinned: bool, resumed: bool,
+) -> None:
+    """Refuse the whole invocation when any segment in `segs` carries a draft
+    stamped for a different run -- before a single segment is dispatched.
+
+    The branch this closes: derive_next_action() gates the draft with
+    `draft_ready.py --expect-token translate_dispatch_token(run_id, seg)`, and
+    a token naming another run fails that gate and falls through to
     `{"action": "translate"}`, overwriting the draft and exiting 0.
     claim_record.py permits a foreign token when no claim record exists, so
     nothing downstream stops it either.
 
-    What --resume-from-run-id adds is a SECOND route into it, and that route
-    is the flag's own headline use case: #458's scenario is a batch split
-    across two run namespaces, so the operator pins the older run to reach
-    its stranded segments and every OTHER selected segment -- the ones
-    stamped for the newer run -- is silently retranslated. Shipping the pin
-    without this gate would mean the fix for "work claimed under the wrong
-    run" destroys work under the wrong run.
+    #458 shipped this gate PINNED-ONLY, on the argument that a pin is a
+    declared statement about which run this invocation belongs to while an
+    unpinned invocation makes no such statement. #742 is the issue that
+    revisited that scope, and the argument does not survive contact with the
+    measured consequence: on a live 74-segment volume three hand-fixed drafts
+    were re-translated and roughly twenty hand edits destroyed, reported as
+    success (`"kind": "translate", "adopted": false, "reason": "promoted"`),
+    with 61 further hand-fixed drafts exposed in the same invocation. Nothing
+    about that loss requires the operator to have declared a run id first.
+    Destroying editorial work already committed to disk is not something a
+    missing declaration makes acceptable; it is something that must be ASKED
+    about, because no gate in this plugin can tell a draft holding hand fixes
+    from one that merely needs re-translating.
 
-    ONE EXCEPTION, and it is not a hole (codex code-review round 1, MINOR):
-    on a `--from-cap`/`--from-converged`/`--from-stalled` invocation, Step 1
-    has ALREADY re-stamped every ADMITTED draft's dispatch_token to this run
+    WHAT DIFFERS BETWEEN THE TWO CALLERS is the SEGMENT SET, and the caller
+    -- not this function -- decides it: pinned passes every selected segment
+    (#458's behaviour, unchanged byte for byte); unpinned passes the selected
+    segments whose classification is not in
+    FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES. `pinned` and `resumed` here select
+    ONLY the wording of the explanation and the remedy, never which segments
+    are checked -- keeping the comparison itself single-sourced, so the two
+    paths cannot drift into two different notions of "foreign".
+
+    ONE EXCEPTION, and it is not a hole: on a
+    `--from-cap`/`--from-converged`/`--from-stalled` invocation, Step 1 has
+    ALREADY re-stamped every ADMITTED draft's dispatch_token to this run
     (select_segments.py's D4/D9 write) by the time this gate runs, so an
     admitted draft can never look foreign here. That is the claim's whole
     purpose -- admission is the authorized transfer of a draft between runs
     -- and it is stated rather than left for a reader to discover: what this
     gate protects on a claim invocation is the segments the claim did NOT
-    admit.
-
-    Deliberately PINNED-ONLY. The unpinned path keeps today's behaviour
-    byte for byte: a pin is a declared statement about which run this
-    invocation belongs to, so a draft belonging to another run contradicts
-    something the operator actually said. Unpinned there is no such
-    statement, and changing that path is out of this issue's scope.
+    admit, which is exactly the population #742 was reported from.
 
     Refuses the WHOLE invocation rather than skipping the offending
     segments: a gate that refuses before the loop cannot half-dispatch, and
@@ -3938,16 +4047,85 @@ def refuse_pinned_run_over_foreign_drafts(segs: list, run_id: str, segments_dir:
     if not foreign:
         return
     detail = ", ".join(f"{seg} (stamped for {owner})" for seg, owner in foreign)
+    # Built once for the same reason `detail` and `common` are: the two
+    # fatal() calls below carry a payload key two tests assert on by name,
+    # and a rename applied to one branch only is exactly the drift a single
+    # local prevents.
+    foreign_payload = [{"seg": seg, "run_id": owner} for seg, owner in foreign]
+    common = (
+        f"{len(foreign)} selected segment(s) carry a draft stamped for a DIFFERENT run: "
+        f"{detail}. Dispatching them under {run_id!r} would retranslate those drafts and "
+        f"discard whatever they hold, because a draft whose dispatch_token names another "
+        f"run fails this driver's own token gate and falls through to translate. Nothing "
+        f"was dispatched."
+    )
+    if pinned:
+        # ped-ant, P2: "re-run without --resume-from-run-id" was an unqualified
+        # remedy for as long as the unpinned path had no gate of its own. #742
+        # gave it one, so dropping the pin now reaches this SAME comparison --
+        # and refuses again whenever ordinary resolution lands on any run other
+        # than the draft's owner, which includes the ordinary case of the pinned
+        # run being the newest digest-matching candidate. Offering a guaranteed
+        # second refusal as the FIRST action after a refusal is worse than
+        # offering nothing, so the route is qualified where it is printed.
+        fatal(
+            f"--resume-from-run-id {run_id!r}: {common} Name only the ids that belong to "
+            f"this run with --only-segs. Re-running WITHOUT --resume-from-run-id helps only "
+            f"if ordinary resolution then lands on the run that owns these drafts -- since "
+            f"#742 the unpinned path runs this same comparison, so if it resolves any other "
+            f"run it refuses again. Otherwise decide per segment, as the unpinned refusal "
+            f"spells out: delete the draft to accept the retranslation, or re-stamp its "
+            f"dispatch_token (only if the draft then passes draft_ready.py AND "
+            f"validate_draft.py).",
+            exit_code=1,
+            pinned_run_id=run_id,
+            foreign_drafts=foreign_payload,
+        )
+    # #742. Every clause below has to be TRUE on every path it can print on,
+    # which is why the cause is READ from `resumed` rather than inferred: a
+    # foreign draft does NOT prove a fresh id was minted. resolve_run_id()
+    # returns the NEWEST digest-matching candidate, so a draft naming an
+    # OLDER run reaches this gate on a perfectly ordinary resume, and a
+    # message that announced a mint there would be diagnosing the wrong
+    # thing.
+    cause = (
+        f"This invocation RESUMED run {run_id!r}, and these drafts name another one -- "
+        f"not necessarily an earlier one: the first digest-MATCHING candidate wins, so a "
+        f"run created after the one resumed here can still own a draft."
+        if resumed
+        else (
+            f"This invocation MINTED a fresh RUN_ID {run_id!r}, because its inputs matched "
+            f"no eligible resume candidate."
+        )
+    )
+    # The remedies are each qualified rather than merely listed, because an
+    # unqualified one is a dead end the operator only discovers by running
+    # it: --only-segs does not RECOVER anything (the named ids hit this same
+    # gate); a pin alone still refuses over a SECOND owner in the same
+    # selection, and refuses anyway if the inputs have moved; and re-stamping
+    # an invalid draft does not resume its review -- validate_draft.py fails
+    # and derivation then either halts the segment as invalid_post_fix_draft
+    # or retranslates it, and WHICH of the two depends on state the operator
+    # is not looking at, so this must not promise either.
     fatal(
-        f"--resume-from-run-id {run_id!r}: {len(foreign)} selected segment(s) carry a draft "
-        f"stamped for a DIFFERENT run: {detail}. Dispatching them under {run_id!r} would "
-        f"retranslate those drafts and discard whatever they hold, because a draft whose "
-        f"dispatch_token names another run fails this driver's own token gate and falls through "
-        f"to translate. Nothing was dispatched. Name only the ids that belong to this run with "
-        f"--only-segs, or re-run without --resume-from-run-id.",
+        f"{common} {cause} Nothing here is repaired automatically -- re-stamping a draft "
+        f"on your behalf is the same silent mutation this refusal exists to stop. What "
+        f"you can do, per remedy: (1) re-run with --only-segs naming only the UNAFFECTED "
+        f"ids -- that CONTINUES the rest, it does not recover the ids above, which hit "
+        f"this same gate; (2) re-run with --resume-from-run-id <owner> TOGETHER WITH "
+        f"--only-segs naming only the ids that run owns -- the pin alone is not enough, "
+        f"because this gate still checks every selected segment and would refuse over a "
+        f"second owner, and it refuses anyway unless that run's input digest still "
+        f"matches this invocation; (3) decide per segment by hand -- DELETE the draft to "
+        f"accept the retranslation (which is also how an unfinished draft picks up a "
+        f"style-bible or canon edit), or re-stamp its dispatch_token to {run_id!r} to "
+        f"keep the work, which preserves it only if the draft then passes draft_ready.py "
+        f"AND validate_draft.py. Back up before re-stamping: a draft that fails "
+        f"validate_draft.py is not resumed into review.",
         exit_code=1,
-        pinned_run_id=run_id,
-        foreign_drafts=[{"seg": seg, "run_id": owner} for seg, owner in foreign],
+        resolved_run_id=run_id,
+        resumed=resumed,
+        foreign_drafts=foreign_payload,
     )
 
 
@@ -6886,8 +7064,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "resuming is safe, exactly as when this flag is absent. Without "
             "it the newest digest-matching run always wins, so a prior run "
             "sharing a digest with a newer one cannot be reached at all, and "
-            "an invocation whose payload matches NO candidate silently mints "
-            "a fresh RUN_ID and claims every named segment under it. "
+            "an invocation whose payload matches NO candidate mints "
+            "a fresh RUN_ID and claims every named segment under it -- except "
+            "that since #742 a segment whose draft is stamped for another run is "
+            "refused rather than claimed -- on this UNPINNED path every selected "
+            "segment whose classification is not one of: "
+            + ", ".join(sorted(FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES))
+            + " (see FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES for why); under a pin, "
+            "every selected segment, with no exemption at all. "
             "Refusals under a pin: exit 1 when runs/RUN_ID is not a "
             "directory or carries no regular input.digest (an established "
             "state, so a gate refusal), when the pinned run's digest does "
@@ -7303,14 +7487,27 @@ def run(args, dirs: dict) -> dict:
                 },
             )
 
-        # #458. Placed here on purpose: run_id is final for BOTH paths by
-        # now (the claim path resolved it before the selector, the ordinary
-        # path just above), `segs` is the final selected set, and nothing
-        # has been dispatched yet.
-        if args.resume_from_run_id is not None:
-            refuse_pinned_run_over_foreign_drafts(
-                segs, run_id, durable_root / "segments",
-            )
+        # #458, widened to the unpinned path by #742. Placed here on purpose:
+        # run_id is final for BOTH paths by now (the claim path resolved it
+        # before the selector, the ordinary path just above), `segs` is the
+        # final selected set, and nothing has been dispatched yet.
+        #
+        # The branch decides only the SEGMENT SET -- pinned checks every
+        # selected segment, #458's own scope, unchanged byte for byte. The
+        # wording flags are passed the same way on both paths, including the
+        # real `resume` value: `resumed` is unread when `pinned` is true, and
+        # hardcoding a false one there would be a lie a future reader could
+        # start believing the moment the pinned message wants it. Read through
+        # run_resumed(), never a truth test -- see its docstring for the two
+        # shapes a truth test answers wrongly, in opposite directions.
+        pinned = args.resume_from_run_id is not None
+        refuse_run_over_foreign_drafts(
+            segs if pinned else segs_covered_by_foreign_draft_gate(segs, select_result),
+            run_id,
+            durable_root / "segments",
+            pinned=pinned,
+            resumed=run_resumed(run_result),
+        )
 
         companion_path = resolve_companion_path(dirs, node_bin=args.node)
 

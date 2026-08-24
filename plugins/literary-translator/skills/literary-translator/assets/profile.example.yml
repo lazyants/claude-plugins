@@ -222,8 +222,10 @@ engine:
     # also a member of resume_setup.py's DIGEST_SUBST_FIELDS, so it does cost one fresh RUN_ID.
     # #735 sharpens what that costs, because "a re-dispatch, never a re-translate" -- what this
     # comment said until then -- was true only of CONVERGED work: a fresh RUN_ID orphans the
-    # dispatch_token on every draft still IN FLIGHT, and those do retranslate, discarding any fix
-    # applied to them by hand. Note also the reason it costs anything, since #735 split the two sets
+    # dispatch_token on every draft still IN FLIGHT. #742 then changed what happens to those:
+    # the driver REFUSES the dispatch (exit 1) and names them, instead of retranslating them and
+    # discarding hand-applied fixes. The cost is now a halt you must answer per segment, not a
+    # silent loss. Note also the reason it costs anything, since #735 split the two sets
     # apart: what mints the fresh RUN_ID is membership of the HASHED set, not of SUBST_FIELDS (the
     # wider, required-payload one). max_codex_jobs_per_batch below is in SUBST_FIELDS and NOT in the
     # hashed set, and costs nothing at all to change.
