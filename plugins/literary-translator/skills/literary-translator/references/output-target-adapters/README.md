@@ -11,7 +11,7 @@ only three" below), not an oversight.
 | `output.target` | Adapter doc | Renders to | Status |
 |---|---|---|---|
 | `obsidian` | [`obsidian.md`](./obsidian.md) | An Obsidian vault (many markdown files) | **Shipped, PRIMARY.** The only working target this increment. |
-| `epub` | *(not yet written)* | A single EPUB file | **Not yet shipped.** Step 0d resolves the name; there is no renderer behind it yet — see `references/assembly-and-output.md`'s "Why `build_epub.py` hasn't been generalized." |
+| `epub` | *(not yet written)* | A single EPUB file | **Not yet shipped, and it HALTS rather than resolving.** `render_epub.py` does not exist, so Step 0 (`profile_validate.py`) and Step 0d both refuse the value, naming the missing module and the alternatives — see `references/assembly-and-output.md`'s "Why `build_epub.py` hasn't been generalized." |
 | `custom` | *(co-designed per project)* | Whatever the co-designed renderer produces | **Always experimental/co-designed** — parsing/rendering logic is per-project by design, the output contract below is fixed. |
 
 ## The shared output contract
@@ -45,8 +45,11 @@ Mirrors `cache_key.py`'s `resolve_extractor_path` on the source side,
 retargeted to the output side:
 
 - `target: obsidian` → the flat sibling module `render_obsidian`.
-- `target: epub` → the flat sibling module name `render_epub` (resolves
-  today; the module itself is a later phase — see the table above).
+- `target: epub` → maps to the flat sibling module name `render_epub`, but
+  that module is a later phase and does not exist, so this **HALTS** instead
+  of resolving (see the table above). The check is on the module FILE beside
+  the resolver, not on the name `epub`: the day `render_epub.py` lands, the
+  target resolves with no edit here.
 - `target: custom` → a path-safe resolved `Path`, via the trio below.
 - Anything else → FATAL, naming the unrecognized value. There is no default
   fallthrough — the dispatch is exhaustive over exactly these three values.

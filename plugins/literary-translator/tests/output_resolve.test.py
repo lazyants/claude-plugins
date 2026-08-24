@@ -104,9 +104,69 @@ def test_obsidian_target_resolves_to_the_documented_module_name(tmp_path):
     assert result == "render_obsidian"
 
 
-def test_epub_target_resolves_to_the_documented_module_name(tmp_path):
-    result = output_resolve.resolve_output_adapter(base_profile("epub"), tmp_path)
+def test_epub_target_halts_because_its_adapter_module_has_not_shipped(tmp_path):
+    """#726: `epub` is MAPPED in BUILTIN_ADAPTER_MODULES but `render_epub.py`
+    has never been written. Returning the name unchecked pushed the failure
+    all the way to W9 assembly, with the whole book already translated and
+    converged. It halts at resolution now, and the message has to be
+    actionable -- naming the module file that is missing and what to do
+    instead, not just "unknown target"."""
+    with pytest.raises(output_resolve.OutputResolveError) as excinfo:
+        output_resolve.resolve_output_adapter(base_profile("epub"), tmp_path)
+    message = str(excinfo.value)
+    assert "epub" in message
+    assert "render_epub.py" in message
+    # At least one of the three documented ways out, so the halt is a
+    # redirection rather than a dead end.
+    assert "segment_drafts_and_audit" in message
+    assert "output.target: custom" in message
+    assert "output.target: obsidian" in message
+
+
+# ---------------------------------------------------------------------------
+# #726: the gate is keyed on the MODULE FILE, never on the target's name.
+#
+# Both cases drive the PUBLIC resolver, not the helper -- a helper-only pair
+# passes even when `resolve_output_adapter` carries a hardcoded
+# `if target == "epub": raise` ahead of the helper call, which is exactly the
+# implementation this pair exists to kill. `output_resolve.SCRIPTS_DIR` is
+# `Path(__file__).resolve().parent`, so loading a COPY of the module makes the
+# copy's own directory the searched one, with no parameter to thread through.
+# ---------------------------------------------------------------------------
+
+
+def _load_output_resolve_copy_in(scripts_dir: Path):
+    copied = scripts_dir / "output_resolve.py"
+    shutil.copy2(OUTPUT_RESOLVE_SRC, copied)
+    spec = importlib.util.spec_from_file_location(
+        f"output_resolve_copy_{scripts_dir.name}", copied
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_epub_resolves_the_moment_render_epub_py_exists_beside_the_resolver(tmp_path):
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "render_epub.py").write_text(
+        "# fixture stand-in for the unshipped epub adapter\n", encoding="utf-8"
+    )
+    module = _load_output_resolve_copy_in(scripts_dir)
+
+    result = module.resolve_output_adapter(base_profile("epub"), tmp_path)
+
     assert result == "render_epub"
+
+
+def test_obsidian_halts_too_when_its_module_is_the_missing_one(tmp_path):
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()  # deliberately EMPTY -- no render_obsidian.py
+    module = _load_output_resolve_copy_in(scripts_dir)
+
+    with pytest.raises(module.OutputResolveError, match="render_obsidian.py"):
+        module.resolve_output_adapter(base_profile("obsidian"), tmp_path)
 
 
 def test_custom_target_resolves_to_a_path_safe_path(tmp_path):

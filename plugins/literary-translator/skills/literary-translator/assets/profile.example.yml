@@ -428,9 +428,10 @@ output:
     # obsidian | epub | custom -- which output-target adapter renders the assembled book; only ever consulted
     # when v1_scope: assembled_book. `obsidian` is the one target this increment actually ships and renders,
     # via scripts/render_obsidian.py -- a vault of narrative pages plus one cross-linked entity note per
-    # canon.json entry. `epub` resolves (Step 0d validates the enum) but has no renderer behind it yet (see
-    # references/assembly-and-output.md's "Why build_epub.py hasn't been generalized"). `custom` also resolves
-    # but always requires this project to co-design its own renderer first (adapter_config.custom.renderer_path).
+    # canon.json entry. `epub` has no renderer behind it yet, so it does NOT resolve: Step 0 and Step 0d both
+    # HALT on it, naming the missing render_epub.py and the alternatives (see references/assembly-and-output.md's
+    # "Why build_epub.py hasn't been generalized"). `custom` resolves its path shape but always requires this
+    # project to co-design its own renderer first (adapter_config.custom.renderer_path).
   name_display:
     parenthetical_originals: never
       # never | first_occurrence -- whether a name's original-script form is shown parenthetically alongside
