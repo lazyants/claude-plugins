@@ -63,11 +63,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import unicodedata
 import sys
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 
 # A sweep over an implausibly small population is the failure that reads as an all-clear: the only
@@ -344,21 +346,42 @@ def tree_index(repo: Path, ref: str) -> dict[str, tuple[str, str]] | None:
     return index
 
 
-def same_path(one: str, other: str) -> bool:
-    """Whether two tracked paths would collide as FILES on this checkout's filesystem.
+@lru_cache(maxsize=None)
+def folds_paths(repo: Path) -> bool:
+    """Whether THIS checkout's filesystem really treats differently-spelled paths as one file.
 
-    macOS is case-insensitive and normalization-insensitive; git is neither. A manifest committed as
-    `plugins/Alpha/...` and a directory read from disk as `plugins/alpha` are one file here and two
-    keys there. So the tree can say two things where the checkout can only hold one, and which one
-    it holds is decided by tree order -- measured: three spellings of one name materialised a single
-    inode carrying the LAST-sorting one's bytes. Not a thing to model; a thing to refuse.
+    Measured, never assumed. macOS folds case (and, on the volumes this repo is developed on,
+    Unicode normalization); Linux folds neither; the same repository is cloned on both. Assuming
+    the local answer everywhere is what made the predicate below call two perfectly distinct Linux
+    paths one file -- and, worse, hand one plugin's published manifest to another plugin that
+    merely spells its name differently.
+
+    The probe is `plugins/` itself: the sweep cannot run without it, so there is always something
+    to ask, and `samefile` answers on inode identity rather than on a guess about the volume.
     """
+    probe, twin = repo / "plugins", repo / "PLUGINS"
+    try:
+        return probe.is_dir() and twin.exists() and os.path.samefile(probe, twin)
+    except OSError:
+        return False
+
+
+def same_path(one: str, other: str, folding: bool) -> bool:
+    """Whether two tracked paths are ONE file in the checkout `folding` describes.
+
+    Where the filesystem folds, the tree can say two things the checkout can only hold one of, and
+    which one it holds is decided by tree order -- measured: three spellings of a name materialised
+    a single inode carrying the last-sorting one's bytes. Not a thing to model; a thing to refuse.
+    Where it does not fold, the two spellings are two files and exact equality is the whole answer.
+    """
+    if not folding:
+        return one == other
     return (unicodedata.normalize("NFC", one).casefold()
             == unicodedata.normalize("NFC", other).casefold())
 
 
 def baseline_blob(
-    index: dict[str, tuple[str, str]], name: str, where: str = BASELINE_REF
+    index: dict[str, tuple[str, str]], name: str, folding: bool, where: str = BASELINE_REF
 ) -> tuple[str | None, str, str]:
     """The manifest blob for `name` in a tree index: (object id, outcome, detail).
 
@@ -380,7 +403,7 @@ def baseline_blob(
     # several colliding spellings AND the exact one at the same time, and then the exact key is
     # found, used, and the ambiguity never surfaces -- while a checkout collapses all of them into
     # one file whose content is decided by tree order, which is not a thing to model.
-    spellings = sorted(path for path in index if same_path(path, rel))
+    spellings = sorted(path for path in index if same_path(path, rel, folding))
     if len(spellings) > 1:
         return None, "topology", (
             f"{where} carries {len(spellings)} spellings of this manifest "
@@ -456,7 +479,8 @@ def baseline_problem(
         # verified above, and `ls-tree` of a valid commit exits 0 even when its pathspec matches
         # nothing), which is why it stays a borrowed reason instead of earning its own key.
         return None, "unreadable"
-    sha, outcome, detail = baseline_blob(published_index, name)
+    folding = folds_paths(repo)
+    sha, outcome, detail = baseline_blob(published_index, name, folding)
     if outcome == "topology":
         unsound.append(detail)
         return None, outcome
@@ -475,7 +499,7 @@ def baseline_problem(
     base_index = indexes.get(base_ref) if base_ref is not None else None
     if base_index is None:
         return None, "no-merge-base"
-    base_sha, base_outcome, base_detail = baseline_blob(base_index, name, "the merge base")
+    base_sha, base_outcome, base_detail = baseline_blob(base_index, name, folding, "the merge base")
     if base_outcome == "topology":
         unsound.append(base_detail)
         return None, "topology"

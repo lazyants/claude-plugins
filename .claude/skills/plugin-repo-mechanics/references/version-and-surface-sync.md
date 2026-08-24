@@ -31,7 +31,7 @@ The section's intro paragraph and "What it covers" bullet list are easy to leave
   itself was unsound — a file it needs to run at all is missing, unreadable or not UTF-8, a path
   resolves outside the checkout, so few plugins were found that a clean result would be vacuous, or
   git records something on a manifest's path at `origin/main` that it will not walk into (a symlink,
-  a submodule, or a spelling this filesystem cannot tell apart from another).
+  a submodule, or two spellings this checkout's filesystem cannot tell apart).
   - **It refuses a tree that would publish a DOWNGRADE.** Once the five surfaces agree, it reads
     that plugin's `plugin.json` on the LOCAL `origin/main` and refuses when this tree's version is
     lower — the case a green line used to wave through, and that reached two release branches in
@@ -55,7 +55,10 @@ The section's intro paragraph and "What it covers" bullet list are easy to leave
     in one recursive `ls-tree` of `plugins/`, never by a failed path lookup: `git show <ref>:a/b/c`
     fails identically for a path that is not there and one behind a symlink or a gitlink, at any
     depth, and looking a path up can never tell you which. Several tracked spellings of one name
-    are refused for the same reason: a checkout can only hold one of them.
+    are refused for the same reason, but only where they really collide: whether this filesystem
+    folds case and normalization is MEASURED per checkout, because macOS folds both and Linux
+    folds neither, and assuming the local answer hands one plugin's published manifest to another
+    plugin that merely spells its name differently.
   - **What it compares is the WORKING TREE against `origin/main`'s git record**, which is what "run
     it before the commit" means — the point is to judge what you are about to commit. It does not
     read the index, so a manifest staged differently from the file on disk is judged as the file on

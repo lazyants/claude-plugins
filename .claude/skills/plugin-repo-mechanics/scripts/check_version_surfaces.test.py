@@ -25,6 +25,7 @@ Two traps this file exists to stay out of:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -35,6 +36,13 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent / "check_version_surfaces.py"
+
+# Imported as well as run, for the one predicate whose two answers cannot both be produced on one
+# machine: a case-folding filesystem and a case-sensitive one. Driving the whole checker would pin
+# only whichever half this runner happens to be, and the other half is where the bug was.
+_spec = importlib.util.spec_from_file_location("check_version_surfaces", SCRIPT)
+checker = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(checker)
 
 GIT_ENV = {
     **os.environ,
@@ -541,6 +549,54 @@ class BaselineTopology(BaselineCase):
         self.assertEqual(code, 1, out)
         self.assertIn("would publish a DOWNGRADE", out)
         self.assertIn("already publishes 2.0.0", out)
+
+
+class PathCollisionSemantics(unittest.TestCase):
+    """The collision predicate is the one thing here whose correct answer differs BY MACHINE.
+
+    macOS folds case and normalization, Linux folds neither, and this repository is cloned on both.
+    These drive the predicate directly with each answer, so both halves are pinned wherever the
+    suite runs; the probe case is what ties them back to the filesystem actually underfoot.
+    """
+
+    ALPHA = "plugins/alpha/.claude-plugin/plugin.json"
+    CAPPED = "plugins/Alpha/.claude-plugin/plugin.json"
+
+    def test_the_probe_agrees_with_this_filesystem(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "plugins").mkdir()
+            twin = repo / "PLUGINS"
+            measured = twin.exists() and os.path.samefile(repo / "plugins", twin)
+            self.assertEqual(checker.folds_paths(repo), measured,
+                             "the probe must report what this filesystem does, not what it was built on")
+        with tempfile.TemporaryDirectory() as bare:
+            # Nothing to probe means no answer, on every platform. Asserted because the rest of
+            # this case can only distinguish the two answers on a machine that gives the OTHER one:
+            # on a folding filesystem `measured` is True and so is a probe hardwired to True.
+            self.assertFalse(checker.folds_paths(Path(bare)))
+
+    def test_folding_and_exact_disagree_about_two_spellings(self) -> None:
+        self.assertTrue(checker.same_path(self.ALPHA, self.CAPPED, True))
+        self.assertFalse(checker.same_path(self.ALPHA, self.CAPPED, False))
+        self.assertTrue(checker.same_path(self.ALPHA, self.ALPHA, False))
+
+    def test_a_case_sensitive_checkout_does_not_adopt_another_spelling(self) -> None:
+        """The finding: with one differently-cased entry, folding ADOPTS it as this plugin's
+        baseline. On a case-sensitive checkout those are two plugins and there is no baseline."""
+        index = {"plugins": ("040000", "t"), "plugins/Alpha": ("040000", "t"),
+                 "plugins/Alpha/.claude-plugin": ("040000", "t"), self.CAPPED: ("100644", "blob0")}
+        self.assertEqual(checker.baseline_blob(index, "alpha", True), ("blob0", checker.COMPARED, ""))
+        self.assertEqual(checker.baseline_blob(index, "alpha", False)[:2], (None, "absent"))
+
+    def test_a_case_sensitive_checkout_does_not_call_two_paths_a_collision(self) -> None:
+        index = {"plugins": ("040000", "t"),
+                 "plugins/alpha": ("040000", "t"), "plugins/alpha/.claude-plugin": ("040000", "t"),
+                 self.ALPHA: ("100644", "mine"),
+                 "plugins/Alpha": ("040000", "t"), "plugins/Alpha/.claude-plugin": ("040000", "t"),
+                 self.CAPPED: ("100644", "theirs")}
+        self.assertEqual(checker.baseline_blob(index, "alpha", True)[1], "topology")
+        self.assertEqual(checker.baseline_blob(index, "alpha", False), ("mine", checker.COMPARED, ""))
 
 
 class UntouchedContract(BaselineCase):
