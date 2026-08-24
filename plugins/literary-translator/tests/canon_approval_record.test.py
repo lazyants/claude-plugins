@@ -328,6 +328,45 @@ def test_the_refusal_column_is_one_column_governing_both_flags():
 # every batch on both entry points.
 # ---------------------------------------------------------------------------
 
+def test_attesting_with_no_records_is_refused_in_process_not_silently_skipped():
+    """The direction `_paired_approval_records` has to defend, and the one its
+    first version got backwards.
+
+    NEITHER DIRECTION IS REACHABLE FROM THE CLI -- main() refuses both halves of
+    the pairing itself -- so what decides which guard is worth writing is what a
+    future in-process caller LOSES by getting it wrong. Attesting with no
+    records used to return `[None] * len(batch_paths)`: every record check
+    silently disabled, on the one merge that claims an independent review
+    approved these exact bytes, with nothing in the output saying so. The
+    opposite mistake only ever adds refusals.
+
+    Called directly rather than through argv, because argv is exactly the layer
+    this guard does not trust."""
+    module = load_canon_validate_module()
+
+    with pytest.raises(module.CanonValidationError) as exc:
+        module._paired_approval_records(
+            ["out_0.json", "out_1.json"], None, citations_reviewed=True
+        )
+    assert "--approval-records" in str(exc.value)
+
+    # The safe direction stays refused too, and stays distinguishable.
+    with pytest.raises(module.CanonValidationError) as exc:
+        module._paired_approval_records(
+            ["out_0.json"], ["approval_0.json"], citations_reviewed=False
+        )
+    assert "--citations-reviewed" in str(exc.value)
+
+    # And the two legitimate shapes still pass through untouched: no attestation
+    # and no records owes no enforcement, and the paired case returns the paths.
+    assert module._paired_approval_records(
+        ["out_0.json", "out_1.json"], None, citations_reviewed=False
+    ) == [None, None]
+    assert module._paired_approval_records(
+        ["out_0.json"], ["approval_0.json"], citations_reviewed=True
+    ) == ["approval_0.json"]
+
+
 def test_the_record_check_can_only_refuse():
     """The enforcer raises or returns None -- it never yields a value a caller
     could branch on to take a shortcut.

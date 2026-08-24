@@ -1863,22 +1863,36 @@ def _paired_approval_records(batch_paths: list, approval_record_paths, citations
     `approved_{i}_attempt_{n}.json`, say -- would teach this script the glossary
     template's private filename convention, and then a rename on either side
     would silently pair a fragment with a record that is not its own."""
+    # DEFENCE IN DEPTH, AND IT HAS TO POINT THE OTHER WAY. main() refuses both
+    # halves of the pairing on its own, so neither branch below is reachable
+    # from the CLI; what decides which one is worth writing is what a future
+    # in-process caller would LOSE by getting it wrong.
+    #
+    # ATTESTING WITH NO RECORDS is the direction that matters, and it is the one
+    # this function used to answer with `[None] * len(batch_paths)` -- silently
+    # enforcing nothing, on the exact merge that claims an independent review
+    # approved these bytes. A caller in that state believes it is running the
+    # #734 check and is not, and nothing in its output says so.
+    #
+    # RECORDS WITH NO ATTESTATION only ever ADDS refusals, so getting it wrong
+    # is loud and safe. It is still refused, because a caller in that state has
+    # misread what the pairing means -- but it is not the failure this guard
+    # exists for, and writing only that one was the earlier mistake.
+    if citations_reviewed and approval_record_paths is None:
+        raise CanonValidationError(
+            "internal: --citations-reviewed merged without --approval-records"
+        )
     if approval_record_paths is None:
         return [None] * len(batch_paths)
+    if not citations_reviewed:
+        raise CanonValidationError(
+            "internal: --approval-records enforced without --citations-reviewed"
+        )
     if len(approval_record_paths) != len(batch_paths):
         raise CanonValidationError(
             f"--approval-records takes exactly one record per merged fragment, "
             f"in the same order: got {len(approval_record_paths)} record(s) for "
             f"{len(batch_paths)} fragment(s)"
-        )
-    # Defence in depth. main() already refuses --approval-records without
-    # --citations-reviewed, but this function is the one every merge path calls,
-    # and a future caller that forgot the CLI rule would otherwise enforce
-    # records while merging bytes nobody attested to -- which reads like a
-    # STRONGER check while actually being a different one.
-    if not citations_reviewed:
-        raise CanonValidationError(
-            "internal: --approval-records enforced without --citations-reviewed"
         )
     return list(approval_record_paths)
 
