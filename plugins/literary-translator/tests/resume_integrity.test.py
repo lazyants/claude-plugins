@@ -1545,8 +1545,11 @@ def test_payload_plugin_root_absent_and_empty_produce_the_same_digest(tmp_path):
 # the same object: SUBST_FIELDS stays the producer-side contract every payload
 # must satisfy, and DIGEST_SUBST_FIELDS is the subset compute_input_digest()
 # actually projects. The knob is a preflight VOLUME CAP -- it decides whether a
-# batch is refused before any dispatch and reaches no translator, no reviewer
-# and no produced artifact -- so hashing it made the ONE knob most likely to
+# batch is refused before any dispatch and reaches no agent prompt and no
+# translation, review or ledger artifact (the preflight's own refusal result
+# and the driver's session journal do record it, as diagnostics ABOUT the run
+# rather than a cached result a later run could reuse) -- so hashing it made
+# the ONE knob most likely to
 # need adjusting once a book's real shape is known also the one that punished
 # adjusting it (fresh RUN_ID -> DRAFT_TOKEN_MISMATCH on every draft in flight).
 # Same reasoning `agent_config_hash` already applies to batch_agent_cap.
@@ -1569,31 +1572,54 @@ _HASHED_SUBST_PROBES = {
 }
 
 
-def _mass_digest_with_subst(tmp_path, name, subst_overrides):
+def _glossary_base_payload():
+    """The glossary twin of mass_base_payload(). Both digest KINDS share one
+    `subst` projection, so every property below is asserted against both."""
+    return {
+        "kind": "glossary",
+        "args": {"candidates": [{"name": "Alice Smith"}]},
+        "subst": dict(BASE_SUBST),
+        "glossary_rule": "strict",
+        "batches": [{"index": 0, "names": ["Alice Smith"]}],
+    }
+
+
+def _digest_with_subst(tmp_path, name, kind, subst_overrides):
     """One INDEPENDENT digest computation, in its own durable root. A fresh
-    root per call for the same reason the plugin_root pair above uses one: a
-    second resolve_run() against a root that already recorded an identical
-    input.digest would RESUME rather than recompute, and this file's digest
-    comparisons need two genuine computations."""
+    root per call, so no two computations here can interact through a root's
+    recorded run dirs at all -- this file's digest comparisons want two
+    genuine computations and nothing else. (These payloads offer no resume
+    candidate, so neither call could resume in any case; the isolation is what
+    makes that irrelevant rather than something to reason about.)"""
     root = make_resume_setup_root(tmp_path, name=name)
     write_fixture_cache_keys(root, mass_base_cache_keys())
-    payload = mass_base_payload()
+    payload = mass_base_payload() if kind == "mass" else _glossary_base_payload()
     payload["subst"] = {**payload["subst"], **subst_overrides}
     proc, parsed = run_resume_setup(root, payload)
     parsed = assert_setup_success(proc, parsed)
     return parsed["input_digest"]
 
 
-def test_max_codex_jobs_per_batch_never_changes_input_digest(tmp_path):
-    """The load-bearing property of the #735 exclusion: two payloads
-    identical in every other respect, differing ONLY in the volume cap, must
-    produce the EXACT SAME input_digest -- so raising the cap mid-book neither
-    mints a fresh RUN_ID nor orphans a draft in flight."""
-    low = _mass_digest_with_subst(tmp_path, "durable_root_cap_low", {"max_codex_jobs_per_batch": 400})
-    high = _mass_digest_with_subst(tmp_path, "durable_root_cap_high", {"max_codex_jobs_per_batch": 4000})
+@pytest.mark.parametrize("kind", ["mass", "glossary"])
+def test_max_codex_jobs_per_batch_never_changes_input_digest(tmp_path, kind):
+    """The load-bearing property of the #735 exclusion: two payloads identical
+    in every other respect, differing ONLY in the volume cap, must produce the
+    EXACT SAME input_digest -- so raising the cap mid-book neither mints a
+    fresh RUN_ID nor orphans a draft in flight.
+
+    Parametrized over BOTH kinds because `subst` is projected once, AFTER the
+    mass/glossary domain split: an implementation projecting a different set
+    per kind would satisfy a mass-only test and still collide on the other
+    branch."""
+    low = _digest_with_subst(
+        tmp_path, f"durable_root_cap_low_{kind}", kind, {"max_codex_jobs_per_batch": 400}
+    )
+    high = _digest_with_subst(
+        tmp_path, f"durable_root_cap_high_{kind}", kind, {"max_codex_jobs_per_batch": 4000}
+    )
 
     assert low == high, (
-        "engine.max_codex_jobs_per_batch must never affect input_digest -- got "
+        f"engine.max_codex_jobs_per_batch must never affect a {kind} input_digest -- got "
         f"{low!r} vs {high!r}"
     )
 
@@ -1616,21 +1642,24 @@ def test_max_codex_jobs_per_batch_is_still_a_required_payload_field(tmp_path):
     )
 
 
+@pytest.mark.parametrize("kind", ["mass", "glossary"])
 @pytest.mark.parametrize("field", sorted(_HASHED_SUBST_PROBES))
-def test_every_other_subst_field_still_moves_the_input_digest(tmp_path, field):
-    """The other side of the guard, and the reason it is parametrized over the
-    WHOLE projection rather than a chosen few: a mutation that narrows the
-    projection too far -- dropping a second field along with the volume cap --
-    must turn something red here. A hand-picked subset would let exactly the
-    unlisted field through."""
-    base = _mass_digest_with_subst(tmp_path, f"durable_root_base_{field}", {})
-    moved = _mass_digest_with_subst(
-        tmp_path, f"durable_root_moved_{field}", {field: _HASHED_SUBST_PROBES[field]}
+def test_every_other_subst_field_still_moves_the_input_digest(tmp_path, field, kind):
+    """The other side of the guard, over the WHOLE projection and BOTH kinds
+    rather than a chosen few of either. Both axes exist because of a specific
+    mutation that would otherwise stay green: narrowing the projection by one
+    extra field is invisible to a hand-picked subset that happens not to list
+    it, and narrowing it for one KIND only is invisible to a mass-only test --
+    and `target_lang` reaches the glossary template too, so that second
+    mutation is a real collision rather than a theoretical one."""
+    base = _digest_with_subst(tmp_path, f"durable_root_base_{kind}_{field}", kind, {})
+    moved = _digest_with_subst(
+        tmp_path, f"durable_root_moved_{kind}_{field}", kind, {field: _HASHED_SUBST_PROBES[field]}
     )
 
     assert moved != base, (
         f"subst[{field!r}] is still a hashed digest field -- changing it must "
-        f"change input_digest, got {moved!r} for both"
+        f"change a {kind} input_digest, got {moved!r} for both"
     )
 
 

@@ -180,11 +180,14 @@ engine:
     # of margin (1 + 40*38 = 1521). The knob is deliberately EXCLUDED from agent_config_hash (cache_key.py's
     # compute_agent_config_hash whitelists exactly effort/max_fix_rounds/model, with a dedicated negative
     # test in ledger_composite_key.test.py), so changing it invalidates NO converged segment. It is
-    # also a member of resume_setup.py's DIGEST_SUBST_FIELDS, so it does need one fresh RUN_ID -- a
-    # re-dispatch, never a re-translate. Note the reason, since #735 split the two sets apart: what
-    # costs the fresh RUN_ID is membership of the HASHED set, not of SUBST_FIELDS (the wider,
-    # required-payload one). max_codex_jobs_per_batch below is in SUBST_FIELDS and NOT in the hashed
-    # set, and costs nothing to change.
+    # also a member of resume_setup.py's DIGEST_SUBST_FIELDS, so it does cost one fresh RUN_ID.
+    # #735 sharpens what that costs, because "a re-dispatch, never a re-translate" -- what this
+    # comment said until then -- was true only of CONVERGED work: a fresh RUN_ID orphans the
+    # dispatch_token on every draft still IN FLIGHT, and those do retranslate, discarding any fix
+    # applied to them by hand. Note also the reason it costs anything, since #735 split the two sets
+    # apart: what mints the fresh RUN_ID is membership of the HASHED set, not of SUBST_FIELDS (the
+    # wider, required-payload one). max_codex_jobs_per_batch below is in SUBST_FIELDS and NOT in the
+    # hashed set, and costs nothing at all to change.
     # Raising it further is a deliberate operator decision, not something to discover mid-run.
     #
     # COUPLING, easy to miss (#402): `CODEX_DEADLINE_SEC` in the workflow template is marked "(tunable)",
@@ -285,9 +288,9 @@ engine:
     # schema-default) are byte-identical at instantiation time -- true either way, on purpose.
     # #735: this knob is REQUIRED in resume_setup.py's payload and deliberately absent from its
     # DIGEST_SUBST_FIELDS, so raising it mid-book mints NO fresh RUN_ID and orphans no draft in
-    # flight -- unlike batch_agent_cap above, which still costs one re-dispatch. Raise it when a
-    # book's real shape turns out to need it; that is the whole point of it being a backstop rather
-    # than a planning constraint. A worst-case
+    # flight -- unlike batch_agent_cap above, which still mints one and does orphan them. Raise it
+    # when a book's real shape turns out to need it; that is the whole point of it being a backstop
+    # rather than a planning constraint. A worst-case
     # CODEX-JOB-COUNT preflight,
     # independent of batch_agent_cap above. batch_agent_cap estimates Workflow agent() calls; this knob
     # estimates the OTHER consumable resource a

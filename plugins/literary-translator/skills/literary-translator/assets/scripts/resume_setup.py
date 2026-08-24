@@ -203,7 +203,9 @@ this script trusts them as given rather than re-deriving them from
 profile.yml itself, since the point is to hash what got burned into THIS
 instantiation rather than what profile.yml says today. It is not quite
 "exactly what got burned in", and has not been since #735: every field
-listed above is REQUIRED and type-checked, while DIGEST_SUBST_FIELDS is the
+listed above is REQUIRED (presence only -- this script checks that `subst` is
+an object and that no name is missing, never the type of a member), while
+DIGEST_SUBST_FIELDS is the
 subset actually hashed -- `max_codex_jobs_per_batch` is burned into the
 template and deliberately left out of the digest, for the reasons recorded
 at that constant. For kind="mass", each segment's 15-field
@@ -446,8 +448,12 @@ SUBST_FIELDS = frozenset({
 # NOT "max_codex_jobs_per_batch": it is a preflight VOLUME CAP. Its only two
 # consumers compare an estimate against it and then refuse or proceed --
 # segment_dispatch_driver.py's check_volume_cap() and the mass template's
-# `estimatedCodexJobs > MAX_CODEX_JOBS_PER_BATCH` -- so it reaches no
-# translator, no reviewer, no fix turn and no produced artifact. Hashing it
+# `estimatedCodexJobs > MAX_CODEX_JOBS_PER_BATCH` -- so it reaches no agent
+# prompt and no translation, review or ledger artifact. It is not invisible:
+# both the preflight's refusal result and the driver's durable session journal
+# record `codexJobsCap`. Those are diagnostics ABOUT the run, never a cached
+# agent result the next run could reuse, which is the only thing this digest
+# has to be able to tell apart. Hashing it
 # therefore never distinguished two states that differ in what a cached
 # result MEANS; what it did instead was make the one knob most likely to
 # need adjusting once a book's real shape is known also the one that
