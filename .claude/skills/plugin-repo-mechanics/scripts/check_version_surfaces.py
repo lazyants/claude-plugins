@@ -23,10 +23,25 @@ one plugin is a finding rather than a last-one-wins.
 
 What a clean run does and does not prove:
 
-  - It compares the surfaces against EACH OTHER. There is no baseline, so it cannot tell you which
-    surface your change forgot from which was already wrong before you started -- for that, the
-    doc's next bullet has you grep each surface on `origin/main`. (`--repo` does accept a checkout
-    of `main`, so it can be pointed at shipped state; it just cannot compare the two.)
+  - It compares the surfaces against EACH OTHER, and it compares ONE of them -- `plugin.json`, the
+    file `claude plugin update` reads -- against `origin/main`, refusing a tree that would publish
+    a version LOWER than the one already there. It still cannot tell you which surface your change
+    forgot from which was already wrong before you started: the baseline answers "does this move
+    the published number backwards", not "which of these five is stale". For that, the doc's next
+    bullet has you grep each surface on `origin/main`.
+  - The baseline reads the LOCAL `origin/main`; nothing here fetches. A stale remote-tracking ref
+    yields a stale baseline, and a checkout without `origin/main` gets no comparison at all -- the
+    summary then says NOT COMPARED rather than reporting the sweep clean, because "could not
+    compare" and "compared and agreed" are exactly the pair a green line used to conflate.
+  - The LEFT-hand side is the WORKING TREE, on disk, which is what "run it before the commit" means
+    and is deliberate: the point is to judge what you are about to commit. It is NOT the index, so a
+    manifest staged differently from the file on disk is judged as the file on disk -- true of every
+    surface this has ever read, and out of scope here. The right-hand side is git's own record at
+    `origin/main`, and only that side has to be walkable.
+  - A tree whose version EQUALS the version at `merge-base HEAD origin/main` is never refused,
+    however far behind `origin/main` it sits. A merge applies this branch's DIFF, and a branch that
+    ends where it started cannot carry the number backwards; unbumped branches are the normal case
+    in this repo, so refusing them would be the same false reading with the sign flipped.
   - The changelog is only checked once the five surfaces agree, because until they do there is no
     single version to look for. A first run over a mismatched tree therefore does not enumerate
     all the remaining work; re-run after fixing what it named.
@@ -35,8 +50,12 @@ What a clean run does and does not prove:
     hidden layer of the README surface and which no parser can judge.
 
 Exit: 0 every plugin agrees; 1 at least one disagreement (each named); 2 the sweep itself is
-unsound -- a file it MUST read to run at all is missing or unreadable, or so few plugins were
-found that a clean result would be vacuous. A plugin's own `plugin.json` or changelog going
+unsound -- a file it MUST read to run at all is missing or unreadable, so few plugins were found
+that a clean result would be vacuous, or git records something on the manifest's path at the
+BASELINE ref that it will not walk into -- a symlink, a gitlink, a name this filesystem cannot tell
+apart from another. Then released state is unreadable in a way that is indistinguishable from a
+plugin that simply is not published yet, which is the one answer that would wave a downgrade
+through, so the sweep refuses rather than guess. A plugin's own `plugin.json` or changelog going
 missing is deliberately NOT unsoundness: those are findings about that plugin, exit 1.
 """
 
@@ -44,9 +63,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import subprocess
+import unicodedata
 import sys
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 
 # A sweep over an implausibly small population is the failure that reads as an all-clear: the only
@@ -80,6 +103,32 @@ VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 FENCE_RE = re.compile(r"`{3,}|~{3,}")
 SURFACES = ("manifest", "marketplace", "row", "heading")
+# What the released state is read from. Only ever read, never fetched: see the docstring.
+BASELINE_REF = "origin/main"
+COMPARED = "compared"
+# The mode git records for a directory. Anything else at `plugins` or `plugins/<name>` -- a symlink
+# (120000), a submodule gitlink (160000), a plain file -- means the two halves of this comparison
+# are not looking through the same thing: the working-tree half FOLLOWS a symlink, and
+# `git show <ref>:a/b/c` does not follow one stored in a tree and stops dead at a gitlink. A plugin
+# behind either makes `git show` fail exactly as an absent plugin does, and "no baseline yet" is
+# the one answer that must never be given for a plugin that HAS one -- it waves a downgrade through.
+TREE_MODE = "040000"
+BLOB_MODES = ("100644", "100755")
+# Every way the baseline comparison can be unavailable, and the words the summary uses for it.
+# These are a SET, not a fallback: "compared and agreed" and "could not compare" printing the same
+# green line is the whole defect this baseline exists to close, so an unavailable comparison has to
+# name which unavailability it was -- and each sentence has to be TRUE of every case that reaches
+# it. "This plugin has no baseline yet" is the one that would wave a real downgrade through, so
+# nothing else is allowed to borrow it.
+NOT_COMPARED = {
+    "not-a-repo": "this is not a git checkout (or git is unavailable), so nothing was compared",
+    "no-ref": f"no usable {BASELINE_REF} commit in this checkout, so nothing was compared",
+    "absent": f"the plugin has no manifest on {BASELINE_REF} yet (a new plugin has no baseline)",
+    "unreadable": f"the manifest on {BASELINE_REF} is not readable as an X.Y.Z version",
+    "topology": f"git records that path on {BASELINE_REF} as something it cannot walk into -- see UNSOUND",
+    "no-merge-base": f"git could not establish a merge base between HEAD and {BASELINE_REF}",
+    "disagree": "the surfaces do not agree on one valid X.Y.Z version, so there was nothing to compare",
+}
 COLUMN = "  "
 CELL = max(len(s) for s in SURFACES)
 
@@ -238,6 +287,247 @@ def changelog_source(repo: Path, name: str) -> tuple[str, re.Pattern[str]]:
     )
 
 
+def git(repo: Path, *args: str) -> str | None:
+    """One git read, or None if git cannot answer it.
+
+    Every failure collapses to None deliberately: no git binary on PATH, `repo` not a checkout at
+    all, the ref absent (a fresh clone with no remote, a detached CI checkout), the path absent at
+    that ref. None of those says anything is wrong with the tree in front of us, so none of them
+    may reach `unsound` and turn a legitimate checkout into exit 2. They make the comparison
+    UNAVAILABLE, which the summary reports in its own words instead of hiding behind a clean line.
+    """
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=False)
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        # Decoded HERE, not by subprocess: `text=True` raises UnicodeDecodeError out of the call
+        # itself, which is not an OSError and escaped as a traceback under exit 1 -- the code that
+        # means "a real disagreement". Undecodable bytes are just another thing git would not give
+        # us in a usable form, and they take the same None path as the rest.
+        return proc.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def version_key(value: object) -> tuple[int, ...] | None:
+    """X.Y.Z as NUMBERS, or None if it is not one.
+
+    Not a string comparison, ever: `"1.9.0" > "1.10.0"` lexically, which is a real version pair in
+    this repo's history and would have read as "the tree is ahead" while it was nine releases behind.
+    """
+    return tuple(int(part) for part in str(value).split(".")) if VERSION_RE.fullmatch(str(value)) else None
+
+
+def tree_index(repo: Path, ref: str, folding: bool) -> dict[str, tuple[str, str]] | None:
+    """Every path git records under `plugins/` at `ref`, with its mode and object id.
+
+    ONE listing, and every question about released state is answered out of it. That is the whole
+    design, and it exists because looking a path UP -- `git show <ref>:a/b/c` -- cannot tell "not
+    there" from "there, behind something git will not walk into", and a symlink or a gitlink at ANY
+    component produces the second while reading exactly like the first. Three review rounds each
+    found a new depth for that same confusion: `plugins` itself, then `plugins/<name>`, then
+    `.claude-plugin` and the manifest leaf. Enumerating the topologies was the wrong shape -- there
+    is always a deeper one. A recursive listing is the SET of what exists, so absence is set
+    membership and topology is the mode already sitting beside each entry. Neither is inferred from
+    a failure, and there is no next level to be surprised by.
+
+    Listed WHOLE and filtered here, rather than scoped with a `-- plugins` pathspec: that pathspec
+    is exact, `ls-tree` does not accept `:(icase)` magic, and a baseline rooted at `PLUGINS` would
+    come back empty -- which reads as "no plugin has a baseline" and waves every downgrade through.
+    Measured on this repo: 676 entries and 81KB for the whole tree against 561 for the subtree, at
+    15ms a call, so the scoping bought nothing worth that failure mode.
+    """
+    listing = git(repo, "ls-tree", "-r", "-t", "-z", "--full-tree", ref)
+    if listing is None:
+        return None
+    index: dict[str, tuple[str, str]] = {}
+    for entry in listing.split("\0"):
+        meta, _, path = entry.partition("\t")
+        fields = meta.split()
+        if path and len(fields) == 3 and same_path(path.split("/", 1)[0], "plugins", folding):
+            index[path] = (fields[0], fields[2])
+    return index
+
+
+@lru_cache(maxsize=None)
+def folds_paths(repo: Path) -> bool:
+    """Whether THIS checkout's filesystem really treats differently-spelled paths as one file.
+
+    Measured, never assumed. macOS folds case (and, on the volumes this repo is developed on,
+    Unicode normalization); Linux folds neither; the same repository is cloned on both. Assuming
+    the local answer everywhere is what made the predicate below call two perfectly distinct Linux
+    paths one file -- and, worse, hand one plugin's published manifest to another plugin that
+    merely spells its name differently.
+
+    The probe is `plugins/` itself: the sweep cannot run without it, so there is always something
+    to ask, and `samefile` answers on inode identity rather than on a guess about the volume.
+    """
+    probe, twin = repo / "plugins", repo / "PLUGINS"
+    try:
+        here = os.stat(probe, follow_symlinks=False)
+        there = os.stat(twin, follow_symlinks=False)
+    except OSError:
+        return False
+    # lstat, not samefile: `samefile` FOLLOWS symlinks, so a `PLUGINS -> plugins` entry -- which
+    # any contributor can add, tracked or not -- makes a case-SENSITIVE filesystem answer "I fold",
+    # and the answer to this question decides whether one plugin may adopt another's manifest.
+    # Comparing the identities of the entries themselves cannot be aliased that way: a symlink has
+    # its own inode, and a folding filesystem hands back one entry for both spellings.
+    return (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino)
+
+
+def same_path(one: str, other: str, folding: bool) -> bool:
+    """Whether two tracked paths are ONE file in the checkout `folding` describes.
+
+    Where the filesystem folds, the tree can say two things the checkout can only hold one of, and
+    which one it holds is decided by tree order -- measured: three spellings of a name materialised
+    a single inode carrying the last-sorting one's bytes. Not a thing to model; a thing to refuse.
+    Where it does not fold, the two spellings are two files and exact equality is the whole answer.
+    """
+    if not folding:
+        return one == other
+    return (unicodedata.normalize("NFC", one).casefold()
+            == unicodedata.normalize("NFC", other).casefold())
+
+
+def baseline_blob(
+    index: dict[str, tuple[str, str]], name: str, folding: bool, where: str = BASELINE_REF
+) -> tuple[str | None, str, str]:
+    """The manifest blob for `name` in a tree index: (object id, outcome, detail).
+
+    `where` names the ref being read, for the message only. Passed in rather than patched into the
+    finished sentence afterwards: the old spelling rewrote the ref name inside the composed string,
+    which quietly depended on no repository path ever containing the literal "origin/main".
+
+    `topology` means the sweep must not answer at all: something on the path is not a directory
+    git can walk into, or the tree spells the name differently than this filesystem does, and in
+    both cases a missing entry says nothing about whether a baseline exists.
+    """
+    rel = f"plugins/{name}/.claude-plugin/plugin.json"
+    # Ancestors are asked as equivalence classes for the same reason the leaf is: where the
+    # filesystem folds, `plugins/Alpha` IS this plugin's directory, so a symlink there hides this
+    # plugin's baseline. Probing the exact lowercase key found nothing and called that "absent" --
+    # the one answer that lets a downgrade through.
+    for step in ("plugins", f"plugins/{name}", f"plugins/{name}/.claude-plugin"):
+        for path, (mode, _) in sorted(index.items()):
+            if mode != TREE_MODE and same_path(path, step, folding):
+                return None, "topology", f"{path} is mode {mode} on {where}, not a directory git can walk into"
+    # Every key this filesystem cannot tell apart from the manifest path, the exact spelling
+    # included. Asked as ONE question rather than as an exact hit with a fallback: a tree can hold
+    # several colliding spellings AND the exact one at the same time, and then the exact key is
+    # found, used, and the ambiguity never surfaces -- while a checkout collapses all of them into
+    # one file whose content is decided by tree order, which is not a thing to model.
+    spellings = sorted(path for path in index if same_path(path, rel, folding))
+    if len(spellings) > 1:
+        return None, "topology", (
+            f"{where} carries {len(spellings)} spellings of this manifest "
+            f"({', '.join(spellings)}), which are one file on this filesystem"
+        )
+    if not spellings:
+        return None, "absent", ""
+    mode, sha = index[spellings[0]]
+    if mode in BLOB_MODES:
+        return sha, COMPARED, ""
+    return None, "topology", f"{spellings[0]} is mode {mode} on {where}, not a regular file"
+
+
+def blob_version(repo: Path, sha: str) -> str | None:
+    """The `version` an already-located manifest blob holds, or None if it holds no X.Y.Z one."""
+    raw = git(repo, "cat-file", "blob", sha)
+    if raw is None:
+        return None
+    try:
+        # AttributeError, not only ValueError: a manifest that parses as a list, a number or a
+        # string is valid JSON with no `.get` on it.
+        version = json.loads(raw).get("version")
+    except (ValueError, AttributeError):
+        return None
+    return str(version) if version_key(version) else None
+
+
+def baseline_refs(repo: Path) -> tuple[str | None, str | None, str | None]:
+    """`origin/main`, the merge base of HEAD with it, and -- when there is no baseline -- WHY.
+
+    The merge base is what separates "this branch MOVES the version" from "this branch is merely
+    BEHIND". Resolved once for the checkout rather than per plugin, so the rows cannot disagree.
+    The two reasons are kept apart because "you have no remote-tracking ref" and "this is not a
+    checkout at all" are different things to go and fix.
+    """
+    published = git(repo, "rev-parse", "--verify", f"{BASELINE_REF}^{{commit}}")
+    if published is None:
+        return None, None, "no-ref" if git(repo, "rev-parse", "--git-dir") is not None else "not-a-repo"
+    base = git(repo, "merge-base", "HEAD", BASELINE_REF)
+    return published.strip(), (base.strip() if base and base.strip() else None), None
+
+
+def baseline_problem(
+    repo: Path,
+    name: str,
+    version: str,
+    refs: tuple[str | None, str | None, str | None],
+    indexes: dict[str, dict[str, tuple[str, str]] | None],
+    unsound: list[str],
+) -> tuple[str | None, str]:
+    """Would merging this tree LOWER what `origin/main` already publishes?
+
+    Returns the problem (or None) and which comparison actually happened -- `COMPARED`, or a key of
+    `NOT_COMPARED`. The caller needs both: a run that compared nothing must not read like a run
+    that compared everything and agreed.
+
+    Merge-to-main IS publish in this repo, and `claude plugin update` resolves the number in
+    `plugin.json`, so a tree stamped below the published version is a downgrade shipped to every
+    installed copy. That is why this is a refusal and not a warning.
+    """
+    published_ref, base_ref, unavailable = refs
+    if published_ref is None:
+        return None, unavailable or "no-ref"
+    if version_key(version) is None:
+        # Every surface says the same thing and that thing is not a version. `judge` has already
+        # said so; what must not happen is this plugin being TALLIED as compared when no comparison
+        # was possible, which is the summary lying about its own coverage.
+        return None, "disagree"
+    published_index = indexes[published_ref]
+    if published_index is None:
+        # The listing itself failed, so no manifest was looked at at all -- this branch BORROWS the
+        # unreadable sentence rather than being described by it. Near-unreachable (the ref was
+        # verified above, and `ls-tree` of a valid commit exits 0 even when its pathspec matches
+        # nothing), which is why it stays a borrowed reason instead of earning its own key.
+        return None, "unreadable"
+    folding = folds_paths(repo)
+    sha, outcome, detail = baseline_blob(published_index, name, folding)
+    if outcome == "topology":
+        unsound.append(detail)
+        return None, outcome
+    if sha is None:
+        return None, outcome
+    published = blob_version(repo, sha)
+    if published is None:
+        return None, "unreadable"
+    here, there = version_key(version), version_key(published)
+    if here >= there:
+        return None, COMPARED
+    # Behind what is published. Only a tree that CHANGED the version carries that backwards on
+    # merge -- a branch whose manifest still holds the merge-base value merges as a diff that never
+    # mentions the file. Equality with the merge base is the test, not "did the branch touch the
+    # file": a bump that was later reverted also ends where it started and is equally harmless.
+    base_index = indexes.get(base_ref) if base_ref is not None else None
+    if base_index is None:
+        return None, "no-merge-base"
+    base_sha, base_outcome, base_detail = baseline_blob(base_index, name, folding, "the merge base")
+    if base_outcome == "topology":
+        unsound.append(base_detail)
+        return None, "topology"
+    if base_sha is not None and blob_version(repo, base_sha) == version:
+        return None, COMPARED
+    return (
+        f"would publish a DOWNGRADE: this tree stamps {version}, "
+        f"{BASELINE_REF} already publishes {published}"
+    ), COMPARED
+
+
 def collect(repo: Path, unsound: list[str]) -> dict[str, dict[str, object]]:
     marketplace_raw = read_text(repo, ".claude-plugin/marketplace.json", unsound)
     readme = read_text(repo, "README.md", unsound)
@@ -316,7 +606,14 @@ def collect(repo: Path, unsound: list[str]) -> dict[str, dict[str, object]]:
     return found
 
 
-def judge(repo: Path, name: str, surfaces: dict[str, object], unsound: list[str]) -> list[str]:
+def judge(
+    repo: Path,
+    name: str,
+    surfaces: dict[str, object],
+    unsound: list[str],
+    refs: tuple[str | None, str | None, str | None],
+    indexes: dict[str, dict[str, tuple[str, str]] | None],
+) -> tuple[list[str], str]:
     problems: list[str] = []
     for surface, count in sorted(surfaces["duplicates"].items()):  # type: ignore[union-attr]
         problems.append(
@@ -343,17 +640,44 @@ def judge(repo: Path, name: str, surfaces: dict[str, object], unsound: list[str]
             problems.append(
                 f"table row links to #{surfaces['anchor']}, but the heading slugifies to #{expected}"
             )
-    if len(distinct) == 1:
-        version = distinct.pop()
-        rel, entry_re = changelog_source(repo, name)
-        if not (repo / rel).is_file():
-            problems.append(f"no changelog at {rel}")
-        else:
-            text = read_text(repo, rel, unsound)
-            entries_found = [m.group(1) for m in heading_matches(entry_re, text or "")]
-            if text is not None and version not in entries_found:
-                problems.append(f"{rel} has no entry for {version}")
-    return problems
+    if len(distinct) != 1:
+        # Same gate the changelog check has always used, and for the same reason: with the surfaces
+        # in disagreement there is no single version this tree can be said to stamp, so there is
+        # nothing to compare a baseline against. The run already exits 1 on the disagreement, and
+        # the re-run this file's docstring requires applies the baseline to the repaired tree --
+        # which is why the outcome is REPORTED rather than guessed at from one chosen surface.
+        return problems, "disagree"
+    version = distinct.pop()
+    rel, entry_re = changelog_source(repo, name)
+    if not (repo / rel).is_file():
+        problems.append(f"no changelog at {rel}")
+    else:
+        text = read_text(repo, rel, unsound)
+        entries_found = [m.group(1) for m in heading_matches(entry_re, text or "")]
+        if text is not None and version not in entries_found:
+            problems.append(f"{rel} has no entry for {version}")
+    regression, outcome = baseline_problem(repo, name, version, refs, indexes, unsound)
+    if regression is not None:
+        problems.append(regression)
+    return problems, outcome
+
+
+def baseline_summary(refs: tuple[str | None, str | None, str | None], outcomes: Counter[str]) -> list[str]:
+    """The line that has to be readable as something OTHER than an all-clear when nothing compared.
+
+    The summary above it counts disagreements, and a sweep that compared no baseline at all
+    produces exactly the same count as one that compared every plugin and found them all ahead.
+    Separating those two is the entire point of the baseline, so it gets its own line and the
+    words NOT COMPARED, with the reason spelled out per bucket rather than left to be inferred
+    from a zero.
+    """
+    published_ref = refs[0]
+    where = f"{BASELINE_REF} ({published_ref[:8]})" if published_ref else BASELINE_REF
+    compared = outcomes.get(COMPARED, 0)
+    skipped = sorted((key, n) for key, n in outcomes.items() if key != COMPARED)
+    lines = [f"baseline vs {where}: {compared} compared, {sum(n for _, n in skipped)} NOT COMPARED"]
+    lines.extend(f"  NOT COMPARED x{n}: {NOT_COMPARED[key]}" for key, n in skipped)
+    return lines
 
 
 def main() -> int:
@@ -365,9 +689,15 @@ def main() -> int:
 
     unsound: list[str] = []
     found = collect(repo, unsound)
+    refs = baseline_refs(repo)
+    # One recursive listing per ref, shared by every plugin: absence, topology and content all
+    # come out of it, so no plugin can be told a different story about the same tree.
+    indexes = {ref: tree_index(repo, ref, folds_paths(repo)) for ref in dict.fromkeys(refs[:2]) if ref is not None}
 
     def give_up() -> int:
-        for line in unsound:
+        # De-duplicated: a problem with `plugins` itself is true of every plugin and is therefore
+        # discovered once per plugin. Printing it seven times reads as seven findings.
+        for line in dict.fromkeys(unsound):
             emit(f"UNSOUND: {line}", sys.stderr)
         return 2
 
@@ -380,8 +710,10 @@ def main() -> int:
     width = max([len("plugin")] + [len(n) for n in found])
     print(COLUMN.join([f"{'plugin':{width}}"] + [f"{s:{CELL}}" for s in SURFACES]) + COLUMN + "anchor")
     failures = 0
+    outcomes: Counter[str] = Counter()
     for name, surfaces in found.items():
-        problems = judge(repo, name, surfaces, unsound)
+        problems, outcome = judge(repo, name, surfaces, unsound, refs, indexes)
+        outcomes[outcome] += 1
         failures += bool(problems)
         cells = COLUMN.join(f"{str(surfaces[s]) if surfaces[s] else '-':{CELL}}" for s in SURFACES)
         emit(f"{name:{width}}{COLUMN}{cells}{COLUMN}{surfaces['anchor'] or '-'}")
@@ -390,6 +722,8 @@ def main() -> int:
 
     emit("")
     emit(f"{len(found)} plugin(s) checked on 5 version surfaces + changelog; {failures} disagreeing")
+    for line in baseline_summary(refs, outcomes):
+        emit(line)
     if unsound:
         return give_up()
     return 1 if failures else 0

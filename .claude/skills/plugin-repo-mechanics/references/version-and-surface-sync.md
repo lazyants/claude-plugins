@@ -29,10 +29,49 @@ The section's intro paragraph and "What it covers" bullet list are easy to leave
   "keep both" leaves the stale row and section sitting above the current ones, where the parse
   takes the last and sees nothing wrong. Exit 1 names each disagreement; exit 2 means the sweep
   itself was unsound — a file it needs to run at all is missing, unreadable or not UTF-8, a path
-  resolves outside the checkout, or so few plugins were found that a clean result would be vacuous.
-  - **It has no baseline**, so it cannot separate the surface your change forgot from one that was
-    already wrong — that is what the next bullet's grep against `origin/main` is for. Nothing runs
-    it for you; run it before the commit, not after the push.
+  resolves outside the checkout, so few plugins were found that a clean result would be vacuous, or
+  git records something on a manifest's path at `origin/main` that it will not walk into (a symlink,
+  a submodule, or two spellings this checkout's filesystem cannot tell apart).
+  - **It refuses a tree that would publish a DOWNGRADE.** Once the five surfaces agree, it reads
+    that plugin's `plugin.json` on the LOCAL `origin/main` and refuses when this tree's version is
+    lower — the case a green line used to wave through, and that reached two release branches in
+    one evening while sibling releases merged out of order. A tree whose version EQUALS the version
+    at `merge-base HEAD origin/main` is never refused, however far behind it sits: a merge applies
+    this branch's diff, and a branch that never moved the number has no delta to carry backwards.
+    Nothing fetches — a stale `origin/main` gives a stale baseline, which is why the push-time
+    grep in `merge-and-review-bot.md` is still yours to run.
+  - **It still has no baseline for the OTHER four surfaces**, so it cannot separate the surface
+    your change forgot from one that was already wrong — that is what the next bullet's grep
+    against `origin/main` is for. Nothing runs it for you; run it before the commit, not after the
+    push.
+  - **A baseline it could not read prints `NOT COMPARED` and the reason** — not a git checkout at
+    all, no `origin/main` in it, the plugin genuinely not on `origin/main` yet, a manifest there
+    that git would not hand over or that holds no X.Y.Z version, no shared history, or the surfaces
+    still disagreeing so there is no single version to compare. Read that line before you read the
+    verdict: `0 disagreeing` above `0 compared, 7 NOT COMPARED` is not an all-clear about the
+    version, and "could not compare" and "compared and agreed" used to print identically. The
+    reasons are kept apart on purpose — "this plugin has no baseline yet" is the one answer that
+    would wave a real downgrade through, so nothing may borrow it. Absence is decided by MEMBERSHIP
+    in one recursive `ls-tree` of `plugins/`, never by a failed path lookup: `git show <ref>:a/b/c`
+    fails identically for a path that is not there and one behind a symlink or a gitlink, at any
+    depth, and looking a path up can never tell you which. Several tracked spellings of one name
+    are refused for the same reason, but only where they really collide: whether this filesystem
+    folds case and normalization is MEASURED per checkout, because macOS folds both and Linux
+    folds neither, and assuming the local answer hands one plugin's published manifest to another
+    plugin that merely spells its name differently.
+  - **What it compares is the WORKING TREE against `origin/main`'s git record**, which is what "run
+    it before the commit" means — the point is to judge what you are about to commit. It does not
+    read the index, so a manifest staged differently from the file on disk is judged as the file on
+    disk. That has been true of every surface it reads since it was written, and it is why this is
+    a pre-commit check rather than a pre-push one.
+  - **Its own suite is `scripts/check_version_surfaces.test.py`** — stdlib `unittest`, throwaway
+    git repos in a temp dir, a few seconds. No workflow's path filter reaches `.claude/**` — they
+    cover the five `plugins/<name>/**` trees, their own workflow file, and (for enduser-handbook)
+    the root `README.md` and `CHANGELOG.md` — so nothing runs this for you. A few cases SKIP
+    according to whether the filesystem under them folds path spellings, because the collision
+    behaviour only exists where it does: a macOS run and a Linux run skip different cases and both
+    are green. Run it yourself after touching the checker:
+    `python3 .claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.test.py`.
   - **The changelog check waits for the five surfaces to agree** (until they do there is no single
     version to look for), so a first run over a mismatched tree does not list all the remaining
     work. Re-run after fixing what it named.
