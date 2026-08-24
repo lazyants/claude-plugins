@@ -1738,8 +1738,17 @@ re-validates every redirect hop and caps time, bytes and content type, and a
 cited page is attacker-authorable whoever opens it. **#505:** a merge run by
 hand under `research_mode: live` is refused outright for any
 `basis:"established"` item unless you pass `canon_validate.py`'s
-`--citations-reviewed`, attesting such a review approved those exact bytes —
-the Workflow passes it itself on the reviewed path, and a merged row is frozen
+`--citations-reviewed`, attesting such a review approved those exact bytes.
+**Since `#734` that attestation must carry its evidence:** pass
+`--approval-records R1 R2 …` too, one `glossary-approval/1` verdict record per
+merged fragment IN THE SAME ORDER, each naming that fragment's `sha256`
+(`--record-approval-to` writes them at the end of the reviewing `--check-batch`
+run, as `approval_{i}_attempt_{n}.json` in the glossary run directory). The
+attestation alone is now refused, in `--merge-batches` and in the legacy bare
+`--batch` alike, and a record whose digest names other bytes refuses the merge
+before any fragment is applied. That check can only REFUSE: a record never
+permits anything, and never authorizes skipping the citation review.
+The Workflow passes both itself on the reviewed path, and a merged row is frozen
 against any further merge (revisable only by a deliberate `--correct`,
 `#495`), so an unaudited citation that reaches the merge stays until somebody
 notices it. The split is what makes that boundary an
