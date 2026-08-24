@@ -55,6 +55,16 @@ the two effort tiers came out **indistinguishable**:
   judge self-consistent on 5 of 6 pairs;
 - the only robust difference was **latency: xhigh ≈2× slower**.
 
+**Second replication, a different language pair and a different task shape (2026-08-24) — same null.**
+Sol `high` vs `xhigh` on one 706-word Proust paragraph (FR→RU), identical prompt, translate-then-
+self-review-until-a-clean-round with **no round cap** (the cap is what censors the round count: an
+earlier capped run had `high` still editing at round 5). Both arms converged in **4 review rounds**
+and stopped on a clean round; self-reported defects 26 vs 29. Two blind Terra judges, counterbalanced
+A/B, **split 1–1, both margins `narrow`**, and they disagreed about which arm even had errors (2–2
+vs 0–1) — the disagreement, not the split, is the finding. Only latency separated the tiers again
+(≈11 min vs ≈13.5 min). Note this also transfers the null off Hebrew and off segment-level work.
+Artifacts: `scratchpad/effort-test/` (arms, judge verdicts, and the capped first run).
+
 **The transferable rule: never conclude an effort/model winner from one run per cell.** Without
 replicates you cannot separate an engine difference from run-to-run variance, and the runtime exposes
 no seed or temperature, so replicates are the ONLY handle. Add: a judge from a different model family
