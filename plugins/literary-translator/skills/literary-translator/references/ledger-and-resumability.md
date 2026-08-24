@@ -504,7 +504,14 @@ Exact byte-scope per field:
   **deliberately excluded** — it's a
   pure orchestration/scheduling knob with zero effect on
   translator/reviewer output semantics; including it would invalidate every
-  converged segment on a mere batch-size tweak. The glossary pass has no
+  converged segment on a mere batch-size tweak. The exclusion side is only
+  half of it, and until #732 it was the only half stated: changing any of the
+  three fields this hash DOES fold invalidates every converged segment, and on the mass
+  path it also moves `input_digest` — each segment's own `cache_key` is a
+  digest `domain` member — so the same edit re-dispatches unfinished work as
+  well. `profile.example.yml`'s `engine.effort` and `engine.max_fix_rounds`
+  change-cost paragraphs spell out what an operator actually pays, in both
+  directions (#732). The glossary pass has no
   per-segment cache key of its own, so it can't see an `engine.effort`
   change through `agent_config_hash` at all — its own resume-integrity
   digest instead gets `effort` directly via `resume_setup.py`'s

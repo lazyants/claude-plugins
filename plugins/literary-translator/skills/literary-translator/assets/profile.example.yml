@@ -166,8 +166,39 @@ engine:
     # glossary-pass codex batch call and the Claude fix step both read this same value as their own agent()
     # effort option. Does NOT apply to purely mechanical, no-judgment calls: the translator-readiness poll and the
     # ledger-bookkeeping call are both effort:'low' by design.
+    # Change cost: expensive in BOTH directions, and it is TWO independent costs.
+    # (1) This knob is inside cache_key.py's compute_agent_config_hash, so changing it reclassifies every
+    # already-converged segment as `stale`. agent_config_hash sits in NEITHER carve-out -- not final_audit.py's
+    # machinery-only SAFE_STALE_CARVEOUT_FIELDS, not the contract-only CONTRACT_ONLY_STALE_FIELD -- so on the
+    # ordinary path a sentinel-bearing converged segment is refused until --allow-retranslate-converged is
+    # passed. The cheaper escape is worth knowing before you spend that: --from-converged admits such a unit
+    # whose draft still matches its stored reviewed_draft_sha1, for a fresh REVIEW/fix pass rather than a
+    # re-translation (#491).
+    # (2) It is ALSO a member of resume_setup.py's DIGEST_SUBST_FIELDS. On an ordinary mass rerun, if none of
+    # the offered prior runs carries the current digest, a fresh RUN_ID is minted -- and a selected unfinished
+    # draft still carrying an older token then fails the driver's `draft_ready.py --expect-token` gate and is
+    # routed back to translation (a later claim or dispatch refusal can still stop it). Under
+    # --resume-from-run-id the mismatch instead refuses to dispatch anything and exits 1 (#458).
+    # LOWERING costs exactly the same as raising. The drafts on disk were produced at the HIGHER tier and are
+    # not worse than what the new setting would produce, but a hash cannot express an ordinal, so the cheap
+    # direction is priced like the expensive one (#732: disclosed here rather than removed).
+    # If you plan to let jobs in flight finish first: that helps only work which reaches CONVERGENCE. A review
+    # coming back with findings stops at needs_fix, leaving the segment unfinished and its draft still on the
+    # old token -- and whatever DOES converge meanwhile is exactly what cost (1) then hits.
   # model: gpt-5.3-codex   # optional codex model for W5 translate/review; unset = codex config default
+  #   Change cost: pinning, unpinning or repinning this costs (1) above -- it is inside
+  #   compute_agent_config_hash, so every converged segment goes stale. It is deliberately NOT in
+  #   DIGEST_SUBST_FIELDS (the glossary pass has no model knob, so folding it into that SHARED digest would be
+  #   a false dependency), but on the MASS path it still moves input_digest through each segment's own
+  #   cache_key, so cost (2) reaches it there too.
   max_fix_rounds: 4                       # cap before escalating to non_converged / blocked
+    # Change cost: identical to engine.effort's above -- this knob sits in BOTH compute_agent_config_hash and
+    # DIGEST_SUBST_FIELDS, so costs (1) and (2) there apply to it unchanged.
+    # It is NOT pure orchestration policy, which is the plausible and WRONG reading (#732). The cap decides which review
+    # point is labelled "final" (`runRound(seg, MAXFIX + 1, true)` in mass-translate-wf.template.js); that
+    # label is literal reviewer prompt text AND part of the review dispatch token RUN_ID:seg:r<label>; and the
+    # driver recognises a stored review's token against the CURRENT cap and derives the next round from it. Two
+    # runs differing in the cap therefore differ in exactly what the resume digest exists to tell apart.
   batch_agent_cap: 10000
     # A worst-case agent-call-count ESTIMATE for this batch is computed before dispatch begins -- if the
     # estimate for the given SEGS array would exceed this cap, the run refuses to start, logging the estimate
@@ -184,7 +215,8 @@ engine:
     # the pre-#607 per-segment 86 (1 + 116*86 = 9977). Raised to 10000 from 3500 (#409 step 2), which at
     # today's 94 would admit only 37 (1 + 37*94 = 3479) and admitted 40 at 86 (1 + 40*86 = 3441) -- i.e. an
     # ordinary book batch sat just under that ceiling, where before #348 the same batch carried ~2000 calls
-    # of margin (1 + 40*38 = 1521). The knob is deliberately EXCLUDED from agent_config_hash (cache_key.py's
+    # of margin (1 + 40*38 = 1521).
+    # Change cost: the knob is deliberately EXCLUDED from agent_config_hash (cache_key.py's
     # compute_agent_config_hash whitelists exactly effort/max_fix_rounds/model, with a dedicated negative
     # test in ledger_composite_key.test.py), so changing it invalidates NO converged segment. It is
     # also a member of resume_setup.py's DIGEST_SUBST_FIELDS, so it does cost one fresh RUN_ID.
