@@ -21,14 +21,22 @@ verdicts.
 
 WHAT THIS FLAG IS, AND THE ONE THING IT MUST NEVER BECOME. It writes an audit
 record for a HUMAN: the sha256 of the exact approved bytes, so the operator
-selects the attested snapshot by digest instead of by that heuristic. Nothing in
-the pass reads it back, and no gate in canon_validate.py consults it. That is
-deliberate and is the whole reason the record is safe to keep in a directory the
-dispatch agent can write: a record that authorizes nothing cannot be forged into
-an authorization. The moment anything reads it to skip work, it becomes a
-review-skip credential sitting inside the writable run directory -- which is
-exactly the design #723 was descoped away from. `test_no_shipped_caller_reads_the_record_back`
-below is the enforcement, not this paragraph.
+selects the attested snapshot by digest instead of by that heuristic. Since #734
+exactly one gate in canon_validate.py also reads it: `--approval-records`, which
+the merge modes require alongside `--citations-reviewed`.
+
+THAT GATE CAN ONLY REFUSE, and that is the line this file defends. A record
+never PERMITS anything -- above all it never authorizes skipping the citation
+review, which stays unconditional for every batch on both entry points. That is
+what keeps it safe to keep in a directory the dispatch agent can write: a forged
+copy buys its forger exactly the merge an honest one would have allowed. The
+moment something reads it to SKIP work it becomes a review-skip credential
+sitting inside the writable run directory -- which is the design #723 was
+descoped away from, and which #734 pointedly did not reinstate.
+`test_the_record_check_can_only_refuse` and
+`test_the_record_never_gates_whether_the_citation_review_runs` below are the
+enforcement, not this paragraph; they replaced
+`test_no_shipped_caller_reads_the_record_back`, which #734 retired.
 
 SCOPE, vs tests/canon_approve_to.test.py. That file owns `--approve-to`: byte
 fidelity, create-once publication, the concurrent-writer race. This file owns

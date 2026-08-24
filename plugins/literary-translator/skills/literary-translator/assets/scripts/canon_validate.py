@@ -224,13 +224,13 @@ root, i.e. SKILL.md's {{PLUGIN_ROOT}}:
     python3 canon_validate.py --research-mode offline --correct correction.json
     python3 canon_validate.py --research-mode live --check-batch out_0.json
     python3 canon_validate.py --research-mode live --check-batch out_0.json --expect-source-forms-file manifest_0.json
-    python3 canon_validate.py --research-mode live --merge-batches out_0.json out_1.json --plugin-root ${plugin_root} --citations-reviewed
+    python3 canon_validate.py --research-mode live --merge-batches out_0.json out_1.json --plugin-root ${plugin_root} --citations-reviewed --approval-records approval_0.json approval_1.json
     python3 canon_validate.py --research-mode live --verify-merged --batch out_0.json --batch out_1.json --expect-source-forms-file manifest_all.json
-    python3 canon_validate.py --research-mode live --batch glossary_out.json --plugin-root ${plugin_root} --citations-reviewed
+    python3 canon_validate.py --research-mode live --batch glossary_out.json --plugin-root ${plugin_root} --citations-reviewed --approval-records approval_0.json
     python3 canon_validate.py --research-mode offline --batch glossary_out.json --plugin-root ${plugin_root}
     python3 canon_validate.py --research-mode live
     python3 canon_validate.py --research-mode live --canon-path /path/to/canon.json
-    python3 canon_validate.py --research-mode live --merge-batches out_0.json --senses-path /path/to/canon_senses.json --plugin-root ${plugin_root} --citations-reviewed
+    python3 canon_validate.py --research-mode live --merge-batches out_0.json --senses-path /path/to/canon_senses.json --plugin-root ${plugin_root} --citations-reviewed --approval-records approval_0.json
 
 Exit code 0 on success, 1 on failure (for --verify-merged, "success" means
 `verified: true`). Exactly one JSON line is printed to stdout either way --
@@ -1476,6 +1476,13 @@ def _read_json_file(path: Path, what: str):
         raise CanonValidationError(f"{what} not found at {path}")
     except OSError as e:
         raise CanonValidationError(f"could not read {what} at {path}: {e}")
+    except UnicodeDecodeError as e:
+        # UnicodeDecodeError is a ValueError, NOT an OSError, so without this it
+        # escapes to main()'s catch-all and the operator loses the one thing
+        # that locates the problem -- which file, and which flag named it.
+        # _read_json_bytes() already translates it; this is that house rule
+        # applied to the reader every flag-supplied JSON path goes through.
+        raise CanonValidationError(f"{what} at {path} is not valid UTF-8: {e}")
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
@@ -3588,10 +3595,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "bytes, so that the operator's later --citations-reviewed "
             "attestation has something on disk to rest on -- selecting the "
             "attested snapshot by digest instead of guessing which snapshot "
-            "was the approved one. NOTHING in the pass reads it back: it is an "
-            "audit record for a human, never an authorization, so a forged "
-            "copy grants nobody anything. Writes nothing on failure. Refused "
-            "in every other mode."
+            "was the approved one. Since #734 exactly one gate reads it back: "
+            "--approval-records, which the merge modes REQUIRE alongside "
+            "--citations-reviewed. That gate can only REFUSE -- a record never "
+            "permits anything, and above all never authorizes skipping the "
+            "citation review -- so a forged copy still grants its forger only "
+            "the merge an honest one would have. Writes nothing on failure. "
+            "Refused in every other mode."
         ),
     )
     parser.add_argument(
@@ -3610,9 +3620,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "since #723 it is no longer unsupported: a glossary pass writes a "
             "verdict record (--record-approval-to) naming the sha256 of every "
             "approved fragment, so the operator attesting here can select those "
-            "exact bytes by digest rather than by guesswork. This script never "
-            "reads that record; the attestation stays the operator's. Refused "
-            "in every non-merge mode."
+            "exact bytes by digest rather than by guesswork. Since #734 this "
+            "flag REQUIRES those records: pass --approval-records, one per "
+            "merged fragment in the same order, or the merge refuses. The "
+            "attestation stays the operator's -- the records are what it rests "
+            "on, checked here rather than taken on trust. Refused in every "
+            "non-merge mode."
         ),
     )
     parser.add_argument(

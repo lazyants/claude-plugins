@@ -2456,10 +2456,10 @@ if (notReadyBatches.length > 0) {
 // collision with "batch-too-large" (decided before any dispatch) or
 // "verify-failed" (decided after the merge).
 //
-// Why this is a refusal at all, when nothing in the run consumes the record:
-// under the descoped #723 the record IS the deliverable. A pass that merges
-// without it leaves the operator holding --citations-reviewed with nothing on
-// disk to rest it on -- the exact state that let a batch whose only recorded
+// Why this is a refusal at all, given that the merge command re-decides the
+// same question off disk (#734): the record IS the deliverable regardless of
+// who reads it. A pass that merges without it leaves the operator holding
+// --citations-reviewed with nothing on disk to rest it on -- the exact state that let a batch whose only recorded
 // verdicts were rejections be merged as attested. The all-or-nothing shape
 // matches the merge's own: one serialized --merge-batches call over every
 // fragment, so there is no partial outcome to express here either.
@@ -2510,6 +2510,24 @@ await agent(mergeBatchesPrompt(fragments, approvalRecords), {
   effort: "low", phase: "Merge", label: "glossary:merge",
 })
 
+// THE MERGE AGENT'S REPLY IS DELIBERATELY NOT READ. Whether the merge happened
+// is decided below, off disk, by --verify-merged -- an agent saying "merged" is
+// the class of claim this whole pass is built not to trust.
+//
+// The limit that follows from it, stated rather than left to be rediscovered:
+// --approval-records' refusal reaches the operator only THROUGH that
+// verification, and verification asks whether canon already carries these rows,
+// not whether a record vouched for them. So on the one path where canon already
+// carries them -- a resume of a run interrupted between its merge and its
+// verification -- a refused merge still ends in merged:true. What that path
+// cannot do is put unattested bytes into canon: the rows are the ones the
+// earlier run merged, which passed this same record check to get there, and a
+// resume re-runs the citation review and rewrites the records for whatever
+// fragment wins. What it costs is the audit record for that resumed run, and
+// only when the recording agent claimed a write it never made -- the same
+// fabrication the record check already says it cannot detect. Closing it would
+// mean teaching --verify-merged the records too, which is machinery answering a
+// case that needs a lying agent AND a seconds-wide interrupt window.
 const verified = await agent(glossaryVerifyPrompt(fragments), {
   effort: "low", phase: "Merge", label: "glossary:verify", schema: CANON_VERIFY_SCHEMA,
 })

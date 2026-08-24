@@ -26,11 +26,15 @@ verdict record (`canon_validate.py --record-approval-to`) naming the sha256 of
 every approved fragment, so the attesting operator can select those exact bytes
 by digest. The approved snapshot remains no evidence of a verdict -- it is still
 written BEFORE the evidence is fetched, which is exactly why a separate record
-was needed. THIS SCRIPT STILL READS NEITHER. No kernel check consults the
-record, deliberately: it lives in a directory the dispatch agent can write, so a
-gate that trusted it would be a forgeable one. The attestation remains the
-operator's, made from outside that directory -- the record just gives it
-something true to rest on.
+was needed. THIS SCRIPT STILL READS NO SNAPSHOT -- but since #734 it does read
+the RECORD: `--approval-records` is required alongside `--citations-reviewed`,
+and the merge refuses unless a `glossary-approval/1` record names the sha256 of
+the fragment being merged (section 9 below). The record lives in a directory the
+dispatch agent can write, so that gate can only REFUSE: it never permits
+anything, never authorizes skipping the citation review, and a forged copy buys
+its forger only the merge an honest one would have allowed. The attestation
+remains the operator's, made from outside that directory -- the record is what
+it now has to rest on, checked rather than trusted.
 
 Scope of the guard, pinned below:
 
@@ -494,6 +498,37 @@ def test_a_record_of_the_wrong_schema_refuses_the_merge(tmp_path):
     payload = parse_stdout(proc)
     assert payload["success"] is False
     assert "schema" in payload["error"]
+    assert canon_bytes(root) == before
+
+
+def test_a_record_that_is_not_utf8_refuses_with_the_flag_named(tmp_path):
+    """Bytes that are not UTF-8 at all -- a truncated write, a binary file
+    dropped at the path, a record from a machine that mangled the encoding.
+
+    IT WAS ALREADY FAIL-CLOSED; what this pins is the DIAGNOSTIC. read_text()
+    raises UnicodeDecodeError, which is a ValueError and not an OSError, so
+    before #734's follow-up it slipped past _read_json_file's translation and
+    surfaced through main()'s catch-all -- an error that says nothing about
+    which file or which flag put it there, on the one command an operator runs
+    while holding an attestation they are about to freeze into canon."""
+    root = make_durable_root(tmp_path)
+    batch_path = write_batch(root, [accepted_established("Roi Soleil")])
+    record = root / "approval_0_attempt_0.json"
+    record.write_bytes(b'{"schema": "glossary-approval/1", "sha256": "\xff\xfe"}')
+    before = canon_bytes(root)
+
+    proc = run_cli(
+        root,
+        ["--research-mode", "live", "--merge-batches", str(batch_path),
+         "--citations-reviewed", "--approval-records", str(record)],
+    )
+
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "--approval-records" in payload["error"]
+    assert str(record) in payload["error"]
+    assert "UTF-8" in payload["error"]
     assert canon_bytes(root) == before
 
 
