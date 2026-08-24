@@ -401,8 +401,12 @@ found in any actual on-disk fragment.
 A segment is reused from cache only if **every one of these 15 hashes**
 matches the current run's freshly-computed values **and** `status ==
 converged`. A mismatch on any single field flips that segment's
-materialized `status` to `stale` — it invalidates only that segment, never
-the whole book. This exact JSON literal is the authoritative field list;
+materialized `status` to `stale`. How WIDE that is depends on which field
+moved, and the two cases are not close: a mismatch on a per-segment field
+invalidates only that segment, never the whole book, while a mismatch on a
+field marked `(global)` below mismatches for every segment at once, because
+the same value is written into all of their keys. This exact JSON literal is
+the authoritative field list;
 any other restatement of the field count/list elsewhere must match it.
 
 ```json

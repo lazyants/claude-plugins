@@ -57,6 +57,13 @@ Covers:
     section records the same refusal beside its own enumeration of what
     every mode requires -- the enumeration a reader consults, and which
     would otherwise be false by omission for the four stamping modes.
+15. R10's series decisions ledger and intake step 2's amended relay rule
+    (#730), clause by clause. Point 2 of that issue ships as prose and
+    NOTHING else -- no script, no schema key, no gate -- so the prose is
+    the implementation, and a single presence needle would let a half-
+    written version pass. Each load-bearing clause is pinned separately
+    over a section-bounded slice, and every one was watched failing under
+    its own deletion before this list was written.
 """
 from __future__ import annotations
 
@@ -72,6 +79,7 @@ REFERENCES = PLUGIN_ROOT / "skills" / "literary-translator" / "references"
 LEDGER_AND_RESUMABILITY = REFERENCES / "ledger-and-resumability.md"
 CANON_AND_GLOSSARY = REFERENCES / "canon-and-glossary.md"
 ORCHESTRATION_AND_BATCHING = REFERENCES / "orchestration-and-batching.md"
+ENGINE_LOOP = REFERENCES / "engine-loop.md"
 
 assert SKILL_MD.is_file(), f"expected {SKILL_MD} to exist"
 
@@ -540,6 +548,258 @@ def test_operating_constellation_reference_exists_and_has_review_orchestration_c
     # work must run"); matched case-insensitively since it's a bold
     # heading phrase, not a fixed-case identifier.
     assert "independent reviewer" in text.lower()
+
+
+# --- #730: the series decisions ledger, and the intake relay rule ------------
+#
+# Point 2 of #730 ships as PROSE and nothing else: there is no script, no
+# schema key and no gate behind it, so this prose IS the implementation and a
+# single presence needle would let a HALF-written version stay green. Each
+# clause below is therefore pinned separately, over a section-BOUNDED slice of
+# the normalized file, so that deleting any one of them turns exactly one
+# assertion red. `_window()` asserts both delimiters unique, and normalization
+# makes every needle independent of where the hard wrap falls today.
+#
+# The needles are EXACT, matching the fourteen pins above rather than admitting
+# a vocabulary of equivalent phrasings, and that is deliberate: reflow is
+# handled by normalization, but a REWORD of a load-bearing clause here is not
+# cosmetic. In this plugin the prose is the control flow -- these sentences are
+# what an orchestrator executes -- so a rewrite of one should be re-read and
+# re-pinned in the same edit, not waved through by a looser matcher. The cost
+# is a red on a genuine reword; the alternative is a matcher that keeps passing
+# while the instruction quietly changes meaning.
+#
+# THE RULE THESE NEEDLES ARE BUILT ON, because four review rounds each broke a
+# differently-decomposed version of the same pin before it was stated:
+# **a needle must BEGIN at the subject its clause is about and END at that
+# subject's consequence.** Substring membership cannot entail a mapping --
+# adjacency is precisely what a set of independent substrings discards -- so
+# every fragment a pin leaves outside itself is a fragment a rewrite may
+# reassign while the test stays green. The breaks were, in order: dropping
+# half of `mixed_by_length`'s behaviour; swapping the two lookup branches'
+# antecedents; re-attributing the whole invalidation cost from the verse mode
+# to `output.target`; giving the standalone ask a weaker provenance than the
+# attached one; and appending a sixth required ledger field. Every one of them
+# kept all the then-current substrings present. So: when adding a pin here,
+# do not ask "is this phrase in the text" -- ask "what is the smallest rewrite
+# that keeps this phrase and changes what it means", and start the needle
+# earlier until there is none.
+
+
+def _r10_window() -> str:
+    return _window(_normalized(SKILL_MD), "- **R10 —", "## Workflow W1–W9")
+
+
+def _intake_step2_window() -> str:
+    return _window(_normalized(SKILL_MD), "2. **Confirm output shape", "3. **Default fast")
+
+
+def test_r10_defines_the_series_decisions_ledger_as_a_real_channel():
+    w = _r10_window()
+    # 1. The channel exists at a MANDATORY relative path. "the series ledger"
+    #    with no fixed path is a hint, not a channel -- which is the defect
+    #    #730 reports one level up.
+    needle = "one file at a MANDATORY relative path, `<series directory>/decisions.md`"
+    assert needle in w, f"R10 must name the ledger's mandatory path: {needle!r}"
+    # 2. Its entry shape, in full -- and the needle starts at the COUNT and
+    #    runs through the sentence that classifies everything else as a note.
+    #    Anchored only at the list, it survived appending a sixth required
+    #    field: the substring stayed intact while the shape it names changed,
+    #    and a sixth requirement retroactively demotes every existing
+    #    five-field row to a note, which R10 then never re-asks. A row missing
+    #    the volume or the user's own words cannot be surfaced as a
+    #    default-with-provenance at all, and a row required to carry MORE than
+    #    those five stops being writable in the moment the decision is made.
+    needle = (
+        "**Entry shape — five fields, and nothing else is a decision.** One row per "
+        "decision: the dotted `profile.yml` path, the value, the date, the user's own "
+        "words, and the volume it was made in. Anything a reader cannot get from those "
+        "five is a note, not a decision"
+    )
+    assert needle in w, f"R10 must fix the five-field entry shape: {needle!r}"
+    # 2b. Which row WINS when a field is revised across volumes. The producer
+    #     writes a row per change and the shape is one row per decision, so a
+    #     path accumulates rows -- this very series has a field reading
+    #     `rhythmic_approximation` in one volume and `full_rhymed_plus_literal`
+    #     in another. Without a resolution rule volume N gets two defaults for
+    #     one path and no way to choose, which is the ambiguity the ledger
+    #     exists to remove. Both halves are pinned: which row is current, AND
+    #     that the superseded ones survive -- an upsert that overwrote them
+    #     would satisfy "deterministic" while discarding the reason the decision
+    #     changed, and that reason is this ledger's whole payload.
+    needle = (
+        "**Append-only, and the LAST row for a dotted path is the current decision.**"
+    )
+    assert needle in w, f"R10 must resolve a revised field to one row: {needle!r}"
+    needle = (
+        "Earlier rows for that path are its HISTORY and are never deleted or rewritten"
+    )
+    assert needle in w, f"R10 must keep superseded rows: {needle!r}"
+    # 3. The PRODUCER. Without this the ledger has no writer, and an empty one
+    #    is indistinguishable from a series that decided nothing -- the exact
+    #    silent-failure shape R10 exists to refuse.
+    needle = "writing the row is part of making the change"
+    assert needle in w, f"R10 must name the ledger's producer: {needle!r}"
+    # 4. The volume-local marker convention the row is written FROM.
+    needle = '`# CHANGED by the user, <date>: "<their words>"`'
+    assert needle in w, f"R10 must state the marker convention: {needle!r}"
+
+
+def test_r10_ledger_lookup_order_and_the_bounded_legacy_read():
+    w = _r10_window()
+    # 5. Ledger-FIRST. A lookup order that consulted the previous volume first
+    #    would make the exception the de facto channel.
+    needle = "Intake reads `decisions.md` BEFORE it relays the Step-0 questionnaire"
+    assert needle in w, f"R10 must make lookup ledger-first: {needle!r}"
+    # 5b. EVERY row is re-asked, not only rows whose field happens to carry a
+    #     Step-0 sentinel question. The ledger explicitly holds decisions that
+    #     have no such question -- `engine.effort` is R10's own example -- and a
+    #     row that is read and then never surfaced is the original defect
+    #     wearing a ledger.
+    needle = (
+        "Lookup is ledger-first, and EVERY field the ledger holds is re-asked**, "
+        "each from its own current row."
+    )
+    assert needle in w, f"R10 must re-ask every field, not just sentinel ones: {needle!r}"
+    #     Each branch is pinned with its own ANTECEDENT attached, in ONE
+    #     contiguous needle. Three detached substrings ("has a question",
+    #     "does not", "standalone ask") stayed green when the two antecedents
+    #     were swapped, which inverts the rule while every phrase survives:
+    #     substring membership cannot entail a mapping, because adjacency is
+    #     what a set of independent substrings discards.
+    needle = (
+        "Where the field has a printed Step-0 question, the provenance attaches to "
+        "that question."
+    )
+    assert needle in w, f"R10 must bind the has-a-question branch to its action: {needle!r}"
+    needle = (
+        "Where it does NOT — `engine.effort` is the plain case, and it is one of the "
+        "fields this ledger most obviously holds — the row is put to the user as a "
+        "standalone provenance-bearing confirmation in the same breath."
+    )
+    assert needle in w, f"R10 must bind the no-question branch to its action: {needle!r}"
+    #     ...and the "question, never a value" bullet must DEFER to those two
+    #     branches rather than universally sending every row to a printed
+    #     question, which is impossible for a field that has none.
+    #     The needle runs THROUGH "it reads the same either way" and into the
+    #     example on purpose. Stopping at "the standalone ask" let a rewrite
+    #     keep both branches while giving only the printed-question branch the
+    #     full provenance and leaving the standalone one a bare "previously
+    #     decided — keep it?" — which is the recorded-then-effectively-dropped
+    #     decision again, on exactly the `engine.effort` path this branch
+    #     exists for.
+    needle = (
+        "It is surfaced by whichever of the two branches above applies to its field — "
+        "beside that field's own printed question where one exists, and otherwise as "
+        "the standalone ask — and it reads the same either way: \"tome 1 set this to "
+        "`rhythmic_approximation` on 2026-08-13, at your request: '<their words>' — "
+        "keep it for this volume?\""
+    )
+    assert needle in w, f"R10's surfacing bullet must defer to both branches: {needle!r}"
+    # 6. The fallback's exact ANTECEDENT -- only on a missing row, not "when
+    #    convenient" -- and its exact SCOPE, one volume back and no further.
+    needle = "Only when the ledger has no row for that field"
+    assert needle in w, f"R10 must bound the legacy read's antecedent: {needle!r}"
+    needle = "may the IMMEDIATELY PRECEDING volume's `profile.yml` be read"
+    assert needle in w, f"R10 must bound the legacy read's scope: {needle!r}"
+    # 7. What that read may touch, and that it terminates. Marker-only,
+    #    read-only, copies nothing, and writes back -- drop the write-back and
+    #    the "one-time migration" becomes a permanent second channel.
+    needle = "for its `# CHANGED by the user` markers ALONE. It is read-only, it"
+    assert needle in w, f"R10 must keep the legacy read marker-only: {needle!r}"
+    needle = "copies nothing into the new profile, and whatever it finds is written into"
+    assert needle in w, f"R10 must require the write-back: {needle!r}"
+    # 8. And that R10's own "never copied" list still holds for profile.yml.
+    needle = "no VALUE from a previous `profile.yml` is ever copied into a new one"
+    assert needle in w, f"R10 must keep the no-copy boundary explicit: {needle!r}"
+
+
+def test_r10_carries_a_question_with_provenance_never_a_value():
+    w = _r10_window()
+    # 9. The prohibition itself. This is the sentence that keeps the ledger
+    #    from becoming the silent inheritance R10 was written to refuse.
+    needle = (
+        "A ledger row must never be written into a new `profile.yml` unasked, by a "
+        "person or by a script"
+    )
+    assert needle in w, f"R10 must forbid writing a row in unasked: {needle!r}"
+    # 10. All four provenance components -- source volume, value, date, and the
+    #     user's own words -- are asserted by the surfacing needle in
+    #     test_r10_ledger_lookup_order_and_the_bounded_legacy_read, which reads
+    #     THIS same window and whose needle already contains that example
+    #     verbatim. Pinning the example here too was a strict SUBSTRING of it:
+    #     zero extra detection, and a second copy of a 200-character literal to
+    #     keep in step. One owner, and it is the longer needle, because that is
+    #     the one binding the example to BOTH branches -- which is the property
+    #     that matters: a standalone ask must carry the same four components as
+    #     an attached one, or the branch with no printed question quietly
+    #     becomes the weaker one.
+    # 11. And that the answer is re-affirmed against THIS book, which is the
+    #     invariant the whole carve-out is built to preserve.
+    needle = "Nothing is inherited without being re-affirmed against THIS text"
+    assert needle in w, f"R10 must require re-affirmation: {needle!r}"
+
+
+def test_intake_step2_relay_rule_admits_provenance_without_dropping_costs():
+    w = _intake_step2_window()
+    # 12. #730 contradicts a literal "relay it verbatim": a line that acquires
+    #     "tome 1 set this on <date>" is not verbatim. What the old sentence
+    #     was actually defending -- that nothing printed is dropped or
+    #     paraphrased away -- is what must survive here.
+    needle = (
+        "every printed question and every cost it states reaches the user intact — "
+        "none dropped, none paraphrased away"
+    )
+    assert needle in w, f"intake must keep the no-dropping rule: {needle!r}"
+    # 13. ...and the augmentation is ATTACH, not replace. Replacing the printed
+    #     question with its provenance would drop the costs the question states.
+    needle = "ATTACH that provenance to the question rather than replacing it"
+    assert needle in w, f"intake must attach rather than replace: {needle!r}"
+    # 14. The carry-forward itself, with the ledger read placed BEFORE the relay.
+    needle = "Read `<series directory>/decisions.md` BEFORE relaying the questionnaire"
+    assert needle in w, f"intake must read the ledger before relaying: {needle!r}"
+    # 15. And why it is needed at all: the two states are indistinguishable in
+    #     a freshly-copied profile, which is what cost the real series its rounds.
+    needle = (
+        "A decision the user already made and a question they have never been asked "
+        "look identical in a freshly-copied profile"
+    )
+    assert needle in w, f"intake must state why the ledger read is required: {needle!r}"
+
+
+def test_engine_loop_r10_index_carries_the_ledger_and_its_bounded_exception():
+    # #730. references/engine-loop.md's R1-R10 index is one of the mandated
+    # per-session pre-reads, and a reader who follows its R10 summary instead
+    # of opening SKILL.md must not come away believing the flat "a previous
+    # volume is not an input" -- that is what the summary said before this
+    # change, and following it skips the one-time migration for a series whose
+    # earlier volumes predate the ledger, so those decisions are gathered cold
+    # again. The summary must therefore carry BOTH halves: the channel, and the
+    # exact bound on the one read into a finished volume.
+    text = _normalized(ENGINE_LOOP)
+    w = _window(text, "- **R10** A previous volume is not an input", "## R1 —")
+    needle = "the user's own working decisions, in `<series directory>/decisions.md`"
+    assert needle in w, f"R10's index entry must name the ledger: {needle!r}"
+    needle = (
+        "ledger-first, and only when the ledger has no row for that field may the "
+        "immediately preceding volume's `profile.yml` be read for its "
+        "`# CHANGED by the user` markers alone"
+    )
+    assert needle in w, f"R10's index entry must bound the legacy read: {needle!r}"
+    needle = "read-only, copying nothing, writing what it finds back into the ledger"
+    assert needle in w, f"R10's index entry must keep the read's obligations: {needle!r}"
+
+
+def test_intake_step2_names_verse_policy_mode_as_a_user_decision():
+    w = _intake_step2_window()
+    # 16. #730 point 1, at the surface that relays it: the mode is the user's
+    #     decision, not the orchestrator's reading of the material. The
+    #     "except" list must no longer exempt it from the sentinel set.
+    assert "except `engine.max_fix_rounds` as an invalid `CHOOSE_`" in w, (
+        "intake's exemption list must now name engine.max_fix_rounds ALONE"
+    )
+    needle = "never one the orchestrator reads off the source material"
+    assert needle in w, f"intake must name the mode a user decision: {needle!r}"
 
 
 if __name__ == "__main__":

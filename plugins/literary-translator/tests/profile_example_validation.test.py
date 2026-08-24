@@ -67,7 +67,7 @@ EXAMPLE_PATH = ASSETS_DIR / "profile.example.yml"
 # case-2 tests below (the CLI-level one and the scan_placeholders()-level
 # one) -- two hand-maintained copies of the same list drift apart silently,
 # since both tests only assert PRESENCE and so stay green when the example
-# grows an eighth sentinel neither list names. The authoritative, both-ways
+# grows a further sentinel neither list names. The authoritative, both-ways
 # drift guard against profile_validate.py's own KNOB_QUESTIONS lives in
 # tests/profile_validate.test.py
 # (test_knob_questions_matches_shipped_sentinels_set_equality).
@@ -79,6 +79,10 @@ SHIPPED_CHOOSE_SENTINELS = (
     "CHOOSE_translate_all_or_preserve_source_or_omit_apparatus_or_body_refs_only",
     "CHOOSE_segment_drafts_and_audit_or_assembled_book",
     "CHOOSE_obsidian_or_epub_or_custom",
+    # #730. verse_policy.mode shipped as an already-decided value until this
+    # release, so the six-value enum never reached the user as a question.
+    "CHOOSE_full_rhymed_plus_literal_or_full_rhymed_only_or_rhythmic_approximation"
+    "_or_mixed_by_length_or_literal_only_or_skip",
 )
 
 
@@ -188,7 +192,9 @@ def _build_filled_profile(durable_root: Path, source_path: Path) -> dict:
         # only because #727 turned them into CHOOSE_-sentinels, so this
         # fixture's claim of "structurally identical to the shipped example,
         # every placeholder replaced" would otherwise silently go false the
-        # moment the example shipped a fourth/fifth/sixth/seventh sentinel.
+        # moment the example shipped one more sentinel. (verse_policy.mode
+        # below became one in #730 and was already spelled out here, so that
+        # release cost this builder no edit -- which is the point.)
         "glossary": {"enabled": True, "research_mode": "offline"},
         "validation": {
             "untranslated_sentinel": "нет перевода",
@@ -266,14 +272,14 @@ def test_missing_profile_autocopy_does_not_touch_an_existing_profile(pv, tmp_pat
 
 def test_verbatim_shipped_example_is_fatally_rejected_by_cli(pv, tmp_path, capsys):
     """#727's actual fix, asserted at the real CLI entry point: a single
-    invocation against the verbatim shipped example -- which carries SEVEN
-    surviving CHOOSE_-sentinels across source.adapter_config.plain_text
-    (verse_detection, footnotes), glossary (enabled, research_mode), footnotes
-    (apparatus_policy), and output (v1_scope, target) -- must name EVERY one of
-    them in that ONE run, not just the single field schema.py happens to
-    restrict unconditionally. Before #727, Step 5 (whole-file jsonschema
-    validation) ran before Step 7 (scan_placeholders) and halted the whole
-    run on the first schema-level violation it hit
+    invocation against the verbatim shipped example -- whose surviving
+    CHOOSE_-sentinels span source.adapter_config.plain_text (verse_detection,
+    footnotes), glossary (enabled, research_mode), footnotes
+    (apparatus_policy), output (v1_scope, target) and verse_policy (mode,
+    #730) -- must name EVERY one of them in that ONE run, not just the single
+    field schema.py happens to restrict unconditionally. Before #727, Step 5
+    (whole-file jsonschema validation) ran before Step 7 (scan_placeholders)
+    and halted the whole run on the first schema-level violation it hit
     (glossary.research_mode's unconditional enum), so an operator only ever
     learned about one missing decision per re-run. #727 moves the placeholder
     scan ahead of schema validation specifically so this no longer happens."""
@@ -298,6 +304,7 @@ def test_verbatim_shipped_example_is_fatally_rejected_by_cli(pv, tmp_path, capsy
         "footnotes.apparatus_policy",
         "output.v1_scope",
         "output.target",
+        "verse_policy.mode",
     ):
         assert field in err, f"expected field {field!r} named in ONE run; got:\n{err}"
 
@@ -335,6 +342,7 @@ def test_verbatim_shipped_example_scan_placeholders_names_every_placeholder(pv):
         "footnotes.apparatus_policy",
         "output.v1_scope",
         "output.target",
+        "verse_policy.mode",
         "output.destination",
     ):
         assert any(err.startswith(f"{field}:") for err in errors), (
