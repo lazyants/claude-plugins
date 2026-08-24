@@ -3226,16 +3226,37 @@ def run_resume_literal(run_result: dict) -> str:
     missing or non-bool `resume` silently coerced to False would relay a
     verdict this driver never actually received into a security gate --
     the one place a plausible default is worse than a refusal."""
+    return "true" if run_resumed(run_result) else "false"
+
+
+def run_resumed(run_result: dict) -> bool:
+    """resolve_run_id()'s `resume` field as a REAL bool, refusing anything else.
+
+    Extracted from run_resume_literal() (ped-ant, P2) once #742 gave the field
+    a SECOND consumer. That consumer -- the unpinned foreign-draft refusal --
+    used a plain truth test, which turns exactly the two shapes this function
+    exists to reject into confident wrong answers in OPPOSITE directions: a
+    missing field reads as "minted", and the JSON string "false" reads as
+    "resumed". The refusal then tells an operator the wrong reason their run
+    id was selected, in the one message whose whole job is telling them why.
+
+    A truth test at either call site is not a smaller version of this check;
+    it is the absence of it. Sibling-script skew must fail loudly here rather
+    than become a guessed verdict -- see run_resume_literal()'s own docstring
+    for what the relayed literal does downstream."""
     resume = run_result.get("resume")
     if not isinstance(resume, bool):
         fatal(
             f"resume_setup.py's 'resume' field is {resume!r}, not a JSON boolean -- "
             f"select_segments.py's --run-resume relays exactly this field into its "
-            f"#409 Step 3 fresh-evidence check, and a guessed value there would be a "
-            f"claim about the resume-integrity gate that nothing actually made.",
+            f"#409 Step 3 fresh-evidence check, and the #742 foreign-draft refusal "
+            f"reads it to tell the operator WHY this run id was selected. A guessed "
+            f"value would be a claim about the resume-integrity gate that nothing "
+            f"actually made, and a wrong diagnosis in the message meant to explain "
+            f"a halt.",
             exit_code=2,
         )
-    return "true" if resume else "false"
+    return resume
 
 
 # ---------------------------------------------------------------------------
@@ -7476,14 +7497,16 @@ def run(args, dirs: dict) -> dict:
         # wording flags are passed the same way on both paths, including the
         # real `resume` value: `resumed` is unread when `pinned` is true, and
         # hardcoding a false one there would be a lie a future reader could
-        # start believing the moment the pinned message wants it.
+        # start believing the moment the pinned message wants it. Read through
+        # run_resumed(), never a truth test -- see its docstring for the two
+        # shapes a truth test answers wrongly, in opposite directions.
         pinned = args.resume_from_run_id is not None
         refuse_run_over_foreign_drafts(
             segs if pinned else segs_covered_by_foreign_draft_gate(segs, select_result),
             run_id,
             durable_root / "segments",
             pinned=pinned,
-            resumed=bool(run_result.get("resume")),
+            resumed=run_resumed(run_result),
         )
 
         companion_path = resolve_companion_path(dirs, node_bin=args.node)

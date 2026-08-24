@@ -4215,6 +4215,54 @@ def test_the_unpinned_refusal_explains_the_run_id_it_actually_resolved(tmp_path,
     assert read_argv_log(root) == [], payload
 
 
+@pytest.mark.parametrize(
+    "bad_resume",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"resume": "false"}, id="json-string-false"),
+        pytest.param({"resume": "true"}, id="json-string-true"),
+        pytest.param({"resume": 0}, id="int-zero"),
+    ],
+)
+def test_a_non_boolean_resume_refuses_instead_of_diagnosing_a_cause(bad_resume, tmp_path):
+    """ped-ant, P2: the #742 refusal reads `resume` to tell the operator WHY
+    this run id was selected, and it must not GUESS that.
+
+    A plain truth test answers the two realistic skew shapes wrongly in
+    OPPOSITE directions -- a missing field reads as "minted", the JSON string
+    `"false"` reads as "resumed" -- so the message meant to explain a halt
+    would confidently state the wrong reason. run_resumed() refuses instead,
+    exit 2, the same way run_resume_literal() already refused for the relay it
+    feeds.
+
+    Driven through run_resumed() directly rather than a CLI round trip
+    because the input is a SIBLING SCRIPT's malformed payload: the fixture's
+    resume_setup.py is the real one and cannot produce these shapes, so
+    manufacturing them at the boundary is the only way to reach the branch --
+    and hand-building a fake resume_setup.py would test the fake."""
+    driver_mod = _load_fixture_driver(phase2_project(tmp_path, n=1))
+
+    with pytest.raises(driver_mod.DriverError) as exc_info:
+        driver_mod.run_resumed(dict(bad_resume))
+
+    assert exc_info.value.exit_code == 2, exc_info.value.exit_code
+    assert "not a JSON boolean" in str(exc_info.value), str(exc_info.value)
+
+
+def test_a_real_boolean_resume_is_returned_unchanged(tmp_path):
+    """The control for the test above: run_resumed() must PASS a genuine bool
+    through in both directions, not merely refuse everything else. A mutation
+    that refuses unconditionally, or that returns a constant, survives the
+    refusal test alone."""
+    driver_mod = _load_fixture_driver(phase2_project(tmp_path, n=1))
+
+    assert driver_mod.run_resumed({"resume": True}) is True
+    assert driver_mod.run_resumed({"resume": False}) is False
+    # And the literal relay stays bound to the same reader.
+    assert driver_mod.run_resume_literal({"resume": True}) == "true"
+    assert driver_mod.run_resume_literal({"resume": False}) == "false"
+
+
 def test_unpinned_foreign_human_escalation_draft_refuses(tmp_path):
     """#742 (codex plan review round 2, MAJOR). `--only-segs` force-selects a
     `human_escalation` id -- the flag's sole explicit override -- so a capped,
