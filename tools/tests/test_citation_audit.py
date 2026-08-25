@@ -1049,3 +1049,24 @@ def test_the_backward_walk_runs_once_per_line_not_once_per_token(tmp_path, monke
     found = ca.find_citations("c.md", text)
     assert len(seen) == 1, f"walked backward {len(seen)} times for one line of 200 tokens"
     assert sum(1 for c in found if c["is_continuation"]) == 200
+
+
+@pytest.mark.parametrize("container,where", [
+    ("see `t.py:\n3`, then `:5`.\n", "on the wrapped citation's own tail line"),
+    ("see `t.py:\n3` is the spot.\nand also `:5`.\n", "on a line after the wrapped citation"),
+])
+def test_a_continuation_after_a_WRAPPED_citation_is_still_attributed(
+        tmp_path, monkeypatch, capsys, container, where):
+    """Two supported prose forms composed: a citation broken across the wrap, then a bare token.
+
+    This was a silent miss. The wrapped citation exists on NEITHER raw line intact, so a candidate
+    search that rescans raw text finds nothing and the bare token is dropped with no output at all --
+    and the wrapped citation itself is enumerated, so the run looks like it saw the sentence. Both
+    halves have to come from the same place, which is why `_line_citations` returns the wrapped tail
+    for consuming AND for offering its target.
+    """
+    _cont_setup(tmp_path, monkeypatch, container, declare_from="")
+    ca.cmd_check(None)
+    err = capsys.readouterr().err
+    assert _undeclared(err) == [":5", "t.py:3"], f"{where}: {err}"
+    assert "continuation of t.py" in err, where

@@ -283,7 +283,7 @@ def _backward_targets(lines, i):
             break
         if len(seg) > MAX_SCANNED_LINE:
             break
-        targets |= {m.group(1) for m in CITATION_RE.finditer(seg)}
+        targets |= {target for _, _, target in _line_citations(lines, j)}
         if targets:
             break
     return targets
@@ -296,8 +296,8 @@ def _continuation_candidates(line_cites, upto, backward):
     block names two files and the line itself names one, and the attribution is not in doubt. Reading
     the nearer, more specific evidence first keeps that case out of the ambiguity branch.
 
-    `line_cites` is the enumeration's OWN per-line matches, reused rather than rescanned; a citation
-    counts when it ENDS at or before the token's column. Truncating the line at that column would be
+    `line_cites` is `_line_citations` for the token's own line, reused rather than rescanned; a
+    citation counts when it ENDS at or before the token's column. Truncating the line at that column would be
     the obvious alternative and is wrong: a cut landing inside a citation's DIGITS leaves a shorter
     line number that nobody wrote, and it still matches. It cannot happen here -- the opener
     allowlist puts a non-citation character immediately before every bare token -- but comparing
@@ -306,28 +306,39 @@ def _continuation_candidates(line_cites, upto, backward):
     Returns a set: empty means "not enumerated" (the module docstring's residual), one means an
     attribution, more than one means the caller must refuse to guess.
     """
-    return {target for end, target in line_cites if end <= upto} or backward
+    return {target for _, end, target in line_cites if end <= upto} or backward
 
 
-def _consumed_spans(lines, i):
-    """Column spans on RAW line `i` that a full citation already accounts for.
+def _line_citations(lines, i):
+    """`(start, end, target)` for every citation whose text ENDS on raw line `i`.
 
-    Two sources. The per-line matches are trivial. The other is the TAIL half of a citation wrapped across
-    the break from line i-1: `_wrapped_citations` matches against `head + stripped_tail`, so a straddling
-    match's tail part always begins at index 0 of the STRIPPED tail -- and the raw column is therefore the
-    width of the prefix `CONT_PREFIX_RE` removed, not 0. Where a comment leader opens the tail line, that
-    is 2, and dropping it would leave the bare token unconsumed, enumerated a second time and attributed
-    to whatever the head line named. The one real wrapped case in this repo has a zero-width prefix and
-    cannot show that up, which is why the fixture uses a comment leader.
+    Two sources, and the second is why this is a function rather than a `finditer` at the call site.
+    The per-line matches are trivial. The other is the TAIL half of a citation wrapped across the
+    break from line i-1: `_wrapped_citations` matches against `head + stripped_tail`, so a straddling
+    match's tail part always begins at index 0 of the STRIPPED tail -- and the raw column is therefore
+    the width of the prefix `CONT_PREFIX_RE` removed, not 0. Where a comment leader opens the tail
+    line that is 2, and dropping it would leave a bare token unconsumed, enumerated a second time and
+    attributed to whatever the head line named. The one real wrapped case in this repo has a
+    zero-width prefix and cannot show that up, which is why the fixture uses a comment leader.
+
+    A wrapped citation is a citation of a real file, so it both CONSUMES its columns and OFFERS its
+    target to a continuation that follows it. Offering it was missing at first, and the miss was
+    silent: prose that wraps a citation and then continues bare enumerated the wrapped citation and
+    dropped the bare token entirely, because neither the raw line nor any line the backward walk
+    rescans holds an intact citation. Nothing in this repo composes the two forms today -- the
+    enumeration is wrong without it either way, and an unenumerated citation stays invisible for as
+    long as it lives.
     """
-    spans = [(m.start(), m.end()) for m in CITATION_RE.finditer(lines[i])]
+    if len(lines[i]) > MAX_SCANNED_LINE:
+        return []
+    out = [(m.start(), m.end(), m.group(1)) for m in CITATION_RE.finditer(lines[i])]
     if i > 0 and len(lines[i - 1]) <= MAX_SCANNED_LINE:
         raw = lines[i]
         prefix = len(raw) - len(CONT_PREFIX_RE.sub("", raw))
         head_len = len(lines[i - 1].rstrip())
         for m in _wrapped_citations(lines, i - 1):
-            spans.append((prefix, prefix + m.end() - head_len))
-    return spans
+            out.append((prefix, prefix + m.end() - head_len, m.group(1)))
+    return out
 
 
 def find_citations(rel, text):
@@ -357,11 +368,10 @@ def find_citations(rel, text):
         # went from 1.78s to 4.13s over the tracked corpus. Only 120 of those lines carry a
         # bare-token shape at all, so the work belongs behind the cheap test for one.
         bare = list(BARE_CONTINUATION_RE.finditer(line))
-        spans = _consumed_spans(lines, i) if bare else ()
-        line_cites = [(m.end(), m.group(1)) for m, col in matches if col is not None]
+        line_cites = _line_citations(lines, i) if bare else []
         backward = _backward_targets(lines, i) if bare else set()
         for m in bare:
-            if any(lo <= m.start() < hi for lo, hi in spans):
+            if any(lo <= m.start() < hi for lo, hi, _ in line_cites):
                 continue
             cands = sorted(_continuation_candidates(line_cites, m.start(), backward))
             if not cands:

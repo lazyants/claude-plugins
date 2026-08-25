@@ -438,6 +438,9 @@
   "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 3]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 40]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
   "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 4]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
