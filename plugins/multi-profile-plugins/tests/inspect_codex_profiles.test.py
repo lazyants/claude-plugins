@@ -205,6 +205,38 @@ with tempfile.TemporaryDirectory() as td:
     assert_no_secret("quoted key", r)
 
 # ---------------------------------------------------------------------------
+# 2c. A quoted TOML key may contain "[", and the key path used to be a pre-joined string
+#     that the redactor split on that character to recover the list indices it had itself
+#     written. So `slot[<credential>` split into a redacted base and a "structural" suffix
+#     printed verbatim. The path is structural now -- an int is an index this program made,
+#     a str came from the file -- so there is nothing to parse and nothing to confuse. The
+#     same case also checks a real generated index still renders, or the fix could pass by
+#     dropping indices altogether.
+# ---------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(
+        root,
+        ".codex2",
+        account=ACCOUNT_B,
+        config=(
+            f'notify = ["{root / ".codex"}/hook", "turn-ended"]\n'
+            f'[mcp_servers."slot[{FAKE_API_KEY}".env]\n'
+            f'CODEX_HOME = "{root / ".codex"}"\n'
+            f'[mcp_servers."]{FAKE_MCP_SECRET}]".env]\n'
+            f'OTHER = "{root / ".codex"}/plugins"\n'
+        ),
+    )
+    r = run(a, b)
+    check("bracket key: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
+    check("bracket key: pin reported", "PIN(S) into another profile" in r.stdout, r.stdout)
+    check("bracket key: redacted whole", "mcp_servers.<redacted>.env.CODEX_HOME" in r.stdout, r.stdout)
+    # A genuine generated index must still render, or "redact everything" would pass this.
+    check("bracket key: real index kept", "notify[0]" in r.stdout, r.stdout)
+    assert_no_secret("bracket key", r)
+
+# ---------------------------------------------------------------------------
 # 3. The boundary case a substring match gets wrong: `.codex` is a substring of
 #    `.codex2`. A profile referencing its OWN home, and a profile referencing a
 #    same-prefix directory that is not a profile at all, are both clean.
@@ -520,7 +552,7 @@ print(f"ran {checks} checks")
 # A case that raises before its checks run, or a fixture block deleted wholesale, subtracts
 # silently: the remaining cases still pass and the run still exits 0. Assert the floor so a
 # suite that stopped exercising most of the script cannot read as a clean one.
-MIN_CHECKS = 90
+MIN_CHECKS = 95
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

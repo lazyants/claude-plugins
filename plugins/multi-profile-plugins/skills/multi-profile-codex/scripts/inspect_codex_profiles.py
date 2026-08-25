@@ -241,23 +241,33 @@ def path_occurs_in(needle_dir: str, value: str) -> bool:
     return False
 
 
-def walk_values(o, prefix: str = ""):
-    """Yield (dotted_key_path, string_value) for every string VALUE in the TOML.
+def walk_values(o, path: tuple[str | int, ...] = ()):
+    """Yield (path, string_value) for every string VALUE, path kept STRUCTURAL.
 
-    Table KEYS are deliberately not yielded. A Codex config's biggest table by
-    far is `[projects."<abs path>"]`, whose keys are the directories the user has
-    trusted — including, legitimately, another profile's home. Those are trust
-    records, not pointers the runtime follows, so matching on them would bury a
-    real finding under noise.
+    The path is a tuple whose members are either a key the FILE chose (str) or a list index
+    this function generated (int). It is deliberately not a pre-joined dotted string: the
+    first version built one, and safe_key then had to recover the generated indices from it
+    by splitting on "[" -- parsing untrusted text back out of a format it had just been
+    encoded into. TOML quoted keys may contain "[", so a key shaped `slot[<credential>` split
+    into a redacted base and a "structural" suffix that was printed verbatim. Keeping the two
+    kinds of component apart by TYPE means there is nothing to parse and nothing to confuse.
+
+    Table KEYS are not yielded as values. A Codex config's biggest table by far is
+    `[projects."<abs path>"]`, whose keys are the directories the user has trusted -- trust
+    records, not pointers the runtime follows, so matching on them would bury real findings.
     """
     if isinstance(o, dict):
         for k, v in o.items():
-            yield from walk_values(v, f"{prefix}.{k}" if prefix else str(k))
+            # str(k) is a type assertion, not a conversion: tomllib only ever produces string
+            # keys, so removing it changes no behaviour and no test can catch it. It stays
+            # because the ENTIRE redaction rests on int-means-generated, str-means-from-file,
+            # and a non-str key arriving from anywhere would be rendered as an index, raw.
+            yield from walk_values(v, path + (str(k),))
     elif isinstance(o, list):
         for n, v in enumerate(o):
-            yield from walk_values(v, f"{prefix}[{n}]")
+            yield from walk_values(v, path + (n,))
     elif isinstance(o, str):
-        yield prefix, o
+        yield path, o
 
 
 def read_account(prof: Path) -> tuple[str, str | None]:
@@ -307,22 +317,25 @@ def duplicates(mapping: dict[Path, object]) -> list[list[Path]]:
     return [profs for profs in by_value.values() if len(profs) > 1]
 
 
-def safe_key(dotted: str) -> str:
-    """Render a dotted TOML key path, redacting every component the FILE named.
+def safe_key(path: tuple[str | int, ...]) -> str:
+    """Render a structural key path, redacting every component the FILE named.
 
-    `mcp_servers.some-server.env.CODEX_HOME` becomes
-    `mcp_servers.<redacted>.env.CODEX_HOME`. The shape survives, so the report still says
-    which kind of setting is wrong and a reader can find it by searching their config for the
-    other profile's path — which they have, since this line names it. What does not survive is
-    any part of the file that could hold a credential.
+    `("mcp_servers", "some-server", "env", "CODEX_HOME")` becomes
+    `mcp_servers.<redacted>.env.CODEX_HOME`. An int is an index this program generated and is
+    structural by construction; a str came out of the file and prints only if Codex's own
+    schema chose that name. Nothing is parsed, so no character inside a key can be mistaken
+    for syntax this function added.
 
-    Array indices this script generates itself (`notify[0]`) are structural and pass through.
+    The shape survives, so the report still says which kind of setting is wrong, and a reader
+    finds the line by searching their config for the other profile's path -- which the same
+    line names.
     """
     out = []
-    for part in dotted.split("."):
-        base, _, index = part.partition("[")
-        suffix = f"[{index}" if index else ""
-        out.append((base if base in SCHEMA_KEYS else "<redacted>") + suffix)
+    for part in path:
+        if isinstance(part, int):
+            out[-1] = f"{out[-1]}[{part}]" if out else f"[{part}]"
+        else:
+            out.append(part if part in SCHEMA_KEYS else "<redacted>")
     return ".".join(out)
 
 
