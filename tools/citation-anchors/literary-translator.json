@@ -778,13 +778,13 @@
    ],
    "claim": "--from-stalled additionally drives run()'s own runs/.driver.lock acquisition and its --driver-lease-held forwarding to the child selector (segment_dispatch_driver.py:1741-1778) -- both real here, not stubbed, since this test calls run() directly rather than through a subprocess and nothing about that machinery is mocked.\"\"\" seg = \"seg21\" root = wiring_make_driver_root_from_stalled(tmp_path, seg)"
   },
-  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7517\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7545\", 0]": {
    "anchors": [
     "session_id=session_id, claims=claims"
    ],
    "claim": "# =========================================================================== # C -- the WIRING itself: does segment_dispatch_driver.py's own run() # (segment_dispatch_driver.py:7517's `claims=claims`) actually carry a REAL # select_segments.py admission into ctx.claims, or does # claim_capability_refusal_for_translate() only ever get exercised against a # context THIS SUITE injected `claims=` into by hand? Every test in Sections # A/B builds DispatchContext directly and passes `claims=` itself -- deleting"
   },
-  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7517\", 1]": {
+  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7545\", 1]": {
    "anchors": [
     "session_id=session_id, claims=claims"
    ],
@@ -1098,14 +1098,14 @@
    ],
    "claim": "never a hand-forged digest (a forged one would prove nothing about the real resolution path). Each call sends a payload with no `resume_from_run_ids` field at all (the same shape resolve_run_id() builds for a first-ever run), so resume_setup.py's own resolve_run() always mints fresh (resume_setup.py:930-934); since nothing about the project changed between the two calls, compute_input_digest() returns the IDENTICAL value both times (resume_setup.py:775). Returns (older_id, newer_id) -- asserts newer_id sorts after older_id, matching _resumable_run_id_candidates()'s own \"lexicographic == chronological\""
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4813\", 0]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4841\", 0]": {
    "anchors": [
     "current_sha1 = current_draft_sha1(seg, segments_dir, dirs[\"scripts_dir\"])"
    ],
    "claim": "\"\"\"The invalid_post_fix_draft branch's own current_draft_sha1() call (segment_dispatch_driver.py:4813) is a SECOND call site sharing the identical --plugin-root trust boundary as the already_converged branch's (see the sibling test above) -- untested here for the same reason: every existing --plugin-root fixture stages the REAL, unmodified draft_sha1.py at both the durable root and the plugin",
    "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py"
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4929\", 0]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4957\", 0]": {
    "anchors": [
     "current_sha1 = current_draft_sha1(seg, segments_dir, dirs[\"scripts_dir\"])"
    ],

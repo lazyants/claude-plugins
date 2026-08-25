@@ -3924,14 +3924,42 @@ def draft_token_owner(seg: str, segments_dir: Path) -> "str | None":
 # refuses and the operator decides) rather than to silently destroyed, which
 # is the only safe default for a guard whose false-GREEN destroys human work.
 #
-# `stale` alone is exempt, and its exemption is bounded by a SECOND gate
-# rather than granted outright: a `stale` unit is one that WAS converged and
-# whose cache key has drifted, so its draft carries -- by definition -- the
-# token of the run that converged it, and the same cache-key move is what
-# mints the fresh RUN_ID. Refusing over it would refuse EVERY
-# input-change-driven retranslation the cache-key design exists to perform.
-# What keeps that from being a hole is that dispatching a previously-converged
-# unit already requires an explicit --allow-retranslate-converged
+# `stale` alone is exempt, and the exemption is CATEGORICAL: the filter below
+# reads classification[seg]["category"] and nothing else -- never stale_reason.
+# Say that first, and resist restating it as a fact about WHY a unit went
+# stale. An earlier revision of this comment did exactly that ("a `stale` unit
+# is one that WAS converged and whose cache key has drifted, so its draft
+# carries -- by definition -- the token of the run that converged it"), and
+# that sentence is an invitation to narrow the set to the case it describes.
+#
+# select_segments.py puts THREE stale_reason shapes in this one category, and
+# the exemption covers all three identically:
+#
+#   ["cache_key_mismatch"]                            -- converged, then an
+#       input drifted, draft untouched since review. This is the shape the
+#       exemption is written FOR: the draft carries the token of the run that
+#       converged it and the same cache-key move is what mints the fresh
+#       RUN_ID, so refusing over it would refuse EVERY input-change-driven
+#       retranslation the cache-key design exists to perform.
+#   ["draft_sha1_mismatch", "cache_key_mismatch"]     -- both at once.
+#   ["draft_sha1_mismatch"]                            -- the draft was
+#       hand-edited since its review and NO cache-key field moved. The
+#       argument above does not reach this one: the fresh RUN_ID, if there is
+#       one, has some other cause entirely.
+#
+# So do not narrow this set on the strength of the first shape's reasoning.
+# Two controls in tests/segment_dispatch_driver.test.py make a narrowing turn
+# red -- test_unpinned_foreign_stale_draft_still_dispatches (whose fixture
+# carries BOTH mismatches) and
+# test_unpinned_foreign_draft_sha1_stale_draft_still_dispatches (the
+# draft-sha1-only shape). The pure ["cache_key_mismatch"] shape has no fixture
+# of its own here, and deliberately so: _is_exempt() never reads stale_reason,
+# so such a fixture would exercise a path already covered and discriminate
+# nothing the two above do not.
+#
+# What bounds the exemption is a SECOND gate rather than the classification,
+# and it bounds all three shapes identically: dispatching a previously-
+# converged unit already requires an explicit --allow-retranslate-converged
 # (select_segments.py's own previously_converged refusal), so the destruction
 # this exemption permits is one the operator authorised in as many words.
 #

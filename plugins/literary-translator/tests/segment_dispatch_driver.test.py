@@ -4320,11 +4320,20 @@ def test_unpinned_foreign_stale_draft_still_dispatches(tmp_path):
     whose cache key drifted still retranslates under a fresh RUN_ID.
 
     Deleting the exemption filter -- i.e. protecting every selected segment
-    the way the pinned path does -- turns THIS test red, and it is the only
-    one that does: a `stale` draft carries, by definition, the token of the
-    run that converged it, and the same cache-key move is what mints the
-    fresh id, so an unexempted gate would refuse every input-drift
-    retranslation the cache-key design exists to perform.
+    the way the pinned path does -- turns this test red: this unit's draft
+    carries the token of the run that converged it and the same cache-key
+    move is what mints the fresh id, so an unexempted gate would refuse every
+    input-drift retranslation the cache-key design exists to perform.
+
+    Read the fixture, not the argument, for what this actually covers.
+    `converged_fragment(stored, "0" * 40)` pins a reviewed_draft_sha1 that no
+    real draft can hash to, so this unit carries BOTH mismatches -- its
+    stale_reason is ["draft_sha1_mismatch", "cache_key_mismatch"], not
+    cache-key drift alone. That matters because a narrowing keyed on
+    "cache_key_mismatch" in stale_reason leaves THIS test green; the sibling
+    below (test_unpinned_foreign_draft_sha1_stale_draft_still_dispatches) is
+    the one that turns red there. The exemption reads neither -- it reads the
+    CATEGORY -- which is the whole point of keeping both.
 
     Two guards against vacuity, both learned from the review:
 
@@ -4390,6 +4399,85 @@ def test_unpinned_foreign_stale_draft_still_dispatches(tmp_path):
     ), (
         "the exempt `stale` segment must actually be RE-TRANSLATED, not merely reach a "
         f"clean review over an untouched draft: {read_argv_log(root)}"
+    )
+
+
+def test_unpinned_foreign_draft_sha1_stale_draft_still_dispatches(tmp_path):
+    """The OTHER shape of `stale`, and the reason the exemption above is
+    described as CATEGORICAL rather than as a fact about cache-key drift.
+
+    classify_segment() returns `stale` on a draft_sha1_mismatch with NO
+    cache-key mismatch at all -- a draft hand-edited since its review -- and
+    FOREIGN_DRAFT_GATE_EXEMPT_CATEGORIES reads the category, so that unit is
+    exempt exactly like a drifted one. The sibling above cannot show this: its
+    fixture carries BOTH mismatches, so it stays green under a narrowing that
+    keeps only cache-key-drifted units exempt -- and such a narrowing is
+    precisely what the old rationale invited a future reader to write. Quoted
+    exactly, since it is this test's whole reason to exist: "a `stale` unit is
+    one that WAS converged and whose cache key has drifted, so its draft
+    carries -- by definition -- the token of the run that converged it".
+
+    The fixture is the whole point, and what can be checked about it here is
+    bounded by the surface: the driver's success payload carries `counts`, not
+    the per-segment `classification`, so stale_reason is not assertable from
+    this test at all. What IS asserted is the fragment as it reaches disk --
+    its cache_key must equal the current one, which makes cache_key_mismatch
+    False and leaves draft_sha1_mismatch as the only route into `stale`. Treat
+    that as a tripwire against a future edit inserting a drift line where the
+    sibling has one, not as a verification of the classifier; the mutation
+    named above is what proves the discrimination.
+
+    The two vacuity guards the sibling documents apply here unchanged:
+    `--allow-retranslate-converged` is required (select_segments.py refuses on
+    the `.ever_converged` sentinel first, and the driver would never reach this
+    gate), and the draft's owner must genuinely differ from the resolved run."""
+    root = make_durable_root(tmp_path, profile_yaml=FULL_PROFILE_YAML)
+    stage_phase2_scripts(root)
+    write_manifest(root, ["seg01"])
+    current_key = make_cache_key("current")
+    write_fixture_cache_keys(root, {"seg01": current_key})
+    write_fixture_segpack(root, "seg01")
+    # The ONLY mismatch this fixture presents is the reviewed_draft_sha1 below,
+    # which no real draft can hash to. Read back off the fragment as WRITTEN:
+    # `dict(current_key) == current_key` is true by construction and would
+    # cover neither converged_fragment() nor write_fragment().
+    frag_path = write_fragment(
+        root, "seg01", converged_fragment(dict(current_key), "0" * 40)
+    )
+    on_disk = json.loads(frag_path.read_text(encoding="utf-8"))
+    assert on_disk["cache_key"] == current_key, (
+        f"the fixture must present NO cache-key drift, else this is a second "
+        f"copy of the sibling: {on_disk['cache_key']}"
+    )
+    mark_ever_converged(root, "seg01")
+    foreign_run_id = "20200101T000000Z"
+    _foreign_draft(root, "seg01", foreign_run_id, "the converged text")
+
+    proc = run_driver(root, "--allow-retranslate-converged", timeout=90)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True, payload
+    assert "foreign_drafts" not in payload, (
+        f"a draft-sha1-only `stale` unit is exempt from the #742 gate too: {payload}"
+    )
+    assert payload["counts"]["stale"] == 1, payload
+    assert payload["run_id"] != foreign_run_id, (
+        "the fixture must present a genuinely FOREIGN draft, else this proves "
+        f"nothing about the exemption: {payload}"
+    )
+    assert payload["summary"]["converged"] == ["seg01"], payload
+    assert payload["summary"]["failed"] == [], payload
+    draft = json.loads(_draft_path(root, "seg01").read_text(encoding="utf-8"))
+    assert draft["dispatch_token"] == f"{payload['run_id']}:seg01", (
+        f"an exempt `stale` draft must be retranslated and re-stamped: {draft}"
+    )
+    assert any(
+        entry["kind"] == "translate" and entry["seg"] == "seg01"
+        for entry in read_argv_log(root)
+    ), (
+        "the exempt unit must actually be RE-TRANSLATED, not merely reach a clean "
+        f"review over an untouched draft: {read_argv_log(root)}"
     )
 
 
@@ -5066,8 +5154,8 @@ def test_derive_next_action_already_converged_round_1_when_clean_and_draft_match
 def test_derive_next_action_already_converged_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """codex round-4 ("Tests that could not fail"): current_draft_sha1()'s
     third argument -- dirs["scripts_dir"] -- is what makes this "clean and
-    draft matches" branch (segment_dispatch_driver.py:4929, feeding the
-    already_converged decision at :4956) hash the draft using the TRUSTED
+    draft matches" branch (segment_dispatch_driver.py:4957, feeding the
+    already_converged decision at :4984) hash the draft using the TRUSTED
     plugin tree's draft_sha1.py under --plugin-root, never the durable
     root's own writable, self-anchored copy (current_draft_sha1()'s own
     `scripts_dir=SCRIPTS_DIR` default). That default matters because the
@@ -6101,7 +6189,7 @@ def test_derive_next_action_fabricated_loc_gate_respects_node_bin(tmp_path):
 
 def test_derive_next_action_invalid_post_fix_draft_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """The invalid_post_fix_draft branch's own current_draft_sha1() call
-    (segment_dispatch_driver.py:4813) is a SECOND call site sharing the
+    (segment_dispatch_driver.py:4841) is a SECOND call site sharing the
     identical --plugin-root trust boundary as the already_converged
     branch's (see the sibling test above) -- untested here for the same
     reason: every existing --plugin-root fixture stages the REAL,
