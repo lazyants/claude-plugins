@@ -260,24 +260,26 @@ def _wrapped_citations(lines, i):
     return list(found.values())
 
 
-def _continuation_candidates(lines, i, upto):
-    """Every distinct citation TARGET in the smallest backward window that names one.
+def _backward_targets(lines, i):
+    """The citation targets of the nearest PRECEDING line that names any, walking back from line `i`.
 
-    Smallest, not "the paragraph": in the one real case that separates them, the surrounding comment
-    block names two files and the line itself names one, and the attribution is not in doubt. Reading
-    the nearer, more specific evidence first keeps that case out of the ambiguity branch. The walk
-    stops at a blank line, at the top of the file, or at `MAX_CONTINUATION_LOOKBACK`.
+    Split out of the per-token work deliberately, and this is the whole reason: the backward window
+    does not depend on where the bare token sits, so it is the same answer for every token on the
+    line. Computed per token instead, one 20 KB line of three-character bare tokens holds 6 666 of
+    them and each one re-scans six full lines through `CITATION_RE`'s path prefix -- measured, a
+    24 KB seven-line file took 17.09s and reported NOTHING, because a token with no candidate
+    produces no output and no line exceeds `MAX_SCANNED_LINE`. Once per line the same file is 1.14s,
+    and flat in the token count rather than linear in it.
 
-    Returns a set: empty means "not enumerated" (the docstring's residual), one means an attribution,
-    more than one means the caller must refuse to guess.
+    The walk stops at a blank line, at the top of the file, or at `MAX_CONTINUATION_LOOKBACK`.
     """
     targets = set()
-    for back in range(0, MAX_CONTINUATION_LOOKBACK + 1):
+    for back in range(1, MAX_CONTINUATION_LOOKBACK + 1):
         j = i - back
         if j < 0:
             break
-        seg = lines[i][:upto] if back == 0 else lines[j]
-        if back and not seg.strip():
+        seg = lines[j]
+        if not seg.strip():
             break
         if len(seg) > MAX_SCANNED_LINE:
             break
@@ -285,6 +287,26 @@ def _continuation_candidates(lines, i, upto):
         if targets:
             break
     return targets
+
+
+def _continuation_candidates(line_cites, upto, backward):
+    """Every distinct citation TARGET in the smallest window that names one.
+
+    Smallest, not "the paragraph": in the one real case that separates them, the surrounding comment
+    block names two files and the line itself names one, and the attribution is not in doubt. Reading
+    the nearer, more specific evidence first keeps that case out of the ambiguity branch.
+
+    `line_cites` is the enumeration's OWN per-line matches, reused rather than rescanned; a citation
+    counts when it ENDS at or before the token's column. Truncating the line at that column would be
+    the obvious alternative and is wrong: a cut landing inside a citation's DIGITS leaves a shorter
+    line number that nobody wrote, and it still matches. It cannot happen here -- the opener
+    allowlist puts a non-citation character immediately before every bare token -- but comparing
+    offsets does not depend on that being true.
+
+    Returns a set: empty means "not enumerated" (the module docstring's residual), one means an
+    attribution, more than one means the caller must refuse to guess.
+    """
+    return {target for end, target in line_cites if end <= upto} or backward
 
 
 def _consumed_spans(lines, i):
@@ -336,10 +358,12 @@ def find_citations(rel, text):
         # bare-token shape at all, so the work belongs behind the cheap test for one.
         bare = list(BARE_CONTINUATION_RE.finditer(line))
         spans = _consumed_spans(lines, i) if bare else ()
+        line_cites = [(m.end(), m.group(1)) for m, col in matches if col is not None]
+        backward = _backward_targets(lines, i) if bare else set()
         for m in bare:
             if any(lo <= m.start() < hi for lo, hi in spans):
                 continue
-            cands = sorted(_continuation_candidates(lines, i, m.start()))
+            cands = sorted(_continuation_candidates(line_cites, m.start(), backward))
             if not cands:
                 continue
             # The KEY carries the whole candidate set, not just the winner. With only the winner in it,

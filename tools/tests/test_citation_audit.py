@@ -1030,3 +1030,22 @@ def test_the_shipped_tree_enumerates_a_nonzero_number_of_continuations():
     slash = [packet for packet in json.loads(r.stdout)
              if packet["is_continuation"] and packet["container"].endswith("chapter-paths.d.mts")]
     assert sorted(packet["cite"] for packet in slash) == [":2140", ":2145"], slash
+
+
+def test_the_backward_walk_runs_once_per_line_not_once_per_token(tmp_path, monkeypatch):
+    """The backward window does not depend on where the token sits, so it is one answer per LINE.
+
+    Asserted structurally rather than by a clock, because a timing test on a shared machine is a
+    flake generator. The consequence it stands in for is measured: computed per token, six lines of
+    path-shaped filler above one 20 KB line of bare tokens takes 17s for a 24 KB file and reports
+    NOTHING -- a token with no candidate produces no output, so the expensive input looks inert. The
+    same file is 1.1s once the walk is hoisted, and flat in the token count rather than linear.
+    """
+    seen = []
+    real = ca._backward_targets
+    monkeypatch.setattr(ca, "_backward_targets",
+                        lambda lines, i: (seen.append(i), real(lines, i))[1])
+    text = "a citation `t.py:3` opens the file.\n" + " :1" * 200 + "\n"
+    found = ca.find_citations("c.md", text)
+    assert len(seen) == 1, f"walked backward {len(seen)} times for one line of 200 tokens"
+    assert sum(1 for c in found if c["is_continuation"]) == 200

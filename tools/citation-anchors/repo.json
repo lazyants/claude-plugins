@@ -339,6 +339,9 @@
   "[\"tools/tests/test_citation_audit.py\", \"self.rename_failed:697\", 0]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:1\", 0, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
   "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 0]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
@@ -427,6 +430,9 @@
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
   "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 38]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 39]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
   "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 3]": {
