@@ -1,0 +1,7 @@
+{"version":3,"term":{"cols":80,"rows":24},"timestamp":1787673611,"command":"python3 /private/tmp/claude-501/-Users-moi-lazy-ants-development-claude-plugins/3a9a3700-dcbd-4a60-a556-d42872371644/scratchpad/probe_beta_header.py","env":{"SHELL":"/bin/zsh"}}
+[0.104, "o", "bearer acquired from the Keychain: 108 chars, never printed\r\n"]
+[0.352, "o", "\r\nWITHOUT the beta header\r\n  status=200 bytes=1974\r\n"]
+[0.000, "o", "  top-level keys: ['amber_ladder', 'cinder_cove', 'extra_usage', 'five_hour', 'iguana_necktie', 'limits', 'member_dashboard_available', 'nimbus_quill', 'omelette_promotional', 'seven_day', 'seven_day_cowork', 'seven_day_oauth_apps', 'seven_day_omelette', 'seven_day_opus', 'seven_day_sonnet', 'spend', 'tangelo']\r\n"]
+[0.504, "o", "\r\nWITH anthropic-beta: oauth-2025-04-20\r\n  status=200 bytes=1974\r\n"]
+[0.000, "o", "  top-level keys: ['amber_ladder', 'cinder_cove', 'extra_usage', 'five_hour', 'iguana_necktie', 'limits', 'member_dashboard_available', 'nimbus_quill', 'omelette_promotional', 'seven_day', 'seven_day_cowork', 'seven_day_oauth_apps', 'seven_day_omelette', 'seven_day_opus', 'seven_day_sonnet', 'spend', 'tangelo']\r\n"]
+[0.012, "x", "0"]

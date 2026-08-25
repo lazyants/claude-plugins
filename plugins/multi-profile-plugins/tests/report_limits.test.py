@@ -83,6 +83,10 @@ marker = os.environ.get("STUB_SECURITY_MARKER")
 if marker:
     with open(marker, "a", encoding="utf-8") as handle:
         print(" ".join(sys.argv[1:]), file=handle)
+payload = os.environ.get("STUB_SECURITY_PAYLOAD")
+if payload is not None:          # the SUCCESS path; absent, this stub denies as before
+    sys.stdout.write(payload)
+    sys.exit(0)
 sys.exit(int(os.environ.get("STUB_SECURITY_RC", "1")))
 '''
 
@@ -1166,6 +1170,138 @@ with tempfile.TemporaryDirectory() as tmp:
           R.TERMINAL_STATES == frozenset({R.REPORTED, R.NO_CURRENT, R.GAP}),
           str(sorted(R.TERMINAL_STATES)))
 
+    # 35 -- the Keychain SUCCESS path. Every earlier case drove this stub into denial, so two
+    # defects sat underneath it: `security ... -w` writes the whole stored credential OBJECT, and
+    # returning its stdout put that object -- refresh token included -- into the Authorization
+    # header, so no Keychain-backed profile could ever authenticate. Driven in-process because
+    # the assertion that matters is on the header, and reaching a stub from a subprocess would
+    # need a production origin override.
+    keyroot = root / "keychain"
+    bindir = install_stub(keyroot)
+    keyprofile = keyroot / ".claudeK"
+    keyprofile.mkdir(parents=True, exist_ok=True)          # deliberately NO .credentials.json
+    stored = json.dumps({
+        "claudeAiOauth": {"accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(24),
+                          "refreshToken": SENTINEL_KEYCHAIN},
+        "mcpOAuth": {"whatever": SENTINEL_KEYCHAIN},
+    })
+    saved_env = {k: os.environ.get(k) for k in
+                 ("PATH", "HOME", "STUB_SECURITY_MARKER", "STUB_SECURITY_PAYLOAD")}
+    key_marker = keyroot / "security-called.txt"
+
+    class KeyRecording:
+        headers: list = []
+
+        def __init__(self, host, timeout=None):
+            self.host = host
+
+        def request(self, method, path, headers=None):
+            KeyRecording.headers.append(dict(headers or {}))
+
+        def getresponse(self):
+            payload = json.dumps({"limits": [
+                {"kind": "weekly_all", "percent": 7, "is_active": True, "resets_at": iso(48)}]})
+
+            class Response:
+                status = 200
+
+                def read(self):
+                    return payload.encode("utf-8")
+            return Response()
+
+        def close(self):
+            pass
+
+    original = R.HTTPSConnection
+    key_out, key_err = io.StringIO(), io.StringIO()
+    try:
+        os.environ["PATH"] = f"{bindir}{os.pathsep}{saved_env['PATH']}"
+        os.environ["STUB_SECURITY_MARKER"] = str(key_marker)
+        os.environ["STUB_SECURITY_PAYLOAD"] = stored
+        R.HTTPSConnection = KeyRecording
+        with contextlib.redirect_stdout(key_out), contextlib.redirect_stderr(key_err):
+            key_records = R._claude_live(keyprofile)
+    finally:
+        R.HTTPSConnection = original
+        for name, value in saved_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    check("35 the fixture security ran, so no real keychain was queried",
+          key_marker.exists() and "find-generic-password" in key_marker.read_text("utf-8"),
+          key_marker.read_text("utf-8") if key_marker.exists() else "no marker written")
+    check("35 a keychain-only profile authenticates and reports",
+          any(record.state == R.REPORTED for record in key_records),
+          str([record.state for record in key_records]))
+    # THE assertion. `in` would pass for the whole object too, since the object CONTAINS the
+    # token -- which is precisely the bug. Equality is what distinguishes them.
+    check("35 the header carries the access TOKEN, not the stored object around it",
+          bool(KeyRecording.headers)
+          and KeyRecording.headers[-1].get("Authorization") == f"Bearer {SENTINEL_TOKEN}",
+          str(len(KeyRecording.headers)))
+    check("35 and the refresh token never leaves the keychain payload",
+          all(SENTINEL_KEYCHAIN not in header.get("Authorization", "")
+              for header in KeyRecording.headers), str(len(KeyRecording.headers)))
+    assert_no_secret("35 keychain success", key_out.getvalue(), key_err.getvalue(),
+                     repr([vars(record) for record in key_records]))
+
+    # 36 -- which item is asked for. The DEFAULT profile keeps its live credential under the
+    # unsuffixed name; the suffixed item for that same path exists on this machine but holds an
+    # empty token, which answers token-absent rather than failing visibly.
+    fake_home = root / "svc-home"
+    (fake_home / ".claude").mkdir(parents=True, exist_ok=True)
+    saved_home = os.environ.get("HOME")
+    try:
+        os.environ["HOME"] = str(fake_home)
+        default_service = R._keychain_service(fake_home / ".claude")
+        other_service = R._keychain_service(fake_home / ".claude2")
+        elsewhere = R._keychain_service(Path("/tmp/somewhere/.claude"))
+    finally:
+        if saved_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved_home
+    check("36 the default profile asks for the UNSUFFIXED item",
+          default_service == "Claude Code-credentials", default_service)
+    check("36 a sibling profile asks for a suffixed item", other_service.startswith(
+        "Claude Code-credentials-") and len(other_service) == len("Claude Code-credentials-") + 8,
+        other_service)
+    check("36 and `.claude` under a DIFFERENT parent is not the default",
+          elsewhere != "Claude Code-credentials", elsewhere)
+    check("36 the two services are different items",
+          default_service != other_service, f"{default_service} {other_service}")
+
+    # 37 -- the keychain payload is held to the same contract as the file, which is the point of
+    # there being one extractor. A stored object with an expired token must not be sent.
+    for label, blob, expect in (
+        ("not JSON at all", "this-is-not-json", "response-malformed"),
+        ("no claudeAiOauth", json.dumps({"mcpOAuth": {}}), "token-absent"),
+        ("empty accessToken", json.dumps({"claudeAiOauth": {"accessToken": ""}}), "token-absent"),
+        ("expired accessToken", json.dumps({"claudeAiOauth": {
+            "accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(-1)}}), "token-expired"),
+    ):
+        saved_path, saved_payload = os.environ.get("PATH"), os.environ.get("STUB_SECURITY_PAYLOAD")
+        out37, err37 = io.StringIO(), io.StringIO()
+        try:
+            os.environ["PATH"] = f"{bindir}{os.pathsep}{saved_path}"
+            os.environ["STUB_SECURITY_PAYLOAD"] = blob
+            with contextlib.redirect_stdout(out37), contextlib.redirect_stderr(err37):
+                try:
+                    R._claude_token(keyprofile)
+                    got = "no-error"
+                except R.Malformed as exc:
+                    got = exc.code
+        finally:
+            os.environ["PATH"] = saved_path
+            if saved_payload is None:
+                os.environ.pop("STUB_SECURITY_PAYLOAD", None)
+            else:
+                os.environ["STUB_SECURITY_PAYLOAD"] = saved_payload
+        check(f"37 a stored payload that is {label} -> {expect}", got == expect, got)
+        assert_no_secret(f"37 {label}", out37.getvalue(), err37.getvalue(), got)
+
     # 24 -- every diagnostic token the script can render is a member of the closed enum.
     check("24 the enum is a frozenset of unique tokens",
           len(R.DIAGNOSTICS) == len(R.DIAGNOSTIC_SET))
@@ -1192,7 +1328,7 @@ if failures:
         print(f"  {failure}")
     sys.exit(1)
 
-MIN_CHECKS = 200
+MIN_CHECKS = 230
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

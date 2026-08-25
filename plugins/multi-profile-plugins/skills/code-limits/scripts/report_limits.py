@@ -105,7 +105,8 @@ API_PATH = "/api/oauth/usage"
 HTTP_TIMEOUT = 15.0
 HTTPSConnection = http.client.HTTPSConnection  # module-level so a test can substitute it
 
-KEYCHAIN_SERVICE_PREFIX = "Claude Code-credentials-"
+KEYCHAIN_SERVICE_DEFAULT = "Claude Code-credentials"
+KEYCHAIN_SERVICE_PREFIX = KEYCHAIN_SERVICE_DEFAULT + "-"
 WINDOW_LABELS = {300: "5h", 10080: "weekly"}
 MAX_LINE_BYTES = 4 * 1024 * 1024
 
@@ -451,13 +452,34 @@ def _claude_cached(profile: Path, now: datetime.datetime) -> list[Record]:
 
 
 def _keychain_service(profile: Path) -> str:
-    """Measured on this machine: the service name is sha256 of the absolute config dir, 8 hex."""
+    """The Keychain item a profile's credentials are stored under.
+
+    MEASURED across this machine's profiles, and the default is a special case that an earlier
+    reading of the same evidence missed. `~/.claude` keeps its live credential in the UNSUFFIXED
+    item; the suffixed item for that path also exists but holds an EMPTY accessToken -- which is
+    worse than a missing item, because it answers `token-absent` rather than failing visibly, and
+    is exactly why "an item exists at the derived name" was mistaken for "the derivation is
+    right". Every other config dir uses the suffix: sha256 of the absolute path, first 8 hex,
+    confirmed against three of them carrying real 108-character tokens.
+
+    Known limit, disclosed rather than guessed at: the suffix is derived from the RESOLVED path.
+    A profile selected by a different spelling of the same directory, or through a separate
+    secure-storage override, would hash differently -- that lands as `token-absent`, never as
+    another account's number, because the item simply will not be found.
+    """
+    if profile == Path(os.path.expanduser("~")) / ".claude":
+        return KEYCHAIN_SERVICE_DEFAULT
     digest = hashlib.sha256(str(profile).encode("utf-8")).hexdigest()[:8]
     return KEYCHAIN_SERVICE_PREFIX + digest
 
 
-def _keychain_token(profile: Path) -> str:
-    """The bearer for a profile that has no credential file. Read-only, and never rendered."""
+def _keychain_blob(profile: Path) -> dict:
+    """The credential OBJECT for a profile that has no credential file on disk.
+
+    `security ... -w` writes the whole stored JSON, not a bearer. Treating its stdout as the token
+    put that entire object -- refresh token included -- into an Authorization header, and every
+    Keychain-backed profile answered `http-error` because no such bearer exists.
+    """
     try:
         done = subprocess.run(
             ["security", "find-generic-password", "-s", _keychain_service(profile), "-w"],
@@ -467,9 +489,33 @@ def _keychain_token(profile: Path) -> str:
         raise Malformed("keychain-denied") from None
     if done.returncode != 0:  # stderr is deliberately captured and never rendered
         raise Malformed("keychain-denied")
-    token = done.stdout.strip()
-    if not token:
+    payload = done.stdout.strip()
+    if not payload:
         raise Malformed("token-absent")
+    try:
+        return json.loads(payload)
+    except ValueError:
+        # Deliberately not rendered: the text that failed to parse IS the credential.
+        raise Malformed("response-malformed") from None
+
+
+def _bearer(blob) -> str:
+    """The access token out of a Claude Code credential object, whatever it was read from.
+
+    ONE extractor, because the file on disk and the Keychain item hold the same object. Two
+    readers is how they drifted: the file's parsed it and validated the expiry, the Keychain's
+    returned raw stdout and checked neither.
+    """
+    oauth = blob.get("claudeAiOauth") if isinstance(blob, dict) else None
+    if not isinstance(oauth, dict):
+        raise Malformed("token-absent")
+    token = oauth.get("accessToken")
+    if not isinstance(token, str) or not token:
+        raise Malformed("token-absent")
+    expires = oauth.get("expiresAt")
+    now = datetime.datetime.now(datetime.timezone.utc)  # read time, not run-start time
+    if expires is not None and _from_epoch(expires, EPOCH_MILLIS) <= now:
+        raise Malformed("token-expired")
     return token
 
 
@@ -482,7 +528,7 @@ def _claude_token(profile: Path) -> str:
         # .credentials.json symlink therefore takes the keychain path too. Left as it is: the
         # reachable case is a profile that has no credential file, and adding a symlink probe
         # would be machinery for an edge nobody has produced.
-        return _keychain_token(profile)
+        return _bearer(_keychain_blob(profile))
     except OSError:
         # Present but unreadable. Path.exists() answers False for a permission failure from
         # 3.14 and raises below it, so testing for the file first would read this as absence
@@ -494,17 +540,7 @@ def _claude_token(profile: Path) -> str:
             blob = json.load(handle)
         except (OSError, ValueError):
             raise Malformed("response-malformed") from None
-    oauth = blob.get("claudeAiOauth") if isinstance(blob, dict) else None
-    if not isinstance(oauth, dict):
-        raise Malformed("token-absent")
-    token = oauth.get("accessToken")
-    if not isinstance(token, str) or not token:
-        raise Malformed("token-absent")
-    expires = oauth.get("expiresAt")
-    now = datetime.datetime.now(datetime.timezone.utc)  # read time, not run-start time
-    if expires is not None and _from_epoch(expires, EPOCH_MILLIS) <= now:
-        raise Malformed("token-expired")
-    return token
+    return _bearer(blob)
 
 
 def _claude_live(profile: Path) -> list[Record]:

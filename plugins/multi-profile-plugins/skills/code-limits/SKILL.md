@@ -52,7 +52,15 @@ such together with that window's own reset time, and says the current window is 
 `--live` makes a Claude Code row call `GET https://api.anthropic.com/api/oauth/usage` instead of
 reading the cache. It reads the profile's OAuth token from `.credentials.json` when that file is
 present, and otherwise from the macOS Keychain item the profile's config directory maps to; the
-keychain read prompts the user, because the process doing the reading is not `claude` itself. A
+keychain read prompts the user, because the process doing the reading is not `claude` itself.
+Both sources hold the SAME object and go through one extractor: the Keychain item stores the
+whole credential JSON, not a bare token, so the access token is parsed out of it and its expiry
+checked exactly as the file's is. Which item is asked for was measured, and the default profile
+is a special case -- `~/.claude` keeps its live credential under the unsuffixed
+`Claude Code-credentials`, while every other config directory uses a name suffixed with the
+first 8 hex of the SHA-256 of its absolute path. A profile reached by a different spelling of
+the same directory, or through a separate secure-storage override, hashes to a name that simply
+is not there, so it gaps as `token-absent` rather than reading another account's item. A
 live call that fails is reported as a gap for that profile, with its diagnostic code -- it never
 falls back to the cache, because a live run that quietly degraded would print exactly what a
 successful one prints.
