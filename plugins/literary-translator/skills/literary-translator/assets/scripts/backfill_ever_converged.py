@@ -1638,15 +1638,33 @@ def acquire_project_lease(durable_root: Path) -> int:
     # with no sentinels at all has NOTHING protecting it -- SKILL.md's #409
     # note says such a project retranslates the whole book on its very first
     # post-upgrade dispatch. Refusing on an NFS/SMB mount would block that
-    # migration outright, trading a narrow, detected window for a certain,
-    # total loss. Same direction segment_dispatch_driver.py takes, for the
-    # same "a detected gap must not become a brand-new outage" reason.
+    # migration outright, trading a narrow, detected window for the certain
+    # loss of every segment this script could have protected -- the
+    # materialized `converged`/`stale` population, not literally every
+    # segment, which is why the code says that rather than "the whole book".
+    # Same direction segment_dispatch_driver.py takes, for the same "a
+    # detected gap must not become a brand-new outage" reason.
+    # The probe distinguishes CONTENTION from a FAILED PROBE, and does not
+    # collapse the two into "refused". select_segments.py measured what the
+    # collapse costs (:3978-4005): an injected ENOLCK -- a filesystem that
+    # cannot lock AT ALL -- read as proof that a lease is held, which is
+    # exactly backwards. Here the direction is the same shape: EMFILE or
+    # ENOLCK on the second open would otherwise be read as "the filesystem
+    # enforces flock", and the one warning this branch exists to print would
+    # never appear on precisely the mounts that need it. EAGAIN and
+    # EWOULDBLOCK are the POSIX contention answers (equal on Linux and macOS,
+    # spelled separately because the standard does not require that); EACCES
+    # is included because some platforms report a contended LOCK_NB that way.
+    _CONTENTION_ERRNOS = (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES)
     probe_fd = None
+    probe_problem = None
     try:
         probe_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
         fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        pass  # expected: a conforming filesystem refuses the second attempt
+    except OSError as exc:
+        if exc.errno not in _CONTENTION_ERRNOS:
+            probe_problem = str(exc)
+        # else: expected -- a conforming filesystem refuses the second attempt
     else:
         sys.stderr.write(
             f"backfill_ever_converged.py: WARNING: the project lease at "
@@ -1667,6 +1685,22 @@ def acquire_project_lease(durable_root: Path) -> int:
             except OSError:
                 pass
             os.close(probe_fd)
+
+    # A FAILED probe is a THIRD outcome, reported as its own fact rather than
+    # folded into either of the other two. "The self-test could not run" and
+    # "the self-test proved the lease unenforced" send an operator to
+    # different places, and neither is "the lease is fine".
+    if probe_problem is not None:
+        sys.stderr.write(
+            f"backfill_ever_converged.py: WARNING: the flock-enforcement "
+            f"self-test for {lock_path} could not be RUN ({probe_problem}) -- "
+            f"this is NOT evidence that the lease is enforced, only that the "
+            f"probe failed. The lease above was acquired; whether this "
+            f"filesystem honours it is now unknown. Proceeding for the same "
+            f"reason the unenforced case proceeds -- a project with no "
+            f"sentinels at all is the larger loss -- but sequence this run "
+            f"before the first W5 dispatch by hand.\n"
+        )
 
     return fd
 

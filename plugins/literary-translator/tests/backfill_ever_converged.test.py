@@ -37,6 +37,7 @@ root and invokes `python3 {durable_root}/scripts/backfill_ever_converged.py
 with the same small fixture script `ledger_merge.test.py`/
 `select_segments.test.py` use.
 """
+import errno
 import fcntl
 import importlib.util
 import io
@@ -3496,15 +3497,29 @@ def _external_lease_held(root):
 
 def _independent_acquire_succeeds(root):
     """True iff a genuinely independent open of runs/.driver.lock can take
-    LOCK_EX|LOCK_NB right now. Never leaves a lease held."""
+    LOCK_EX|LOCK_NB right now. Never leaves a lease held.
+
+    Only the CONTENTION errnos count as "no, something holds it". Mapping an
+    arbitrary OSError to False would manufacture exactly the evidence this
+    helper exists to gather -- an ENOLCK or EMFILE would read as proof that
+    the lease is held, and the lifetime assertion below would pass without
+    ever having observed a lease. Same discrimination the production probe
+    makes, and the same one select_segments.py measured the cost of omitting.
+    """
     path = _lock_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return False
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                return False
+            raise AssertionError(
+                f"the lease probe could not be RUN ({exc}) -- this test "
+                f"proves nothing, and reporting it as 'held' would be the "
+                f"false green it exists to catch"
+            ) from exc
         fcntl.flock(fd, fcntl.LOCK_UN)
         return True
     finally:
@@ -3517,10 +3532,21 @@ def test_apply_refuses_while_the_project_lease_is_held_and_writes_nothing(tmp_pa
     the lease after the census and the create loop would still print this
     refusal while having already done the damage."""
     root = setup_mixed_project(tmp_path)
-    before = sentinel_files(root)
+    prime_materialized_ledger(root)
 
     with _external_lease_held(root) as lock_path:
+        # The WHOLE tree, not just the sentinel names. Asserting only on
+        # sentinels left a third mutation alive (named by review): move the
+        # acquire out of the wrapper to just before the sentinel loop, and
+        # this test still passes while an --apply run re-materializes
+        # runs/ledger.json inside a driver's lease -- contradicting this
+        # test's own name, and the docstring's "holds it for this run's
+        # lifetime". `.driver.lock` itself is excluded because the fixture
+        # below creates it: it is the lease being HELD, not a write by the
+        # run under test.
+        before = _snapshot_tree(root)
         proc = run_backfill(root, "--apply")
+        after = _snapshot_tree(root)
 
     assert proc.returncode != 0, (
         "--apply must refuse while another project-lease participant holds "
@@ -3532,9 +3558,12 @@ def test_apply_refuses_while_the_project_lease_is_held_and_writes_nothing(tmp_pa
         "the refusal must name the path an operator has to go look at, not "
         f"merely say something is locked: {payload['error']!r}"
     )
-    assert sentinel_files(root) == before, (
-        "a refused run must have written NO sentinel -- the lease has to be "
-        "taken before the create loop, not around it"
+    diff = _tree_diff(before, after)
+    assert diff == {"added": [], "removed": [], "changed": []}, (
+        "a refused run must have written NOTHING anywhere under the durable "
+        "root -- not a sentinel, and not a re-materialized runs/ledger.json. "
+        "The lease has to be taken at the TOP of the run, not around the "
+        f"create loop: {diff}"
     )
 
 
