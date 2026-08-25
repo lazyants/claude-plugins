@@ -14,6 +14,7 @@ Dependency-free: run it with `python3 report_limits.test.py`.
 """
 from __future__ import annotations
 
+import ast
 import datetime
 import json
 import os
@@ -288,9 +289,26 @@ with tempfile.TemporaryDirectory() as tmp:
     check("1 no method parameter is taken anywhere",
           "def send(" not in source and "method:" not in source and "method=" not in source,
           "a function takes a method as data")
-    check("1 the three requests are module-level constants",
-          all(marker in source for marker in
-              ("_REQ_INITIALIZE = {", "_NOTIF_INITIALIZED = {", "_REQ_RATE_LIMITS = {")))
+    # Structural, not a substring pin. Every `"method"` value in the module must be a string
+    # LITERAL, and the set of those literals must be exactly the three read-only messages. The
+    # old check asserted three constant NAMES were present, which stayed true for a mutant
+    # adding `def _dynamic_rpc(operation): return {"method": operation}` beside them.
+    method_values = [
+        value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Dict)
+        for key, value in zip(node.keys, node.values)
+        if isinstance(key, ast.Constant) and key.value == "method"
+    ]
+    check("1 every RPC method is a literal, never an expression",
+          bool(method_values) and all(isinstance(v, ast.Constant) and isinstance(v.value, str)
+                                      for v in method_values),
+          str([ast.dump(v)[:70] for v in method_values]))
+    check("1 the only methods the module can name are the three read-only ones",
+          sorted(v.value for v in method_values
+                 if isinstance(v, ast.Constant) and isinstance(v.value, str))
+          == ["account/rateLimits/read", "initialize", "initialized"],
+          str([ast.dump(v)[:70] for v in method_values]))
     check("3 the redeeming method is not spelled",
           "account/rateLimitResetCredit/consume" not in source)
     for word in ("consume", "redeem"):
@@ -359,7 +377,6 @@ with tempfile.TemporaryDirectory() as tmp:
         ("limits is an object", cached(utilization={"limits": {}})),
         ("utilization not an object", {"cachedUsageUtilization":
                                        {"fetchedAtMs": now_ms(-1), "utilization": []}}),
-        ("entries not objects", cached(entries=["not-an-object"])),
         ("zero recognised records", cached(utilization={})),
         ("cache not an object", {"cachedUsageUtilization": []}),
     ):
@@ -630,6 +647,111 @@ with tempfile.TemporaryDirectory() as tmp:
     check("21 the keychain failure maps to a closed code",
           "[keychain-denied]" in done.stdout, done.stdout)
 
+# --- 26 - 31: the round-3 findings, each in a confined root ------------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+
+    # 26 -- one non-object entry must gap ITSELF, not its valid siblings. A container pass ahead
+    # of the per-record loop rejected the whole candidate and lost every valid pool with it.
+    mixed = root / "mixed"
+    make_claude(mixed, ".claudeM", cached(entries=[entry(percent=42), "not-an-object"]))
+    done, _, _ = run(["--claude-profile", str(mixed / ".claudeM"),
+                      "--codex-home", str(make_codex_home(mixed, ".codexClean"))], root=mixed)
+    # Counted in the report BODY: the warning now quotes the gapped row verbatim, so counting
+    # the whole of stdout would see the same diagnostic twice and say nothing about the rows.
+    body = done.stdout.split("warnings")[0]
+    check("26 the malformed entry gaps under its own index",
+          "limits[1]" in body and body.count("[payload-malformed]") == 1, done.stdout)
+    check("26 the warning quotes the gapped row rather than inventing a token",
+          "limits[1] [payload-malformed]" in done.stdout.split("warnings")[-1], done.stdout)
+    check("26 the VALID sibling still reports", "42.0%" in done.stdout, done.stdout)
+    check("26 the run gaps", done.returncode == 1, f"rc={done.returncode}")
+    check("26 and it is the Claude profile the warning names",
+          ".claudeM" in done.stdout.split("warnings")[-1], done.stdout)
+
+    # 27 -- a subscription flag of the WRONG TYPE is schema drift, not a clean absence. `is False`
+    # let a string fall through to no-usage-cache, which is KNOWN_ABSENT and exits 0.
+    drift = root / "drift"
+    make_claude(drift, ".claudeS", {"hasAvailableSubscription": "false"})
+    done, _, _ = run(["--claude-profile", str(drift / ".claudeS"),
+                      "--codex-home", str(make_codex_home(drift, ".codexClean"))], root=drift)
+    check("27 a string subscription flag gaps", "[field-malformed]" in done.stdout, done.stdout)
+    check("27 it is NOT recorded as a known absence",
+          "[no-usage-cache]" not in done.stdout and "[no-subscription]" not in done.stdout,
+          done.stdout)
+    check("27 and the run exits 1", done.returncode == 1, f"rc={done.returncode}")
+
+    # 28 -- the coupon count is one of the things this report exists to print, so a response that
+    # omits the container has not answered the question and must not print nothing and pass.
+    nocoupon = root / "nocoupon"
+    make_claude(nocoupon, ".claudeOK", cached(entries=[entry()]))
+    done, _, _ = run(["--claude-profile", str(nocoupon / ".claudeOK"),
+                      "--codex-home", str(make_codex_home(nocoupon, ".codexN"))], root=nocoupon,
+                     stub_result={"rateLimits": {"limitId": "codex", "primary": {
+                         "usedPercent": 61, "windowDurationMins": 10080, "resetsAt": epoch(30)}}})
+    check("28 an omitted coupon container gaps its own row",
+          "reset coupons" in done.stdout and "[field-malformed]" in done.stdout, done.stdout)
+    check("28 the usage window beside it still reports", "61.0%" in done.stdout, done.stdout)
+    check("28 the run exits 1 rather than printing nothing and passing",
+          done.returncode == 1, f"rc={done.returncode}")
+    check("28 the warning names the Codex home, not the clean Claude profile",
+          ".codexN" in done.stdout.split("warnings")[-1]
+          and ".claudeOK" not in done.stdout.split("warnings")[-1], done.stdout)
+
+    # 29 -- an escaped lone surrogate survives json.loads and raises only when something ENCODES
+    # it, which happens in the renderer, outside the per-candidate handler.
+    surrogate = root / "surrogate"
+    make_claude(surrogate, ".claudeU",
+                cached(entries=[entry(percent=42), entry(kind="\ud800weekly")]))
+    done, _, _ = run(["--claude-profile", str(surrogate / ".claudeU"),
+                      "--codex-home", str(make_codex_home(surrogate, ".codexClean"))],
+                     root=surrogate)
+    check("29 the surrogate label gaps its own record",
+          "limits[1]" in done.stdout and "[field-malformed]" in done.stdout, done.stdout)
+    check("29 the valid sibling still reports", "42.0%" in done.stdout, done.stdout)
+    check("29 no traceback escaped to stderr", "Traceback" not in done.stderr, done.stderr)
+
+    # 30 -- a profile DIRECTORY name is not this script's to validate, and neither is the encoding
+    # of the stream it prints to. Under an ascii stdout an unencodable character raises out of
+    # print(), past every per-candidate handler, ending the run with no warnings at all.
+    narrow = root / "narrow"
+    make_claude(narrow, ".claudeW", cached(entries=[entry(
+        kind="weekly_scoped", percent=19,
+        scope={"model": {"id": None, "display_name": "Fabl\u00e9"}, "surface": None})]))
+    done, _, _ = run(["--claude-profile", str(narrow / ".claudeW"),
+                      "--codex-home", str(make_codex_home(narrow, ".codexClean"))],
+                     root=narrow, extra_env={"PYTHONIOENCODING": "ascii"})
+    check("30 an ascii stdout does not abort the report",
+          "UnicodeEncodeError" not in done.stderr and "Traceback" not in done.stderr, done.stderr)
+    check("30 the row is escaped rather than lost", "Fabl\\xe9" in done.stdout, done.stdout)
+    check("30 and the run is otherwise clean", done.returncode == 0,
+          f"rc={done.returncode}\n{done.stdout}\n{done.stderr}")
+
+    # 31 -- a credential file that EXISTS but cannot be read must not read as absent. Path.exists()
+    # answers False for a permission failure from 3.14, so testing for the file first falls
+    # through to the keychain and reports a DIFFERENT credential's pool as this profile's.
+    if os.geteuid() != 0:                 # root bypasses the permission bits this case needs
+        locked = root / "locked"
+        prof = make_claude(locked, ".claudeP", cached(entries=[entry(percent=77)]))
+        clean = make_codex_home(locked, ".codexClean")
+        prof.chmod(0o000)
+        try:
+            done, _, _ = run(["--live", "--claude-profile", str(prof),
+                              "--codex-home", str(clean)], root=locked)
+        finally:
+            prof.chmod(0o700)
+        marker = locked / "security-called.txt"
+        check("31 an unreadable credential file gaps the profile",
+              "[candidate-unreadable]" in done.stdout, done.stdout)
+        check("31 it never falls back to the keychain -- the fixture security left no marker",
+              not marker.exists(),
+              marker.read_text(encoding="utf-8") if marker.exists() else "")
+        check("31 the cache is not used as a fallback either", "77.0%" not in done.stdout,
+              done.stdout)
+        check("31 and the run gaps", done.returncode == 1, f"rc={done.returncode}")
+
+
 # --- 22 / 23: transport safety. These import the module, deliberately, because reaching an HTTPS
 # stub from a subprocess would need a production origin override -- the very defect they prevent.
 sys.path.insert(0, str(SCRIPT.parent))
@@ -801,7 +923,7 @@ if failures:
         print(f"  {failure}")
     sys.exit(1)
 
-MIN_CHECKS = 140
+MIN_CHECKS = 160
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

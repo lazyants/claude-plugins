@@ -63,24 +63,31 @@ DIAGNOSTICS = (
 )
 DIAGNOSTIC_SET = frozenset(DIAGNOSTICS)
 
-# Terminal states. Every candidate and every record ends in exactly one of these.
+# Terminal states. Every candidate and every record ends in exactly one of these three.
 REPORTED = "reported"
 NO_CURRENT = "known-no-current-value"
 GAP = "gap"
-INFO = "info"  # a rendered fact that is not a window: coupon count, credit balance
+# Not a terminal state: a RENDER KIND for a successfully read fact that is not a usage window --
+# the coupon count, the credit balance. Such a row reached its value, so it is `reported` for the
+# purpose of the exit contract; the constant only tells the renderer it has no percentage.
+INFO = "info"
 
 # Diagnostics that mean "there is no current value here", as opposed to "this was not examined".
 KNOWN_ABSENT = frozenset({"no-usage-cache", "no-subscription"})
 
 # --- the three JSON-RPC messages, frozen whole ------------------------------------------------
-_REQ_INITIALIZE = {
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "initialize",
-    "params": {"clientInfo": {"name": "code-limits", "title": "code-limits", "version": "1"}},
-}
-_NOTIF_INITIALIZED = {"jsonrpc": "2.0", "method": "initialized", "params": {}}
-_REQ_RATE_LIMITS = {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": {}}
+# Serialized at import and never rebuilt. The dict literals below are never bound to a name, so
+# after import there is no message left to mutate and no expression anywhere that could compose a
+# method from data -- every method this module can name is a literal in these three frames.
+_FRAMES: tuple[bytes, ...] = tuple(
+    (json.dumps(message) + "\n").encode("utf-8") for message in (
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"clientInfo": {"name": "code-limits", "title": "code-limits",
+                                   "version": "1"}}},
+        {"jsonrpc": "2.0", "method": "initialized", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": {}},
+    )
+)
 _RATE_LIMITS_ID = 2
 
 # --- pinned network destination ---------------------------------------------------------------
@@ -154,6 +161,11 @@ def _text(value, limit: int = 200) -> str:
     if not isinstance(value, str) or not value or len(value) > limit:
         raise Malformed("field-malformed")
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise Malformed("field-malformed")
+    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
+        # An escaped lone surrogate passes json.loads and raises UnicodeEncodeError only when
+        # something encodes it -- which happens in the renderer, outside this record's handler.
+        # Refusing it here keeps the failure inside the record it belongs to.
         raise Malformed("field-malformed")
     return value
 
@@ -297,14 +309,14 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
     if entries is not None:
         if not isinstance(entries, list):
             raise Malformed("payload-malformed")
-        for item in entries:              # container pass: shape first, for every entry
-            _obj(item)
         for index, item in enumerate(entries):
             # Per RECORD, not per candidate. One malformed entry must not suppress its siblings:
             # the valid pools are exactly what the operator opened the report to see, and a
-            # profile that prints nothing looks identical to one that has nothing.
+            # profile that prints nothing looks identical to one that has nothing. The entry's
+            # own SHAPE is checked inside this handler for the same reason -- a container pass
+            # that rejected a non-object entry ahead of the loop lost every valid sibling.
             try:
-                records.append(_claude_row(item, freshness, now))
+                records.append(_claude_row(_obj(item), freshness, now))
             except Malformed as exc:
                 records.append(Record(f"limits[{index}]", GAP, diagnostic=exc.code))
         return records
@@ -376,7 +388,11 @@ def _claude_cached(profile: Path, now: datetime.datetime) -> list[Record]:
 
     # Decided BEFORE the cache is inspected, so a profile that is both unsubscribed and cacheless
     # lands in exactly one class instead of matching two rules.
-    if blob.get("hasAvailableSubscription") is False:
+    subscription = blob.get("hasAvailableSubscription")
+    if subscription is not None and not _flag(subscription):
+        # _flag, not `is False`: a vendor type change is schema drift and must gap, where
+        # `is False` silently fell through to no-usage-cache -- a KNOWN_ABSENT state that
+        # exits 0.
         raise Malformed("no-subscription")
 
     cached = blob.get("cachedUsageUtilization")
@@ -402,12 +418,22 @@ def _claude_token(profile: Path) -> str:
     """Return the profile's bearer. Never rendered, never logged, never placed in an argv."""
     now = datetime.datetime.now(datetime.timezone.utc)  # read time, not run-start time
     creds = profile / ".credentials.json"
-    if creds.exists():
-        try:
-            with open(creds, encoding="utf-8") as handle:
+    try:
+        handle = open(creds, encoding="utf-8")
+    except FileNotFoundError:
+        handle = None                     # genuinely absent: the keychain is the other place
+    except OSError:
+        # Present but unreadable. Path.exists() answers False for a permission failure from
+        # 3.14 and raises below it, so testing for the file first would read this as absence
+        # and fall through to the keychain -- reporting a DIFFERENT credential's pool as this
+        # profile's, cleanly. Opening it is the only probe whose failure modes are separable.
+        raise Malformed("candidate-unreadable") from None
+    if handle is not None:
+        with handle:
+            try:
                 blob = json.load(handle)
-        except (OSError, ValueError):
-            raise Malformed("response-malformed") from None
+            except (OSError, ValueError):
+                raise Malformed("response-malformed") from None
         oauth = blob.get("claudeAiOauth") if isinstance(blob, dict) else None
         if not isinstance(oauth, dict):
             raise Malformed("token-absent")
@@ -510,8 +536,8 @@ def _appserver_result(home: Path) -> dict:
     deadline = time.monotonic() + _appserver_timeout()
     try:
         try:
-            for message in (_REQ_INITIALIZE, _NOTIF_INITIALIZED, _REQ_RATE_LIMITS):
-                stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+            for frame in _FRAMES:
+                stdin.write(frame)
             stdin.flush()
         except OSError:
             raise Malformed("appserver-failed") from None
@@ -624,14 +650,19 @@ def _codex_records(home: Path) -> list[Record]:
     if not records:
         raise Malformed("payload-malformed")
 
+    # Absence RAISES rather than skipping: the coupon count is one of the things this report
+    # exists to print, so a response that omits the container has not answered the question and
+    # must gap rather than print nothing and exit 0. Absent and present-but-not-an-object are
+    # separated because they say different things about the vendor.
     coupons = result.get("rateLimitResetCredits")
-    if coupons is not None:
-        try:
-            count = _nonneg_int(_obj(coupons).get("availableCount"))
-        except Malformed as exc:
-            records.append(Record("reset coupons", GAP, diagnostic=exc.code))
-            count = None
-    if coupons is not None and count is not None:
+    try:
+        if coupons is None:
+            raise Malformed("field-malformed")
+        count = _nonneg_int(_obj(coupons).get("availableCount"))
+    except Malformed as exc:
+        records.append(Record("reset coupons", GAP, diagnostic=exc.code))
+        count = None
+    if count is not None:
         records.append(Record(
             "reset coupons", INFO, freshness=str(count),
             note="read only; redeem one in the Codex TUI with /usage, never from here",
@@ -747,6 +778,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="examine this Codex home (repeatable; replaces discovery)")
     args = parser.parse_args(argv)
 
+    # Neither vendor labels nor profile directory names are under this script's control, and an
+    # unencodable character in either raises out of print() -- past every per-candidate handler,
+    # ending the run with a traceback and no warnings, which is the one failure mode the exit
+    # contract cannot describe. Escaping is the right answer for a NAME the machine gave us;
+    # a vendor FIELD carrying one is refused in _text instead, so it gaps its own record.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
+
     home = Path(os.path.expanduser("~"))
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -783,8 +823,12 @@ def main(argv: list[str] | None = None) -> int:
             if code:
                 print(f"    [{code}]")
             if state == GAP:
-                warnings.append(
-                    f"{group} {candidate.path.name}: NOT checked -- {code or 'field-malformed'}")
+                # A candidate-level code, or -- when the gap came from individual records -- the
+                # rows themselves. The old fallback printed a fixed token that no record had
+                # necessarily reported, which is a warning inventing its own reason.
+                detail = code or ", ".join(f"{r.name} [{r.diagnostic}]"
+                                           for r in records if r.state == GAP)
+                warnings.append(f"{group} {candidate.path.name}: NOT checked -- {detail}")
 
     if warnings:
         print("\nwarnings")

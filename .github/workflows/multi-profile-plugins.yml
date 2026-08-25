@@ -15,6 +15,13 @@ name: multi-profile-plugins
 # and asserts they never reach stdout. That check is the reason this runs anywhere at all: the
 # script reads a file holding an API key and OAuth tokens, and a diagnostic that prints one is a
 # worse outcome than the misconfiguration it was looking for.
+#
+# The workflow also drives `report_limits.test.py`, the usage-limit report's own suite. Its script
+# reads three more credential shapes -- a Claude Code OAuth bearer, a macOS Keychain secret, and a
+# Codex `auth.json` token -- so the suite plants a sentinel in each and asserts none reaches
+# stdout, stderr, an argv, or a rendered exception. Separately, it asserts the exit contract: a
+# run that could not check every candidate must exit 1, never 0, because a check that silently did
+# not run would otherwise read exactly like a clean pass.
 
 on:
   push:

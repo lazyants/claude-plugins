@@ -2,8 +2,9 @@
 name: code-limits
 description: >-
   How much of a usage-limit window is left, when it resets, and which Claude Code profile or Codex
-  home is close to exhausted, across every profile on this machine -- the 4 Claude Code profiles
-  under `~/.claude*` (`CLAUDE_CONFIG_DIR`) and the 3 Codex homes under `~/.codex*` (`CODEX_HOME`).
+  home is close to exhausted, across every profile on this machine -- every discovered Claude Code
+  profile under `~/.claude*` (`CLAUDE_CONFIG_DIR`) and every discovered Codex home under
+  `~/.codex*` (`CODEX_HOME`).
   Use when asked how much usage-limit budget is left, when a five-hour or weekly window resets,
   which profile or account is nearly out, or how many Codex "usage limit reset" coupons remain.
   Ships `scripts/report_limits.py`, one table covering both CLIs: Claude Code read from its
@@ -18,13 +19,17 @@ description: >-
 
 ## What it covers
 
-One report, one table, across every usage-limit pool this machine draws on: the 4 Claude Code
-profiles under `~/.claude*` and the 3 Codex homes under `~/.codex*`. Each row states how much of
-the window is used, when that window resets, and how fresh the number is.
+One report, one table, across every usage-limit pool this machine draws on: every discovered
+Claude Code profile under `~/.claude*` and every discovered Codex home under `~/.codex*`. Each
+usage-window row states how much of the window is used, when that window resets, and how fresh
+the number is. The reset-coupon count and the credit balance render as a plain info line
+instead: neither carries a reset time, and neither names its own source -- only the group
+heading above it (`Claude Code` or `Codex`) does.
 
 ## Two sources, different in kind
 
-The Claude Code side and the Codex side are read differently, and every row says which.
+The Claude Code side and the Codex side are read differently. Every row prints under one of the
+two group headings, `Claude Code` or `Codex`, that say which.
 
 **Claude Code is a cache on disk.** `<profile>/.claude.json` carries `cachedUsageUtilization`, a
 snapshot taken at some past `fetchedAtMs`. Reading it costs nothing and needs no credential, but
@@ -64,10 +69,19 @@ Codex client running concurrently against the same home is an accepted, unmeasur
 
 `rateLimitResetCredits.availableCount` is what the Codex TUI's own `/usage` calls "usage limit
 reset available" -- a coupon that lifts a rate limit early. The report READS this count and
-prints it. It never redeems one: the redeeming RPC is a different JSON-RPC method, and this
-module cannot name it -- there is no `method` parameter anywhere in the module that could carry
-that, or any other, method name. To redeem a reset coupon, use the Codex TUI's own `/usage`; this
-tool deliberately will not do it.
+prints it.
+
+It never redeems one: the three JSON-RPC messages it can send are serialized to bytes once at
+import (`_FRAMES`), and the dict literals are never bound to a name, so nothing after import can
+rebuild or mutate a message. The suite parses the module's own source with `ast` and asserts
+every `"method"` value anywhere in it is a string literal drawn from exactly those three methods
+-- a fourth method, however it is spelled, turns that suite red. That is a CI gate rather than a
+runtime guard: it stops a fourth method being merged, not one already running. To
+redeem a reset coupon, use the Codex TUI's own `/usage`; this tool deliberately will not do it.
+
+A reply that omits `rateLimitResetCredits`, or gives it as anything other than an object with a
+non-negative integer `availableCount`, gaps this row and exits 1 instead of printing nothing and
+exiting 0 -- the coupon count is one of the things this report exists to answer.
 
 ## Exit contract
 
