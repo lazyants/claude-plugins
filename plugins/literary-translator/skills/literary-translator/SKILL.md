@@ -3807,6 +3807,35 @@ named. Acting on it is this pass's job, under one rule:
 > **Enumerate the class, then adjudicate every site individually. Never close an
 > enumeration by applying the rule across it.**
 
+Two traps attend that work:
+
+- **The enumeration is a pattern you wrote, not a given.** The enumeration is
+  produced by a pattern you wrote for this round, and that pattern is the step
+  most likely to be wrong. It fails silently in both directions and still
+  prints a plausible count. Print the DISTINCT matched surface forms and read
+  them before treating any hit as a defect, deciding per form and never per
+  count. Reading the forms you matched can only show an over-count. A form the
+  pattern never matched is missing from that list too, so an omission looks
+  exactly like a clean run, and the direction this warns about is the one the
+  remedy above cannot see. The check for that direction is a different one:
+  widen the pattern deliberately, dropping its most restrictive element, and
+  see whether the set of distinct forms grows. Measured on one round of a
+  French-to-Russian book, a stem scan for a spelling class returned 89 hits
+  across three stems and exactly one of them was a defect — `идет` 66 and none,
+  `черт` 12 and none, `произведен` 11 and one — because in an inflected
+  language a stem matches forms where the property under test is legitimately
+  absent, and in the total those hits are indistinguishable from real ones. The
+  same day a source-side scan stringified a whole block dict, counted
+  `source_html` and `plain_text` both, and reported every figure at exactly
+  twice its true value.
+- **A class claim and the sites it names are two claims.** Under the rule above,
+  a finding that says a rule is applied inconsistently "throughout" and then
+  lists sites has made two claims, and they fail independently. Measure the class
+  AND open the named sites, because refuting the class claim discharges no named
+  site. In that same round 427 italic spans in the source against 831 in the
+  drafts refuted the class outright, while three of the sites that finding named
+  were real defects.
+
 The enumeration and the defect set are different objects, and measured on a live
 book the ratio ran better than ten to one — 109 occurrences of strings the book
 italicises somewhere, about ten of them actually wrong. Four things decide a
