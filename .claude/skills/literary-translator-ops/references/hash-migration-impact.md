@@ -103,8 +103,8 @@ sha of the `_RENDER_VERSION_FILES` tuple = **`render_obsidian.py` + `diff_render
 `assemble.py` run the render diff-gate writes a fresh candidate and reports a **mismatch** against the
 frozen last-accepted baseline for any verse whose REDUCED markdown changed — the gate NEVER re-renders
 live, and the compare is on reduced md lines (CRLF/CR-normalized, rstripped, trailing-blank-dropped),
-NOT bytes (`:118-121`). A content mismatch returns BEFORE the stale-version check; re-accept a
-replacement baseline via `--accept-baseline --force-accept-baseline` (`:445-452`). Both files are in
+NOT bytes (`:201-210`). A content mismatch returns BEFORE the stale-version check; re-accept a
+replacement baseline via `--accept-baseline --force-accept-baseline` (`:569-574`). Both files are in
 NEITHER cache_key NOR the resume digest → a genuinely separate surface.
 
 ## Surface 4 — migration-INERT

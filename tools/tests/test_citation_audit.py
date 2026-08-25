@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import time
+import types
 
 import pytest
 
@@ -278,7 +279,7 @@ def test_subject_rule_ignores_the_citation_lexeme_itself():
     make this citation pass. A gate a correct citation cannot satisfy gets switched off.
     """
     sentence = "since `type` is intentionally open-ended (`manifest.schema.json:18`)."
-    assert ca._subject_required(sentence, "manifest.schema.json:18") == set()
+    assert ca._subject_required(sentence, "manifest.schema.json:18", "manifest.schema.json") == set()
 
     # The case above is green even without the exclusion, because every token in it is lowercase and
     # the anchor-eligibility filter drops those anyway -- so on its own it pins nothing. An
@@ -286,21 +287,22 @@ def test_subject_rule_ignores_the_citation_lexeme_itself():
     # characters and carries an underscore, so without the exclusion the citation's own name becomes
     # the "subject" and demands an anchor naming it, turning a correct citation red.
     underscore = "the ceiling is duplicated rather than imported (`codex_job.py:65`)."
-    assert ca._subject_required(underscore, "codex_job.py:65") == set()
+    assert ca._subject_required(underscore, "codex_job.py:65", "codex_job.py") == set()
 
 
 def test_subject_rule_still_finds_a_real_subject():
     """The R2 counterexample's RED direction: the sentence is ABOUT a named symbol, so an anchor
     that never mentions it can pin a true-but-irrelevant range."""
     sentence = "`derivation_bundle_hash` in DERIVATION_STATE_FIELDS (`select_segments.py:186-193`)"
-    assert "DERIVATION_STATE_FIELDS" in ca._subject_required(sentence, "select_segments.py:186-193")
+    assert "DERIVATION_STATE_FIELDS" in ca._subject_required(
+        sentence, "select_segments.py:186-193", "select_segments.py")
 
 
 def test_subject_rule_does_not_fire_on_a_purely_behavioural_sentence():
     """No code-shaped token means no subject requirement, so ordered anchors stand alone and the
     rule cannot produce a false RED on legitimate prose."""
     sentence = "the scan stops at the first blank line (`notes.md:12`)."
-    assert ca._subject_required(sentence, "notes.md:12") == set()
+    assert ca._subject_required(sentence, "notes.md:12", "notes.md") == set()
 
 
 # --------------------------------------------------------------------------- resolution
@@ -759,3 +761,398 @@ def test_an_exemption_reason_must_be_a_string(tmp_path, monkeypatch, value):
     with pytest.raises(SystemExit) as e:
         ca.load_declarations()
     assert "reason" in str(e.value)
+
+
+# ---------------------------------------------------------------------------
+# #754 -- bare `:NNN` continuations.
+# ---------------------------------------------------------------------------
+
+FILLER = "\n".join(f"line{i} filler_text_here" for i in range(1, 30)) + "\n"
+
+
+def _cont_setup(tmp_path, monkeypatch, container, declare_from=None, extra=None):
+    """A fixture tree with four interchangeable targets, declared from ONE revision of the container.
+
+    `declare_from` is what the anchors were adjudicated against; the container on disk is what
+    `check` reads. Passing them separately is the only way a test can watch a declaration go stale,
+    and every re-attribution test here needs exactly that. Returns the declaration map so a test can
+    add an explicit `"target"` before calling `cmd_check` -- the map is what `load_declarations`
+    closes over, so a mutation after this returns is still what the gate reads.
+    """
+    files = {"c.md": container, "a.py": FILLER, "b.py": FILLER, "d.py": FILLER, "t.py": FILLER}
+    files.update(extra or {})
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(ca, "REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(ca, "tracked_text_files", lambda: sorted(files))
+    src = container if declare_from is None else declare_from
+    decls = {
+        ca.decl_key(c): {"anchors": [f"line{c['start']} filler_text_here"], "claim": c["sentence"]}
+        for c in ca.find_citations("c.md", src)
+    }
+    monkeypatch.setattr(ca, "load_declarations", lambda: (decls, {}))
+    return decls
+
+
+def _undeclared(err):
+    """Just the citation lexemes the run called UNDECLARED, so a test asserts a SET, not a substring.
+
+    A substring assertion on one line cannot notice a second, unwanted occurrence -- and every
+    opener-allowlist test here is about what must NOT be enumerated.
+    """
+    return sorted(line.split(" cites ")[1].split(" (")[0]
+                  for line in err.splitlines() if line.strip().startswith("UNDECLARED "))
+
+
+def test_a_bare_continuation_on_the_citation_s_own_line_is_enumerated(tmp_path, monkeypatch, capsys):
+    """The shape the whole issue is about: name the file once, then keep citing it bare."""
+    _cont_setup(tmp_path, monkeypatch, "the hash is `t.py:3`, and the check at `:5`.\n",
+                declare_from="")
+    rc = ca.cmd_check(None)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert _undeclared(err) == [":5", "t.py:3"]
+    assert "continuation of t.py" in err, err
+
+
+def test_a_bare_continuation_is_attributed_across_a_line_wrap(tmp_path, monkeypatch, capsys):
+    """Most of this corpus wraps its prose, so a same-line-only rule would miss a third of the class
+    -- including both citations that were already stale when this was written."""
+    _cont_setup(tmp_path, monkeypatch,
+                "the hash is `t.py:3`, and the\nstale check sits at `:5`.\n", declare_from="")
+    ca.cmd_check(None)
+    assert _undeclared(capsys.readouterr().err) == [":5", "t.py:3"]
+
+
+def test_the_continuation_lookback_bound_holds_on_BOTH_sides(tmp_path, monkeypatch, capsys):
+    """A constant that is only tested from one side documents a boundary the code need not enforce.
+
+    Six lines back is the deepest this corpus actually uses; seven is where a bare number stops
+    being a continuation of anything and starts being a number in a different paragraph.
+    """
+    prose = "".join(f"filler prose line {i}\n" for i in range(1, 6))
+    _cont_setup(tmp_path, monkeypatch, "the hash is `t.py:3`.\n" + prose + "and now `:5`.\n",
+                declare_from="")
+    ca.cmd_check(None)
+    assert _undeclared(capsys.readouterr().err) == [":5", "t.py:3"], "6 lines back must still attach"
+
+    prose = "".join(f"filler prose line {i}\n" for i in range(1, 7))
+    _cont_setup(tmp_path, monkeypatch, "the hash is `t.py:3`.\n" + prose + "and now `:5`.\n",
+                declare_from="")
+    ca.cmd_check(None)
+    assert _undeclared(capsys.readouterr().err) == ["t.py:3"], "7 lines back must NOT attach"
+
+
+def test_a_blank_line_stops_the_continuation_walk(tmp_path, monkeypatch, capsys):
+    """A paragraph break ends the sentence, whatever the line budget says."""
+    _cont_setup(tmp_path, monkeypatch, "the hash is `t.py:3`.\n\nand now `:5`.\n", declare_from="")
+    ca.cmd_check(None)
+    assert _undeclared(capsys.readouterr().err) == ["t.py:3"]
+
+
+def test_the_opener_allowlist_refuses_a_slice_a_json_value_and_an_ipv6_literal(
+        tmp_path, monkeypatch, capsys):
+    """The three shapes that are `:NNN` and are never a citation.
+
+    A slice is the one that matters at scale -- admitting `[` moves the unattributable pool in this
+    repo from 93 to 255, and every one of the 162 is `x[:10]`. The other two are one character each
+    and would each be a false RED a maintainer has to dismiss by hand.
+    """
+    _cont_setup(tmp_path, monkeypatch,
+                "the hash is `t.py:3`; code does data[:10], json {\"const\":9}, "
+                "addr 2001:db8::1234.\n", declare_from="")
+    ca.cmd_check(None)
+    assert _undeclared(capsys.readouterr().err) == ["t.py:3"]
+
+
+def test_a_slash_separated_run_of_line_numbers_is_two_continuations(tmp_path, monkeypatch, capsys):
+    """The shape the first draft of this rule dropped: one filename, then `/:NNN/:NNN`."""
+    _cont_setup(tmp_path, monkeypatch, "measured at t.py:3/:5/:7 exactly.\n", declare_from="")
+    ca.cmd_check(None)
+    assert _undeclared(capsys.readouterr().err) == [":5", ":7", "t.py:3"]
+
+
+def test_a_url_earlier_on_the_line_cannot_auto_exempt_a_continuation(tmp_path, monkeypatch, capsys):
+    """`auto_exempt_reason` tests `"://" in before[-12:]` -- PROXIMITY, not containment.
+
+    Routed through it, a perfectly good continuation a dozen characters after a URL is auto-exempted
+    and `cmd_check` skips it unconditionally, so the gate goes green with a real citation neither
+    declared nor exempted nor ever checked again. That is the silent direction, and it is why a
+    continuation returns `None` from that helper before any of its branches run.
+    """
+    _cont_setup(tmp_path, monkeypatch, "see `t.py:3`; https://x `:5` matters.\n", declare_from="")
+    ca.cmd_check(None)
+    assert _undeclared(capsys.readouterr().err) == [":5", "t.py:3"]
+
+
+def test_a_wrapped_citation_s_tail_is_not_also_read_as_a_continuation(tmp_path, monkeypatch, capsys):
+    """The tail half of a wrapped citation sits at the width of the stripped comment prefix, not 0.
+
+    Drop that offset and the bare token is enumerated a SECOND time, attributed to whatever the head
+    line named -- here `a.py`, which the sentence is not about at all. The one real wrapped citation
+    in this repo opens its tail line with no prefix and cannot show that up.
+    """
+    _cont_setup(tmp_path, monkeypatch, "# a.py:1 and t.py\n# :3 is the continuation\n",
+                declare_from="")
+    ca.cmd_check(None)
+    err = capsys.readouterr().err
+    assert _undeclared(err) == ["a.py:1", "t.py:3"], err
+    assert "continuation of a.py" not in err
+
+
+def test_a_re_attribution_reds_on_the_continuation_s_OWN_key(tmp_path, monkeypatch, capsys):
+    """The design's main risk: a bare token whose file changed under a key that did not.
+
+    The assertion names the continuation KEY, not just "the run went red". Replacing `a.py` with
+    `b.py` also moves the ordinary pathful key, so a test that only checks the exit code stays red
+    with the candidate set deleted from the identity -- the wrong check eating the fixture.
+    """
+    _cont_setup(tmp_path, monkeypatch, "beta says `b.py:3` and also :3 here.\n",
+                declare_from="alpha says `a.py:3` and also :3 here.\n")
+    rc = ca.cmd_check(None)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert '["c.md", "b.py:3", 0, "continuation"]' in err, err
+    assert 'STALE-DECLARATION no live citation matches: ["c.md", "a.py:3", 0, "continuation"]' in err
+
+
+def test_a_balanced_swap_of_two_paragraphs_still_reds(tmp_path, monkeypatch, capsys):
+    """The fixture no pathful diagnostic can carry, and the one that pins the ORDINAL rule.
+
+    Two paragraphs exchange their filenames. The pathful key multiset is identical before and after,
+    so any red here is the continuations' alone. Count the ordinal per identity string instead of
+    per raw token and both continuation keys are also unchanged: every declaration stays used, the
+    run is green, and nothing records that both bare tokens now cite a different file.
+    """
+    before = "alpha says `a.py:3` and also :3 here.\n\nbeta says `b.py:3` and also :3 here.\n"
+    after = "alpha says `b.py:3` and also :3 here.\n\nbeta says `a.py:3` and also :3 here.\n"
+    _cont_setup(tmp_path, monkeypatch, after, declare_from=before)
+    rc = ca.cmd_check(None)
+    err = capsys.readouterr().err
+    assert rc == 1, err
+    assert '["c.md", "b.py:3", 0, "continuation"]' in err
+    assert '["c.md", "a.py:3", 1, "continuation"]' in err
+    assert 'STALE-DECLARATION no live citation matches: ["c.md", "a.py:3", 0, "continuation"]' in err
+    assert 'STALE-DECLARATION no live citation matches: ["c.md", "b.py:3", 1, "continuation"]' in err
+
+
+def test_two_named_files_make_the_attribution_the_adjudicator_s(tmp_path, monkeypatch, capsys):
+    """Refusing to guess, and the explicit `"target"` that resolves it."""
+    decls = _cont_setup(tmp_path, monkeypatch, "`a.py:3` and `b.py:3`, then also :3 here.\n")
+    rc = ca.cmd_check(None)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "AMBIGUOUS-CONTINUATION" in err, err
+    assert "'a.py', 'b.py'" in err, err
+
+    decls['["c.md", "a.py|b.py:3", 0, "continuation"]']["target"] = "a.py"
+    assert ca.cmd_check(None) == 0, capsys.readouterr().err
+
+
+def test_an_explicit_target_does_not_outlive_the_window_it_was_adjudicated_in(
+        tmp_path, monkeypatch, capsys):
+    """The second half of the same story, and the reason the key carries the whole candidate SET.
+
+    Swap one competing candidate for a third file: the window is still ambiguous, the explicit
+    target is still tracked, and `resolve` still accepts it. With only the winner in the key nothing
+    would change and the run would stay green against a file the sentence no longer names.
+    """
+    before = "`a.py:3` and `b.py:3`, then also :3 here.\n"
+    after = "`a.py:3` and `d.py:3`, then also :3 here.\n"
+    decls = _cont_setup(tmp_path, monkeypatch, after, declare_from=before)
+    decls['["c.md", "a.py|b.py:3", 0, "continuation"]']["target"] = "a.py"
+    rc = ca.cmd_check(None)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert '["c.md", "a.py|d.py:3", 0, "continuation"]' in err
+    assert 'STALE-DECLARATION no live citation matches: ["c.md", "a.py|b.py:3", 0, "continuation"]' in err
+
+
+def test_report_survives_an_ambiguous_continuation_instead_of_raising(tmp_path, monkeypatch, capsys):
+    """`report` is the command an adjudicator runs precisely to settle an ambiguity, so it is the one
+    command that must not die on one. Without the `target is None` guard `resolve` reaches
+    `endswith("/" + None)` and raises."""
+    _cont_setup(tmp_path, monkeypatch,
+                "`a.py:3` and `b.py:3`, then also :3 in resolve_target_name().\n")
+    ca.cmd_report(types.SimpleNamespace(scope=None, json=True))
+    packets = json.loads(capsys.readouterr().out)
+    bare = [p for p in packets if p["is_continuation"]]
+    assert len(bare) == 1 and bare[0]["resolved"] is None and bare[0]["target"] is None
+    # An ambiguous packet has NO filename to exclude, and `str.replace("", " ")` spaces out every
+    # character rather than raising -- which shreds every multi-character token and hands the
+    # adjudicator an empty list exactly where a human is being asked to choose. The sentence carries
+    # one eligible subject on purpose: an assertion of `== []` would pass either way.
+    assert bare[0]["subject_tokens"] == ["resolve_target_name"], bare[0]["subject_tokens"]
+
+
+def test_a_continuation_that_drifts_names_the_file_it_was_attributed_to(tmp_path, monkeypatch, capsys):
+    """The payoff: a bare number that no longer says what its sentence claims fails by name."""
+    _cont_setup(tmp_path, monkeypatch, "the hash is `t.py:3`, and the check at `:5`.\n",
+                extra={"t.py": "\n".join(f"line{i} filler_text_here" for i in [1, 2, 3, 4, 99]
+                                         ) + "\n"})
+    rc = ca.cmd_check(None)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "DRIFTED " + "c.md:1 -> " + "t.py:5-5" in err, err
+
+
+def test_the_subject_rule_reads_a_continuation_s_ATTRIBUTED_filename(tmp_path, monkeypatch):
+    """A bare cite has no filename of its own, and `"".split(":")[0]` is the empty string --
+    `str.replace("", " ")` then spaces out every character rather than raising. The visible cost is
+    a false RED: the target's own stem becomes a subject token the anchors are required to name."""
+    # The synthetic filename's STEM has to be anchor-eligible (>= 8 chars, carrying an underscore)
+    # or the two spellings of this rule are indistinguishable: a short stem is dropped by the length
+    # floor whether it was stripped or not, and the mutation that reverts the fix stays green.
+    line = "# validate_seg() (canon_x_validator.py:1316-1332, the regex check at :1251) --"
+    got = ca._subject_required(line, ":1251", "canon_x_validator.py")
+    assert "canon_x_validator" not in got, got
+    assert got == {"validate_seg"}, got
+
+
+def test_the_shipped_tree_enumerates_a_nonzero_number_of_continuations():
+    """A rule that silently stops matching prints exactly what a working one prints, so the count is
+    asserted inside the tool's own summary line.
+
+    Deliberately NOT pinned to an absolute number: writing a new bare continuation already reds
+    through UNDECLARED, so a count assertion would be a second, more brittle alarm for an event the
+    first one catches. The corpus WITNESS below is the part worth pinning -- the slash-separated
+    form is a real occurrence in this tree, not only a fixture.
+    """
+    p = subprocess.run([sys.executable, os.path.join(TOOLS, "citation_audit.py"), "check"],
+                       cwd=REPO_ROOT, capture_output=True, text=True)
+    assert p.returncode == 0, p.stdout + p.stderr
+    n = int(p.stdout.split("(")[1].split(" of them")[0])
+    assert n > 0, "no bare continuation was enumerated at all -- the rule stopped matching"
+
+    r = subprocess.run([sys.executable, os.path.join(TOOLS, "citation_audit.py"),
+                        "report", "--json"], cwd=REPO_ROOT, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    slash = [packet for packet in json.loads(r.stdout)
+             if packet["is_continuation"] and packet["container"].endswith("chapter-paths.d.mts")]
+    assert sorted(packet["cite"] for packet in slash) == [":2140", ":2145"], slash
+
+
+def test_the_backward_walk_runs_once_per_line_not_once_per_token(tmp_path, monkeypatch):
+    """The backward window does not depend on where the token sits, so it is one answer per LINE.
+
+    Asserted structurally rather than by a clock, because a timing test on a shared machine is a
+    flake generator. The consequence it stands in for is measured: computed per token, six lines of
+    path-shaped filler above one 20 KB line of bare tokens takes 17s for a 24 KB file and reports
+    NOTHING -- a token with no candidate produces no output, so the expensive input looks inert. The
+    same file is 1.1s once the walk is hoisted, and flat in the token count rather than linear.
+    """
+    seen = []
+    real = ca._backward_targets
+    monkeypatch.setattr(ca, "_backward_targets",
+                        lambda lines, i: (seen.append(i), real(lines, i))[1])
+    text = "a citation `t.py:3` opens the file.\n" + " :1" * 200 + "\n"
+    found = ca.find_citations("c.md", text)
+    assert len(seen) == 1, f"walked backward {len(seen)} times for one line of 200 tokens"
+    assert sum(1 for c in found if c["is_continuation"]) == 200
+
+
+@pytest.mark.parametrize("container,where", [
+    ("see `t.py:\n3`, then `:5`.\n", "on the wrapped citation's own tail line"),
+    ("see `t.py:\n3` is the spot.\nand also `:5`.\n", "on a line after the wrapped citation"),
+])
+def test_a_continuation_after_a_WRAPPED_citation_is_still_attributed(
+        tmp_path, monkeypatch, capsys, container, where):
+    """Two supported prose forms composed: a citation broken across the wrap, then a bare token.
+
+    This was a silent miss. The wrapped citation exists on NEITHER raw line intact, so a candidate
+    search that rescans raw text finds nothing and the bare token is dropped with no output at all --
+    and the wrapped citation itself is enumerated, so the run looks like it saw the sentence. Both
+    halves have to come from the same place, which is why `_line_citations` returns the wrapped tail
+    for consuming AND for offering its target.
+    """
+    _cont_setup(tmp_path, monkeypatch, container, declare_from="")
+    ca.cmd_check(None)
+    err = capsys.readouterr().err
+    assert _undeclared(err) == [":5", "t.py:3"], f"{where}: {err}"
+    assert "continuation of t.py" in err, where
+
+
+CONT_AMBIGUOUS_SUBJECT = (
+    "`alpha_validator.py:3` and `beta_validator.py:3` agree, and `:3` is the same spot.\n"
+)
+CONT_AMBIGUOUS_ABOUT_SYMBOL = (
+    "`alpha_validator.py:3` and `beta_validator.py:3` agree; `:3` is about resolveBuildIdentity.\n"
+)
+
+
+def _subject_tree(tmp_path, monkeypatch, line3_extra, container=CONT_AMBIGUOUS_SUBJECT):
+    """The ambiguous-continuation tree whose candidate stems are long enough to be anchor-eligible.
+
+    The existing ambiguity fixtures use `a.py` / `b.py`, and that is why this path stayed invisible:
+    a two-character stem is below `MIN_ANCHOR_LEN`, so the subject rule could never fire on it
+    however wrong the target was. Eligibility is the whole precondition, so it has to be built in.
+
+    `line3_extra` lands on the cited line of the SELECTED candidate only. The subject rule reads the
+    citation's own container line and then asks whether the token is also in the cited range, so a
+    fixture has to put it in both places -- one alone reds nothing and would pass against a gate
+    that had stopped checking.
+    """
+    def filler(extra=""):
+        return "".join(
+            f"line{n} filler_text_here{extra if n == 3 else ''}\n" for n in range(1, 12)
+        )
+    return _cont_setup(
+        tmp_path, monkeypatch, container,
+        extra={"alpha_validator.py": filler(line3_extra), "beta_validator.py": filler()},
+    )
+
+
+def test_an_explicit_target_strips_its_own_stem_from_the_subject_rule(
+        tmp_path, monkeypatch, capsys):
+    """A correct declaration must not red because the file it names appears in its own sentence.
+
+    The occurrence carries no `target` of its own -- that is what AMBIGUOUS means -- so the subject
+    rule saw the selected candidate's stem as a semantic subject and demanded an anchor naming it.
+    A gate that a correct citation cannot satisfy is the failure this rule already guards against
+    everywhere else, so the adjudicated target has to reach it.
+    """
+    decls = _subject_tree(tmp_path, monkeypatch, " alpha_validator here")
+    amb = next(k for k in decls if k.endswith(', "continuation"]'))
+    decls[amb]["target"] = "alpha_validator.py"
+    ca.cmd_check(None)
+    assert "NO-SUBJECT-ANCHOR" not in capsys.readouterr().err
+
+
+def test_an_explicit_target_does_not_switch_the_subject_rule_off(tmp_path, monkeypatch, capsys):
+    """The other half, and the one that keeps the fix from being a suppression.
+
+    Stripping the adjudicated filename must remove the FILENAME and nothing else: a real symbol the
+    sentence is about still has to be anchored, or the fix would have bought a green by deleting the
+    check for every ambiguous continuation ever declared.
+    """
+    decls = _subject_tree(tmp_path, monkeypatch, " resolveBuildIdentity lives here",
+                          container=CONT_AMBIGUOUS_ABOUT_SYMBOL)
+    amb = next(k for k in decls if k.endswith(', "continuation"]'))
+    decls[amb]["target"] = "alpha_validator.py"
+    ca.cmd_check(None)
+    err = capsys.readouterr().err
+    assert "NO-SUBJECT-ANCHOR" in err and "resolveBuildIdentity" in err
+
+
+def test_report_offers_the_subjects_the_gate_will_judge_a_declared_target_against(
+        tmp_path, monkeypatch, capsys):
+    """`report` is read to WRITE a declaration, so its subject list has to match the gate's.
+
+    Before a target exists the packet still offers the stems -- that is the ambiguous occurrence a
+    human is being asked to resolve. Once one is adjudicated the two must agree, or a re-run would
+    keep proposing an anchor the gate has stopped asking for.
+    """
+    decls = _subject_tree(tmp_path, monkeypatch, " alpha_validator here")
+    args = types.SimpleNamespace(scope=None, json=True)
+    ca.cmd_report(args)
+    before = json.loads(capsys.readouterr().out)
+    amb = next(k for k in decls if k.endswith(', "continuation"]'))
+    decls[amb]["target"] = "alpha_validator.py"
+    ca.cmd_report(args)
+    after = json.loads(capsys.readouterr().out)
+
+    def subjects(packets):
+        return next(p["subject_tokens"] for p in packets if p["is_continuation"])
+
+    assert "alpha_validator" in subjects(before)
+    assert "alpha_validator" not in subjects(after)
