@@ -1355,6 +1355,36 @@ def main():
     final_manifest = two_phase_write(manifest, profile)
     schema_errors = validate_against_schema(final_manifest)
 
+    # Outside the pinned SELF-CHECK REGION on purpose (see the region's header
+    # comment and references/false-green-gate.md): this predicate reads
+    # `report`, computed above, never a `run_self_checks()` internal, so it
+    # does not belong inside the sentinels and touching it never moves
+    # CURRENT_EXTRACTOR_SELFCHECK_HASH. A zero-body extraction is the false
+    # green issue #761 was filed about -- classification collapsed the whole
+    # book to front/back-only and the extractor still printed ALL PASS.
+    spine_yields_body_files_ok = report["n_body_files"] > 0
+    spine_yields_body_files_detail = (
+        f"n_body_files={report['n_body_files']} n_notes_files={report['n_notes_files']} "
+        f"n_frontback_files={report['n_frontback_files']} n_spine={report['n_spine']}"
+    )
+    if not spine_yields_body_files_ok:
+        # Predicate plus remedy, NO consequence clause -- true only on the
+        # failing path. Counts above are printed unconditionally (PASS or
+        # FAIL, same as every other self-check row); this appended prose
+        # must NOT appear on a healthy PASS, where it would be false.
+        # A consequence clause was here twice before (plan review rounds 1
+        # and 2) and both times drew a MAJOR for overclaiming what the
+        # predicate proves -- zero body-CLASSIFIED files does not mean zero
+        # manuscript (#761's own measured instance had 1645 misclassified
+        # frontback segments, not an empty book). Do not add one back;
+        # state only the predicate and the remedy.
+        spine_yields_body_files_detail += (
+            "; no spine item was classified body. Set "
+            "source.adapter_config.gutenberg_epub.spine_overrides "
+            "(e.g. {\"content.xhtml\": \"body\"}) for the file(s) that carry the "
+            "manuscript."
+        )
+
     print("=" * 70)
     print("MANIFEST  ->", MANIFEST_PATH)
     print("=" * 70)
@@ -1382,6 +1412,10 @@ def main():
     print("SELF-CHECKS:")
     for r in checks["results"]:
         print(f"  {'PASS' if r['ok'] else 'FAIL'}  {r['name']:36s} {r['detail']}")
+    print(
+        f"  {'PASS' if spine_yields_body_files_ok else 'FAIL'}  "
+        f"{'spine_yields_body_files':36s} {spine_yields_body_files_detail}"
+    )
     print("-" * 70)
     print("SCHEMA VALIDATION (manifest.schema.json):")
     if schema_errors:
@@ -1390,7 +1424,7 @@ def main():
     else:
         print("  PASS  manifest.json matches manifest.schema.json")
     print("-" * 70)
-    ok = checks["all_pass"] and not schema_errors
+    ok = checks["all_pass"] and not schema_errors and spine_yields_body_files_ok
     print("ALL PASS" if ok else "*** SOME CHECKS FAILED ***")
     sys.exit(0 if ok else 1)
 

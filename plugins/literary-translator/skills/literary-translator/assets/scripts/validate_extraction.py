@@ -380,8 +380,9 @@ def run_derivable_checks(manifest: dict, apparatus_policy: str, max_segment_word
     failures (never raises for a failed check). Semantics mirror
     extract.py.template's run_self_checks exactly for the derivable subset --
     plus the GATE-ONLY checks that have no counterpart in that suite at all
-    (#210's two heading checks, and #397's two empty-block checks), which are
-    re-derived here because the manifest is the only place they are visible.
+    (#210's two heading checks, #397's two empty-block checks, and #761's
+    spine_yields_body_files), which are re-derived here because the manifest
+    is the only place they are visible.
 
     Raises KeyError/TypeError only if the manifest is so structurally malformed
     that an invariant cannot even be evaluated -- main() converts that into a
@@ -461,6 +462,41 @@ def run_derivable_checks(manifest: dict, apparatus_policy: str, max_segment_word
         not (n_body_files > 0 and len(body_segments) == 0),
         f"n_body_files={n_body_files} n_body_segments={len(body_segments)}",
     )
+
+    # 4b. #761: the COMPLEMENT of #83 above, not a duplicate of it. #83 asks
+    #     "body files exist but collapsed to zero body segments" -- it is
+    #     gated on n_body_files > 0, so it passes BY CONSTRUCTION when no body
+    #     file exists at all. This one asks the question #83 cannot: "does any
+    #     spine item classify as body in the first place". Same n_body_files
+    #     derived from the SPINE above, never a report.
+    #
+    #     The detail string deliberately carries NO consequence clause (no
+    #     "so this manifest carries no manuscript to translate" or similar) --
+    #     do NOT add one back. That claim is FALSE on a reachable path:
+    #     reclassifying a spine item's klass leaves its segments/blocks
+    #     untouched, so a manifest can fail this check while still holding
+    #     real body-shaped prose under a misclassified kind (the #761
+    #     measured instance: 1645 segments, all misclassified as frontback).
+    #     Three review rounds (two on the plan, one on the code) each found a
+    #     fresh way this predicate does not entail a consequence claim. State
+    #     counts, the predicate, and the remedy -- nothing more.
+    n_notes_files = sum(1 for s in spine if s["klass"] == "footnote-defs")
+    n_frontback_files = sum(1 for s in spine if s["klass"] == "front-back")
+    detail = (
+        f"n_body_files={n_body_files} n_notes_files={n_notes_files} "
+        f"n_frontback_files={n_frontback_files} n_spine={len(spine)}"
+    )
+    if n_body_files == 0:
+        detail += (
+            "; no spine item is classified body. For source.format: "
+            "gutenberg_epub, review or set "
+            "source.adapter_config.gutenberg_epub.spine_overrides (e.g. "
+            '{"content.xhtml": "body"}); for custom, fix the classification '
+            "in the extractor named by "
+            "source.adapter_config.custom.extractor_path; plain_text has no "
+            "shipped extractor yet (#62) -- co-design a custom one (Step 0c)."
+        )
+    chk("spine_yields_body_files", n_body_files > 0, detail)
 
     # 5. no body segment built entirely from footnote-definition files
     notes_files = {s["file"] for s in spine if s["klass"] == "footnote-defs"}
