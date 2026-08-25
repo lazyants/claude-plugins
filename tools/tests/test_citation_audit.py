@@ -1070,3 +1070,89 @@ def test_a_continuation_after_a_WRAPPED_citation_is_still_attributed(
     err = capsys.readouterr().err
     assert _undeclared(err) == [":5", "t.py:3"], f"{where}: {err}"
     assert "continuation of t.py" in err, where
+
+
+CONT_AMBIGUOUS_SUBJECT = (
+    "`alpha_validator.py:3` and `beta_validator.py:3` agree, and `:3` is the same spot.\n"
+)
+CONT_AMBIGUOUS_ABOUT_SYMBOL = (
+    "`alpha_validator.py:3` and `beta_validator.py:3` agree; `:3` is about resolveBuildIdentity.\n"
+)
+
+
+def _subject_tree(tmp_path, monkeypatch, line3_extra, container=CONT_AMBIGUOUS_SUBJECT):
+    """The ambiguous-continuation tree whose candidate stems are long enough to be anchor-eligible.
+
+    The existing ambiguity fixtures use `a.py` / `b.py`, and that is why this path stayed invisible:
+    a two-character stem is below `MIN_ANCHOR_LEN`, so the subject rule could never fire on it
+    however wrong the target was. Eligibility is the whole precondition, so it has to be built in.
+
+    `line3_extra` lands on the cited line of the SELECTED candidate only. The subject rule reads the
+    citation's own container line and then asks whether the token is also in the cited range, so a
+    fixture has to put it in both places -- one alone reds nothing and would pass against a gate
+    that had stopped checking.
+    """
+    def filler(extra=""):
+        return "".join(
+            f"line{n} filler_text_here{extra if n == 3 else ''}\n" for n in range(1, 12)
+        )
+    return _cont_setup(
+        tmp_path, monkeypatch, container,
+        extra={"alpha_validator.py": filler(line3_extra), "beta_validator.py": filler()},
+    )
+
+
+def test_an_explicit_target_strips_its_own_stem_from_the_subject_rule(
+        tmp_path, monkeypatch, capsys):
+    """A correct declaration must not red because the file it names appears in its own sentence.
+
+    The occurrence carries no `target` of its own -- that is what AMBIGUOUS means -- so the subject
+    rule saw the selected candidate's stem as a semantic subject and demanded an anchor naming it.
+    A gate that a correct citation cannot satisfy is the failure this rule already guards against
+    everywhere else, so the adjudicated target has to reach it.
+    """
+    decls = _subject_tree(tmp_path, monkeypatch, " alpha_validator here")
+    amb = next(k for k in decls if k.endswith(', "continuation"]'))
+    decls[amb]["target"] = "alpha_validator.py"
+    ca.cmd_check(None)
+    assert "NO-SUBJECT-ANCHOR" not in capsys.readouterr().err
+
+
+def test_an_explicit_target_does_not_switch_the_subject_rule_off(tmp_path, monkeypatch, capsys):
+    """The other half, and the one that keeps the fix from being a suppression.
+
+    Stripping the adjudicated filename must remove the FILENAME and nothing else: a real symbol the
+    sentence is about still has to be anchored, or the fix would have bought a green by deleting the
+    check for every ambiguous continuation ever declared.
+    """
+    decls = _subject_tree(tmp_path, monkeypatch, " resolveBuildIdentity lives here",
+                          container=CONT_AMBIGUOUS_ABOUT_SYMBOL)
+    amb = next(k for k in decls if k.endswith(', "continuation"]'))
+    decls[amb]["target"] = "alpha_validator.py"
+    ca.cmd_check(None)
+    err = capsys.readouterr().err
+    assert "NO-SUBJECT-ANCHOR" in err and "resolveBuildIdentity" in err
+
+
+def test_report_offers_the_subjects_the_gate_will_judge_a_declared_target_against(
+        tmp_path, monkeypatch, capsys):
+    """`report` is read to WRITE a declaration, so its subject list has to match the gate's.
+
+    Before a target exists the packet still offers the stems -- that is the ambiguous occurrence a
+    human is being asked to resolve. Once one is adjudicated the two must agree, or a re-run would
+    keep proposing an anchor the gate has stopped asking for.
+    """
+    decls = _subject_tree(tmp_path, monkeypatch, " alpha_validator here")
+    args = types.SimpleNamespace(scope=None, json=True)
+    ca.cmd_report(args)
+    before = json.loads(capsys.readouterr().out)
+    amb = next(k for k in decls if k.endswith(', "continuation"]'))
+    decls[amb]["target"] = "alpha_validator.py"
+    ca.cmd_report(args)
+    after = json.loads(capsys.readouterr().out)
+
+    def subjects(packets):
+        return next(p["subject_tokens"] for p in packets if p["is_continuation"])
+
+    assert "alpha_validator" in subjects(before)
+    assert "alpha_validator" not in subjects(after)

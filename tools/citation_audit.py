@@ -723,7 +723,20 @@ def cmd_check(args):
                             f"anchor {missing!r} is not in the cited range{hint}"
                             + _adjudicated(d, c))
             continue
-        subjects = _subject_required(c["raw_line"], c["cite"], c["target"])
+        # The declared target is what makes an AMBIGUOUS continuation judgeable here: it carries no
+        # `target` of its own, so without one the selected candidate's own stem is read back as a
+        # semantic subject and a correct declaration reds with NO-SUBJECT-ANCHOR. A rival candidate's
+        # stem stays eligible, matching what a pathful citation already does with the other filenames
+        # on its line.
+        #
+        # Written `c["target"] or d.get("target")` rather than the reverse, but do not read that as a
+        # measured difference: `resolve`'s explicit override exists to pick between SHADOW files, and
+        # whenever the declared target's basename matches the one the prose names -- which is every
+        # use it was built for -- both orders strip the same two names. Swapping them is a mutation
+        # no test in this suite refuses. The order is kept only because `c["target"]` is set by
+        # construction for every pathful citation, so this one reads the name the occurrence itself
+        # carries and cannot start preferring a declaration's over it.
+        subjects = _subject_required(c["raw_line"], c["cite"], c["target"] or d.get("target"))
         if subjects and not any(any(s in a for a in anchors) for s in subjects):
             in_range = {s for s in subjects if any(s in line for line in tl[c["start"] - 1 : c["end"]])}
             if in_range:
@@ -780,10 +793,14 @@ def cmd_report(args):
         # Computed even when the target is unresolved, and that is the case worth serving: an
         # AMBIGUOUS continuation carries no target at all, and this packet is exactly what an
         # adjudicator reads to decide which of the named files it continues. Emitting nothing there
-        # would leave the one occurrence that needs a human with the least to go on -- and it is the
-        # only path on which `target` is None, so it is also what keeps `_subject_required`'s
-        # empty-name branch honest rather than defensive.
-        p["subject_tokens"] = sorted(_subject_required(c["raw_line"], c["cite"], c["target"]))
+        # would leave the one occurrence that needs a human with the least to go on -- and an
+        # undeclared ambiguous continuation, which is precisely what a report is read for, is the
+        # path on which `target` is None, so it is also what keeps `_subject_required`'s empty-name
+        # branch honest rather than defensive. The declared target is used once one exists, so the
+        # subjects a re-run offers match the ones the gate will judge that declaration against.
+        p["subject_tokens"] = sorted(
+            _subject_required(c["raw_line"], c["cite"], c["target"] or d.get("target"))
+        )
         if resolved:
             tl = files[resolved]
             lo, hi = max(1, c["start"] - 2), min(len(tl), c["end"] + 2)
