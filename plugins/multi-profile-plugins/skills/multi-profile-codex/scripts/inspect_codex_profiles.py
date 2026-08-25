@@ -42,8 +42,11 @@ baked into a config are themselves absolute and unresolved.
 Exit 0 = every checked profile has distinct credentials, no cross-profile
 config pins, and no shared content store (PASS).
 Exit 1 = a warning was found (WARN): duplicate credentials, a config pinned
-into another profile's home, a shared content store, or a profile whose
-config.toml is missing/unparseable.
+into another profile's home, a shared content store, a profile whose
+config.toml is missing or unparseable, or an explicitly-passed directory that
+is not a Codex profile at all. The last two are warnings rather than quiet
+skips on purpose: what they mean is that a profile was NOT examined, and a run
+that did not examine a profile must not report it as clean.
 """
 from __future__ import annotations
 
@@ -59,9 +62,16 @@ from pathlib import Path
 # means one profile's writes, pruning, or `codex delete` reach the other's data.
 CONTENT_STORES = ["sessions", "archived_sessions", "plugins", "cache", "computer-use"]
 
-# How much of a matched config value to show. Matched values are file paths, but
-# they are still config content, so they are truncated rather than dumped whole.
-VALUE_DISPLAY_LEN = 120
+# A matched value is never printed, only the dotted key that holds it and the profile it
+# points at. That is what a reader needs in order to fix the config, and it is the only form
+# that is safe: a single MCP env value can hold BOTH a path and a token, so any rule that
+# prints "the part that matched" is one unusual config away from printing a credential.
+
+# Characters that delimit a path inside the three value shapes this script sees: a bare TOML
+# string, a `:`-joined search path, and a JSON blob. Used on BOTH sides of a match, which is
+# what separates a real reference from a same-suffix path: `/Volumes/backup/Users/me/.codex`
+# is not a reference to `/Users/me/.codex`, and only the PRECEDING character says so.
+VALUE_DELIMITERS = "\"'`:,;|= \t\r\n{}[]()<>"
 
 # An account_id is an identifier, not a credential, but the full UUID is more
 # than a health check needs: a short prefix is enough to tell two homes apart.
@@ -109,15 +119,24 @@ def path_occurs_in(needle_dir: str, value: str) -> bool:
     wrong — real configs bury the path mid-string, inside a `:`-joined search
     path or a JSON blob (`{"browser":"<home>/plugins/..."}`).
 
-    So: find every occurrence, and accept one only where the following character
-    cannot extend it into a DIFFERENT directory name. `/` and `:` and quotes end
-    a path; an alphanumeric, `.`, `-`, or `_` continues the basename, which is
-    what distinguishes `.codex` from `.codex2`, `.codex.bak`, and `.codex-old`.
+    So: find every occurrence and require a path-component boundary on BOTH sides.
+
+    After the match, `/` counts (a subpath is still a reference) and so does any
+    delimiter or the end of the string; anything else continues the basename into a
+    DIFFERENT directory, which is what separates `.codex` from `.codex2`,
+    `.codex.bak`, `.codex-old`, and `.codex+work`.
+
+    Before the match, only the start of the string or a delimiter counts. Checking
+    the following character alone is not enough: `/Volumes/backup/Users/me/.codex`
+    is a same-suffix path under a backup mount, not a reference to `/Users/me/.codex`,
+    and the preceding character is the only thing that says so.
     """
     start = 0
     while (i := value.find(needle_dir, start)) != -1:
+        before_ok = i == 0 or value[i - 1] in VALUE_DELIMITERS
         after = value[i + len(needle_dir):]
-        if not after or after[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-":
+        after_ok = not after or after[0] == "/" or after[0] in VALUE_DELIMITERS
+        if before_ok and after_ok:
             return True
         start = i + 1
     return False
@@ -207,6 +226,22 @@ def main(argv: list[str]) -> int:
 
     warns: list[str] = []
 
+    # 0. An explicitly-passed directory is taken on trust everywhere below: unlike a discovered
+    #    one it never went through looks_like_profile. A typo, or a home that has since been
+    #    moved, therefore reaches every check as a profile with nothing in it, each check finds
+    #    nothing to report, and the run ends on the unconditional PASS line -- a clean verdict
+    #    over a directory that was never examined. Auto-detected profiles cannot reach this.
+    if args.profiles:
+        print("== explicit profile dirs ==")
+        for prof in profile_paths:
+            if looks_like_profile(prof):
+                print(f"  {label(prof):<{width}} ok")
+            else:
+                reason = "does not exist" if not prof.exists() else "no config.toml and no auth.json"
+                warns.append(f"{label(prof)} is not a Codex profile directory ({reason}) -- NOT checked")
+                print(f"  {label(prof):<{width}} NOT A PROFILE ({reason})")
+        print()
+
     # 1. Credentials. Two homes holding the same account defeat the whole point of
     #    the split — the accounts' rate limits are one pool — and if they reached
     #    that state by sharing one auth.json inode, `codex logout` in either logs
@@ -254,24 +289,32 @@ def main(argv: list[str]) -> int:
             with cp.open("rb") as fh:
                 cfg = tomllib.load(fh)
         except FileNotFoundError:
-            print(f"  {label(prof):<{width}} no config.toml, skipped")
+            # Not merely skipped: this profile's pins were NOT checked, so the run is not a
+            # clean bill of health for it, and reporting it as anything but a warning is the
+            # false-PASS the docstring's exit contract promises it is not.
+            warns.append(f"{label(prof)} has no config.toml -- cross-profile pins NOT checked")
+            print(f"  {label(prof):<{width}} NO config.toml (pins not checked)")
             continue
         except (OSError, tomllib.TOMLDecodeError) as exc:
             warns.append(f"{label(prof)}/config.toml is unreadable or invalid TOML: {type(exc).__name__}")
             print(f"  {label(prof):<{width}} UNREADABLE ({type(exc).__name__})")
             continue
-        pins = [
-            (label(other), key, value)
+        # The VALUE is deliberately dropped here and never printed. One MCP env value can hold
+        # a path and a token in the same string, so printing "the value that matched" leaks a
+        # credential on exactly the config a user would most want to run this against. The
+        # dotted key names the line to edit, which is all a reader needs.
+        pins = sorted({
+            (key, label(other))
             for key, value in walk_values(cfg)
             for other in profile_paths
             if other != prof and path_occurs_in(str(other), value)
-        ]
+        })
         if pins:
-            keys = ", ".join(sorted({f"{k} -> {o}" for o, k, _ in pins}))
+            keys = ", ".join(f"{k} -> {o}" for k, o in pins)
             warns.append(f"{label(prof)}/config.toml points into another profile's home: {keys}")
             print(f"  {label(prof):<{width}} {len(pins)} PIN(S) into another profile:")
-            for other, key, value in pins:
-                print(f"      {key} -> {other}: {value[:VALUE_DISPLAY_LEN]}")
+            for key, other in pins:
+                print(f"      {key} -> {other}")
         else:
             print(f"  {label(prof):<{width}} clean")
 

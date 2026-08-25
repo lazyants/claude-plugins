@@ -60,10 +60,10 @@ jobs:
       - name: inspect_codex_profiles.test.py
         run: python3 plugins/multi-profile-plugins/tests/inspect_codex_profiles.test.py
 
-      # The script's own entry point, against a HOME with no Codex profile in it. This is the
-      # `codex` runtime's absence path and it must exit 0 with a stated reason rather than
-      # tracebacking -- the suite covers it too, but only through the same interpreter it just
-      # used, and this asserts the file is executable as shipped.
+      # The script's own entry point, against a HOME with no Codex profile in it: the absence
+      # path must exit 0 with a stated reason rather than tracebacking. The script is shipped
+      # mode 644 and invoked through `python3` here, exactly as the skill documents it, so this
+      # asserts the entry point's behaviour and nothing about an executable bit.
       - name: The script runs against an empty HOME
         env:
           HOME: ${{ runner.temp }}
