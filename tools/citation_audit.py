@@ -34,7 +34,7 @@ property that makes them worth anything.
 BARE CONTINUATIONS (#754). Prose here names a file once and then keeps citing it without repeating the
 name -- "<file> line 194, hashed <colon>335, stale-check <colon>599". `CITATION_RE` requires the
 filename, so until now none of those was enumerated at all. EVERY count in this paragraph is one census
-of `origin/main` `94618b4c` -- the tree before this change, which is the only basis on which the numbers
+of `origin/main` `a8557a77` -- the tree before this change, which is the only basis on which the numbers
 mean "what was invisible", since this file's own suite now contributes fixtures of both kinds. On that
 tree: 30 such tokens across 18 files, FIVE of them already pointing at unrelated code. A bare token is enumerated when
 the smallest backward window that names any file names at least one (see `_continuation_candidates`): one
@@ -98,7 +98,7 @@ MAX_SCANNED_LINE = 20000
 # A bare `:NNN` continuation. The OPENER SET IS THE WHOLE RULE, and it is an allowlist: start of line,
 # whitespace, a backtick, `(`, or `/`. Everything else is a shape that is not a citation and whose false
 # RED a maintainer switches the gate off over. `[` is out because of `x[:10]` slice syntax: on the same
-# `94618b4c` census, admitting it moves the unattributable pool from 94 to 253 and the ENUMERATED count
+# `a8557a77` census, admitting it moves the unattributable pool from 94 to 253 and the ENUMERATED count
 # not at all -- 159 more tokens, not one of them a citation; `"` is
 # out because of JSON (`{"const":1}`); a preceding `:` is out because of IPv6 (`2606:4700:4700::1111`).
 # `/` is IN for the opposite reason -- a slash-separated run of line numbers after ONE filename, as one
