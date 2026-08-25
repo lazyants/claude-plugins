@@ -6,6 +6,13 @@
    ],
    "claim": "The citation's OWN lexeme is excluded, and so is its bare filename. Without that exclusion the rule fired on every citation and made correct ones impossible to declare: `custom.md:269` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\", and `manifest.schema.json:18` really does say \"Deliberately not a fixed enum\" -- but its only other code-shaped token is `type`, four characters, too short to be an anchor. A gate that a correct citation cannot satisfy gets switched off, or pushes the author to delete the line number."
   },
+  "[\"tools/citation_audit.py\", \"extract.py.template:1110–1279\", 0]": {
+   "anchors": [
+    "BEGIN SELF-CHECK REGION",
+    "END SELF-CHECK REGION"
+   ],
+   "claim": "# The range separator accepts a typographic dash as well as a hyphen. Prose that has been through # an editor carries en-dashes, and this repo already had one: `extract.py.template:1110–1279` in # `source-prep.md` parsed as the single line `:1110`, so the wide-range rule never fired and the"
+  },
   "[\"tools/citation_audit.py\", \"manifest.schema.json:18\", 0]": {
    "anchors": [
     "Deliberately not a fixed enum"
@@ -110,6 +117,12 @@
   "[\"tools/tests/test_citation_audit.py\", \"extract.py.template:1108\", 0]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
+  "[\"tools/tests/test_citation_audit.py\", \"extract.py.template:1110\", 0]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"extract.py.template:1110\", 1]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
   "[\"tools/tests/test_citation_audit.py\", \"extract.py.template:845-846\", 0]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
@@ -123,6 +136,15 @@
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
   "[\"tools/tests/test_citation_audit.py\", \"foo.py:12\", 11]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"foo.py:12\", 12]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"foo.py:12\", 13]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"foo.py:12\", 14]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
   "[\"tools/tests/test_citation_audit.py\", \"foo.py:12\", 1]": {

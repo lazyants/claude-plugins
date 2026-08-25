@@ -49,6 +49,29 @@ def test_citation_regex_accepts_a_non_allowlisted_extension():
     assert (int(m.group(2)), int(m.group(3))) == (845, 846)
 
 
+@pytest.mark.parametrize("dash", ["-", "\u2013", "\u2014"])
+def test_a_typographic_dash_is_a_range_separator(dash):
+    """Prose that has been through an editor carries en-dashes, and this repo already had one.
+
+    `extract.py.template:1110\u20131279` in `source-prep.md` parsed as the single line `:1110`, so
+    the wide-range rule never fired: the far end of a 170-line hash-pinned region was bounded by
+    nothing while the gate reported OK. A separator the parser does not know NARROWS a range
+    silently -- the prior art's second defeated design arriving by a different route.
+    """
+    m = ca.CITATION_RE.search(f"see `extract.py.template:1110{dash}1279` for the region")
+    assert m and (m.group(1), m.group(2), m.group(3)) == ("extract.py.template", "1110", "1279")
+
+
+def test_a_dash_not_followed_by_a_number_is_not_a_range():
+    """The other direction: `foo.py:12 -- see below` must stay a single-line citation rather than
+    swallowing prose into a range."""
+    m = ca.CITATION_RE.search("the check at foo.py:12\u2014see below for why")
+    assert m and (m.group(2), m.group(3)) == ("12", None)
+    # `group(0)` is the citation LEXEME -- it becomes the key and the text of any exemption written
+    # for it. A dash consumed with no number after it would trail into both.
+    assert m.group(0) == "foo.py:12"
+
+
 def test_citation_regex_matches_a_bare_and_a_pathed_citation():
     assert ca.CITATION_RE.search("cache_key.py:202").group(1) == "cache_key.py"
     assert ca.CITATION_RE.search("`assets/lib/chapter-paths.mjs:1191`").group(1) == (

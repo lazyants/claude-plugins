@@ -55,7 +55,14 @@ ANCHOR_DIR = os.path.join(REPO_ROOT, "tools", "citation-anchors")
 # in `undeclared` and has to be dismissed by writing an exemption with a reason, which is at worst
 # review-visible. Shape borrowed from changelog_citations.test.py's own `_CITATION`, whose comment
 # reaches the same conclusion for the same reason.
-CITATION_RE = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z_][\w.-]*\.[A-Za-z][\w]*):(\d+)(?:-(\d+))?\b")
+# The range separator accepts a typographic dash as well as a hyphen. Prose that has been through
+# an editor carries en-dashes, and this repo already had one: `extract.py.template:1110–1279` in
+# `source-prep.md` parsed as the single line `:1110`, so the wide-range rule never fired and the
+# far end of a 170-line region was pinned by nothing while the gate reported OK. A separator the
+# parser does not know narrows a range SILENTLY, which is the prior art's second defeated design
+# arriving by a different route.
+CITATION_RE = re.compile(
+    r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z_][\w.-]*\.[A-Za-z][\w]*):(\d+)(?:[-–—](\d+))?\b")
 
 # A citation's own lexeme is never a subject token (see `_subject_required`).
 CODE_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\(\))?|[A-Z][A-Z0-9_]{3,}")

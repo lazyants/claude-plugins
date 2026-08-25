@@ -230,9 +230,10 @@
    ],
    "claim": "- **Use 2+ segments with real margin, never 1.** `extract.py.template` calls `start_segment` on EVERY `<h2>` (`extract.py.template:845-846`), so h2-count == segment-count. On a 1-segment book, W4 (review) eats the only segment and **W5 (translate) never executes** — the smoke test goes green without testing anything. Size the chapters so the smallest is comfortably (≥28%) short of wherever the review/translate split lands, so which segment ends up in W4 vs W5 cannot flip and invalidate the design. - **Never let scaffolding live inside the artifact under test.** Test scaffolds (an agent's self-test copies, your own verification-run copies) landing inside the same `durable_root` the smoke test measures silently contaminate it. Move them out to a sibling directory the moment you notice them there, before trusting any measurement of the scaffold."
   },
-  "[\".claude/skills/literary-translator-run/references/source-prep.md\", \"extract.py.template:1110\", 0]": {
+  "[\".claude/skills/literary-translator-run/references/source-prep.md\", \"extract.py.template:1110–1279\", 0]": {
    "anchors": [
-    "BEGIN SELF-CHECK REGION"
+    "BEGIN SELF-CHECK REGION",
+    "END SELF-CHECK REGION"
    ],
    "claim": "Consequence: you CANNOT translate a `.txt`/OCR/scraped source through the shipped code. Fastest workaround = wrap the text as a **minimal EPUB** and run the proven `gutenberg_epub` adapter. The extractor's self-check region (`extract.py.template:1110–1279`) is genuinely GENERIC (grep confirms zero project literals), so a 0-footnote / 0-verse / 0-frontmatter Hebrew EPUB passes it. That region is hash-pinned by `validate_extraction.py`, so only the four `# ADAPT-POINT:` regions are editable."
   },
