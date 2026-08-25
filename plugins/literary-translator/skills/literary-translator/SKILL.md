@@ -569,10 +569,11 @@ hand-run dispatch open exactly as before; and two machines pointed at one
 durable root through a sync-replicated folder (Synology Drive, Dropbox,
 iCloud), where each takes a valid local flock and neither sees the other —
 pre-existing, and identical for the driver's own lease. On a filesystem
-that does not enforce `flock` (some NFS/SMB mounts) the backfill warns on
-stderr and proceeds rather than refusing, since refusing there would block
-the one-time legacy migration entirely, and a root with no sentinels at
-all is the larger, certain loss.
+that cannot lock (some NFS/SMB mounts) — whether `flock` fails outright or
+succeeds without being enforced — the backfill warns on stderr and proceeds
+rather than refusing, since refusing there would block the one-time legacy
+migration entirely, and a root with no sentinels at all loses every segment
+the backfill could have protected.
 
 **Check `$?` first, then** read the printed JSON's
 `missing_sentinels`/`counts` fields — a non-empty `missing_sentinels` means

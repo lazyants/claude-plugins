@@ -56,10 +56,12 @@ it is:
     sees the other, and the sync daemon reconciles the conflicting writes
     afterwards. Pre-existing and identical for the driver's own lease -- see
     ``segment_dispatch_driver.py:acquire_driver_lock()``.
-  - **A filesystem that does not enforce flock** (some NFS/SMB mounts). The
-    self-test in ``acquire_project_lease()`` detects it and WARNS; it does not
-    refuse. See that function for why the direction differs from
-    ``select_segments.py``'s.
+  - **A filesystem that cannot lock, in either of its two shapes** (some
+    NFS/SMB mounts). Either ``flock`` fails outright -- no lease is held at
+    all -- or it succeeds and is not enforced, which the self-test detects by
+    taking the same lock a second time. ``acquire_project_lease()`` WARNS on
+    both and refuses on neither; see that function for the three-outcome
+    split, and for why the direction differs from ``select_segments.py``'s.
 
 ## How "ever converged" is determined
 
@@ -1537,6 +1539,21 @@ def resolve_ledger_segments(args, dirs: dict):
 # and reclassifying every already-converged segment `stale` for a pathname.
 DRIVER_LOCK_NAME = ".driver.lock"
 
+# The ONLY errnos that mean "something else holds this lease". Everything else
+# a flock() can raise means the attempt did not happen -- the filesystem
+# cannot lock (ENOLCK, ENOSYS, EOPNOTSUPP), or the process ran out of
+# descriptors. Collapsing the two is the defect select_segments.py measured
+# (:3978-4005) and it fails in BOTH directions: read as contention it
+# manufactures a holder that is not there, read as success it manufactures an
+# enforcement guarantee that is not there. One definition, used by the acquire
+# and by its self-test, so the two can never drift apart -- they did, for one
+# revision, and only the acquire was wrong.
+#
+# EAGAIN and EWOULDBLOCK are the POSIX contention answers; equal on Linux and
+# macOS, spelled separately because the standard does not require that. EACCES
+# is included because some platforms report a contended LOCK_NB that way.
+LOCK_CONTENTION_ERRNOS = (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES)
+
 
 def driver_lock_path(durable_root: Path) -> Path:
     """``runs/.driver.lock`` -- byte-identical to the path
@@ -1556,6 +1573,16 @@ def acquire_project_lease(durable_root: Path) -> int:
     Non-blocking by design: a held lease means real work is in flight against
     this project, and queuing behind it silently is exactly the interleaving
     #621 is about.
+
+    THREE outcomes, not two, and the third is the one that is easy to get
+    wrong. A flock() that FAILS is not the same as a lease that is HELD:
+    only ``LOCK_CONTENTION_ERRNOS`` means a holder exists. Anything else
+    means the attempt could not be made, and this returns a descriptor
+    carrying NO lease after warning loudly -- refusing there would
+    permanently block a one-time migration on a filesystem where no driver
+    can be running either. So a successful return does NOT by itself prove
+    exclusion; it proves either exclusion or a warning the operator has been
+    handed.
 
     OPEN FLAGS: plain ``O_CREAT|O_RDWR``, matching
     ``segment_dispatch_driver.py`` and NOT ``select_segments.py``'s hardened
@@ -1587,24 +1614,38 @@ def acquire_project_lease(durable_root: Path) -> int:
             f"could not open the project lease at {lock_path}: {exc}",
             lock_path=str(lock_path),
         )
+    # A FAILED acquire is not automatically a HELD lease. Only the contention
+    # errnos refuse; anything else means flock could not be performed at all,
+    # and refusing on it would permanently block this one-time migration on
+    # exactly the mounts the degraded-mode policy below exists to keep
+    # working -- with no driver anywhere near the project. Caught by review
+    # after the self-test below had already been fixed for the identical
+    # confusion: the same misreading shipped twice in one function, and the
+    # second copy is why LOCK_CONTENTION_ERRNOS is now one module constant.
+    lock_unsupported = None
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
-        os.close(fd)
-        fatal(
-            f"another project-lease participant already holds {lock_path} "
-            f"({exc}) -- refusing to write sentinels alongside it. "
-            f"segment_dispatch_driver.py holds this lease for its whole run, "
-            f"across both its select_segments.py census and every translate "
-            f"it dispatches, and select_segments.py --from-stalled holds it "
-            f"standalone. The lease is a kernel flock, released automatically "
-            f"when its holder exits or crashes, so it cannot be stale while a "
-            f"process holds it: wait for that process to finish and re-run. "
-            f"`cat {lock_path}` names the holder when the holder stamped one "
-            f"-- the --from-stalled path deliberately stamps nothing, so an "
-            f"empty or stale body is not evidence that nobody is there.",
-            lock_path=str(lock_path),
-        )
+        if exc.errno not in LOCK_CONTENTION_ERRNOS:
+            lock_unsupported = str(exc)
+        else:
+            os.close(fd)
+            fatal(
+                f"another project-lease participant already holds {lock_path} "
+                f"({exc}) -- refusing to write sentinels alongside it. "
+                f"segment_dispatch_driver.py holds this lease for its whole "
+                f"run, across both its select_segments.py census and every "
+                f"translate it dispatches, and select_segments.py "
+                f"--from-stalled holds it standalone. The lease is a kernel "
+                f"flock, released automatically when its holder exits or "
+                f"crashes, so it cannot be stale while a process holds it: "
+                f"wait for that process to finish and re-run. "
+                f"`cat {lock_path}` names the holder when the holder stamped "
+                f"one -- the --from-stalled path deliberately stamps nothing, "
+                f"so an empty or stale body is not evidence that nobody is "
+                f"there.",
+                lock_path=str(lock_path),
+            )
     try:
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
@@ -1644,25 +1685,41 @@ def acquire_project_lease(durable_root: Path) -> int:
     # segment, which is why the code says that rather than "the whole book".
     # Same direction segment_dispatch_driver.py takes, for the same "a
     # detected gap must not become a brand-new outage" reason.
+    # DEGRADED MODE, entered when the acquire above could not be performed at
+    # all. No lease is held -- there is nothing to self-test, so the probe is
+    # skipped rather than run to produce a second, weaker report of the fact
+    # already established. Proceeding is the same policy the unenforced case
+    # takes below and for the same reason: a project with no sentinels at all
+    # loses every segment this script could have protected, which is worse
+    # than a window this warning tells the operator to close by hand.
+    if lock_unsupported is not None:
+        sys.stderr.write(
+            f"backfill_ever_converged.py: WARNING: flock could not be "
+            f"performed on {lock_path} at all ({lock_unsupported}) -- this is "
+            f"NOT another process holding the lease, it is this filesystem "
+            f"being unable to lock. NO project lease is held by this run: a "
+            f"W5 dispatch can proceed against this project at the same time, "
+            f"and nothing will refuse it. Known on some network filesystems "
+            f"(NFS/SMB). Proceeding, because a project with no sentinels at "
+            f"all is the larger loss -- but sequence this run before the "
+            f"first W5 dispatch by hand, exactly as the pre-#621 rule "
+            f"required.\n"
+        )
+        return fd
+
     # The probe distinguishes CONTENTION from a FAILED PROBE, and does not
-    # collapse the two into "refused". select_segments.py measured what the
-    # collapse costs (:3978-4005): an injected ENOLCK -- a filesystem that
-    # cannot lock AT ALL -- read as proof that a lease is held, which is
-    # exactly backwards. Here the direction is the same shape: EMFILE or
-    # ENOLCK on the second open would otherwise be read as "the filesystem
-    # enforces flock", and the one warning this branch exists to print would
-    # never appear on precisely the mounts that need it. EAGAIN and
-    # EWOULDBLOCK are the POSIX contention answers (equal on Linux and macOS,
-    # spelled separately because the standard does not require that); EACCES
-    # is included because some platforms report a contended LOCK_NB that way.
-    _CONTENTION_ERRNOS = (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES)
+    # collapse the two into "refused". Read LOCK_CONTENTION_ERRNOS' own
+    # comment for why: EMFILE or ENOLCK on this second open would otherwise
+    # be read as "the filesystem enforces flock", and the one warning this
+    # branch exists to print would never appear on precisely the mounts that
+    # need it.
     probe_fd = None
     probe_problem = None
     try:
         probe_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
         fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
-        if exc.errno not in _CONTENTION_ERRNOS:
+        if exc.errno not in LOCK_CONTENTION_ERRNOS:
             probe_problem = str(exc)
         # else: expected -- a conforming filesystem refuses the second attempt
     else:

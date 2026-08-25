@@ -3668,3 +3668,58 @@ def test_the_lease_file_names_this_script_as_its_holder(tmp_path):
     assert isinstance(record["pid"], int), (
         f"the body must carry an integer pid, the driver's own shape: {record!r}"
     )
+
+
+def test_a_filesystem_that_cannot_flock_at_all_warns_instead_of_claiming_a_holder(
+    tmp_path, capsys
+):
+    """A FAILED acquire is not a HELD lease, and the difference decides
+    whether the one-time migration can run at all.
+
+    Caught by review after the self-test had already been fixed for the
+    identical confusion -- the same misreading shipped twice in one function.
+    With ENOLCK injected on the FIRST flock, the earlier version exited 1
+    saying "another project-lease participant already holds" it, on a mount
+    with no driver anywhere near it, permanently blocking the migration on
+    exactly the filesystems the degraded-mode policy exists to keep working.
+
+    ENOLCK, not a generic OSError: the point is the errno classification, and
+    a test that injected EAGAIN would assert the refusal path instead. The
+    contention direction stays covered by the refusal test above, so the two
+    errnos are pinned against each other rather than one being trusted."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_no_flock")
+    root = setup_mixed_project(tmp_path)
+
+    real_flock = backfill.fcntl.flock
+
+    def flock_unsupported(fd, op):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    backfill.fcntl.flock = flock_unsupported
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        backfill.fcntl.flock = real_flock
+
+    assert result["success"] is True, (
+        "a filesystem that cannot lock must not block the migration -- the "
+        f"documented policy is warn-and-proceed: {result!r}"
+    )
+    assert result["created"], (
+        "the run must still have done its actual work; a degraded lease is "
+        "not a reason to protect nothing"
+    )
+
+    err = capsys.readouterr().err
+    assert "flock could not be performed" in err, (
+        f"the operator must be told no lease is held, in the run they are "
+        f"watching: {err!r}"
+    )
+    assert "No locks available" in err, (
+        "the warning must carry the errno text, or the operator cannot tell "
+        "an unlockable mount from any other degraded state"
+    )
+    assert "already holds" not in err, (
+        "the old bug: an unlockable filesystem reported as another "
+        "participant holding the lease, which is a holder that does not exist"
+    )
