@@ -733,6 +733,13 @@ def cmd_report(args):
         p = dict(c)
         p["resolved"] = resolved
         p["declared"] = bool(d)
+        # Computed even when the target is unresolved, and that is the case worth serving: an
+        # AMBIGUOUS continuation carries no target at all, and this packet is exactly what an
+        # adjudicator reads to decide which of the named files it continues. Emitting nothing there
+        # would leave the one occurrence that needs a human with the least to go on -- and it is the
+        # only path on which `target` is None, so it is also what keeps `_subject_required`'s
+        # empty-name branch honest rather than defensive.
+        p["subject_tokens"] = sorted(_subject_required(c["raw_line"], c["cite"], c["target"]))
         if resolved:
             tl = files[resolved]
             lo, hi = max(1, c["start"] - 2), min(len(tl), c["end"] + 2)
@@ -742,7 +749,6 @@ def cmd_report(args):
             # subjects drawn from an adjacent clause would point an adjudicator at target lines the
             # gate will never ask an anchor to name -- measured at 76 of 82 when the gate itself
             # read a window.
-            p["subject_tokens"] = sorted(_subject_required(c["raw_line"], c["cite"], c["target"]))
             p["subject_locations"] = {
                 s: [n for n, line in enumerate(tl, 1) if s in line][:6] for s in p["subject_tokens"]
             }

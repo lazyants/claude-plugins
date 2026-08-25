@@ -972,11 +972,17 @@ def test_report_survives_an_ambiguous_continuation_instead_of_raising(tmp_path, 
     """`report` is the command an adjudicator runs precisely to settle an ambiguity, so it is the one
     command that must not die on one. Without the `target is None` guard `resolve` reaches
     `endswith("/" + None)` and raises."""
-    _cont_setup(tmp_path, monkeypatch, "`a.py:3` and `b.py:3`, then also :3 here.\n")
+    _cont_setup(tmp_path, monkeypatch,
+                "`a.py:3` and `b.py:3`, then also :3 in resolve_target_name().\n")
     ca.cmd_report(types.SimpleNamespace(scope=None, json=True))
     packets = json.loads(capsys.readouterr().out)
     bare = [p for p in packets if p.get("is_continuation")]
     assert len(bare) == 1 and bare[0]["resolved"] is None and bare[0]["target"] is None
+    # An ambiguous packet has NO filename to exclude, and `str.replace("", " ")` spaces out every
+    # character rather than raising -- which shreds every multi-character token and hands the
+    # adjudicator an empty list exactly where a human is being asked to choose. The sentence carries
+    # one eligible subject on purpose: an assertion of `== []` would pass either way.
+    assert bare[0]["subject_tokens"] == ["resolve_target_name"], bare[0]["subject_tokens"]
 
 
 def test_a_continuation_that_drifts_names_the_file_it_was_attributed_to(tmp_path, monkeypatch, capsys):
@@ -994,8 +1000,13 @@ def test_the_subject_rule_reads_a_continuation_s_ATTRIBUTED_filename(tmp_path, m
     """A bare cite has no filename of its own, and `"".split(":")[0]` is the empty string --
     `str.replace("", " ")` then spaces out every character rather than raising. The visible cost is
     a false RED: the target's own stem becomes a subject token the anchors are required to name."""
-    line = "# validate_seg() (canon_x.py:1316-1332, the regex check at :1251) --"
-    assert ca._subject_required(line, ":1251", "canon_x.py") == {"validate_seg"}
+    # The synthetic filename's STEM has to be anchor-eligible (>= 8 chars, carrying an underscore)
+    # or the two spellings of this rule are indistinguishable: a short stem is dropped by the length
+    # floor whether it was stripped or not, and the mutation that reverts the fix stays green.
+    line = "# validate_seg() (canon_x_validator.py:1316-1332, the regex check at :1251) --"
+    got = ca._subject_required(line, ":1251", "canon_x_validator.py")
+    assert "canon_x_validator" not in got, got
+    assert got == {"validate_seg"}, got
 
 
 def test_the_shipped_tree_enumerates_a_nonzero_number_of_continuations():
