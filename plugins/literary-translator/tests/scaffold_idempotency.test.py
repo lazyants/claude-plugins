@@ -2,10 +2,12 @@
 "copy-once, never clobber" guards that make Step 0 and Step 0a safe to
 re-invoke across a project's whole lifetime:
 
-  (A) Step 0's auto-copy-then-halt (``profile_validate.py``'s
+  (A) Step 0's auto-copy (``profile_validate.py``'s
       ``ensure_profile_exists``): if ``.claude/literary-translator/
       profile.yml`` is ABSENT, the shipped ``assets/profile.example.yml`` is
-      copied there verbatim and the run halts. If it is PRESENT -- in
+      copied there verbatim and the run goes on to print that copy's intake
+      questionnaire before halting non-zero (#751; it used to halt on the
+      spot, one run earlier). If it is PRESENT -- in
       particular, a real, filled-in profile with a project's own real
       values -- it must be left completely untouched, checked fresh on
       EVERY invocation, forever. This suite drives the REAL
@@ -140,7 +142,8 @@ def _iter_string_values(obj):
 
 
 # ---------------------------------------------------------------------------
-# Part A -- Step 0's auto-copy-then-halt (real profile_validate.py)
+# Part A -- Step 0's auto-copy, then the same run's questionnaire (real
+# profile_validate.py)
 # ---------------------------------------------------------------------------
 
 def make_real_values_profile(tmp_path):
@@ -258,7 +261,7 @@ def test_step0_real_profile_stays_byte_identical_across_repeated_invocations(tmp
         current_bytes = profile_path.read_bytes()
         assert current_bytes == original_bytes, (
             f"profile.yml was modified by Step 0 invocation #{i + 1} -- the "
-            f"auto-copy-then-halt guard re-fired (or otherwise touched the "
+            f"auto-copy guard re-fired (or otherwise touched the "
             f"file) even though a real, filled-in profile already existed"
         )
         assert hashlib.sha256(current_bytes).hexdigest() == original_hash

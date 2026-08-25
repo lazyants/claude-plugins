@@ -2683,7 +2683,7 @@ def test_escape_B_sandbox_cwd_resolves_outside_git_root_resolves_inside(tmp_path
     --show-toplevel`.
 
     RED: nest durable_root inside a real git repo (the SUPPORTED durable_root==project_root
-    configuration, SKILL.md:254-256) and show that `--cwd durable_root` (the OLD design)
+    configuration, SKILL.md:267-269) and show that `--cwd durable_root` (the OLD design)
     resolves to the OUTER repo toplevel -- i.e. codex would be granted workspace-write over
     the WHOLE repo (scripts/, segments/, the lock, the joblog), not just durable_root.
 

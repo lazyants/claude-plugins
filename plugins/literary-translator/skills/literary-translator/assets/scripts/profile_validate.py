@@ -52,10 +52,16 @@ durable-root copy of either.
 
 Order of operations (numbered to match SKILL.md's Step 0 list exactly):
 
-  1. Existence check FIRST, before any dependency preflight or validation.
-     If the profile path is absent, copy the shipped
-     ``assets/profile.example.yml`` there verbatim and HALT -- an existing,
-     filled-in profile is never touched again (checked fresh every run).
+  1. Existence check FIRST. If the profile path is absent, copy the shipped
+     ``assets/profile.example.yml`` there verbatim and then CONTINUE into
+     this same run's steps 2-5, so the invocation that creates the starter
+     profile is also the one that prints the intake questionnaire (#751) --
+     an existing, filled-in profile is never touched again (checked fresh
+     every run). This branch used to halt immediately, telling the reader to
+     fill the placeholders in and re-run; that left a window in which a
+     sentinel-laden profile existed and the questions had not been relayed,
+     and an orchestrator that filled the fresh copy from its own inline
+     comments closed that window by answering every intake decision itself.
   2. Dependency preflight: ``import yaml`` and ``import jsonschema``, each in
      its own try/except, with an actionable ``pip install`` message naming
      the missing package.
@@ -198,13 +204,20 @@ SCHEMA_PATH = ASSETS_ROOT / "schemas" / "profile.schema.json"
 # rather than inside the check because output_resolve.py's module level is
 # stdlib-only -- no PyYAML, no jsonschema, no sibling import of its own -- so it
 # cannot disturb step 1's "profile absent" branch or step 2's dependency
-# preflight, both of which must still work with neither package installed.
+# preflight, both of which must still work with neither package installed --
+# step 1 still COPIES the example with neither installed; since #751 it then
+# falls through into the preflight rather than exiting, so a missing package
+# is reported there instead of one run later.
 sys.path.insert(0, str(SCRIPTS_DIR))
 import output_resolve  # noqa: E402  -- must follow the sys.path insert above
 
 # Deferred dependency handles -- populated by _dependency_preflight(), never
-# imported at module load time (the "profile.yml is absent" branch must not
-# require either package to be installed at all; see step 1 above).
+# imported at module load time, so that step 1's COPY of the shipped example
+# happens with neither package installed and the operator ends up holding a
+# real starter profile plus an actionable install message (see step 1 above).
+# Since #751 that branch no longer exits before the preflight, so the install
+# message is what a dependency-less run prints INSTEAD of the questionnaire --
+# the copy has still been made either way.
 yaml = None
 jsonschema = None
 
@@ -373,10 +386,16 @@ RESUMED_PROMPT_CONTRACT_FILENAMES = (
 # ---------------------------------------------------------------------------
 
 def ensure_profile_exists(profile_path: Path) -> bool:
-    """Step 1. Returns True if `profile_path` already existed (caller may
-    proceed). If absent, copies the shipped example there and returns False
-    (caller must halt) -- checked fresh on every invocation, so an existing,
-    filled-in profile is NEVER touched again."""
+    """Step 1. Returns True if `profile_path` already existed. If absent,
+    copies the shipped example there and returns False -- checked fresh on
+    every invocation, so an existing, filled-in profile is NEVER touched
+    again.
+
+    The return value says which of the two happened, and NOT whether the
+    caller should stop: since #751 both branches go on to run steps 2-5, so
+    that the run which creates a starter profile is also the run that prints
+    its intake questionnaire. Callers use the False case only to print the
+    creation notice."""
     if profile_path.exists():
         return True
     profile_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1017,16 +1036,23 @@ def main(argv=None):
     profile_path = Path(args.profile)
 
     # --- Step 1: existence check, before anything else -----------------
+    # Deliberately does NOT exit: the placeholder scan at step 5 below is the
+    # intake questionnaire, and it has to reach the operator in the SAME run
+    # that put the sentinels on disk (#751). Exiting here instead left the
+    # copy sitting there un-asked-about, and the message that used to print
+    # ("fill in every placeholder, then re-run") sent the reader to the
+    # example's own inline comments for answers that were the user's to give.
     if not ensure_profile_exists(profile_path):
         print(
             f"Created a starter profile at {profile_path} from "
-            f"assets/profile.example.yml. Fill in every placeholder "
-            f"(YOUR BOOK TITLE HERE, /ABS/PATH/TO/YOUR_PROJECT, "
-            f"/ABS/PATH/TO/YOUR_SOURCE, every CHOOSE_-prefixed field), then "
-            f"re-run Step 0.",
+            f"assets/profile.example.yml. Its placeholders ARE the intake "
+            f"questions (YOUR BOOK TITLE HERE, /ABS/PATH/TO/YOUR_PROJECT, "
+            f"/ABS/PATH/TO/YOUR_SOURCE, every CHOOSE_-prefixed field); once "
+            f"the dependency preflight below succeeds they are listed in "
+            f"full. Relay them to the user and fill in their answers -- "
+            f"never answer them from this file's own inline comments.",
             file=sys.stderr,
         )
-        sys.exit(1)
 
     # --- Step 2: dependency preflight ------------------------------------
     dependency_preflight()

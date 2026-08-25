@@ -64,6 +64,14 @@ Covers:
     written version pass. Each load-bearing clause is pinned separately
     over a section-bounded slice, and every one was watched failing under
     its own deletion before this list was written.
+16. #751's authorship contract -- Step 0 is `profile.yml`'s sole creator,
+    and its questionnaire is relayed rather than answered from the shipped
+    example's own comments -- at all three surfaces that state it, plus W1
+    no longer naming `profile.yml` among the placeholders it tells a reader
+    to fill. These three are EXACT-TEXT window assertions rather than
+    membership needles, for the reason spelled out above them: three review
+    rounds each produced a rewrite that kept every proposed needle intact
+    and reversed the instruction by appending a carve-out beside it.
 """
 from __future__ import annotations
 
@@ -800,6 +808,251 @@ def test_intake_step2_names_verse_policy_mode_as_a_user_decision():
     )
     needle = "never one the orchestrator reads off the source material"
     assert needle in w, f"intake must name the mode a user decision: {needle!r}"
+
+
+# --- #751: profile.yml's sole creator, and the questionnaire's one run -------
+#
+# WHY THESE THREE ARE WHOLE-WINDOW EQUALITY AND NOT SUBSTRING NEEDLES.
+#
+# Every other pin in this file asserts membership, under the rule stated above:
+# start the needle at its subject and end it at that subject's consequence.
+# That rule defends against a rewrite which REASSIGNS text the needle left
+# outside itself. It does not defend against a rewrite that leaves every
+# pinned character intact and APPENDS an exception next to it -- "Ordinarily,",
+# "By default, ", "For expedited runs, however, `profile.yml` may instead be
+# hand-written." Three successive review rounds each produced a fresh table of
+# those, against differently-decomposed needles, which is the signal that the
+# needle SHAPE was wrong rather than its endpoints: no membership assertion can
+# catch an exception added beside it, because membership is exactly the
+# property an addition preserves.
+#
+# So the three passages #751 authors are pinned as EXACT normalized text over a
+# bounded window. Deleting a clause, rewording one, weakening one, or appending
+# a carve-out all move the window and all go red. The windows are drawn tightly
+# around the contract itself (Step 0's item 1; R10's "never copied" tail;
+# engine-loop's whole R10 index entry) rather than around a whole section, so
+# an unrelated edit elsewhere in Step 0 or R10 does not red them.
+#
+# The accepted cost is this file's own stated tradeoff: a genuine reword inside
+# one of these three windows turns it red and has to be re-pinned in the same
+# edit. In this plugin the prose IS the control flow, and #751 exists because
+# one of these passages quietly said the opposite of what the code did.
+#
+# The membership needles below run IN ADDITION, purely for diagnosis: when a
+# window assertion fails, they name WHICH clause moved instead of leaving a
+# 1300-character diff to read.
+
+STEP0_ITEM1_EXPECTED = (
+    "1. **Existence check first**: if `.claude/literary-translator/profile.yml` "
+    "is absent, copy `assets/profile.example.yml` to that exact path (guarded "
+    "on absence — an existing filled-in profile is never touched again), name "
+    "the path, and then CONTINUE into this same run's placeholder scan at item "
+    "5, so the one invocation that creates the starter profile is also the one "
+    "that prints its questionnaire. It does not halt on the spot and it does "
+    "not tell anyone to fill the file in first: there is deliberately no window "
+    "in which a sentinel-laden profile exists and its questions have not been "
+    "relayed. **This branch is the ONLY sanctioned creator of that file.** The "
+    "orchestrating session must never create "
+    "`.claude/literary-translator/profile.yml` itself, and must never answer a "
+    "fresh copy's sentinels from that file's own inline comments: a profile "
+    "carrying real values instead of `CHOOSE_` sentinels takes the `exists()` "
+    "branch, item 5's scan finds nothing to ask, and Step 0 prints `OK` without "
+    "one intake decision having been put to the user — printing exactly what a "
+    "run that answered all of them prints. Because the scan parses YAML, item "
+    "2's dependency preflight now runs in this branch too; if a package is "
+    "missing the operator gets that actionable message instead of the "
+    "questionnaire, and the starter profile has still been created."
+)
+
+R10_NEVER_COPIED_TAIL_EXPECTED = (
+    "`profile.yml` verbatim (it carries `v1_scope`, effort and the language "
+    "config of a different source) — unchanged by the ledger rule: no VALUE "
+    "from a previous `profile.yml` is ever copied into a new one, and the "
+    "marker-only legacy read is the sole thing that may open that file at all. "
+    "**And a new volume's `profile.yml` is not hand-authored either** — not "
+    "copied is only half of this entry, and the other half is where the file "
+    "DOES come from: Step 0's existence check is its sole creator, from the "
+    "plugin's own `assets/profile.example.yml` — R10's input (1), mechanics "
+    "from the PLUGIN, not a fourth input — and every INTAKE DECISION in it "
+    "comes only from the user's answers to the questionnaire that same Step 0 "
+    "run prints. (Its other fields — `source.path`, `durable_root`, the "
+    "source-format and adapter knobs — are read off this book's own material, "
+    "and always were; they are not decisions anyone is asked to make.) Writing "
+    "the file by hand, or answering a fresh copy's sentinels from its own "
+    "inline comments, produces a complete profile carrying real values instead "
+    "of `CHOOSE_` sentinels, so the placeholder scan has nothing left to ask, "
+    "Step 0 prints `OK`, and every intake decision the user was supposed to "
+    "make is taken instead by whoever typed the file — silently, and printing "
+    "exactly what a run that answered all of them prints."
+)
+
+# Deliberately narrower than the whole R10 index entry: pinning all 983
+# characters of it would red on ordinary maintenance of the empty-root,
+# classification and ledger-fallback prose that #751 never touched, and a
+# failure attributed to the wrong change is a failure people learn to ignore.
+# Starting at the new sentence's own subject and running to the section end
+# still catches an appended carve-out, which is the rewrite this pin exists
+# to refuse.
+ENGINE_LOOP_R10_AUTHORSHIP_EXPECTED = (
+    "The new volume's own `profile.yml` is created by Step 0's existence check "
+    "from the plugin's `assets/profile.example.yml` and is never hand-written; "
+    "that same Step 0 run prints its intake questionnaire, and every intake "
+    "decision in the file comes from the user's answers to it — never from the "
+    "example's own comments, and never from a previous volume."
+)
+
+
+def _step0_item1_window() -> str:
+    return _window(
+        _normalized(SKILL_MD),
+        "1. **Existence check first**",
+        "2. If present, dependency preflight",
+    ).rstrip()
+
+
+def _r10_never_copied_tail_window() -> str:
+    return _window(
+        _normalized(SKILL_MD),
+        "`profile.yml` verbatim (it carries",
+        "**The check, because a rule nobody can verify is a wish:**",
+    ).rstrip()
+
+
+def _engine_loop_r10_authorship_window() -> str:
+    return _window(
+        _normalized(ENGINE_LOOP),
+        "The new volume's own `profile.yml` is created",
+        "## R1 — Role separation",
+    ).rstrip()
+
+
+def test_step0_item1_is_exactly_the_sole_creator_contract():
+    """#751, change 2. Item 1 is the instruction an orchestrator executes at
+    the moment a new volume has no profile yet, so it is pinned whole: it must
+    bind copy -> same-run scan, forbid the session creating the file, forbid
+    answering a fresh copy from its own comments, and state the consequence of
+    doing either."""
+    assert _step0_item1_window() == STEP0_ITEM1_EXPECTED, (
+        "Step 0's item 1 is the #751 contract and is pinned as exact text; if "
+        "this reword is intended, re-pin STEP0_ITEM1_EXPECTED in the same edit"
+    )
+
+
+def test_r10_never_copied_tail_is_exactly_the_authorship_contract():
+    """#751, change 3. R10 previously said only that a previous volume's
+    profile is never COPIED, which reads as an instruction to write a fresh one
+    by hand -- the defect #751 reports. The tail is pinned whole so that the
+    "where it DOES come from" half cannot be dropped, weakened to a default, or
+    given an appended exception while the "never copied" half survives."""
+    assert _r10_never_copied_tail_window() == R10_NEVER_COPIED_TAIL_EXPECTED, (
+        "R10's never-copied tail is the #751 contract and is pinned as exact "
+        "text; if this reword is intended, re-pin "
+        "R10_NEVER_COPIED_TAIL_EXPECTED in the same edit"
+    )
+
+
+def test_engine_loop_r10_authorship_clause_is_exact():
+    """#751, change 4. The index entry is what a reader consulting R1-R10 sees
+    without opening SKILL.md, so the authorship rule has to be there too --
+    and it is the surface where a fourth "legitimate input" would most
+    plausibly be introduced. Pinned from its own subject to the end of the
+    entry rather than over the whole entry; see the constant's own note."""
+    assert _engine_loop_r10_authorship_window() == ENGINE_LOOP_R10_AUTHORSHIP_EXPECTED, (
+        "engine-loop's R10 authorship clause is pinned as exact text; if this "
+        "reword is intended, re-pin ENGINE_LOOP_R10_AUTHORSHIP_EXPECTED in "
+        "the same edit"
+    )
+
+
+def test_engine_loop_r10_entry_still_says_exactly_three_sources():
+    """Companion to the narrowed window above. Narrowing gave up pinning the
+    rest of the R10 entry, and the one thing in that remainder #751 depends on
+    is its three-source classification: if a later edit promoted `profile.yml`
+    to a fourth input up there, the authorship clause below it would still
+    read as intact. So that classification is asserted separately, as
+    membership -- it is pre-existing prose this change does not own."""
+    entry = _window(
+        _normalized(ENGINE_LOOP),
+        "- **R10** A previous volume is not an input",
+        "## R1 — Role separation",
+    )
+    needle = (
+        "A previous volume is not an input: mechanics come from the plugin, "
+        "the general contract from the shipped template, and whatever outlives "
+        "a book"
+    )
+    assert needle in entry, (
+        f"the R10 index must keep naming exactly its three sources: {needle!r}"
+    )
+
+
+def test_751_clauses_name_which_one_moved():
+    """Diagnostic companion to the three exact-text tests above. These are
+    ordinary subject-to-consequence needles: they cannot catch an appended
+    carve-out (that is what the equality assertions are for), but when one of
+    those fails they say WHICH clause changed instead of leaving a
+    thousand-character diff to read by eye."""
+    item1 = _step0_item1_window()
+    r10 = _r10_never_copied_tail_window()
+    engine = _engine_loop_r10_authorship_window()
+
+    # A. copy bound to the SAME run's scan -- the whole point of #751.
+    needle = (
+        "and then CONTINUE into this same run's placeholder scan at item 5, so "
+        "the one invocation that creates the starter profile is also the one "
+        "that prints its questionnaire"
+    )
+    assert needle in item1, f"Step 0 must bind the copy to the same run's scan: {needle!r}"
+
+    # B. the sole-creator prohibition, bound to what bypassing it costs.
+    needle = (
+        "**This branch is the ONLY sanctioned creator of that file.** The "
+        "orchestrating session must never create "
+        "`.claude/literary-translator/profile.yml` itself, and must never "
+        "answer a fresh copy's sentinels from that file's own inline comments"
+    )
+    assert needle in item1, f"Step 0 must forbid both bypass routes: {needle!r}"
+
+    # C. R10's missing half: not copied, AND where it does come from.
+    needle = (
+        "**And a new volume's `profile.yml` is not hand-authored either** — "
+        "not copied is only half of this entry, and the other half is where "
+        "the file DOES come from: Step 0's existence check is its sole "
+        "creator, from the plugin's own `assets/profile.example.yml`"
+    )
+    assert needle in r10, f"R10 must name the profile's sole creator: {needle!r}"
+
+    # D. and that this is NOT a fourth input -- R10 says "exactly three
+    #    places", so the new sentence has to classify itself.
+    needle = "R10's input (1), mechanics from the PLUGIN, not a fourth input"
+    assert needle in r10, f"R10 must classify the example as input (1): {needle!r}"
+
+    # E. the index entry carries the same rule for a reader who never opens
+    #    SKILL.md.
+    needle = (
+        "The new volume's own `profile.yml` is created by Step 0's existence "
+        "check from the plugin's `assets/profile.example.yml` and is never "
+        "hand-written"
+    )
+    assert needle in engine, f"the R10 index must carry the authorship rule: {needle!r}"
+
+
+def test_w1_no_longer_claims_profile_yml_among_its_placeholders():
+    """#751, change 5. W1's label used to read "fill in every placeholder
+    across `profile.yml` and every other just-scaffolded file", which is a
+    licence to defer the profile's placeholders past Step 0 -- unreachable in
+    practice (Step 0 halts on them) and misleading in exactly the direction
+    this issue is about."""
+    w = _window(_normalized(SKILL_MD), "**W1 Scaffold**", "**W2 Extract")
+    needle = (
+        "It does NOT cover `profile.yml`: that file's placeholders are the "
+        "intake questionnaire, they were relayed and answered back at Step 0"
+    )
+    assert needle in w, f"W1 must disclaim profile.yml's placeholders: {needle!r}"
+    assert "every placeholder across `profile.yml`" not in w, (
+        "W1 must no longer name profile.yml among the files it tells the "
+        "reader to fill in"
+    )
 
 
 if __name__ == "__main__":

@@ -3,10 +3,12 @@
 Targets ``assets/profile.example.yml`` + ``profile_validate.py``, split into
 exactly THREE cases (per the plugin's own test enumeration):
 
-  1. A missing ``profile.yml`` triggers Step 0's auto-copy-then-halt path --
-     the shipped example is copied to the target path verbatim, and the run
-     halts (non-zero exit) naming the path and instructing the user to fill
-     in every placeholder.
+  1. A missing ``profile.yml`` triggers Step 0's auto-copy path -- the
+     shipped example is copied to the target path verbatim, and that SAME
+     run goes on to print the whole intake questionnaire before halting
+     non-zero (#751). It used to halt on the spot and tell the reader to
+     fill in every placeholder and re-run, which left the questions
+     unrelayed while a sentinel-laden profile sat on disk.
   2. The shipped example loaded VERBATIM (placeholders intact) is FATALLY
      rejected. See the NOTE below on why this is checked at *two* levels
      (the real CLI entry point, and ``scan_placeholders()`` directly).
@@ -231,8 +233,9 @@ def _build_filled_profile(durable_root: Path, source_path: Path) -> dict:
 
 # ---------------------------------------------------------------------------
 # Case 1: missing profile.yml -> Step 0 auto-copies the shipped example
-# verbatim to the target path, then halts (never runs dependency preflight
-# or schema validation in this branch at all).
+# verbatim to the target path and then CONTINUES into the same run's
+# placeholder scan, so the one invocation that creates the starter profile is
+# also the one that prints the intake questionnaire (#751).
 # ---------------------------------------------------------------------------
 
 def test_missing_profile_triggers_autocopy_and_halt(pv, tmp_path, capsys):
@@ -248,6 +251,77 @@ def test_missing_profile_triggers_autocopy_and_halt(pv, tmp_path, capsys):
     )
     assert str(profile_path) in err, err
     assert "placeholder" in err.lower(), err
+
+
+def test_missing_profile_prints_the_whole_questionnaire_in_that_same_run(pv, tmp_path, capsys):
+    """#751. The defect this closes is a SEQUENCE, not a missing check.
+
+    Before this, the absence branch copied the example and exited straight
+    away, telling the reader to "fill in every placeholder ... then re-run
+    Step 0" -- so the questionnaire only ever existed on a LATER invocation.
+    An orchestrator obeying that message opens the fresh copy, whose own
+    inline comments say "consciously replace", fills the sentinels from
+    them, and re-runs against a file that no longer has a single question
+    left in it. Validation prints OK and the user was asked nothing.
+
+    Closing that means there must be NO window between the file acquiring
+    sentinels and the questions being on screen: the one run that creates
+    the profile must also print them. Asserted here at the real CLI entry
+    point, against a genuinely ABSENT profile -- which is what makes this
+    different from ``test_verbatim_shipped_example_is_fatally_rejected_by_cli``
+    above, which hands the validator a profile that already exists and so
+    exercises the ``exists() -> True`` branch instead.
+
+    Every sentinel is asserted, not merely one: "prints the questionnaire"
+    is a claim about the WHOLE set of open decisions, and a run that named
+    only the first would satisfy a weaker check while leaving the operator
+    to discover the rest one re-run at a time -- the very thing #727 fixed
+    for the already-exists branch and this extends to the creating one."""
+    profile_path = tmp_path / ".claude" / "literary-translator" / "profile.yml"
+    assert not profile_path.exists()
+
+    exit_code, out, err = _run_main(pv, profile_path, capsys)
+
+    assert exit_code != 0, "the run that creates the starter profile must still halt"
+    assert profile_path.exists(), "Step 0 must have created the starter profile"
+
+    # The relay instruction: the questions are useless if they stop at the
+    # orchestrator, so the header naming its own audience is pinned too.
+    assert "Step 0 needs these intake decisions answered" in err, (
+        "the FIRST run against an absent profile must print the questionnaire "
+        f"header, not defer it to a re-run:\n{err}"
+    )
+    assert "fill in their answers" in err, (
+        f"the questionnaire header must instruct relaying it to the user:\n{err}"
+    )
+
+    # ...and every open decision, in that one run -- same expectation the
+    # already-exists branch is held to at case 2 below.
+    for sentinel in SHIPPED_CHOOSE_SENTINELS:
+        assert sentinel in err, (
+            f"expected sentinel {sentinel!r} named in the creating run; got:\n{err}"
+        )
+    # The dotted paths come from KNOB_QUESTIONS rather than a hand-typed list:
+    # this module's own comment says a restated name list here "has now gone
+    # stale twice, once per release that added one", and a stale list stays
+    # GREEN while quietly asserting less. Not circular -- the stderr lines are
+    # produced by _scan_choose_sentinels() walking the parsed document, and
+    # KNOB_QUESTIONS only supplies the appended question text. Its key set is
+    # held equal to the shipped example's sentinel-bearing paths, both ways, by
+    # profile_validate.test.py's own two-way drift guard.
+    for field in sorted(pv.KNOB_QUESTIONS):
+        assert field in err, (
+            f"expected field {field!r} named in the creating run; got:\n{err}"
+        )
+
+    # The creation notice itself must not send the reader to the file's own
+    # comments for the answers -- that route reaches a valid profile with
+    # every decision made by the wrong party.
+    assert "never answer them from this file's own inline comments" in err, (
+        f"the creation notice must forbid answering from the example's comments:\n{err}"
+    )
+
+    assert out == "", f"Step 0 reports on stderr only; got stdout:\n{out}"
 
 
 def test_missing_profile_autocopy_does_not_touch_an_existing_profile(pv, tmp_path, capsys):

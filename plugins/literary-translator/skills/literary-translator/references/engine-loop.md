@@ -49,7 +49,12 @@ so there is exactly one place each rule can go stale.
   ledger-first, and only when the ledger has no row for that field may the
   immediately preceding volume's `profile.yml` be read for its
   `# CHANGED by the user` markers alone — read-only, copying nothing, writing
-  what it finds back into the ledger.
+  what it finds back into the ledger. The new volume's own `profile.yml` is
+  created by Step 0's existence check from the plugin's
+  `assets/profile.example.yml` and is never hand-written; that same Step 0 run
+  prints its intake questionnaire, and every intake decision in the file comes
+  from the user's answers to it — never from the example's own comments, and
+  never from a previous volume.
 
 ## R1 — Role separation is a hard rule, never profile-configurable
 
