@@ -13,7 +13,7 @@
 
 The shipped `assets/templates/extract.py.template` is the **gutenberg_epub** extractor and only that: `load_profile()` hard-`die()`s if `source.format != "gutenberg_epub"` (the format gate), `build()` unconditionally opens `source.path` as a ZIP/EPUB, and the two-phase hash hardcodes the gutenberg adapter config. Yet `references/source-format-adapters/plain-text.md` claims the same template gets its `# ADAPT-POINT:` sections "filled in for plain-text" — a docs↔executable MISMATCH. Trust the executable: there is no plain_text branch to adapt into.
 
-Consequence: you CANNOT translate a `.txt`/OCR/scraped source through the shipped code. Fastest workaround = wrap the text as a **minimal EPUB** and run the proven `gutenberg_epub` adapter. The extractor's self-check region (`extract.py.template:1108–1277`) is genuinely GENERIC (grep confirms zero project literals), so a 0-footnote / 0-verse / 0-frontmatter Hebrew EPUB passes it. That region is hash-pinned by `validate_extraction.py`, so only the four `# ADAPT-POINT:` regions are editable.
+Consequence: you CANNOT translate a `.txt`/OCR/scraped source through the shipped code. Fastest workaround = wrap the text as a **minimal EPUB** and run the proven `gutenberg_epub` adapter. The extractor's self-check region (`extract.py.template:1110–1279`) is genuinely GENERIC (grep confirms zero project literals), so a 0-footnote / 0-verse / 0-frontmatter Hebrew EPUB passes it. That region is hash-pinned by `validate_extraction.py`, so only the four `# ADAPT-POINT:` regions are editable.
 
 ## Get clean source text
 

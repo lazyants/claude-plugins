@@ -83,7 +83,7 @@ def test_wrappers_disjoint_from_terminators():
 # #238/#241 (A-C4) -- THREE independent copies of the same Hebrew mark/
 # connector match-key fold exist this train: bootstrap_names.py,
 # language_smoke_report.py, and the pre-existing final_audit.py
-# (_fold_source_marks, final_audit.py:548). No shared import between any of
+# (_fold_source_marks, final_audit.py:675-698). No shared import between any of
 # them (final_audit.py is frozen; language_smoke_report.py runs as an
 # isolated subprocess) -- this is the minimum drift guard asserting all
 # three still agree.

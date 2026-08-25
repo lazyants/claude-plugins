@@ -126,7 +126,7 @@ def _write_valid_profile(tmp_path: Path, source_format: str = "gutenberg_epub") 
     for #180's format-gate tests below -- the fixture's
     ``adapter_config.custom: {{extractor_path: null}}`` and ``gutenberg_id:
     null`` already satisfy profile.schema.json's custom-format `allOf`
-    branch (schema.json:362-380) with no further changes needed."""
+    branch (schema.json:384-400) with no further changes needed."""
     durable_root = tmp_path / "durable"
     durable_root.mkdir()
     source_file = tmp_path / "source.epub"

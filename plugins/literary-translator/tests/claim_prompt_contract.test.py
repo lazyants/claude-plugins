@@ -1430,7 +1430,7 @@ def run_pipeline(tmp_path, seg, *, max_fix_rounds=2, timeout=30) -> dict:
 @pytest.mark.parametrize("seg", ["seg01", "FRONTBACK:errata_02"])
 def test_fix_prompt_actual_rendered_text_preserves_the_claimed_token_byte_for_byte(tmp_path, seg):
     """D9's actual protection on the fallback template path (PLAN.md D9,
-    mass-translate-wf.template.js:1288): the claim survives a fix round
+    mass-translate-wf.template.js:1628): the claim survives a fix round
     ONLY because fixPrompt()'s own rendered text instructs the fixer to
     copy the draft's existing dispatch_token byte for byte, unchanged. This
     is exercised against the ACTUAL rendered fixPrompt() output produced by
@@ -1518,8 +1518,8 @@ def test_default_path_has_no_deterministic_draft_token_recheck_after_a_fix(tmp_p
 def test_default_path_ledger_write_precedes_the_translate_dispatch(tmp_path):
     """PLAN.md D8's residual, pinned so it stays visible in the suite
     rather than only in prose: `recordLedgerCall(seg, {status:
-    "in_progress"})` (mass-translate-wf.template.js:1786) completes BEFORE
-    `agent(translateDrivePrompt(seg))` (:1785) -- so any refusal inside
+    "in_progress"})` (mass-translate-wf.template.js:2368) completes BEFORE
+    `agent(translateDrivePrompt(seg))` (:2371) -- so any refusal inside
     codex_job.py (the chokepoint layer, a different teammate's file, out of
     this file's scope) fires strictly AFTER the ledger has already been
     full-replaced to a two-key in_progress row. This is why that chokepoint

@@ -38,7 +38,7 @@ ever refuses is as wrong as one that never does:
   - a moved MACHINERY field still ASSEMBLES -- the #491 carve-out population is
     excluded by construction, so a plugin upgrade cannot newly strand a book.
     That case rewrites `runs/.plugin_bundle_hash`, the marker Step 0a writes and
-    `cache_key.py:563` reads back, and asserts the recomputed field really moved
+    `cache_key.py:644` reads back, and asserts the recomputed field really moved
     before asserting assembly survived it: editing a bundle script's bytes would
     leave the field unchanged and make the test vacuous;
   - the #533/R9 contract-only admission behaves identically on BOTH orderings,

@@ -1892,7 +1892,7 @@ def test_check_frozen_inputs_cli_exit_code_reflects_mismatch(tmp_path):
 ])
 def test_check_frozen_inputs_fails_closed_on_frozen_input_specs_key_mismatch(tmp_path, monkeypatch, direction):
     """Round 12 (#243): `frozen_input_check()`'s own `paths` dict
-    (skeptic_ready.py:1051) is a FIXED, three-key `{"canon", "manifest",
+    (skeptic_ready.py:1320) is a FIXED, three-key `{"canon", "manifest",
     "senses"}` literal -- unlike the two digest functions'
     `{key: (state, bytes)}` maps (built fresh from their own kwargs every
     call, see tests/suspicion_scan.test.py's/tests/skeptic_setup.test.py's
@@ -1901,7 +1901,7 @@ def test_check_frozen_inputs_fails_closed_on_frozen_input_specs_key_mismatch(tmp
     entry that diverges from it (a fourth spec with no matching `paths`
     key, a spec dropped while `paths` keeps its old key, or a spec that
     silently REUSES an existing key) has to be caught by comparing that
-    fixed literal against the tuple itself, at skeptic_ready.py:1053
+    fixed literal against the tuple itself, at skeptic_ready.py:1322
     (``if sorted(paths) != sorted(_spec_keys): raise AssertionError``).
 
     A prior round declined to test this guard, on the premise that
@@ -1909,10 +1909,10 @@ def test_check_frozen_inputs_fails_closed_on_frozen_input_specs_key_mismatch(tmp
     (so the argument went) validates the aggregate's stamps against
     `FROZEN_INPUT_SPECS`-derived expectations before `paths` is ever
     built, making any reaching test a fabricated bypass. That premise is
-    false: `run_check_frozen_inputs()` (skeptic_ready.py:1089, the
+    false: `run_check_frozen_inputs()` (skeptic_ready.py:1638, the
     standalone `--check-frozen-inputs` CLI mode wired in `main()`) calls
     `frozen_input_check(aggregate, canon_path, manifest_path, senses_path,
-    tolerant_reads=True)` DIRECTLY (skeptic_ready.py:1142) with no upstream
+    tolerant_reads=True)` DIRECTLY (skeptic_ready.py:1141-1142) with no upstream
     stamp-validation gate on that path -- the guard is reached through its
     own real, undoctored call chain, exactly like the CLEAN/tamper cases
     already covered above by
@@ -1952,7 +1952,7 @@ def test_check_frozen_inputs_fails_closed_on_frozen_input_specs_key_mismatch(tmp
     import time via `_load_module()` up top), and `skeptic_ready.py`
     resolves `FROZEN_INPUT_SPECS` from its OWN globals at call time (its
     own top-level `from skeptic_constants import (..., FROZEN_INPUT_SPECS,
-    ...)`, skeptic_ready.py:223-232, bound the name into `sr`'s globals,
+    ...)`, skeptic_ready.py:271-281, bound the name into `sr`'s globals,
     not `skeptic_constants`'s) -- patching `skeptic_constants`'s copy
     instead would leave `sr.frozen_input_check()`'s own `_spec_keys` lookup
     unaffected and this test would silently exercise nothing.

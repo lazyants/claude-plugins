@@ -4791,8 +4791,8 @@ has_in_section "publish-targets README: the create branch is conditional, not au
   "$PTREADME" '## Adding a new target X' \
   'before creating a container because the label match came back zero'
 # Round 3: this halt was called "ambiguous-container", which THIS PLUGIN already uses for the
-# MULTIPLE-candidate outcome — `assets/lib/chapter-paths.mjs:1191` ("container-ambiguous halt") and
-# `tests/chapter-paths.test.mjs:822`/`:1756`. Two different halts under one name, in one plugin, is
+# MULTIPLE-candidate outcome — `assets/lib/chapter-paths.mjs:1386` ("container-ambiguous halt") and
+# `tests/chapter-paths.test.mjs:823`/`:1755`. Two different halts under one name, in one plugin, is
 # the kind of collision an adapter author resolves by guessing. Renamed to "near-miss" everywhere it
 # is mine to rename; the module's own term is left alone.
 has_in_section "publish-targets README: names the near-miss halt a new adapter owes" \

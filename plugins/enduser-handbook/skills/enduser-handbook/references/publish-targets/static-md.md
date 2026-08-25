@@ -517,7 +517,7 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
       ever written here; the shipped 1.10.0 behaviour this retires had no membership check at
       all and appended another duplicate row on every re-run, without limit.
     - **The same nested placement, but when the new child row uses `*` or `+`** used to lock the whole
-      file out on the NEXT run instead: `chapterRelPath` (`chapter-paths.mjs:168-172`) always
+      file out on the NEXT run instead: `chapterRelPath` (`chapter-paths.mjs:174-178`) always
       joins the entry's `group` onto its `slug` — `<group>/<slug>.md` — whenever `group` is
       set, so a title that breaks its own link parse leaves that group-prefixed `/` sitting in
       the raw bullet content, and `isBarePathBullet` refuses exactly that shape on a `*`/`+`

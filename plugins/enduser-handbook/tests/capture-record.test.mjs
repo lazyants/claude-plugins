@@ -8272,10 +8272,9 @@ test('openCaptureRun (codex round 8, IMPORTANT 1): a contended open never runs t
         return nodeFs.readdirSync(p, opts);
       },
     });
-    // Before the fix: `openCaptureRun` resolved (and could EXECUTE) the identity command around
-    // capture-record.mjs:1219 while the exclusive pending-token create happened only around
-    // :1254 — so this arbitrary, possibly side-effecting operator command ran for a run that was
-    // never going to open.
+    // Before the fix (codex round 8): `openCaptureRun` resolved (and could EXECUTE) the identity
+    // command before the exclusive pending-token create ran — so this arbitrary, possibly
+    // side-effecting operator command ran for a run that was never going to open.
     const result = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
     assert.equal(result.ok, false, JSON.stringify(result));
     assert.equal(result.halts[0].halt, 'run_already_open', JSON.stringify(result));
@@ -9424,7 +9423,7 @@ function findDisallowedFsReference(source, tokens, namespaceNames, directNames, 
 // [round 8→9, this fix] Everything above polices the CONSTRUCTION of the seam — every occurrence of
 // an fs-bound name is confined to the one sanctioned property-value slot inside the `defaultDeps`
 // literal. None of it says anything about the CONSUMPTION of `defaultDeps` itself once built. Codex's
-// round-7 executed mutant on the real module — `capture-record.mjs:817`, `deps.mkdirSync(...)` ->
+// round-7 executed mutant on the real module — `capture-record.mjs:991`, `deps.mkdirSync(...)` ->
 // `defaultDeps.mkdirSync(...)` — reaches the real filesystem through the frozen module-level default
 // directly, completely ignoring whatever `deps` an injected virtual/test filesystem supplied, and
 // `checkCapabilityPolicy` returned `{ok: true}` (reproduced directly against a copy of the real
@@ -9666,7 +9665,7 @@ test('capability policy: mutants — each of these must FAIL', () => {
     // `defaultDeps` itself does, and the old rule had no way to tell them apart.
     "const bypass = { run: fs.writeFileSync };\nbypass.run('/outside', 'x');",
     // [round 8→9, this fix] codex's round-7 executed mutant on the real module —
-    // `capture-record.mjs:817`, `deps.mkdirSync(...)` -> `defaultDeps.mkdirSync(...)` — reached
+    // `capture-record.mjs:991`, `deps.mkdirSync(...)` -> `defaultDeps.mkdirSync(...)` — reached
     // through the frozen module-level default directly, bypassing whatever `deps` an injected
     // virtual/test filesystem supplied entirely; `checkCapabilityPolicy` returned `{ok: true}`
     // against the pre-fix checker (reproduced directly against a copy of the real module before
@@ -9781,7 +9780,7 @@ test('capability policy: the seam locator is agnostic to the declaration keyword
 // alone, and the one still-admitted alias gap, pinned so a future round does not have to rediscover
 // any of them by hand.
 test('capability policy: defaultDeps is the seam DEFAULT, never a call target — direct, bracket and optional-chain member access are all rejected; the merged local and the real merge/spread shapes stay untouched; the un-tracked alias gap is measured, not assumed', () => {
-  // codex's round-7 executed mutant (capture-record.mjs:817), and the bracket/optional-chain
+  // codex's round-7 executed mutant (capture-record.mjs:991), and the bracket/optional-chain
   // variants of the identical bypass — none of these is a shape check, so all three fall to it.
   assert.equal(checkCapabilityPolicy('defaultDeps.mkdirSync(dir, { recursive: true });').ok, false);
   assert.equal(checkCapabilityPolicy("defaultDeps['mkdirSync'](dir, { recursive: true });").ok, false);

@@ -149,7 +149,7 @@ def normalize_form(s: str) -> str:
     """NFC-normalize, casefold, and collapse-and-strip internal whitespace
     -- the ONE normalizer every grouping/matching key across the
     homonym-split feature is computed from (relocated here from
-    canon_adjudication_audit.py:296, which now imports it from this
+    canon_adjudication_audit.py:396, which now imports it from this
     module instead of defining its own copy). Display fields always keep
     the original string; only grouping/hashing/comparison ever sees the
     normalized form."""
@@ -696,8 +696,8 @@ def load_senses_from_snapshot(
        explicit path the caller expected to exist (`allow_absent=False`)
        is a BLOCK when absent. ANY non-regular path -- a directory, a
        dangling symlink, a device node -- is a BLOCK regardless of
-       `allow_absent` (mirrors glossary_batch_plan.py:199 +
-       canon_adjudication_audit.py:739).
+       `allow_absent` (mirrors glossary_batch_plan.py:351-361 +
+       canon_adjudication_audit.py:687-696).
     2. When present, schema-validates against `schema_path` FIRST, before
        any emptiness decision -- a schema failure is always BLOCKING,
        never silently "no senses". A raw `{}` fails here (missing

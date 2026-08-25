@@ -1,0 +1,58 @@
+# Repo-wide `file.ext:NNN` citation gate (#579).
+#
+# DELIBERATELY HAS NO `paths:` FILTER, unlike every other workflow here. The others are scoped to
+# their own plugin because each drives one plugin's suite. This one READS THE WHOLE TREE: a citation
+# in any tracked text file can be invalidated by an edit to any other tracked text file, so the only
+# honest filter is none. This repo's CLAUDE.md states the rule that forces it -- "a path filter must
+# cover every file the suite READS, not only the directory it lives in" -- and a filter that
+# under-covered here would let a PR editing a cited file merge with the gate never scheduled, which
+# is the exact hole CI is supposed to close.
+#
+# It is cheap enough to afford that: one Python process over ~570 files, seconds rather than minutes.
+name: citation-audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: citation-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    # The gate's honest runtime is ~2s over 574 files. This bound is the backstop for a fork
+    # PR carrying a pathological line: the scanner refuses to read one (MAX_SCANNED_LINE), and
+    # if anything else ever runs long the job dies in minutes rather than at the 6-hour cap.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        # Depth 1 is enough: unlike the literary-translator suite, nothing here resolves a historical
+        # commit -- the gate only ever reads the working tree.
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'   # mirrors the dev machine, so a CI result is comparable
+
+      - name: Unit tests for the audit tool
+        run: |
+          set -euo pipefail
+          # `--collect-only` first, and the count is asserted: `pytest <dir>` over a directory whose
+          # files matched no collection pattern reports "no tests ran" and EXITS 0. That is exactly
+          # how a gate goes green without running, and it is why these files are named `test_*.py`
+          # rather than following the plugins' `*.test.py` convention (no root pytest.ini declares
+          # that pattern, and the literary-translator one does not govern this directory).
+          collected=$(python3 -m pytest tools/tests --collect-only -q | tail -1)
+          echo "collect-only says: $collected"
+          python3 -m pytest tools/tests --collect-only -q | grep -qE '^[1-9][0-9]* test' \
+            || { echo "::error::pytest collected no tests from tools/tests"; exit 1; }
+          python3 -m pytest tools/tests -q
+
+      - name: Citation gate
+        run: python3 tools/citation_audit.py check

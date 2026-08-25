@@ -249,7 +249,7 @@ _WRAPPERS = frozenset("()[]{}'’‘“«")
 # same reason TOKEN_RE/TERMINATORS/_WRAPPERS above are independently copied
 # here too). tests/extractor_terminators_drift.test.py's drift guard asserts
 # this copy agrees with bootstrap_names.py's and with the pre-existing
-# final_audit._fold_source_marks (final_audit.py:548).
+# final_audit._fold_source_marks (final_audit.py:675-698).
 # ---------------------------------------------------------------------------
 
 # NAME_CONNECTORS -- byte-identical to bootstrap_names.py's own (maqaf
@@ -268,7 +268,7 @@ _HEBREW_ASCII_CONNECTOR_SPLIT_RE = re.compile(
 def _fold_match_marks(s):
     """Fold Hebrew niqqud/cantillation for the #238 MATCH KEY ONLY -- mirrors
     bootstrap_names.py's own ``_fold_match_marks`` (itself a mirror of
-    ``final_audit._fold_source_marks``, ``final_audit.py:548``) byte-for-byte:
+    ``final_audit._fold_source_marks``, ``final_audit.py:675-698``) byte-for-byte:
     NFD-decompose, drop every combining mark (Unicode category ``Mn``) in the
     Hebrew block range U+0591-U+05C7, then re-NFC. NEVER applied to an
     EMITTED name -- this script's own Contract-5-equivalent emit site in

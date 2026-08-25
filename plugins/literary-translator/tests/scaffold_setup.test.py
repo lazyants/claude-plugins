@@ -1,9 +1,9 @@
 """tests/scaffold_setup.test.py -- regression-lock suite for #194:
 ``scaffold_setup.py`` writes the two Step-0a bundle-hash marker files.
 
-THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:503)
+THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:638-644)
 READS ``${durable_root}/runs/.plugin_bundle_hash`` and
-``resume_setup.compute_input_digest`` (resume_setup.py:289-292) reads BOTH
+``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH
 ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before
 #194 SKILL.md's Step 0a only PROSE-described "computes/writes" them: no
 shipped script actually wrote either marker, so a real run failed with

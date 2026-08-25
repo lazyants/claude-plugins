@@ -30,7 +30,7 @@ Route and heading are identical across a page's staged (variant) and un-staged (
 neither `capture.page_identity_signal` nor the primary heading changes when only the underlying data
 does. A forgotten or **reverted** precondition (the empty fixture was not applied, or a prior run
 already restored the populated data) therefore still passes ordinary page identity and silently
-ships the wrong-but-real state. `references/page-identity.md:127-136` states this rule generally;
+ships the wrong-but-real state. `references/page-identity.md:156-162` states this rule generally;
 state-variant capture is the canonical case it exists for.
 
 The fix is the fail-closed `state` marker on `assertIdentity` (`assets/capture-helpers.playwright.ts`):

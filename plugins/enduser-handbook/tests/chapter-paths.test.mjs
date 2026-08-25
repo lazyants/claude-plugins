@@ -4967,10 +4967,10 @@ test('buildEmbedCandidates legacy eligibility 4/4: a GROUPED static_md entry off
   assert.equal(candidates.size, 1, 'grouped entries never get the group-free legacy spelling, regardless of target');
 });
 
-// [round 7] EmbedCandidateHalt (chapter-paths.mjs:2374) is a private, unexported class — the
+// [round 7] EmbedCandidateHalt (chapter-paths.mjs:2755) is a private, unexported class — the
 // .d.mts documents the distinction explicitly ("Throws (an EmbedCandidateHalt, an ordinary Error
 // to a caller outside this module)"), and it is load-bearing at runtime: expectedAssets' own catch
-// (`err instanceof EmbedCandidateHalt`, chapter-paths.mjs:2693) depends on buildEmbedCandidates
+// (`err instanceof EmbedCandidateHalt`, chapter-paths.mjs:3074) depends on buildEmbedCandidates
 // actually throwing THIS class rather than a plain Error, or the halt would escape uncaught instead
 // of converting to `{ok:false, halt:...}`. A regex-only assertion cannot see that distinction — both
 // classes would carry the same message. Since the class itself cannot be imported, `.name` (set

@@ -94,7 +94,7 @@ but the project has not fully converged (any of `not_started`/`recoverable`/
 This closes the previous gap where a project with unconverged segments
 silently exited `0` on the default `segment_drafts_and_audit` delivery path,
 giving it no deterministic delivery-refusal gate to match the engine-loop
-HARD rule already enforced on the `assembled_book` path (`assemble.py:405`'s
+HARD rule already enforced on the `assembled_book` path (`assemble.py:2592`'s
 `assert_project_complete`). `warnings` and the frontback coverage report
 remain purely informational.
 
@@ -517,7 +517,7 @@ non-shipped historiettes-t3 provenance project referenced above.
   searching a variant spelling finds nothing; and emit no per-row count
   unless it is re-derived from the artifact itself, an index page being where
   a fabricated number is least likely to be checked. Step 0a copies
-  `PLAN.template.md` once and never refreshes it (`SKILL.md:393`), so a
+  `PLAN.template.md` once and never refreshes it (`SKILL.md:482`), so a
   project scaffolded before the retirement may still name
   `output.index.enabled` in its hand-edited `PLAN.md` intake answer; drop
   that phrase by hand — there is no automatic migration.

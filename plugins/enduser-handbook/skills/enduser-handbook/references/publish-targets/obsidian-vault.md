@@ -798,7 +798,7 @@ the one exception to "do all of these" — see its own conditional note below.
        broken title, and that raw text is the row's WHOLE unparsed content, including the
        link target. `wireNestedListChapter` is reached only for a GROUPED entry, and a
        grouped entry's target always carries its group prefix (`chapterRelPath`,
-       `chapter-paths.mjs:168-172`, returns `<group>/<slug>.md` whenever `group` is set) —
+       `chapter-paths.mjs:174-178`, returns `<group>/<slug>.md` whenever `group` is set) —
        that `/` is what trips `isBarePathBullet` ("Nested-list automation limits" below),
        not the broken title in isolation: measured, an otherwise-identical flat-style,
        slash-free target reaches `present` instead, so do not generalize this to "a

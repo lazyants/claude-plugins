@@ -1201,7 +1201,7 @@ def test_scope_filter_excludes_non_proper_names_from_cats_1_to_3(tmp_path):
 #
 # CHARACTERIZATION -- red-before-green is STRUCTURALLY IMPOSSIBLE for both
 # tests below. The scope filter (see this module's own docstring, "Scope",
-# and `_proper_name_records` at scripts/canon_adjudication_audit.py:533) is
+# and `_proper_name_records` at scripts/canon_adjudication_audit.py:786-794) is
 # a DENYLIST -- `is_proper_name is True and basis != "not_a_name"` -- with
 # zero hardcoded enum literals besides "not_a_name" itself. A
 # basis:"sense_translated" entry was therefore ALREADY included in Cats 1-3

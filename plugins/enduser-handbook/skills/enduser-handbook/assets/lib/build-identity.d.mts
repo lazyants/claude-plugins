@@ -103,7 +103,7 @@ export declare function resolveClosingIdentity(input: {
  *
  * [round 6] Three production call sites, not two: both record readers (capture-record.mjs —
  * `readRunRecordText` for the run record, `readChapterRecordText` for the chapter record) AND
- * `classifyBuildDelta` in this same module (build-identity.mjs:521), which reuses it to fail loudly
+ * `classifyBuildDelta` in this same module (build-identity.mjs:533-539), which reuses it to fail loudly
  * when `recordState` is `'ok'`/`'stale'` and `record` is not a real `BuildIdentity` — see that
  * function's own comment for why. The previous wording ("run by both record readers ... and nothing
  * else") was ambiguous between "nothing else RUNS it" — false, `classifyBuildDelta` does — and

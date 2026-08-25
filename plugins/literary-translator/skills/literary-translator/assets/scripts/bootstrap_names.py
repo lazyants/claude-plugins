@@ -299,7 +299,7 @@ WRAPPERS = frozenset("()[]{}'’‘“«")
 # -- as the raw surface reconstruction; nothing in this section is ever used
 # to build that string). Three independent copies exist this train (A-C4):
 # this one, language_smoke_report.py's own mirror, and the pre-existing
-# final_audit._fold_source_marks (final_audit.py:548, read-only to this
+# final_audit._fold_source_marks (final_audit.py:675-698, read-only to this
 # script -- final_audit.py is frozen this train). No shared import between
 # any of the three -- language_smoke_report.py runs as an isolated
 # subprocess with no sibling-module dependency, the same reason TOKEN_RE/
@@ -340,7 +340,7 @@ _HEBREW_ASCII_CONNECTOR_SPLIT_RE = re.compile(
 
 def _fold_match_marks(s: str) -> str:
     """Fold Hebrew niqqud/cantillation for the #238 MATCH KEY ONLY -- mirrors
-    ``final_audit._fold_source_marks`` (``final_audit.py:548``) byte-for-byte:
+    ``final_audit._fold_source_marks`` (``final_audit.py:675-698``) byte-for-byte:
     NFD-decompose, drop every combining mark (Unicode category ``Mn``) in the
     Hebrew block range U+0591-U+05C7, then re-NFC. NEVER applied to an
     EMITTED ``name`` (Contract 5) -- this fold lives ONLY in
@@ -430,7 +430,7 @@ def _warn_inventory_match_key_collisions(name_inventory: frozenset, path: Path) 
     ``name_inventory`` surface forms fold to the SAME #238/#241 match key
     (e.g. ``משה לייב`` and ``משה־לייב`` both ``fold_match_key`` to
     ``משה לייב``). Contract 2's no-new-fatal rule forbids turning this into a
-    :class:`BootstrapNamesError` -- nine importers, and ``segpack.py:663-668``
+    :class:`BootstrapNamesError` -- nine importers, and ``segpack.py:1125-1131``
     turns ANY exception into a FATAL -- so a ``name_inventory`` that was VALID
     at 6fb80ba must stay valid. Structurally harmless for MATCHING:
     ``_compiled_inventory_trie()`` inserts the SAME flattened path for every

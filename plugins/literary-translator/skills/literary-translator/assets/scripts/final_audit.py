@@ -1564,14 +1564,14 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     scripts" convention, which is already false here (canon_validate.py and
     glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports
     cache_key.py). The real reason: ledger_update.py is a
-    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:102-109 records that that
+    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:149-156 records that that
     tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS
     INVISIBLE -- which is why canon_senses.py had to be registered
     explicitly once two members imported it. A shared module would put this
     predicate's bytes outside the hash meant to cover them, so WEAKENING
     this guard would no longer move plugin_bundle_hash, and every durable
     root scaffolded beforehand would go on trusting it: the exact
-    false-green cache_key.py:116-120 names. Consolidation stays possible --
+    false-green cache_key.py:163-167 names. Consolidation stays possible --
     it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the
     same commit.
 

@@ -601,7 +601,7 @@ def test_retry_of_resolved_entry_emits_note(tmp_path):
 
 
 def test_retry_diagnostic_prefers_entries_note_over_dismissal_note(tmp_path):
-    """#653 bot review P2 (PR #703, glossary_batch_plan.py:515): a name can
+    """#653 bot review P2 (PR #703, glossary_batch_plan.py:532-536): a name can
     legitimately be BOTH a resolved entries{} key AND carry a `dismiss`
     document in corrections[] -- the sanctioned dismiss -> --retry ->
     accepted-merge sequence produces exactly that overlap. If it is later

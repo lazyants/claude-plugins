@@ -201,7 +201,7 @@ def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling(tmp_path):
 # `--restamp-derivation`, `--batch`, or `--merge-batches` in NO test file.
 # `resolve_cache_key_script`/`_stamp_generation_hash` are shared code, but
 # each of these three threads its OWN `plugin_root_str` parameter through
-# from `main()`'s dispatch (canon_validate.py:2609-2646) to its own
+# from `main()`'s dispatch (canon_validate.py:3970-4017) to its own
 # `_stamp_write_verify` call -- a regression in any one of those three
 # threading sites would not be caught by the `--init` test above.
 # ---------------------------------------------------------------------------

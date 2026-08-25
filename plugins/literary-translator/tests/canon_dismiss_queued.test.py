@@ -654,7 +654,7 @@ def test_dismiss_of_form_also_present_in_entries_leaves_the_entry_untouched(tmp_
 def test_dismiss_one_of_two_rows_queued_for_the_same_form_leaves_the_other(tmp_path):
     """`_merge_batch` appends whenever the whole object differs, so one
     form queued by two batches for two different reasons is TWO rows, not
-    one -- ordinary, not a hand-edit artifact (person_registry.py:858-861
+    one -- ordinary, not a hand-edit artifact (person_registry.py:899-910
     documents and coalesces exactly this). Matching on the whole value
     means dismissing one reason must not silently dismiss the other; two
     decisions take two documents."""

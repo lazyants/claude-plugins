@@ -40,7 +40,7 @@ implementation; a Cypress or Puppeteer project reimplements the glue, not the po
 
 **Load-bearing caveat: the glue carries a safety contract it must not drop.**
 `decideRoute`'s `[guard:eventsource]` and `[guard:beacon]` branches key on the exact
-`resourceType` tokens `'eventsource'` and `'ping'` (`assets/lib/capture-guard-policy.mjs:217,224`).
+`resourceType` tokens `'eventsource'` and `'ping'` (`assets/lib/capture-guard-policy.mjs:271,278`).
 The reused classifier only preserves the SSE/beacon block if the per-engine glue populates
 `GuardRequest.resourceType` with that identical vocabulary. An SSE `GET` arriving with
 `resourceType: 'fetch'` or `undefined` falls through to `[guard:get-head]` and connects to
@@ -164,8 +164,8 @@ assume the context-level guarantee Playwright gives you for free.
 boundary**. The skill's capture harness runs **container-only**
 ([container-isolation.md](container-isolation.md)): "If `capture.command` is empty or the
 project clearly runs captures on the host, you do not just run it anyway. You halt and
-tell the user the guarantees above are not met" (`container-isolation.md:161-166`), and W2
-states plainly "you never run the engine on the host" (`SKILL.md:94`). Because a manual
+tell the user the guarantees above are not met" (`container-isolation.md:179-181`), and W2
+states plainly "you never run the engine on the host" (`SKILL.md:100`). Because a manual
 capture is by definition a human at the keyboard rather than a container-run script, the
 skill's automated flow **halts** on `engine: manual` rather than proceeding — it does not
 attempt to drive or guard a human-operated session.

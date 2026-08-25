@@ -9,14 +9,14 @@ validate_assembled.py directly).
 
 WHY THIS FILE EXISTS. `validate_conservation.py`'s own `output-coverage`
 lane (default `segment_drafts_and_audit` scope) is a SECOND caller of the
-same `collect_reviewed_draft_rebind()` (validate_conservation.py:1114) --
+same `collect_reviewed_draft_rebind()` (validate_conservation.py:1240) --
 reused, never reimplemented, per that script's own module docstring
 ("Population scope"/"Reuses validate_assembled.py's own reviewed-SHA
 rebind machinery" section). The #491 R2 fix could not edit that call site
 itself (a different file, owned by a concurrent change), so the team lead
 wired it centrally: `va.collect_reviewed_draft_rebind(ledger_segments,
 va.collect_manifest_seg_ids(manifest_segments))` (validate_conservation.py
-:1114-1116). That wiring is correct today, but every out-of-manifest
+:1240-1242). That wiring is correct today, but every out-of-manifest
 fixture in the existing suite (tests/validate_assembled_carveout.test.py)
 drives `validate_assembled.py` only -- nothing exercises the SAME retained-
 entry shape THROUGH `validate_conservation.py`'s own call site. A mutant
@@ -28,9 +28,9 @@ closes that gap.
 
 `run_output_coverage()`'s default-scope branch DISCARDS the rebind's
 `stale_segs` return value outright (bound to `_stale_segs`,
-validate_conservation.py:1114) and derives `eligible_keys` as
+validate_conservation.py:1240) and derives `eligible_keys` as
 `{(seg, bid) for (seg, bid) in source_marker_counter if seg in
-trusted_drafts}` (validate_conservation.py:1125) -- `source_marker_counter`
+trusted_drafts}` (validate_conservation.py:1253) -- `source_marker_counter`
 comes from `collect_source_markers(manifest_segments, ...)`, which by
 construction can NEVER name a `(seg, bid)` pair for a segment the manifest
 does not cite. So an out-of-manifest segment's own `stale_segs`-only
@@ -367,7 +367,7 @@ def test_in_manifest_carved_out_stale_corrupt_draft_still_exits_2(tmp_path):
 # ===========================================================================
 # 4. Mutation proof (the deliverable this file exists for).
 #
-#    M1: validate_conservation.py:1114-1116's call site is mutated from
+#    M1: validate_conservation.py:1240-1242's call site is mutated from
 #        `va.collect_reviewed_draft_rebind(ledger_segments,
 #         va.collect_manifest_seg_ids(manifest_segments))` to
 #        `va.collect_reviewed_draft_rebind(ledger_segments,

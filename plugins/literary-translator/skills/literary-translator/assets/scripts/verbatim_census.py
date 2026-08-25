@@ -67,7 +67,7 @@ Two refusals exist so a green-looking zero can never be mistaken for a clean
 census:
 
   - a scanned unit whose segpack block carries no `plain_text` (schema-valid,
-    `segpack.py:281-283`) -- the frozen contract names that field, and
+    `segpack.py:530-534`) -- the frozen contract names that field, and
     `validate_draft._block_source_text()`'s fallback to raw `source_html`
     would compare Hebrew against markup;
   - a run of segments whose SOURCE contains no Hebrew at all -- the census
@@ -151,7 +151,7 @@ dumps_line = _json_stdout.dumps_line
 SCRIPT_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPT_DIR.parent
 
-# Sibling imports, never reimplementations (occurrence_targets.py:158's own
+# Sibling imports, never reimplementations (occurrence_targets.py:199-247's own
 # pattern). `segpack.py` can `sys.exit(<str>)` at import time when ITS sibling
 # import fails, which would surface here as an uncaught SystemExit with status
 # 1 -- a data/environment failure wearing the one status this script promises
@@ -201,7 +201,7 @@ HEBREW_LETTERS = frozenset(
     if unicodedata.category(chr(cp)).startswith("L")
 )
 
-# Exactly final_audit._fold_source_marks()'s own range (final_audit.py:614).
+# Exactly final_audit._fold_source_marks()'s own range (final_audit.py:696).
 # A mark OUTSIDE it -- an Arabic fatha, a Devanagari matra -- deliberately
 # ENDS a run instead of joining it, so a mixed-script corruption stays visible
 # as two short runs rather than being folded away as a mark difference.
@@ -250,7 +250,7 @@ def _placeholder_strings(segpack):
 
 def mask_placeholders(text, verse_placeholders):
     """Replace each KNOWN placeholder span with an equal-length run of spaces.
-    Equal-length, never a collapsing single space, for bootstrap_names.py:96's
+    Equal-length, never a collapsing single space, for bootstrap_names.py:136-150's
     reason -- and because deletion would join `אב⟦FNREF_1⟧גד` into the
     invented run `אבגד`."""
     def _sub(m):
@@ -433,7 +433,7 @@ def _validated_pair(seg, segments_dir):
     have. `validate_segpack()` is additionally wrapped because it is not total
     over JSON values: a `canon_names` member that is itself a list raises
     `TypeError` from its own set construction (reproduced against
-    `segpack.py:631` at bf85312; filed separately, not repaired here)."""
+    `segpack.py:942-943` at bf85312; filed separately, not repaired here)."""
     err = validate_seg(seg)
     if err:
         raise CensusError(err)

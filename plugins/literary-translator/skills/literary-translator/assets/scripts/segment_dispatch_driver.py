@@ -300,14 +300,14 @@ that `codex_job.py` "accepts neither flag on the data side". Both were
 false, and the first one directly contradicted `build_codex_job_argv()`'s
 OWN docstring in this same file, which already listed `[--plugin-root]`
 among the flags it splices. Verified against the shipped `codex_job.py`:
-it DOES accept `--plugin-root` (`codex_job.py:1050`) -- `build_codex_job_argv()`
+it DOES accept `--plugin-root` (`codex_job.py:2757`) -- `build_codex_job_argv()`
 forwards it whenever `plugin_root_str` is set (below, in the argv-building
-section) -- and consumes it in `_trusted_scripts_dir()` (`codex_job.py:327-336`),
+section) -- and consumes it in `_trusted_scripts_dir()` (`codex_job.py:615-625`),
 which returns `{plugin_root}/assets/scripts/` directly when given and falls
 back to its own `__file__`-relative `SCRIPTS_DIR` only when it is absent.
 "Accepts neither flag" is HALF right, not simply backwards: `codex_job.py`
 accepts `--plugin-root` but NOT `--durable-root` -- for the DATA side it
-takes a required `--cwd` instead (`codex_job.py:1030`), which this driver
+takes a required `--cwd` instead (`codex_job.py:2723`), which this driver
 already forwards as `str(durable_root)` in every dispatch (build_codex_job_argv()'s
 own `--cwd` argument), matching every other v1.17.0-hardened script's
 self-anchored-unless-redirected shape without needing a second, redundant
@@ -748,7 +748,7 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
             # Path("").absolute() (like Path("").resolve()) is CWD, silently
             # making wherever this process happens to be launched from the
             # executable authority for the template AND every sibling
-            # script. codex_job.py:1436 already refuses this same input;
+            # script. codex_job.py:2930 already refuses this same input;
             # refusing it here too, before any path is built from it, keeps
             # both scripts consistent instead of one being the loophole.
             fatal(
@@ -806,9 +806,9 @@ def _root_forward_args(dirs: dict, durable_root_str, plugin_root_str, *, support
     this function. codex round-3 correction: this used to also claim
     codex_job.py "accepts neither flag on the data side" -- false, and
     HALF backwards, not simply reversed: codex_job.py DOES accept
-    --plugin-root (codex_job.py:1050, forwarded by build_codex_job_argv()
+    --plugin-root (codex_job.py:2757, forwarded by build_codex_job_argv()
     whenever plugin_root_str is set) but does NOT accept --durable-root --
-    for the DATA side it takes a required --cwd instead (codex_job.py:1030),
+    for the DATA side it takes a required --cwd instead (codex_job.py:2723),
     which this driver already forwards separately as str(durable_root).
     The file path Popen'd for it changes too (see resolve_dirs()), but
     that is in addition to, not instead of, the --plugin-root flag itself
@@ -893,7 +893,7 @@ def fatal(message: str, exit_code: int = 1, **extra) -> NoReturn:
 # json"), and _read_review_obj()'s copy of the same. The REAL protection is
 # cross-file, not "this script never does it": select_segments.py's own
 # load_candidate_segments() fatals on any manifest.json `seg` failing its
-# validate_seg() (select_segments.py:904-915, the regex check at :911) --
+# validate_seg() (select_segments.py:1316-1332, the regex check at :1251) --
 # every `seg` this script ever operates on already came from THAT
 # validated output (the `segs` list Step 1's own gate returns), never from
 # an unvalidated source, before this script ever builds a path from one.
@@ -2121,7 +2121,7 @@ def parse_claims_from_cap_over_sentinel(select_result: dict, claims: dict, admit
 
 
 # Mirrors codex_job.py's own `_ACTIVE = frozenset(("queued", "running"))`
-# (codex_job.py:102) -- duplicated, not imported, per this project's "no
+# (codex_job.py:234) -- duplicated, not imported, per this project's "no
 # shared lib between self-contained scripts" convention. Used ONLY by
 # _attempt_cancel_orphan()'s own live status check below, never a
 # re-derivation of anything hygiene() itself decides differently.
@@ -2132,7 +2132,7 @@ def _attempt_cancel_orphan(*, durable_root: Path, seg: str, disp: str, companion
     """codex round-2 item 10: best-effort orphan cancellation, called ONLY
     from dispatch_codex_job()'s own backstop-timeout path, right after the
     SIGKILL+reap. Mirrors codex_job.py's own `hygiene()` method
-    (codex_job.py:704-740), including its live status check (codex round-4
+    (codex_job.py:1750-1784), including its live status check (codex round-4
     MINOR correction: an earlier version of this function skipped that
     check and went straight from "joblog says launched" to cancelling --
     a real, not merely cosmetic, divergence from the claim this docstring
@@ -2161,7 +2161,7 @@ def _attempt_cancel_orphan(*, durable_root: Path, seg: str, disp: str, companion
 
     `jobId`/`jobCwd` ARE durable by the time this driver's backstop can
     realistically fire: codex_job.py's own `launch()` writes both, via an
-    atomic O_EXCL+os.replace, BEFORE `poll()` (codex_job.py:797-802) --
+    atomic O_EXCL+os.replace, BEFORE `poll()` (codex_job.py:2156-2160) --
     `poll()` is the long phase, so the joblog this reads is already
     written in the overwhelming majority of cases. The one case this
     genuinely cannot close, stated rather than papered over: if the
@@ -2521,7 +2521,7 @@ def load_translate_config(durable_root: Path) -> dict:
             fatal(f"profile.yml at {profile_path} missing required field: engine.{field}", exit_code=2)
     max_fix_rounds = engine["max_fix_rounds"]
     # codex round-4 MAJOR: was `< 0` ("non-negative"), accepting 0 despite
-    # profile.schema.json's own `"minimum": 1` (profile.schema.json:494-497)
+    # profile.schema.json's own `"minimum": 1` (profile.schema.json:494)
     # -- an invalid profile this driver should refuse, not silently accept.
     # A fresh segment at max_fix_rounds=0 dispatches translate and review
     # round "1" (derive_next_action()'s own "no review yet" branch always
@@ -2824,9 +2824,9 @@ def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path) -> list:
     that "it might be a real run, so do not silently forget it" -- was
     rejected: this function's return value is forwarded verbatim into
     resume_setup.py's own `resume_from_run_ids`, and that authority's
-    resolve_run() (resume_setup.py:785) decides a MATCH by reading
+    resolve_run() (resume_setup.py:901) decides a MATCH by reading
     `runs/<id>/input.digest` with its OWN `Path.is_file()` call
-    (resume_setup.py:807) -- the identical swallow-pattern, one layer
+    (resume_setup.py:923) -- the identical swallow-pattern, one layer
     down, in a file this fix does not own. Passing an unreadable candidate
     through would not close the hole; it would only relocate it to a site
     this change cannot reach, while looking closed here. Refusing at the
@@ -2897,7 +2897,7 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
     Deliberately does NOT send `segs` (codex round-2 follow-up, post-
     8815800): the shipped resume_setup.py derives the input_digest's
     domain itself, straight from manifest.json's own segments[]
-    (_load_manifest_seg_ids(), resume_setup.py:552) -- never from a
+    (_load_manifest_seg_ids(), resume_setup.py:727) -- never from a
     caller-supplied list -- and reads a `segs` field literally NOWHERE in
     its own source; resume_integrity.test.py:test_mass_segs_field_omitted_
     still_works proves omission is accepted for kind="mass" specifically,
@@ -2925,7 +2925,7 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
     codex round-2 follow-up: `resume_from_run_ids` (plural, shipped
     8815800) carries EVERY candidate _resumable_run_id_candidates() offers
     (most recent first) in this ONE call, omitted entirely when there are
-    none -- resume_setup.py's own resolve_run() (resume_setup.py:724) now
+    none -- resume_setup.py's own resolve_run() (resume_setup.py:921-928) now
     does the try-each-candidate-in-order/first-match-wins loop internally
     and computes input_digest EXACTLY ONCE regardless of candidate count.
     This replaces an earlier version of this function that called
@@ -2947,7 +2947,7 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
     `args` is always `{}` for kind="mass" -- resume_setup.py now REJECTS
     (ResumeSetupError) any other value outright, before its own expensive
     per-segment cache_key.py shell-outs (compute_input_digest(),
-    resume_setup.py:626-638), for the reason this driver already applies:
+    resume_setup.py:818-827), for the reason this driver already applies:
     this driver's own CLI scoping flags (--only-segs/
     --allow-retranslate-converged/--allow-empty) govern Step 1's OWN
     gating (select_segments.py, already run and already enforced before
@@ -3710,11 +3710,11 @@ def call_template_functions(dirs: dict, subst: dict, calls: list, node_bin: str 
 
     STANDING TRAP (codex, round 2): `globalThis.args = "[]"` makes SEGS
     ALWAYS EMPTY (`const SEGS = Array.isArray(args) ? args : JSON.parse(
-    args);`, template.js:494) -- and the truncation marker
+    args);`, template.js:545) -- and the truncation marker
     (_TRUNCATE_BEFORE_MARKER) sits well AFTER that line, so this harness
     DOES execute the template's own top-level SEGS guards (the duplicate-id
-    `seen`-set check at template.js:536-541, and the SEG_ID_RE safety loop
-    at template.js:513-518) on every call. They run, and they look like
+    `seen`-set check at template.js:588-592, and the SEG_ID_RE safety loop
+    at template.js:563-569) on every call. They run, and they look like
     coverage -- but against an always-empty SEGS they are zero-iteration
     loops: they can never fire, on any input, ever, under this harness.
     This is NOT a one-time bug to fix; it is a property of this
@@ -4591,7 +4591,7 @@ def _translate_in_progress_since(dirs: dict, seg: str, review_path: Path) -> boo
     driver's own translate branch (see process_segment()'s
     `if action["action"] == "translate":`, just before its codex
     dispatch) and the shipped workflow's translateStage()
-    (mass-translate-wf.template.js:1856). A fix turn goes through neither,
+    (mass-translate-wf.template.js:2367). A fix turn goes through neither,
     so it writes no fragment at all -- which is what makes the discriminator
     work at all.
 
@@ -4629,7 +4629,7 @@ def _translate_in_progress_since(dirs: dict, seg: str, review_path: Path) -> boo
     Why _translate_redispatched_since()'s own mtime-only test above is NOT
     reusable here, unmodified, at THIS call site: the workflow also writes
     `{"status": "blocked", "reason": "draft-missing"}` AFTER a numbered
-    review (mass-translate-wf.template.js:1754), and a segment left
+    review (mass-translate-wf.template.js:2257), and a segment left
     `blocked` is explicitly retried via `--only-segs` under the SAME
     run_id (resume_setup.py resolves it to the same run by matching the
     same input digest). A mtime-only guard would hold the round label for
@@ -4843,7 +4843,7 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
 
     # #392 round-2 item 8: the fabricated-finding gate, PORTED (never
     # transcribed) from the template's own findingsAuthentic()/
-    # matchedVerdict() (mass-translate-wf.template.js:568-581), by
+    # matchedVerdict() (mass-translate-wf.template.js:753-765), by
     # executing them via call_template_functions() -- the same authority
     # every prompt this driver sends is already sourced from.
     # review.schema.json types findings[].loc as a bare string with no
@@ -4939,9 +4939,9 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
             # round_label is REQUIRED here, not decoration: the caller needs
             # it to compute the ledger's own `rounds` field (a real integer,
             # per mass-translate-wf.template.js's own runRound(),
-            # template.js:1595-1596 -- `rounds: round`, the NUMERIC loop
+            # template.js:2077 -- `rounds: round`, the NUMERIC loop
             # variable, which equals MAXFIX + 1 on the mandatory final call,
-            # template.js:1757). Without this, a segment that converges on
+            # template.js:2343). Without this, a segment that converges on
             # the FINAL round -- an entirely ordinary outcome -- could never
             # be told apart from one that converged on a numbered round.
             # reviewed_sha1/reviewed_token/reviewed_digest travel with this
@@ -4964,7 +4964,7 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         # was written -- or the sha1 simply could not be recomputed) must
         # NEVER fall through to already_converged: ledger_update.py's own
         # independent check (enrich_converged_fields, ledger_update.py:
-        # 789-792) refuses that convergence write outright, and with no
+        # 1263-1266) refuses that convergence write outright, and with no
         # branch that ever re-dispatches a review in that case, every later
         # invocation would repeat the SAME refused write forever -- a
         # live-lock, not a transient failure. There is also nothing to FIX
@@ -5937,7 +5937,7 @@ def _terminal_write_still_binds_what_was_reviewed(
     over- nor under-motivated -- the ordinary detached-job route does NOT
     reach this on its own. A competing codex_job.py serializes on the
     per-segment `.codex_job.<seg>.lock` and then calls `safe_adopt()`
-    BEFORE it would launch or promote anything (codex_job.py:1300); a
+    BEFORE it would launch or promote anything (codex_job.py:2500); a
     canonical review.json that still passes `review_ready.py
     --expect-token` is ADOPTED, leaving the artifact byte-identical rather
     than replacing it. SKILL.md additionally forbids running the default
@@ -6503,7 +6503,7 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 # accepted there. The provenance half is NOT merely mirrored
                 # either, and saying it was would be wrong: review_token_matches()
                 # is a PREFIX match that admits any ':r<roundLabel>' suffix
-                # (ledger_update.py:821), while the comparison here is against
+                # (ledger_update.py:1179), while the comparison here is against
                 # the EXACT token this decision was made from, round label
                 # included. A precondition
                 # THERE would close it for every caller, including the shipped
@@ -6897,12 +6897,12 @@ def _ledger_rounds_value(round_label: str, max_fix_rounds: int) -> int:
     `null` satisfies neither.
 
     Mirrors mass-translate-wf.template.js's own runRound(seg, round,
-    isFinal) exactly (template.js:1574): `recordLedgerCall(seg, {status:
-    "converged", rounds: round, ...})` (template.js:1595-1596) always
+    isFinal) exactly (template.js:2049): `recordLedgerCall(seg, {status:
+    "converged", rounds: round, ...})` (template.js:2077) always
     writes the NUMERIC loop variable `round`, never a value derived from
     the "final" round LABEL -- and on the mandatory final call that
     variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`,
-    template.js:1757). So round_label == "final" -> max_fix_rounds + 1;
+    template.js:2343). So round_label == "final" -> max_fix_rounds + 1;
     every other round_label is already the decimal round number as a
     string and converts directly. This REPLACES the former
     `_round_number()`, which parsed the trailing digit out of a
@@ -7316,7 +7316,7 @@ def run(args, dirs: dict) -> dict:
             # appends every entry with no dedupe of its own -- unlike the
             # mass-translate-wf.template.js Workflow template, which refuses
             # a duplicate outright with an explicit `seen` set (template.js:
-            # 536-541). Without this, pool.map() would drive the SAME
+            # 588-592). Without this, pool.map() would drive the SAME
             # segment on two worker threads at once: two codex_job.py
             # dispatches racing for the same per-segment flock lease, two
             # ledger writes, two entries in the argv/journal log -- silent

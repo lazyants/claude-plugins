@@ -651,7 +651,7 @@ def test_usage_agreeing_token_and_run_id_clear_every_new_check(tmp_path, capsys,
     before the FIRST colon, so a review token has one colon more than the check
     needs and must still clear it: were the check to demand exactly one colon,
     every review dispatch the shipped template makes
-    (mass-translate-wf.template.js:1032 builds RUN_ID + ":" + seg + ":r" +
+    (mass-translate-wf.template.js:1313 builds RUN_ID + ":" + seg + ":r" +
     roundLabel, segment_dispatch_driver.py's review_dispatch_token() the same
     shape) would be refused at the chokepoint, which no test asserting only the
     translate form would notice."""
@@ -2683,7 +2683,7 @@ def test_escape_B_sandbox_cwd_resolves_outside_git_root_resolves_inside(tmp_path
     --show-toplevel`.
 
     RED: nest durable_root inside a real git repo (the SUPPORTED durable_root==project_root
-    configuration, SKILL.md:192) and show that `--cwd durable_root` (the OLD design)
+    configuration, SKILL.md:254-256) and show that `--cwd durable_root` (the OLD design)
     resolves to the OUTER repo toplevel -- i.e. codex would be granted workspace-write over
     the WHOLE repo (scripts/, segments/, the lock, the joblog), not just durable_root.
 

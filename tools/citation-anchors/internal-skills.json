@@ -1,0 +1,262 @@
+{
+ "declarations": {
+  "[\".claude/skills/enduser-handbook-ops/SKILL.md\", \"reference-assets.test.sh:3106\", 0]": {
+   "anchors": [
+    "command -v ruby"
+   ],
+   "claim": "- **`reference-assets.test.sh`'s absolute PASS/FAIL total is environment-dependent — state deltas in CHANGELOG entries, not absolute counts.** The suite's optional `esbuild`-gated TypeScript check (the `command -v esbuild` / `npx --no-install esbuild --version` block — grep for it, the line number drifts) adds 0 or 1 assertion depending on whether a LOCAL `esbuild` binary or a cached `npx --no-install esbuild` resolves — this differs between a normal dev shell and the bot's/codex's sandboxed environment, producing a consistent ±1 total at every measurement point while the delta between before/after stays identical. Verified 2026-07-23: a CHANGELOG entry stating \"486 → 490 assertions\" was accurate locally but the bot's sandbox measured \"485 → 489\" and flagged the mismatch as a documentation bug. Write release notes as `+N assertions` (the portable fact), not `X → Y` absolute totals (environment-fragile) — same principle the plan's own \"baseline assertion count is not a stable invariant\" note already established for planning, now confirmed to bite release-note prose too. - **A SECOND, independent gate on the same total: `reference-assets.test.sh:3106`'s profile-schema validation assertion is Ruby-gated.** It is emitted only when `command -v ruby && ruby -ryaml -rjson -e '1'` succeeds; the `else` branch prints a note and emits **zero** assertions instead of a failing one, so the total moves silently rather than going red. macOS ships `/usr/bin/ruby`; a Linux CI image typically does not. Measured 2026-08-18 on 1.18.1: the bot's sandbox read 1080 → 1081 where the local machine read 1081 → 1082 — proved by shadowing `ruby` with a stub that exits 1, which reproduced the bot's exact lower total. Before attributing a suite-total mismatch to the esbuild gate above, check this one too: a first hypothesis that blamed the esbuild gate for a mismatch this Ruby gate actually caused was wrong and shipped from a half-remembered note before being corrected. The general rule, confirmed against literary-translator's own suite as a cross-check: a count is portable when a gate suppresses EXECUTION (an `if`-guarded assertion block, like both gates here) and NOT when it suppresses COLLECTION (`pytest.importorskip`, `pytest.skip(..., allow_module_level=True)`, `collect_ignore` — none of which this bash suite has an analogue for, since it has no separate collection phase). - **A different mechanism reaches the same conclusion: a plugin-subtree `git archive` test bed carries 17 permanent failures that look like mutation fallout.** `git archive <sha> plugins/enduser-handbook` gives a clean isolated copy to mutate for review — but 17 assertions in `reference-assets.test.sh` reach UP past the plugin root to the repo-root `CHANGELOG.md` and `README.md` (the #565 canvas carve-out universals, the 1.11.0/1.16.0 entry pins, the #574 bracket universals). In a subtree-only bed they fail `(file not found: CHANGELOG.md)` whether or not anything was mutated. Measured 2026-08-18:"
+  },
+  "[\".claude/skills/enduser-handbook-ops/references/capture-guard-facts.md\", \"assets/lib/capture-guard-policy.mjs:243\", 0]": {
+   "anchors": [
+    "export function decideRoute(req, opts = {}) {"
+   ],
+   "claim": "`context.route` never sees a redirect hop — verified against real chromium on playwright-core 1.61.1 AND 1.62.1, not read off the source. The #471 fix (`46c95cb`'s predecessor, shipped in 1.13.0) adds a **second, audit-only** channel on `context.on('request')` that re-classifies each hop by its own method/URL/body through the same `decideRoute` (`assets/lib/capture-guard-policy.mjs:243`). A dangerous hop lands in the ledger and fails the run — **but it has already fired.** Real prevention would need `route.fetch()` with manual redirect following; that is explicitly out of scope for the shipped fix. Read the index's \"redirect-hop audit channel\" phrasing literally: it is an audit, not a block."
+  },
+  "[\".claude/skills/enduser-handbook-ops/references/capture-guard-facts.md\", \"tests/reference-assets.test.sh:1433\", 0]": {
+   "anchors": [
+    "misses exactly that"
+   ],
+   "claim": "would miss a `data` attribute assigned by a script after page load. It is untrue — CSS attribute selectors are evaluated against the **live DOM at query time**, so a script-time assignment is visible to `object[data]` exactly like a parse-time one. The claim stood in three places at once: the PR body, the copyable asset (`assets/capture-helpers.playwright.ts` — the unqualified-selector comment near line 1022), and the suite's own comments (`tests/reference-assets.test.sh:1433` and `:1450`, which narrate the old wrong justification before the corrected one). Fixing it required enumerating the whole plugin for the same two claims, not just the one site the round started at — the same fix-one-site-of-N defect the fixing branch was itself trying to close."
+  },
+  "[\".claude/skills/enduser-handbook-ops/references/capture-guard-facts.md\", \"tests/reference-assets.test.sh:1497\", 0]": {
+   "anchors": [
+    "#557 named"
+   ],
+   "claim": "**The design error behind this surface, filed as #557:** the \"what gets admitted\" narrative is re-derived from scratch in several independent prose paragraphs in `capture-spec-helpers.md` (`tests/reference-assets.test.sh:1497` names it), none tied to `decideRoute`'s actual branch order. Three consecutive review rounds each found a DIFFERENT paragraph making a claim the guard does not back, and round 3's defect was introduced by round 2's own rewrite — the grep pins only pin sentences already known wrong, so they can't catch the next paraphrase. The structural fix (not done, filed as follow-up): state the branch chain once, canonically, pinned to the `// [guard:*]` sentinels the suite"
+  },
+  "[\".claude/skills/enduser-handbook-ops/references/file-citation-renumbering.md\", \"SKILL.md:100\", 0]": {
+   "anchors": [
+    "capture.command` exactly as written in the profile"
+   ],
+   "claim": "This plugin's docs cite real code lines by `file.ext:NNN` (e.g. `chapter-paths.mjs:174-178`, `capture-guard-policy.mjs:271`, `SKILL.md:100` — 6 such citations across `SKILL.md` and `references/**/*.md` as of 2026-08). Editing any cited file pushes every line below the insertion down, so a citation elsewhere silently goes stale. Two traps sit in the obvious fix.",
+   "target": "plugins/enduser-handbook/skills/enduser-handbook/SKILL.md"
+  },
+  "[\".claude/skills/enduser-handbook-ops/references/file-citation-renumbering.md\", \"capture-guard-policy.mjs:271\", 0]": {
+   "anchors": [
+    "resourceType === 'eventsource'"
+   ],
+   "claim": "This plugin's docs cite real code lines by `file.ext:NNN` (e.g. `chapter-paths.mjs:174-178`, `capture-guard-policy.mjs:271`, `SKILL.md:100` — 6 such citations across `SKILL.md` and `references/**/*.md` as of 2026-08). Editing any cited file pushes every line below the insertion down, so a citation elsewhere silently goes stale. Two traps sit in the obvious fix."
+  },
+  "[\".claude/skills/enduser-handbook-ops/references/file-citation-renumbering.md\", \"chapter-paths.mjs:174-178\", 0]": {
+   "anchors": [
+    "export function chapterRelPath(entry) {",
+    "entry.group !== undefined ?"
+   ],
+   "claim": "This plugin's docs cite real code lines by `file.ext:NNN` (e.g. `chapter-paths.mjs:174-178`, `capture-guard-policy.mjs:271`, `SKILL.md:100` — 6 such citations across `SKILL.md` and `references/**/*.md` as of 2026-08). Editing any cited file pushes every line below the insertion down, so a citation elsewhere silently goes stale. Two traps sit in the obvious fix."
+  },
+  "[\".claude/skills/literary-translator-ops/SKILL.md\", \"glossary-pass-wf.template.js:1013\", 0]": {
+   "anchors": [
+    "JSON.stringify(batch.candidates, null, 1)"
+   ],
+   "claim": "- **Adding a field to a candidate row or a skeptic assignment is a PROMPT decision, not a data decision.** Two workflow templates serialize the whole Python-produced structure into the prompt verbatim — `glossary-pass-wf.template.js:1013` (`JSON.stringify(batch.candidates, null, 1)`) and `skeptic-pass-wf.template.js:449` (`...(batch.assignments, null, 1)`). Nothing on the Python side hints at this: the row is built in `bootstrap_names.collect_candidates()`, written to `name_candidates.json`, and the exposure happens in another language, in another directory, outside any diff that adds the field. So a new field must be bounded and injection-checked where it is"
+  },
+  "[\".claude/skills/literary-translator-ops/SKILL.md\", \"skeptic-pass-wf.template.js:449\", 0]": {
+   "anchors": [
+    "JSON.stringify(batch.assignments, null, 1)"
+   ],
+   "claim": "- **Adding a field to a candidate row or a skeptic assignment is a PROMPT decision, not a data decision.** Two workflow templates serialize the whole Python-produced structure into the prompt verbatim — `glossary-pass-wf.template.js:1013` (`JSON.stringify(batch.candidates, null, 1)`) and `skeptic-pass-wf.template.js:449` (`...(batch.assignments, null, 1)`). Nothing on the Python side hints at this: the row is built in `bootstrap_names.collect_candidates()`, written to `name_candidates.json`, and the exposure happens in another language, in another directory, outside any diff that adds the field. So a new field must be bounded and injection-checked where it is ADDED. This is why `_capped_candidate_name()` bounds `name` in the producer at all, against this"
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"cache_key.py:480-488\", 0]": {
+   "anchors": [
+    "def compute_schema_hash(profile: dict, durable_root: Path) -> str:",
+    "a project-local schema file (schemas/)"
+   ],
+   "claim": "**Corollary (the reusable design rule): to enrich canon with adjudication/annotation data WITHOUT re-translating, put it in a SIDE-STORE keyed by `source_form`** — a sibling file (`canon_adjudications.json` is the existing precedent, or a new `canon_senses.json`) — **NEVER in the `entries{}` body.** No sidecar file is among the 15 cache-key fields (`schema_hash` = draft/review/ segpack schemas only, `cache_key.py:480-488`), so sidecar DATA edits are cache-neutral. This is why a homonym-split / evidence design stores `senses[]` / evidence in a sidecar, not in canon entries."
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"cache_key.py:632-635\", 0]": {
+   "anchors": [
+    "def compute_derivation_bundle_hash(profile: dict, durable_root: Path) -> str:",
+    "a derivation-bundle script"
+   ],
+   "claim": "\"Cache-key member = mass re-translation\" is the FLOOR; a derivation-bundle edit costs regen-THEN-retranslate. The hash itself is a raw-byte SHA1 of the concatenated members (`compute_derivation_bundle_hash`, `cache_key.py:632-635`) — no comment-stripping, so even a comment reword flips it."
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"cache_key.py:735-741\", 0]": {
+   "anchors": [
+    "canon = load_canon(durable_root)",
+    "referenced = {name: entries[name] for name in names if name in entries}"
+   ],
+   "claim": "The four surfaces above are about editing a SCHEMA or SCRIPT **file**. A distinct surface is editing `canon.json` **content**: `used_terms_hash` (15-field cache-key field #3, `cache_key.py:735-741`) hashes the **WHOLE referenced canon ENTRY object** (`{name: entries[name]}` for every name a segment references, via `canonical_json_bytes`). So **adding ANY field to a canon `entries{}` record re-translates every converged segment that references that `source_form`** — even a purely descriptive field the translator ignores; blast radius = exactly the referencing segments"
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:2537-2543\", 0]": {
+   "anchors": [
+    "def _stamp_write_verify(",
+    "`run_merge_batches`, `run_init`, `run_restamp_derivation`"
+   ],
+   "claim": "The underlying trap is unchanged: the \"rerun W3/W3a then re-translate\" path is **not reachable via the glossary pass alone** for a fully-converged project (canon frozen, **zero unresolved glossary candidates**). The ONLY writer of `canon.json`'s `derivation_bundle_hash` was glossary **MERGE** mode (`_stamp_write_verify`, `canon_validate.py:2537-2543`; callers `run_merge` / `run_merge_batches` / `run_init` / `run_restamp_derivation`). The glossary pass **SKIPS entirely** when there are no candidates (`glossary_batch_plan.py:752-756`, a *tested* supported state, prints `{\"no_new_candidates\": true, \"batches\": []}`) → canon was never restamped → segpack rebuild copies the stale hash **verbatim, never recomputed** (`segpack.py:798-809`) → `select_segments` stayed `blocked_needs_regeneration`."
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:2537-2564\", 0]": {
+   "anchors": [
+    "def _stamp_write_verify(",
+    "CONSERVE THE STAMP ON A NO-OP"
+   ],
+   "claim": "**Superseded workaround — do NOT cite this anymore.** The prior undocumented/unsanctioned trick (\"`run_merge_batches` restamps unconditionally → a `--merge-batches <empty-batch>` forces a restamp\", issue #193) is exactly what 1.15.0/#291 **removed**: `_stamp_write_verify` no longer restamps unconditionally (`canon_validate.py:2537-2564`, \"a merge that changes nothing no longer moves `generation_hashes`\"), and `derivation_gate_recovery_e2e.test.py` has a step asserting \"the pre-1.15.0 empty-merge bypass no longer works.\" Cite `--restamp-derivation` only."
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:2705-2745\", 0]": {
+   "anchors": [
+    "def run_restamp_derivation(",
+    "force_restamp=True, plugin_root_str=plugin_root_str"
+   ],
+   "claim": "**The sanctioned escape: `canon_validate.py --restamp-derivation`, then rerun `segpack.py`.** `run_restamp_derivation` (`canon_validate.py:2705-2745`) re-records the CURRENT `particle_config_hash` / `derivation_bundle_hash` onto an existing `canon.json` **without touching its entries** (`force_restamp=True` into the shared `_stamp_write_verify`). `select_segments.py`'s own `blocked_needs_regeneration` hint already names it (`_w3_regen_step`, `select_segments.py:1110-1117`:"
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:658-667\", 0]": {
+   "anchors": [
+    "CANON_ENTRY_FIELDS = (",
+    "\"is_proper_name\""
+   ],
+   "claim": "(`canon_adjudications.json` is the existing precedent, or a new `canon_senses.json`) — **NEVER in the `entries{}` body.** No sidecar file is among the 15 cache-key fields (`schema_hash` = draft/review/ segpack schemas only, `cache_key.py:480-488`), so sidecar DATA edits are cache-neutral. This is why a homonym-split / evidence design stores `senses[]` / evidence in a sidecar, not in canon entries. Belt-and-braces: `CANON_ENTRY_FIELDS` (`canon_validate.py:658-667`) is the projection `_entry_from_accepted_item` writes, so a stray field on an accepted batch item is silently STRIPPED — you cannot accidentally leak entry-body data in via a merge. Note the code fix that READS the sidecar is still a bundle-member edit → surface-1 upgrade re-translation; \"cache-neutral\" is about the DATA enrichment, never the code change."
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"diff_rendered_output.py:194\", 0]": {
+   "anchors": [
+    "_RENDER_VERSION_FILES = (\"render_obsidian.py\", \"diff_rendered_output.py\")"
+   ],
+   "claim": "NOT re-translation, NOT fresh-resume — localized to the Obsidian render/diff gate. `render_version` = sha of the `_RENDER_VERSION_FILES` tuple = **`render_obsidian.py` + `diff_rendered_output.py`** (`diff_rendered_output.py:194`, hashed `:335`, stale-check `:599`). Editing either flips it. On the next `assemble.py` run the render diff-gate writes a fresh candidate and reports a **mismatch** against the frozen last-accepted baseline for any verse whose REDUCED markdown changed — the gate NEVER re-renders live, and the compare is on reduced md lines (CRLF/CR-normalized, rstripped, trailing-blank-dropped), NOT bytes (`:118-121`). A content mismatch returns BEFORE the stale-version check; re-accept a"
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"glossary_batch_plan.py:752-756\", 0]": {
+   "anchors": [
+    "if not included:",
+    "print(dumps_line({\"no_new_candidates\": True, \"batches\": []}))"
+   ],
+   "claim": "glossary pass alone** for a fully-converged project (canon frozen, **zero unresolved glossary candidates**). The ONLY writer of `canon.json`'s `derivation_bundle_hash` was glossary **MERGE** mode (`_stamp_write_verify`, `canon_validate.py:2537-2543`; callers `run_merge` / `run_merge_batches` / `run_init` / `run_restamp_derivation`). The glossary pass **SKIPS entirely** when there are no candidates (`glossary_batch_plan.py:752-756`, a *tested* supported state, prints `{\"no_new_candidates\": true, \"batches\": []}`) → canon was never restamped → segpack rebuild copies the stale hash **verbatim, never recomputed** (`segpack.py:798-809`) → `select_segments` stayed `blocked_needs_regeneration`."
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"ledger_merge.py:368-422\", 0]": {
+   "anchors": [
+    "def _read_fragments(ledger_d: Path = LEDGER_D) -> dict:",
+    "seg = frag_path.stem"
+   ],
+   "claim": "**A separate, heavier, NON-sanctioned alternative also exists (verified independently, not a documented plugin feature):** segment classification is gated on ledger-FRAGMENT PRESENCE, not on hash content. `_read_fragments()` (`ledger_merge.py:368-422`) returns `{}` when `runs/ledger.d/` is missing, and otherwise keys each fragment by its filename stem (one file per segment, `runs/ledger.d/{seg}.json`);"
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"segpack.py:798-809\", 0]": {
+   "anchors": [
+    "generation_hashes: copied verbatim, never recomputed",
+    "manifest_hashes = manifest.get(\"generation_hashes\", {})"
+   ],
+   "claim": "(`_stamp_write_verify`, `canon_validate.py:2537-2543`; callers `run_merge` / `run_merge_batches` / `run_init` / `run_restamp_derivation`). The glossary pass **SKIPS entirely** when there are no candidates (`glossary_batch_plan.py:752-756`, a *tested* supported state, prints `{\"no_new_candidates\": true, \"batches\": []}`) → canon was never restamped → segpack rebuild copies the stale hash **verbatim, never recomputed** (`segpack.py:798-809`) → `select_segments` stayed `blocked_needs_regeneration`."
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"select_segments.py:1051-1063\", 0]": {
+   "anchors": [
+    "flag-only, needs regeneration",
+    "DERIVATION_STATE_FIELDS = frozenset("
+   ],
+   "claim": "**Within surface 1, members do NOT migrate equally.** `plugin_bundle_hash` and `schema_hash` route a mismatched converged segment to `stale` → **re-translate only**. But `derivation_bundle_hash ∈ DERIVATION_STATE_FIELDS` (`select_segments.py:1051-1063`, alongside `particle_config_hash` / `source_extraction_hash` / `source_input_hash`) → routes to **`blocked_needs_regeneration`** (`select_segments.py:1502`): rerun **W3/W3a only** (`bootstrap_names.py` → glossary pass → `segpack.py`) FIRST, THEN re-translate — strictly HEAVIER."
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"select_segments.py:1065-1117\", 0]": {
+   "anchors": [
+    "def _w3_regen_step(field: str) -> str:",
+    "then segpack.py)"
+   ],
+   "claim": "`derivation_bundle_hash` and `particle_config_hash` both route through `_w3_regen_step` (`select_segments.py:1065-1117`) — **W3/W3a, never W2**; W2 only reruns for `source_extraction_hash` / `source_input_hash` (`_W2_REGEN_STEP`, `select_segments.py:1126`). Verify this membership/remedy mapping against `select_segments.py` itself before restating it — this exact doc's own remedy text drifted to an overstated \"W2/W3/W3a\" once already (codex round-3 finding, 2026-07-23, #282/#283 plan review), verified wrong against `select_segments.py`'s field→function mapping directly; the enumeration and remedy"
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"select_segments.py:1110-1117\", 0]": {
+   "anchors": [
+    "W3/W3a (re-run bootstrap_names.py to regenerate name candidates,",
+    "then segpack.py)"
+   ],
+   "claim": "**The sanctioned escape: `canon_validate.py --restamp-derivation`, then rerun `segpack.py`.** `run_restamp_derivation` (`canon_validate.py:2705-2745`) re-records the CURRENT `particle_config_hash` / `derivation_bundle_hash` onto an existing `canon.json` **without touching its entries** (`force_restamp=True` into the shared `_stamp_write_verify`). `select_segments.py`'s own `blocked_needs_regeneration` hint already names it (`_w3_regen_step`, `select_segments.py:1110-1117`: \"...or, on a project with no new candidates left to merge, canon_validate.py --restamp-derivation -- then segpack.py\"). The full blocked → `--restamp-derivation` → `segpack.py` → cleared recovery is pinned end to end by `tests/derivation_gate_recovery_e2e.test.py` against the real scripts, no stub. Restamping alone still only reaches ordinary `stale` (re-translate), **never `reusable`** — the underlying file"
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"select_segments.py:1126\", 0]": {
+   "anchors": [
+    "_W2_REGEN_STEP = \"W2 (re-run the source-format extractor)\""
+   ],
+   "claim": "`derivation_bundle_hash` and `particle_config_hash` both route through `_w3_regen_step` (`select_segments.py:1065-1117`) — **W3/W3a, never W2**; W2 only reruns for `source_extraction_hash` / `source_input_hash` (`_W2_REGEN_STEP`, `select_segments.py:1126`). Verify this membership/remedy mapping against `select_segments.py` itself before restating it — this exact doc's own remedy text drifted to an overstated \"W2/W3/W3a\" once already (codex round-3 finding, 2026-07-23, #282/#283 plan review), verified wrong against `select_segments.py`'s field→function mapping directly; the enumeration and remedy text here can drift again and must be re-checked, not trusted at face value."
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"select_segments.py:1473\", 0]": {
+   "anchors": [
+    "derivation_mismatched = [f for f in mismatched if f in DERIVATION_STATE_FIELDS]"
+   ],
+   "claim": "Only particle / extraction / input / **derivation** hash mismatches trigger `blocked_needs_regeneration` (`select_segments.py:1473`); a `schema_hash`-only mismatch is ordinary `stale` (`select_segments.py:1514`). So editing a cache-key schema's **description** on top of a release that ALREADY flips `plugin_bundle_hash` is **zero marginal workload** — the 15-field composite `cache_key` is already invalidated, so it's the same single re-translation, not a second one. Corollary:"
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"select_segments.py:1473-1517\", 0]": {
+   "anchors": [
+    "derivation_mismatched = [f for f in mismatched if f in DERIVATION_STATE_FIELDS]",
+    "\"stale_reason\": [\"cache_key_mismatch\"]"
+   ],
+   "claim": "then segpack.py\"). The full blocked → `--restamp-derivation` → `segpack.py` → cleared recovery is pinned end to end by `tests/derivation_gate_recovery_e2e.test.py` against the real scripts, no stub. Restamping alone still only reaches ordinary `stale` (re-translate), **never `reusable`** — the underlying file bytes genuinely changed, so `cache_key_mismatch` stays true even once the derivation-state fields themselves catch up (`classify_converged_segment`'s fall-through, `select_segments.py:1473-1517`, esp. `:1511-1517`). **Limitation, stated in the CHANGELOG rather than hidden:** `--restamp-derivation` is operator-trusted — it does NOT itself verify the \"no new candidates left to merge\" precondition it documents."
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"select_segments.py:1502\", 0]": {
+   "anchors": [
+    "\"category\": \"blocked_needs_regeneration\","
+   ],
+   "claim": "**Within surface 1, members do NOT migrate equally.** `plugin_bundle_hash` and `schema_hash` route a mismatched converged segment to `stale` → **re-translate only**. But `derivation_bundle_hash ∈ DERIVATION_STATE_FIELDS` (`select_segments.py:1051-1063`, alongside `particle_config_hash` / `source_extraction_hash` / `source_input_hash`) → routes to **`blocked_needs_regeneration`** (`select_segments.py:1502`): rerun **W3/W3a only** (`bootstrap_names.py` → glossary pass → `segpack.py`) FIRST, THEN re-translate — strictly HEAVIER."
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"select_segments.py:1514\", 0]": {
+   "anchors": [
+    "\"category\": \"stale\","
+   ],
+   "claim": "Only particle / extraction / input / **derivation** hash mismatches trigger `blocked_needs_regeneration` (`select_segments.py:1473`); a `schema_hash`-only mismatch is ordinary `stale` (`select_segments.py:1514`). So editing a cache-key schema's **description** on top of a release that ALREADY flips `plugin_bundle_hash` is **zero marginal workload** — the 15-field composite `cache_key` is already invalidated, so it's the same single re-translation, not a second one. Corollary:"
+  },
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"select_segments.py:1520-1525\", 0]": {
+   "anchors": [
+    "def classify_segment(",
+    "\"category\": \"not_started\""
+   ],
+   "claim": "`_read_fragments()` (`ledger_merge.py:368-422`) returns `{}` when `runs/ledger.d/` is missing, and otherwise keys each fragment by its filename stem (one file per segment, `runs/ledger.d/{seg}.json`); `classify_segment()` (`select_segments.py:1520-1525`) returns `{\"category\": \"not_started\"}` whenever a segment has NO record in the merged ledger at all. Deleting a blocked segment's `runs/ledger.d/{seg}.json` fragment therefore ALSO clears `blocked_needs_regeneration` — not via any restamp, but by discarding that segment's entire convergence record, forcing a full FRESH re-translation (heavier than the `stale` outcome `--restamp-derivation` produces: a `not_started` segment carries no"
+  },
+  "[\".claude/skills/literary-translator-ops/references/plugin-facts.md\", \"assemble.py:2298\", 0]": {
+   "anchors": [
+    "mentions_cfg.get(\"enabled\") is not False"
+   ],
+   "claim": "(`profile.schema.json:761-764`, `default: true` — its own description literally says: \"this 'default' annotation is documentation only, see the three runtime predicates in render_obsidian.py/assemble.py/validate_backlinks.py for the actual mechanism\"). The REAL enable-predicate is `mentions_cfg.get(\"enabled\") is not False`, hand-duplicated byte-for-byte across **three** call sites: `validate_backlinks.py:521` (`_effective_enabled`), `assemble.py:2298` (`_effective_mentions_enabled`), `render_obsidian.py:247` (`_effective_mentions_enabled`) — each docstring explicitly cross-references the other two copies. **Flipping only some of the duplicated sites silently yields a false-green disabled-report on an advisory gate** — e.g. patching `render_obsidian.py`'s copy alone would still ship the `## Mentions` section while"
+  },
+  "[\".claude/skills/literary-translator-ops/references/plugin-facts.md\", \"profile.schema.json:761-764\", 0]": {
+   "anchors": [
+    "\"default\": true",
+    "this 'default' annotation is documentation only"
+   ],
+   "claim": "- **A `\"default\": <value>` annotation in `profile.schema.json` is documentation-only — nothing fills it in.** No default-filling validator runs anywhere in the plugin; `profile_validate.py` schema-validates the config exactly as WRITTEN, so an absent key stays absent and every consumer must independently resolve \"absent means X\" itself. Verified on `output.adapter_config.obsidian.mentions_section.enabled` (`profile.schema.json:761-764`, `default: true` — its own description literally says: \"this 'default' annotation is documentation only, see the three runtime predicates in render_obsidian.py/assemble.py/validate_backlinks.py for the actual mechanism\"). The REAL enable-predicate is `mentions_cfg.get(\"enabled\") is not False`, hand-duplicated byte-for-byte across **three** call sites: `validate_backlinks.py:521` (`_effective_enabled`), `assemble.py:2298`",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json"
+  },
+  "[\".claude/skills/literary-translator-ops/references/plugin-facts.md\", \"render_obsidian.py:247\", 0]": {
+   "anchors": [
+    "mentions_cfg.get(\"enabled\") is not False"
+   ],
+   "claim": "annotation is documentation only, see the three runtime predicates in render_obsidian.py/assemble.py/validate_backlinks.py for the actual mechanism\"). The REAL enable-predicate is `mentions_cfg.get(\"enabled\") is not False`, hand-duplicated byte-for-byte across **three** call sites: `validate_backlinks.py:521` (`_effective_enabled`), `assemble.py:2298` (`_effective_mentions_enabled`), `render_obsidian.py:247` (`_effective_mentions_enabled`) — each docstring explicitly cross-references the other two copies. **Flipping only some of the duplicated sites silently yields a false-green disabled-report on an advisory gate** — e.g. patching `render_obsidian.py`'s copy alone would still ship the `## Mentions` section while `validate_backlinks.py`'s independent copy quietly reports `\"status\": \"disabled\"`. Lesson: any"
+  },
+  "[\".claude/skills/literary-translator-ops/references/plugin-facts.md\", \"validate_backlinks.py:521\", 0]": {
+   "anchors": [
+    "mentions_cfg.get(\"enabled\") is not False"
+   ],
+   "claim": "(`profile.schema.json:761-764`, `default: true` — its own description literally says: \"this 'default' annotation is documentation only, see the three runtime predicates in render_obsidian.py/assemble.py/validate_backlinks.py for the actual mechanism\"). The REAL enable-predicate is `mentions_cfg.get(\"enabled\") is not False`, hand-duplicated byte-for-byte across **three** call sites: `validate_backlinks.py:521` (`_effective_enabled`), `assemble.py:2298` (`_effective_mentions_enabled`), `render_obsidian.py:247` (`_effective_mentions_enabled`) — each docstring explicitly cross-references the other two copies. **Flipping only some of the duplicated sites silently yields a false-green disabled-report on an advisory gate** — e.g. patching `render_obsidian.py`'s copy alone would still ship the `## Mentions` section while"
+  },
+  "[\".claude/skills/literary-translator-run/references/manual-translation-drive.md\", \"codex_job.py:48\", 0]": {
+   "anchors": [
+    "os.replace -- no backup, no post-confirm."
+   ],
+   "claim": "2. **Back up before the first dispatch.** Promotion is `os.replace()` with no backup and no post-confirm (`codex_job.py:48`), so every existing `<seg>.review.json` is destroyed on first write. Copy them out first — but do NOT delete the originals, since the round label is read from them and `derive_next_action()` consults them."
+  },
+  "[\".claude/skills/literary-translator-run/references/manual-translation-drive.md\", \"extract.py.template:845-846\", 0]": {
+   "anchors": [
+    "seen_first_h2[0] = True",
+    "start_segment(node, file_label)"
+   ],
+   "claim": "- **Use 2+ segments with real margin, never 1.** `extract.py.template` calls `start_segment` on EVERY `<h2>` (`extract.py.template:845-846`), so h2-count == segment-count. On a 1-segment book, W4 (review) eats the only segment and **W5 (translate) never executes** — the smoke test goes green without testing anything. Size the chapters so the smallest is comfortably (≥28%) short of wherever the review/translate split lands, so which segment ends up in W4 vs W5 cannot flip and invalidate the design. - **Never let scaffolding live inside the artifact under test.** Test scaffolds (an agent's self-test copies, your own verification-run copies) landing inside the same `durable_root` the smoke test measures silently contaminate it. Move them out to a sibling directory the moment you notice them there, before trusting any measurement of the scaffold."
+  },
+  "[\".claude/skills/literary-translator-run/references/source-prep.md\", \"extract.py.template:1110\", 0]": {
+   "anchors": [
+    "BEGIN SELF-CHECK REGION"
+   ],
+   "claim": "Consequence: you CANNOT translate a `.txt`/OCR/scraped source through the shipped code. Fastest workaround = wrap the text as a **minimal EPUB** and run the proven `gutenberg_epub` adapter. The extractor's self-check region (`extract.py.template:1110–1279`) is genuinely GENERIC (grep confirms zero project literals), so a 0-footnote / 0-verse / 0-frontmatter Hebrew EPUB passes it. That region is hash-pinned by `validate_extraction.py`, so only the four `# ADAPT-POINT:` regions are editable."
+  },
+  "[\".claude/skills/schema-gate-hardening/references/gate-review-lenses.md\", \"render_obsidian.py:1371-1382\", 0]": {
+   "anchors": [
+    "def _heading_plain_text(node):",
+    "never on \"did the text change\""
+   ],
+   "claim": "2. **Source-marker extraction too strict for a garbled OCR/text-layer.** A completeness gate (`∪ source markers ⊆ ∪ rendered headings`) is only as good as its extractor: an anchored strict regex silently MISSED split/nikud-carrying markers, and **a marker it can't extract can't be reported as dropped ⇒ false-GREEN.** Fix: whitespace-tolerant extraction + canonical reconstruction, and deliberately **OVER-extract** — over-capture only ever yields a loud false-RED (safe, you investigate); under-capture yields a silent false-GREEN. 3. **\"Did the VALUE change?\" is the wrong signal for \"did we ACT?\" — gate on \"was there anything to RESOLVE\".** A resolve-then-report function that decides it transformed nothing by comparing `text == original` false-negatives every **no-op substitution**: a known token that legitimately maps to itself (X→X) leaves the string byte-identical, so the function reports \"no transform\" and skips the follow-up it owed. Gate instead on whether a known token MATCHED — the question actually being asked. Found by code review on literary-translator 1.4.2, in the renderer's **#171** heading-sentinel invariant (`render_obsidian.py:1371-1382`, `:1412`) — NOT #173, which is the separate exact-map placeholder-fidelity fix in the same release. 4. **Per-unit review is structurally blind to cross-unit drift.** N independently-generated units each pass their own per-unit review \"clean\" yet drift in cross-unit PRESENTATION (one segment prefixes source lines with a `[Yiddish]` label; the other 39 use a bare `>`). The per-unit review CAN'T catch this — it never sees the others. Only a corpus-wide normalization gate over the assembled whole does."
+  },
+  "[\".claude/skills/schema-gate-hardening/references/gate-review-lenses.md\", \"validate_backlinks.py:1318-1320\", 0]": {
+   "anchors": [
+    "aggregate = occurrence_targets.build(",
+    "manifest, canon, senses_result, language_config, nodestream"
+   ],
+   "claim": "5. **The self-referential gate — `expected` derived through the code under test (spine §8).** A coverage gate computed its expected occurrence set by calling `occurrence_targets.build(...)`, the very function whose matching it was meant to certify (`validate_backlinks.py:1318-1320`). Any name the matcher fails to find is absent from BOTH sides, so `expected == actual`, `warnings: 0`, exit 0 — on every input, forever. The gate cannot fail on the defect class it exists to catch. This survived a full plan→codex→review→ship cycle because every reviewer checked whether the gate was *correct*, never where its expectation *came from*. **Ask the provenance question explicitly, and never cite such a gate as evidence its own subject works** — the check has to be an independent oracle (a committed expected fixture, a second implementation, or human eyes). 6. **An empty-result sentinel read as an affirmative (spine §9).** `glossary_batch_plan.py` prints `{\"no_new_candidates\": true}` for *both* \"every candidate is already in canon\" and \"my extractor matched nothing at all\"; the consumer (`SKILL.md`'s SKIP branch) assumes the benign reading and skips the step. On an uncased script where the candidate matcher was structurally dead, that skipped the sole writer of `canon.json` and the run FATALed two steps later with an error naming neither cause. **Zero is not a result — it is the absence of one.** Either emit distinguishable states at the source (`nothing_to_do` vs `detector_found_nothing`), or make the consumer prove non-vacuity (assert the detector actually ran and saw candidate-shaped input) before treating empty as success."
+  }
+ },
+ "exemptions": {
+  "[\".claude/skills/codex-runtime-driving/references/codex-companion-runtime.md\", \"codex-companion.mjs:644\", 0]": {
+   "reason": "Target is codex-companion.mjs, which belongs to the separate codex plugin, outside this repository. Cannot be gated here."
+  },
+  "[\".claude/skills/literary-translator-run/references/vault-deposit.md\", \"vault/scripts/validate_links.py:114\", 0]": {
+   "reason": "Target is a script in the operator's book-vault repository (Obsidian vault deposit target), outside this repository. Cannot be gated here."
+  }
+ }
+}
