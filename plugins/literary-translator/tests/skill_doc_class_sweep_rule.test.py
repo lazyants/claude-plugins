@@ -116,6 +116,123 @@ def test_w6_says_why_this_is_the_operators_call_and_not_the_loops():
     )
 
 
+def test_w6_says_that_BUILDING_the_enumeration_is_the_fragile_step():
+    """#746. The four bullets above all presuppose that the enumeration is a
+    correct list of candidate sites. Nothing said that the list is produced by a
+    pattern the OPERATOR writes for that round, and that this is the step most
+    likely to be wrong -- measured on a live book, a stem scan for a spelling class
+    returned 89 hits of which exactly one was a defect, and a source-side scan that
+    stringified a whole block dict reported every figure at exactly 2x.
+
+    Each pin below is a COMPLETE sentence including its terminal period. A pin
+    that stops mid-clause stays green under the likeliest careless edit there
+    is: a qualifier appended to the end ("... never per count ONLY WHILE there
+    are fewer than ten forms"). The period is what makes that mutation red.
+
+    RESIDUAL, stated because a check that oversells itself is the defect class
+    this file exists to remove. Substring containment cannot see a NEGATING
+    FRAME: quote any pinned sentence verbatim, then write "the superseded policy
+    said that, and it is false under the current rule", and every assertion here
+    stays green while W6 tells the operator the opposite. That is true of every
+    pin this file already shipped, not only of the five added for #746, and it
+    is accepted rather than closed. The alternative -- comparing the whole
+    block for equality -- is the paragraph pin the docstring above deliberately
+    refused: it goes RED on any re-wrap or clarification, so it false-REDs
+    ordinary maintenance to guard an edit nobody makes by accident.
+    What these pins defend against is DRIFT: a half-remembered rewrite that
+    quietly loses a clause. A reader who writes the negation is not drifting.
+    """
+    w6 = _w6_section()
+    assert (
+        "The enumeration is produced by a pattern you wrote for this round, and "
+        "that pattern is the step most likely to be wrong." in w6
+    ), (
+        "W6 must say that the enumeration is BUILT by a pattern the OPERATOR "
+        "wrote for this round, and that building it is the fragile step. W6 is "
+        "the operator's pass and the fix turn has no authority over loci no "
+        "finding named, so the actor here is deictic 'you' by design. Pinned as "
+        "the whole sentence: 'pattern' and 'enumeration' each occur elsewhere "
+        "in W6, so either token alone would pin the relationship not at all"
+    )
+    assert "It fails silently in both directions and still prints a plausible count." in w6, (
+        "and that the failure is SILENT IN BOTH DIRECTIONS and prints a "
+        "plausible number either way -- the property that makes the count "
+        "untrustworthy. An over-count invites a sweep across sites that were "
+        "already correct; an under-count closes a live class. Without this "
+        "clause the rule reads as a tidiness note"
+    )
+    assert (
+        "Print the DISTINCT matched surface forms and read them before treating "
+        "any hit as a defect, deciding per form and never per count." in w6
+    ), (
+        "and must give the remedy as an ACTION with its decision rule attached: "
+        "print the distinct matched forms, decide per form, never per count. "
+        "'per form, never per count' is the half that does the work -- an "
+        "instruction to print the forms without it is satisfied by printing "
+        "them and then acting on the total anyway"
+    )
+    assert "Reading the forms you matched can only show an over-count." in w6, (
+        "and must say that the remedy is ONE-SIDED. The sentence above claims "
+        "the pattern fails silently in BOTH directions, and printing the forms "
+        "it matched cannot show a form it never matched -- an omission is "
+        "absent from that list exactly like a clean run. Without this the "
+        "operator reads the printed forms as having validated the enumeration"
+    )
+    assert (
+        "The check for that direction is a different one: widen the pattern "
+        "deliberately, dropping its most restrictive element, and see whether "
+        "the set of distinct forms grows." in w6
+    ), (
+        "and must give the under-count check, which is a different action and "
+        "not a harder reading of the same output. Pinned as the whole sentence "
+        "including 'widen ... dropping its most restrictive element': an "
+        "instruction to 'check for misses' without naming the action is "
+        "satisfied by looking harder at the same list, which is the failure"
+    )
+
+
+def test_w6_separates_a_class_claim_from_the_sites_it_names():
+    """#746, second half. A finding of the form 'X is applied inconsistently
+    throughout' followed by a list of sites makes TWO claims that fail
+    independently: measured on the same round, 427 italic spans in the source
+    against 831 in the drafts refuted the class claim outright while three of
+    the sites that finding named were real defects. An operator who measures the
+    class, finds it refuted, and closes the finding drops those sites.
+
+    The CONVERSE -- confirming sites and sweeping the class -- is NOT
+    restated here. It is already carried by the quoted rule
+    (test_w6_states_that_a_dominant_class_is_the_operators_to_sweep), by the
+    first of the four site bullets
+    (test_w6_carries_the_four_things_that_decide_a_site), by
+    references/engine-loop.md, and by the runtime fix prompt itself in
+    assets/templates/mass-translate-wf.template.js. The bullet points back at
+    the quoted rule instead, and the deictic opener is pinned below so that a
+    later edit cannot quietly turn the pointer into a fifth paraphrase.
+    """
+    w6 = _w6_section()
+    assert (
+        'Under the rule above, a finding that says a rule is applied '
+        'inconsistently "throughout" and then lists sites has made two claims, '
+        'and they fail independently.' in w6
+    ), (
+        "W6 must state the two-claims separation, and must open it by POINTING "
+        "at the quoted rule rather than restating the no-sweep converse a fifth "
+        "time. Pinned as the whole sentence including 'Under the rule above' "
+        "for exactly that reason: drop the opener and the natural rewrite is a "
+        "fresh paraphrase of a rule that already has four copies"
+    )
+    assert (
+        "Measure the class AND open the named sites, because refuting the "
+        "class claim discharges no named site." in w6
+    ), (
+        "and must say which direction is NEW: a refuted class claim discharges "
+        "no named site. Pinned as the COMPLETE sentence, opening imperative "
+        "included: a pin starting at the lowercase 'refuting' survives 'It is "
+        "false that refuting the class claim discharges no named site.' -- an "
+        "outright negation of the property, measured green"
+    )
+
+
 if __name__ == "__main__":
     import sys
 
