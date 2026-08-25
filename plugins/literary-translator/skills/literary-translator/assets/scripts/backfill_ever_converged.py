@@ -1542,8 +1542,12 @@ DRIVER_LOCK_NAME = ".driver.lock"
 # The ONLY errnos that mean "something else holds this lease". Everything else
 # a flock() can raise means the attempt did not happen -- the filesystem
 # cannot lock (ENOLCK, ENOSYS, EOPNOTSUPP), or the process ran out of
-# descriptors. Collapsing the two is the defect select_segments.py measured
-# (:3978-4005) and it fails in BOTH directions: read as contention it
+# descriptors. Collapsing the two is the defect select_segments.py measured in
+# `_independent_lock_attempt()` -- cited by FUNCTION, never by line range,
+# because that file is a bundle member this one cannot touch and a sibling
+# release moves it freely; its own self-test comment still cites
+# "segment_dispatch_driver.py:1207-1262" for a passage that has since moved
+# ~100 lines. The collapse fails in BOTH directions: read as contention it
 # manufactures a holder that is not there, read as success it manufactures an
 # enforcement guarantee that is not there. One definition, used by the acquire
 # and by its self-test, so the two can never drift apart -- they did, for one
@@ -1606,6 +1610,26 @@ def acquire_project_lease(durable_root: Path) -> int:
     ``select_segments.py``'s ``--from-stalled`` lease stamps nothing at all.
     """
     lock_path = driver_lock_path(durable_root)
+    # The root is checked BEFORE anything is created, and the ordering is the
+    # whole point. Taking the lease moved to the TOP of the run, ahead of
+    # everything that used to touch the filesystem first, so this mkdir became
+    # the first thing a mistyped --durable-root reaches. `parents=True` then
+    # MATERIALIZES the whole missing path, and the run goes on to fail one
+    # step later with "schemas directory not found" -- which reads as an
+    # incomplete project rather than a nonexistent one, and by then the path
+    # exists on disk, so looking at it corroborates the wrong reading.
+    # Measured against the pre-lease script on the same argv: it wrote nothing
+    # and said "No such file or directory: <root>". Restoring that sentence is
+    # the fix; a legitimate durable root always exists, since it holds
+    # segments/ and the ledger, and only `runs/` is legitimately absent.
+    if not durable_root.is_dir():
+        fatal(
+            f"durable root does not exist (or is not a directory): "
+            f"{durable_root} -- refusing to create it. This script backfills "
+            f"sentinels into an EXISTING project; a root that is not there is "
+            f"a mistyped --durable-root, not a project to be scaffolded.",
+            durable_root=str(durable_root),
+        )
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
