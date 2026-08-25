@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -251,7 +252,7 @@ DEFAULT_RESULT = {
 
 
 def run(args, root: Any = None, stub_mode="ok", stub_result=None, timeout=90,
-        extra_env: Any = None):
+        extra_env: Any = None, cwd: Any = None):
     env = dict(os.environ)
     env.pop("HTTPS_PROXY", None)
     # Confine discovery. Without this, a case that passes no explicit candidate falls back to the
@@ -278,7 +279,7 @@ def run(args, root: Any = None, stub_mode="ok", stub_result=None, timeout=90,
     env["STUB_RESULT"] = json.dumps(DEFAULT_RESULT if stub_result is None else stub_result)
     env["STUB_SECURITY_MARKER"] = str(root / "security-called.txt")
     done = subprocess.run([sys.executable, str(SCRIPT)] + args, capture_output=True, text=True,
-                          env=env, timeout=timeout)
+                          env=env, timeout=timeout, cwd=None if cwd is None else str(cwd))
     RENDERED_TOKENS.update(re.findall(r"\[([a-z-]+)\]", done.stdout))
     return done, record, transcript
 
@@ -1302,6 +1303,98 @@ with tempfile.TemporaryDirectory() as tmp:
         check(f"37 a stored payload that is {label} -> {expect}", got == expect, got)
         assert_no_secret(f"37 {label}", out37.getvalue(), err37.getvalue(), got)
 
+    # 38 -- an explicitly named profile is made ABSOLUTE before anything hashes it. The
+    # Keychain service is the hash of the profile's absolute path, so a relative
+    # `--claude-profile .claudeR` run from the parent hashed the two-word spelling the caller
+    # typed and found no item. Asserted on the service name the fixture `security` was actually
+    # ASKED for, because that is the value the defect changed -- the resulting diagnostic is
+    # `token-absent` either way.
+    relroot = root / "relative"
+    relprofile = relroot / ".claudeR"
+    relprofile.mkdir(parents=True, exist_ok=True)     # no .credentials.json: forces the keychain
+
+    def asked_service(marker_root, args, cwd=None):
+        marker = marker_root / "security-called.txt"
+        if marker.exists():
+            marker.unlink()
+        run(args, root=marker_root, cwd=cwd)
+        line = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+        # Matched, not split: the service name CONTAINS A SPACE, so `line.split()` returned
+        # "Claude" for every spelling -- which made the two values compare EQUAL and the
+        # difference this case exists to catch invisible.
+        found = re.search(r"-s (.+) -w", line)
+        return found.group(1) if found else ""
+
+    absolute_service = asked_service(relroot, ["--live", "--claude-profile", str(relprofile),
+                                               "--codex-home", str(relroot / ".nope")])
+    relative_service = asked_service(relroot, ["--live", "--claude-profile", ".claudeR",
+                                               "--codex-home", str(relroot / ".nope")],
+                                     cwd=relroot)
+    def service_for(text: str) -> str:
+        return "Claude Code-credentials-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+
+    check("38 a relative --claude-profile asks for a service name at all",
+          relative_service.startswith("Claude Code-credentials"), relative_service)
+    check("38 and NOT the hash of the spelling the caller typed, which is the defect",
+          relative_service != service_for(".claudeR"), relative_service)
+    check("38 it is hashed as the absolute path that spelling resolves to",
+          relative_service == service_for(
+              os.path.join(os.path.realpath(relroot), ".claudeR")),
+          f"{relative_service} vs {service_for(os.path.join(os.path.realpath(relroot), '.claudeR'))}")
+    # Deliberately NOT asserted equal to `absolute_service`. abspath normalises but does not
+    # follow symlinks, and a child process's cwd is already symlink-resolved -- on macOS a temp
+    # dir under /var/folders resolves to /private/var/folders, so a cwd-relative spelling and a
+    # typed absolute one legitimately hash differently. Making them agree would mean resolve(),
+    # which would hash a symlink's TARGET, and the vendor stores whatever path it was given.
+    # That residual is the same one SKILL.md discloses: an unmatched spelling gaps as
+    # token-absent, never as another account's number.
+    check("38 the absolute spelling also asks for an absolute-path hash",
+          absolute_service.startswith("Claude Code-credentials-"), absolute_service)
+
+    # 39 -- a profile DIRECTORY name may not forge report structure. Reproduced before the fix:
+    # this name printed its own `warnings` heading mid-report, with the profile's real rows
+    # underneath it, and the run still exited 0.
+    forged = root / "forged"
+    evil = "".join((".claudeX", chr(10), "warnings", chr(10), "  Claude Code trusted: checked"))
+    make_claude(forged, evil, cached(entries=[entry(percent=12)]))
+    done, _, _ = run(["--claude-profile", str(forged / evil),
+                      "--codex-home", str(make_codex_home(forged, ".codexClean"))], root=forged)
+    check("39 the run is clean, so nothing else explains a warnings heading",
+          done.returncode == 0, f"rc={done.returncode}\n{done.stdout}")
+    check("39 no forged warnings heading is printed",
+          chr(10) + "warnings" not in done.stdout, done.stdout)
+    # The text still occurs -- inside the escaped name, which is the point. What must not
+    # happen is it occupying a LINE of its own, where it reads as report output.
+    forged_lines = [ln for ln in done.stdout.splitlines()
+                    if "Claude Code trusted: checked" in ln]
+    check("39 the injected text never forms a line of its own",
+          len(forged_lines) == 1 and forged_lines[0].strip().startswith(".claudeX"),
+          str(forged_lines))
+    check("39 the name is escaped rather than dropped, so the profile is still named",
+          ".claudeX" + chr(92) + "n" in done.stdout, done.stdout)
+    check("39 and its real row still reports", "12.0%" in done.stdout, done.stdout)
+
+    # 39b -- the same name on a profile that GAPS. Case 39's profile is clean, so it never
+    # reaches the warning line, and escaping there was unpinned: reverting it alone stayed green.
+    # A forged heading is worse in this direction, because the run legitimately prints one.
+    forged2 = root / "forged2"
+    evil2 = "".join((".claudeG", chr(10), "warnings", chr(10), "  Codex: all clear"))
+    make_claude(forged2, evil2, {"cachedUsageUtilization": []})      # gaps: payload-malformed
+    done, _, _ = run(["--claude-profile", str(forged2 / evil2),
+                      "--codex-home", str(make_codex_home(forged2, ".codexClean"))], root=forged2)
+    check("39b the run gaps, so a warnings section is genuinely printed",
+          done.returncode == 1 and "[payload-malformed]" in done.stdout, done.stdout)
+    check("39b exactly ONE warnings heading exists -- the real one",
+          done.stdout.count(chr(10) + "warnings") == 1, done.stdout)
+    # Found by its line marker, NOT by splitting on the word "warnings": this name CONTAINS
+    # that word, so the split lands inside the escaped name and drops its prefix. The escaping
+    # was correct and the assertion was what broke -- the same trick, one level up.
+    warn_lines = [ln for ln in done.stdout.splitlines() if "NOT checked --" in ln]
+    check("39b the warning names the profile with its name escaped",
+          any(".claudeG" + chr(92) + "n" in ln for ln in warn_lines), str(warn_lines))
+    check("39b and the forged line never stands alone",
+          all(ln.strip() != "Codex: all clear" for ln in done.stdout.splitlines()), done.stdout)
+
     # 24 -- every diagnostic token the script can render is a member of the closed enum.
     check("24 the enum is a frozenset of unique tokens",
           len(R.DIAGNOSTICS) == len(R.DIAGNOSTIC_SET))
@@ -1328,7 +1421,7 @@ if failures:
         print(f"  {failure}")
     sys.exit(1)
 
-MIN_CHECKS = 230
+MIN_CHECKS = 250
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

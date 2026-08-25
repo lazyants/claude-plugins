@@ -250,6 +250,20 @@ def _obj(value):
 # --- rendering ---------------------------------------------------------------------------------
 
 
+def _safe_name(text: str) -> str:
+    """A filesystem-derived name, made safe to PRINT -- escaped, never refused.
+
+    A directory name belongs to the machine, not to a vendor, so gapping a profile over its
+    spelling would be a check its owner could not clear; `_text`'s refusal is for vendor fields
+    and is deliberately not applied here. But a name may not forge report STRUCTURE either.
+    Reproduced: a directory called `.claude-evil\nwarnings\n  Claude Code trusted: checked`
+    printed its own `warnings` heading in the middle of the report, above rows that then read as
+    belonging to it, while the run still exited 0. Only non-printable characters are escaped, so
+    an ordinary accented profile name still renders as itself.
+    """
+    return "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in text)
+
+
 def _local(when: datetime.datetime) -> str:
     return when.astimezone().strftime("%d %b %H:%M %Z")
 
@@ -798,12 +812,20 @@ class Candidate:
 
 
 def _explicit(path: Path) -> Candidate:
-    """An explicitly named candidate still gets a probe.
+    """An explicitly named candidate still gets a probe, and is made absolute first.
 
     Discovery cannot hand over a directory that is not there, but an argument can, and without
-    this a typo'd or moved profile reaches the producer, finds nothing, and reports a clean
+    the probe a typo'd or moved profile reaches the producer, finds nothing, and reports a clean
     "no cache" -- a verdict about a profile that was never examined at all.
+
+    Absolute because the Keychain service name is the hash of the profile's absolute path, and
+    only discovery produces one of those for free. `--claude-profile .claude-work` from the
+    parent directory otherwise hashes the two-word spelling the caller typed, finds no item, and
+    gaps as `token-absent` -- the safe direction, but a documented invocation form that cannot
+    work. abspath, not resolve(): normalising is the fix, and following a symlink would hash a
+    path the vendor never stored.
     """
+    path = Path(os.path.abspath(path))
     if _stat_kind(path) != "dir":
         return Candidate(path, "candidate-unreadable")
     return Candidate(path)
@@ -924,7 +946,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         for candidate in candidates:
             state, records, code = _examine(candidate, producer)
-            print(f"  {candidate.path.name}")
+            print(f"  {_safe_name(candidate.path.name)}")
             for record in records:
                 print(record.render())
             if code:
@@ -935,7 +957,8 @@ def main(argv: list[str] | None = None) -> int:
                 # necessarily reported, which is a warning inventing its own reason.
                 detail = code or ", ".join(f"{r.name} [{r.diagnostic}]"
                                            for r in records if r.state == GAP)
-                warnings.append(f"{group} {candidate.path.name}: NOT checked -- {detail}")
+                warnings.append(
+                    f"{group} {_safe_name(candidate.path.name)}: NOT checked -- {detail}")
 
     if warnings:
         print("\nwarnings")
