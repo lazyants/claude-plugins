@@ -367,78 +367,29 @@ def _local_dict_len(filename, funcname, varname):
 # would make this file the third copy of one number, which is the shape #580 was
 # filed about.
 FIGURES = [
-    # Rotated to 1.71.0, per the maintenance contract above. State what this
-    # rotation actually did, because this comment is the ONLY evidence a
-    # rotation happened at all -- the docstring says an unrotated list is
-    # indistinguishable from a rotated one, so a record claiming work it did not
-    # do defeats the one thing it exists for. NOTHING WAS RETIRED. Both of
-    # 1.70.0's rows -- the plugin and orchestration tuple sizes -- carry over
-    # BYTE-IDENTICAL, phrase, value and derivation alike, because the 1.71.0
-    # entry happens to reuse their exact phrases ("still holds 19 entries",
-    # "still holds 6"); each was re-checked against the new entry rather than
-    # assumed. The only row change is the ADDED `DERIVATION_BUNDLE_MEMBERS` row.
-    # 1.71.0 is a BATCH FOLD like both of its predecessors, so the shape is the
-    # same one for the same reason: a fold's one release-level cost is what it
-    # does to the bundle hashes, and the membership counts the entry cites are
-    # the only figures in it a derivation can reach.
+    # EMPTY, rotated to 1.72.0. All three of 1.71.0's rows were RETIRED with the
+    # entry they described (the `PLUGIN_BUNDLE_MEMBERS`,
+    # `DERIVATION_BUNDLE_MEMBERS` and `ORCHESTRATION_BUNDLE_MEMBERS` sizes): the
+    # 1.72.0 entry is documentation-only, moves no bundle membership, and makes
+    # no claim about any of the three, so carrying a row over would declare a
+    # figure its entry does not state.
     #
-    # The module-level chain of historical rotations above tops out at 1.69.0:
-    # 1.70.0 recorded itself HERE rather than promoting 1.69.0's record into it,
-    # and this rotation does not repair that. 1.70.0's record, so it is not lost
-    # with the comment this replaces: TWO rows, the plugin and orchestration
-    # tuple sizes, declared because a fold's membership claim is as re-derivable
-    # as a "moved to N" one.
-    #
-    # THREE rows this time rather than two, because this range moves all three
-    # bundle hashes and the entry therefore states all three memberships as
-    # unchanged. A "membership did not move" claim is exactly as re-derivable as
-    # a "moved to N" one, and exactly as capable of going stale if a later edit
-    # in the same release adds a member. `_tuple_len` reads each by AST from the
-    # script that owns it.
-    #
-    # What the entry states and this file deliberately does NOT declare, so an
-    # empty space below is read as a decision rather than an omission:
-    #
-    # - "the BYTES of nine members", and the members named one by one in the
-    #   three cost bullets. That is a measurement over a GIT RANGE
-    #   (1.70.0..this cut), not over the tree, and this file can only read the
-    #   tree. A derivation would have to shell out to `git diff` against a base
-    #   commit the fold's own merge can move -- a second implementation of what
-    #   the diff already says -- and pinning the base here would hardcode the
-    #   answer, the `lambda: 17` failure the docstring refuses. It is spelled as
-    #   a WORD for that reason, and the members are ENUMERATED beside it so the
-    #   half that matters cannot drift into a wrong total at all.
-    # - The field measurements quoted from the merges being folded: the
-    #   74-segment volume and its 61 exposed drafts (#742), the 12 of 12
-    #   profiles (#751), the 89 stem hits and the 427/831 italic spans (#746).
-    #   Each was measured against a live operator-owned durable root or a
-    #   round of review that exists in no tree at all, so none is re-derivable
-    #   here however it were phrased. Declaring one would hardcode its answer.
-    # - The remaining numerals are identifiers, never measurements, and this
-    #   list is meant to be EXHAUSTIVE over what the entry contains -- an
-    #   account that presents itself as complete and is not is the same defect
-    #   as a stale figure. They are: the version numbers, the release date, the
-    #   base commit `6d0a2b2`, the issue numbers of the fold enumeration AND the
-    #   cross-references outside it (#458, #491), the pipeline stage labels (W1,
-    #   W3, W6, R10, R1-R10, Step 0a), and the four exit codes (`exit 0`, two
-    #   `exits 1`, `exit 2`).
-    Figure(
-        phrase="still holds 19 entries",
-        value=19,
-        derive=lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
-    ),
-    Figure(
-        phrase="still holds 2",
-        value=2,
-        derive=lambda: _tuple_len("cache_key.py", "DERIVATION_BUNDLE_MEMBERS"),
-    ),
-    Figure(
-        phrase="still holds 6",
-        value=6,
-        derive=lambda: _tuple_len(
-            "scaffold_setup.py", "ORCHESTRATION_BUNDLE_MEMBERS"
-        ),
-    ),
+    # Nothing replaces them, and the list is meant to be EXHAUSTIVE over what the
+    # entry contains, so here is the account of every numeral in it. The entry
+    # promotes operating lessons measured while running this plugin on live
+    # books, and every measurement it quotes was taken against an
+    # operator-owned durable root or a round of review that exists in NO tree:
+    # the 19-of-20 dispatch count and its round-2 token, the ~35-70k per-agent
+    # bootstrap band and the 69,844-token poll subagent, the 638 agents / ~25M
+    # tokens / ~700k per segment / 3-5 codex calls / ~90-95% orchestration
+    # arithmetic, the ~92 KB and ~100k tokens of one 807-candidate glossary
+    # launch, the 32/3/15 closures of one quotation class, the 1057 enumerated
+    # and 230 reproduced source runs, the 20/8/12 defect split, and the 11 words
+    # across 8 segments. None is re-derivable here however it were phrased, and
+    # declaring one would hardcode its answer -- the `lambda: 17` failure the
+    # docstring refuses. The remaining numerals are identifiers, never
+    # measurements: the version numbers (1.72.0, 1.37.0), the release date, and
+    # the issue numbers (#461, #527, #532).
 ]
 
 

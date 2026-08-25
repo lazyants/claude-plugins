@@ -3891,6 +3891,36 @@ site, and skipping any of them is how a sweep does its damage:
   a note written rounds earlier recording that those two occurrences are a man's
   byname and that an earlier finding wanting them italicised was wrong.
 
+**Enumerate the population from the SOURCE, not from your own matcher.** A
+draft-side pattern defines its own residue: what it cannot reach is not in the
+count, so the class closes, reopens next round at a different honest number, and
+closes again. Measured on a live book, one quotation class was declared closed
+three times — 32 sites, then 3, then 15 — every count true about its predicate and
+silent about the class. Re-anchoring the denominator on the source (every source
+run the draft reproduces: 1057 enumerated, 230 reproduced) made the counts
+comparable ACROSS rounds, and let the transform refuse to write when it found
+fewer pairs than the enumeration held. The measurement that justifies the
+re-anchoring: of 20 real defects in that class, reviewers had named 8, and eight of
+the 12 unnamed sat in units that had already CONVERGED and would have shipped — a
+draft-side pattern cannot find those, because nothing draws attention to a
+converged unit. Where the enumeration cannot be complete, say the floor out loud
+(a run the alignment cannot locate is invisible to it) and report the residue as a
+named number rather than implying zero.
+
+**Gate a sweep on the invariant its own transform can break — a structural gate by
+construction never reads what changed.** Measured on a live book: a parcel
+rebuilding aligned source spans as `token + punctuation + space` read a
+WORD-INTERNAL mark as punctuation trailing the previous token and inserted a space
+the source does not have, in 11 words across 8 segments; its gate was green
+throughout because it conserved LETTERS, and a space is not a letter. Name the
+invariant per transform — reordering conserves the letter multiset but not the
+sequence, splitting conserves letters but not the word count, re-levelling quotes
+conserves everything except quote balance. Two cheap rules from the same class:
+**a sweep must print its own site count and refuse a zero-site run** (a
+replace-across-files loop that matched nothing prints exactly what a successful one
+prints), and it must print old/new for every site and have them read, with any
+match outside the adjudicated site list reported rather than silently applied.
+
 Reviewer concentration in one segment is evidence of reading order **or** of a
 real local defect, and nothing tells them apart except measuring the class.
 Report what you find rather than fixing it reflexively: a converged unit goes

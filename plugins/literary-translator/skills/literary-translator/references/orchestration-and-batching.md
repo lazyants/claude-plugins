@@ -906,6 +906,37 @@ What the mode-awareness still prevents is the
 thing that would break the principle: a MODE-BLIND estimate charging an
 offline project the live `16N + 2` for a ladder it can never execute.
 
+## What a fan-out actually costs: the per-`agent()` floor
+
+`batch_agent_cap` bounds the agent COUNT; this is what each one costs, and the two
+numbers together are the price of a batch. **Every `agent()` call pays a fixed
+harness bootstrap regardless of how small its task is.** Measured on a live run:
+~35–70k tokens per call, with a subagent whose entire job was one bash poll
+returning a `READY <seg>` line costing 69,844 tokens, read from that subagent's own
+transcript usage fields. A 40-segment batch came to 638 agents and ~25M subagent
+tokens — roughly 700k per segment, against the 3–5 substantive codex calls that
+segment actually needs. So **~90–95% of the Claude-side burn is deterministic
+orchestration** (ledger writes, poll chunks, verdict reads) that needs no model at
+all.
+
+It is structural, not tuning: a Workflow script cannot run bash itself, so the
+template spawns a fresh bootstrapped subagent per step. The same property carries a
+second, separate cost — a Workflow script has no filesystem access either, so a
+batch plan reaches its run only by being written verbatim into the tool call. For
+one glossary pass over 807 candidates that was ~92 KB of `args`, about 100k tokens
+to launch, and none of the obvious escapes exist: passing `args` as a JSON string
+is the same bytes; trimming candidate rows drops signal the dispatch prompt tells
+the judge to use; and splitting into several invocations breaks `--verify-merged`,
+which checks against the union manifest `resume_setup.py` wrote from the whole
+plan. Decide to pay it up front rather than spending a second helping of context
+looking for a way out.
+
+**Two consequences worth stating wherever a run is being priced.** A cost model
+built on "how much translation work is there" is off by an order of magnitude on
+this path — count agents, not words. And the billing is split: codex tokens bill to
+the OpenAI account while the orchestration agents hit the Claude session limit, so
+a run can die of a Claude weekly limit with codex capacity untouched.
+
 ## The glossary-pass template — a second, smaller `pipeline()` call
 
 `glossary-pass-wf.template.js` runs once during W3, bootstrap, before the

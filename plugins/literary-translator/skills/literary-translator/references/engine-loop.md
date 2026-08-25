@@ -533,3 +533,69 @@ fragment — no separate reset/clear script is needed. See
 (`output.v1_scope: segment_drafts_and_audit`) complete while ANY item remains
 `non_converged` OR `blocked`** — both are "not done," not just `blocked`; a
 future assembly script must also hard-fail on either status when it exists.
+
+## A refused finding can live-lock the unit, and the summary still reads complete
+
+A fix turn may legitimately refuse the finding it was handed — 1.37.0 (#532) gives
+it an apply-side rule that REQUIRES a refusal for a canon claim whose form
+resolves in neither the segment's `canon_map` nor `canon.json`. A refusal that
+leaves the draft byte-identical is where the loop stops moving, and it stops
+silently:
+
+- The stored review counts as fresh while its `dispatch_token` still names this
+  run and round. Refusing changes no draft bytes, so `draft_sha1` does not move,
+  so the artifact never goes stale, so the next round re-serves that same review
+  with a `fix_prompt` instead of dispatching a new one. The unit cannot converge,
+  and no cap fires either, because the round never advances for it.
+- **Measured on a live book:** round 4 dispatched 19 of 20 units; the missing one
+  still carried the round-2 `dispatch_token` on its `segments/<seg>.review.json`,
+  and grepping every `runs/*/driver_journal.jsonl` for that id showed its dispatch
+  history simply stopping.
+- **The exit summary hides it.** The unit reports under `needs_fix`, which reads
+  as "reviewed again, still not clean" when what happened is "not looked at". The
+  tell is the `round_label` in that entry: it does not advance between rounds
+  while every other unit's does.
+
+**The release is `reject_review.py`, and it is the ONLY release.** This is the
+loop #461 was filed about — `derive_next_action()` cannot tell "the draft is
+unchanged because the fix was correctly skipped" from "the draft is unchanged
+because nothing was attempted", since both leave `draft_sha1` matching the
+review — and the marker file at `segments/<seg>.review_rejected.json` is the
+operator's durable, auditable way to say that this specific verdict does not
+bind. It is bound to the review's own token, verdict digest and round, so the
+decision survives the next reviewer instead of being re-argued: at a numbered
+round it converts the would-be `needs_fix` into a fresh review at the next round
+label, and at the mandatory `final` round a record carrying the draft its verdict
+was written against, over a reviewer-asserted `coverage_ok`, terminates the unit
+as converged on the operator's own `reason` (#527). `reject_review.py` is the
+sole writer and `derive_next_action()` only ever reads it.
+
+**Do NOT release it by writing a refusal marker into the draft.** `fixPrompt`
+forbids exactly that, and the reason is the one that matters here: `notes[]` is
+the translator's channel and is READ BY THE NEXT REVIEWER, so a marker there
+feeds the dispute back into the loop it was meant to end, while moving
+`draft_sha1` only invalidates the current review without binding anything —
+deciding that a stored verdict does not bind is the operator's job, through the
+mechanism above. (Correcting a note that a substantiated `NOTE:n` finding is
+about is an ordinary applied fix, not a marker.) And the move that must never be
+used to release it is applying a finding you have evidence is wrong: that is the
+one edit which damages correct prose, and the live-lock is exactly the pressure
+that makes it tempting.
+
+**Re-read the finding before rejecting its verdict.** A stale artifact describes
+a draft that no longer exists, so a refusal recorded rounds ago can be re-served
+against text that has since satisfied it — measured on that same unit, whose
+finding asked for a removal an earlier round had already made.
+
+**Three different causes, one shape.** This; an operator waiver written into
+`notes[]`, which does reach the next reviewer and still lifts nothing — the
+criterion it enforces comes from the DISPATCH CONTRACT, so a note explaining that
+the operator chose to depart from a criterion set there leaves the same finding
+returning every round until the cap fires, which on a capped-once project
+silently converts a settled decision into a permanently unclaimable segment (the
+waiver belongs where the reviewer takes its criteria from: the profile and the
+dispatch contract, or `reject_review.py` for the verdict already stored); and a
+driver-stranded `in_progress` unit (`references/ledger-and-resumability.md`) all
+end the same way — a unit no longer dispatched while the round summary still reads
+complete. **Reconcile the dispatch COUNT against the requested set every round**;
+`dispatched = N-1` for N requested units is the cheapest detector of all three.

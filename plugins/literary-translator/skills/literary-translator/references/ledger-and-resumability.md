@@ -1397,6 +1397,35 @@ IDs beside actually-emitted IDs.
   override, logged as such, regardless of its `human_escalation`
   classification.
 
+## A never-converged unit stranded by a killed driver fits no claim profile
+
+A driver killed mid-flight never writes the terminal record for the segments it
+was holding, so they stay `in_progress` — dispatch-eligible by default, which is
+the part that hides them. For a unit that HAS converged before, that is P3's
+population and `--from-stalled` is its route. For a unit that never converged, all
+three profiles refuse it, each on a different fact: `--from-cap` and
+`--from-converged` on the materialized status, and `--from-stalled` on the
+`.ever_converged.<seg>` sentinel it requires and this unit has never had.
+
+The way through is the absence of a guard rather than a route built for it: with
+no sentinel the unit never trips Step 1's previously-converged refusal, so
+`select_segments.py --only-segs <seg>` with NO claim flag at all dispatches it.
+That works precisely because it never converged — luck, not design — and it is
+worth knowing before an operator reaches for `--allow-retranslate-converged`,
+which authorizes a re-translation this unit does not need.
+
+**The dangerous part is the round it blocks on the way there.** D3b requires that
+every emitted seg be a subset of the claimed ids on a `--from-stalled`
+invocation, so one stranded, unclaimable id refuses the whole round until it is
+claimed or excluded. Exclusion is the obvious move, and it is where the unit
+disappears: the round then runs, converges, and its exit summary lists what it
+dispatched — the excluded unit appears nowhere, so the summary reads as complete.
+**Write the exclusion into an open-items record BEFORE the summary exists, not
+after.** After any driver death, classify first and then read the ledger record of
+every `recoverable`/`in_progress` id — the category label alone reports none of
+the three independent facts (status, sentinel, `reviewed_draft_sha1`) that decide
+which route the unit needs.
+
 ## Related tests
 
 `tests/ledger_update.test.py` (fragment-replace transitions — a
