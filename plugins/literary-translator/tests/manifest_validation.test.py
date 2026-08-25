@@ -6,7 +6,7 @@ manifest.schema.json section: "validates ... generation_hashes.
 source_extraction_hash (REQUIRED), source_inputs: [string] (REQUIRED,
 minItems:1) PLUS generation_hashes.source_input_hash (REQUIRED) ...").
 
-Two things are exercised, both against the REAL, shipped files -- never
+Three things are exercised, all against the REAL, shipped files -- never
 hand-rolled restatements:
 
 1. **Schema validation** -- calls ``extract.py.template``'s own
@@ -35,17 +35,26 @@ hand-rolled restatements:
    fixture that passes every other check, so a regression that weakens
    *this specific* check cannot hide behind an unrelated failure.
 
+3. **The zero-body refusal (#761)** -- drives the REAL ``main()`` end to
+   end over a throwaway ``${durable_root}``: a spine that classifies no
+   file as body must exit 1 naming ``spine_yields_body_files``, never
+   print ``ALL PASS``, and the same EPUB with a ``spine_overrides`` entry
+   must still clear cleanly. See that block's own header comment for why
+   a ``run_self_checks()``-only test cannot cover it.
+
 ``extract.py.template`` is loaded by copying it into a throwaway
 ``${durable_root}`` fixture first (never imported directly from its real
 ``assets/templates/`` location) -- its module-level
 ``DURABLE_ROOT = Path(__file__).resolve().parent`` self-anchors off
 wherever it is loaded from, and calling ``two_phase_write()``/writing a
 real ``manifest.json`` against the plugin's own source tree would be a
-real, if narrow, side effect this suite must not risk (this suite only
-calls ``run_self_checks()``/``validate_against_schema()`` directly, so no
-manifest.json is ever actually written -- the copy is defensive, matching
-the self-anchoring discipline every other test in this suite already
-follows for scripts under ``${durable_root}/scripts/``). The real
+real, if narrow, side effect this suite must not risk. For the checks that
+call ``run_self_checks()``/``validate_against_schema()`` directly the copy
+is defensive, matching the self-anchoring discipline every other test in
+this suite already follows for scripts under ``${durable_root}/scripts/``;
+for the #761 end-to-end checks it is load-bearing -- those go through
+``main()``, whose ``two_phase_write()`` writes a real ``manifest.json``
+beside whatever ``extract.py`` was loaded from. The real
 ``manifest.schema.json`` is copied alongside it into ``schemas/``, exactly
 as Step 0a would, so ``validate_against_schema()`` reads the actual shipped
 schema, not a hand-copied stand-in.
@@ -58,10 +67,13 @@ tests/manifest_validation.test.py`` (already configured project-wide via
 """
 import hashlib
 import importlib.util
+import json
 import shutil
+import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_PATH = (
@@ -86,10 +98,20 @@ ASSEMBLE_PATH = (
     PLUGIN_ROOT
     / "skills" / "literary-translator" / "assets" / "scripts" / "assemble.py"
 )
+# #761's end-to-end main() fixture (below) needs the REAL scripts/ directory
+# copied whole into its throwaway durable_root: main()'s two_phase_write()
+# shells out to scripts/cache_key.py, which itself loads scripts/json_stdout.py
+# as an exact-path sibling -- a durable_root missing either exits loud and
+# far from this file's own assertions.
+SCRIPTS_SRC_DIR = (
+    PLUGIN_ROOT
+    / "skills" / "literary-translator" / "assets" / "scripts"
+)
 
 assert TEMPLATE_PATH.is_file(), f"extract.py.template not found at {TEMPLATE_PATH}"
 assert SCHEMA_PATH.is_file(), f"manifest.schema.json not found at {SCHEMA_PATH}"
 assert ASSEMBLE_PATH.is_file(), f"assemble.py not found at {ASSEMBLE_PATH}"
+assert (SCRIPTS_SRC_DIR / "cache_key.py").is_file(), f"cache_key.py not found under {SCRIPTS_SRC_DIR}"
 
 
 def _load_extract_module(tmp_path: Path):
@@ -443,10 +465,18 @@ def test_body_files_yield_segments_fatal_when_body_file_yields_no_segment(extrac
 
 
 def test_body_files_yield_segments_passes_when_source_has_no_body_files(extract_mod):
-    """Companion regression-lock: a source with NO body files (n_body_files==0)
-    legitimately has no body segment -- the check is gated on n_body_files>0 and
-    must NOT false-fail here (guards against an over-eager fix that fires on any
-    empty body-segment list)."""
+    """Companion regression-lock, not a legitimacy claim (#761 reversed that):
+    #83's body_files_yield_segments is gated on n_body_files>0 and answers
+    "body files exist but collapsed to zero body segments" -- it must NOT
+    false-fail merely because there are no body files at all (guards against
+    an over-eager fix that fires on any empty body-segment list). The two
+    checks partition the space: a source with NO body files at all
+    (n_body_files==0, this fixture) is a DIFFERENT question, now refused by
+    main()'s spine_yields_body_files / the gate's own check of the same name
+    -- see extract.py.template's main() and validate_extraction.py's
+    run_derivable_checks(). Neither of those is reachable from
+    run_self_checks() directly, which is why this test still asserts #83
+    passes here rather than asserting the source is accepted overall."""
     manifest = _baseline_manifest()
     manifest["segments"] = [s for s in manifest["segments"] if s["kind"] != "body"]
     report = _baseline_report()
@@ -622,3 +652,182 @@ def test_same_block_mount_verse_claim_classifies_verse_when_type_not_declared_he
     kind = assemble_mod._classify_kind("CHAPTER", claims, verse_store_by_vid)
 
     assert kind == "verse"
+
+
+# ---------------------------------------------------------------------------
+# #761: main() must refuse, not print ALL PASS and exit 0, when spine
+# classification yields ZERO body files. run_self_checks()'s own
+# body_files_yield_segments (#83, exercised above) is gated on
+# n_body_files>0 by design (see the companion docstring update above) --
+# nothing inside run_self_checks() ever asserts a body file exists at all,
+# so a helper-only test that stops at run_self_checks() would stay green
+# even if the new spine_yields_body_files logic in main() were deleted.
+# This drives the REAL main() end-to-end, through a throwaway durable_root
+# extract.py.template's own self-anchoring makes possible with no
+# monkeypatching (its module-level DURABLE_ROOT = Path(__file__).resolve()
+# .parent, with ROOT_MARKER_PATH defined right beside it).
+# ---------------------------------------------------------------------------
+
+_E2E_BODY_FILENAME = "body.xhtml"
+
+_E2E_CONTAINER_XML = (
+    '<?xml version="1.0"?>\n'
+    '<container version="1.0" '
+    'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'
+    '  <rootfiles>\n'
+    '    <rootfile full-path="content.opf" '
+    'media-type="application/oebps-package+xml"/>\n'
+    '  </rootfiles>\n'
+    '</container>\n'
+)
+
+_E2E_OPF = (
+    '<?xml version="1.0" encoding="utf-8"?>\n'
+    '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+    'unique-identifier="bookid">\n'
+    '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
+    '    <dc:title>Test Book</dc:title>\n'
+    '  </metadata>\n'
+    '  <manifest>\n'
+    f'    <item id="body" href="{_E2E_BODY_FILENAME}" '
+    'media-type="application/xhtml+xml"/>\n'
+    '  </manifest>\n'
+    '  <spine>\n'
+    '    <itemref idref="body"/>\n'
+    '  </spine>\n'
+    '</package>\n'
+)
+
+# No footnote markup anywhere (no FNanchor_N/Footnote_N ids) and, in the
+# negative fixture below, no spine_overrides -- classify_spine_item's
+# fallback then classifies this file "front-back", exactly issue #761's
+# measured instance (a whole book collapsing to front-matter). Matches the
+# minimal fixture extract_bodywalk_verse.test.py already confirms produces
+# a clean, fully self-check-passing manifest when spine_overrides DOES
+# force it to "body" (see that file's h2+comment/whitespace case).
+_E2E_BODY_HTML = '<h2>Chapter</h2>\n<!-- editorial note --><p>Real chapter prose.</p>'
+
+
+def _make_e2e_epub(epub_path: Path, body_inner_html: str) -> None:
+    xhtml = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml">\n'
+        '<head><title>x</title></head>\n'
+        f'<body>\n{body_inner_html}\n</body>\n'
+        '</html>\n'
+    )
+    with zipfile.ZipFile(epub_path, "w") as zf:
+        zf.writestr("META-INF/container.xml", _E2E_CONTAINER_XML)
+        zf.writestr("content.opf", _E2E_OPF)
+        zf.writestr(_E2E_BODY_FILENAME, xhtml)
+
+
+def _make_e2e_durable_root(tmp_path: Path, epub_path: Path, spine_overrides: dict) -> Path:
+    """A full ${durable_root} main() can run against with NO monkeypatching:
+    the copied extract.py.template, a full copy of the real scripts/
+    directory (cache_key.py + its json_stdout.py sibling -- two_phase_write()
+    shells out to it), the real manifest.schema.json, a minimal profile.yml
+    satisfying load_profile()'s gutenberg_epub check and build()'s own
+    source/project/footnotes reads, and the ownership marker
+    _resolve_owner_profile_path() requires."""
+    durable_root = tmp_path / "durable"
+    durable_root.mkdir()
+    shutil.copyfile(TEMPLATE_PATH, durable_root / "extract.py")
+    shutil.copytree(SCRIPTS_SRC_DIR, durable_root / "scripts")
+    (durable_root / "schemas").mkdir()
+    shutil.copyfile(SCHEMA_PATH, durable_root / "schemas" / "manifest.schema.json")
+
+    profile = {
+        "source": {
+            "format": "gutenberg_epub",
+            "path": str(epub_path),
+            "adapter_config": {"gutenberg_epub": {"spine_overrides": spine_overrides}},
+        },
+        "project": {"max_segment_words": 100000},
+        "footnotes": {"apparatus_policy": "omit_apparatus"},
+    }
+    profile_path = durable_root / "profile.yml"
+    profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+    (durable_root / ".literary-translator-root.json").write_text(
+        json.dumps({"owner_profile_path": str(profile_path)}), encoding="utf-8"
+    )
+    return durable_root
+
+
+def _load_e2e_extract_module(durable_root: Path):
+    extract_copy = durable_root / "extract.py"
+    spec = importlib.util.spec_from_file_location("extract_e2e_under_test", extract_copy)
+    assert spec is not None and spec.loader is not None, f"could not load spec for {extract_copy}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_main_refuses_zero_body_spine_instead_of_printing_all_pass(tmp_path, capsys):
+    """The exact #761 scenario: an EPUB with no footnote markup and NO
+    spine_overrides classifies its one spine file front-back, yielding
+    n_body_files==0. main() must exit 1, name spine_yields_body_files as a
+    FAIL line, and must NOT print ALL PASS -- today (before the main() fix)
+    it does the opposite: exit 0 and print ALL PASS.
+
+    Also pins the remedy prose itself, not just the check name -- and pins
+    it as ONE CONTIGUOUS sentence, not scattered nouns. A review round
+    demonstrated why: token-level assertions (the predicate phrase, the
+    dotted path, the JSON example, checked as separate substrings) all pass
+    against a message that INVERTS the instruction (e.g. "Never set
+    spine_overrides ... delete extractor_path ..."), because every noun the
+    scattered asserts were checking for is still present -- token
+    membership cannot entail meaning. Asserting the whole remedy sentence
+    verbatim, as one literal, pins every clause at once, including ones
+    nobody thought to enumerate separately."""
+    epub_path = tmp_path / "book.epub"
+    _make_e2e_epub(epub_path, _E2E_BODY_HTML)
+    durable_root = _make_e2e_durable_root(tmp_path, epub_path, spine_overrides={})
+    module = _load_e2e_extract_module(durable_root)
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.main()
+
+    assert exc_info.value.code == 1, exc_info.value.code
+    out = capsys.readouterr().out
+    assert "FAIL  spine_yields_body_files" in out, out
+    assert "ALL PASS" not in out, out
+    # The complete failing-path remedy, verbatim, as one contiguous expected
+    # string -- exactly what extract.py.template appends to
+    # spine_yields_body_files_detail when n_body_files == 0. A single
+    # membership check on the whole sentence, not separate asserts per noun.
+    expected_remedy = (
+        "no spine item was classified body. Set "
+        "source.adapter_config.gutenberg_epub.spine_overrides "
+        "(e.g. {\"content.xhtml\": \"body\"}) for the file(s) that carry the "
+        "manuscript."
+    )
+    assert expected_remedy in out, out
+
+
+def test_main_passes_and_prints_all_pass_when_spine_override_yields_a_body_file(tmp_path, capsys):
+    """Positive control for the test above, without which the negative test
+    could pass vacuously on an earlier missing-profile/scaffolding failure
+    that looks identical to a real red: the SAME epub, with spine_overrides
+    forcing the one file to 'body', must clear main() cleanly -- exit 0,
+    ALL PASS printed, and no spine_yields_body_files FAIL line. Also pins the
+    fix for the defect a review round caught by reading, not testing: the
+    remedy prose ("produced no manuscript", "spine_overrides") must NOT
+    appear on a healthy PASS line, where it would be false -- only the
+    counts are unconditional."""
+    epub_path = tmp_path / "book.epub"
+    _make_e2e_epub(epub_path, _E2E_BODY_HTML)
+    durable_root = _make_e2e_durable_root(
+        tmp_path, epub_path, spine_overrides={_E2E_BODY_FILENAME: "body"}
+    )
+    module = _load_e2e_extract_module(durable_root)
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.main()
+
+    assert exc_info.value.code == 0, exc_info.value.code
+    out = capsys.readouterr().out
+    assert "ALL PASS" in out, out
+    assert "FAIL  spine_yields_body_files" not in out, out
+    assert "produced no manuscript" not in out, out
+    assert "spine_overrides" not in out, out

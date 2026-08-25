@@ -280,7 +280,11 @@ closes that hole two ways (for `gutenberg_epub`/`plain_text`; see below for
    adaptation. It loads the produced `manifest.json` plus the profile and
    **re-derives every manifest-derivable invariant from scratch**, ignoring
    whatever result `extract.py`'s own checks claimed: block-id uniqueness,
-   spine order, segmentation-nonempty, body-files-yield-segments,
+   spine order, segmentation-nonempty, body-files-yield-segments, — as of
+   #761 — spine-yields-body-files (the spine classifies ZERO items as `body`,
+   so the manifest carries no manuscript at all; this is exactly the case
+   body-files-yield-segments is deliberately gated off for, and it is a
+   GATE-ONLY check with no counterpart in the extractor's own suite),
    no-pseudo-segments-from-notes, the footnote bijection + sentinel-uniqueness
    (or, under `body_refs_only`, body-ref-marker well-formedness/uniqueness —
    branching on `footnotes.apparatus_policy` exactly as the extractor does),

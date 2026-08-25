@@ -13,7 +13,7 @@ reverting a mutation for "argparse rejects an unknown mode" is ceremony with no 
 
 THE TWO PINNED CASES ARE OPPOSITE DIRECTIONS OF ONE RULE, and both are real citations in this repo:
   * `hash-migration-impact.md:46` must go RED when anchored on true-but-irrelevant in-range strings.
-  * `custom.md:269` must stay GREEN, because its sentence has no anchor-eligible subject at all.
+  * `custom.md:275` must stay GREEN, because its sentence has no anchor-eligible subject at all.
 A guard tested in one direction only is half-tested: the first version of the subject rule passed
 the RED case and made the GREEN one impossible to declare.
 """
@@ -271,7 +271,7 @@ def test_an_anchor_pushed_past_the_end_of_a_range_fails():
 def test_subject_rule_ignores_the_citation_lexeme_itself():
     """The R3 BLOCKER, pinned in its GREEN direction.
 
-    `custom.md:269` says "`type` is intentionally open-ended (`manifest.schema.json:18`)" and the
+    `custom.md:275` says "`type` is intentionally open-ended (`manifest.schema.json:18`)" and the
     cited line really does say "Deliberately not a fixed enum" -- a CORRECT citation. Its only
     code-shaped tokens are the citation's own lexeme and `type`, four characters and too short to be
     an anchor. The first version of this rule counted the lexeme, so no legal declaration could ever

@@ -80,6 +80,30 @@ use `spine_overrides` when one source file needs a per-project correction.
 classification when the content-signal heuristic gets one file wrong, without
 touching the heuristic itself.
 
+**Zero body files is a REFUSAL, not a configuration (#761).** The fallback
+above keys on Gutenberg's `FNanchor_N` / `Footnote_N` id convention, so in a
+source with no footnote markup at all — an EPUB built for this pipeline from
+a PDF rather than by ebookmaker, which is how Hebrew, Arabic and other RTL
+sources usually arrive — every XHTML spine item that reaches the fallback
+takes its last branch. (Reaching it is the precondition: `spine_overrides`
+returns first, and a non-XHTML manifest entry returns `front-back` earlier
+still.) With no overrides set, the whole book then becomes front matter. Both `extract.py` and the managed W2
+gate now fail, named `spine_yields_body_files`, when the spine classifies
+zero items as `body`; the extractor exits 1 instead of printing `ALL PASS`,
+and the gate's non-zero exit blocks W3. The remedy the failure names is
+`spine_overrides` — one entry per file that carries the manuscript, e.g.
+`{"content.xhtml": "body"}`.
+
+There is deliberately **no profile knob to declare a source body-free** and
+waive this. The adjacent #83 check (`body_files_yield_segments`, "body files
+exist but collapsed to nothing") is gated on there being body files at all,
+and that gate is what left the total-failure case unguarded; the answer is a
+second check, not a widened first one. A knob would have meant a new key in
+`profile.schema.json`, which every project re-copies into
+`${durable_root}/schemas/` and which both resume digests hash — costing every
+project its resume identity for a case no project has ever had. If a
+genuinely body-free source ever appears, take it to a plugin issue.
+
 ## The custom block-boundary text extractor — never `get_text(" ")`
 
 For serialized translation text, `extract.py` never uses BeautifulSoup's

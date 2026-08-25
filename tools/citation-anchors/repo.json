@@ -1,10 +1,10 @@
 {
  "declarations": {
-  "[\"tools/citation_audit.py\", \"custom.md:269\", 0]": {
+  "[\"tools/citation_audit.py\", \"custom.md:275\", 0]": {
    "anchors": [
     "`type` is intentionally open-ended"
    ],
-   "claim": "The citation's OWN lexeme is excluded, and so is its bare filename. Without that exclusion the rule fired on every citation and made correct ones impossible to declare: `custom.md:269` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\", and `manifest.schema.json:18` really does say \"Deliberately not a fixed enum\" -- but its only other code-shaped token is `type`, four characters, too short to be an anchor. A gate that a correct citation cannot satisfy gets switched off, or pushes the author to delete the line number."
+   "claim": "The citation's OWN lexeme is excluded, and so is its bare filename. Without that exclusion the rule fired on every citation and made correct ones impossible to declare: `custom.md:275` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\", and `manifest.schema.json:18` really does say \"Deliberately not a fixed enum\" -- but its only other code-shaped token is `type`, four characters, too short to be an anchor. A gate that a correct citation cannot satisfy gets switched off, or pushes the author to delete the line number."
   },
   "[\"tools/citation_audit.py\", \"extract.py.template:1110–1279\", 0]": {
    "anchors": [
@@ -17,37 +17,37 @@
    "anchors": [
     "Deliberately not a fixed enum"
    ],
-   "claim": "The citation's OWN lexeme is excluded, and so is its bare filename. Without that exclusion the rule fired on every citation and made correct ones impossible to declare: `custom.md:269` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\", and `manifest.schema.json:18` really does say \"Deliberately not a fixed enum\" -- but its only other code-shaped token is `type`, four characters, too short to be an anchor. A gate that a correct citation cannot satisfy gets switched off, or pushes the author to delete the line number."
+   "claim": "The citation's OWN lexeme is excluded, and so is its bare filename. Without that exclusion the rule fired on every citation and made correct ones impossible to declare: `custom.md:275` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\", and `manifest.schema.json:18` really does say \"Deliberately not a fixed enum\" -- but its only other code-shaped token is `type`, four characters, too short to be an anchor. A gate that a correct citation cannot satisfy gets switched off, or pushes the author to delete the line number."
   },
   "[\"tools/citation_audit.py\", \"manifest.schema.json:18\", 1]": {
    "anchors": [
     "Deliberately not a fixed enum"
    ],
-   "claim": "The citation's OWN lexeme is excluded, and so is its bare filename. Without that exclusion the rule fired on every citation and made correct ones impossible to declare: `custom.md:269` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\", and `manifest.schema.json:18` really does say \"Deliberately not a fixed enum\" -- but its only other code-shaped token is `type`, four characters, too short to be an anchor. A gate that a correct citation cannot satisfy gets switched off, or pushes the author to delete the line number."
+   "claim": "The citation's OWN lexeme is excluded, and so is its bare filename. Without that exclusion the rule fired on every citation and made correct ones impossible to declare: `custom.md:275` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\", and `manifest.schema.json:18` really does say \"Deliberately not a fixed enum\" -- but its only other code-shaped token is `type`, four characters, too short to be an anchor. A gate that a correct citation cannot satisfy gets switched off, or pushes the author to delete the line number."
   },
-  "[\"tools/tests/test_citation_audit.py\", \"custom.md:269\", 0]": {
+  "[\"tools/tests/test_citation_audit.py\", \"custom.md:275\", 0]": {
    "anchors": [
     "`type` is intentionally open-ended"
    ],
-   "claim": "* `hash-migration-impact.md:46` must go RED when anchored on true-but-irrelevant in-range strings. * `custom.md:269` must stay GREEN, because its sentence has no anchor-eligible subject at all. A guard tested in one direction only is half-tested: the first version of the subject rule passed the RED case and made the GREEN one impossible to declare."
+   "claim": "* `hash-migration-impact.md:46` must go RED when anchored on true-but-irrelevant in-range strings. * `custom.md:275` must stay GREEN, because its sentence has no anchor-eligible subject at all. A guard tested in one direction only is half-tested: the first version of the subject rule passed the RED case and made the GREEN one impossible to declare."
   },
-  "[\"tools/tests/test_citation_audit.py\", \"custom.md:269\", 1]": {
+  "[\"tools/tests/test_citation_audit.py\", \"custom.md:275\", 1]": {
    "anchors": [
     "`type` is intentionally open-ended"
    ],
-   "claim": "`custom.md:269` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\" and the cited line really does say \"Deliberately not a fixed enum\" -- a CORRECT citation. Its only code-shaped tokens are the citation's own lexeme and `type`, four characters and too short to be an anchor. The first version of this rule counted the lexeme, so no legal declaration could ever make this citation pass. A gate a correct citation cannot satisfy gets switched off."
+   "claim": "`custom.md:275` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\" and the cited line really does say \"Deliberately not a fixed enum\" -- a CORRECT citation. Its only code-shaped tokens are the citation's own lexeme and `type`, four characters and too short to be an anchor. The first version of this rule counted the lexeme, so no legal declaration could ever make this citation pass. A gate a correct citation cannot satisfy gets switched off."
   },
   "[\"tools/tests/test_citation_audit.py\", \"hash-migration-impact.md:46\", 0]": {
    "anchors": [
     "DERIVATION_STATE_FIELDS"
    ],
-   "claim": "THE TWO PINNED CASES ARE OPPOSITE DIRECTIONS OF ONE RULE, and both are real citations in this repo: * `hash-migration-impact.md:46` must go RED when anchored on true-but-irrelevant in-range strings. * `custom.md:269` must stay GREEN, because its sentence has no anchor-eligible subject at all."
+   "claim": "THE TWO PINNED CASES ARE OPPOSITE DIRECTIONS OF ONE RULE, and both are real citations in this repo: * `hash-migration-impact.md:46` must go RED when anchored on true-but-irrelevant in-range strings. * `custom.md:275` must stay GREEN, because its sentence has no anchor-eligible subject at all."
   },
   "[\"tools/tests/test_citation_audit.py\", \"manifest.schema.json:18\", 0]": {
    "anchors": [
     "Deliberately not a fixed enum"
    ],
-   "claim": "`custom.md:269` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\" and the cited line really does say \"Deliberately not a fixed enum\" -- a CORRECT citation. Its only code-shaped tokens are the citation's own lexeme and `type`, four characters and too short to be an anchor. The first version of this rule counted the lexeme, so no legal declaration could ever make this citation pass. A gate a correct citation cannot satisfy gets switched off."
+   "claim": "`custom.md:275` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\" and the cited line really does say \"Deliberately not a fixed enum\" -- a CORRECT citation. Its only code-shaped tokens are the citation's own lexeme and `type`, four characters and too short to be an anchor. The first version of this rule counted the lexeme, so no legal declaration could ever make this citation pass. A gate a correct citation cannot satisfy gets switched off."
   },
   "[\"tools/tests/test_citation_audit.py\", \"manifest.schema.json:18\", 1]": {
    "anchors": [

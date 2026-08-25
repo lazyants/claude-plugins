@@ -403,6 +403,32 @@ def test_body_files_yield_segments_violation():
     assert _ok(ve.run_derivable_checks(m, "omit_apparatus", 700), "body_files_yield_segments") is False
 
 
+# ---------------------------------------------------------------------------
+# #761: spine_yields_body_files -- the COMPLEMENT of #83 above. #83 is gated
+# on n_body_files > 0 and so passes by construction when no body file exists
+# at all; this check is the one that fires in exactly that case.
+# ---------------------------------------------------------------------------
+
+def _manifest_all_frontback_zero_body() -> dict:
+    """Baseline manifest with its one body-klass spine item reclassified as
+    front-back -- n_body_files derives to 0 while every other derivable
+    invariant (blocks, segments, frontback inventory) is untouched, so a
+    failure here isolates to spine_yields_body_files alone."""
+    m = _baseline_manifest()
+    m["spine"][0]["klass"] = "front-back"
+    return m
+
+
+def test_spine_yields_body_files_violation():
+    m = _manifest_all_frontback_zero_body()
+    assert _ok(ve.run_derivable_checks(m, "omit_apparatus", 700), "spine_yields_body_files") is False
+
+
+def test_spine_yields_body_files_present_and_true_on_clean_baseline():
+    results = ve.run_derivable_checks(_baseline_manifest(), "omit_apparatus", 700)
+    assert _ok(results, "spine_yields_body_files") is True
+
+
 def _add_pseudo_notes_segment(m: dict) -> dict:
     """A schema-valid body segment sourced ENTIRELY from a footnote-defs spine
     file, with a real resolvable block -- triggers ONLY no_pseudo_segments_from_
@@ -706,6 +732,94 @@ def test_bypass_fn_bijection_under_translate_all(tmp_path, monkeypatch):
 
 def test_bypass_no_segment_exceeds_max_words(tmp_path, monkeypatch):
     assert _run_gate(tmp_path, monkeypatch, _baseline_manifest(), max_segment_words=2) == 1
+
+
+# --- #761: zero body-klass spine items must FAIL, not pass ALL PASS ----------
+
+# Verbatim expected remedy sentence -- what an operator actually reads when
+# this check fires. Pinned as ONE contiguous literal, not scattered noun
+# assertions: codex demonstrated that asserting individual tokens
+# (spine_overrides, extractor_path, #62, the JSON example all present) still
+# passes when the actionable clauses BETWEEN those tokens are inverted --
+# e.g. "Never set spine_overrides ... delete extractor_path ... (#62)" keeps
+# every noun and flips every instruction. Token membership cannot entail
+# meaning; only the whole sentence can. Kept in sync with the `detail +=`
+# block in run_derivable_checks (validate_extraction.py) by hand -- there is
+# no shared constant, so a source-side wording edit must update this too.
+_ZERO_BODY_REMEDY_VERBATIM = (
+    "no spine item is classified body. For source.format: gutenberg_epub, "
+    "review or set source.adapter_config.gutenberg_epub.spine_overrides "
+    '(e.g. {"content.xhtml": "body"}); for custom, fix the classification '
+    "in the extractor named by source.adapter_config.custom.extractor_path; "
+    "plain_text has no shipped extractor yet (#62) -- co-design a custom "
+    "one (Step 0c)."
+)
+
+
+def _assert_remedy_present(err: str) -> None:
+    assert _ZERO_BODY_REMEDY_VERBATIM in err, err
+
+
+def test_bypass_spine_yields_body_files(tmp_path, monkeypatch, capsys):
+    """The exact #761 scenario through the real gate entry point: a manifest
+    whose spine has zero body-klass items must exit 1, with
+    spine_yields_body_files named on stderr -- not silently ALL PASS."""
+    code = _run_gate(tmp_path, monkeypatch, _manifest_all_frontback_zero_body())
+    _out, err = capsys.readouterr()
+    assert code == 1
+    assert "spine_yields_body_files" in err, err
+    _assert_remedy_present(err)
+
+
+def _manifest_notes_only_zero_body() -> dict:
+    """Spine carries a footnote-defs file and a front-back file -- no body
+    file at all -- with every body-only block/segment dropped so this stays a
+    clean, single-violation manifest. This is the case the message contract
+    exists for: n_notes_files > 0 while n_body_files == 0, so the detail must
+    NOT read as if the whole spine were classified front-back."""
+    m = _baseline_manifest()
+    del m["blocks"]["HEAD:seg01"]
+    del m["blocks"]["PARA:seg01:0001"]
+    m["segments"] = [s for s in m["segments"] if s["kind"] != "body"]
+    m["spine"] = [
+        {"pos": 0, "file": "notes.xhtml", "klass": "footnote-defs"},
+        {"pos": 1, "file": "front.xhtml", "klass": "front-back"},
+    ]
+    return m
+
+
+def test_spine_yields_body_files_notes_only_message_contract(tmp_path, monkeypatch, capsys):
+    code = _run_gate(tmp_path, monkeypatch, _manifest_notes_only_zero_body())
+    _out, err = capsys.readouterr()
+    assert code == 1
+    assert "spine_yields_body_files" in err, err
+    assert "n_notes_files=1" in err, err
+    assert "n_body_files=0" in err, err
+    # the whole point of the message contract: must not claim a cause the
+    # predicate does not entail (this manifest is NOT all front-back).
+    assert "classified front-back" not in err.lower(), err
+    assert "everything was front-back" not in err.lower(), err
+    _assert_remedy_present(err)
+
+
+def test_spine_yields_body_files_fires_for_custom_format(tmp_path, monkeypatch, capsys):
+    """The region pin is skipped for source.format: custom, but derivable
+    checks are not -- this one must still fire, remedy prose and all."""
+    code = _run_gate(
+        tmp_path, monkeypatch, _manifest_all_frontback_zero_body(), source_format="custom",
+    )
+    _out, err = capsys.readouterr()
+    assert code == 1
+    _assert_remedy_present(err)
+
+
+def test_spine_yields_body_files_fires_for_plain_text_format(tmp_path, monkeypatch, capsys):
+    code = _run_gate(
+        tmp_path, monkeypatch, _manifest_all_frontback_zero_body(), source_format="plain_text",
+    )
+    _out, err = capsys.readouterr()
+    assert code == 1
+    _assert_remedy_present(err)
 
 
 # --- region-pin: a tampered / absent / drifted region fails -------------------

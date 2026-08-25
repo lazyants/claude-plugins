@@ -121,7 +121,13 @@ are deliberately gated OFF for `custom` as a result:
   unadapted template copy would certify nothing about the extractor that
   actually produced `manifest.json`. The gate's other check (independently
   re-deriving every manifest-derivable invariant from `manifest.json`) still
-  runs in full for `custom`.
+  runs in full for `custom`. That includes #761's `spine_yields_body_files`:
+  a `custom`-produced `manifest.json` whose spine classifies zero items as
+  `body` is refused here too. The message names both adapters' remedies
+  because this one string serves every `source.format`; for `custom` the
+  remedy is the classification logic in the extractor named by
+  `source.adapter_config.custom.extractor_path`, never
+  `adapter_config.gutenberg_epub.spine_overrides`, which is inert here.
 
 Neither mechanism has a `custom`-side analog today. A `custom` extractor's
 currency, and its own equivalent of the three residual self-checks the

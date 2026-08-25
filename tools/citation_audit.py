@@ -319,7 +319,7 @@ def _subject_required(text, cite):
     because a window made the rule fire on symbols from adjacent clauses.
 
     The citation's OWN lexeme is excluded, and so is its bare filename. Without that exclusion the
-    rule fired on every citation and made correct ones impossible to declare: `custom.md:269` says
+    rule fired on every citation and made correct ones impossible to declare: `custom.md:275` says
     "`type` is intentionally open-ended (`manifest.schema.json:18`)", and `manifest.schema.json:18`
     really does say "Deliberately not a fixed enum" -- but its only other code-shaped token is
     `type`, four characters, too short to be an anchor. A gate that a correct citation cannot
