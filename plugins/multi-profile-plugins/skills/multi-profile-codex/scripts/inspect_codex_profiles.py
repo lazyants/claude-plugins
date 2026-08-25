@@ -73,15 +73,15 @@ from pathlib import Path
 # means one profile's writes, pruning, or `codex delete` reach the other's data.
 CONTENT_STORES = ["sessions", "archived_sessions", "plugins", "cache", "computer-use"]
 
-# A matched value is never printed, only the dotted key that holds it and the profile it
-# points at. That is what a reader needs in order to fix the config, and it is the only form
-# that is safe: a single MCP env value can hold BOTH a path and a token, so any rule that
-# prints "the part that matched" is one unusual config away from printing a credential.
-
-# Characters that delimit a path inside the three value shapes this script sees: a bare TOML
-# string, a `:`-joined search path, and a JSON blob. Used on BOTH sides of a match, which is
-# what separates a real reference from a same-suffix path: `/Volumes/backup/Users/me/.codex`
-# is not a reference to `/Users/me/.codex`, and only the PRECEDING character says so.
+# Characters treated as ending a path inside a config value. Used on BOTH sides of a match,
+# which is what separates a real reference from a same-suffix path: `/Volumes/backup/…/.codex`
+# is not a reference to `/…/.codex`, and only the PRECEDING character says so.
+#
+# The set is deliberately wider than the three value shapes actually seen here (a bare TOML
+# string, a `:`-joined search path, a JSON blob) can produce -- a brace never sits against a
+# path in JSON, since a quote always intervenes. Being too generous costs a false WARNING;
+# being too narrow costs a MISSED pin, which is a false clean. Those are not symmetric, so
+# the set errs wide on purpose.
 VALUE_DELIMITERS = "\"'`:,;|= \t\r\n{}[]()<>"
 
 # An account_id is an identifier, not a credential, but the full UUID is more
@@ -94,10 +94,14 @@ ACCOUNT_FINGERPRINT_LEN = 8
 # an identifier at all rather than whatever a malformed auth.json happens to hold there.
 ACCOUNT_ID_RE = re.compile(r"[0-9a-fA-F-]{8,64}")
 
-# Login modes rendered verbatim. Anything else is reported as "unknown-mode": the value
-# comes out of a credential file, and echoing an unrecognised one is how that file's
-# contents would reach a terminal.
-KNOWN_AUTH_MODES = ("chatgpt", "apikey", "api_key", "device")
+# Login modes rendered verbatim. Anything else prints as "unknown-mode": the value comes out
+# of a credential file, and echoing an unrecognised one is how that file's contents would
+# reach a terminal. The list holds only modes with a source -- `chatgpt` is what all logins
+# on the machine this was written against write, and `apikey` is the mode `codex login
+# --with-api-key` produces. Guessing further spellings would widen an echo allowlist over a
+# credential file on no evidence, and costs nothing to omit: an unlisted mode still prints
+# safely and is still treated as carrying no comparable account id.
+KNOWN_AUTH_MODES = ("chatgpt", "apikey")
 
 # Modes that carry an account id. An api-key login legitimately has none, so demanding one
 # would make a perfectly good profile warn on every run, forever -- a check nobody can
@@ -106,11 +110,6 @@ KNOWN_AUTH_MODES = ("chatgpt", "apikey", "api_key", "device")
 # distinctness it could not establish.
 ACCOUNT_BEARING_MODES = ("chatgpt",)
 
-# Every profile must be marked for each of these before the run may report PASS. The
-# marks are what makes "not examined" impossible to confuse with "examined and clean":
-# two separate findings in review were a check that could not run, printing nothing and
-# letting the final PASS line speak for a profile it never looked at.
-CHECKS = ("credentials", "config", "stores")
 
 
 def abspath_arg(s: str) -> Path:
@@ -129,8 +128,7 @@ def looks_like_profile(p: Path) -> bool:
 
 
 def discover_profiles(home: Path) -> list[Path]:
-    if not home.is_dir():
-        return []
+    # No is_dir() guard: Path.glob on a missing directory yields nothing rather than raising.
     return sorted(p for p in home.glob(".codex*") if looks_like_profile(p))
 
 
@@ -202,8 +200,9 @@ def read_account(prof: Path) -> tuple[str, str | None]:
     Reads two named fields and nothing else — the same file holds an API key and
     OAuth tokens, which must never reach stdout.
 
-    NOTHING here is a passthrough of file content. The status is one of AUTH_STATUSES,
-    chosen by matching the file's value, never by echoing it: a field this function
+    NOTHING here is a passthrough of file content. The status is one of KNOWN_AUTH_MODES,
+    `unknown-mode`, `unreadable` or `not-logged-in`, chosen by matching the file's value
+    rather than by echoing it: a field this function
     forwarded verbatim would put whatever a malformed auth.json contains onto the
     terminal, which is the one outcome the whole script is written to avoid. The
     account id is returned in FULL for comparison and truncated only where it is
@@ -214,7 +213,10 @@ def read_account(prof: Path) -> tuple[str, str | None]:
         auth = json.loads((prof / "auth.json").read_text())
     except FileNotFoundError:
         return "not-logged-in", None
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, so it is not covered by the two above: a
+        # non-UTF-8 auth.json would otherwise escape as a traceback rather than as the gap
+        # that every other unreadable-credentials case produces.
         return "unreadable", None
     if not isinstance(auth, dict):
         return "unreadable", None
@@ -227,6 +229,18 @@ def read_account(prof: Path) -> tuple[str, str | None]:
     return mode, account
 
 
+def duplicates(mapping: dict[Path, object]) -> list[list[Path]]:
+    """Group profiles that share a value: the shape all three checks are looking for.
+
+    Each check asks the same question of a different key -- an (st_dev, st_ino) pair, an
+    account id, a resolved store path -- and only the message differs.
+    """
+    by_value: dict[object, list[Path]] = {}
+    for prof, value in mapping.items():
+        by_value.setdefault(value, []).append(prof)
+    return [profs for profs in by_value.values() if len(profs) > 1]
+
+
 def fingerprint(account: str) -> str:
     """Render an account id for display: a short prefix, never the whole identifier."""
     return account[:ACCOUNT_FINGERPRINT_LEN]
@@ -236,7 +250,12 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="inspect_codex_profiles.py",
         description="Read-only health check for a Codex CLI multi-profile (CODEX_HOME) setup.",
-        epilog="Exit 0 = distinct credentials, no cross-profile pins, no shared store (PASS). Exit 1 = WARN.",
+        epilog=(
+            "Exit 0 = no cross-profile pins, no shared store, and no two profiles on one "
+            "account (PASS); where a login mode carries no account id, the PASS line says "
+            "ownership could not be compared. Exit 1 = a warning, including any profile "
+            "that could not be examined."
+        ),
     )
     parser.add_argument(
         "profiles",
@@ -276,15 +295,29 @@ def main(argv: list[str]) -> int:
 
     warns: list[str] = []
 
+    def warn(message: str, indent: int = 2) -> None:
+        """Record a finding and show it where it was found, from ONE string.
+
+        Each site used to build two: a collected one and a cosmetically different inline
+        one. Nothing kept them in step.
+        """
+        warns.append(message)
+        print(f"{' ' * indent}<-- WARN: {message}")
+
     # Checks that could NOT run, per profile, with the reason. Twice in review a check that
     # could not run said nothing and let the final PASS line speak for a profile it had never
     # looked at — once for a missing config.toml, once for a malformed auth.json. Patching
     # each site as it was found would have left the next one to be found the same way, so
     # "could not examine" is recorded HERE and nowhere else, and one loop at the end turns
-    # every gap into a warning. A check added later gets the invariant by construction: it
-    # records a gap, or it completes. There is deliberately no second path to the same
-    # conclusion — a guard that some other line already covers is one nothing can be shown
-    # to need.
+    # every recorded gap into a warning.
+    #
+    # That loop iterates the gaps themselves, deliberately, and not a list of expected check
+    # names: a name list has to be kept in step by hand, and a gap recorded under a name
+    # missing from it would be discarded in silence — the exact failure this whole mechanism
+    # exists to prevent, reintroduced one level up. Iterating what was recorded is what makes
+    # "a check added later either records a gap or completes" true rather than merely
+    # intended. There is no second path to the same conclusion: a guard some other line
+    # already covers is one nothing can be shown to need.
     gaps: dict[Path, dict[str, str]] = {prof: {} for prof in profile_paths}
 
     # 0. An explicitly-passed directory is taken on trust everywhere below: unlike a discovered
@@ -302,8 +335,11 @@ def main(argv: list[str]) -> int:
                 # directory whose contents cannot be read is indistinguishable here from one
                 # that is genuinely empty, and the message must not claim the difference.
                 reason = "does not exist" if not prof.exists() else "no readable config.toml or auth.json"
-                for check_name in CHECKS:
-                    gaps[prof][check_name] = f"not a Codex profile directory ({reason})"
+                # ONE gap, not one per check. The later checks each record their own gap when
+                # they genuinely cannot run -- and they still run: a chmod-000 directory
+                # reaches the store scan and reports it as inaccessible, which fanning out
+                # here would only bury under three copies of this same sentence.
+                gaps[prof]["profile"] = f"not a Codex profile directory ({reason})"
                 print(f"  {label(prof):<{width}} NOT A PROFILE ({reason})")
         print()
 
@@ -346,23 +382,14 @@ def main(argv: list[str]) -> int:
         shown = f"account={fingerprint(account)}…" if account else "account=-"
         print(f"  {label(prof):<{width}} {mode:<14} {shown:<20} {inode}")
 
-    by_ident: dict[tuple[int, int], list[Path]] = {}
-    for prof, ident in idents.items():
-        by_ident.setdefault(ident, []).append(prof)
-    for profs in (g for g in by_ident.values() if len(g) > 1):
+    for profs in duplicates(idents):
         names = ", ".join(label(p) for p in profs)
-        warns.append(f"profiles {names} share ONE auth.json file — a logout in either logs out both")
-        print(f"  <-- WARN: {names} share one auth.json (logout in either logs out both)")
+        warn(f"profiles {names} share ONE auth.json file — a logout in either logs out both")
 
-    by_account: dict[str, list[Path]] = {}
-    for prof, account in accounts.items():
-        by_account.setdefault(account, []).append(prof)
-    for account, profs in ((a, g) for a, g in by_account.items() if len(g) > 1):
+    for profs in duplicates(accounts):
         names = ", ".join(label(p) for p in profs)
-        warns.append(
-            f"profiles {names} are logged into the SAME account ({fingerprint(account)}…) — one usage pool"
-        )
-        print(f"  <-- WARN: {names} are logged into the same account (one usage pool, not two)")
+        fp = fingerprint(accounts[profs[0]])
+        warn(f"profiles {names} are logged into the SAME account ({fp}…) — one usage pool, not two")
 
     # 2. Cross-profile config pins — the failure a copied config.toml introduces.
     #    Matching is boundary-aware, never a bare substring: see path_occurs_in.
@@ -379,7 +406,7 @@ def main(argv: list[str]) -> int:
             gaps[prof]["config"] = "no config.toml"
             print(f"  {label(prof):<{width}} NO config.toml (pins not checked)")
             continue
-        except (OSError, tomllib.TOMLDecodeError) as exc:
+        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
             gaps[prof]["config"] = f"config.toml is unreadable or invalid TOML ({type(exc).__name__})"
             print(f"  {label(prof):<{width}} UNREADABLE ({type(exc).__name__})")
             continue
@@ -406,42 +433,48 @@ def main(argv: list[str]) -> int:
     #    symlink resolves to the same target as a shared real dir reached
     #    another way.
     print("\n== content store identity ==")
+    absent_everywhere: list[str] = []
     for store in CONTENT_STORES:
         store_targets: dict[Path, str] = {}
         for prof in profile_paths:
             sp = prof / store
             try:
-                # Follows symlinks deliberately, matching the realpath comparison on the next
-                # line. An lstat here would admit a BROKEN symlink, whose realpath then names
-                # a directory that does not exist -- and two broken links to one missing
-                # target would be reported as sharing a store that nothing has.
-                os.stat(sp)
+                # strict=True resolves AND asserts the target exists, in one call. A broken
+                # symlink is then FileNotFoundError like any other missing store, instead of
+                # resolving to a directory that does not exist -- two broken links aimed at
+                # one missing target would otherwise be reported as sharing it. And unlike
+                # Path.exists(), which answers False for a permission error exactly as for an
+                # absent directory, an unreadable store raises here instead of quietly
+                # letting this profile reach PASS with the store unexamined.
+                store_targets[prof] = os.path.realpath(sp, strict=True)
             except FileNotFoundError:
                 continue  # genuinely absent, which is normal and not a gap
             except OSError as exc:
-                # Path.exists() answers False for a permission error too, so the store would
-                # read as absent and this profile would reach PASS with the store unexamined.
                 gaps[prof]["stores"] = f"`{store}` is inaccessible ({type(exc).__name__})"
-                continue
-            store_targets[prof] = os.path.realpath(sp)
-        status = ", ".join(f"{label(p)}={kind(p / store)}" for p in profile_paths)
-        print(f"  {store:18} {status}")
+        kinds = {p: kind(p / store) for p in profile_paths}
+        if all(k == "absent" for k in kinds.values()):
+            absent_everywhere.append(store)
+        else:
+            status = ", ".join(f"{label(p)}={kinds[p]}" for p in profile_paths)
+            print(f"  {store:18} {status}")
 
-        by_target: dict[str, list[Path]] = {}
-        for prof, target in store_targets.items():
-            by_target.setdefault(target, []).append(prof)
-        for profs in (g for g in by_target.values() if len(g) > 1):
+        for profs in duplicates(store_targets):
             names = ", ".join(label(p) for p in profs)
-            warns.append(f"profiles {names} share their `{store}` directory — each can overwrite the other's data")
-            print(f"    <-- WARN: {names} share `{store}`")
+            warn(
+                f"profiles {names} share their `{store}` directory — "
+                "each can overwrite the other's data",
+                indent=4,
+            )
+
+
+    if absent_everywhere:
+        print(f"  (absent in every profile: {', '.join(absent_everywhere)})")
 
     # The single place "could not examine" becomes "not clean". A profile some check could
     # not look at must never be covered by the PASS line, whatever the reason was.
     for prof in profile_paths:
-        for check_name in CHECKS:
-            reason = gaps[prof].get(check_name)
-            if reason:
-                warns.append(f"{label(prof)}: {check_name} NOT checked -- {reason}")
+        for check_name, reason in gaps[prof].items():
+            warns.append(f"{label(prof)}: {check_name} NOT checked — {reason}")
 
     print()
     if warns:

@@ -22,6 +22,16 @@ SCRIPT = (
     / "skills/multi-profile-codex/scripts/inspect_codex_profiles.py"
 )
 
+# Account ids used by the fixtures. Named because the literals appeared 39 times across the
+# file, including one hardcoded a third way inside assert_no_secret -- a typo in any single
+# copy would have quietly changed what a case was testing.
+ACCOUNT_A = "aaaaaaaa-1111-2222-3333-444444444444"
+ACCOUNT_B = "bbbbbbbb-1111-2222-3333-444444444444"
+ACCOUNT_C = "cccccccc-1111-2222-3333-444444444444"
+ACCOUNT_SHARED = "dddddddd-1111-2222-3333-444444444444"
+# Same first eight characters as ACCOUNT_A, different account.
+ACCOUNT_A_TWIN = "aaaaaaaa-9999-8888-7777-666666666666"
+
 # A credential shape that must never reach stdout, planted in every fixture.
 FAKE_API_KEY = "sk-test-MUSTNEVERBEPRINTED-DEADBEEF"
 FAKE_TOKEN = "eyJhbGciOiJUEST.MUSTNEVERBEPRINTED.token"
@@ -35,7 +45,13 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     global checks
     checks += 1
     if not condition:
-        failures.append(f"{name}: {detail}" if detail else name)
+        if detail:
+            # Indented: an unindented report puts the script's own "PASS —" line at column 0
+            # underneath "FAIL (n):", which reads as a pass to a grep and to a reader.
+            body = "\n".join(f"      {line}" for line in detail.splitlines())
+            failures.append(f"{name}:\n{body}")
+        else:
+            failures.append(name)
 
 
 def make_home(root: Path, name: str, *, account: str, config: str = "") -> Path:
@@ -77,7 +93,7 @@ def assert_no_secret(name: str, result: subprocess.CompletedProcess[str]) -> Non
     # The account fingerprint is deliberately truncated, so the full id must not appear.
     check(
         f"{name}: account id truncated",
-        "aaaaaaaa-1111-2222-3333-444444444444" not in blob,
+        ACCOUNT_A not in blob,
         "printed a full account_id",
     )
 
@@ -87,9 +103,9 @@ def assert_no_secret(name: str, result: subprocess.CompletedProcess[str]) -> Non
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
-    c = make_home(root, ".codex3", account="cccccccc-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(root, ".codex2", account=ACCOUNT_B)
+    c = make_home(root, ".codex3", account=ACCOUNT_C)
     r = run(a, b, c)
     check("clean: exit 0", r.returncode == 0, f"exit={r.returncode}\n{r.stdout}")
     check("clean: says PASS", "PASS —" in r.stdout, r.stdout)
@@ -103,7 +119,7 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
     copied = (
         f'notify = ["{a}/computer-use/Client.app/Contents/MacOS/Client", "turn-ended"]\n'
         "\n"
@@ -113,6 +129,9 @@ with tempfile.TemporaryDirectory() as td:
         "[mcp_servers.node_repl.env]\n"
         f'CODEX_HOME = "{a}"\n'
         f'NODE_REPL_TRUSTED_CODE_PATHS = "{a}:/Applications/ChatGPT.app/Contents/Resources"\n'
+        # The mirror shape: the home is not first, so it is PRECEDED by the `:` rather than
+        # followed by one. Both ends of the boundary rule are exercised by this file only here.
+        f'PATH_JOINED = "/opt/bin:{a}/plugins"\n'
         f'NODE_REPL_TRUSTED_SERVICES = \'{{"browser":"{a}/plugins/cache/browser/service.mjs"}}\'\n'
         # The shape that makes printing a matched value unsafe: ONE string holding both a
         # path that matches and a credential that must not be echoed. A report that shows
@@ -122,7 +141,7 @@ with tempfile.TemporaryDirectory() as td:
         f'SERVICE_BLOB = \'{{"apiKey":"{FAKE_API_KEY}","token":"{FAKE_TOKEN}",'
         f'"mcp":"{FAKE_MCP_SECRET}","root":"{a}/plugins"}}\'\n'
     )
-    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444", config=copied)
+    b = make_home(root, ".codex2", account=ACCOUNT_B, config=copied)
     r = run(a, b)
     check("copied config: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
     check("copied config: reports pins", "PIN(S) into another profile" in r.stdout, r.stdout)
@@ -131,6 +150,7 @@ with tempfile.TemporaryDirectory() as td:
         "marketplaces.openai-bundled.source",
         "mcp_servers.node_repl.env.CODEX_HOME",
         "mcp_servers.node_repl.env.NODE_REPL_TRUSTED_CODE_PATHS",
+        "mcp_servers.node_repl.env.PATH_JOINED",
         "mcp_servers.node_repl.env.NODE_REPL_TRUSTED_SERVICES",
         "mcp_servers.node_repl.env.SERVICE_BLOB",
     ):
@@ -152,12 +172,11 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = root / ".codex2"
+    a = make_home(root, ".codex", account=ACCOUNT_A)
     b = make_home(
         root,
         ".codex2",
-        account="bbbbbbbb-1111-2222-3333-444444444444",
+        account=ACCOUNT_B,
         config=(
             "[mcp_servers.own.env]\n"
             f'CODEX_HOME = "{root / ".codex2"}"\n'
@@ -179,37 +198,13 @@ with tempfile.TemporaryDirectory() as td:
     check("boundary: says PASS", "PASS —" in r.stdout, r.stdout)
 
 # ---------------------------------------------------------------------------
-# 3b. The same boundary rule must still FIRE where it should. Without this, case 3 is
-#     satisfiable by a matcher that has simply stopped matching anything at all.
-# ---------------------------------------------------------------------------
-with tempfile.TemporaryDirectory() as td:
-    root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(
-        root,
-        ".codex2",
-        account="bbbbbbbb-1111-2222-3333-444444444444",
-        config=(
-            "[mcp_servers.probe2.env]\n"
-            f'EXACT = "{a}"\n'
-            f'SUBPATH = "{a}/sessions"\n'
-            f'JOINED = "/opt/bin:{a}/plugins"\n'
-            f'BLOB = \'{{"svc":"{a}/plugins/x.mjs"}}\'\n'
-        ),
-    )
-    r = run(a, b)
-    check("boundary fires: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
-    for key in ("EXACT", "SUBPATH", "JOINED", "BLOB"):
-        check(f"boundary fires: names {key}", f"probe2.env.{key}" in r.stdout, r.stdout)
-
-# ---------------------------------------------------------------------------
 # 3c. An explicitly-passed directory that is not a profile must WARN, not pass. It skips
 #     the auto-detect filter entirely, so a typo or a moved home otherwise reaches every
 #     check as an empty profile and lands on the unconditional PASS line.
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
     r = run(a, root / ".codex-typo")
     check("missing dir: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
     check("missing dir: named", "not a Codex profile directory" in r.stdout, r.stdout)
@@ -227,8 +222,8 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(root, ".codex2", account=ACCOUNT_B)
     (b / "config.toml").unlink()
     r = run(a, b)
     check("no config.toml: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
@@ -241,13 +236,13 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(root, ".codex2", account=ACCOUNT_B)
     (b / "auth.json").unlink()
     os.symlink(a / "auth.json", b / "auth.json")
     r = run(a, b)
     check("shared auth: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
-    check("shared auth: named", "share one auth.json" in r.stdout, r.stdout)
+    check("shared auth: named", "share ONE auth.json file" in r.stdout, r.stdout)
     assert_no_secret("shared auth", r)
 
 # ---------------------------------------------------------------------------
@@ -261,8 +256,8 @@ with tempfile.TemporaryDirectory() as td:
     b = make_home(root, ".codex2", account=same)
     r = run(a, b)
     check("same account: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
-    check("same account: named", "logged into the same account" in r.stdout, r.stdout)
-    check("same account: not misreported as a shared file", "share one auth.json" not in r.stdout, r.stdout)
+    check("same account: named", "logged into the SAME account" in r.stdout, r.stdout)
+    check("same account: not misreported as a shared file", "share ONE auth.json file" not in r.stdout, r.stdout)
 
 # ---------------------------------------------------------------------------
 # 6. A shared content directory — the disk-saving symlink that lets one profile
@@ -270,13 +265,13 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(root, ".codex2", account=ACCOUNT_B)
     (a / "sessions").mkdir()
     os.symlink(a / "sessions", b / "sessions")
     r = run(a, b)
     check("shared sessions: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
-    check("shared sessions: named", "share `sessions`" in r.stdout, r.stdout)
+    check("shared sessions: named", "share their `sessions` directory" in r.stdout, r.stdout)
 
 # ---------------------------------------------------------------------------
 # 6b. auth_mode is rendered from a fixed set of labels, never echoed. The field sits in
@@ -285,12 +280,12 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(root, ".codex2", account=ACCOUNT_B)
     (b / "auth.json").write_text(
         json.dumps({
             "auth_mode": FAKE_API_KEY,
-            "tokens": {"account_id": "bbbbbbbb-1111-2222-3333-444444444444"},
+            "tokens": {"account_id": ACCOUNT_B},
         })
     )
     r = run(a, b)
@@ -304,8 +299,8 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(root, ".codex2", account=ACCOUNT_B)
     (b / "auth.json").write_text("{not json at all")
     r = run(a, b)
     check("bad auth: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
@@ -318,8 +313,8 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(root, ".codex2", account=ACCOUNT_B)
     (b / "auth.json").unlink()
     r = run(a, b)
     check("not-logged-in: exit 0", r.returncode == 0, f"exit={r.returncode}\n{r.stdout}")
@@ -338,8 +333,8 @@ for label_, tokens in (
 ):
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-        b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+        a = make_home(root, ".codex", account=ACCOUNT_A)
+        b = make_home(root, ".codex2", account=ACCOUNT_B)
         (b / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": tokens}))
         r = run(a, b)
         check(f"{label_}: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
@@ -353,8 +348,8 @@ for label_, tokens in (
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(root, ".codex2", account=ACCOUNT_B)
     (b / "auth.json").write_text(json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": FAKE_API_KEY}))
     r = run(a, b)
     check("api-key: exit 0", r.returncode == 0, f"exit={r.returncode}\n{r.stdout}")
@@ -373,14 +368,14 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(root, ".codex2", account=ACCOUNT_B)
     missing = root / "gone"
     os.symlink(missing, a / "sessions")
     os.symlink(missing, b / "sessions")
     r = run(a, b)
     check("broken symlink: exit 0", r.returncode == 0, f"exit={r.returncode}\n{r.stdout}")
-    check("broken symlink: no share claim", "share `sessions`" not in r.stdout, r.stdout)
+    check("broken symlink: no share claim", "share their `sessions` directory" not in r.stdout, r.stdout)
 
 # ---------------------------------------------------------------------------
 # 6g. A store that cannot be stat'ed must not read as absent. Path.exists() answers False
@@ -390,8 +385,8 @@ with tempfile.TemporaryDirectory() as td:
 if os.geteuid() != 0:  # root ignores the mode bits, so the case cannot be staged
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-        b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+        a = make_home(root, ".codex", account=ACCOUNT_A)
+        b = make_home(root, ".codex2", account=ACCOUNT_B)
         (b / "sessions").mkdir()
         b.chmod(0o000)
         try:
@@ -408,13 +403,13 @@ if os.geteuid() != 0:  # root ignores the mode bits, so the case cannot be stage
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root, ".codex2", account="aaaaaaaa-9999-8888-7777-666666666666")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(root, ".codex2", account=ACCOUNT_A_TWIN)
     r = run(a, b)
     check("same prefix: exit 0", r.returncode == 0, f"exit={r.returncode}\n{r.stdout}")
     check(
         "same prefix: not called one account",
-        "logged into the same account" not in r.stdout,
+        "logged into the SAME account" not in r.stdout,
         r.stdout,
     )
 
@@ -424,8 +419,8 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(root, ".codex2", account=ACCOUNT_B)
     (b / "config.toml").write_text("this is [not valid TOML\n")
     r = run(a, b)
     check("bad TOML: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
@@ -437,8 +432,8 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    a = make_home(root / "one", ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    b = make_home(root / "two", ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
+    a = make_home(root / "one", ".codex", account=ACCOUNT_A)
+    b = make_home(root / "two", ".codex", account=ACCOUNT_A)
     r = run(a, b)
     check("same basename: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
     check("same basename: full paths shown", str(a) in r.stdout and str(b) in r.stdout, r.stdout)
@@ -463,9 +458,9 @@ with tempfile.TemporaryDirectory() as td:
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
-    make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
-    make_home(root / ".codex-backups", "20260825-111153", account="aaaaaaaa-1111-2222-3333-444444444444")
+    make_home(root, ".codex", account=ACCOUNT_A)
+    make_home(root, ".codex2", account=ACCOUNT_B)
+    make_home(root / ".codex-backups", "20260825-111153", account=ACCOUNT_A)
     r = subprocess.run(
         [sys.executable, str(SCRIPT)],
         capture_output=True,
@@ -482,7 +477,7 @@ print(f"ran {checks} checks")
 # A case that raises before its checks run, or a fixture block deleted wholesale, subtracts
 # silently: the remaining cases still pass and the run still exits 0. Assert the floor so a
 # suite that stopped exercising most of the script cannot read as a clean one.
-MIN_CHECKS = 88
+MIN_CHECKS = 84
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
