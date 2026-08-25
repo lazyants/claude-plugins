@@ -322,8 +322,14 @@ def find_citations(rel, text):
         for m, col in matches:
             target, start, end = m.group(1), int(m.group(2)), m.group(3)
             rows.append((m.group(0), target, [target], m.group(0), False, col, start, end))
-        spans = _consumed_spans(lines, i)
-        for m in BARE_CONTINUATION_RE.finditer(line):
+        # `_consumed_spans` re-runs `CITATION_RE` and the wrapped-citation join over this line, and
+        # `find_citations` has already scanned every line once. Doing it unconditionally doubled the
+        # calls into `_wrapped_citations` -- measured 735,058 for 368,114 lines -- and the whole gate
+        # went from 1.78s to 4.13s over the tracked corpus. Only 120 of those lines carry a
+        # bare-token shape at all, so the work belongs behind the cheap test for one.
+        bare = list(BARE_CONTINUATION_RE.finditer(line))
+        spans = _consumed_spans(lines, i) if bare else ()
+        for m in bare:
             if any(lo <= m.start() < hi for lo, hi in spans):
                 continue
             cands = sorted(_continuation_candidates(lines, i, m.start()))
