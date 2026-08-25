@@ -267,9 +267,12 @@ def _backward_targets(lines, i):
     does not depend on where the bare token sits, so it is the same answer for every token on the
     line. Computed per token instead, one 20 KB line of three-character bare tokens holds 6 666 of
     them and each one re-scans six full lines through `CITATION_RE`'s path prefix -- measured, a
-    24 KB seven-line file took 17.09s and reported NOTHING, because a token with no candidate
-    produces no output and no line exceeds `MAX_SCANNED_LINE`. Once per line the same file is 1.14s,
-    and flat in the token count rather than linear in it.
+    24 KB seven-line file takes 86.19s and reports NOTHING, because a token with no candidate
+    produces no output and no line exceeds `MAX_SCANNED_LINE`. Once per line the same file is 1.70s,
+    and flat in the token count rather than linear in it: a probe with ten times the tokens per line
+    times the same. Re-derive both arms by moving the `_backward_targets` call back inside the token
+    loop and timing `find_citations` on such a file -- the pair moves whenever the per-line work does,
+    as it did when a wrapped citation's tail became part of that work.
 
     The walk stops at a blank line, at the top of the file, or at `MAX_CONTINUATION_LOOKBACK`.
     """
