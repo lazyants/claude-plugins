@@ -344,6 +344,7 @@
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"ledger-record-base.schema.json:78-86\", 0, \"continuation\"]": {
    "anchors": [
     "\"status\": { \"const\": \"converged\" }",
+    "\"then\": {",
     "\"required\": [\"rounds\", \"cache_key\""
    ],
    "claim": "plain integer, per ledger-record-base.schema.json:15 (`\"rounds\": {\"type\": \"integer\"}`) and that same schema's allOf block (:78-86), which requires `rounds` outright whenever `status == \"converged\"`."
@@ -1105,6 +1106,7 @@
   "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"ledger-record-base.schema.json:78-86\", 0, \"continuation\"]": {
    "anchors": [
     "\"status\": { \"const\": \"converged\" }",
+    "\"then\": {",
     "\"required\": [\"rounds\", \"cache_key\""
    ],
    "claim": "integer (ledger-record-base.schema.json:15) and REQUIRES it outright for status=converged (same file's allOf block, :78-86) -- so a write that can't produce a real number for the final round is rejected twice over."
