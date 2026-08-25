@@ -70,6 +70,28 @@ jobs:
       - name: inspect_codex_profiles.test.py
         run: python3 plugins/multi-profile-plugins/tests/inspect_codex_profiles.test.py
 
+      # The usage-limit report's suite. It builds fixture profiles and Codex homes in a temp
+      # dir, confines HOME to that dir so no case can read this machine's real profiles or
+      # spawn a real app-server against a live home, and stands in for `codex` with an
+      # executable of its own on PATH -- so the real binary is never needed here.
+      - name: report_limits.test.py
+        run: python3 plugins/multi-profile-plugins/tests/report_limits.test.py
+
+      # The report's own entry point against the same empty HOME: with no profile of either
+      # vendor present it must say so and exit 1, rather than tracebacking or printing a clean
+      # table over nothing.
+      - name: The report runs against an empty HOME
+        env:
+          HOME: ${{ runner.temp }}
+        run: |
+          set +e
+          python3 plugins/multi-profile-plugins/skills/code-limits/scripts/report_limits.py
+          rc=$?
+          set -e
+          if [ "$rc" != "1" ]; then
+            echo "expected exit 1 over an empty HOME, got $rc"; exit 1
+          fi
+
       # The script's own entry point, against a HOME with no Codex profile in it: the absence
       # path must exit 0 with a stated reason rather than tracebacking. The script is shipped
       # mode 644 and invoked through `python3` here, exactly as the skill documents it, so this
