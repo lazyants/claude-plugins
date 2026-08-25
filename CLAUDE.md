@@ -34,6 +34,7 @@ work, never the coverage: skipping a suite locally is right, skipping it remotel
 | `db-guardrails.yml` | `tests/block-destructive-db.test.sh` | bash, python3, jq (preinstalled) |
 | `enduser-handbook.yml` | `node --test tests/*.test.mjs`, then `tests/reference-assets.test.sh` | Node 22, ruby (preinstalled), esbuild (best-effort) |
 | `literary-translator.yml` | `python3 -m pytest -q`, run **from the plugin directory** | Python 3.14 + `requirements.txt`, Node 22 |
+| `skill-frontmatter.yml` | `tests/skill-frontmatter-limits.test.rb` | ruby (preinstalled) |
 | `version-surfaces.yml` | `.claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.test.py`, then the checker itself over the tree | Python 3.14 (stdlib only) |
 
 `multi-profile-plugins` and `obsidian-project-vault` ship no tests, so they have no suite of their
@@ -43,12 +44,15 @@ The five plugin workflows are each path-filtered to their own plugin plus their 
 touching one plugin runs one suite; `workflow_dispatch` runs any of them by hand. Superseded runs on
 the same ref are cancelled, so only the newest commit's run gates anything.
 
-Two workflows deliberately reach outside one plugin directory, and the rule behind both:
+Three workflows deliberately reach outside one plugin directory, and the rule behind all three:
 `enduser-handbook.yml` also lists the root `README.md` and `CHANGELOG.md`, because
-`reference-assets.test.sh` reads both directly and pins release copy in them; and
-`version-surfaces.yml` is repo-wide by nature — its checker compares every plugin's manifest
-against `.claude-plugin/marketplace.json`, the README's row and section, and the changelog, so its
-filter lists all of those plus the scripts directory the checker lives in. **A path filter must
+`reference-assets.test.sh` reads both directly and pins release copy in them; `version-surfaces.yml`
+is repo-wide by nature — its checker compares every plugin's manifest against
+`.claude-plugin/marketplace.json`, the README's row and section, and the changelog, so its filter
+lists all of those plus the scripts directory the checker lives in; and `skill-frontmatter.yml` is
+repo-wide for the same reason — it walks `.claude/skills/**` and `plugins/*/skills/**`, so its
+filter lists both roots, and it lists them as exact paths too, because a file or symlink created
+AT `plugins/<name>/skills` is a path the walker stats and refuses by name. **A path filter must
 cover every file the suite READS, not only the directory it lives in** — otherwise a PR editing
 just that file merges with the suite never scheduled, which is exactly the hole that "CI replaces
 the local run" is supposed to close. No other suite reaches outside its own plugin directory
@@ -86,6 +90,15 @@ directly comparable to what a local run would have produced, which is the point 
   concurrency cases and must not be raced against their own siblings.
 - The pytest step also passes `--durations=25`, so every run reports where its time went instead
   of leaving the question to be re-investigated by hand.
+- `skill-frontmatter` measures the YAML **value** with Ruby's Psych, never the source bytes. The
+  cap the Agent Skills spec sets is on the parsed string, and this repo's skills use block scalars
+  whose raw text runs longer than the value a parser produces. A dependency-free hand-rolled reader
+  was drafted for this gate and rejected twice: each review round found a fresh class of valid YAML
+  it silently UNDER-measured, which is a false PASS on a genuinely violating file. Its toolchain
+  step therefore fails loudly rather than skipping when ruby or psych is absent.
+- `skill-frontmatter` runs its own fixture suite before it looks at the real corpus, and refuses to
+  report on the corpus if any fixture fails. It also prints a per-root file count: a walk that
+  iterates zero times otherwise prints exactly what a passing one prints.
 
 **Acceptance for any change to how the suite is invoked:** `passed + skipped + xfailed` must
 equal what `pytest --collect-only -q` reports on the same tree. A parallel or sharded run that
