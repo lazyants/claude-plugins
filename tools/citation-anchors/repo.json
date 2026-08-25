@@ -6,6 +6,12 @@
    ],
    "claim": "The citation's OWN lexeme is excluded, and so is its bare filename. Without that exclusion the rule fired on every citation and made correct ones impossible to declare: `custom.md:275` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\", and `manifest.schema.json:18` really does say \"Deliberately not a fixed enum\" -- but its only other code-shaped token is `type`, four characters, too short to be an anchor. A gate that a correct citation cannot satisfy gets switched off, or pushes the author to delete the line number."
   },
+  "[\"tools/citation_audit.py\", \"extract.py.template:1110\", 0, \"continuation\"]": {
+   "anchors": [
+    "BEGIN SELF-CHECK REGION"
+   ],
+   "claim": "# an editor carries en-dashes, and this repo already had one: `extract.py.template:1110–1279` in # `source-prep.md` parsed as the single line `:1110`, so the wide-range rule never fired and the # far end of a 170-line region was pinned by nothing while the gate reported OK. A separator the"
+  },
   "[\"tools/citation_audit.py\", \"extract.py.template:1110–1279\", 0]": {
    "anchors": [
     "BEGIN SELF-CHECK REGION",
@@ -36,6 +42,12 @@
     "`type` is intentionally open-ended"
    ],
    "claim": "`custom.md:275` says \"`type` is intentionally open-ended (`manifest.schema.json:18`)\" and the cited line really does say \"Deliberately not a fixed enum\" -- a CORRECT citation. Its only code-shaped tokens are the citation's own lexeme and `type`, four characters and too short to be an anchor. The first version of this rule counted the lexeme, so no legal declaration could ever make this citation pass. A gate a correct citation cannot satisfy gets switched off."
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"extract.py.template:1110\", 0, \"continuation\"]": {
+   "anchors": [
+    "BEGIN SELF-CHECK REGION"
+   ],
+   "claim": "`extract.py.template:1110\\u20131279` in `source-prep.md` parsed as the single line `:1110`, so the wide-range rule never fired: the far end of a 170-line hash-pinned region was bounded by"
   },
   "[\"tools/tests/test_citation_audit.py\", \"hash-migration-impact.md:46\", 0]": {
    "anchors": [
@@ -78,6 +90,69 @@
   "[\"tools/citation_audit.py\", \"self.rename_failed:697\", 0]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:1\", 0]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:1\", 1]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 0, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 0]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 1]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 2, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 2]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 3, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 3]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 4]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 5]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 6]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 7]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 8]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py:3\", 9]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py|b.py:3\", 10, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py|b.py:3\", 4, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py|b.py:3\", 6, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py|b.py:3\", 7, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py|b.py:3\", 8, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"a.py|d.py:3\", 9, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
   "[\"tools/tests/test_citation_audit.py\", \"assets/lib/chapter-paths.mjs:1191\", 0]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
@@ -90,16 +165,67 @@
   "[\"tools/tests/test_citation_audit.py\", \"b.py:1\", 2]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 0]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 1, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 10]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 11]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 1]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 2]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 3]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 4]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 5, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 5]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 6]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 7]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 8]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"b.py:3\", 9]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
   "[\"tools/tests/test_citation_audit.py\", \"b.py:7\", 0]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
   "[\"tools/tests/test_citation_audit.py\", \"b.py:7\", 1]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
+  "[\"tools/tests/test_citation_audit.py\", \"c.md:1\", 0]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
   "[\"tools/tests/test_citation_audit.py\", \"c.md:2\", 0]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
   "[\"tools/tests/test_citation_audit.py\", \"cache_key.py:202\", 0]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"canon_x.py:1251\", 0, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"canon_x.py:1316-1332\", 0]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
   "[\"tools/tests/test_citation_audit.py\", \"canon_x.py:396\", 0]": {
@@ -112,6 +238,12 @@
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
   "[\"tools/tests/test_citation_audit.py\", \"codex_job.py:65\", 1]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"d.py:3\", 0]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"d.py:3\", 1]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
   "[\"tools/tests/test_citation_audit.py\", \"extract.py.template:1108\", 0]": {
@@ -240,7 +372,61 @@
   "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 1]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 21]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 22]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 23]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 24]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 25]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 26]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 27]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 28]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 29]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
   "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 2]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 30]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 31]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 32]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 33]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 34]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 35]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 36]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 37]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 38]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
   "[\"tools/tests/test_citation_audit.py\", \"t.py:3\", 3]": {
@@ -279,11 +465,41 @@
   "[\"tools/tests/test_citation_audit.py\", \"t.py:3-7\", 0]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:5\", 0, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
   "[\"tools/tests/test_citation_audit.py\", \"t.py:5\", 0]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
   },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:5\", 1, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
   "[\"tools/tests/test_citation_audit.py\", \"t.py:5\", 1]": {
    "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:5\", 2, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:5\", 3, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:5\", 4, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:5\", 5, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:5\", 6, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:5\", 7, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:5-5\", 0]": {
+   "reason": "synthetic fixture in the tool's own suite: a citation-shaped string built to exercise the enumerator, naming no file that exists"
+  },
+  "[\"tools/tests/test_citation_audit.py\", \"t.py:7\", 0, \"continuation\"]": {
+   "reason": "synthetic fixture in the tool's own suite: a bare-continuation string built to exercise the attribution rule, continuing a file that does not exist"
   }
  }
 }

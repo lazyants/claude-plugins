@@ -43,6 +43,12 @@
    ],
    "claim": "# allowlist above. That set means \"can never change what the prose should # say\", which is FALSE for the style contract: a contract edit CAN change what # the prose should say, and a REVERSED rule actively demanded the wrong choice # in every segment converged under it. One global style_contract_hash # (cache_key.py:255, GLOBAL_CACHE_KEY_FIELDS at :274) cannot tell an addition # from a reversal, so this population is admitted only when the operator # DECLARES it, per project, and every admitted segment is named. Widening the # allowlist instead would also silently move final_audit.py's own # project_complete arithmetic and select_segments.py's D6 semantics, which"
   },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:274\", 0, \"continuation\"]": {
+   "anchors": [
+    "GLOBAL_CACHE_KEY_FIELDS = frozenset"
+   ],
+   "claim": "# in every segment converged under it. One global style_contract_hash # (cache_key.py:255, GLOBAL_CACHE_KEY_FIELDS at :274) cannot tell an addition # from a reversal, so this population is admitted only when the operator"
+  },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:287-291\", 0]": {
    "anchors": [
     "def fail(message: str)",
@@ -225,6 +231,13 @@
    ],
    "claim": "os.close() succeeds, the already-present path before returning -- and a sync failure on EITHER path returns False through the same _report_sentinel_failure() contract as every other failure here, fail-closed rather than best-effort (see that helper's own docstring for why, citing claim_record.py:565-577). Covering the already-present path too, not only fresh-create, is load-bearing: without it, a retry after a failed sync would hit FileExistsError, classify SENTINEL_PRESENT, and return True having synced nothing -- laundering the earlier failure into a green result. `tests/backfill_ever_converged.test.py` pins this"
   },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_update.py\", \"tests/backfill_ever_converged.test.py:2106-2172\", 0]": {
+   "anchors": [
+    "def test_a_failed_directory_sync_does_not_launder_into_a_green_retry",
+    "assert second[\"directory_sync_error\"] is None"
+   ],
+   "claim": "(`backfill_ever_converged.py:640-660`, test `tests/backfill_ever_converged.test.py:2106-2172`).\"\"\" path = ever_converged_path(seg, segments_dir)"
+  },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/occurrence_targets.py\", \"render_obsidian.py:706-1132\", 0]": {
    "anchors": [
     "def build_entity_index",
@@ -328,6 +341,13 @@
    ],
    "claim": "\"\"\"The ledger's own `rounds` field for a converged write -- a REQUIRED plain integer, per ledger-record-base.schema.json:15 (`\"rounds\": {\"type\": \"integer\"}`) and that same schema's allOf block (:78-86), which requires `rounds` outright whenever `status == \"converged\"`."
   },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"ledger-record-base.schema.json:78-86\", 0, \"continuation\"]": {
+   "anchors": [
+    "\"required\": [\"timestamp\"]",
+    "\"required\": [\"rounds\", \"cache_key\""
+   ],
+   "claim": "plain integer, per ledger-record-base.schema.json:15 (`\"rounds\": {\"type\": \"integer\"}`) and that same schema's allOf block (:78-86), which requires `rounds` outright whenever `status == \"converged\"`."
+  },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"ledger_update.py:1179\", 0]": {
    "anchors": [
     "':r<roundLabel>' SUFFIX (review_token_matches(), a prefix match --"
@@ -411,6 +431,12 @@
     "if candidate_digest_path.is_file():"
    ],
    "claim": "rejected: this function's return value is forwarded verbatim into resume_setup.py's own `resume_from_run_ids`, and that authority's resolve_run() (resume_setup.py:901) decides a MATCH by reading `runs/<id>/input.digest` with its OWN `Path.is_file()` call (resume_setup.py:923) -- the identical swallow-pattern, one layer down, in a file this fix does not own. Passing an unreadable candidate through would not close the hole; it would only relocate it to a site this change cannot reach, while looking closed here. Refusing at the point where the ambiguity is actually discovered is the only"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"select_segments.py:1251\", 0, \"continuation\"]": {
+   "anchors": [
+    "_SEG_ID_RE.fullmatch(seg)"
+   ],
+   "claim": "# load_candidate_segments() fatals on any manifest.json `seg` failing its # validate_seg() (select_segments.py:1316-1332, the regex check at :1251) -- # every `seg` this script ever operates on already came from THAT"
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"select_segments.py:1316-1332\", 0]": {
    "anchors": [
@@ -702,6 +728,13 @@
    ],
    "claim": "deliberate contract decision the plan states: unlike write_fragment_atomically()'s best-effort directory sync (`except OSError: pass`), a segments/ directory-fsync failure here must refuse convergence rather than report success over a directory entry that was never made durable -- claim_record.py:565-577 argues the split explicitly, for exactly this asymmetry (a crash can lose the entry while the fragment it backs survives)."
   },
+  "[\"plugins/literary-translator/tests/backfill_ever_converged.test.py\", \"tests/backfill_ever_converged.test.py:2106-2172\", 0]": {
+   "anchors": [
+    "def test_a_failed_directory_sync_does_not_launder_into_a_green_retry",
+    "assert second[\"directory_sync_error\"] is None"
+   ],
+   "claim": "documents, and tests/backfill_ever_converged.test.py:2106-2172 pins, for its own retry path."
+  },
   "[\"plugins/literary-translator/tests/backlink_integrity_e2e.test.py\", \"canon_senses.test.py:7-10\", 0]": {
    "anchors": [
     "synthetic inline",
@@ -802,6 +835,12 @@
    ],
    "claim": "\"\"\"PLAN.md D8's residual, pinned so it stays visible in the suite rather than only in prose: `recordLedgerCall(seg, {status: \"in_progress\"})` (mass-translate-wf.template.js:2368) completes BEFORE `agent(translateDrivePrompt(seg))` (:2371) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of this file's scope) fires strictly AFTER the ledger has already been full-replaced to a two-key in_progress row. This is why that chokepoint"
   },
+  "[\"plugins/literary-translator/tests/claim_prompt_contract.test.py\", \"mass-translate-wf.template.js:2371\", 0, \"continuation\"]": {
+   "anchors": [
+    "await agent(translateDrivePrompt(seg)"
+   ],
+   "claim": "\"in_progress\"})` (mass-translate-wf.template.js:2368) completes BEFORE `agent(translateDrivePrompt(seg))` (:2371) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of"
+  },
   "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5000\", 0]": {
    "anchors": [
     "run_id_problem = validate_run_id(run_id)"
@@ -813,6 +852,18 @@
     "return {\"category\": \"recoverable\", \"status\": status}"
    ],
    "claim": "# It is not, and it does not. `status: in_progress` classifies as `recoverable` # (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1451), and D3 (:4276) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces # --only-segs as a side effect of its population being human_escalation;"
+  },
+  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1559\", 0, \"continuation\"]": {
+   "anchors": [
+    "DEFAULT_ELIGIBLE_CATEGORIES = frozenset"
+   ],
+   "claim": "# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1559), and D3 (:5009) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces"
+  },
+  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5009\", 0, \"continuation\"]": {
+   "anchors": [
+    "D3: the authorization must be a SUBSET"
+   ],
+   "claim": "# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1559), and D3 (:5009) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces"
   },
   "[\"plugins/literary-translator/tests/codex_job_driver.test.py\", \"SKILL.md:267-269\", 0]": {
    "anchors": [
@@ -848,6 +899,12 @@
     "from canon_senses import CanonSensesLoadError, is_split, load_senses"
    ],
    "claim": "\"\"\"DEFAULT_BATCH_SIZE, read from glossary_batch_plan.py's own AST -- no import. glossary_batch_plan.py:146 does a bare `from canon_senses import CanonSensesLoadError, is_split, load_senses`, so an actual import would need sys.path surgery that would persist for the whole test session. Mirrors _emitted_refusal_reasons's own idiom above.\"\"\""
+  },
+  "[\"plugins/literary-translator/tests/final_audit.test.py\", \"validate_draft.py:622\", 0, \"continuation\"]": {
+   "anchors": [
+    "still a genuine SOURCE DEFECT below"
+   ],
+   "claim": "# hard check 1 calls `validate_draft.validate()` first and dies on the identical # input at validate_draft.py:625 and :622. That is pre-existing and out of # scope. The `isinstance` guards in `term_carriers()` are kept anyway; they cost"
   },
   "[\"plugins/literary-translator/tests/final_audit.test.py\", \"validate_draft.py:625\", 0]": {
    "anchors": [
@@ -1045,6 +1102,13 @@
    ],
    "claim": "`runRound(seg, MAXFIX + 1, true)`, template.js:2343, which records `rounds: round` == MAXFIX + 1, template.js:2077 -- a plain integer, never derived from the \"final\" round LABEL) is an entirely normal outcome, not an edge case. The ledger schema requires `rounds` to be an integer (ledger-record-base.schema.json:15) and REQUIRES it outright for status=converged (same file's allOf block, :78-86) -- so a write that can't produce a real number for the final round is rejected twice over."
   },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"ledger-record-base.schema.json:78-86\", 0, \"continuation\"]": {
+   "anchors": [
+    "\"required\": [\"timestamp\"]",
+    "\"required\": [\"rounds\", \"cache_key\""
+   ],
+   "claim": "integer (ledger-record-base.schema.json:15) and REQUIRES it outright for status=converged (same file's allOf block, :78-86) -- so a write that can't produce a real number for the final round is rejected twice over."
+  },
   "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"ledger_update.py:1263-1266\", 0]": {
    "anchors": [
     "if current_draft_sha1 != reviewer_draft_sha1:",
@@ -1052,11 +1116,25 @@
    ],
    "claim": "\"\"\"codex #392-class MAJOR: ledger_update.py's own independent check (enrich_converged_fields, ledger_update.py:1263-1266) refuses a convergence write when the current draft's sha1 no longer matches the reviewer's recorded draft_sha1 -- correctly: it means the draft was edited out-of-band since this (clean) review was written, and the review's own verdict no longer applies to what is on disk now. Without"
   },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"mass-translate-wf.template.js:1513-1520\", 0, \"continuation\"]": {
+   "anchors": [
+    "Deliberate, documented 3-argument signature",
+    "readReviewPrompt already returned this round"
+   ],
+   "claim": "\"\"\"Pins (as a real assertion, not a comment) that fixPrompt's 3-argument signature (mass-translate-wf.template.js:1562, documented at :1513-1520 as deliberate: \"revObj is still passed through ... but fixPrompt itself"
+  },
   "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"mass-translate-wf.template.js:1562\", 0]": {
    "anchors": [
     "function fixPrompt(seg, round, revObj) {"
    ],
    "claim": "\"\"\"Pins (as a real assertion, not a comment) that fixPrompt's 3-argument signature (mass-translate-wf.template.js:1562, documented at :1513-1520 as deliberate: \"revObj is still passed through ... but fixPrompt itself no longer splices it into the prompt as the findings source\") really does hold. Verified against the real template directly: fixPrompt's own 70-line body (:1563-1632) never references `revObj` at all --"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"mass-translate-wf.template.js:1563-1632\", 0, \"continuation\"]": {
+   "anchors": [
+    "You are the Claude editor applying review findings",
+    "End your reply with the line: FIXED "
+   ],
+   "claim": "does hold. Verified against the real template directly: fixPrompt's own 70-line body (:1563-1632) never references `revObj` at all -- findings are only ever REFERENCED by file path in the rendered prompt"
   },
   "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"mass-translate-wf.template.js:2257\", 0]": {
    "anchors": [
@@ -1111,6 +1189,12 @@
    ],
    "claim": "\"\"\"codex round-4 (\"Tests that could not fail\"): current_draft_sha1()'s third argument -- dirs[\"scripts_dir\"] -- is what makes this \"clean and draft matches\" branch (segment_dispatch_driver.py:4929, feeding the already_converged decision at :4956) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable root's own writable, self-anchored copy (current_draft_sha1()'s own `scripts_dir=SCRIPTS_DIR` default). That default matters because the",
    "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4984\", 0, \"continuation\"]": {
+   "anchors": [
+    "\"action\": \"already_converged\""
+   ],
+   "claim": "draft matches\" branch (segment_dispatch_driver.py:4957, feeding the already_converged decision at :4984) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable"
   },
   "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:1755-1765\", 0]": {
    "anchors": [
@@ -1229,17 +1313,35 @@
    ],
    "claim": "raised. That's what makes control reach line 929 at all. The call order this relies on -- both digest checks (steps 3 and 6) before `resolve_skeptic_run()` (step 7) before the target guard (line 929) -- reflects the CURRENT source as read at the time this test was written (skeptic_setup.py:744, :829, :841, :929); nothing in this test enforces that order as an invariant. A future edit moving `resolve_skeptic_run()` ahead of step 6's call would land the injected mutation before `compute_skeptic_input_digest()` runs, tripping ITS guard instead of the target one -- this test's own assertion on `\"_frozen_input_snapshots_by_key\""
   },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:829\", 0, \"continuation\"]": {
+   "anchors": [
+    "skeptic_input_digest = compute_skeptic_input_digest("
+   ],
+   "claim": "reflects the CURRENT source as read at the time this test was written (skeptic_setup.py:744, :829, :841, :929); nothing in this test enforces that order as an invariant. A future edit moving `resolve_skeptic_run()`"
+  },
   "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:829\", 0]": {
    "anchors": [
     "skeptic_input_digest = compute_skeptic_input_digest("
    ],
    "claim": "The trap a naive version of this test falls into: `compute_skeptic_input_digest()` is DEFINED in this module (skeptic_setup.py:476) and reads the SAME module-level `FROZEN_INPUT_SPECS` global the target guard at line 929 reads (its own guard is at skeptic_setup.py:550-561). `run()` calls it at step 6 (skeptic_setup.py:829), before resolving the RUN_ID at step 7 (`resolve_skeptic_run()`, skeptic_setup.py:841). Mutating `mod.FROZEN_INPUT_SPECS` before calling `mod.run(args)` at all would trip THAT function's own guard first and never reach line 929 -- proving nothing about the guard this test targets. `compute_producer_input_digest()`"
   },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:841\", 0, \"continuation\"]": {
+   "anchors": [
+    "resolve_skeptic_run(skeptic_input_digest"
+   ],
+   "claim": "reflects the CURRENT source as read at the time this test was written (skeptic_setup.py:744, :829, :841, :929); nothing in this test enforces that order as an invariant. A future edit moving `resolve_skeptic_run()`"
+  },
   "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:841\", 0]": {
    "anchors": [
     "run_id, resume = resolve_skeptic_run(skeptic_input_digest"
    ],
    "claim": "is DEFINED in this module (skeptic_setup.py:476) and reads the SAME module-level `FROZEN_INPUT_SPECS` global the target guard at line 929 reads (its own guard is at skeptic_setup.py:550-561). `run()` calls it at step 6 (skeptic_setup.py:829), before resolving the RUN_ID at step 7 (`resolve_skeptic_run()`, skeptic_setup.py:841). Mutating `mod.FROZEN_INPUT_SPECS` before calling `mod.run(args)` at all would trip THAT function's own guard first and never reach line 929 -- proving nothing about the guard this test targets. `compute_producer_input_digest()` (step 3, skeptic_setup.py:744) is NOT part of this trap and this test"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:929\", 0, \"continuation\"]": {
+   "anchors": [
+    "sorted(_frozen_input_snapshots_by_key)"
+   ],
+   "claim": "reflects the CURRENT source as read at the time this test was written (skeptic_setup.py:744, :829, :841, :929); nothing in this test enforces that order as an invariant. A future edit moving `resolve_skeptic_run()`"
   },
   "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:929\", 0]": {
    "anchors": [

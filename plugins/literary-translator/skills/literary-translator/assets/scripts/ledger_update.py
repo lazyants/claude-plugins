@@ -771,9 +771,9 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR, provenance=None):
     too, not only fresh-create, is load-bearing: without it, a retry after a
     failed sync would hit FileExistsError, classify SENTINEL_PRESENT, and
     return True having synced nothing -- laundering the earlier failure into
-    a green result. `tests/backfill_ever_converged.test.py` pins this
-    directly against the shipped laundering test for the sibling writer
-    (`backfill_ever_converged.py:640-660`, test `:1644-1709`)."""
+    a green result. Pinned directly against the shipped laundering test for
+    the sibling writer (`backfill_ever_converged.py:640-660`, and
+    `tests/backfill_ever_converged.test.py:2106-2172`)."""
     path = ever_converged_path(seg, segments_dir)
 
     # ONE pathname resolution of segments/, here, BEFORE the entry is

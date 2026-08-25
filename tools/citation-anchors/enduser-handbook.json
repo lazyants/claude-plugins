@@ -14,6 +14,18 @@
    ],
    "claim": "* [round 6] THROWS an `Error` in wikilinks mode (`profileLike.publish.wikilinks === true`) on each * of three `vaultRelChaptersDir` faults, measured at chapter-paths.mjs:2134/:2140/:2145 — omitted or * nullish (\"vaultRelChaptersDir is required in wikilinks mode — a silent bare-slug fallback resolves * ambiguously across the whole vault (#294)\"), absolute (\"must be vault-root-relative\"), or escaping * the vault root with a leading `..`. Path mode reads the argument not at all and never throws."
   },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.d.mts\", \"chapter-paths.mjs:2140\", 0, \"continuation\"]": {
+   "anchors": [
+    "vaultRelChaptersDir must be vault-root-relative"
+   ],
+   "claim": "* [round 6] THROWS an `Error` in wikilinks mode (`profileLike.publish.wikilinks === true`) on each * of three `vaultRelChaptersDir` faults, measured at chapter-paths.mjs:2134/:2140/:2145 — omitted or * nullish (\"vaultRelChaptersDir is required in wikilinks mode — a silent bare-slug fallback resolves"
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.d.mts\", \"chapter-paths.mjs:2145\", 0, \"continuation\"]": {
+   "anchors": [
+    "vaultRelChaptersDir '${vaultRelChaptersDir}' escapes"
+   ],
+   "claim": "* [round 6] THROWS an `Error` in wikilinks mode (`profileLike.publish.wikilinks === true`) on each * of three `vaultRelChaptersDir` faults, measured at chapter-paths.mjs:2134/:2140/:2145 — omitted or * nullish (\"vaultRelChaptersDir is required in wikilinks mode — a silent bare-slug fallback resolves"
+  },
   "[\"plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.mjs\", \"chapter-paths.mjs:247-250\", 0]": {
    "anchors": [
     "export function legacyStaticEmbedPath(chapterFile, outputDir, slug, file) {",
@@ -155,6 +167,12 @@
     "No graph view, no backlinks panel."
    ],
    "claim": "# so this case does not apply there\") is deliberately left unpinned. It's a verified fact today, # but A4 flagged it as tied to a filed, tracked gap (#261, group-H's Related-block enumeration) — if that # gap is ever legitimately closed by giving Obsidian's Related block an index member, this exact # clause is the line that SHOULD change. Pinning it would fight that future correct edit rather than # catch a regression; the asymmetry is stated in prose (static-md.md:15-16's \"no backlinks panel\" # rationale) rather than gated in a test."
+  },
+  "[\"plugins/enduser-handbook/tests/reference-assets.test.sh\", \"tests/chapter-paths.test.mjs:1755\", 0, \"continuation\"]": {
+   "anchors": [
+    "\"multiple\" is mapped explicitly"
+   ],
+   "claim": "# MULTIPLE-candidate outcome — `assets/lib/chapter-paths.mjs:1386` (\"container-ambiguous halt\") and # `tests/chapter-paths.test.mjs:823`/`:1755`. Two different halts under one name, in one plugin, is # the kind of collision an adapter author resolves by guessing. Renamed to \"near-miss\" everywhere it"
   },
   "[\"plugins/enduser-handbook/tests/reference-assets.test.sh\", \"tests/chapter-paths.test.mjs:823\", 0]": {
    "anchors": [
