@@ -63,14 +63,18 @@ DIAGNOSTICS = (
 )
 DIAGNOSTIC_SET = frozenset(DIAGNOSTICS)
 
-# Terminal states. Every candidate and every record ends in exactly one of these three.
+# Terminal states. Every candidate and every record ends in exactly one of these three, and
+# nothing else is ever assigned to Record.state -- an earlier "info" constant was, which made
+# this comment false about the line directly under it.
 REPORTED = "reported"
 NO_CURRENT = "known-no-current-value"
 GAP = "gap"
-# Not a terminal state: a RENDER KIND for a successfully read fact that is not a usage window --
-# the coupon count, the credit balance. Such a row reached its value, so it is `reported` for the
-# purpose of the exit contract; the constant only tells the renderer it has no percentage.
-INFO = "info"
+TERMINAL_STATES = frozenset({REPORTED, NO_CURRENT, GAP})
+
+# A percentage the vendor reports past 100 is the backend's number, not schema drift: the
+# official schema types `usedPercent` as an unbounded int32. Refusing it would gap a pool for
+# being over its limit, which is the moment this report is most worth reading.
+PERCENT_MAX = float("inf")
 
 # Diagnostics that mean "there is no current value here", as opposed to "this was not examined".
 KNOWN_ABSENT = frozenset({"no-usage-cache", "no-subscription"})
@@ -256,9 +260,16 @@ class Record:
     """One pool observation, one reason there is no current value for it, or one info line."""
 
     def __init__(self, name: str, state: str, *, percent=None, resets=None,
-                 freshness: str = "", diagnostic: str = "", note: str = "") -> None:
+                 freshness: str = "", diagnostic: str = "", note: str = "",
+                 info: bool = False) -> None:
+        if state not in TERMINAL_STATES:
+            raise Malformed("internal-error")
         self.name = name
         self.state = state
+        # A RENDER kind, deliberately not a state: a coupon count or a credit balance was read
+        # successfully, so it is `reported` for the exit contract and only the renderer needs to
+        # know it carries no percentage.
+        self.info = info
         self.percent = percent
         self.resets = resets
         self.freshness = freshness
@@ -267,7 +278,7 @@ class Record:
 
     def render(self) -> str:
         head = f"    {self.name:<30}"
-        if self.state == INFO:
+        if self.info:
             body = self.freshness
         elif self.state == REPORTED and self.resets is not None and self.percent is not None:
             pct = f"{self.percent:.1f}".rjust(5)
@@ -319,6 +330,11 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
                 records.append(_claude_row(_obj(item), freshness, now))
             except Malformed as exc:
                 records.append(Record(f"limits[{index}]", GAP, diagnostic=exc.code))
+            except Exception:
+                # Not only Malformed: a 400-digit integer raises OverflowError inside float(),
+                # and an escaping exception loses every valid sibling -- exactly what this
+                # handler exists to prevent.
+                records.append(Record(f"limits[{index}]", GAP, diagnostic="internal-error"))
         return records
 
     for key in ("five_hour", "seven_day"):
@@ -388,11 +404,11 @@ def _claude_cached(profile: Path, now: datetime.datetime) -> list[Record]:
 
     # Decided BEFORE the cache is inspected, so a profile that is both unsubscribed and cacheless
     # lands in exactly one class instead of matching two rules.
-    subscription = blob.get("hasAvailableSubscription")
-    if subscription is not None and not _flag(subscription):
-        # _flag, not `is False`: a vendor type change is schema drift and must gap, where
-        # `is False` silently fell through to no-usage-cache -- a KNOWN_ABSENT state that
-        # exits 0.
+    if "hasAvailableSubscription" in blob and not _flag(blob["hasAvailableSubscription"]):
+        # Key MEMBERSHIP, and _flag rather than `is False`: a vendor type change is schema
+        # drift and must gap, where `is False` fell through to no-usage-cache -- a KNOWN_ABSENT
+        # state that exits 0 -- and a `subscription is not None` guard did the same for null,
+        # which is a present key holding a non-boolean like any other.
         raise Malformed("no-subscription")
 
     cached = blob.get("cachedUsageUtilization")
@@ -421,7 +437,11 @@ def _claude_token(profile: Path) -> str:
     try:
         handle = open(creds, encoding="utf-8")
     except FileNotFoundError:
-        handle = None                     # genuinely absent: the keychain is the other place
+        # Absent, or a link to something absent -- open() cannot separate those, and a dangling
+        # .credentials.json symlink therefore takes the keychain path too. Left as it is: the
+        # reachable case is a profile that has no credential file, and adding a symlink probe
+        # would be machinery for an edge nobody has produced.
+        handle = None
     except OSError:
         # Present but unreadable. Path.exists() answers False for a permission failure from
         # 3.14 and raises below it, so testing for the file first would read this as absence
@@ -606,7 +626,9 @@ def _codex_records(home: Path) -> list[Record]:
                 records_pre.append(Record(f"limitId[{len(records_pre)}]", GAP,
                                           diagnostic=exc.code))
     elif isinstance(default, dict):
-        pools[_text(default.get("limitId", "codex"), 64)] = default
+        # `limitId` is `string | null`, and a .get default answers only the ABSENT case.
+        raw_id = default.get("limitId")
+        pools["codex" if raw_id is None else _text(raw_id, 64)] = default
     else:
         raise Malformed("payload-malformed")
 
@@ -634,39 +656,60 @@ def _codex_records(home: Path) -> list[Record]:
             # malformed optional field must not discard the valid windows beside it.
             try:
                 window = _obj(window)
-                minutes = _pos_int(window.get("windowDurationMins"))
-                name = f"{limit_id}/{_window_label(minutes)}"
+                # `windowDurationMins` and `resetsAt` are both `integer | null` in the vendor's
+                # own schema, so a null is the backend declining to provide the value, not drift.
+                # Gapping on it would leave such an account unable to report cleanly whatever its
+                # owner did -- a check nobody can satisfy is worse than the gap it closes.
+                raw_minutes = window.get("windowDurationMins")
+                minutes = None if raw_minutes is None else _pos_int(raw_minutes)
+                label = slot if minutes is None else _window_label(minutes)
+                name = f"{limit_id}/{label}"
                 if collide:
                     name = f"{name}({slot})"
+                percent = _num(window.get("usedPercent"), 0.0, PERCENT_MAX)
+                raw_resets = window.get("resetsAt")
+                if raw_resets is None:
+                    records.append(Record(name, NO_CURRENT, percent=percent, freshness=freshness,
+                                          note="no reset time reported by the backend"))
+                    continue
                 records.append(_window_row(
                     name=name,
-                    percent=_num(window.get("usedPercent"), 0.0, 100.0),
-                    resets=_from_epoch_seconds(window.get("resetsAt")),
+                    percent=percent,
+                    resets=_from_epoch_seconds(raw_resets),
                     freshness=freshness, now=now, active=True,
                     stale_note="the window shown had already reset when this was read",
                 ))
             except Malformed as exc:
                 records.append(Record(f"{limit_id}/{slot}", GAP, diagnostic=exc.code))
+            except Exception:
+                # Not only Malformed. A 400-digit integer raises OverflowError inside float(),
+                # and any exception escaping here loses every valid window beside it -- the exact
+                # outcome this per-record handler exists to prevent.
+                records.append(Record(f"{limit_id}/{slot}", GAP, diagnostic="internal-error"))
     if not records:
         raise Malformed("payload-malformed")
 
-    # Absence RAISES rather than skipping: the coupon count is one of the things this report
-    # exists to print, so a response that omits the container has not answered the question and
-    # must gap rather than print nothing and exit 0. Absent and present-but-not-an-object are
-    # separated because they say different things about the vendor.
+    # `rateLimitResetCredits` is `Summary | null` and is absent from the schema's `required`
+    # list, so neither absence nor null is drift: it is the backend saying it has no
+    # reset-credit data. Reported as a known absence, never as a gap -- an account whose backend
+    # does not provide it could otherwise never produce a clean report. A present container of
+    # the wrong shape still gaps, because that one the schema does forbid.
     coupons = result.get("rateLimitResetCredits")
-    try:
-        if coupons is None:
-            raise Malformed("field-malformed")
-        count = _nonneg_int(_obj(coupons).get("availableCount"))
-    except Malformed as exc:
-        records.append(Record("reset coupons", GAP, diagnostic=exc.code))
-        count = None
-    if count is not None:
+    if coupons is None:
         records.append(Record(
-            "reset coupons", INFO, freshness=str(count),
-            note="read only; redeem one in the Codex TUI with /usage, never from here",
+            "reset coupons", NO_CURRENT, freshness="not reported", info=True,
+            note="the backend provided no reset-credit data",
         ))
+    else:
+        try:
+            count = _nonneg_int(_obj(coupons).get("availableCount"))
+        except Malformed as exc:
+            records.append(Record("reset coupons", GAP, diagnostic=exc.code))
+        else:
+            records.append(Record(
+                "reset coupons", REPORTED, freshness=str(count), info=True,
+                note="read only; redeem one in the Codex TUI with /usage, never from here",
+            ))
 
     credits = default.get("credits") if isinstance(default, dict) else None
     if credits is not None and not isinstance(credits, dict):
@@ -674,7 +717,7 @@ def _codex_records(home: Path) -> list[Record]:
     elif isinstance(credits, dict):
         try:
             if _flag(credits.get("hasCredits")):
-                records.append(Record("credits", INFO,
+                records.append(Record("credits", REPORTED, info=True,
                                       freshness=f"{_decimal(credits.get('balance')):.2f}"))
         except Malformed as exc:
             records.append(Record("credits", GAP, diagnostic=exc.code))

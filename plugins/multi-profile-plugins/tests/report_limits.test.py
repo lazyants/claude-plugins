@@ -573,8 +573,6 @@ with tempfile.TemporaryDirectory() as tmp:
 
     for label, result in (
         ("no rateLimits at all", {"rateLimitsByLimitId": {}}),
-        ("window duration absent", {"rateLimits": {"limitId": "codex", "primary": {
-            "usedPercent": 5, "resetsAt": epoch(3)}}}),
         ("usedPercent is a bool", {"rateLimits": {"limitId": "codex", "primary": {
             "usedPercent": True, "windowDurationMins": 10080, "resetsAt": epoch(3)}}}),
         ("availableCount is a bool", {
@@ -655,7 +653,10 @@ with tempfile.TemporaryDirectory() as tmp:
     # 26 -- one non-object entry must gap ITSELF, not its valid siblings. A container pass ahead
     # of the per-record loop rejected the whole candidate and lost every valid pool with it.
     mixed = root / "mixed"
-    make_claude(mixed, ".claudeM", cached(entries=[entry(percent=42), "not-an-object"]))
+    # A valid entry on EITHER side of the malformed one. With the only valid entry first, a
+    # `break` after appending the gap row leaves this case green while later siblings vanish.
+    make_claude(mixed, ".claudeM",
+                cached(entries=[entry(percent=42), "not-an-object", entry(percent=63)]))
     done, _, _ = run(["--claude-profile", str(mixed / ".claudeM"),
                       "--codex-home", str(make_codex_home(mixed, ".codexClean"))], root=mixed)
     # Counted in the report BODY: the warning now quotes the gapped row verbatim, so counting
@@ -665,22 +666,35 @@ with tempfile.TemporaryDirectory() as tmp:
           "limits[1]" in body and body.count("[payload-malformed]") == 1, done.stdout)
     check("26 the warning quotes the gapped row rather than inventing a token",
           "limits[1] [payload-malformed]" in done.stdout.split("warnings")[-1], done.stdout)
-    check("26 the VALID sibling still reports", "42.0%" in done.stdout, done.stdout)
+    check("26 the VALID sibling before it still reports", "42.0%" in done.stdout, done.stdout)
+    check("26 the VALID sibling AFTER it still reports", "63.0%" in done.stdout, done.stdout)
     check("26 the run gaps", done.returncode == 1, f"rc={done.returncode}")
     check("26 and it is the Claude profile the warning names",
           ".claudeM" in done.stdout.split("warnings")[-1], done.stdout)
 
     # 27 -- a subscription flag of the WRONG TYPE is schema drift, not a clean absence. `is False`
     # let a string fall through to no-usage-cache, which is KNOWN_ABSENT and exits 0.
-    drift = root / "drift"
-    make_claude(drift, ".claudeS", {"hasAvailableSubscription": "false"})
-    done, _, _ = run(["--claude-profile", str(drift / ".claudeS"),
-                      "--codex-home", str(make_codex_home(drift, ".codexClean"))], root=drift)
-    check("27 a string subscription flag gaps", "[field-malformed]" in done.stdout, done.stdout)
-    check("27 it is NOT recorded as a known absence",
-          "[no-usage-cache]" not in done.stdout and "[no-subscription]" not in done.stdout,
-          done.stdout)
-    check("27 and the run exits 1", done.returncode == 1, f"rc={done.returncode}")
+    # Every non-boolean, not one. `null` in particular is a PRESENT key holding a non-boolean,
+    # and a `subscription is not None` guard skipped exactly that back to the clean state.
+    for index, bad in enumerate(("false", 0, 1, None, [], {})):
+        drift = root / f"drift{index}"
+        make_claude(drift, ".claudeS", {"hasAvailableSubscription": bad})
+        done, _, _ = run(["--claude-profile", str(drift / ".claudeS"),
+                          "--codex-home", str(make_codex_home(drift, ".codexClean"))], root=drift)
+        check(f"27 subscription flag {bad!r} gaps", "[field-malformed]" in done.stdout,
+              done.stdout)
+        check(f"27 flag {bad!r} is NOT recorded as a known absence",
+              "[no-usage-cache]" not in done.stdout and "[no-subscription]" not in done.stdout,
+              done.stdout)
+        check(f"27 flag {bad!r} exits 1", done.returncode == 1, f"rc={done.returncode}")
+    # ... and the one value that is NOT drift still takes the documented path.
+    okflag = root / "okflag"
+    make_claude(okflag, ".claudeS", {"hasAvailableSubscription": False})
+    done, _, _ = run(["--claude-profile", str(okflag / ".claudeS"),
+                      "--codex-home", str(make_codex_home(okflag, ".codexClean"))], root=okflag)
+    check("27 a literal false is still the no-subscription state, not a gap",
+          "[no-subscription]" in done.stdout and done.returncode == 0,
+          f"rc={done.returncode}\n{done.stdout}")
 
     # 28 -- the coupon count is one of the things this report exists to print, so a response that
     # omits the container has not answered the question and must not print nothing and pass.
@@ -690,41 +704,69 @@ with tempfile.TemporaryDirectory() as tmp:
                       "--codex-home", str(make_codex_home(nocoupon, ".codexN"))], root=nocoupon,
                      stub_result={"rateLimits": {"limitId": "codex", "primary": {
                          "usedPercent": 61, "windowDurationMins": 10080, "resetsAt": epoch(30)}}})
-    check("28 an omitted coupon container gaps its own row",
-          "reset coupons" in done.stdout and "[field-malformed]" in done.stdout, done.stdout)
+    # The vendor's schema makes this container optional AND nullable, so its absence is the
+    # backend declining to answer -- reported as a known absence, never gapped. What must still
+    # gap is a container the schema does NOT allow, which is the second half below.
+    check("28 an omitted coupon container is reported as a known absence, not a gap",
+          "reset coupons" in done.stdout and "not reported" in done.stdout, done.stdout)
+    check("28 it is not a silent omission either -- the row is printed",
+          done.stdout.count("reset coupons") == 1, done.stdout)
     check("28 the usage window beside it still reports", "61.0%" in done.stdout, done.stdout)
-    check("28 the run exits 1 rather than printing nothing and passing",
-          done.returncode == 1, f"rc={done.returncode}")
-    check("28 the warning names the Codex home, not the clean Claude profile",
-          ".codexN" in done.stdout.split("warnings")[-1]
+    check("28 and the run stays clean", done.returncode == 0,
+          f"rc={done.returncode}\n{done.stdout}")
+
+    # 28b -- the shape the schema forbids. availableCount is `required` and an integer, so a
+    # present container without it is drift and must gap.
+    done, _, _ = run(["--claude-profile", str(nocoupon / ".claudeOK"),
+                      "--codex-home", str(make_codex_home(nocoupon, ".codexBad"))],
+                     root=nocoupon,
+                     stub_result={"rateLimits": {"limitId": "codex", "primary": {
+                         "usedPercent": 61, "windowDurationMins": 10080, "resetsAt": epoch(30)}},
+                         "rateLimitResetCredits": {"notTheCount": 1}})
+    check("28b a present container missing its required count gaps",
+          "reset coupons" in done.stdout and "[field-malformed]" in done.stdout, done.stdout)
+    check("28b the run exits 1", done.returncode == 1, f"rc={done.returncode}")
+    check("28b the warning names the Codex home, not the clean Claude profile",
+          ".codexBad" in done.stdout.split("warnings")[-1]
           and ".claudeOK" not in done.stdout.split("warnings")[-1], done.stdout)
 
     # 29 -- an escaped lone surrogate survives json.loads and raises only when something ENCODES
     # it, which happens in the renderer, outside the per-candidate handler.
     surrogate = root / "surrogate"
+    # Both ends of the range: rejecting only U+D800 left the other 2 047 code points live.
     make_claude(surrogate, ".claudeU",
-                cached(entries=[entry(percent=42), entry(kind="\ud800weekly")]))
+                cached(entries=[entry(percent=42), entry(kind="\ud800weekly"),
+                                entry(kind="weekly\udfff")]))
     done, _, _ = run(["--claude-profile", str(surrogate / ".claudeU"),
                       "--codex-home", str(make_codex_home(surrogate, ".codexClean"))],
                      root=surrogate)
     check("29 the surrogate label gaps its own record",
           "limits[1]" in done.stdout and "[field-malformed]" in done.stdout, done.stdout)
+    # Counted in the BODY: the warning quotes each gapped row verbatim, so a whole-stdout
+    # count sees every diagnostic twice and stops saying anything about the rows.
+    surr_body = done.stdout.split("warnings")[0]
+    check("29 the OTHER end of the surrogate range gaps too",
+          "limits[2]" in surr_body and surr_body.count("[field-malformed]") == 2, done.stdout)
     check("29 the valid sibling still reports", "42.0%" in done.stdout, done.stdout)
     check("29 no traceback escaped to stderr", "Traceback" not in done.stderr, done.stderr)
 
-    # 30 -- a profile DIRECTORY name is not this script's to validate, and neither is the encoding
-    # of the stream it prints to. Under an ascii stdout an unencodable character raises out of
-    # print(), past every per-candidate handler, ending the run with no warnings at all.
+    # 30 -- under an ascii stdout an unencodable character raises out of print(), past every
+    # per-candidate handler, ending the run with no warnings at all. The DIRECTORY name is the
+    # half that _text cannot cover: it is not a vendor field and not this script's to validate,
+    # so only the stream configuration can carry it. Both halves are in this one fixture.
     narrow = root / "narrow"
-    make_claude(narrow, ".claudeW", cached(entries=[entry(
+    make_claude(narrow, ".claudeW\u00e9", cached(entries=[entry(
         kind="weekly_scoped", percent=19,
         scope={"model": {"id": None, "display_name": "Fabl\u00e9"}, "surface": None})]))
-    done, _, _ = run(["--claude-profile", str(narrow / ".claudeW"),
+    done, _, _ = run(["--claude-profile", str(narrow / ".claudeW\u00e9"),
                       "--codex-home", str(make_codex_home(narrow, ".codexClean"))],
                      root=narrow, extra_env={"PYTHONIOENCODING": "ascii"})
     check("30 an ascii stdout does not abort the report",
           "UnicodeEncodeError" not in done.stderr and "Traceback" not in done.stderr, done.stderr)
-    check("30 the row is escaped rather than lost", "Fabl\\xe9" in done.stdout, done.stdout)
+    check("30 the vendor field is escaped rather than lost",
+          "Fabl\\xe9" in done.stdout, done.stdout)
+    check("30 the profile DIRECTORY name is escaped rather than aborting the report",
+          ".claudeW\\xe9" in done.stdout, done.stdout)
     check("30 and the run is otherwise clean", done.returncode == 0,
           f"rc={done.returncode}\n{done.stdout}\n{done.stderr}")
 
@@ -750,6 +792,125 @@ with tempfile.TemporaryDirectory() as tmp:
         check("31 the cache is not used as a fallback either", "77.0%" not in done.stdout,
               done.stdout)
         check("31 and the run gaps", done.returncode == 1, f"rc={done.returncode}")
+
+
+# --- 32: shapes the VENDOR'S OWN SCHEMA declares nullable or optional ---------------------------
+#
+# Source of truth, re-derivable: openai/codex, codex-rs/app-server-protocol/schema/json/v2/
+# GetAccountRateLimitsResponse.json. Only `rateLimits` is in `required`; every field below is
+# `... | null`, or absent from a `required` list, or both. A null there is the backend declining
+# to answer, not schema drift -- so it must NOT gap. Gapping it would leave an account whose
+# backend returns one unable to produce a clean report no matter what its owner did, which is the
+# failure mode this whole report is built to avoid, pointed the other way.
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    OK_WINDOW = {"usedPercent": 5, "windowDurationMins": 10080, "resetsAt": epoch(3)}
+    OK_POOL = {"limitId": "codex", "primary": OK_WINDOW}
+    COUPONS = {"availableCount": 0}
+    nullroot = root / "nullable"
+    ok_claude = make_claude(nullroot, ".claudeClean", cached(entries=[entry()]))
+    nullhome = make_codex_home(nullroot, ".codexNull")
+
+    for label, result, expect in (
+        ("rateLimitResetCredits absent", {"rateLimits": OK_POOL}, "not reported"),
+        ("rateLimitResetCredits null",
+         {"rateLimits": OK_POOL, "rateLimitResetCredits": None}, "not reported"),
+        ("rateLimitsByLimitId null",
+         {"rateLimits": OK_POOL, "rateLimitsByLimitId": None, "rateLimitResetCredits": COUPONS},
+         "codex/weekly"),
+        ("windowDurationMins null",
+         {"rateLimits": {"limitId": "codex", "primary": dict(OK_WINDOW,
+                                                             windowDurationMins=None)},
+          "rateLimitResetCredits": COUPONS}, "codex/primary"),
+        ("windowDurationMins absent",
+         {"rateLimits": {"limitId": "codex", "primary": {"usedPercent": 5,
+                                                         "resetsAt": epoch(3)}},
+          "rateLimitResetCredits": COUPONS}, "codex/primary"),
+        ("resetsAt null",
+         {"rateLimits": {"limitId": "codex", "primary": dict(OK_WINDOW, resetsAt=None)},
+          "rateLimitResetCredits": COUPONS}, "no reset time reported by the backend"),
+        ("limitId null",
+         {"rateLimits": {"limitId": None, "primary": OK_WINDOW},
+          "rateLimitResetCredits": COUPONS}, "codex/weekly"),
+        ("credits null",
+         {"rateLimits": {"limitId": "codex", "credits": None, "primary": OK_WINDOW},
+          "rateLimitResetCredits": COUPONS}, "codex/weekly"),
+        ("secondary null",
+         {"rateLimits": {"limitId": "codex", "secondary": None, "primary": OK_WINDOW},
+          "rateLimitResetCredits": COUPONS}, "codex/weekly"),
+        # `usedPercent` is an UNBOUNDED int32 in that schema. A pool past its limit is the moment
+        # the report is most worth reading, so refusing the number would be the worst possible
+        # time to gap.
+        ("usedPercent past 100",
+         {"rateLimits": {"limitId": "codex", "primary": dict(OK_WINDOW, usedPercent=137)},
+          "rateLimitResetCredits": COUPONS}, "137.0%"),
+    ):
+        done, _, _ = run(["--claude-profile", str(ok_claude), "--codex-home", str(nullhome)],
+                         root=nullroot, stub_result=result)
+        check(f"32 schema-nullable {label} does not gap the run",
+              done.returncode == 0, f"rc={done.returncode}\n{done.stdout}")
+        check(f"32 schema-nullable {label} emits no warning",
+              "warnings" not in done.stdout, done.stdout)
+        check(f"32 schema-nullable {label} still reports its row",
+              expect in done.stdout, done.stdout)
+
+    # 33 -- a valid record whose sibling raises something OTHER than Malformed. The per-record
+    # handler's comment claims one bad entry cannot suppress the rest; only catching Malformed
+    # made that false for a 400-digit integer, which raises OverflowError inside float().
+    huge = root / "huge"
+    make_claude(huge, ".claudeH", cached(entries=[
+        entry(percent=42), entry(kind="weekly_huge", percent=10 ** 400), entry(percent=63)]))
+    done, _, _ = run(["--claude-profile", str(huge / ".claudeH"),
+                      "--codex-home", str(make_codex_home(huge, ".codexClean"))], root=huge)
+    check("33 the overflowing record gaps under its own index",
+          "limits[1]" in done.stdout, done.stdout)
+    check("33 the record BEFORE it still reports", "42.0%" in done.stdout, done.stdout)
+    check("33 the record AFTER it still reports too", "63.0%" in done.stdout, done.stdout)
+    check("33 and the diagnostic is a member of the closed enum, not a traceback",
+          "Traceback" not in done.stderr, done.stderr)
+
+    # 33b -- the same claim on the CODEX side, which has its own per-record handler and needed
+    # the same total catch. A 400-digit usedPercent raises OverflowError inside float().
+    ovf = root / "ovf"
+    done, _, _ = run(["--claude-profile", str(make_claude(ovf, ".claudeClean",
+                                                          cached(entries=[entry()]))),
+                      "--codex-home", str(make_codex_home(ovf, ".codexO"))], root=ovf,
+                     stub_result={"rateLimitsByLimitId": {
+                         "codex": {"limitId": "codex", "primary": {
+                             "usedPercent": 5, "windowDurationMins": 10080,
+                             "resetsAt": epoch(9)}},
+                         "codex_bad": {"limitId": "codex_bad", "primary": {
+                             "usedPercent": 10 ** 400, "windowDurationMins": 10080,
+                             "resetsAt": epoch(9)}}},
+                         "rateLimitResetCredits": {"availableCount": 2}})
+    check("33b the overflowing codex window gaps under its own pool and slot",
+          "codex_bad/primary" in done.stdout and "[internal-error]" in done.stdout, done.stdout)
+    check("33b the OTHER pool still reports", "codex/weekly" in done.stdout, done.stdout)
+    coupon_rows_33b = [ln for ln in done.stdout.splitlines()
+                       if ln.strip().startswith("reset coupons")]
+    check("33b and the coupon row beside it still reports its own count",
+          len(coupon_rows_33b) == 1 and coupon_rows_33b[0].split()[2] == "2",
+          str(coupon_rows_33b))
+    check("33b no traceback escaped", "Traceback" not in done.stderr, done.stderr)
+
+    # 34 -- the report's own claim that only `_FRAMES` reaches the child. The AST literal gate
+    # cannot see `dict([("method", operation)])`, so it is not on its own a statement about what
+    # can be SENT. This pair is: the bytes written are frames, and the frames are these three.
+    source_34 = SCRIPT.read_text(encoding="utf-8")
+    lines_34 = source_34.splitlines()
+    writes = [n for n, line in enumerate(lines_34, 1) if "stdin.write(" in line]
+    check("34 the module writes to the child on exactly one line", len(writes) == 1, str(writes))
+    check("34 and that line writes a frame from _FRAMES and nothing else",
+          bool(writes) and lines_34[writes[0] - 1].strip() == "stdin.write(frame)",
+          lines_34[writes[0] - 1] if writes else "no stdin.write at all")
+    sec_lines = [n for n, line in enumerate(lines_34, 1) if '"security"' in line]
+    check("34 `security` is named exactly once", len(sec_lines) == 1, str(sec_lines))
+    # An absolute path would reach the host binary whatever PATH the suite installs, so the
+    # marker fixture would prove nothing. The shebang's /usr/bin/env is not such a path, which
+    # is why this pins the binary NAME rather than any occurrence of a bin directory.
+    check("34 and never by an absolute path, which would bypass the fixture PATH entirely",
+          "/security" not in source_34, "an absolute path to a security binary appears")
 
 
 # --- 22 / 23: transport safety. These import the module, deliberately, because reaching an HTTPS
@@ -896,6 +1057,27 @@ with tempfile.TemporaryDirectory() as tmp:
     assert_no_secret("25b live read", out_buf.getvalue(), err_buf.getvalue(),
                      repr([vars(record) for record in produced]))
 
+    # The runtime half of 34: whatever any helper could construct, only these bytes are written.
+    frames = [json.loads(frame.decode("utf-8")) for frame in R._FRAMES]
+    check("34 _FRAMES decodes to exactly the three read-only messages, in order",
+          [f.get("method") for f in frames]
+          == ["initialize", "initialized", "account/rateLimits/read"],
+          str([f.get("method") for f in frames]))
+    check("34 every frame ends in the newline the protocol frames on",
+          all(frame.endswith(b"\n") for frame in R._FRAMES), str(R._FRAMES[:1]))
+
+    # A state outside the declared three is refused at construction, so the comment saying there
+    # are three cannot drift from the code again.
+    try:
+        R.Record("x", "info")
+        refused = False
+    except R.Malformed:
+        refused = True
+    check("24 Record refuses a state outside the three terminal ones", refused)
+    check("24 the terminal set is exactly those three",
+          R.TERMINAL_STATES == frozenset({R.REPORTED, R.NO_CURRENT, R.GAP}),
+          str(sorted(R.TERMINAL_STATES)))
+
     # 24 -- every diagnostic token the script can render is a member of the closed enum.
     check("24 the enum has a total fallback", "internal-error" in R.DIAGNOSTIC_SET)
     check("24 the enum is a frozenset of unique tokens",
@@ -923,7 +1105,7 @@ if failures:
         print(f"  {failure}")
     sys.exit(1)
 
-MIN_CHECKS = 160
+MIN_CHECKS = 200
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

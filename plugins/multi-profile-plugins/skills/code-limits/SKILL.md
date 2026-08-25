@@ -65,23 +65,43 @@ does. Measured around a single `account/rateLimits/read` call against one home: 
 before, 5 521 after -- new `-wal`/`-shm` companions and migrated sqlite state. Contention with a
 Codex client running concurrently against the same home is an accepted, unmeasured risk.
 
+## Absent and null, per the vendor's schema
+
+The Codex reply is checked against what the vendor's own schema
+(`codex-rs/app-server-protocol/schema/json/v2/GetAccountRateLimitsResponse.json`) actually
+requires, not against what would be convenient to require: only `rateLimits` is mandatory, and
+fields like `rateLimitResetCredits`, `windowDurationMins`, `resetsAt`, and `limitId` are all
+declared nullable or optional. A value the schema allows to be absent or null never gaps -- a
+check a profile's owner could never clear would be worse than the absence it reports -- but what
+renders instead varies by field: some rows still report normally under a different label, some
+print an explicit absence, and some produce no row at all. An omitted `rateLimitResetCredits`, for
+instance, now prints a `reset coupons` row reading "not reported" instead of gapping the run,
+and because `usedPercent` is an unbounded int32 in that schema, a pool reported past 100%
+renders as given rather than being refused, which would gap the report exactly when it is most
+worth reading. A shape the schema does not permit at all still gaps, as before.
+
 ## Reset coupons
 
 `rateLimitResetCredits.availableCount` is what the Codex TUI's own `/usage` calls "usage limit
 reset available" -- a coupon that lifts a rate limit early. The report READS this count and
 prints it.
 
-It never redeems one: the three JSON-RPC messages it can send are serialized to bytes once at
-import (`_FRAMES`), and the dict literals are never bound to a name, so nothing after import can
-rebuild or mutate a message. The suite parses the module's own source with `ast` and asserts
-every `"method"` value anywhere in it is a string literal drawn from exactly those three methods
--- a fourth method, however it is spelled, turns that suite red. That is a CI gate rather than a
-runtime guard: it stops a fourth method being merged, not one already running. To
-redeem a reset coupon, use the Codex TUI's own `/usage`; this tool deliberately will not do it.
+It never redeems one, and the guarantee is about what can be SENT. The module writes to the
+child on exactly one line, and that line writes a frame from `_FRAMES` and nothing else;
+`_FRAMES` decodes at runtime to exactly the three read-only methods, in order, so those bytes
+are the only ones ever written to the child's stdin. (It also receives `CODEX_HOME` in its
+environment, and nothing else from here.) The suite's `ast` walk of every `"method"` literal
+in the source is a second, static check on top of that -- it catches an extra method-bearing
+dict appearing anywhere in the file, but on its own says nothing about a method assembled some
+other way (`dict([("method", operation)])` would not be a literal), which is why it is a CI gate
+rather than a runtime guard: it stops a fourth method from being merged, not one already
+running. To redeem a reset coupon, use the Codex TUI's own `/usage`; this tool deliberately will
+not do it.
 
-A reply that omits `rateLimitResetCredits`, or gives it as anything other than an object with a
-non-negative integer `availableCount`, gaps this row and exits 1 instead of printing nothing and
-exiting 0 -- the coupon count is one of the things this report exists to answer.
+An omitted or null `rateLimitResetCredits` renders as a known absence -- the row reads "not
+reported" and the run stays clean -- because the vendor's schema allows the field to be absent.
+A non-null value that is not an object, or an `availableCount` that is not a non-negative
+integer, is a shape the schema does not permit, and that still gaps the row and exits 1.
 
 ## Exit contract
 
