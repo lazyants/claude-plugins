@@ -16,7 +16,13 @@ The README table link is `[\`<name>\`](#<name>--vXYZ)`. GitHub slugifies the hea
 
 ### Surface #4 has a hidden fifth layer: the section's BODY PROSE
 
-The section's intro paragraph and "What it covers" bullet list are easy to leave frozen at an older version while the header says the new one — this satisfies the row/header/anchor triplet yet is still stale. Update the body prose separately whenever the plugin's feature set actually changed: a bugfix or feature release should get at least one new sentence + bullet. A pure metadata/hardening bump with truly no user-visible behavior change can legitimately skip the prose update.
+The section's intro paragraph and "What it covers" bullet list are easy to leave frozen at an older version while the header says the new one — this satisfies the row/header/anchor triplet yet is still stale, and `check_version_surfaces.py` does not read them, so nothing but you catches it.
+
+**What that prose is FOR, since `980ba4bf` (#736): the plugin's CURRENT capability set, never its history.** That commit removed every version-tagged release bullet from the README and put the replacement rule in the README's own Changelogs callout — *"The per-plugin sections below describe what each plugin does and deliberately carry no per-release history — the changelog is the only place it lives."* An earlier version of this section said a bugfix or feature release "should get at least one new sentence + bullet"; that per-release accretion rule is exactly what grew the surface #736 had to delete, and following it now reverses a shipped decision.
+
+So the only prose question at a bump is **whether the description is still true**. Revise it when this release made it untrue *or incomplete* as a statement of what the plugin does today — a release that ADDS a capability leaves every existing sentence true while making the description incomplete, so "still accurate" is not the test — and otherwise leave it alone, however many releases have landed since it was last touched. A release never earns a bullet by being a release. Where a version number does belong in the prose it sits inside a capability sentence that needs it (the `literary-translator` section carries such sentences), never as a heading for a bullet of its own.
+
+**Corollary: a body-prose surface can no longer be "N releases stale."** It does not track releases, so there is nothing to backfill — the skipped-surface backfill rule below covers `plugin.json`, `marketplace.json`, the README row/header/anchor and the CHANGELOG entry, and has no README-prose leg. This is what closed #485, which had asked for three literary-translator releases' worth of README body prose to be written.
 
 ## Source of truth + verification
 
