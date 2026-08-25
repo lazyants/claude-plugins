@@ -3089,13 +3089,13 @@ def test_an_unreadable_manifest_never_makes_the_term_lane_raise(tmp_path):
 # that most needs one.
 #
 # The SEGPACK side of the same class is deliberately NOT tested, and that is a
-# measurement rather than an omission: a segpack whose `footnotes` is a mapping,
-# or whose verse `parent_block` is unhashable, never reaches any WARN check --
+# measurement rather than an omission: a segpack whose verse `parent_block` is
+# unhashable, or whose `footnotes` is a mapping, never reaches any WARN check --
 # hard check 1 calls `validate_draft.validate()` first and dies on the identical
-# input at validate_draft.py:625 and :622. That is pre-existing and out of
-# scope. The `isinstance` guards in `term_carriers()` are kept anyway; they cost
-# three calls, and "a lane that never raises" should not depend on which OTHER
-# check happens to run before it.
+# input at validate_draft.py:625 and :684 respectively. That is pre-existing and
+# out of scope. The `isinstance` guards in `term_carriers()` are kept anyway;
+# they cost three calls, and "a lane that never raises" should not depend on
+# which OTHER check happens to run before it.
 
 
 def test_a_corrupt_manifest_verse_block_does_not_crash_the_lane(tmp_path):

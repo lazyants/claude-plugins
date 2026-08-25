@@ -901,17 +901,17 @@
    ],
    "claim": "\"\"\"DEFAULT_BATCH_SIZE, read from glossary_batch_plan.py's own AST -- no import. glossary_batch_plan.py:146 does a bare `from canon_senses import CanonSensesLoadError, is_split, load_senses`, so an actual import would need sys.path surgery that would persist for the whole test session. Mirrors _emitted_refusal_reasons's own idiom above.\"\"\""
   },
-  "[\"plugins/literary-translator/tests/final_audit.test.py\", \"validate_draft.py:622\", 0, \"continuation\"]": {
-   "anchors": [
-    "still a genuine SOURCE DEFECT below"
-   ],
-   "claim": "# hard check 1 calls `validate_draft.validate()` first and dies on the identical # input at validate_draft.py:625 and :622. That is pre-existing and out of # scope. The `isinstance` guards in `term_carriers()` are kept anyway; they cost"
-  },
   "[\"plugins/literary-translator/tests/final_audit.test.py\", \"validate_draft.py:625\", 0]": {
    "anchors": [
     "parent_block_claims.setdefault(v[\"parent_block\"]"
    ],
-   "claim": "# The SEGPACK side of the same class is deliberately NOT tested, and that is a # measurement rather than an omission: a segpack whose `footnotes` is a mapping, # or whose verse `parent_block` is unhashable, never reaches any WARN check -- # hard check 1 calls `validate_draft.validate()` first and dies on the identical # input at validate_draft.py:625 and :622. That is pre-existing and out of # scope. The `isinstance` guards in `term_carriers()` are kept anyway; they cost # three calls, and \"a lane that never raises\" should not depend on which OTHER # check happens to run before it."
+   "claim": "# The SEGPACK side of the same class is deliberately NOT tested, and that is a # measurement rather than an omission: a segpack whose verse `parent_block` is # unhashable, or whose `footnotes` is a mapping, never reaches any WARN check -- # hard check 1 calls `validate_draft.validate()` first and dies on the identical # input at validate_draft.py:625 and :684 respectively. That is pre-existing and # out of scope. The `isinstance` guards in `term_carriers()` are kept anyway; # they cost three calls, and \"a lane that never raises\" should not depend on # which OTHER check happens to run before it."
+  },
+  "[\"plugins/literary-translator/tests/final_audit.test.py\", \"validate_draft.py:684\", 0, \"continuation\"]": {
+   "anchors": [
+    "src_fn = {str(f[\"n\"]): f.get(\"source_text\", \"\") for f in (src.get(\"footnotes\") or [])}"
+   ],
+   "claim": "# The SEGPACK side of the same class is deliberately NOT tested, and that is a # measurement rather than an omission: a segpack whose verse `parent_block` is # unhashable, or whose `footnotes` is a mapping, never reaches any WARN check -- # hard check 1 calls `validate_draft.validate()` first and dies on the identical # input at validate_draft.py:625 and :684 respectively. That is pre-existing and # out of scope. The `isinstance` guards in `term_carriers()` are kept anyway; # they cost three calls, and \"a lane that never raises\" should not depend on # which OTHER check happens to run before it."
   },
   "[\"plugins/literary-translator/tests/fixtures/backlink_e2e/case_spec.py\", \"segpack.schema.json:132\", 0]": {
    "anchors": [
