@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.72.0 — 2026-08-25
+
+**Operating lessons from two live books, promoted into the skill.** Documentation only —
+no script, prompt, gate or schema changes. Each item below was measured while running this
+plugin on real books (a French→Russian collection and a Hebrew→English one) and each was
+checked against what the skill already said before being written: the claim-profile,
+sentinel, `input_digest` and sweep machinery is documented here in depth already, and these
+are the operating behaviours that machinery produces which the docs did not name.
+
+- **A refused finding can live-lock the unit** (`references/engine-loop.md`). A fix turn
+  that refuses its finding — which 1.37.0/#532 sometimes REQUIRES — leaves the draft
+  byte-identical, so `draft_sha1` never moves, so the review artifact never goes stale, so
+  the driver re-serves the same review with a `fix_prompt` instead of dispatching a new one.
+  The unit never converges and never caps. Measured on a live book: round 4 dispatched 19 of
+  20 units and the missing one still carried its round-2 `dispatch_token`. The exit summary
+  reports it under `needs_fix`, which reads as "reviewed again, still not clean" rather than
+  "not looked at"; the tell is a `round_label` that does not advance. The release is an
+  `ADJUDICATED:` entry in the draft's `notes[]` — apparatus the reader never sees — and
+  never applying a finding you have evidence is wrong. Two other causes produce the same
+  shape (an operator waiver written where the reviewer does not read, a driver-stranded
+  unit), and one detector catches all three: reconcile the dispatch COUNT against the
+  requested set every round.
+- **A never-converged unit stranded by a killed driver fits no claim profile**
+  (`references/ledger-and-resumability.md`). It stays `in_progress`; `--from-cap` and
+  `--from-converged` refuse on status and `--from-stalled` on the `.ever_converged` sentinel
+  it has never had. The route through is the absence of a guard rather than one built for
+  it — `--only-segs` with no claim flag — and on the way there D3b makes one such id refuse
+  the whole `--from-stalled` round, so it gets excluded and then appears nowhere in the exit
+  summary. Write the exclusion down before that summary exists.
+- **What a fan-out actually costs: the per-`agent()` floor**
+  (`references/orchestration-and-batching.md`). `batch_agent_cap` bounds the agent count;
+  this is the price of each. ~35–70k tokens of harness bootstrap per call regardless of task
+  size (a one-poll subagent measured at 69,844), so a 40-segment batch ran 638 agents / ~25M
+  subagent tokens ≈ 700k per segment against 3–5 substantive codex calls — ~90–95% of the
+  Claude-side burn is deterministic orchestration. Structural, not tuning: the script sandbox
+  cannot run bash, and it has no filesystem access either, so a batch plan is typed verbatim
+  into the tool call (~92 KB / ~100k tokens for one 807-candidate glossary pass, with no
+  escape that survives `--verify-merged`). Count agents, not words — and codex tokens bill to
+  a different account than the orchestration agents do.
+- **Two sweep rules the W6 pass did not state** (`SKILL.md`). Enumerate the population from
+  the SOURCE, not from your own matcher: a draft-side pattern defines its own residue, which
+  is how one class was closed three times at 32, 3 and 15 sites, every count honest about its
+  predicate and silent about the class — and eight of that class's twelve unnamed defects sat
+  in units that had already converged, where no draft-side pattern would ever look. And gate a
+  sweep on the invariant its own transform can break: a rebuild that conserved LETTERS passed
+  green while inserting a space into 11 words across 8 segments, because a space is not a
+  letter. A sweep must also print its site count and refuse a zero-site run.
+
 ## 1.71.0 — 2026-08-25
 
 The third batch fold: every merge that landed on `main` after the 1.70.0 cut (`6d0a2b2`) without a

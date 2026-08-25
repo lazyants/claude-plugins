@@ -533,3 +533,48 @@ fragment — no separate reset/clear script is needed. See
 (`output.v1_scope: segment_drafts_and_audit`) complete while ANY item remains
 `non_converged` OR `blocked`** — both are "not done," not just `blocked`; a
 future assembly script must also hard-fail on either status when it exists.
+
+## A refused finding can live-lock the unit, and the summary still reads complete
+
+A fix turn may legitimately refuse the finding it was handed — 1.37.0 (#532) gives
+it an apply-side rule that REQUIRES a refusal for a canon claim whose form
+resolves in neither the segment's `canon_map` nor `canon.json`. A refusal that
+leaves the draft byte-identical is where the loop stops moving, and it stops
+silently:
+
+- The stored review counts as fresh while its `dispatch_token` still names this
+  run and round. Refusing changes no draft bytes, so `draft_sha1` does not move,
+  so the artifact never goes stale, so the next round re-serves that same review
+  with a `fix_prompt` instead of dispatching a new one. The unit cannot converge,
+  and no cap fires either, because the round never advances for it.
+- **Measured on a live book:** round 4 dispatched 19 of 20 units; the missing one
+  still carried the round-2 `dispatch_token` on its `segments/<seg>.review.json`,
+  and grepping every `runs/*/driver_journal.jsonl` for that id showed its dispatch
+  history simply stopping.
+- **The exit summary hides it.** The unit reports under `needs_fix`, which reads
+  as "reviewed again, still not clean" when what happened is "not looked at". The
+  tell is the `round_label` in that entry: it does not advance between rounds
+  while every other unit's does.
+
+**The release is to move `draft_sha1` honestly** — an `ADJUDICATED:` entry in the
+draft's `notes[]` recording what was checked and why the finding was refused.
+`notes[]` is apparatus and is never assembled into the book, so nothing the reader
+sees changes, and the next dispatch is a real review over a genuinely different
+draft. The move that must NOT be used to release it is applying a finding you have
+evidence is wrong: that is the one edit which damages correct prose, and the
+live-lock is exactly the pressure that makes it tempting.
+
+**Re-read the finding before refusing it a second time.** A stale artifact
+describes a draft that no longer exists, so a refusal recorded rounds ago can be
+re-served against text that has since satisfied it — measured on that same unit,
+whose finding asked for a removal an earlier round had already made.
+
+**Three different causes, one shape.** This; an operator waiver written into
+`notes[]`, which the reviewer never reads because it reads the dispatch contract
+(a criterion set there is enforced regardless of any note explaining that the
+operator chose to depart from it, and on a capped-once project that silently
+converts a settled decision into a permanently unclaimable segment); and a
+driver-stranded `in_progress` unit (`references/ledger-and-resumability.md`) all
+end the same way — a unit no longer dispatched while the round summary still reads
+complete. **Reconcile the dispatch COUNT against the requested set every round**;
+`dispatched = N-1` for N requested units is the cheapest detector of all three.
