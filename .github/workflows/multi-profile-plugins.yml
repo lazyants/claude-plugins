@@ -1,0 +1,80 @@
+name: multi-profile-plugins
+
+# Drives `plugins/multi-profile-plugins/tests/inspect_codex_profiles.test.py`, which runs the
+# Codex health check as a SUBPROCESS against fixture homes built in a temp dir.
+#
+# The property under test is a matching rule that is wrong in both obvious directions, and wrong
+# quietly: a bare substring test reports every sibling profile as a leak into the base one
+# (`~/.codex` is a substring of `~/.codex2`), and the `startswith` test that fixes it then misses
+# the pins that actually occur, which sit mid-string inside a `:`-joined search path or a JSON
+# services blob. Both mutants were confirmed to fail this suite before it was committed, along
+# with dropping the same-account check, swallowing a TOML parse error, and dropping the
+# shared-store check.
+#
+# The suite also plants credential-shaped strings in every fixture `auth.json` and `config.toml`
+# and asserts they never reach stdout. That check is the reason this runs anywhere at all: the
+# script reads a file holding an API key and OAuth tokens, and a diagnostic that prints one is a
+# worse outcome than the misconfiguration it was looking for.
+
+on:
+  push:
+    branches: [main]
+    # The suite reads nothing outside this plugin directory: it builds its own fixture homes and
+    # invokes the script by a path relative to the test file. A filter narrower than what a suite
+    # reads is how a PR merges with the suite never scheduled -- see CLAUDE.md.
+    paths:
+      - 'plugins/multi-profile-plugins/**'
+      - '.github/workflows/multi-profile-plugins.yml'
+  pull_request:
+    paths:
+      - 'plugins/multi-profile-plugins/**'
+      - '.github/workflows/multi-profile-plugins.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codex-profiles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      # BOTH ends of the supported range, because the floor was claimed and not tested and was
+      # wrong. `Path.exists()` and `Path.is_dir()` RAISE PermissionError on 3.11, 3.12 and 3.13
+      # and swallow it only from 3.14, so a directory the process cannot read crashed the
+      # script on every version below the one CI happened to pin -- while the file's own
+      # comment named 3.11 as the floor, because that is where `tomllib` arrives. A single
+      # pinned version cannot catch that; the whole point of naming a floor is that something
+      # runs there.
+      matrix:
+        python-version: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # 3.14 mirrors this machine, as the sibling workflows do; 3.11 is the floor `tomllib`
+      # sets. Neither the script nor the suite has any other dependency, so nothing installs.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The suite prints `ran N checks` and refuses a run below its own floor. A case that raises
+      # before its checks execute, or a deleted fixture block, otherwise subtracts silently: the
+      # remaining cases pass and the run still exits 0, which reads exactly like full coverage.
+      - name: inspect_codex_profiles.test.py
+        run: python3 plugins/multi-profile-plugins/tests/inspect_codex_profiles.test.py
+
+      # The script's own entry point, against a HOME with no Codex profile in it: the absence
+      # path must exit 0 with a stated reason rather than tracebacking. The script is shipped
+      # mode 644 and invoked through `python3` here, exactly as the skill documents it, so this
+      # asserts the entry point's behaviour and nothing about an executable bit.
+      - name: The script runs against an empty HOME
+        env:
+          HOME: ${{ runner.temp }}
+        run: python3 plugins/multi-profile-plugins/skills/multi-profile-codex/scripts/inspect_codex_profiles.py

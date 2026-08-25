@@ -34,14 +34,17 @@ work, never the coverage: skipping a suite locally is right, skipping it remotel
 | `db-guardrails.yml` | `tests/block-destructive-db.test.sh` | bash, python3, jq (preinstalled) |
 | `enduser-handbook.yml` | `node --test tests/*.test.mjs`, then `tests/reference-assets.test.sh` | Node 22, ruby (preinstalled), esbuild (best-effort) |
 | `literary-translator.yml` | `python3 -m pytest -q`, run **from the plugin directory** | Python 3.14 + `requirements.txt`, Node 22 |
+| `multi-profile-plugins.yml` | `tests/inspect_codex_profiles.test.py`, then the Codex script against an empty `HOME` | Python 3.14 (stdlib only) |
 | `skill-frontmatter.yml` | `tests/skill-frontmatter-limits.test.rb` | ruby (preinstalled) |
 | `citation-audit.yml` | `tools/tests` (pytest), then `tools/citation_audit.py check` over the tree | Python 3.14 + `pytest` (the tool itself is stdlib-only) |
 | `version-surfaces.yml` | `.claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.test.py`, then the checker itself over the tree | Python 3.14 (stdlib only) |
 
-`multi-profile-plugins` and `obsidian-project-vault` ship no tests, so they have no suite of their
-own — `version-surfaces.yml` still covers their release surfaces, as it does every plugin's.
+`obsidian-project-vault` ships no tests, so it has no suite of its own — `version-surfaces.yml`
+still covers its release surfaces, as it does every plugin's. `multi-profile-plugins` ships a suite
+for its Codex health check only; its older Claude Code script (`inspect_profiles.py`) has none, so
+the workflow being green says nothing about that half.
 
-The five plugin workflows are each path-filtered to their own plugin plus their own file, so a PR
+The six plugin workflows are each path-filtered to their own plugin plus their own file, so a PR
 touching one plugin runs one suite; `workflow_dispatch` runs any of them by hand. Superseded runs on
 the same ref are cancelled, so only the newest commit's run gates anything.
 
