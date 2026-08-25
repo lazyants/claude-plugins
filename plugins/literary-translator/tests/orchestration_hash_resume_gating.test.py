@@ -316,17 +316,17 @@ def test_changed_orchestration_bundle_hash_marker_forces_fresh_run(tmp_path):
 
 # Each entry: (label, file, exact pre-fix substring that must be ABSENT).
 STALE_PHRASES = [
-    ("cache_key.py:75", CACHE_KEY_SCRIPT, "orchestration_bundle_hash's diagnostic-only bucket"),
-    ("review_ready.py:53", REVIEW_READY_SCRIPT, "orchestration_bundle_hash's diagnostic-only bucket"),
+    ("cache_key.py:129", CACHE_KEY_SCRIPT, "orchestration_bundle_hash's diagnostic-only bucket"),
+    ("review_ready.py:74", REVIEW_READY_SCRIPT, "orchestration_bundle_hash's diagnostic-only bucket"),
     ("draft_ready.py:12", DRAFT_READY_SCRIPT, "which is diagnostic-only"),
-    ("SKILL.md:258", SKILL_MD, "sibling, non-gating"),
-    ("SKILL.md:259", SKILL_MD, "provenance-only for W8 reporting"),
-    ("SKILL.md:761", SKILL_MD, "non-gating `orchestration_bundle_hash` instead"),
-    ("ledger:418", LEDGER_DOC, "non-gating `orchestration_bundle_hash` instead"),
-    ("ledger:493", LEDGER_DOC, "purely diagnostic/provenance"),
-    ("schema_literal_drift.test.py:487", SCHEMA_LITERAL_DRIFT_TEST, "purely diagnostic/provenance"),
-    ("orchestration-and-batching.md:158", ORCHESTRATION_DOC, "is diagnostic only, never part of the composite"),
-    ("schema_literal_drift.test.py:31", SCHEMA_LITERAL_DRIFT_TEST, "never gated against"),
+    ("SKILL.md:512", SKILL_MD, "sibling, non-gating"),
+    ("SKILL.md:514", SKILL_MD, "provenance-only for W8 reporting"),
+    ("SKILL.md:4044-4050", SKILL_MD, "non-gating `orchestration_bundle_hash` instead"),
+    ("ledger:607", LEDGER_DOC, "non-gating `orchestration_bundle_hash` instead"),
+    ("ledger:719", LEDGER_DOC, "purely diagnostic/provenance"),
+    ("schema_literal_drift.test.py:556-558", SCHEMA_LITERAL_DRIFT_TEST, "purely diagnostic/provenance"),
+    ("orchestration-and-batching.md:220", ORCHESTRATION_DOC, "is diagnostic only, never part of the composite"),
+    ("schema_literal_drift.test.py:31-32", SCHEMA_LITERAL_DRIFT_TEST, "never gated against"),
     ("select_segments.py:12", SELECT_SEGMENTS_SCRIPT, "purely diagnostic/orchestration"),
 ]
 
@@ -367,7 +367,7 @@ def test_reworded_site_mentions_resume(label, path):
 
 
 def test_ledger_already_accurate_ledger_merge_aside_not_flagged():
-    """references/ledger-and-resumability.md:181's `ledger_merge.py` aside
+    """references/ledger-and-resumability.md:198's `ledger_merge.py` aside
     ("diagnostic-only, never part of any segment's cache key") is already
     accurate -- qualified in the very next sentence by the resume-integrity
     digest note -- and must survive untouched. None of the STALE_PHRASES
@@ -387,7 +387,7 @@ def test_ledger_already_accurate_ledger_merge_aside_not_flagged():
 
 
 def test_orchestration_batching_already_accurate_review_resume_sentence_not_flagged():
-    """orchestration-and-batching.md:157's `review_ready.py`/
+    """orchestration-and-batching.md:215's `review_ready.py`/
     `resume_setup.py` sentence ("gating members, not diagnostic-only") is
     already accurate and must survive untouched -- distinct from the
     line directly below it (158) which WAS the stale, flat
@@ -401,7 +401,7 @@ def test_orchestration_batching_already_accurate_review_resume_sentence_not_flag
 
 
 def test_resume_setup_py_own_docstring_never_carried_the_stale_phrasing():
-    """resume_setup.py:110 already correctly self-describes as
+    """resume_setup.py:307-309 already correctly self-describes as
     correctness-gating, not diagnostic-only -- it was never one of the
     nine #186 sites, so none of the STALE_PHRASES keys should ever match
     it (a sanity guard, not evidence the fix touched this file)."""

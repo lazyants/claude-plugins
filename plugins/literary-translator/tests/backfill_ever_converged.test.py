@@ -1214,7 +1214,7 @@ def test_a_failed_sentinel_sync_does_not_launder_into_true_on_retry(tmp_path):
     the already-present branch must NOT return True having synced nothing --
     that would record convergence over a sentinel whose directory entry was
     never made durable, laundering the first call's failed sync into a green
-    result. Exactly the shape backfill_ever_converged.py:603-623 already
+    result. Exactly the shape backfill_ever_converged.py:971-1000 already
     documents and tests at :1644-1709 for its own retry path.
 
     RED against a fix that syncs only the fresh-create branch: the second

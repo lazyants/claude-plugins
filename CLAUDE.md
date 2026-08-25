@@ -35,6 +35,7 @@ work, never the coverage: skipping a suite locally is right, skipping it remotel
 | `enduser-handbook.yml` | `node --test tests/*.test.mjs`, then `tests/reference-assets.test.sh` | Node 22, ruby (preinstalled), esbuild (best-effort) |
 | `literary-translator.yml` | `python3 -m pytest -q`, run **from the plugin directory** | Python 3.14 + `requirements.txt`, Node 22 |
 | `skill-frontmatter.yml` | `tests/skill-frontmatter-limits.test.rb` | ruby (preinstalled) |
+| `citation-audit.yml` | `tools/tests` (pytest), then `tools/citation_audit.py check` over the tree | Python 3.14 + `pytest` (the tool itself is stdlib-only) |
 | `version-surfaces.yml` | `.claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.test.py`, then the checker itself over the tree | Python 3.14 (stdlib only) |
 
 `multi-profile-plugins` and `obsidian-project-vault` ship no tests, so they have no suite of their
@@ -57,6 +58,12 @@ cover every file the suite READS, not only the directory it lives in** — other
 just that file merges with the suite never scheduled, which is exactly the hole that "CI replaces
 the local run" is supposed to close. No other suite reaches outside its own plugin directory
 (literary-translator's changelog tests read `PLUGIN_ROOT/CHANGELOG.md`, its own).
+
+`citation-audit.yml` carries NO `paths:` filter at all, and that is the same rule taken to its
+conclusion: its suite reads every tracked text file in the repo, so any path filter would be a lie.
+It also asserts a non-zero collected test count before running the gate — `tools/tests` holds
+`test_*.py`, not this repo's `*.test.py`, because no root pytest config declares that pattern and a
+`*.test.py` file there would be collected by nothing, reported "no tests ran", and exited 0.
 
 `version-surfaces.yml` is the one workflow whose `pull_request` trigger is scoped to `branches:
 [main]`: its checker's baseline is `origin/main`, which is the right comparison only for a PR that

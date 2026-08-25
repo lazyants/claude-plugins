@@ -1125,7 +1125,7 @@ def test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch(tm
 def test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_digests(tmp_path, monkeypatch):
     """Round 14 (#243, codex review): `run()`'s OWN
     `_frozen_input_snapshots_by_key` vs `FROZEN_INPUT_SPECS` guard
-    (skeptic_setup.py:831, defense-in-depth against a future reordering
+    (skeptic_setup.py:929, defense-in-depth against a future reordering
     ahead of the H1-stamp comprehension right below it -- see that guard's
     own comment) was the ONLY one of the four FROZEN_INPUT_SPECS-key-
     mismatch guards in this file's code closure (suspicion_scan's own
@@ -1137,18 +1137,18 @@ def test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_dige
     specific site.
 
     The trap a naive version of this test falls into: `compute_skeptic_input_digest()`
-    is DEFINED in this module (skeptic_setup.py:382) and reads the SAME
-    module-level `FROZEN_INPUT_SPECS` global the target guard at line 831
-    reads (its own guard is at skeptic_setup.py:456-467). `run()` calls it
-    at step 6 (skeptic_setup.py:731), before resolving the RUN_ID at step 7
-    (`resolve_skeptic_run()`, skeptic_setup.py:743). Mutating
+    is DEFINED in this module (skeptic_setup.py:476) and reads the SAME
+    module-level `FROZEN_INPUT_SPECS` global the target guard at line 929
+    reads (its own guard is at skeptic_setup.py:550-561). `run()` calls it
+    at step 6 (skeptic_setup.py:829), before resolving the RUN_ID at step 7
+    (`resolve_skeptic_run()`, skeptic_setup.py:841). Mutating
     `mod.FROZEN_INPUT_SPECS` before calling `mod.run(args)` at all would
-    trip THAT function's own guard first and never reach line 831 --
+    trip THAT function's own guard first and never reach line 929 --
     proving nothing about the guard this test targets. `compute_producer_input_digest()`
-    (step 3, skeptic_setup.py:650) is NOT part of this trap and this test
+    (step 3, skeptic_setup.py:744) is NOT part of this trap and this test
     says nothing about it either way: it's imported from `suspicion_scan`
-    (skeptic_setup.py:187-188), is DEFINED there (suspicion_scan.py:871),
-    and its own `FROZEN_INPUT_SPECS` name lookup (suspicion_scan.py:969)
+    (skeptic_setup.py:229-230), is DEFINED there (suspicion_scan.py:909),
+    and its own `FROZEN_INPUT_SPECS` name lookup (suspicion_scan.py:1007)
     resolves through a Python function's `__globals__`, which is bound to
     the module it was DEFINED in -- so it reads `suspicion_scan`'s own
     `FROZEN_INPUT_SPECS` binding, never this module's `mod.FROZEN_INPUT_SPECS`.
@@ -1161,16 +1161,16 @@ def test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_dige
     injected only AFTER it returns -- i.e. after step 6's call to
     `compute_skeptic_input_digest()` has already run against unmutated
     `mod.FROZEN_INPUT_SPECS` and, sharing that same guard, necessarily not
-    raised. That's what makes control reach line 831 at all. The call
+    raised. That's what makes control reach line 929 at all. The call
     order this relies on -- both digest checks (steps 3 and 6) before
-    `resolve_skeptic_run()` (step 7) before the target guard (line 831) --
+    `resolve_skeptic_run()` (step 7) before the target guard (line 929) --
     reflects the CURRENT source as read at the time this test was written
-    (skeptic_setup.py:650, :731, :743, :831); nothing in this test enforces
+    (skeptic_setup.py:744, :829, :841, :929); nothing in this test enforces
     that order as an invariant. A future edit moving `resolve_skeptic_run()`
     ahead of step 6's call would land the injected mutation before
     `compute_skeptic_input_digest()` runs, tripping ITS guard instead of
     the target one -- this test's own assertion on `"_frozen_input_snapshots_by_key"
-    in msg` (the line-831 guard's exception text, not
+    in msg` (the line-929 guard's exception text, not
     `compute_skeptic_input_digest()`'s) would catch that as a failure
     rather than silently accept it. A reorder that still leaves
     `compute_skeptic_input_digest()` running before the injection point
@@ -1196,14 +1196,14 @@ def test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_dige
     a length-only guard; this duplicate-key case is exactly the one a
     length check does NOT miss (only a same-count divergent-key swap
     would slip past a length-only comparison -- a property of that weakened
-    MUTANT, not of line 831's actual SHIPPED guard, which is itself a
+    MUTANT, not of line 929's actual SHIPPED guard, which is itself a
     sorted-LIST comparison and DOES distinguish a same-count divergent-key
     swap; this test's own duplicate-key mutation just doesn't exercise that
     swap direction, which is covered directly by
     `compute_skeptic_input_digest()`'s OWN round-11 parametrized test above
     (`test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch`,
-    `same_count_key_swap` direction, skeptic_setup.test.py:877-881), proving
-    THAT function's own guard catches it -- run()'s line-831 guard has no
+    `same_count_key_swap` direction, skeptic_setup.test.py:998-1002), proving
+    THAT function's own guard catches it -- run()'s line-929 guard has no
     dedicated same-count-key-swap test in this file, despite its
     sorted-comparison shape covering that case structurally). The
     load-bearing probe is (3): relocating the
@@ -1266,7 +1266,7 @@ def test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_dige
     expected_snapshot_keys = repr(sorted(["canon", "manifest", "senses"]))
     expected_spec_keys = repr(sorted(spec[0] for spec in mutated_specs))
     assert "_frozen_input_snapshots_by_key" in msg, (
-        "raised AssertionError must be run()'s OWN guard (skeptic_setup.py:831, "
+        "raised AssertionError must be run()'s OWN guard (skeptic_setup.py:929, "
         "which names its local `_frozen_input_snapshots_by_key`), not "
         f"compute_skeptic_input_digest()'s sibling guard -- got: {msg!r}"
     )

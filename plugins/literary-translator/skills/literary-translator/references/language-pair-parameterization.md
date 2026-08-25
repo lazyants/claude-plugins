@@ -73,7 +73,7 @@ A language config file contains four required keys, plus an optional fifth:
   a token run the way the particle algorithm builds Latin-script candidates.
   It exists for caseless/multiword surfacing where the ordinary
   capitalization-run path finds nothing: `is_upper_initial`
-  (`bootstrap_names.py:148`) gates on ASCII or Unicode category `Lu`, and
+  (`bootstrap_names.py:474`) gates on ASCII or Unicode category `Lu`, and
   Hebrew letters are category `Lo` — invisible to that gate — so without a
   `name_inventory` a Hebrew name surfaces zero candidates. Matching a
   `name_inventory` form never crosses an existing sentence-terminator

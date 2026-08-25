@@ -905,7 +905,7 @@ that a human adjudicated it.
   two rows for one form are ordinary, not a hand-edit artifact:
   `_merge_batch` appends whenever the whole object differs, so one form
   queued by two batches for two different reasons is two rows
-  (`person_registry.py:859-870` coalesces them for display), and matching on
+  (`person_registry.py:903-921` coalesces them for display), and matching on
   the whole value dismisses one reason without silently dismissing the
   other.
 
@@ -975,15 +975,15 @@ that a human adjudicated it.
 
   **One consumer DOES see a dismissal**, and it is disclosed rather than
   argued away: `person_registry.py` turns every DICT-shaped `review_queue[]`
-  row into a refusal-only unit (`person_registry.py:859-895`,
+  row into a refusal-only unit (`person_registry.py:899-933`,
   `refusal_only: True`) and emits it in `refusals[]`
-  (`person_registry.py:1953-1963`, `refused_by: "canon_review_queue"`); it
+  (`person_registry.py:1994-2004`, `refused_by: "canon_review_queue"`); it
   never reads `corrections[]`. So a dismissed name stops appearing as a
   `canon_review_queue` refusal in a later W9r registry run — that is the
   intended meaning of the decision, not a side effect to suppress: the
   operator said this candidate is not canon-worthy, and the refusal list is
   where "still undecided" is reported. A bare-string row is unaffected
-  either way: `person_registry.py:864-866` skips any row that is not a
+  either way: `person_registry.py:905-906` skips any row that is not a
   `dict`, so it was never surfaced in `refusals[]` before a dismissal
   either — dismissing it changes `review_queue[]` and the exclusion set,
   never W9r's refusal list.

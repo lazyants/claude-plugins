@@ -1,7 +1,7 @@
 # Fixing a stale `file.ext:NNN` code citation — two traps in the obvious fix
 
-This plugin's docs cite real code lines by `file.ext:NNN` (e.g. `chapter-paths.mjs:168`,
-`capture-guard-policy.mjs:217`, `SKILL.md:94` — 14 such citations across `SKILL.md` and
+This plugin's docs cite real code lines by `file.ext:NNN` (e.g. `chapter-paths.mjs:174-178`,
+`capture-guard-policy.mjs:271`, `SKILL.md:100` — 6 such citations across `SKILL.md` and
 `references/**/*.md` as of 2026-08). Editing any cited file pushes every line below the insertion
 down, so a citation elsewhere silently goes stale. Two traps sit in the obvious fix.
 
@@ -28,6 +28,12 @@ citation may legitimately name a line *inside* a function whose name the surroun
 The well-posed form — anchor immediately adjacent, statement-shaped, unique in the target file —
 decides only a small minority of citations mechanically. The complete check is reading each citation
 against its own sentence, which is a judgment call, not a script.
+
+**`tools/citation_audit.py` now enumerates and gates this repo's whole `file.ext:NNN` corpus** (its
+ordered-anchor design is the one that survived `changelog_citations.test.py`'s two defeated weaker
+designs, referenced above). It re-checks a declared anchor set on every run, so a citation that was
+correct when adjudicated cannot silently rot again — it does NOT establish that a citation is correct
+in the first place; that adjudication is still the judgment call described above.
 
 **Historical CHANGELOG entries are a deliberate exception.** `reference-assets.test.sh` treats
 `CHANGELOG.md` entries as frozen prose describing what was true at release time (see the

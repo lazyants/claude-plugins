@@ -8,7 +8,7 @@ appendix-backlink-integrity, 1.8.0).
 The shipped `## Mentions` design (`references/output-target-adapters/
 obsidian.md`) has historically treated the inline linker's own scan of
 *translated* prose (`build_entity_index`/`_Linker`, `render_obsidian.py:
-255-466`) AS the occurrence index. That model silently drops any occurrence
+706-1132`) AS the occurrence index. That model silently drops any occurrence
 whose translated surface differs from the one `canonical_target_form` the
 linker matches (#206), and collapses two distinct `source_form`s that
 happen to share a target string (#207-a). This module fixes both by
@@ -531,7 +531,7 @@ def _link_groups_from_nodestream(nodestream) -> dict:
     procedurally checked it.
 
     FAIL-CLOSED and NON-RAISING (Contract 3's no-new-raise rule --
-    `validate_backlinks.py:1264` turns any exception out of `build()` into a
+    `validate_backlinks.py:1317-1325` turns any exception out of `build()` into a
     hard gate FATAL): anything that is not a dict of `str -> str` yields
     `{}`, i.e. no group is ever exempted and behaviour is exactly 1.58.0's.
     A partly-malformed map is rejected WHOLE rather than filtered down to
@@ -616,7 +616,7 @@ A group carrying a complete `canon_link_groups.json` ruling
     `eligible_by_source_form` like any uncontested form) and nothing
     downstream asks WHICH primary a member was credited to. Every other group collides exactly as in 1.58.0 and warns
     to stderr (never raises -- Contract 3's no-new-raise rule;
-    `validate_backlinks.py:1264` would turn any new exception into a hard
+    `validate_backlinks.py:1317-1325` would turn any new exception into a hard
     gate FATAL) once per group, naming every member and the shared key,
     mirroring `bootstrap_names._warn_inventory_match_key_collisions`'s own
     style.

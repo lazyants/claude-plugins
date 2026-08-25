@@ -195,12 +195,12 @@ Modeled on `final_audit.py` / `canon_validate.py` / `review_artifact_check.py` /
   in.** No default-filling validator runs anywhere in the plugin; `profile_validate.py` schema-validates
   the config exactly as WRITTEN, so an absent key stays absent and every consumer must independently
   resolve "absent means X" itself. Verified on `output.adapter_config.obsidian.mentions_section.enabled`
-  (`profile.schema.json:698-701`, `default: true` — its own description literally says: "this 'default'
+  (`profile.schema.json:761-764`, `default: true` — its own description literally says: "this 'default'
   annotation is documentation only, see the three runtime predicates in
   render_obsidian.py/assemble.py/validate_backlinks.py for the actual mechanism"). The REAL
   enable-predicate is `mentions_cfg.get("enabled") is not False`, hand-duplicated byte-for-byte across
-  **three** call sites: `validate_backlinks.py:372` (`_effective_enabled`), `assemble.py:1353`
-  (`_effective_mentions_enabled`), `render_obsidian.py:207` (`_effective_mentions_enabled`) — each
+  **three** call sites: `validate_backlinks.py:521` (`_effective_enabled`), `assemble.py:2298`
+  (`_effective_mentions_enabled`), `render_obsidian.py:247` (`_effective_mentions_enabled`) — each
   docstring explicitly cross-references the other two copies. **Flipping only some of the duplicated
   sites silently yields a false-green disabled-report on an advisory gate** — e.g. patching
   `render_obsidian.py`'s copy alone would still ship the `## Mentions` section while

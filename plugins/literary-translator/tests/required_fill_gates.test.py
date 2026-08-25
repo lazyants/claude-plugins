@@ -73,7 +73,7 @@ FORMATTING_MARKER_ID = "formatting-conventions"
 #
 # The two headings that bound section D. `### E.` is section D's terminator,
 # not a section under test -- both strings are already closed-list-pinned by
-# tests/style_contract_markers.test.py:125-131.
+# tests/style_contract_markers.test.py:135-142.
 SECTION_D_HEADING = "### D. Formatting"
 SECTION_E_HEADING = "### E. Techniques and hard cases"
 

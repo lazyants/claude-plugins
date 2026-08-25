@@ -1015,7 +1015,7 @@ def test_lt497_a_malformed_map_is_rejected_whole_and_never_raises(link_groups):
     """A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected
     WHOLE, not filtered to its well-formed pairs -- a surviving subset could
     still satisfy the exemption, which is the decision a malformed map has not
-    earned. Non-raising: Contract 3, and validate_backlinks.py:1264 turns any
+    earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any
     exception out of build() into a hard gate FATAL."""
     result = ot.build(*_collision_fixture(link_groups=link_groups))
     assert result["eligible_by_source_form"] == {}

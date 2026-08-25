@@ -148,7 +148,7 @@ def test_case_c_footnote_definition_embeds_verse(extract_mod, tmp_path):
     """The verse lives inside the footnote's own DEFINITION text (FN:1),
     which is never a member of this segpack's own blocks[] -- yet the verse
     is still included in verses[] because its parent is one of this
-    segpack's footnote_def_block_ids (segpack.py:326's
+    segpack's footnote_def_block_ids (segpack.py:673's
     ``parent not in seg_block_ids and parent not in footnote_def_block_ids``
     guard)."""
     pack = _pack_for("c", extract_mod, tmp_path)

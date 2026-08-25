@@ -197,7 +197,7 @@ export function locateChapterLine(
  * required (and validated) in wikilinks mode, ignored in path mode.
  *
  * [round 6] THROWS an `Error` in wikilinks mode (`profileLike.publish.wikilinks === true`) on each
- * of three `vaultRelChaptersDir` faults, measured at chapter-paths.mjs:1773/:1779/:1784 — omitted or
+ * of three `vaultRelChaptersDir` faults, measured at chapter-paths.mjs:2134/:2140/:2145 — omitted or
  * nullish ("vaultRelChaptersDir is required in wikilinks mode — a silent bare-slug fallback resolves
  * ambiguously across the whole vault (#294)"), absolute ("must be vault-root-relative"), or escaping
  * the vault root with a leading `..`. Path mode reads the argument not at all and never throws.

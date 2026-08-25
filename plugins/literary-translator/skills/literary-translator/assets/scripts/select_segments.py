@@ -520,14 +520,14 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     scripts" convention, which is already false here (canon_validate.py and
     glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports
     cache_key.py). The real reason: ledger_update.py is a
-    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:102-109 records that that
+    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:149-156 records that that
     tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS
     INVISIBLE -- which is why canon_senses.py had to be registered
     explicitly once two members imported it. A shared module would put this
     predicate's bytes outside the hash meant to cover them, so WEAKENING
     this guard would no longer move plugin_bundle_hash, and every durable
     root scaffolded beforehand would go on trusting it: the exact
-    false-green cache_key.py:116-120 names. Consolidation stays possible --
+    false-green cache_key.py:163-167 names. Consolidation stays possible --
     it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the
     same commit.
 
@@ -4033,7 +4033,7 @@ def acquire_and_hold_lease(lock_path: Path, what: str) -> "tuple[bool, str]":
     the admission decision rest on state that changed while we waited).
 
     The self-test after a successful acquire is
-    segment_dispatch_driver.py:1207-1262's, with ONE deliberate difference: it
+    segment_dispatch_driver.py:1313-1369's, with ONE deliberate difference: it
     warns and proceeds, THIS REFUSES. The asymmetry is the point. On an
     unenforced mount the driver's own acquire is merely not exclusive, whereas
     this script's standalone path would FALSELY ACQUIRE runs/.driver.lock while

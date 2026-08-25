@@ -1306,7 +1306,7 @@ def test_an_ordinary_batch_does_not_exhaust_the_byte_budget(tmp_path, monkeypatc
 
 def _default_batch_size() -> int:
     """DEFAULT_BATCH_SIZE, read from glossary_batch_plan.py's own AST -- no
-    import. glossary_batch_plan.py:123 does a bare
+    import. glossary_batch_plan.py:146 does a bare
     `from canon_senses import CanonSensesLoadError, is_split, load_senses`,
     so an actual import would need sys.path surgery that would persist for
     the whole test session. Mirrors _emitted_refusal_reasons's own idiom

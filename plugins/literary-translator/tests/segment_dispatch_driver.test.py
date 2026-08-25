@@ -2032,7 +2032,7 @@ def test_volume_cap_default_when_profile_omits_the_key(tmp_path):
 
 def test_load_engine_config_refuses_max_fix_rounds_zero(tmp_path):
     """codex round-4 MAJOR: profile.schema.json pins engine.max_fix_rounds
-    to `"minimum": 1` (profile.schema.json:494-497), but this check used
+    to `"minimum": 1` (profile.schema.json:494), but this check used
     to accept 0 ("must be a non-negative integer"). A fresh segment at
     max_fix_rounds=0 dispatches translate then review round "1", but round
     recognition (_matched_review_round_label()'s own `range(1,
@@ -3334,8 +3334,8 @@ def _fixture_ctx(root, run_id, translate_cfg=None, claims=None):
 def test_a_segment_converged_on_the_mandatory_final_round_records_a_real_rounds_number(tmp_path):
     """codex #384-class BLOCKER: a segment that converges on the mandatory
     FINAL confirming review (mass-translate-wf.template.js's own
-    `runRound(seg, MAXFIX + 1, true)`, template.js:1757, which records
-    `rounds: round` == MAXFIX + 1, template.js:1595-1596 -- a plain integer,
+    `runRound(seg, MAXFIX + 1, true)`, template.js:2343, which records
+    `rounds: round` == MAXFIX + 1, template.js:2077 -- a plain integer,
     never derived from the "final" round LABEL) is an entirely normal
     outcome, not an edge case. The ledger schema requires `rounds` to be an
     integer (ledger-record-base.schema.json:15) and REQUIRES it outright for
@@ -3374,7 +3374,7 @@ def test_a_segment_converged_on_the_mandatory_final_round_records_a_real_rounds_
     assert fragment["status"] == "converged"
     assert fragment["rounds"] == max_fix_rounds + 1, (
         f"the mandatory final round is round number max_fix_rounds+1={max_fix_rounds + 1} "
-        f"in the template's own runRound(seg, MAXFIX + 1, true) call (template.js:1757) -- "
+        f"in the template's own runRound(seg, MAXFIX + 1, true) call (template.js:2343) -- "
         f"got rounds={fragment.get('rounds')!r}"
     )
 
@@ -3384,7 +3384,7 @@ def test_resume_digest_stays_stable_as_a_segment_converges_and_drops_out_of_the_
     SHRINKS by one entry every time a segment converges
     (DEFAULT_ELIGIBLE_CATEGORIES excludes `reusable`). resolve_run_id()
     must NOT hash that shrinking list into compute_input_digest()'s
-    `domain` (resume_setup.py:437-449), or a single convergence mints a
+    `domain` (resume_setup.py:124-133), or a single convergence mints a
     fresh RUN_ID and orphans every dispatch_token already on disk --
     including the just-converged segment's own draft/review, and any fix
     just applied by hand to a DIFFERENT still-in-progress segment."""
@@ -3529,9 +3529,9 @@ def _two_identical_digest_runs(driver_mod, dirs, translate_cfg):
     real resolution path). Each call sends a payload with no
     `resume_from_run_ids` field at all (the same shape resolve_run_id()
     builds for a first-ever run), so resume_setup.py's own resolve_run()
-    always mints fresh (resume_setup.py:814-822); since nothing about the
+    always mints fresh (resume_setup.py:930-934); since nothing about the
     project changed between the two calls, compute_input_digest() returns
-    the IDENTICAL value both times (resume_setup.py:803). Returns
+    the IDENTICAL value both times (resume_setup.py:775). Returns
     (older_id, newer_id) -- asserts newer_id sorts after older_id, matching
     _resumable_run_id_candidates()'s own "lexicographic == chronological"
     invariant, and asserts the two digest FILES actually match, so a test
@@ -4930,7 +4930,7 @@ def test_run_one_codex_job_reports_the_real_dispatch_failure_not_the_journals(tm
 
 def test_a_clean_review_stale_against_an_edited_draft_re_reviews_instead_of_live_locking(tmp_path):
     """codex #392-class MAJOR: ledger_update.py's own independent check
-    (enrich_converged_fields, ledger_update.py:499-502) refuses a
+    (enrich_converged_fields, ledger_update.py:1263-1266) refuses a
     convergence write when the current draft's sha1 no longer matches the
     reviewer's recorded draft_sha1 -- correctly: it means the draft was
     edited out-of-band since this (clean) review was written, and the
@@ -5066,8 +5066,8 @@ def test_derive_next_action_already_converged_round_1_when_clean_and_draft_match
 def test_derive_next_action_already_converged_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """codex round-4 ("Tests that could not fail"): current_draft_sha1()'s
     third argument -- dirs["scripts_dir"] -- is what makes this "clean and
-    draft matches" branch (segment_dispatch_driver.py:2342, feeding the
-    already_converged decision at :2338) hash the draft using the TRUSTED
+    draft matches" branch (segment_dispatch_driver.py:4929, feeding the
+    already_converged decision at :4956) hash the draft using the TRUSTED
     plugin tree's draft_sha1.py under --plugin-root, never the durable
     root's own writable, self-anchored copy (current_draft_sha1()'s own
     `scripts_dir=SCRIPTS_DIR` default). That default matters because the
@@ -6101,7 +6101,7 @@ def test_derive_next_action_fabricated_loc_gate_respects_node_bin(tmp_path):
 
 def test_derive_next_action_invalid_post_fix_draft_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """The invalid_post_fix_draft branch's own current_draft_sha1() call
-    (segment_dispatch_driver.py:2246) is a SECOND call site sharing the
+    (segment_dispatch_driver.py:4813) is a SECOND call site sharing the
     identical --plugin-root trust boundary as the already_converged
     branch's (see the sibling test above) -- untested here for the same
     reason: every existing --plugin-root fixture stages the REAL,
@@ -6842,7 +6842,7 @@ def test_derive_next_action_still_advances_over_a_blocked_fragment_newer_than_th
     """Codex's admitted MAJOR against an earlier revision of this fix,
     reproduced directly: the shipped workflow writes `{"status": "blocked",
     "reason": "draft-missing"}` AFTER a numbered review
-    (mass-translate-wf.template.js:1754), and a `blocked` segment is
+    (mass-translate-wf.template.js:2257), and a `blocked` segment is
     retried via `--only-segs` under the SAME run_id. A guard that only
     checked the fragment's mtime (reusing _translate_redispatched_since()
     unmodified at this call site, as an earlier revision of this fix
@@ -6893,18 +6893,18 @@ def test_derive_next_action_still_advances_over_an_unparseable_fragment_newer_th
 
 def test_render_fix_prompt_never_inlines_poisoned_review_findings_text(tmp_path):
     """Pins (as a real assertion, not a comment) that fixPrompt's 3-argument
-    signature (mass-translate-wf.template.js:1281, documented at :1232-1239
+    signature (mass-translate-wf.template.js:1562, documented at :1513-1520
     as deliberate: "revObj is still passed through ... but fixPrompt itself
     no longer splices it into the prompt as the findings source") really
     does hold. Verified against the real template directly: fixPrompt's
-    own 11-line body (:1278-1287) never references `revObj` at all --
+    own 70-line body (:1563-1632) never references `revObj` at all --
     findings are only ever REFERENCED by file path in the rendered prompt
     text (an instruction to go read seg.review.json), never inlined as
     JSON-embedded bytes. Genuinely stronger than a delimiter-in-a-string
     scheme: a prompt-injection payload sitting in findings[].issue/suggest
     has nothing in the rendered prompt to attach to. This branch strictly
     reduces the surface relative to the Workflow it replaces, whose
-    verifyReviewArtifactPrompt (template.js:1374-1380) splices revObj in
+    verifyReviewArtifactPrompt (template.js:1755-1765) splices revObj in
     directly -- a function this driver deliberately never calls.
 
     review.schema.json types findings[].issue/suggest as bare strings with
@@ -7018,7 +7018,7 @@ def test_template_harness_source_refuses_a_missing_truncation_marker():
 # fix (that half of the original report was refuted by research: an orphan
 # that later completes writes into a leaked sandbox tempdir nothing ever
 # reads again) -- this closes wasted spend, mirroring codex_job.py's own
-# hygiene() shape (codex_job.py:681-717): query/cancel with the joblog's
+# hygiene() shape (codex_job.py:1750-1784): query/cancel with the joblog's
 # own recorded jobCwd, never durable_root.
 # ===========================================================================
 
@@ -7165,7 +7165,7 @@ def test_attempt_cancel_orphan_does_not_cancel_on_a_workspace_root_mismatch(tmp_
     """The other half of hygiene()'s own live check: even a job reporting
     an ACTIVE status must not be cancelled if the queried workspaceRoot
     does not match the recorded jobCwd -- the identical defense-in-depth
-    hygiene() itself applies (codex_job.py:738, `if ws == prior_cwd and
+    hygiene() itself applies (codex_job.py:1784, `if ws == prior_cwd and
     job.get("status") in _ACTIVE:`)."""
     root = phase2_project(tmp_path, n=1)
     companion = _write_fake_companion(tmp_path)
@@ -8112,7 +8112,7 @@ def _resume_setup_result(proc):
 def test_resolve_run_id_resumes_via_a_plural_candidate_that_is_not_the_newest(tmp_path, monkeypatch):
     """The property this integration test exists to prove: resolve_run_id()
     now sends EVERY offered candidate in ONE resume_from_run_ids call --
-    the shipped resume_setup.py's own resolve_run() (resume_setup.py:724)
+    the shipped resume_setup.py's own resolve_run() (resume_setup.py:921-928)
     does the try-each-in-order/first-match-wins loop SERVER-side -- not the
     deprecated one-call-per-candidate CLIENT loop this function used
     before. Constructs a project with TWO real run directories: an OLDER
@@ -8983,7 +8983,7 @@ def test_empty_or_whitespace_only_plugin_root_is_refused_never_becomes_cwd(tmp_p
     string, never as the flag being omitted) would silently make wherever
     this process happens to be launched from the executable authority for
     the template AND every sibling script, with no error at all.
-    `codex_job.py:1436` already refuses exactly this input; refusing it
+    `codex_job.py:2930` already refuses exactly this input; refusing it
     here too, before any path is built from it, keeps both scripts
     consistent instead of one being the loophole the other closed."""
     for bad_value in ("", "   ", "\t\n", "  \t "):

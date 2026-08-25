@@ -3092,7 +3092,7 @@ def test_an_unreadable_manifest_never_makes_the_term_lane_raise(tmp_path):
 # measurement rather than an omission: a segpack whose `footnotes` is a mapping,
 # or whose verse `parent_block` is unhashable, never reaches any WARN check --
 # hard check 1 calls `validate_draft.validate()` first and dies on the identical
-# input at validate_draft.py:563 and :622. That is pre-existing and out of
+# input at validate_draft.py:625 and :622. That is pre-existing and out of
 # scope. The `isinstance` guards in `term_carriers()` are kept anyway; they cost
 # three calls, and "a lane that never raises" should not depend on which OTHER
 # check happens to run before it.

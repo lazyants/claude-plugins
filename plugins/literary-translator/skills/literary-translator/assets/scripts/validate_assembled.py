@@ -280,7 +280,7 @@ LEDGER_STATUS_ENUM = frozenset(
 #
 # Restated here, not imported -- house convention for this plugin's
 # self-contained scripts (see e.g. ledger_merge.py's own CACHE_KEY_FIELDS,
-# assemble.py:374's own comment). The existing three-way census
+# assemble.py:426-427's own comment). The existing three-way census
 # (tests/stale_carveout.test.py's own
 # test_three_copy_drift_guard_for_machinery_only_fields) lives in a file a
 # concurrent #491 change owns, so this copy is pinned by a SEPARATE
@@ -863,7 +863,7 @@ def _stale_qualifies_for_carveout(
 
     Restates only the FIELD-LIST half of assemble.py's own #491
     four-condition carve-out predicate
-    (_stale_carveout_refusal_reason, assemble.py:567-635) -- conditions 1-3
+    (_stale_carveout_refusal_reason, assemble.py:697-715) -- conditions 1-3
     of 4:
       1. `stale_mismatched_fields` is present and a non-empty list.
       2. Every member of that list is a `str` (assemble.py's own codex
@@ -877,7 +877,7 @@ def _stale_qualifies_for_carveout(
 
     DELIBERATE ASYMMETRY -- deliberately OMITS assemble.py's own condition
     4 (whether the `.ever_converged.<seg>` sentinel is present,
-    assemble.py:613-634). #491 R2 (round-2 review) found the ORIGINAL
+    assemble.py:715). #491 R2 (round-2 review) found the ORIGINAL
     version of this paragraph factually wrong: it justified the omission by
     claiming assemble.py always re-checks the sentinel downstream, so this
     gate could never ship anything assembly would refuse. That does not
@@ -914,7 +914,7 @@ def _stale_qualifies_for_carveout(
          segment and a false-clean rebind.
 
     Restating the sentinel classifier (classify_ever_converged_sentinel(),
-    assemble.py:417-552) here would still buy nothing beyond what reason 2
+    assemble.py:540-683) here would still buy nothing beyond what reason 2
     above already gives, at the cost of a SIXTH byte-identical copy of a
     predicate the #409 program already restates five times and enforces
     byte-for-byte (tests/select_segments.test.py's

@@ -1452,7 +1452,7 @@ const NESTED_ORDERED_MARKER_RE = /^\s*\d+[.)]\s/;
  *   before `#`/`^`; kind 'wikilink'.
  * - Otherwise ⇒ the trimmed content verbatim, kind 'raw'.
  *
- * Deliberately NOT findMarkdownLinkGroups (that returns the DESTINATION, chapter-paths.mjs:562-596).
+ * Deliberately NOT findMarkdownLinkGroups (that returns the DESTINATION, chapter-paths.mjs:625-660).
  */
 function parseNestedLabel(content) {
   const t = String(content).trim();
@@ -1605,12 +1605,12 @@ export function isPlainLabel(s) {
   return true;
 }
 
-// §5.7 bare-path guard: step-0's bare-row fallback strips only `-` (chapter-paths.mjs:812), so a
+// §5.7 bare-path guard: step-0's bare-row fallback strips only `-` (chapter-paths.mjs:895), so a
 // `*`/`+`-marked bullet whose content is a bare (non-link) path is INVISIBLE to the caller's
 // membership scan — auto-wiring would create a duplicate container beside the retained phantom
 // text row. Refuse when the marker is `*`/`+`, the label fell to the RAW branch (not a whole-
 // content link/wikilink), and the raw value contains `/` OR `\` (the path layer treats `\`≡`/`,
-// chapter-paths.mjs:46-49) OR ends in `.md` (case-insensitive). Deliberately conservative — a
+// chapter-paths.mjs:48-56) OR ends in `.md` (case-insensitive). Deliberately conservative — a
 // legitimate `*`/`+` plain label containing `/` (`* Sales/Marketing`) is also refused (defers to
 // manual, never corrupts). `-`-marked such rows ARE seen by step 0, so they stay automatable.
 function isBarePathBullet(marker, info) {
@@ -2767,7 +2767,7 @@ class EmbedCandidateHalt extends Error {
 // non-degenerate. Nondegeneracy is compared over the CANONICAL relative prefix from
 // dirname(chapterFile) to outputDir, never a raw string-equality: legacyStaticEmbedPath normalizes
 // '/', '\\' and dot segments before constructing its result, so several raw spellings of the same
-// degenerate layout (chapter-paths.mjs:229 pins the leading-slash quirk) must all be excluded
+// degenerate layout (chapter-paths.mjs:247-250 pins the leading-slash quirk) must all be excluded
 // identically.
 function isLegacyCandidateEligible(profileLike, entry, chapterFile, target) {
   if (target !== 'static_md') return false;
@@ -2843,7 +2843,7 @@ export function isCanonicalAssetKey(key) {
 }
 
 // The escape-aware, DEPTH-COUNTING generalization of findLinkOpeners's label scan above
-// (chapter-paths.mjs:518-523), needed because an image's alt text may legitimately contain a
+// (chapter-paths.mjs:592-600), needed because an image's alt text may legitimately contain a
 // literal '[' ("![A [Beta]](img.png)") — a shape findLinkOpeners declines by design (nested-bracket
 // labels are supported here, never silently dropped). Returns the index of the matching ']'
 // (depth back to 0), or -1 when the label never closes.
@@ -2882,7 +2882,7 @@ function scanBalanced(text, start, open, close, { stopAtNewline }) {
 }
 
 // The same balanced-paren / angle-wrapped destination scan findMarkdownLinkGroups uses above
-// (chapter-paths.mjs:562-597), factored so the image scanner below can start from an arbitrary
+// (chapter-paths.mjs:632-654), factored so the image scanner below can start from an arbitrary
 // absolute offset (just past the opening '(') instead of a per-line opener list. A destination
 // never legitimately spans a line break, wrapped or not, so hitting one is treated the same as
 // never finding a close. Returns the index of the closing ')', or -1.

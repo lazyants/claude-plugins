@@ -265,7 +265,7 @@ except ImportError as exc:  # pragma: no cover -- defensive, should be unreachab
         f"could not import cache_key.py from {SCRIPTS_DIR}: {exc}"
     )
 # #492: deliberately NO `except SystemExit` arm here, unlike the two above.
-# cache_key.py's PyYAML import is try/except-guarded (cache_key.py:64-67) and
+# cache_key.py's PyYAML import is try/except-guarded (cache_key.py:104-107) and
 # merely assigns `yaml = None`; its require_yaml() fail() fires later, from
 # load_profile() -- which assert_live_inputs_match_ledger() calls inside a
 # SystemExit handler of its own. So this module CANNOT exit during the import
@@ -419,7 +419,7 @@ def _profile_get(profile: dict, dotted_path: str):
 # load_converged_segments() below accepts such a record exactly like
 # status=="converged", so a plugin upgrade can no longer strand a finished
 # book. See final_audit.py's own `count_stale_previously_converged()`
-# (`final_audit.py:1156-1243`), the sibling carve-out this one is designed
+# (`final_audit.py:1811-1893`), the sibling carve-out this one is designed
 # to always agree with over the SAME materialized runs/ledger.json snapshot.
 # ---------------------------------------------------------------------------
 
@@ -439,7 +439,7 @@ SAFE_STALE_CARVEOUT_FIELDS = frozenset(
 # say", which is FALSE for the style contract: a contract edit CAN change what
 # the prose should say, and a REVERSED rule actively demanded the wrong choice
 # in every segment converged under it. One global style_contract_hash
-# (cache_key.py:193, GLOBAL_CACHE_KEY_FIELDS at :212) cannot tell an addition
+# (cache_key.py:255, GLOBAL_CACHE_KEY_FIELDS at :274) cannot tell an addition
 # from a reversal, so this population is admitted only when the operator
 # DECLARES it, per project, and every admitted segment is named. Widening the
 # allowlist instead would also silently move final_audit.py's own
@@ -554,14 +554,14 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     scripts" convention, which is already false here (canon_validate.py and
     glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports
     cache_key.py). The real reason: ledger_update.py is a
-    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:102-109 records that that
+    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:149-156 records that that
     tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS
     INVISIBLE -- which is why canon_senses.py had to be registered
     explicitly once two members imported it. A shared module would put this
     predicate's bytes outside the hash meant to cover them, so WEAKENING
     this guard would no longer move plugin_bundle_hash, and every durable
     root scaffolded beforehand would go on trusting it: the exact
-    false-green cache_key.py:116-120 names. Consolidation stays possible --
+    false-green cache_key.py:163-167 names. Consolidation stays possible --
     it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the
     same commit.
 
@@ -745,7 +745,7 @@ def _stale_carveout_refusal_reason(
     silently becomes deliverable. And ONLY a clean ENOENT sentinel read
     blocks -- AMBIGUOUS (a dangling symlink, an EACCES) carves out exactly
     like PRESENT, mirroring final_audit.py's own
-    count_stale_previously_converged() (`final_audit.py:1213-1242`) so the
+    count_stale_previously_converged() (`final_audit.py:1811-1893`) so the
     two whole-project completeness signals never disagree about the same
     materialized snapshot. Reading an unreadable dotfile as "absent" would
     declare a finished book undeliverable, and unrecoverably so: the
@@ -1162,7 +1162,7 @@ def _live_cache_key_fields(profile: dict, seg: str, globals_cache: dict) -> dict
     81-segment book instead of 81x that.
 
     Every exception a computer can raise -- including the SystemExit
-    cache_key.py's own fail() raises (cache_key.py:212), which is how a
+    cache_key.py's own fail() raises (cache_key.py:287-291), which is how a
     missing style_bible.md, an absent particle config and an unresolvable
     manifest source input all surface -- is converted by the caller into an
     AssembleError naming the segment and the field. "Cannot confirm this

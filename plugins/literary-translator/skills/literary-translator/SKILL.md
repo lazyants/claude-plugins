@@ -4167,7 +4167,7 @@ Keep the declaration stable across the whole W7→W9 chain; toggling it between
 steps is the only way a normal run can make the two gates disagree about the
 same book. (They read the moved-field list from different authorities -- W7
 from `select_segments.py`'s recomputation against the CURRENT cache key, W9
-from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:648`
+from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887`
 drops any inherited value and re-derives that list from the same diff, so the
 two agree by construction on anything a run produces. Hand-editing the
 materialized `ledger.json` between the two steps can split them; so can

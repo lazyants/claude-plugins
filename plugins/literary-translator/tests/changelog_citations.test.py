@@ -63,8 +63,8 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 #
 # Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic
 # style bans) per the maintenance contract above. This rotation inherited the
-# NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:143-171`,
-# `cache_key.py:178-199` and `resume_setup.py:723-740` -- and RETIRED all three,
+# NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-246`,
+# `cache_key.py:253-274` and `resume_setup.py:837-856` -- and RETIRED all three,
 # because 1.67.0 became the newest entry when this branch rebased onto a main
 # that had already shipped 1.66.0, and this guard checks the newest entry only.
 # The map is empty as a result, not by inheritance: the 1.67.0 entry cites no

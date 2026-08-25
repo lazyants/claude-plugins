@@ -1,0 +1,186 @@
+{
+ "declarations": {
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/assets/lib/build-identity.d.mts\", \"build-identity.mjs:533-539\", 0]": {
+   "anchors": [
+    "const validity = isValidBuildIdentityField(record);",
+    "classifyBuildDelta: record is not a valid BuildIdentity",
+    "did you pass the whole chapter/run record instead of its build_identity field?"
+   ],
+   "claim": "* [round 6] Three production call sites, not two: both record readers (capture-record.mjs — * `readRunRecordText` for the run record, `readChapterRecordText` for the chapter record) AND * `classifyBuildDelta` in this same module (build-identity.mjs:533-539), which reuses it to fail loudly * when `recordState` is `'ok'`/`'stale'` and `record` is not a real `BuildIdentity` — see that * function's own comment for why. The previous wording (\"run by both record readers ... and nothing * else\") was ambiguous between \"nothing else RUNS it\" — false, `classifyBuildDelta` does — and * \"nothing else of the record's shape is validated BY it\", which is what was meant; it is now"
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.d.mts\", \"chapter-paths.mjs:2134\", 0]": {
+   "anchors": [
+    "vaultRelChaptersDir is required in wikilinks mode"
+   ],
+   "claim": "* [round 6] THROWS an `Error` in wikilinks mode (`profileLike.publish.wikilinks === true`) on each * of three `vaultRelChaptersDir` faults, measured at chapter-paths.mjs:2134/:2140/:2145 — omitted or * nullish (\"vaultRelChaptersDir is required in wikilinks mode — a silent bare-slug fallback resolves * ambiguously across the whole vault (#294)\"), absolute (\"must be vault-root-relative\"), or escaping * the vault root with a leading `..`. Path mode reads the argument not at all and never throws."
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.mjs\", \"chapter-paths.mjs:247-250\", 0]": {
+   "anchors": [
+    "export function legacyStaticEmbedPath(chapterFile, outputDir, slug, file) {",
+    "return `${rel}/${slug}/${file}`;"
+   ],
+   "claim": "// spelling, never the '-'-hyphenated adapter filename — and the entry is genuinely flat AND // non-degenerate. Nondegeneracy is compared over the CANONICAL relative prefix from // dirname(chapterFile) to outputDir, never a raw string-equality: legacyStaticEmbedPath normalizes // '/', '\\\\' and dot segments before constructing its result, so several raw spellings of the same // degenerate layout (chapter-paths.mjs:247-250 pins the leading-slash quirk) must all be excluded // identically."
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.mjs\", \"chapter-paths.mjs:48-56\", 0]": {
+   "anchors": [
+    "function isAbsolute(p) {",
+    ".split(/[\\\\/]+/)"
+   ],
+   "claim": "// `*`/`+`-marked bullet whose content is a bare (non-link) path is INVISIBLE to the caller's // membership scan — auto-wiring would create a duplicate container beside the retained phantom // text row. Refuse when the marker is `*`/`+`, the label fell to the RAW branch (not a whole- // content link/wikilink), and the raw value contains `/` OR `\\` (the path layer treats `\\`≡`/`, // chapter-paths.mjs:48-56) OR ends in `.md` (case-insensitive). Deliberately conservative — a // legitimate `*`/`+` plain label containing `/` (`* Sales/Marketing`) is also refused (defers to // manual, never corrupts). `-`-marked such rows ARE seen by step 0, so they stay automatable."
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.mjs\", \"chapter-paths.mjs:592-600\", 0]": {
+   "anchors": [
+    "let j = i + 1;",
+    "if (line[j] === ']') break;"
+   ],
+   "claim": "// The escape-aware, DEPTH-COUNTING generalization of findLinkOpeners's label scan above // (chapter-paths.mjs:592-600), needed because an image's alt text may legitimately contain a // literal '[' (\"![A [Beta]](img.png)\") — a shape findLinkOpeners declines by design (nested-bracket // labels are supported here, never silently dropped). Returns the index of the matching ']' // (depth back to 0), or -1 when the label never closes."
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.mjs\", \"chapter-paths.mjs:625-660\", 0]": {
+   "anchors": [
+    "function findMarkdownLinkGroups(line) {",
+    "if (line[i] === ')') groups.push(line.slice(start, i));"
+   ],
+   "claim": "* * Deliberately NOT findMarkdownLinkGroups (that returns the DESTINATION, chapter-paths.mjs:625-660). */ function parseNestedLabel(content) { const t = String(content).trim();"
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.mjs\", \"chapter-paths.mjs:632-654\", 0]": {
+   "anchors": [
+    "const gt = line.indexOf('>', i + 1);",
+    "if (depth === 0) break;"
+   ],
+   "claim": "// The same balanced-paren / angle-wrapped destination scan findMarkdownLinkGroups uses above // (chapter-paths.mjs:632-654), factored so the image scanner below can start from an arbitrary // absolute offset (just past the opening '(') instead of a per-line opener list. A destination // never legitimately spans a line break, wrapped or not, so hitting one is treated the same as // never finding a close. Returns the index of the closing ')', or -1."
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.mjs\", \"chapter-paths.mjs:895\", 0]": {
+   "anchors": [
+    "const stripped = line.trim().replace(/^-\\s*/, '');"
+   ],
+   "claim": "// §5.7 bare-path guard: step-0's bare-row fallback strips only `-` (chapter-paths.mjs:895), so a // `*`/`+`-marked bullet whose content is a bare (non-link) path is INVISIBLE to the caller's // membership scan — auto-wiring would create a duplicate container beside the retained phantom // text row. Refuse when the marker is `*`/`+`, the label fell to the RAW branch (not a whole- // content link/wikilink), and the raw value contains `/` OR `\\` (the path layer treats `\\`≡`/`,"
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/references/capture-engines.md\", \"SKILL.md:100\", 0]": {
+   "anchors": [
+    "you never run the engine on the host"
+   ],
+   "claim": "boundary**. The skill's capture harness runs **container-only** ([container-isolation.md](container-isolation.md)): \"If `capture.command` is empty or the project clearly runs captures on the host, you do not just run it anyway. You halt and tell the user the guarantees above are not met\" (`container-isolation.md:179-181`), and W2 states plainly \"you never run the engine on the host\" (`SKILL.md:100`). Because a manual capture is by definition a human at the keyboard rather than a container-run script, the skill's automated flow **halts** on `engine: manual` rather than proceeding — it does not attempt to drive or guard a human-operated session."
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/references/capture-engines.md\", \"assets/lib/capture-guard-policy.mjs:271\", 0]": {
+   "anchors": [
+    "resourceType === 'eventsource'"
+   ],
+   "claim": "**Load-bearing caveat: the glue carries a safety contract it must not drop.** `decideRoute`'s `[guard:eventsource]` and `[guard:beacon]` branches key on the exact `resourceType` tokens `'eventsource'` and `'ping'` (`assets/lib/capture-guard-policy.mjs:271,278`). The reused classifier only preserves the SSE/beacon block if the per-engine glue populates `GuardRequest.resourceType` with that identical vocabulary. An SSE `GET` arriving with `resourceType: 'fetch'` or `undefined` falls through to `[guard:get-head]` and connects to the live endpoint — a silent fail-open, not a loud one. So every section below states"
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/references/capture-engines.md\", \"container-isolation.md:179-181\", 0]": {
+   "anchors": [
+    "guarantees above are not met"
+   ],
+   "claim": "`manual` is not a fifth automated engine — it is a declared, honestly-documented **halt boundary**. The skill's capture harness runs **container-only** ([container-isolation.md](container-isolation.md)): \"If `capture.command` is empty or the project clearly runs captures on the host, you do not just run it anyway. You halt and tell the user the guarantees above are not met\" (`container-isolation.md:179-181`), and W2 states plainly \"you never run the engine on the host\" (`SKILL.md:100`). Because a manual capture is by definition a human at the keyboard rather than a container-run script, the skill's automated flow **halts** on `engine: manual` rather than proceeding — it does not attempt to drive or guard a human-operated session."
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/references/publish-targets/obsidian-vault.md\", \"chapter-paths.mjs:174-178\", 0]": {
+   "anchors": [
+    "export function chapterRelPath(entry) {",
+    "entry.group !== undefined ? `${entry.group}/${entry.slug}.md` : `${entry.slug}.md`;"
+   ],
+   "claim": "broken title by itself: `parseNestedLabel` falls to its `raw` branch on the same broken title, and that raw text is the row's WHOLE unparsed content, including the link target. `wireNestedListChapter` is reached only for a GROUPED entry, and a grouped entry's target always carries its group prefix (`chapterRelPath`, `chapter-paths.mjs:174-178`, returns `<group>/<slug>.md` whenever `group` is set) — that `/` is what trips `isBarePathBullet` (\"Nested-list automation limits\" below), not the broken title in isolation: measured, an otherwise-identical flat-style, slash-free target reaches `present` instead, so do not generalize this to \"a target-breaking title is always unwritable on `*`/`+`\". For THIS adapter's own"
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/references/publish-targets/static-md.md\", \"chapter-paths.mjs:174-178\", 0]": {
+   "anchors": [
+    "export function chapterRelPath(entry) {",
+    "entry.group !== undefined ? `${entry.group}/${entry.slug}.md` : `${entry.slug}.md`;"
+   ],
+   "claim": "- **The same nested placement, but when the new child row uses `*` or `+`** used to lock the whole file out on the NEXT run instead: `chapterRelPath` (`chapter-paths.mjs:174-178`) always joins the entry's `group` onto its `slug` — `<group>/<slug>.md` — whenever `group` is set, so a title that breaks its own link parse leaves that group-prefixed `/` sitting in the raw bullet content, and `isBarePathBullet` refuses exactly that shape on a `*`/`+` child marker. **As of 1.11.0, the writer catches this on the SAME run instead**, because the"
+  },
+  "[\"plugins/enduser-handbook/skills/enduser-handbook/references/state-variants.md\", \"references/page-identity.md:156-162\", 0]": {
+   "anchors": [
+    "When a shot deliberately stages a data-state",
+    "silently ships the wrong-but-real state"
+   ],
+   "claim": "Route and heading are identical across a page's staged (variant) and un-staged (populated) states — neither `capture.page_identity_signal` nor the primary heading changes when only the underlying data does. A forgotten or **reverted** precondition (the empty fixture was not applied, or a prior run already restored the populated data) therefore still passes ordinary page identity and silently ships the wrong-but-real state. `references/page-identity.md:156-162` states this rule generally; state-variant capture is the canonical case it exists for."
+  },
+  "[\"plugins/enduser-handbook/tests/build-identity.test.mjs\", \"build-identity.mjs:17-21\", 0]": {
+   "anchors": [
+    "exactly two functions throw a TypeError on an input outside their declared domain",
+    "Those are caller-contract violations"
+   ],
+   "claim": "test('resolveBuildIdentity: an unrecognized uiObservation.kind fails closed (throws) rather than silently resolving', () => { // [round 7] The module header (build-identity.mjs:17-21) documents that exactly two functions // throw a TypeError on an out-of-domain input — this one and classifyBuildDelta (see that // function's own pinned-class assertions below). A class-blind assertion here survives a mutant // that swaps the TypeError for a plain Error, silently losing that documented distinction."
+  },
+  "[\"plugins/enduser-handbook/tests/capture-record.test.mjs\", \"capture-record.mjs:991\", 0]": {
+   "anchors": [
+    "deps.mkdirSync(profileLike.publish.chapters_dir, { recursive: true });"
+   ],
+   "claim": "// [round 8→9, this fix] Everything above polices the CONSTRUCTION of the seam — every occurrence of // an fs-bound name is confined to the one sanctioned property-value slot inside the `defaultDeps` // literal. None of it says anything about the CONSUMPTION of `defaultDeps` itself once built. Codex's // round-7 executed mutant on the real module — `capture-record.mjs:991`, `deps.mkdirSync(...)` -> // `defaultDeps.mkdirSync(...)` — reaches the real filesystem through the frozen module-level default // directly, completely ignoring whatever `deps` an injected virtual/test filesystem supplied, and // `checkCapabilityPolicy` returned `{ok: true}` (reproduced directly against a copy of the real // module's source before this fix). That matters beyond tidiness: every crash-recovery/atomicity test"
+  },
+  "[\"plugins/enduser-handbook/tests/capture-record.test.mjs\", \"capture-record.mjs:991\", 1]": {
+   "anchors": [
+    "deps.mkdirSync(profileLike.publish.chapters_dir, { recursive: true });"
+   ],
+   "claim": "\"const bypass = { run: fs.writeFileSync };\\nbypass.run('/outside', 'x');\", // [round 8→9, this fix] codex's round-7 executed mutant on the real module — // `capture-record.mjs:991`, `deps.mkdirSync(...)` -> `defaultDeps.mkdirSync(...)` — reached // through the frozen module-level default directly, bypassing whatever `deps` an injected // virtual/test filesystem supplied entirely; `checkCapabilityPolicy` returned `{ok: true}` // against the pre-fix checker (reproduced directly against a copy of the real module before // this fix). Every occurrence-of-`fs` rule above is silent on this: `defaultDeps` was never"
+  },
+  "[\"plugins/enduser-handbook/tests/capture-record.test.mjs\", \"capture-record.mjs:991\", 2]": {
+   "anchors": [
+    "deps.mkdirSync(profileLike.publish.chapters_dir, { recursive: true });"
+   ],
+   "claim": "test('capability policy: defaultDeps is the seam DEFAULT, never a call target — direct, bracket and optional-chain member access are all rejected; the merged local and the real merge/spread shapes stay untouched; the un-tracked alias gap is measured, not assumed', () => { // codex's round-7 executed mutant (capture-record.mjs:991), and the bracket/optional-chain // variants of the identical bypass — none of these is a shape check, so all three fall to it."
+  },
+  "[\"plugins/enduser-handbook/tests/chapter-paths.test.mjs\", \"chapter-paths.d.mts:16\", 0]": {
+   "anchors": [
+    "capture-only subset of the profile",
+    "staticEmbedPath"
+   ],
+   "claim": "test('staticEmbedPath chapterFile pin [round-11]: a capture-only profileLike (no `publish` key) is honored, never thrown on', () => { // Round-11 finding: every prior fixture supplied a full profile AND a chapterFile derivable // from that profile plus the entry, so a mutant that ignores the chapterFile argument and // silently recomputes it as `profileLike.publish.chapters_dir + chapterRelPath(entry)` stayed // green. `chapter-paths.d.mts:16` states profileLike is the CAPTURE-ONLY subset staticEmbedPath // actually reads at runtime (never `publish`) — a real capture spec legitimately never // constructs `publish.*`. A capture-only profileLike (literally no `publish` key) with a // chapterFile deliberately off the chapters_dir tree entirely (there is no chapters_dir to be // on) proves both halves of the contract at once: the mutant would THROW reading"
+  },
+  "[\"plugins/enduser-handbook/tests/chapter-paths.test.mjs\", \"chapter-paths.mjs:2755\", 0]": {
+   "anchors": [
+    "class EmbedCandidateHalt extends Error {"
+   ],
+   "claim": "// [round 7] EmbedCandidateHalt (chapter-paths.mjs:2755) is a private, unexported class — the // .d.mts documents the distinction explicitly (\"Throws (an EmbedCandidateHalt, an ordinary Error // to a caller outside this module)\"), and it is load-bearing at runtime: expectedAssets' own catch // (`err instanceof EmbedCandidateHalt`, chapter-paths.mjs:3074) depends on buildEmbedCandidates // actually throwing THIS class rather than a plain Error, or the halt would escape uncaught instead"
+  },
+  "[\"plugins/enduser-handbook/tests/chapter-paths.test.mjs\", \"chapter-paths.mjs:3074\", 0]": {
+   "anchors": [
+    "if (err instanceof EmbedCandidateHalt) return haltResult(err.construct, 0);"
+   ],
+   "claim": "// [round 7] EmbedCandidateHalt (chapter-paths.mjs:2755) is a private, unexported class — the // .d.mts documents the distinction explicitly (\"Throws (an EmbedCandidateHalt, an ordinary Error // to a caller outside this module)\"), and it is load-bearing at runtime: expectedAssets' own catch // (`err instanceof EmbedCandidateHalt`, chapter-paths.mjs:3074) depends on buildEmbedCandidates // actually throwing THIS class rather than a plain Error, or the halt would escape uncaught instead // of converting to `{ok:false, halt:...}`. A regex-only assertion cannot see that distinction — both // classes would carry the same message. Since the class itself cannot be imported, `.name` (set // explicitly in the constructor) is the only caller-visible identity signal."
+  },
+  "[\"plugins/enduser-handbook/tests/profile-schema-evaluator.test.mjs\", \"profile-schema-evaluator.mjs:32\", 0]": {
+   "anchors": [
+    "export class SchemaEvaluationError extends Error {}"
+   ],
+   "claim": "// [round 7] `undefined` in the error-position is a no-op check (equivalent to omitting the // argument) — assertNoUnknownKeywords has one dedicated exported class for exactly this failure // (SchemaEvaluationError, profile-schema-evaluator.mjs:32/83); pin it so a mutant that throws a // plain Error/TypeError instead is caught, not just \"threw something\"."
+  },
+  "[\"plugins/enduser-handbook/tests/reference-assets.test.sh\", \"assets/lib/chapter-paths.mjs:1386\", 0]": {
+   "anchors": [
+    "container-ambiguous halt"
+   ],
+   "claim": "has_in_section \"publish-targets README: the create branch is conditional, not automatic (#476)\" \\ \"$PTREADME\" '## Adding a new target X' \\ 'before creating a container because the label match came back zero' # Round 3: this halt was called \"ambiguous-container\", which THIS PLUGIN already uses for the # MULTIPLE-candidate outcome — `assets/lib/chapter-paths.mjs:1386` (\"container-ambiguous halt\") and # `tests/chapter-paths.test.mjs:823`/`:1755`. Two different halts under one name, in one plugin, is # the kind of collision an adapter author resolves by guessing. Renamed to \"near-miss\" everywhere it # is mine to rename; the module's own term is left alone."
+  },
+  "[\"plugins/enduser-handbook/tests/reference-assets.test.sh\", \"static-md.md:15-16\", 0]": {
+   "anchors": [
+    "No graph view, no backlinks panel."
+   ],
+   "claim": "# so this case does not apply there\") is deliberately left unpinned. It's a verified fact today, # but A4 flagged it as tied to a filed, tracked gap (#261, group-H's Related-block enumeration) — if that # gap is ever legitimately closed by giving Obsidian's Related block an index member, this exact # clause is the line that SHOULD change. Pinning it would fight that future correct edit rather than # catch a regression; the asymmetry is stated in prose (static-md.md:15-16's \"no backlinks panel\" # rationale) rather than gated in a test."
+  },
+  "[\"plugins/enduser-handbook/tests/reference-assets.test.sh\", \"tests/chapter-paths.test.mjs:823\", 0]": {
+   "anchors": [
+    "test('findContainer: multiple matching headings => container-ambiguous'"
+   ],
+   "claim": "\"$PTREADME\" '## Adding a new target X' \\ 'before creating a container because the label match came back zero' # Round 3: this halt was called \"ambiguous-container\", which THIS PLUGIN already uses for the # MULTIPLE-candidate outcome — `assets/lib/chapter-paths.mjs:1386` (\"container-ambiguous halt\") and # `tests/chapter-paths.test.mjs:823`/`:1755`. Two different halts under one name, in one plugin, is # the kind of collision an adapter author resolves by guessing. Renamed to \"near-miss\" everywhere it # is mine to rename; the module's own term is left alone."
+  }
+ },
+ "exemptions": {
+  "[\"plugins/enduser-handbook/tests/chapter-paths.test.mjs\", \"a.md:3\", 0]": {
+   "reason": "negative-assertion needle: asserted TOOL-OUTPUT string, not a citation"
+  },
+  "[\"plugins/enduser-handbook/tests/chapter-paths.test.mjs\", \"b.md:9\", 0]": {
+   "reason": "negative-assertion needle: asserted TOOL-OUTPUT string, not a citation"
+  },
+  "[\"plugins/enduser-handbook/tests/export-parity.test.mjs\", \"b.d.mts:1\", 0]": {
+   "reason": "negative-assertion needle: asserted TOOL-OUTPUT string, not a citation"
+  },
+  "[\"plugins/enduser-handbook/tests/export-parity.test.mjs\", \"m.d.mts:2\", 0]": {
+   "reason": "negative-assertion needle: asserted TOOL-OUTPUT string, not a citation"
+  },
+  "[\"plugins/enduser-handbook/tests/export-parity.test.mjs\", \"stray.d.mts:3\", 0]": {
+   "reason": "negative-assertion needle: asserted TOOL-OUTPUT string, not a citation"
+  },
+  "[\"plugins/enduser-handbook/tests/reference-assets.test.sh\", \"reference-assets.test.sh:1333-1346\", 0]": {
+   "reason": "negative-assertion needle: the literal string this test asserts is ABSENT from another file, not a pointer to a location; renumbering it would change what the guard catches"
+  }
+ }
+}

@@ -1,0 +1,1361 @@
+{
+ "declarations": {
+  "[\"plugins/literary-translator/skills/literary-translator/SKILL.md\", \"ledger_merge.py:873-887\", 0]": {
+   "anchors": [
+    "entry.pop(\"stale_mismatched_fields\", None)",
+    "fields = stale_mismatched_fields.get(seg)",
+    "entry[\"stale_mismatched_fields\"] = fields"
+   ],
+   "claim": "Keep the declaration stable across the whole W7→W9 chain; toggling it between steps is the only way a normal run can make the two gates disagree about the same book. (They read the moved-field list from different authorities -- W7 from `select_segments.py`'s recomputation against the CURRENT cache key, W9 from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887` drops any inherited value and re-derives that list from the same diff, so the two agree by construction on anything a run produces. Hand-editing the materialized `ledger.json` between the two steps can split them; so can editing one segment's `status` to `converged`, which skips both carve-outs"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json\", \"cache_key.py:514\", 0]": {
+   "anchors": [
+    "compute_profile_semantics_hash"
+   ],
+   "claim": "}, \"enabled\": { \"type\": \"boolean\", \"default\": true, \"description\": \"Master switch for the W3 glossary/canon RESEARCH pass. When false, W3 still runs the mandatory language smoke test (W3a's segpack.py re-runs that same extractor over every segment and W5 acts on its new_names, so name detection stays load-bearing), but skips glossary_batch_plan.py, resume_setup.py, the glossary Workflow, the canon merge, and the skeptic pass; it bootstraps an empty, fully stamped canon.json with canon_validate.py --init and rejoins at the mandatory homonym-split evidence gate exactly as the no_new_candidates SKIP branch does. An existing canon.json is NOT discarded -- --init is create-only, so its entries keep reaching every segpack. Absent means true, so every existing profile keeps validating unchanged. Outside compute_profile_semantics_hash()'s named-six allowlist (cache_key.py:514), so adding or flipping this key never re-translates a converged segment on its own -- but enabling it later and canonizing names does change affected segments' used_terms_hash and makes them dispatch-eligible again. Adding this property to profile.schema.json itself moves resume_setup.py's own _schemas_dir_hash() (it hashes every top-level *.schema.json file's raw bytes under durable_root/schemas/ into input_digest), so the FIRST Step 0a refresh after this release is a one-time resume-identity reset: any in-flight mass-translate or glossary run cannot resume across it -- it starts a fresh run_id and re-dispatches from scratch, including any partial glossary batch.\" }, \"min_candidate_freq\": { \"type\": \"integer\", \"minimum\": 1"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:104-107\", 0]": {
+   "anchors": [
+    "import yaml",
+    "yaml = None"
+   ],
+   "claim": "_dependency_precondition_fatal( f\"could not import cache_key.py from {SCRIPTS_DIR}: {exc}\" ) # #492: deliberately NO `except SystemExit` arm here, unlike the two above. # cache_key.py's PyYAML import is try/except-guarded (cache_key.py:104-107) and # merely assigns `yaml = None`; its require_yaml() fail() fires later, from # load_profile() -- which assert_live_inputs_match_ledger() calls inside a # SystemExit handler of its own. So this module CANNOT exit during the import # statement, and a handler here would be dead code claiming otherwise."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:149-156\", 0]": {
+   "anchors": [
+    "canon_senses.py (RFC #215)",
+    "transitive import is otherwise invisible",
+    "source-derivation state"
+   ],
+   "claim": "hazard -- NOT because of the \"no shared lib between self-contained scripts\" convention, which is already false here (canon_validate.py and glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports cache_key.py). The real reason: ledger_update.py is a PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:149-156 records that that tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS INVISIBLE -- which is why canon_senses.py had to be registered explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:163-167\", 0]": {
+   "anchors": [
+    "false-green",
+    "durable root scaffolded before the change",
+    "against a plugin that no longer behaves"
+   ],
+   "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:255\", 0]": {
+   "anchors": [
+    "style_contract_hash\","
+   ],
+   "claim": "# allowlist above. That set means \"can never change what the prose should # say\", which is FALSE for the style contract: a contract edit CAN change what # the prose should say, and a REVERSED rule actively demanded the wrong choice # in every segment converged under it. One global style_contract_hash # (cache_key.py:255, GLOBAL_CACHE_KEY_FIELDS at :274) cannot tell an addition # from a reversal, so this population is admitted only when the operator # DECLARES it, per project, and every admitted segment is named. Widening the # allowlist instead would also silently move final_audit.py's own # project_complete arithmetic and select_segments.py's D6 semantics, which"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:287-291\", 0]": {
+   "anchors": [
+    "def fail(message: str)",
+    "Fail loudly, naming the problem"
+   ],
+   "claim": "Every exception a computer can raise -- including the SystemExit cache_key.py's own fail() raises (cache_key.py:287-291), which is how a missing style_bible.md, an absent particle config and an unresolvable manifest source input all surface -- is converted by the caller into an AssembleError naming the segment and the field. \"Cannot confirm this input\" must never read as \"this input is unchanged\". (A PyYAML-less"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"final_audit.py:1811-1893\", 0]": {
+   "anchors": [
+    "def count_stale_previously_converged",
+    "state != SENTINEL_ABSENT"
+   ],
+   "claim": "# moved (`stale_mismatched_fields`) on the materialized entry only, and # load_converged_segments() below accepts such a record exactly like # status==\"converged\", so a plugin upgrade can no longer strand a finished # book. See final_audit.py's own `count_stale_previously_converged()` # (`final_audit.py:1811-1893`), the sibling carve-out this one is designed # to always agree with over the SAME materialized runs/ledger.json snapshot."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"final_audit.py:1811-1893\", 1]": {
+   "anchors": [
+    "def count_stale_previously_converged",
+    "state != SENTINEL_ABSENT"
+   ],
+   "claim": "absent from the allowlist by construction and refuses too, never silently becomes deliverable. And ONLY a clean ENOENT sentinel read blocks -- AMBIGUOUS (a dangling symlink, an EACCES) carves out exactly like PRESENT, mirroring final_audit.py's own count_stale_previously_converged() (`final_audit.py:1811-1893`) so the two whole-project completeness signals never disagree about the same materialized snapshot. Reading an unreadable dotfile as \"absent\" would declare a finished book undeliverable, and unrecoverably so: the operator's only route to a fresh sentinel is a retranslate, which"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/backfill_ever_converged.py\", \"cache_key.py:149-156\", 0]": {
+   "anchors": [
+    "canon_senses.py (RFC #215)",
+    "transitive import is otherwise invisible",
+    "source-derivation state"
+   ],
+   "claim": "hazard -- NOT because of the \"no shared lib between self-contained scripts\" convention, which is already false here (canon_validate.py and glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports cache_key.py). The real reason: ledger_update.py is a PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:149-156 records that that tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS INVISIBLE -- which is why canon_senses.py had to be registered explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/backfill_ever_converged.py\", \"cache_key.py:163-167\", 0]": {
+   "anchors": [
+    "false-green",
+    "durable root scaffolded before the change",
+    "against a plugin that no longer behaves"
+   ],
+   "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/bootstrap_names.py\", \"final_audit.py:675-698\", 0]": {
+   "anchors": [
+    "def _fold_source_marks",
+    "0x0591 <= ord(c) <= 0x05C7"
+   ],
+   "claim": "# this one, language_smoke_report.py's own mirror, and the pre-existing # final_audit._fold_source_marks (final_audit.py:675-698, read-only to this # script -- final_audit.py is frozen this train). No shared import between # any of the three -- language_smoke_report.py runs as an isolated # subprocess with no sibling-module dependency, the same reason TOKEN_RE/ # TERMINATORS/WRAPPERS above are independently copied there too."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/bootstrap_names.py\", \"final_audit.py:675-698\", 1]": {
+   "anchors": [
+    "def _fold_source_marks",
+    "0x0591 <= ord(c) <= 0x05C7"
+   ],
+   "claim": "\"\"\"Fold Hebrew niqqud/cantillation for the #238 MATCH KEY ONLY -- mirrors ``final_audit._fold_source_marks`` (``final_audit.py:675-698``) byte-for-byte: NFD-decompose, drop every combining mark (Unicode category ``Mn``) in the Hebrew block range U+0591-U+05C7, then re-NFC. NEVER applied to an EMITTED ``name`` (Contract 5) -- this fold lives ONLY in ``match_units()``/``fold_match_key()`` below, which"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/bootstrap_names.py\", \"segpack.py:1125-1131\", 0]": {
+   "anchors": [
+    "except Exception as exc:",
+    "FATAL: could not load particle config"
+   ],
+   "claim": "\"\"\"A-C1 (#238/#241): warn -- NEVER raise -- when two distinct ``name_inventory`` surface forms fold to the SAME #238/#241 match key (e.g. ``משה לייב`` and ``משה־לייב`` both ``fold_match_key`` to ``משה לייב``). Contract 2's no-new-fatal rule forbids turning this into a :class:`BootstrapNamesError` -- nine importers, and ``segpack.py:1125-1131`` turns ANY exception into a FATAL -- so a ``name_inventory`` that was VALID at 6fb80ba must stay valid. Structurally harmless for MATCHING:"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/canon_senses.py\", \"canon_adjudication_audit.py:396\", 0]": {
+   "anchors": [
+    "from canon_senses import"
+   ],
+   "claim": "\"\"\"NFC-normalize, casefold, and collapse-and-strip internal whitespace -- the ONE normalizer every grouping/matching key across the homonym-split feature is computed from (relocated here from canon_adjudication_audit.py:396, which now imports it from this module instead of defining its own copy). Display fields always keep the original string; only grouping/hashing/comparison ever sees the normalized form.\"\"\" return \" \".join(unicodedata.normalize(\"NFC\", s).casefold().split())"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/canon_senses.py\", \"canon_adjudication_audit.py:687-696\", 0]": {
+   "anchors": [
+    "def _load_senses_or_raise",
+    "raise CanonAdjudicationAuditError(str(e), offending=e.offending)"
+   ],
+   "claim": "explicit path the caller expected to exist (`allow_absent=False`) is a BLOCK when absent. ANY non-regular path -- a directory, a dangling symlink, a device node -- is a BLOCK regardless of `allow_absent` (mirrors glossary_batch_plan.py:351-361 + canon_adjudication_audit.py:687-696). 2. When present, schema-validates against `schema_path` FIRST, before any emptiness decision -- a schema failure is always BLOCKING, never silently \"no senses\". A raw `{}` fails here (missing required `schema_version`/`entries_by_source_form`); there is no"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/canon_senses.py\", \"glossary_batch_plan.py:351-361\", 0]": {
+   "anchors": [
+    "def load_senses_sidecar",
+    "return load_senses(path, allow_absent=not explicit)"
+   ],
+   "claim": "absent path (an implicit default that was never written yet). An explicit path the caller expected to exist (`allow_absent=False`) is a BLOCK when absent. ANY non-regular path -- a directory, a dangling symlink, a device node -- is a BLOCK regardless of `allow_absent` (mirrors glossary_batch_plan.py:351-361 + canon_adjudication_audit.py:687-696)."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/canon_validate.py\", \"tests/canon_validate_recollapse.test.py:289-301\", 0]": {
+   "anchors": [
+    "real_normalize_form = CANON_VALIDATE.normalize_form",
+    "expected exactly 1 normalize_form call"
+   ],
+   "claim": "#488 added `canon_senses.senses_for`, which computes exactly this, and this function was DELIBERATELY not re-pointed at it. The lookup here is normalized through THIS module's own `normalize_form` binding, and `tests/canon_validate_recollapse.test.py:289-301` pins the indexed fast path by monkeypatching that binding and asserting exactly one call; delegating would move the call inside canon_senses, silently reduce that count to zero, and force a passing performance test to be rewritten for a refactor #488 does not need. The shared comparator is",
+   "target": "plugins/literary-translator/tests/canon_validate_recollapse.test.py"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5000\", 0]": {
+   "anchors": [
+    "run_id_problem = validate_run_id(run_id)"
+   ],
+   "claim": "WHY THIS MODULE NEEDS ITS OWN COPY AT ALL: the asymmetry that made claimed_path() a path-traversal hole. The WRITER validated its run id before minting a claim (select_segments.py:5000, called from its claim block) and every READER built the same path from an unvalidated one."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/final_audit.py\", \"cache_key.py:149-156\", 0]": {
+   "anchors": [
+    "canon_senses.py (RFC #215)",
+    "transitive import is otherwise invisible",
+    "source-derivation state"
+   ],
+   "claim": "hazard -- NOT because of the \"no shared lib between self-contained scripts\" convention, which is already false here (canon_validate.py and glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports cache_key.py). The real reason: ledger_update.py is a PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:149-156 records that that tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS INVISIBLE -- which is why canon_senses.py had to be registered explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/final_audit.py\", \"cache_key.py:163-167\", 0]": {
+   "anchors": [
+    "false-green",
+    "durable root scaffolded before the change",
+    "against a plugin that no longer behaves"
+   ],
+   "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/fix_scope_audit.py\", \"SKILL.md:4327-4330\", 0]": {
+   "anchors": [
+    "registry schemas ship under",
+    "never copied into a durable root"
+   ],
+   "claim": "* `assets/schemas/*.json` -> `${durable_root}/schemas/`. FLAT only: `assets/schemas/registry/` is deliberately plugin-only (SKILL.md:4327-4330) and is never copied, so it is never compared.",
+   "target": "plugins/literary-translator/skills/literary-translator/SKILL.md"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/glossary_preflight.py\", \"canon_senses.py:25-35\", 0]": {
+   "anchors": [
+    "#243 exception, LAZY.",
+    "A missing ``bootstrap_names.py`` at call time RAISES"
+   ],
+   "claim": "Imported lazily, inside the function: a module-level import of a sibling script here once broke 81 tests (`canon_senses.py:25-35`), so the established pattern is a lazy import with an actionable re-raise. READING `bootstrap_names.py` is free -- the #193 dead end is about putting a shared helper THERE, not about importing from it, and this file is in no bundle."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/language_smoke_report.py\", \"final_audit.py:675-698\", 0]": {
+   "anchors": [
+    "def _fold_source_marks",
+    "0x0591 <= ord(c) <= 0x05C7"
+   ],
+   "claim": "# copy of bootstrap_names.py's match-key fold (A-C4 -- no shared import, # same reason TOKEN_RE/TERMINATORS/_WRAPPERS above are independently copied # here too). tests/extractor_terminators_drift.test.py's drift guard asserts # this copy agrees with bootstrap_names.py's and with the pre-existing # final_audit._fold_source_marks (final_audit.py:675-698). # ---------------------------------------------------------------------------"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/language_smoke_report.py\", \"final_audit.py:675-698\", 1]": {
+   "anchors": [
+    "def _fold_source_marks",
+    "0x0591 <= ord(c) <= 0x05C7"
+   ],
+   "claim": "\"\"\"Fold Hebrew niqqud/cantillation for the #238 MATCH KEY ONLY -- mirrors bootstrap_names.py's own ``_fold_match_marks`` (itself a mirror of ``final_audit._fold_source_marks``, ``final_audit.py:675-698``) byte-for-byte: NFD-decompose, drop every combining mark (Unicode category ``Mn``) in the Hebrew block range U+0591-U+05C7, then re-NFC. NEVER applied to an EMITTED name -- this script's own Contract-5-equivalent emit site in ``extract_candidate_names()`` stays raw regardless.\"\"\""
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_merge.py\", \"select_segments.py:743-763\", 0]": {
+   "anchors": [
+    "entries = sorted(segments_dir.iterdir())",
+    "TWO swallow sites",
+    "in place of the glob pattern"
+   ],
+   "claim": "One `iterdir()` inside one try answers all of it: ENOENT/ENOTDIR are the definitive not-there, and every other OSError is a could-not-look that REFUSES rather than reporting emptiness -- the same split, and deliberately the same shape, as select_segments.py:743-763. The .json filter replaces the glob pattern exactly, name for name (see the endswith() comment in the loop): ledger_update.py stages `{seg}.json.tmp.{pid}` and publishes `{seg}.json`, so a staged temp file is excluded by both."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_update.py\", \"backfill_ever_converged.py:640-660\", 0]": {
+   "anchors": [
+    "def sentinel_body",
+    "Losing the evidence while keeping a marker"
+   ],
+   "claim": "failed sync would hit FileExistsError, classify SENTINEL_PRESENT, and return True having synced nothing -- laundering the earlier failure into a green result. `tests/backfill_ever_converged.test.py` pins this directly against the shipped laundering test for the sibling writer (`backfill_ever_converged.py:640-660`, test `:1644-1709`).\"\"\" path = ever_converged_path(seg, segments_dir)"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_update.py\", \"cache_key.py:149-156\", 0]": {
+   "anchors": [
+    "canon_senses.py (RFC #215)",
+    "transitive import is otherwise invisible",
+    "source-derivation state"
+   ],
+   "claim": "hazard -- NOT because of the \"no shared lib between self-contained scripts\" convention, which is already false here (canon_validate.py and glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports cache_key.py). The real reason: ledger_update.py is a PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:149-156 records that that tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS INVISIBLE -- which is why canon_senses.py had to be registered explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_update.py\", \"cache_key.py:163-167\", 0]": {
+   "anchors": [
+    "false-green",
+    "durable root scaffolded before the change",
+    "against a plugin that no longer behaves"
+   ],
+   "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_update.py\", \"claim_record.py:565-577\", 0]": {
+   "anchors": [
+    "A FAILURE IS A FAILURE",
+    "of the defect rather than its fix."
+   ],
+   "claim": "sentinel FILE, then fsync that directory, so the entry that makes the file findable survives a crash too: fsync on a file commits its contents, not its link. Same two-halves reasoning claim_record.py's fsync_directory() docstring states for the claim record (claim_record.py:565-577)."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_update.py\", \"claim_record.py:565-577\", 1]": {
+   "anchors": [
+    "A FAILURE IS A FAILURE",
+    "of the defect rather than its fix."
+   ],
+   "claim": "os.close() succeeds, the already-present path before returning -- and a sync failure on EITHER path returns False through the same _report_sentinel_failure() contract as every other failure here, fail-closed rather than best-effort (see that helper's own docstring for why, citing claim_record.py:565-577). Covering the already-present path too, not only fresh-create, is load-bearing: without it, a retry after a failed sync would hit FileExistsError, classify SENTINEL_PRESENT, and return True having synced nothing -- laundering the earlier failure into a green result. `tests/backfill_ever_converged.test.py` pins this"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/occurrence_targets.py\", \"render_obsidian.py:706-1132\", 0]": {
+   "anchors": [
+    "def build_entity_index",
+    "class _Linker",
+    "return \"\".join(out)"
+   ],
+   "claim": "The shipped `## Mentions` design (`references/output-target-adapters/ obsidian.md`) has historically treated the inline linker's own scan of *translated* prose (`build_entity_index`/`_Linker`, `render_obsidian.py: 706-1132`) AS the occurrence index. That model silently drops any occurrence whose translated surface differs from the one `canonical_target_form` the linker matches (#206), and collapses two distinct `source_form`s that happen to share a target string (#207-a). This module fixes both by"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/occurrence_targets.py\", \"validate_backlinks.py:1317-1325\", 0]": {
+   "anchors": [
+    "aggregate = occurrence_targets.build(",
+    "occurrence_targets.build() failed"
+   ],
+   "claim": "FAIL-CLOSED and NON-RAISING (Contract 3's no-new-raise rule -- `validate_backlinks.py:1317-1325` turns any exception out of `build()` into a hard gate FATAL): anything that is not a dict of `str -> str` yields `{}`, i.e. no group is ever exempted and behaviour is exactly 1.58.0's."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/occurrence_targets.py\", \"validate_backlinks.py:1317-1325\", 1]": {
+   "anchors": [
+    "aggregate = occurrence_targets.build(",
+    "occurrence_targets.build() failed"
+   ],
+   "claim": "the primary itself needs no special handling (it routes to `eligible_by_source_form` like any uncontested form) and nothing downstream asks WHICH primary a member was credited to. Every other group collides exactly as in 1.58.0 and warns to stderr (never raises -- Contract 3's no-new-raise rule; `validate_backlinks.py:1317-1325` would turn any new exception into a hard gate FATAL) once per group, naming every member and the shared key, mirroring `bootstrap_names._warn_inventory_match_key_collisions`'s own style."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/scaffold_setup.py\", \"verbatim_census.py:109\", 0]": {
+   "anchors": [
+    "sys.dont_write_bytecode = True"
+   ],
+   "claim": "# Set before the `import cache_key` below, which is the only point where it # still has any effect (verbatim_census.py:109 sets it for the same reason). # A plain sibling import leaves assets/scripts/__pycache__/*.pyc behind in the # PLUGIN tree this script runs from -- a real mutation of the very tree # `--verify` reports on, and one that makes \"this mode writes nothing\" false."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:1750-1784\", 0]": {
+   "anchors": [
+    "def hygiene(self):",
+    "if ws == prior_cwd and job.get(\"status\") in _ACTIVE:"
+   ],
+   "claim": "\"\"\"codex round-2 item 10: best-effort orphan cancellation, called ONLY from dispatch_codex_job()'s own backstop-timeout path, right after the SIGKILL+reap. Mirrors codex_job.py's own `hygiene()` method (codex_job.py:1750-1784), including its live status check (codex round-4 MINOR correction: an earlier version of this function skipped that check and went straight from \"joblog says launched\" to cancelling -- a real, not merely cosmetic, divergence from the claim this docstring already made. The joblog's local \"launched\" status only means \"not"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2156-2160\", 0]": {
+   "anchors": [
+    "self._write_joblog({",
+    "\"jobCwd\": self.sandbox_dir,"
+   ],
+   "claim": "`jobId`/`jobCwd` ARE durable by the time this driver's backstop can realistically fire: codex_job.py's own `launch()` writes both, via an atomic O_EXCL+os.replace, BEFORE `poll()` (codex_job.py:2156-2160) -- `poll()` is the long phase, so the joblog this reads is already written in the overwhelming majority of cases. The one case this genuinely cannot close, stated rather than papered over: if the backstop fires MID-launch(), before that write completes, there is no"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:234\", 0]": {
+   "anchors": [
+    "_ACTIVE = frozenset((\"queued\", \"running\"))"
+   ],
+   "claim": "# Mirrors codex_job.py's own `_ACTIVE = frozenset((\"queued\", \"running\"))` # (codex_job.py:234) -- duplicated, not imported, per this project's \"no # shared lib between self-contained scripts\" convention. Used ONLY by # _attempt_cancel_orphan()'s own live status check below, never a # re-derivation of anything hygiene() itself decides differently."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2500\", 0]": {
+   "anchors": [
+    "if self.safe_adopt():"
+   ],
+   "claim": "Reachability, kept at its real width so the fix is read neither as over- nor under-motivated -- the ordinary detached-job route does NOT reach this on its own. A competing codex_job.py serializes on the per-segment `.codex_job.<seg>.lock` and then calls `safe_adopt()` BEFORE it would launch or promote anything (codex_job.py:2500); a canonical review.json that still passes `review_ready.py --expect-token` is ADOPTED, leaving the artifact byte-identical rather than replacing it. SKILL.md additionally forbids running the default Workflow and this driver against one project concurrently."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2723\", 0]": {
+   "anchors": [
+    "p.add_argument(\"--cwd\", required=True)"
+   ],
+   "claim": "\"Accepts neither flag\" is HALF right, not simply backwards: `codex_job.py` accepts `--plugin-root` but NOT `--durable-root` -- for the DATA side it takes a required `--cwd` instead (`codex_job.py:2723`), which this driver already forwards as `str(durable_root)` in every dispatch (build_codex_job_argv()'s own `--cwd` argument), matching every other v1.17.0-hardened script's self-anchored-unless-redirected shape without needing a second, redundant root flag on this particular leaf."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2723\", 1]": {
+   "anchors": [
+    "p.add_argument(\"--cwd\", required=True)"
+   ],
+   "claim": "codex_job.py \"accepts neither flag on the data side\" -- false, and HALF backwards, not simply reversed: codex_job.py DOES accept --plugin-root (codex_job.py:2757, forwarded by build_codex_job_argv() whenever plugin_root_str is set) but does NOT accept --durable-root -- for the DATA side it takes a required --cwd instead (codex_job.py:2723), which this driver already forwards separately as str(durable_root)."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2757\", 0]": {
+   "anchors": [
+    "p.add_argument(\"--plugin-root\", default=None, dest=\"plugin_root\")"
+   ],
+   "claim": "that `codex_job.py` \"accepts neither flag on the data side\". Both were false, and the first one directly contradicted `build_codex_job_argv()`'s OWN docstring in this same file, which already listed `[--plugin-root]` among the flags it splices. Verified against the shipped `codex_job.py`: it DOES accept `--plugin-root` (`codex_job.py:2757`) -- `build_codex_job_argv()` forwards it whenever `plugin_root_str` is set (below, in the argv-building section) -- and consumes it in `_trusted_scripts_dir()` (`codex_job.py:615-625`), which returns `{plugin_root}/assets/scripts/` directly when given and falls back to its own `__file__`-relative `SCRIPTS_DIR` only when it is absent."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2757\", 1]": {
+   "anchors": [
+    "p.add_argument(\"--plugin-root\", default=None, dest=\"plugin_root\")"
+   ],
+   "claim": "hand-builds its own --plugin-root handling inline rather than calling this function. codex round-3 correction: this used to also claim codex_job.py \"accepts neither flag on the data side\" -- false, and HALF backwards, not simply reversed: codex_job.py DOES accept --plugin-root (codex_job.py:2757, forwarded by build_codex_job_argv() whenever plugin_root_str is set) but does NOT accept --durable-root -- for the DATA side it takes a required --cwd instead (codex_job.py:2723), which this driver already forwards separately as str(durable_root)."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2930\", 0]": {
+   "anchors": [
+    "if not args.plugin_root.strip():"
+   ],
+   "claim": "# empty string, not as the flag being omitted -- and # Path(\"\").absolute() (like Path(\"\").resolve()) is CWD, silently # making wherever this process happens to be launched from the # executable authority for the template AND every sibling # script. codex_job.py:2930 already refuses this same input; # refusing it here too, before any path is built from it, keeps # both scripts consistent instead of one being the loophole."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:615-625\", 0]": {
+   "anchors": [
+    "def _trusted_scripts_dir(self):",
+    "return os.path.join(self.plugin_root, \"assets\", \"scripts\")"
+   ],
+   "claim": "it DOES accept `--plugin-root` (`codex_job.py:2757`) -- `build_codex_job_argv()` forwards it whenever `plugin_root_str` is set (below, in the argv-building section) -- and consumes it in `_trusted_scripts_dir()` (`codex_job.py:615-625`), which returns `{plugin_root}/assets/scripts/` directly when given and falls back to its own `__file__`-relative `SCRIPTS_DIR` only when it is absent."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"ledger-fragment.schema.json:13\", 0]": {
+   "anchors": [
+    "\"enum\": [\"pending\", \"in_progress\", \"converged\", \"non_converged\", \"blocked\"]"
+   ],
+   "claim": "The status spelling checked below is authoritative from ledger-fragment.schema.json:13 / FRAGMENT_STATUS_FALLBACK_ENUM (ledger_update.py:139-141): the on-disk FRAGMENT enum has exactly five values -- pending, in_progress, converged, non_converged, blocked."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"ledger-record-base.schema.json:15\", 0]": {
+   "anchors": [
+    "\"rounds\": {"
+   ],
+   "claim": "\"\"\"The ledger's own `rounds` field for a converged write -- a REQUIRED plain integer, per ledger-record-base.schema.json:15 (`\"rounds\": {\"type\": \"integer\"}`) and that same schema's allOf block (:78-86), which requires `rounds` outright whenever `status == \"converged\"`."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"ledger_update.py:1179\", 0]": {
+   "anchors": [
+    "':r<roundLabel>' SUFFIX (review_token_matches(), a prefix match --"
+   ],
+   "claim": "# substitute at the same token over the same unread draft was # accepted there. The provenance half is NOT merely mirrored # either, and saying it was would be wrong: review_token_matches() # is a PREFIX match that admits any ':r<roundLabel>' suffix # (ledger_update.py:1179), while the comparison here is against # the EXACT token this decision was made from, round label # included. A precondition # THERE would close it for every caller, including the shipped # Workflow template, and it is not bought: converged_by_rejection"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"ledger_update.py:1263-1266\", 0]": {
+   "anchors": [
+    "if current_draft_sha1 != reviewer_draft_sha1:",
+    "\"draft changed since review; cannot record convergence\""
+   ],
+   "claim": "# codex #392-class MAJOR: a CLEAN review whose draft_sha1 no longer # matches the CURRENT draft (edited out-of-band since this review # was written -- or the sha1 simply could not be recomputed) must # NEVER fall through to already_converged: ledger_update.py's own # independent check (enrich_converged_fields, ledger_update.py: # 1263-1266) refuses that convergence write outright, and with no # branch that ever re-dispatches a review in that case, every later # invocation would repeat the SAME refused write forever -- a # live-lock, not a transient failure. There is also nothing to FIX"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"ledger_update.py:139-141\", 0]": {
+   "anchors": [
+    "FRAGMENT_STATUS_FALLBACK_ENUM = [",
+    "\"pending\", \"in_progress\", \"converged\", \"non_converged\", \"blocked\","
+   ],
+   "claim": "The status spelling checked below is authoritative from ledger-fragment.schema.json:13 / FRAGMENT_STATUS_FALLBACK_ENUM (ledger_update.py:139-141): the on-disk FRAGMENT enum has exactly five values -- pending, in_progress, converged, non_converged, blocked."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"mass-translate-wf.template.js:1288\", 0]": {
+   "anchors": [
+    "review_TASK.md's own field list must never override it."
+   ],
+   "claim": "\".driver.lock, segments/.codex_job.<seg>.lock) -- it cannot \" \"prove the rest, and does not pretend to. If the assertion is \" \"wrong, a concurrent fix turn writes the canonical draft \" \"directly and copies whatever dispatch_token it read \" \"(mass-translate-wf.template.js:1288): depending on timing it \" \"either loses its own work, or leaves the claim's re-stamped \" \"draft carrying content that nobody has re-reviewed. Never a \" \"blanket authorization: only the ids named here.\""
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"mass-translate-wf.template.js:2257\", 0]": {
+   "anchors": [
+    "seg, { status: \"blocked\", reason: \"draft-missing\" },"
+   ],
+   "claim": "Why _translate_redispatched_since()'s own mtime-only test above is NOT reusable here, unmodified, at THIS call site: the workflow also writes `{\"status\": \"blocked\", \"reason\": \"draft-missing\"}` AFTER a numbered review (mass-translate-wf.template.js:2257), and a segment left `blocked` is explicitly retried via `--only-segs` under the SAME run_id (resume_setup.py resolves it to the same run by matching the same input digest). A mtime-only guard would hold the round label for that recovery too -- a paid same-label review dispatched over a draft"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"mass-translate-wf.template.js:2367\", 0]": {
+   "anchors": [
+    "async function translateStage(seg) {"
+   ],
+   "claim": "`{\"status\": \"in_progress\"}` immediately BEFORE the dispatch: this driver's own translate branch (see process_segment()'s `if action[\"action\"] == \"translate\":`, just before its codex dispatch) and the shipped workflow's translateStage() (mass-translate-wf.template.js:2367). A fix turn goes through neither, so it writes no fragment at all -- which is what makes the discriminator work at all."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"mass-translate-wf.template.js:753-765\", 0]": {
+   "anchors": [
+    "function findingsAuthentic(rev) {",
+    "function matchedVerdict(rev) {"
+   ],
+   "claim": "# #392 round-2 item 8: the fabricated-finding gate, PORTED (never # transcribed) from the template's own findingsAuthentic()/ # matchedVerdict() (mass-translate-wf.template.js:753-765), by # executing them via call_template_functions() -- the same authority # every prompt this driver sends is already sourced from."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"profile.schema.json:494\", 0]": {
+   "anchors": [
+    "\"max_fix_rounds\": {"
+   ],
+   "claim": "fatal(f\"profile.yml at {profile_path} missing required field: engine.{field}\", exit_code=2) max_fix_rounds = engine[\"max_fix_rounds\"] # codex round-4 MAJOR: was `< 0` (\"non-negative\"), accepting 0 despite # profile.schema.json's own `\"minimum\": 1` (profile.schema.json:494) # -- an invalid profile this driver should refuse, not silently accept.",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"resume_setup.py:727\", 0]": {
+   "anchors": [
+    "def _load_manifest_seg_ids(durable_root: Path) -> list:"
+   ],
+   "claim": "Deliberately does NOT send `segs` (codex round-2 follow-up, post- 8815800): the shipped resume_setup.py derives the input_digest's domain itself, straight from manifest.json's own segments[] (_load_manifest_seg_ids(), resume_setup.py:727) -- never from a caller-supplied list -- and reads a `segs` field literally NOWHERE in its own source; resume_integrity.test.py:test_mass_segs_field_omitted_ still_works proves omission is accepted for kind=\"mass\" specifically, not merely inferred from the module docstring. This driver ships in"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"resume_setup.py:818-827\", 0]": {
+   "anchors": [
+    "segs = _load_manifest_seg_ids(dirs[\"durable_root\"])",
+    "for seg in segs"
+   ],
+   "claim": "`args` is always `{}` for kind=\"mass\" -- resume_setup.py now REJECTS (ResumeSetupError) any other value outright, before its own expensive per-segment cache_key.py shell-outs (compute_input_digest(), resume_setup.py:818-827), for the reason this driver already applies: this driver's own CLI scoping flags (--only-segs/ --allow-retranslate-converged/--allow-empty) govern Step 1's OWN gating (select_segments.py, already run and already enforced before resolve_run_id() is ever called) -- they do not change what any"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"resume_setup.py:901\", 0]": {
+   "anchors": [
+    "def resolve_run("
+   ],
+   "claim": "folding an unstattable entry INTO the candidate list, on the theory that \"it might be a real run, so do not silently forget it\" -- was rejected: this function's return value is forwarded verbatim into resume_setup.py's own `resume_from_run_ids`, and that authority's resolve_run() (resume_setup.py:901) decides a MATCH by reading `runs/<id>/input.digest` with its OWN `Path.is_file()` call (resume_setup.py:923) -- the identical swallow-pattern, one layer down, in a file this fix does not own. Passing an unreadable candidate through would not close the hole; it would only relocate it to a site"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"resume_setup.py:921-928\", 0]": {
+   "anchors": [
+    "for resume_from in candidates:",
+    "the next candidate."
+   ],
+   "claim": "codex round-2 follow-up: `resume_from_run_ids` (plural, shipped 8815800) carries EVERY candidate _resumable_run_id_candidates() offers (most recent first) in this ONE call, omitted entirely when there are none -- resume_setup.py's own resolve_run() (resume_setup.py:921-928) now does the try-each-candidate-in-order/first-match-wins loop internally and computes input_digest EXACTLY ONCE regardless of candidate count."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"resume_setup.py:923\", 0]": {
+   "anchors": [
+    "if candidate_digest_path.is_file():"
+   ],
+   "claim": "rejected: this function's return value is forwarded verbatim into resume_setup.py's own `resume_from_run_ids`, and that authority's resolve_run() (resume_setup.py:901) decides a MATCH by reading `runs/<id>/input.digest` with its OWN `Path.is_file()` call (resume_setup.py:923) -- the identical swallow-pattern, one layer down, in a file this fix does not own. Passing an unreadable candidate through would not close the hole; it would only relocate it to a site this change cannot reach, while looking closed here. Refusing at the point where the ambiguity is actually discovered is the only"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"select_segments.py:1316-1332\", 0]": {
+   "anchors": [
+    "def load_candidate_segments(manifest_path: Path = MANIFEST_PATH) -> list:",
+    "problem = validate_seg(seg)",
+    "fatal(f\"manifest.json: unsafe segment id: {problem}\")"
+   ],
+   "claim": "# json\"), and _read_review_obj()'s copy of the same. The REAL protection is # cross-file, not \"this script never does it\": select_segments.py's own # load_candidate_segments() fatals on any manifest.json `seg` failing its # validate_seg() (select_segments.py:1316-1332, the regex check at :1251) -- # every `seg` this script ever operates on already came from THAT # validated output (the `segs` list Step 1's own gate returns), never from # an unvalidated source, before this script ever builds a path from one."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2049\", 0]": {
+   "anchors": [
+    "async function runRound(seg, round, isFinal) {"
+   ],
+   "claim": "Mirrors mass-translate-wf.template.js's own runRound(seg, round, isFinal) exactly (template.js:2049): `recordLedgerCall(seg, {status: \"converged\", rounds: round, ...})` (template.js:2077) always writes the NUMERIC loop variable `round`, never a value derived from the \"final\" round LABEL -- and on the mandatory final call that variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`,",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2077\", 0]": {
+   "anchors": [
+    "seg, { status: \"converged\", rounds: round, needsCacheKey: true },"
+   ],
+   "claim": "# round_label is REQUIRED here, not decoration: the caller needs # it to compute the ledger's own `rounds` field (a real integer, # per mass-translate-wf.template.js's own runRound(), # template.js:2077 -- `rounds: round`, the NUMERIC loop # variable, which equals MAXFIX + 1 on the mandatory final call, # template.js:2343). Without this, a segment that converges on # the FINAL round -- an entirely ordinary outcome -- could never # be told apart from one that converged on a numbered round.",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2077\", 1]": {
+   "anchors": [
+    "seg, { status: \"converged\", rounds: round, needsCacheKey: true },"
+   ],
+   "claim": "Mirrors mass-translate-wf.template.js's own runRound(seg, round, isFinal) exactly (template.js:2049): `recordLedgerCall(seg, {status: \"converged\", rounds: round, ...})` (template.js:2077) always writes the NUMERIC loop variable `round`, never a value derived from the \"final\" round LABEL -- and on the mandatory final call that variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`, template.js:2343). So round_label == \"final\" -> max_fix_rounds + 1;",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2343\", 0]": {
+   "anchors": [
+    "const finalRound = await runRound(seg, MAXFIX + 1, true);"
+   ],
+   "claim": "# it to compute the ledger's own `rounds` field (a real integer, # per mass-translate-wf.template.js's own runRound(), # template.js:2077 -- `rounds: round`, the NUMERIC loop # variable, which equals MAXFIX + 1 on the mandatory final call, # template.js:2343). Without this, a segment that converges on # the FINAL round -- an entirely ordinary outcome -- could never # be told apart from one that converged on a numbered round.",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2343\", 1]": {
+   "anchors": [
+    "const finalRound = await runRound(seg, MAXFIX + 1, true);"
+   ],
+   "claim": "\"converged\", rounds: round, ...})` (template.js:2077) always writes the NUMERIC loop variable `round`, never a value derived from the \"final\" round LABEL -- and on the mandatory final call that variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`, template.js:2343). So round_label == \"final\" -> max_fix_rounds + 1; every other round_label is already the decimal round number as a string and converts directly. This REPLACES the former `_round_number()`, which parsed the trailing digit out of a dispatch_token string and returned None for a \"...:rfinal\" token --",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:545\", 0]": {
+   "anchors": [
+    "const SEGS = Array.isArray(args) ? args : JSON.parse(args);"
+   ],
+   "claim": "STANDING TRAP (codex, round 2): `globalThis.args = \"[]\"` makes SEGS ALWAYS EMPTY (`const SEGS = Array.isArray(args) ? args : JSON.parse( args);`, template.js:545) -- and the truncation marker (_TRUNCATE_BEFORE_MARKER) sits well AFTER that line, so this harness DOES execute the template's own top-level SEGS guards (the duplicate-id `seen`-set check at template.js:588-592, and the SEG_ID_RE safety loop at template.js:563-569) on every call. They run, and they look like",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:563-569\", 0]": {
+   "anchors": [
+    "const SEG_ID_RE = /^(?:FRONTBACK:)?[A-Za-z0-9_]+$/;",
+    "throw new Error(`Unsafe segment id"
+   ],
+   "claim": "args);`, template.js:545) -- and the truncation marker (_TRUNCATE_BEFORE_MARKER) sits well AFTER that line, so this harness DOES execute the template's own top-level SEGS guards (the duplicate-id `seen`-set check at template.js:588-592, and the SEG_ID_RE safety loop at template.js:563-569) on every call. They run, and they look like coverage -- but against an always-empty SEGS they are zero-iteration loops: they can never fire, on any input, ever, under this harness.",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:588-592\", 0]": {
+   "anchors": [
+    "const seen = new Set();",
+    "seen.add(s);"
+   ],
+   "claim": "ALWAYS EMPTY (`const SEGS = Array.isArray(args) ? args : JSON.parse( args);`, template.js:545) -- and the truncation marker (_TRUNCATE_BEFORE_MARKER) sits well AFTER that line, so this harness DOES execute the template's own top-level SEGS guards (the duplicate-id `seen`-set check at template.js:588-592, and the SEG_ID_RE safety loop at template.js:563-569) on every call. They run, and they look like coverage -- but against an always-empty SEGS they are zero-iteration loops: they can never fire, on any input, ever, under this harness.",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:588-592\", 1]": {
+   "anchors": [
+    "const seen = new Set();",
+    "seen.add(s);"
+   ],
+   "claim": "# uniqueItems constraint (manifest.schema.json), and # select_segments.py's default (non---only-segs) manifest path # appends every entry with no dedupe of its own -- unlike the # mass-translate-wf.template.js Workflow template, which refuses # a duplicate outright with an explicit `seen` set (template.js: # 588-592). Without this, pool.map() would drive the SAME # segment on two worker threads at once: two codex_job.py # dispatches racing for the same per-segment flock lease, two # ledger writes, two entries in the argv/journal log -- silent",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"cache_key.py:149-156\", 0]": {
+   "anchors": [
+    "canon_senses.py (RFC #215)",
+    "transitive import is otherwise invisible",
+    "source-derivation state"
+   ],
+   "claim": "hazard -- NOT because of the \"no shared lib between self-contained scripts\" convention, which is already false here (canon_validate.py and glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports cache_key.py). The real reason: ledger_update.py is a PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:149-156 records that that tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS INVISIBLE -- which is why canon_senses.py had to be registered explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"cache_key.py:163-167\", 0]": {
+   "anchors": [
+    "false-green",
+    "durable root scaffolded before the change",
+    "against a plugin that no longer behaves"
+   ],
+   "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"claim_record.py:438-439\", 0]": {
+   "anchors": [
+    "cache_key_at_claim` is the key freshly computed"
+   ],
+   "claim": "# unchanged draft the moment its baseline went missing. Reuses # `current_cache_key`, computed once directly above: a second # cache_key.py subprocess call here would be exactly the kind of # second, later-timestamped invocation D4's own \"the key as of # publication\" contract must not tolerate (claim_record.py:438-439). stored_cache_key_for_drift = ledger_record.get(\"cache_key\") if not isinstance(stored_cache_key_for_drift, dict):"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"segment_dispatch_driver.py:1313-1369\", 0]": {
+   "anchors": [
+    "codex round-3: a runtime self-test",
+    "self_test_fd = None",
+    "os.close(self_test_fd)"
+   ],
+   "claim": "The self-test after a successful acquire is segment_dispatch_driver.py:1313-1369's, with ONE deliberate difference: it warns and proceeds, THIS REFUSES. The asymmetry is the point. On an unenforced mount the driver's own acquire is merely not exclusive, whereas this script's standalone path would FALSELY ACQUIRE runs/.driver.lock while a real driver holds it and then admit a live unit -- the unsafe direction,"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_assembled.py\", \"assemble.py:426-427\", 0]": {
+   "anchors": [
+    "see e.g. ledger_merge.py's own CACHE_KEY_FIELDS"
+   ],
+   "claim": "# Restated here, not imported -- house convention for this plugin's # self-contained scripts (see e.g. ledger_merge.py's own CACHE_KEY_FIELDS, # assemble.py:426-427's own comment). The existing three-way census # (tests/stale_carveout.test.py's own # test_three_copy_drift_guard_for_machinery_only_fields) lives in a file a # concurrent #491 change owns, so this copy is pinned by a SEPARATE # four-way drift assertion in tests/validate_assembled_carveout.test.py"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_assembled.py\", \"assemble.py:540-683\", 0]": {
+   "anchors": [
+    "def classify_ever_converged_sentinel",
+    "not a regular file"
+   ],
+   "claim": "Restating the sentinel classifier (classify_ever_converged_sentinel(), assemble.py:540-683) here would still buy nothing beyond what reason 2 above already gives, at the cost of a SIXTH byte-identical copy of a predicate the #409 program already restates five times and enforces byte-for-byte (tests/select_segments.test.py's test_exactly_these_five_scripts_participate_in_the_sentinel_contract)."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_assembled.py\", \"assemble.py:697-715\", 0]": {
+   "anchors": [
+    "def _stale_carveout_refusal_reason",
+    "Four conditions, ALL of which must hold"
+   ],
+   "claim": "Restates only the FIELD-LIST half of assemble.py's own #491 four-condition carve-out predicate (_stale_carveout_refusal_reason, assemble.py:697-715) -- conditions 1-3 of 4:"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_assembled.py\", \"assemble.py:715\", 0]": {
+   "anchors": [
+    "sentinel is not SENTINEL_ABSENT"
+   ],
+   "claim": "DELIBERATE ASYMMETRY -- deliberately OMITS assemble.py's own condition 4 (whether the `.ever_converged.<seg>` sentinel is present, assemble.py:715). #491 R2 (round-2 review) found the ORIGINAL version of this paragraph factually wrong: it justified the omission by claiming assemble.py always re-checks the sentinel downstream, so this gate could never ship anything assembly would refuse. That does not hold in the scope this function actually runs in -- the default"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_extraction.py\", \"assemble.py:1849-1955\", 0]": {
+   "anchors": [
+    "legitimately unresolvable-by-design",
+    "block_ids = seg_entry.get(\"block_ids\") or []",
+    "seg_referenced_ns.update(block_nested_ns)"
+   ],
+   "claim": "# The population is the CITED tiers, not the declared vocabulary: every block # type in H (``manifest.heading_types | {\"HEAD\"}``) that some segment's # ``block_ids`` actually names, not H itself. ``assemble.py:1849-1955`` builds # an outline node only for a block a segment cites -- a type an operator lists # in ``heading_types`` but this book never actually uses would inflate the # outline with a tier that never reaches the assembled book or the published # vault."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_extraction.py\", \"assemble.py:1996\", 0]": {
+   "anchors": [
+    "heading_levels.get(raw_type, 2)"
+   ],
+   "claim": "# Heading-level outline disclosure (issue #233). ``heading_levels`` is optional # and per-tier: a book can cite three heading-shaped block types and declare a # level for none, one, or all of them, and nothing in a schema-valid manifest # distinguishes \"the operator meant level 2 for this tier\" from \"the operator # forgot to declare this tier\" -- assemble.py:1996 resolves an undeclared tier # to level 2 exactly the same way it resolves a tier the operator deliberately # pinned there. That ambiguity is why this can only ever be a disclosure, never # a HARD check: there is no way to tell the two apart from the manifest alone, # and refusing every undeclared tier would refuse legal books that use the"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_extraction.py\", \"assemble.py:1996\", 1]": {
+   "anchors": [
+    "heading_levels.get(raw_type, 2)"
+   ],
+   "claim": "\"\"\"``(level, is_declared)`` for one tier, mirroring ``assemble.py:1996``'s ``heading_levels.get(raw_type, 2)`` exactly."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/verbatim_census.py\", \"bootstrap_names.py:136-150\", 0]": {
+   "anchors": [
+    "def mask_sentinels",
+    "never a single collapsing space"
+   ],
+   "claim": "\"\"\"Replace each KNOWN placeholder span with an equal-length run of spaces. Equal-length, never a collapsing single space, for bootstrap_names.py:136-150's reason -- and because deletion would join `אב⟦FNREF_1⟧גד` into the invented run `אבגד`.\"\"\" def _sub(m):"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/verbatim_census.py\", \"bootstrap_names.py:222-242\", 0]": {
+   "anchors": [
+    "unassigned (Cn) codepoint",
+    "compute a byte-identical ``TOKEN_RE``",
+    "kept[i], kept[j]"
+   ],
+   "claim": "# Connectors are admitted only BETWEEN two Hebrew base letters -- which is # what keeps ASCII '\"' from fusing ordinary quoted Latin prose, the same # construction bootstrap_names.py:222-242 uses for TOKEN_RE. Their FAMILY is # tracked because fold_match_key() splits on all of them and joins with a # space, so it erases which family was used: `אב־גד` and `אב׳גד` both fold to # `אב גד`. A punctuation-family change is a real difference, so the family # signature is compared alongside the folded key."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/verbatim_census.py\", \"final_audit.py:696\", 0]": {
+   "anchors": [
+    "0x0591 <= ord(c) <= 0x05C7"
+   ],
+   "claim": "# Exactly final_audit._fold_source_marks()'s own range (final_audit.py:696). # A mark OUTSIDE it -- an Arabic fatha, a Devanagari matra -- deliberately # ENDS a run instead of joining it, so a mixed-script corruption stays visible # as two short runs rather than being folded away as a mark difference."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/verbatim_census.py\", \"occurrence_targets.py:199-247\", 0]": {
+   "anchors": [
+    "from bootstrap_names import extract_candidate_spans",
+    "reuses (never reimplements)",
+    "plugin install is not corrupted."
+   ],
+   "claim": "# Sibling imports, never reimplementations (occurrence_targets.py:199-247's own # pattern). `segpack.py` can `sys.exit(<str>)` at import time when ITS sibling # import fails, which would surface here as an uncaught SystemExit with status # 1 -- a data/environment failure wearing the one status this script promises # never to use. SystemExit is caught alongside ImportError for that reason."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/verbatim_census.py\", \"segpack.py:530-534\", 0]": {
+   "anchors": [
+    "if \"plain_text\" in b:",
+    "has neither source_html nor plain_text"
+   ],
+   "claim": "- a scanned unit whose segpack block carries no `plain_text` (schema-valid, `segpack.py:530-534`) -- the frozen contract names that field, and `validate_draft._block_source_text()`'s fallback to raw `source_html` would compare Hebrew against markup;"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/verbatim_census.py\", \"segpack.py:942-943\", 0]": {
+   "anchors": [
+    "canon_names_set = set(canon_names_val)"
+   ],
+   "claim": "exiting 1 -- a data-dependent failure status this script promises not to have. `validate_segpack()` is additionally wrapped because it is not total over JSON values: a `canon_names` member that is itself a list raises `TypeError` from its own set construction (reproduced against `segpack.py:942-943` at bf85312; filed separately, not repaired here).\"\"\" err = validate_seg(seg) if err:"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/verbatim_census.py\", \"validate_conservation.py:32-36\", 0]": {
+   "anchors": [
+    "content-conservation at WORD-MULTISET",
+    "three artifacts `wrapper-conservation` mode needs"
+   ],
+   "claim": "`validate_draft.py` validates a draft against its canonical segpack, but the comparison is over KEY SETS plus placeholder/anchor rules (its own six checks, `validate_draft.py:30-45`). No text of any reproduced source span is compared to `plain_text`. `validate_conservation.py` is a different, opt-in gate and is word-multiset by design (`validate_conservation.py:32-36`). So a quoted Hebrew phrase inside an English draft can lose a letter and every gate stays green."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/verbatim_census.py\", \"validate_draft.py:30-45\", 0]": {
+   "anchors": [
+    "Block/footnote/verse KEY SETS are exact 1:1",
+    "Exit codes (a CONTRACT since #398"
+   ],
+   "claim": "`validate_draft.py` validates a draft against its canonical segpack, but the comparison is over KEY SETS plus placeholder/anchor rules (its own six checks, `validate_draft.py:30-45`). No text of any reproduced source span is compared to `plain_text`. `validate_conservation.py` is a different, opt-in gate and is word-multiset by design (`validate_conservation.py:32-36`). So a quoted Hebrew phrase inside an English draft can lose a letter and every gate stays green."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js\", \"codex_job.py:215\", 0]": {
+   "anchors": [
+    "hard ceiling for ANY single subprocess"
+   ],
+   "claim": "// NOT PER_CALL_CAP. #348 suggested making the declared-but-unused // PER_CALL_CAP = 90 load-bearing here; deliberately declined. PER_CALL_CAP // mirrors codex_job.py:215's ceiling for THE DRIVER'S OWN SUBPROCESSES (\"hard // ceiling for ANY single subprocess\") -- a different quantity from this // template's per-agent-call poll bound, and conflating them would make one // constant answer two unrelated questions. WAIT_CHUNK_SEC is the new // load-bearing chunk bound; do not \"restore\" the conflation."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"SKILL.md:482\", 0]": {
+   "anchors": [
+    "never re-copied, never regenerated"
+   ],
+   "claim": "the note covers (its `aliases` minus the display name), or a reader searching a variant spelling finds nothing; and emit no per-row count unless it is re-derived from the artifact itself, an index page being where a fabricated number is least likely to be checked. Step 0a copies `PLAN.template.md` once and never refreshes it (`SKILL.md:482`), so a project scaffolded before the retirement may still name `output.index.enabled` in its hand-edited `PLAN.md` intake answer; drop that phrase by hand — there is no automatic migration."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"assemble.py:2592\", 0]": {
+   "anchors": [
+    "assert_project_complete(manifest, converged, refusals)"
+   ],
+   "claim": "This closes the previous gap where a project with unconverged segments silently exited `0` on the default `segment_drafts_and_audit` delivery path, giving it no deterministic delivery-refusal gate to match the engine-loop HARD rule already enforced on the `assembled_book` path (`assemble.py:2592`'s `assert_project_complete`). `warnings` and the frontback coverage report remain purely informational."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"person_registry.py:1994-2004\", 0]": {
+   "anchors": [
+    "for row in verdicts.get(\"refusals\") or []:",
+    "\"refused_by\": \"canon_review_queue\" if prep_unit.get(\"refusal_only\") else \"pass_a\","
+   ],
+   "claim": "**One consumer DOES see a dismissal**, and it is disclosed rather than argued away: `person_registry.py` turns every DICT-shaped `review_queue[]` row into a refusal-only unit (`person_registry.py:899-933`, `refusal_only: True`) and emits it in `refusals[]` (`person_registry.py:1994-2004`, `refused_by: \"canon_review_queue\"`); it never reads `corrections[]`. So a dismissed name stops appearing as a `canon_review_queue` refusal in a later W9r registry run — that is the intended meaning of the decision, not a side effect to suppress: the operator said this candidate is not canon-worthy, and the refusal list is"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"person_registry.py:899-933\", 0]": {
+   "anchors": [
+    "review_queue rows, coalesced by raw source_form",
+    "\"refusal_only\": True,"
+   ],
+   "claim": "**One consumer DOES see a dismissal**, and it is disclosed rather than argued away: `person_registry.py` turns every DICT-shaped `review_queue[]` row into a refusal-only unit (`person_registry.py:899-933`, `refusal_only: True`) and emits it in `refusals[]` (`person_registry.py:1994-2004`, `refused_by: \"canon_review_queue\"`); it never reads `corrections[]`. So a dismissed name stops appearing as a `canon_review_queue` refusal in a later W9r registry run — that is the"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"person_registry.py:903-921\", 0]": {
+   "anchors": [
+    "queued = {}",
+    "for source_form in sorted(queued):",
+    "\" | \".join(notes),"
+   ],
+   "claim": "`_merge_batch` appends whenever the whole object differs, so one form queued by two batches for two different reasons is two rows (`person_registry.py:903-921` coalesces them for display), and matching on the whole value dismisses one reason without silently dismissing the other."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"person_registry.py:905-906\", 0]": {
+   "anchors": [
+    "if not isinstance(row, dict):"
+   ],
+   "claim": "`canon_review_queue` refusal in a later W9r registry run — that is the intended meaning of the decision, not a side effect to suppress: the operator said this candidate is not canon-worthy, and the refusal list is where \"still undecided\" is reported. A bare-string row is unaffected either way: `person_registry.py:905-906` skips any row that is not a `dict`, so it was never surfaced in `refusals[]` before a dismissal either — dismissing it changes `review_queue[]` and the exclusion set, never W9r's refusal list."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/language-pair-parameterization.md\", \"bootstrap_names.py:474\", 0]": {
+   "anchors": [
+    "ch in _ASCII_UPPER or unicodedata.category(ch) == \"Lu\""
+   ],
+   "claim": "It exists for caseless/multiword surfacing where the ordinary capitalization-run path finds nothing: `is_upper_initial` (`bootstrap_names.py:474`) gates on ASCII or Unicode category `Lu`, and Hebrew letters are category `Lo` — invisible to that gate — so without a `name_inventory` a Hebrew name surfaces zero candidates. Matching a `name_inventory` form never crosses an existing sentence-terminator boundary (the same boundary the particle-run algorithm already respects),"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/source-format-adapters/custom.md\", \"manifest.schema.json:18\", 0]": {
+   "anchors": [
+    "Deliberately not a fixed enum"
+   ],
+   "claim": "note's frontmatter `title` / filename fall back to the raw seg id instead of the heading text (`assembly-and-output.md`'s algorithm section spells out the fallback). This is a silent misclassification, not a validation failure — schema validation and the self-check suite both pass on it, since `type` is intentionally open-ended (`manifest.schema.json:18`). Declaring `heading_types` is the only way to opt a custom tag in."
+  },
+  "[\"plugins/literary-translator/tests/assemble_live_inputs.test.py\", \"cache_key.py:644\", 0]": {
+   "anchors": [
+    "the plugin_bundle_hash marker file"
+   ],
+   "claim": "That case rewrites `runs/.plugin_bundle_hash`, the marker Step 0a writes and `cache_key.py:644` reads back, and asserts the recomputed field really moved before asserting assembly survived it: editing a bundle script's bytes would leave the field unchanged and make the test vacuous;"
+  },
+  "[\"plugins/literary-translator/tests/authoring_hygiene_drift.test.py\", \"engine-loop.md:11\", 0]": {
+   "anchors": [
+    "historiettes-mass-translate-wf.reference.js"
+   ],
+   "claim": "# differs every time). This is a SECOND, independent guard over the docs # corpus, keyed not on a fixed phrase but on the co-occurrence -- within a # single paragraph -- of a `historiettes-t3` mention and a near-adjacent # read/directly imperative. Plain provenance attribution # (`engine-loop.md:11`'s bare parenthetical) stays legitimate. # --------------------------------------------------------------------------"
+  },
+  "[\"plugins/literary-translator/tests/backfill_ever_converged.test.py\", \"backfill_ever_converged.py:971-1000\", 0]": {
+   "anchors": [
+    "def sync_segments_dir(dir_fd: int):",
+    "red-then-laundered-green"
+   ],
+   "claim": "FileExistsError on a retry, classifies the entry SENTINEL_PRESENT, and the already-present branch must NOT return True having synced nothing -- that would record convergence over a sentinel whose directory entry was never made durable, laundering the first call's failed sync into a green result. Exactly the shape backfill_ever_converged.py:971-1000 already documents and tests at :1644-1709 for its own retry path."
+  },
+  "[\"plugins/literary-translator/tests/backfill_ever_converged.test.py\", \"claim_record.py:565-577\", 0]": {
+   "anchors": [
+    "A FAILURE IS A FAILURE",
+    "token-without-record"
+   ],
+   "claim": "deliberate contract decision the plan states: unlike write_fragment_atomically()'s best-effort directory sync (`except OSError: pass`), a segments/ directory-fsync failure here must refuse convergence rather than report success over a directory entry that was never made durable -- claim_record.py:565-577 argues the split explicitly, for exactly this asymmetry (a crash can lose the entry while the fragment it backs survives)."
+  },
+  "[\"plugins/literary-translator/tests/backlink_integrity_e2e.test.py\", \"canon_senses.test.py:7-10\", 0]": {
+   "anchors": [
+    "synthetic inline",
+    "never the absent SSK data"
+   ],
+   "claim": "\"\"\"tests/backlink_integrity_e2e.test.py -- the binding, in-tree acceptance test for the appendix backlink-integrity feature (RFC lt-appendix-backlink- integrity, 1.8.0). SSK vol.2's real data is not in-tree (see `canon_senses.test.py:7-10`'s own precedent), so THIS file's fixture chain vs. the committed `fixtures/backlink_e2e/expected_vault/` is the binding proof the whole D1-D4 chain actually works end to end, not just per-module unit tests."
+  },
+  "[\"plugins/literary-translator/tests/backlink_integrity_e2e.test.py\", \"segpack.schema.json:132\", 0]": {
+   "anchors": [
+    "\"canon_map\": {"
+   ],
+   "claim": "owns, not an importable module; `tests/verse_footnote_corpus.py`'s own module docstring documents this same convention) from `tests/assemble.test.py`'s `write_manifest`/`write_segpack`/`write_draft`/ `write_ledger`, extended here with a minimal, schema-valid `canon_map: {}` on every segpack (`segpack.schema.json:132` requires the key; assemble.py itself never reads it, so an empty dict is harmless-but-schema-complete -- see `test_fixture_static_files_and_staged_manifest_are_schema_valid` below, which validates the staged segpacks against the real schema)."
+  },
+  "[\"plugins/literary-translator/tests/backlink_integrity_e2e.test.py\", \"segpack.schema.json:132\", 1]": {
+   "anchors": [
+    "\"canon_map\": {"
+   ],
+   "claim": "\"verses\": verses or [], \"names\": [], \"canon_names\": [], \"new_names\": [], # segpack.schema.json:132 requires canon_map (always present, # possibly {}) -- assemble.py never reads it, so an empty dict is # harmless-but-schema-complete (codex R4 minor 2)."
+  },
+  "[\"plugins/literary-translator/tests/canon_adjudication_audit.test.py\", \"scripts/canon_adjudication_audit.py:786-794\", 0]": {
+   "anchors": [
+    "def _proper_name_records",
+    "entry.get(\"basis\") != \"not_a_name\""
+   ],
+   "claim": "# CHARACTERIZATION -- red-before-green is STRUCTURALLY IMPOSSIBLE for both # tests below. The scope filter (see this module's own docstring, \"Scope\", # and `_proper_name_records` at scripts/canon_adjudication_audit.py:786-794) is # a DENYLIST -- `is_proper_name is True and basis != \"not_a_name\"` -- with # zero hardcoded enum literals besides \"not_a_name\" itself. A # basis:\"sense_translated\" entry was therefore ALREADY included in Cats 1-3 # before #138 touched a single schema/prompt surface (there is no code path"
+  },
+  "[\"plugins/literary-translator/tests/canon_dismiss_queued.test.py\", \"person_registry.py:899-910\", 0]": {
+   "anchors": [
+    "coalesced by raw source_form",
+    "queued.setdefault(form"
+   ],
+   "claim": "\"\"\"`_merge_batch` appends whenever the whole object differs, so one form queued by two batches for two different reasons is TWO rows, not one -- ordinary, not a hand-edit artifact (person_registry.py:899-910 documents and coalesces exactly this). Matching on the whole value means dismissing one reason must not silently dismiss the other; two decisions take two documents.\"\"\" root = make_project(tmp_path)"
+  },
+  "[\"plugins/literary-translator/tests/canon_enum_drift.test.py\", \"obsidian.md:53\", 0]": {
+   "anchors": [
+    "basis: established | transliterated"
+   ],
+   "claim": "def _parse_obsidian_frontmatter_enum(): \"\"\"obsidian.md:53 -- the entity-note frontmatter's `basis:` pipe-enum line inside the fenced YAML example block.\"\"\" text = OBSIDIAN_SPEC.read_text(encoding=\"utf-8\") m = re.search(r\"^basis:\\s*([a-z_ |]+)$\", text, re.MULTILINE) assert m, \"no 'basis: a | b | c' frontmatter line found in obsidian.md\""
+  },
+  "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:3970-4017\", 0]": {
+   "anchors": [
+    "elif args.restamp_derivation:",
+    "elif args.batch is not None:"
+   ],
+   "claim": "# `resolve_cache_key_script`/`_stamp_generation_hash` are shared code, but # each of these three threads its OWN `plugin_root_str` parameter through # from `main()`'s dispatch (canon_validate.py:3970-4017) to its own # `_stamp_write_verify` call -- a regression in any one of those three # threading sites would not be caught by the `--init` test above."
+  },
+  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"cache_key.py:202-246\", 0]": {
+   "anchors": [
+    "PLUGIN_BUNDLE_MEMBERS = (",
+    "\"select_segments.py\",",
+    "glossary-pass-wf.template.js"
+   ],
+   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-246`, # `cache_key.py:253-274` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
+  },
+  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"cache_key.py:253-274\", 0]": {
+   "anchors": [
+    "CACHE_KEY_FIELD_ORDER = (",
+    "GLOBAL_CACHE_KEY_FIELDS = frozenset(CACHE_KEY_FIELD_ORDER)"
+   ],
+   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-246`, # `cache_key.py:253-274` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
+  },
+  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"resume_setup.py:837-856\", 0]": {
+   "anchors": [
+    "version = {",
+    "DIGEST_SUBST_FIELDS, never SUBST_FIELDS (#735)",
+    "return _sha256_hex(_canonical_json_bytes(digest_input))"
+   ],
+   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-246`, # `cache_key.py:253-274` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
+  },
+  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:1741-1778\", 0]": {
+   "anchors": [
+    "is forwarded HERE, and ONLY here",
+    "cmd += [\"--driver-lease-held\"]"
+   ],
+   "claim": "--from-stalled additionally drives run()'s own runs/.driver.lock acquisition and its --driver-lease-held forwarding to the child selector (segment_dispatch_driver.py:1741-1778) -- both real here, not stubbed, since this test calls run() directly rather than through a subprocess and nothing about that machinery is mocked.\"\"\" seg = \"seg21\" root = wiring_make_driver_root_from_stalled(tmp_path, seg)"
+  },
+  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7517\", 0]": {
+   "anchors": [
+    "session_id=session_id, claims=claims"
+   ],
+   "claim": "# =========================================================================== # C -- the WIRING itself: does segment_dispatch_driver.py's own run() # (segment_dispatch_driver.py:7517's `claims=claims`) actually carry a REAL # select_segments.py admission into ctx.claims, or does # claim_capability_refusal_for_translate() only ever get exercised against a # context THIS SUITE injected `claims=` into by hand? Every test in Sections # A/B builds DispatchContext directly and passes `claims=` itself -- deleting"
+  },
+  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7517\", 1]": {
+   "anchors": [
+    "session_id=session_id, claims=claims"
+   ],
+   "claim": "construct DispatchContext directly and inject `claims=` themselves, so they prove `claim_capability_refusal_for_translate()` works but prove NOTHING about whether run() actually populates `ctx.claims` from the selector's own output -- deleting `claims=claims` from the real construction at segment_dispatch_driver.py:7517 leaves all eleven of them green, because none of them ever go through run() at all."
+  },
+  "[\"plugins/literary-translator/tests/claim_prompt_contract.test.py\", \"mass-translate-wf.template.js:1628\", 0]": {
+   "anchors": [
+    "byte for byte into your rewritten draft, unchanged; never invent, drop, or recompute it."
+   ],
+   "claim": "\"\"\"D9's actual protection on the fallback template path (PLAN.md D9, mass-translate-wf.template.js:1628): the claim survives a fix round ONLY because fixPrompt()'s own rendered text instructs the fixer to copy the draft's existing dispatch_token byte for byte, unchanged. This is exercised against the ACTUAL rendered fixPrompt() output produced by the real, currently-shipped template running under Node -- never a"
+  },
+  "[\"plugins/literary-translator/tests/claim_prompt_contract.test.py\", \"mass-translate-wf.template.js:2368\", 0]": {
+   "anchors": [
+    "recordLedgerCall(seg, { status: \"in_progress\" }, \"ledger:in_progress:\" + seg);"
+   ],
+   "claim": "\"\"\"PLAN.md D8's residual, pinned so it stays visible in the suite rather than only in prose: `recordLedgerCall(seg, {status: \"in_progress\"})` (mass-translate-wf.template.js:2368) completes BEFORE `agent(translateDrivePrompt(seg))` (:2371) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of this file's scope) fires strictly AFTER the ledger has already been full-replaced to a two-key in_progress row. This is why that chokepoint"
+  },
+  "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5000\", 0]": {
+   "anchors": [
+    "run_id_problem = validate_run_id(run_id)"
+   ],
+   "claim": "inversion crosses: the RUN_ID resume_setup.py just minted (a real value, from a real subprocess run, never a hand-typed guess at the format) must be accepted by select_segments.py's OWN `validate_run_id()` -- the exact function D1a's `select_segments.py --run-id` flag consults (select_segments.py:5000, `run_id_problem = validate_run_id(run_id)`)."
+  },
+  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1541\", 0]": {
+   "anchors": [
+    "return {\"category\": \"recoverable\", \"status\": status}"
+   ],
+   "claim": "# It is not, and it does not. `status: in_progress` classifies as `recoverable` # (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1451), and D3 (:4276) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces # --only-segs as a side effect of its population being human_escalation;"
+  },
+  "[\"plugins/literary-translator/tests/codex_job_driver.test.py\", \"SKILL.md:254-256\", 0]": {
+   "anchors": [
+    "Everything else under `durable_root`",
+    "is ignored for this check",
+    "explicitly supported config"
+   ],
+   "claim": "RED: nest durable_root inside a real git repo (the SUPPORTED durable_root==project_root configuration, SKILL.md:254-256) and show that `--cwd durable_root` (the OLD design) resolves to the OUTER repo toplevel -- i.e. codex would be granted workspace-write over the WHOLE repo (scripts/, segments/, the lock, the joblog), not just durable_root."
+  },
+  "[\"plugins/literary-translator/tests/codex_job_driver.test.py\", \"mass-translate-wf.template.js:1313\", 0]": {
+   "anchors": [
+    "const expectToken = RUN_ID + \":\" + seg + \":r\" + roundLabel;"
+   ],
+   "claim": "BOTH legitimate token shapes are covered. The run component is everything before the FIRST colon, so a review token has one colon more than the check needs and must still clear it: were the check to demand exactly one colon, every review dispatch the shipped template makes (mass-translate-wf.template.js:1313 builds RUN_ID + \":\" + seg + \":r\" + roundLabel, segment_dispatch_driver.py's review_dispatch_token() the same shape) would be refused at the chokepoint, which no test asserting only the translate form would notice.\"\"\" argv = _argv(tmp_path, run_id=\"RUN\", expect_token=token,"
+  },
+  "[\"plugins/literary-translator/tests/extractor_contract_drift.test.py\", \"schema.json:384-400\", 0]": {
+   "anchors": [
+    "\"const\": \"custom\"",
+    "\"custom\": { \"type\": \"object\" }"
+   ],
+   "claim": "null`` already satisfy profile.schema.json's custom-format `allOf` branch (schema.json:384-400) with no further changes needed.\"\"\" durable_root = tmp_path / \"durable\" durable_root.mkdir() source_file = tmp_path / \"source.epub\" source_file.write_bytes(b\"fake epub bytes for the fixture\")",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json"
+  },
+  "[\"plugins/literary-translator/tests/extractor_terminators_drift.test.py\", \"final_audit.py:675-698\", 0]": {
+   "anchors": [
+    "def _fold_source_marks(s):",
+    "return unicodedata.normalize(\"NFC\", stripped)"
+   ],
+   "claim": "# --------------------------------------------------------------------------- # #238/#241 (A-C4) -- THREE independent copies of the same Hebrew mark/ # connector match-key fold exist this train: bootstrap_names.py, # language_smoke_report.py, and the pre-existing final_audit.py # (_fold_source_marks, final_audit.py:675-698). No shared import between any of # them (final_audit.py is frozen; language_smoke_report.py runs as an # isolated subprocess) -- this is the minimum drift guard asserting all # three still agree."
+  },
+  "[\"plugins/literary-translator/tests/fetch_citation.test.py\", \"glossary_batch_plan.py:146\", 0]": {
+   "anchors": [
+    "from canon_senses import CanonSensesLoadError, is_split, load_senses"
+   ],
+   "claim": "\"\"\"DEFAULT_BATCH_SIZE, read from glossary_batch_plan.py's own AST -- no import. glossary_batch_plan.py:146 does a bare `from canon_senses import CanonSensesLoadError, is_split, load_senses`, so an actual import would need sys.path surgery that would persist for the whole test session. Mirrors _emitted_refusal_reasons's own idiom above.\"\"\""
+  },
+  "[\"plugins/literary-translator/tests/final_audit.test.py\", \"validate_draft.py:625\", 0]": {
+   "anchors": [
+    "parent_block_claims.setdefault(v[\"parent_block\"]"
+   ],
+   "claim": "# The SEGPACK side of the same class is deliberately NOT tested, and that is a # measurement rather than an omission: a segpack whose `footnotes` is a mapping, # or whose verse `parent_block` is unhashable, never reaches any WARN check -- # hard check 1 calls `validate_draft.validate()` first and dies on the identical # input at validate_draft.py:625 and :622. That is pre-existing and out of # scope. The `isinstance` guards in `term_carriers()` are kept anyway; they cost # three calls, and \"a lane that never raises\" should not depend on which OTHER # check happens to run before it."
+  },
+  "[\"plugins/literary-translator/tests/fixtures/backlink_e2e/case_spec.py\", \"segpack.schema.json:132\", 0]": {
+   "anchors": [
+    "\"canon_map\": {"
+   ],
+   "claim": "# --------------------------------------------------------------------------- # Per-segment segpacks (local order_index 0-based; the test file's # write_segpack() helper extends this with a minimal, schema-valid # canon_map: {} -- segpack.schema.json:132 requires the key, harmless-empty # is schema-valid since assemble.py never reads it)."
+  },
+  "[\"plugins/literary-translator/tests/frozen_input_path_state_parity.test.py\", \"tests/occ_index.test.py:1-45\", 0]": {
+   "anchors": [
+    "Tests for scripts/occ_index.py",
+    "def _load_module(name: str, path: Path, extra_sys_path: Path):",
+    "return module"
+   ],
+   "claim": "Standalone-script loader mirrors tests/occ_index.test.py:1-45 / tests/suspicion_scan.test.py's own ``_load_module`` (suspicion_scan.py does top-level ``from X import ...`` for its sibling scripts, so SCRIPTS_DIR must be on sys.path around its load; canon_senses.py has no sibling imports and needs no such scaffolding, mirroring tests/canon_senses.test.py's own"
+  },
+  "[\"plugins/literary-translator/tests/glossary_batch_plan.test.py\", \"glossary_batch_plan.py:532-536\", 0]": {
+   "anchors": [
+    "Branch order: `entry_keys` is checked FIRST",
+    "the sanctioned dismiss -> --retry -> accepted-merge"
+   ],
+   "claim": "def test_retry_diagnostic_prefers_entries_note_over_dismissal_note(tmp_path): \"\"\"#653 bot review P2 (PR #703, glossary_batch_plan.py:532-536): a name can legitimately be BOTH a resolved entries{} key AND carry a `dismiss` document in corrections[] -- the sanctioned dismiss -> --retry -> accepted-merge sequence produces exactly that overlap. If it is later absent from name_candidates.json (an ordinary source re-extraction) and"
+  },
+  "[\"plugins/literary-translator/tests/glossary_batch_plan_split_exclusion.test.py\", \"glossary-pass-wf.template.js:1075\", 0]": {
+   "anchors": [
+    "reading its one line of JSON output: \" + checkBatchCmd"
+   ],
+   "claim": "# own self-anchored default path. Closes the gap the two sections above # cannot: a consumer coded as `if args.senses_path is None: senses = EMPTY` # passes every explicit-path test above while never loading the real # default -- exactly how the Workflow invokes this script in production # (glossary-pass-wf.template.js:1075/1232/1258 call --check-batch with no # override). Each test uses `make_durable_root` so the default sidecar is # written to a private root, never the shared plugin tree."
+  },
+  "[\"plugins/literary-translator/tests/glossary_batch_plan_split_exclusion.test.py\", \"glossary_batch_plan.py:707\", 0]": {
+   "anchors": [
+    "canon_explicit = args.canon is not None"
+   ],
+   "claim": "# --------------------------------------------------------------------------- # --senses-path path-state policy (contract §10 / §11b, mirrors --canon's # explicit-vs-default split at glossary_batch_plan.py:707) # ---------------------------------------------------------------------------"
+  },
+  "[\"plugins/literary-translator/tests/glossary_batch_plan_split_exclusion.test.py\", \"glossary_batch_plan.py:707\", 1]": {
+   "anchors": [
+    "canon_explicit = args.canon is not None"
+   ],
+   "claim": "\"\"\"(§10.2) An explicit --senses-path that does not exist is a caller error -> BLOCK (allow_absent=False), proving `senses_explicit = args.senses_path is not None` mirrors `canon_explicit` at glossary_batch_plan.py:707 exactly. A silently-empty result here would let a typo'd --senses-path bypass the exclusion entirely.\"\"\" nc, canon = write_inputs(tmp_path, [cand(\"Alice\", freq=20)]) proc = run(nc, canon, \"--senses-path\", str(tmp_path / \"nope-canon-senses.json\"))"
+  },
+  "[\"plugins/literary-translator/tests/heading_level_outline.test.py\", \"assemble.py:1996\", 0]": {
+   "anchors": [
+    "heading_levels.get(raw_type, 2)"
+   ],
+   "claim": "Interpretation note (see the #233 CONTRACT's own \"Exact output\" section): the contract's illustrative NOTE line shows ``\"PEREK\"=3 (default)``, but its Definitions section is explicit that a defaulted tier is ALWAYS level 2 (mirroring ``assemble.py:1996``'s ``heading_levels.get(raw_type, 2)``). That example line is read here as illustrative of the FORMAT only; the fixtures below use levels for which \"declared\" and the ever-present default (2) do not collide, and expected strings are derived from that fixed default, never from the example's own numbers."
+  },
+  "[\"plugins/literary-translator/tests/occurrence_targets.test.py\", \"validate_backlinks.py:1317-1325\", 0]": {
+   "anchors": [
+    "aggregate = occurrence_targets.build(",
+    "occurrence_targets.build() failed"
+   ],
+   "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4044-4050\", 0]": {
+   "anchors": [
+    "Excluded from every bundle hash",
+    "nor of `orchestration_bundle_hash`",
+    "final_audit.py` is not one of",
+    "never flips a cache key or the resume-integrity digest via either bundle"
+   ],
+   "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:512\", 0]": {
+   "anchors": [
+    "ORCHESTRATION_BUNDLE_MEMBERS` — non-gating for convergence, never part of the"
+   ],
+   "claim": "STALE_PHRASES = [ (\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"),"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:514\", 0]": {
+   "anchors": [
+    "digest, and also surfaced in W8's reporting"
+   ],
+   "claim": "(\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"),"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"cache_key.py:129\", 0]": {
+   "anchors": [
+    "orchestration_bundle_hash's bucket, which is non-gating for convergence but"
+   ],
+   "claim": "STALE_PHRASES = [ (\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"),"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"draft_ready.py:12\", 0]": {
+   "anchors": [
+    "covered instead by `orchestration_bundle_hash` -- non-gating for convergence"
+   ],
+   "claim": "STALE_PHRASES = [ (\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"),"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"orchestration-and-batching.md:215\", 0]": {
+   "anchors": [
+    "diagnostic-only, unlike their sibling readiness/merge scripts below"
+   ],
+   "claim": "def test_orchestration_batching_already_accurate_review_resume_sentence_not_flagged(): \"\"\"orchestration-and-batching.md:215's `review_ready.py`/ `resume_setup.py` sentence (\"gating members, not diagnostic-only\") is already accurate and must survive untouched -- distinct from the line directly below it (158) which WAS the stale, flat orchestration_bundle_hash characterization this file's fix targets.\"\"\""
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"orchestration-and-batching.md:220\", 0]": {
+   "anchors": [
+    "orchestration_bundle_hash` is non-gating for convergence — never part of"
+   ],
+   "claim": "(\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"), (\"schema_literal_drift.test.py:31-32\", SCHEMA_LITERAL_DRIFT_TEST, \"never gated against\"), (\"select_segments.py:12\", SELECT_SEGMENTS_SCRIPT, \"purely diagnostic/orchestration\"), ]"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"references/ledger-and-resumability.md:198\", 0]": {
+   "anchors": [
+    "diagnostic-only, never part of any segment's cache key"
+   ],
+   "claim": "def test_ledger_already_accurate_ledger_merge_aside_not_flagged(): \"\"\"references/ledger-and-resumability.md:198's `ledger_merge.py` aside (\"diagnostic-only, never part of any segment's cache key\") is already accurate -- qualified in the very next sentence by the resume-integrity digest note -- and must survive untouched. None of the STALE_PHRASES keys above match this exact clause, so a correct fix never trips it.\"\"\""
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"resume_setup.py:307-309\", 0]": {
+   "anchors": [
+    "this script's own logic directly determines whether a run",
+    "squarely correctness-gating territory, not diagnostic-only"
+   ],
+   "claim": "def test_resume_setup_py_own_docstring_never_carried_the_stale_phrasing(): \"\"\"resume_setup.py:307-309 already correctly self-describes as correctness-gating, not diagnostic-only -- it was never one of the nine #186 sites, so none of the STALE_PHRASES keys should ever match it (a sanity guard, not evidence the fix touched this file).\"\"\" text = RESUME_SETUP_SCRIPT.read_text(encoding=\"utf-8\")"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"review_ready.py:74\", 0]": {
+   "anchors": [
+    "orchestration_bundle_hash's bucket -- non-gating for convergence but gating"
+   ],
+   "claim": "STALE_PHRASES = [ (\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"),"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"schema_literal_drift.test.py:31-32\", 0]": {
+   "anchors": [
+    "non-gating for convergence but",
+    "gating for resume via the resume-integrity digest"
+   ],
+   "claim": "(\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"), (\"schema_literal_drift.test.py:31-32\", SCHEMA_LITERAL_DRIFT_TEST, \"never gated against\"), (\"select_segments.py:12\", SELECT_SEGMENTS_SCRIPT, \"purely diagnostic/orchestration\"), ]"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"schema_literal_drift.test.py:556-558\", 0]": {
+   "anchors": [
+    "orchestration_bundle_hash's membership is owned by",
+    "doc against THAT, exactly as the two tests above check their bullets"
+   ],
+   "claim": "(\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"), (\"schema_literal_drift.test.py:31-32\", SCHEMA_LITERAL_DRIFT_TEST, \"never gated against\"), (\"select_segments.py:12\", SELECT_SEGMENTS_SCRIPT, \"purely diagnostic/orchestration\"), ]"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"select_segments.py:12\", 0]": {
+   "anchors": [
+    "gating for BOTH convergence and resume"
+   ],
+   "claim": "(\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"), (\"schema_literal_drift.test.py:31-32\", SCHEMA_LITERAL_DRIFT_TEST, \"never gated against\"), (\"select_segments.py:12\", SELECT_SEGMENTS_SCRIPT, \"purely diagnostic/orchestration\"), ]"
+  },
+  "[\"plugins/literary-translator/tests/required_fill_gates.test.py\", \"tests/style_contract_markers.test.py:135-142\", 0]": {
+   "anchors": [
+    "\"### D. Formatting\"",
+    "\"### E. Techniques and hard cases\""
+   ],
+   "claim": "# The two headings that bound section D. `### E.` is section D's terminator, # not a section under test -- both strings are already closed-list-pinned by # tests/style_contract_markers.test.py:135-142. SECTION_D_HEADING = \"### D. Formatting\" SECTION_E_HEADING = \"### E. Techniques and hard cases\""
+  },
+  "[\"plugins/literary-translator/tests/review_ready.test.py\", \"review_ready.py:319-349\", 0]": {
+   "anchors": [
+    "def main():",
+    "review file absent/empty ({rpath})",
+    "_load_review_schema(dirs[\"schemas_dir\"])"
+   ],
+   "claim": "CORRECTED (this docstring previously claimed the reason was \"no schemas/ dir to even load review.schema.json from\" -- FALSE, and it was already false before this fix, not a regression this branch caused): review_ready.py's own main() (review_ready.py:319-349) checks the review FILE's presence/non-emptiness at line 332, strictly BEFORE it ever reaches `_load_review_schema()` at line 339 -- so the orphan location's missing segments/{seg}.review.json is what's actually reached first, never the missing schemas/ dir. Verified by running the"
+  },
+  "[\"plugins/literary-translator/tests/scaffold_setup.test.py\", \"cache_key.py:638-644\", 0]": {
+   "anchors": [
+    "def compute_plugin_bundle_hash(profile: dict, durable_root: Path) -> str:",
+    "the plugin_bundle_hash marker file"
+   ],
+   "claim": "THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:638-644) READS ``${durable_root}/runs/.plugin_bundle_hash`` and ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before #194 SKILL.md's Step 0a only PROSE-described \"computes/writes\" them: no"
+  },
+  "[\"plugins/literary-translator/tests/scaffold_setup.test.py\", \"resume_setup.py:837-843\", 0]": {
+   "anchors": [
+    "dirs[\"runs_dir\"] / \".plugin_bundle_hash\", \"plugin_bundle_hash\"",
+    "dirs[\"runs_dir\"] / \".orchestration_bundle_hash\", \"orchestration_bundle_hash\""
+   ],
+   "claim": "THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:638-644) READS ``${durable_root}/runs/.plugin_bundle_hash`` and ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before #194 SKILL.md's Step 0a only PROSE-described \"computes/writes\" them: no shipped script actually wrote either marker, so a real run failed with \"has Step 0a run for this project?\". ``scaffold_setup.py`` is the shipped"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"codex_job.py:1750-1784\", 0]": {
+   "anchors": [
+    "def hygiene(self):",
+    "if ws == prior_cwd and job.get(\"status\") in _ACTIVE:"
+   ],
+   "claim": "# dispatch_codex_job()'s own backstop-timeout path. NOT a state-corruption # fix (that half of the original report was refuted by research: an orphan # that later completes writes into a leaked sandbox tempdir nothing ever # reads again) -- this closes wasted spend, mirroring codex_job.py's own # hygiene() shape (codex_job.py:1750-1784): query/cancel with the joblog's # own recorded jobCwd, never durable_root."
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"codex_job.py:1784\", 0]": {
+   "anchors": [
+    "if ws == prior_cwd and job.get(\"status\") in _ACTIVE:"
+   ],
+   "claim": "\"\"\"The other half of hygiene()'s own live check: even a job reporting an ACTIVE status must not be cancelled if the queried workspaceRoot does not match the recorded jobCwd -- the identical defense-in-depth hygiene() itself applies (codex_job.py:1784, `if ws == prior_cwd and job.get(\"status\") in _ACTIVE:`).\"\"\" root = phase2_project(tmp_path, n=1) companion = _write_fake_companion(tmp_path) _write_status_scenario(tmp_path, status=\"running\", workspace_root=\"/a-different-workspace\")"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"codex_job.py:2930\", 0]": {
+   "anchors": [
+    "if not args.plugin_root.strip():"
+   ],
+   "claim": "an unset `{{PLUGIN_ROOT}}` template substitution renders as the empty string, never as the flag being omitted) would silently make wherever this process happens to be launched from the executable authority for the template AND every sibling script, with no error at all. `codex_job.py:2930` already refuses exactly this input; refusing it here too, before any path is built from it, keeps both scripts consistent instead of one being the loophole the other closed.\"\"\" for bad_value in (\"\", \" \", \"\\t\\n\", \" \\t \"):"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"ledger-record-base.schema.json:15\", 0]": {
+   "anchors": [
+    "\"rounds\": {"
+   ],
+   "claim": "`runRound(seg, MAXFIX + 1, true)`, template.js:2343, which records `rounds: round` == MAXFIX + 1, template.js:2077 -- a plain integer, never derived from the \"final\" round LABEL) is an entirely normal outcome, not an edge case. The ledger schema requires `rounds` to be an integer (ledger-record-base.schema.json:15) and REQUIRES it outright for status=converged (same file's allOf block, :78-86) -- so a write that can't produce a real number for the final round is rejected twice over."
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"ledger_update.py:1263-1266\", 0]": {
+   "anchors": [
+    "if current_draft_sha1 != reviewer_draft_sha1:",
+    "\"draft changed since review; cannot record convergence\""
+   ],
+   "claim": "\"\"\"codex #392-class MAJOR: ledger_update.py's own independent check (enrich_converged_fields, ledger_update.py:1263-1266) refuses a convergence write when the current draft's sha1 no longer matches the reviewer's recorded draft_sha1 -- correctly: it means the draft was edited out-of-band since this (clean) review was written, and the review's own verdict no longer applies to what is on disk now. Without"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"mass-translate-wf.template.js:1562\", 0]": {
+   "anchors": [
+    "function fixPrompt(seg, round, revObj) {"
+   ],
+   "claim": "\"\"\"Pins (as a real assertion, not a comment) that fixPrompt's 3-argument signature (mass-translate-wf.template.js:1562, documented at :1513-1520 as deliberate: \"revObj is still passed through ... but fixPrompt itself no longer splices it into the prompt as the findings source\") really does hold. Verified against the real template directly: fixPrompt's own 70-line body (:1563-1632) never references `revObj` at all --"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"mass-translate-wf.template.js:2257\", 0]": {
+   "anchors": [
+    "seg, { status: \"blocked\", reason: \"draft-missing\" },"
+   ],
+   "claim": "\"\"\"Codex's admitted MAJOR against an earlier revision of this fix, reproduced directly: the shipped workflow writes `{\"status\": \"blocked\", \"reason\": \"draft-missing\"}` AFTER a numbered review (mass-translate-wf.template.js:2257), and a `blocked` segment is retried via `--only-segs` under the SAME run_id. A guard that only checked the fragment's mtime (reusing _translate_redispatched_since() unmodified at this call site, as an earlier revision of this fix proposed) would misread that recovery as \"a translate is in progress\""
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"profile.schema.json:494\", 0]": {
+   "anchors": [
+    "\"max_fix_rounds\": {"
+   ],
+   "claim": "\"\"\"codex round-4 MAJOR: profile.schema.json pins engine.max_fix_rounds to `\"minimum\": 1` (profile.schema.json:494), but this check used to accept 0 (\"must be a non-negative integer\"). A fresh segment at max_fix_rounds=0 dispatches translate then review round \"1\", but round recognition (_matched_review_round_label()'s own `range(1, max_fix_rounds + 2)` loop) admits ONLY \"final\" when max_fix_rounds=0 --",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"resume_setup.py:124-133\", 0]": {
+   "anchors": [
+    "SHRINKING post-`select_segments.py` eligible list",
+    "in-flight fix work each time."
+   ],
+   "claim": "\"\"\"codex #392-class BLOCKER: select_segments.py's own eligible list SHRINKS by one entry every time a segment converges (DEFAULT_ELIGIBLE_CATEGORIES excludes `reusable`). resolve_run_id() must NOT hash that shrinking list into compute_input_digest()'s `domain` (resume_setup.py:124-133), or a single convergence mints a fresh RUN_ID and orphans every dispatch_token already on disk -- including the just-converged segment's own draft/review, and any fix just applied by hand to a DIFFERENT still-in-progress segment.\"\"\" root = phase2_project(tmp_path, n=2)"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"resume_setup.py:775\", 0]": {
+   "anchors": [
+    "def compute_input_digest("
+   ],
+   "claim": "`resume_from_run_ids` field at all (the same shape resolve_run_id() builds for a first-ever run), so resume_setup.py's own resolve_run() always mints fresh (resume_setup.py:930-934); since nothing about the project changed between the two calls, compute_input_digest() returns the IDENTICAL value both times (resume_setup.py:775). Returns (older_id, newer_id) -- asserts newer_id sorts after older_id, matching _resumable_run_id_candidates()'s own \"lexicographic == chronological\" invariant, and asserts the two digest FILES actually match, so a test built on this helper is proven to be exercising a real collision.\"\"\""
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"resume_setup.py:921-928\", 0]": {
+   "anchors": [
+    "for resume_from in candidates:",
+    "the next candidate."
+   ],
+   "claim": "\"\"\"The property this integration test exists to prove: resolve_run_id() now sends EVERY offered candidate in ONE resume_from_run_ids call -- the shipped resume_setup.py's own resolve_run() (resume_setup.py:921-928) does the try-each-in-order/first-match-wins loop SERVER-side -- not the deprecated one-call-per-candidate CLIENT loop this function used before. Constructs a project with TWO real run directories: an OLDER one whose recorded input.digest genuinely matches this project's"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"resume_setup.py:930-934\", 0]": {
+   "anchors": [
+    "for _ in range(RUN_ID_RETRY_LIMIT):",
+    "return candidate, False, input_digest"
+   ],
+   "claim": "never a hand-forged digest (a forged one would prove nothing about the real resolution path). Each call sends a payload with no `resume_from_run_ids` field at all (the same shape resolve_run_id() builds for a first-ever run), so resume_setup.py's own resolve_run() always mints fresh (resume_setup.py:930-934); since nothing about the project changed between the two calls, compute_input_digest() returns the IDENTICAL value both times (resume_setup.py:775). Returns (older_id, newer_id) -- asserts newer_id sorts after older_id, matching _resumable_run_id_candidates()'s own \"lexicographic == chronological\""
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4813\", 0]": {
+   "anchors": [
+    "current_sha1 = current_draft_sha1(seg, segments_dir, dirs[\"scripts_dir\"])"
+   ],
+   "claim": "\"\"\"The invalid_post_fix_draft branch's own current_draft_sha1() call (segment_dispatch_driver.py:4813) is a SECOND call site sharing the identical --plugin-root trust boundary as the already_converged branch's (see the sibling test above) -- untested here for the same reason: every existing --plugin-root fixture stages the REAL, unmodified draft_sha1.py at both the durable root and the plugin",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4929\", 0]": {
+   "anchors": [
+    "current_sha1 = current_draft_sha1(seg, segments_dir, dirs[\"scripts_dir\"])"
+   ],
+   "claim": "\"\"\"codex round-4 (\"Tests that could not fail\"): current_draft_sha1()'s third argument -- dirs[\"scripts_dir\"] -- is what makes this \"clean and draft matches\" branch (segment_dispatch_driver.py:4929, feeding the already_converged decision at :4956) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable root's own writable, self-anchored copy (current_draft_sha1()'s own `scripts_dir=SCRIPTS_DIR` default). That default matters because the",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:1755-1765\", 0]": {
+   "anchors": [
+    "function verifyReviewArtifactPrompt(seg, revObj) {",
+    "The script already did the comparison -- do not re-judge it."
+   ],
+   "claim": "JSON-embedded bytes. Genuinely stronger than a delimiter-in-a-string scheme: a prompt-injection payload sitting in findings[].issue/suggest has nothing in the rendered prompt to attach to. This branch strictly reduces the surface relative to the Workflow it replaces, whose verifyReviewArtifactPrompt (template.js:1755-1765) splices revObj in directly -- a function this driver deliberately never calls.",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:2077\", 0]": {
+   "anchors": [
+    "seg, { status: \"converged\", rounds: round, needsCacheKey: true },"
+   ],
+   "claim": "\"\"\"codex #384-class BLOCKER: a segment that converges on the mandatory FINAL confirming review (mass-translate-wf.template.js's own `runRound(seg, MAXFIX + 1, true)`, template.js:2343, which records `rounds: round` == MAXFIX + 1, template.js:2077 -- a plain integer, never derived from the \"final\" round LABEL) is an entirely normal outcome, not an edge case. The ledger schema requires `rounds` to be an integer (ledger-record-base.schema.json:15) and REQUIRES it outright for status=converged (same file's allOf block, :78-86) -- so a write that",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:2343\", 0]": {
+   "anchors": [
+    "const finalRound = await runRound(seg, MAXFIX + 1, true);"
+   ],
+   "claim": "\"\"\"codex #384-class BLOCKER: a segment that converges on the mandatory FINAL confirming review (mass-translate-wf.template.js's own `runRound(seg, MAXFIX + 1, true)`, template.js:2343, which records `rounds: round` == MAXFIX + 1, template.js:2077 -- a plain integer, never derived from the \"final\" round LABEL) is an entirely normal outcome, not an edge case. The ledger schema requires `rounds` to be an integer (ledger-record-base.schema.json:15) and REQUIRES it outright for",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:2343\", 1]": {
+   "anchors": [
+    "const finalRound = await runRound(seg, MAXFIX + 1, true);"
+   ],
+   "claim": "fragment = json.loads((root / \"runs\" / \"ledger.d\" / \"seg01.json\").read_text(encoding=\"utf-8\")) assert fragment[\"status\"] == \"converged\" assert fragment[\"rounds\"] == max_fix_rounds + 1, ( f\"the mandatory final round is round number max_fix_rounds+1={max_fix_rounds + 1} \" f\"in the template's own runRound(seg, MAXFIX + 1, true) call (template.js:2343) -- \" f\"got rounds={fragment.get('rounds')!r}\" )",
+   "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_confident_mismerge.test.py\", \"canon-senses.schema.json:11-26\", 0]": {
+   "anchors": [
+    "\"entries_by_source_form\"",
+    "\"minItems\": 2",
+    "\"sense_id\", \"disambiguator\", \"index_scope\", \"evidence\""
+   ],
+   "claim": "traveler). Reachability pinned per the approved plan's round-3 blocker 3 -- see this module's own docstring for the three pinning steps. Drives the real chain to `propose_split` with 3 referents, each carrying byte-verified evidence (the Phase-1 senses[] minItems:2 shape, canon-senses.schema.json:11-26).\"\"\" durable_root = str(tmp_path) lang_dir = tmp_path / \"languages\" hebrew_form = \"פייגע\" particle_config = write_particle_config(lang_dir, name_inventory=[hebrew_form])"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_defaults_parity.test.py\", \"tests/occ_index.test.py:1-45\", 0]": {
+   "anchors": [
+    "Tests for scripts/occ_index.py",
+    "def _load_module(name: str, path: Path, extra_sys_path: Path):",
+    "return module"
+   ],
+   "claim": "Standalone-script loader mirrors tests/occ_index.test.py:1-45. \"\"\" import importlib.util import json import sys"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_ready.test.py\", \"skeptic_ready.py:1141-1142\", 0]": {
+   "anchors": [
+    "def frozen_input_check(",
+    "aggregate: dict, canon_path: Path, manifest_path: Path, senses_path: Path,"
+   ],
+   "claim": "built, making any reaching test a fabricated bypass. That premise is false: `run_check_frozen_inputs()` (skeptic_ready.py:1638, the standalone `--check-frozen-inputs` CLI mode wired in `main()`) calls `frozen_input_check(aggregate, canon_path, manifest_path, senses_path, tolerant_reads=True)` DIRECTLY (skeptic_ready.py:1141-1142) with no upstream stamp-validation gate on that path -- the guard is reached through its own real, undoctored call chain, exactly like the CLEAN/tamper cases already covered above by test_check_frozen_inputs_clean_reports_no_mismatch et al."
+  },
+  "[\"plugins/literary-translator/tests/skeptic_ready.test.py\", \"skeptic_ready.py:1320\", 0]": {
+   "anchors": [
+    "paths = {\"canon\": canon_path, \"manifest\": manifest_path, \"senses\": senses_path}"
+   ],
+   "claim": "\"\"\"Round 12 (#243): `frozen_input_check()`'s own `paths` dict (skeptic_ready.py:1320) is a FIXED, three-key `{\"canon\", \"manifest\", \"senses\"}` literal -- unlike the two digest functions' `{key: (state, bytes)}` maps (built fresh from their own kwargs every call, see tests/suspicion_scan.test.py's/tests/skeptic_setup.test.py's own `..._fails_closed_on_frozen_input_specs_key_mismatch` siblings),"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_ready.test.py\", \"skeptic_ready.py:1322\", 0]": {
+   "anchors": [
+    "if sorted(paths) != sorted(_spec_keys)"
+   ],
+   "claim": "this dict never changes shape at runtime -- so a `FROZEN_INPUT_SPECS` entry that diverges from it (a fourth spec with no matching `paths` key, a spec dropped while `paths` keeps its old key, or a spec that silently REUSES an existing key) has to be caught by comparing that fixed literal against the tuple itself, at skeptic_ready.py:1322 (``if sorted(paths) != sorted(_spec_keys): raise AssertionError``)."
+  },
+  "[\"plugins/literary-translator/tests/skeptic_ready.test.py\", \"skeptic_ready.py:1638\", 0]": {
+   "anchors": [
+    "def run_check_frozen_inputs(aggregate_manifest_path"
+   ],
+   "claim": "`frozen_input_check()` is only reachable via `--verify-merged`, which (so the argument went) validates the aggregate's stamps against `FROZEN_INPUT_SPECS`-derived expectations before `paths` is ever built, making any reaching test a fabricated bypass. That premise is false: `run_check_frozen_inputs()` (skeptic_ready.py:1638, the standalone `--check-frozen-inputs` CLI mode wired in `main()`) calls `frozen_input_check(aggregate, canon_path, manifest_path, senses_path, tolerant_reads=True)` DIRECTLY (skeptic_ready.py:1141-1142) with no upstream stamp-validation gate on that path -- the guard is reached through its"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_ready.test.py\", \"skeptic_ready.py:271-281\", 0]": {
+   "anchors": [
+    "from skeptic_constants import (",
+    "FROZEN_INPUT_SPECS,"
+   ],
+   "claim": "already-loaded module this whole test file shares (loaded once at import time via `_load_module()` up top), and `skeptic_ready.py` resolves `FROZEN_INPUT_SPECS` from its OWN globals at call time (its own top-level `from skeptic_constants import (..., FROZEN_INPUT_SPECS, ...)`, skeptic_ready.py:271-281, bound the name into `sr`'s globals, not `skeptic_constants`'s) -- patching `skeptic_constants`'s copy instead would leave `sr.frozen_input_check()`'s own `_spec_keys` lookup unaffected and this test would silently exercise nothing."
+  },
+  "[\"plugins/literary-translator/tests/skeptic_report.test.py\", \"tests/occ_index.test.py:1-45\", 0]": {
+   "anchors": [
+    "Tests for scripts/occ_index.py",
+    "def _load_module(name: str, path: Path, extra_sys_path: Path):",
+    "return module"
+   ],
+   "claim": "skeptic_report.py is loaded here via importlib from its real path, with SCRIPTS_DIR temporarily on sys.path so its own `from skeptic_constants import ...` resolves -- mirrors tests/occ_index.test.py's own loader (contract A4: \"mirror tests/occ_index.test.py:1-45\")."
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:229-230\", 0]": {
+   "anchors": [
+    "from suspicion_scan import (",
+    "compute_producer_input_digest,"
+   ],
+   "claim": "trip THAT function's own guard first and never reach line 929 -- proving nothing about the guard this test targets. `compute_producer_input_digest()` (step 3, skeptic_setup.py:744) is NOT part of this trap and this test says nothing about it either way: it's imported from `suspicion_scan` (skeptic_setup.py:229-230), is DEFINED there (suspicion_scan.py:909), and its own `FROZEN_INPUT_SPECS` name lookup (suspicion_scan.py:1007) resolves through a Python function's `__globals__`, which is bound to the module it was DEFINED in -- so it reads `suspicion_scan`'s own `FROZEN_INPUT_SPECS` binding, never this module's `mod.FROZEN_INPUT_SPECS`."
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:476\", 0]": {
+   "anchors": [
+    "def compute_skeptic_input_digest("
+   ],
+   "claim": "The trap a naive version of this test falls into: `compute_skeptic_input_digest()` is DEFINED in this module (skeptic_setup.py:476) and reads the SAME module-level `FROZEN_INPUT_SPECS` global the target guard at line 929 reads (its own guard is at skeptic_setup.py:550-561). `run()` calls it at step 6 (skeptic_setup.py:829), before resolving the RUN_ID at step 7 (`resolve_skeptic_run()`, skeptic_setup.py:841). Mutating"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:550-561\", 0]": {
+   "anchors": [
+    "if sorted(frozen_input_snapshots) != sorted(spec_keys)",
+    "hand-added parameter/snapshot entry here (or vice versa), or"
+   ],
+   "claim": "The trap a naive version of this test falls into: `compute_skeptic_input_digest()` is DEFINED in this module (skeptic_setup.py:476) and reads the SAME module-level `FROZEN_INPUT_SPECS` global the target guard at line 929 reads (its own guard is at skeptic_setup.py:550-561). `run()` calls it at step 6 (skeptic_setup.py:829), before resolving the RUN_ID at step 7 (`resolve_skeptic_run()`, skeptic_setup.py:841). Mutating `mod.FROZEN_INPUT_SPECS` before calling `mod.run(args)` at all would trip THAT function's own guard first and never reach line 929 --"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:744\", 0]": {
+   "anchors": [
+    "recomputed_producer_digest = compute_producer_input_digest("
+   ],
+   "claim": "(`resolve_skeptic_run()`, skeptic_setup.py:841). Mutating `mod.FROZEN_INPUT_SPECS` before calling `mod.run(args)` at all would trip THAT function's own guard first and never reach line 929 -- proving nothing about the guard this test targets. `compute_producer_input_digest()` (step 3, skeptic_setup.py:744) is NOT part of this trap and this test says nothing about it either way: it's imported from `suspicion_scan` (skeptic_setup.py:229-230), is DEFINED there (suspicion_scan.py:909), and its own `FROZEN_INPUT_SPECS` name lookup (suspicion_scan.py:1007) resolves through a Python function's `__globals__`, which is bound to"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:744\", 1]": {
+   "anchors": [
+    "recomputed_producer_digest = compute_producer_input_digest("
+   ],
+   "claim": "raised. That's what makes control reach line 929 at all. The call order this relies on -- both digest checks (steps 3 and 6) before `resolve_skeptic_run()` (step 7) before the target guard (line 929) -- reflects the CURRENT source as read at the time this test was written (skeptic_setup.py:744, :829, :841, :929); nothing in this test enforces that order as an invariant. A future edit moving `resolve_skeptic_run()` ahead of step 6's call would land the injected mutation before `compute_skeptic_input_digest()` runs, tripping ITS guard instead of the target one -- this test's own assertion on `\"_frozen_input_snapshots_by_key\""
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:829\", 0]": {
+   "anchors": [
+    "skeptic_input_digest = compute_skeptic_input_digest("
+   ],
+   "claim": "The trap a naive version of this test falls into: `compute_skeptic_input_digest()` is DEFINED in this module (skeptic_setup.py:476) and reads the SAME module-level `FROZEN_INPUT_SPECS` global the target guard at line 929 reads (its own guard is at skeptic_setup.py:550-561). `run()` calls it at step 6 (skeptic_setup.py:829), before resolving the RUN_ID at step 7 (`resolve_skeptic_run()`, skeptic_setup.py:841). Mutating `mod.FROZEN_INPUT_SPECS` before calling `mod.run(args)` at all would trip THAT function's own guard first and never reach line 929 -- proving nothing about the guard this test targets. `compute_producer_input_digest()`"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:841\", 0]": {
+   "anchors": [
+    "run_id, resume = resolve_skeptic_run(skeptic_input_digest"
+   ],
+   "claim": "is DEFINED in this module (skeptic_setup.py:476) and reads the SAME module-level `FROZEN_INPUT_SPECS` global the target guard at line 929 reads (its own guard is at skeptic_setup.py:550-561). `run()` calls it at step 6 (skeptic_setup.py:829), before resolving the RUN_ID at step 7 (`resolve_skeptic_run()`, skeptic_setup.py:841). Mutating `mod.FROZEN_INPUT_SPECS` before calling `mod.run(args)` at all would trip THAT function's own guard first and never reach line 929 -- proving nothing about the guard this test targets. `compute_producer_input_digest()` (step 3, skeptic_setup.py:744) is NOT part of this trap and this test"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:929\", 0]": {
+   "anchors": [
+    "if sorted(_frozen_input_snapshots_by_key) != sorted(_spec_keys)"
+   ],
+   "claim": "\"\"\"Round 14 (#243, codex review): `run()`'s OWN `_frozen_input_snapshots_by_key` vs `FROZEN_INPUT_SPECS` guard (skeptic_setup.py:929, defense-in-depth against a future reordering ahead of the H1-stamp comprehension right below it -- see that guard's own comment) was the ONLY one of the four FROZEN_INPUT_SPECS-key- mismatch guards in this file's code closure (suspicion_scan's own `compute_producer_input_digest()`, this module's `compute_skeptic_input_digest()`"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.py:929\", 1]": {
+   "anchors": [
+    "if sorted(_frozen_input_snapshots_by_key) != sorted(_spec_keys)"
+   ],
+   "claim": "msg = str(exc_info.value) expected_snapshot_keys = repr(sorted([\"canon\", \"manifest\", \"senses\"])) expected_spec_keys = repr(sorted(spec[0] for spec in mutated_specs)) assert \"_frozen_input_snapshots_by_key\" in msg, ( \"raised AssertionError must be run()'s OWN guard (skeptic_setup.py:929, \" \"which names its local `_frozen_input_snapshots_by_key`), not \" f\"compute_skeptic_input_digest()'s sibling guard -- got: {msg!r}\" ) assert expected_snapshot_keys in msg and expected_spec_keys in msg, ("
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"skeptic_setup.test.py:998-1002\", 0]": {
+   "anchors": [
+    "@pytest.mark.parametrize(\"direction\", [",
+    "\"same_count_key_swap\",",
+    "def test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch(tmp_path"
+   ],
+   "claim": "swap; this test's own duplicate-key mutation just doesn't exercise that swap direction, which is covered directly by `compute_skeptic_input_digest()`'s OWN round-11 parametrized test above (`test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch`, `same_count_key_swap` direction, skeptic_setup.test.py:998-1002), proving THAT function's own guard catches it -- run()'s line-929 guard has no dedicated same-count-key-swap test in this file, despite its sorted-comparison shape covering that case structurally). The load-bearing probe is (3): relocating the"
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"suspicion_scan.py:1007\", 0]": {
+   "anchors": [
+    "spec_keys = [spec[0] for spec in FROZEN_INPUT_SPECS]"
+   ],
+   "claim": "proving nothing about the guard this test targets. `compute_producer_input_digest()` (step 3, skeptic_setup.py:744) is NOT part of this trap and this test says nothing about it either way: it's imported from `suspicion_scan` (skeptic_setup.py:229-230), is DEFINED there (suspicion_scan.py:909), and its own `FROZEN_INPUT_SPECS` name lookup (suspicion_scan.py:1007) resolves through a Python function's `__globals__`, which is bound to the module it was DEFINED in -- so it reads `suspicion_scan`'s own `FROZEN_INPUT_SPECS` binding, never this module's `mod.FROZEN_INPUT_SPECS`."
+  },
+  "[\"plugins/literary-translator/tests/skeptic_setup.test.py\", \"suspicion_scan.py:909\", 0]": {
+   "anchors": [
+    "def compute_producer_input_digest(canon_state"
+   ],
+   "claim": "trip THAT function's own guard first and never reach line 929 -- proving nothing about the guard this test targets. `compute_producer_input_digest()` (step 3, skeptic_setup.py:744) is NOT part of this trap and this test says nothing about it either way: it's imported from `suspicion_scan` (skeptic_setup.py:229-230), is DEFINED there (suspicion_scan.py:909), and its own `FROZEN_INPUT_SPECS` name lookup (suspicion_scan.py:1007) resolves through a Python function's `__globals__`, which is bound to the module it was DEFINED in -- so it reads `suspicion_scan`'s own `FROZEN_INPUT_SPECS` binding, never this module's `mod.FROZEN_INPUT_SPECS`."
+  },
+  "[\"plugins/literary-translator/tests/suspicion_scan.test.py\", \"caseless_offset.test.py:248-260\", 0]": {
+   "anchors": [
+    "def test_bootstrap_extract_candidate_spans_caseless_hebrew_via_inventory",
+    "def test_bootstrap_extract_candidate_spans_hebrew_zero_candidates_without_inventory"
+   ],
+   "claim": "# A Hebrew form with NO name_inventory configured: is_upper_initial() # can never see a candidate in a script with no case distinction (Lo # category), and the inventory bypass is disabled (empty inventory) -- # see caseless_offset.test.py:248-260 for the underlying matcher # invariant this test exercises through the full scan pipeline."
+  },
+  "[\"plugins/literary-translator/tests/validate_assembled.test.py\", \"assemble.py:1080-1085\", 0]": {
+   "anchors": [
+    "if actual_sha1 != expected_sha1:",
+    "draft has changed since review"
+   ],
+   "claim": "# =========================================================================== # RED -- default scope: draft changed after W7 review (reviewed_draft_sha1 # rebind, mirrors assemble.py:1080-1085) -- plus its GREEN twin. # ==========================================================================="
+  },
+  "[\"plugins/literary-translator/tests/validate_conservation_carveout.test.py\", \"validate_conservation.py:1240\", 0]": {
+   "anchors": [
+    "va.collect_reviewed_draft_rebind("
+   ],
+   "claim": "WHY THIS FILE EXISTS. `validate_conservation.py`'s own `output-coverage` lane (default `segment_drafts_and_audit` scope) is a SECOND caller of the same `collect_reviewed_draft_rebind()` (validate_conservation.py:1240) -- reused, never reimplemented, per that script's own module docstring (\"Population scope\"/\"Reuses validate_assembled.py's own reviewed-SHA rebind machinery\" section). The #491 R2 fix could not edit that call site itself (a different file, owned by a concurrent change), so the team lead"
+  },
+  "[\"plugins/literary-translator/tests/validate_conservation_carveout.test.py\", \"validate_conservation.py:1240\", 1]": {
+   "anchors": [
+    "trusted_drafts, _stale_segs, contract_admitted ="
+   ],
+   "claim": "`run_output_coverage()`'s default-scope branch DISCARDS the rebind's `stale_segs` return value outright (bound to `_stale_segs`, validate_conservation.py:1240) and derives `eligible_keys` as `{(seg, bid) for (seg, bid) in source_marker_counter if seg in trusted_drafts}` (validate_conservation.py:1253) -- `source_marker_counter` comes from `collect_source_markers(manifest_segments, ...)`, which by construction can NEVER name a `(seg, bid)` pair for a segment the manifest"
+  },
+  "[\"plugins/literary-translator/tests/validate_conservation_carveout.test.py\", \"validate_conservation.py:1240-1242\", 0]": {
+   "anchors": [
+    "va.collect_reviewed_draft_rebind(",
+    "va.collect_manifest_seg_ids(manifest_segments),"
+   ],
+   "claim": "(\"Population scope\"/\"Reuses validate_assembled.py's own reviewed-SHA rebind machinery\" section). The #491 R2 fix could not edit that call site itself (a different file, owned by a concurrent change), so the team lead wired it centrally: `va.collect_reviewed_draft_rebind(ledger_segments, va.collect_manifest_seg_ids(manifest_segments))` (validate_conservation.py :1240-1242). That wiring is correct today, but every out-of-manifest fixture in the existing suite (tests/validate_assembled_carveout.test.py) drives `validate_assembled.py` only -- nothing exercises the SAME retained- entry shape THROUGH `validate_conservation.py`'s own call site. A mutant"
+  },
+  "[\"plugins/literary-translator/tests/validate_conservation_carveout.test.py\", \"validate_conservation.py:1240-1242\", 1]": {
+   "anchors": [
+    "va.collect_reviewed_draft_rebind(",
+    "va.collect_manifest_seg_ids(manifest_segments),"
+   ],
+   "claim": "# # M1: validate_conservation.py:1240-1242's call site is mutated from # `va.collect_reviewed_draft_rebind(ledger_segments, # va.collect_manifest_seg_ids(manifest_segments))` to # `va.collect_reviewed_draft_rebind(ledger_segments, # set(ledger_segments))` -- i.e. \"in scope\" degrades back to \"is a"
+  },
+  "[\"plugins/literary-translator/tests/validate_conservation_carveout.test.py\", \"validate_conservation.py:1253\", 0]": {
+   "anchors": [
+    "eligible_keys = {(seg, bid) for (seg, bid) in source_marker_counter if seg in trusted_drafts}"
+   ],
+   "claim": "`run_output_coverage()`'s default-scope branch DISCARDS the rebind's `stale_segs` return value outright (bound to `_stale_segs`, validate_conservation.py:1240) and derives `eligible_keys` as `{(seg, bid) for (seg, bid) in source_marker_counter if seg in trusted_drafts}` (validate_conservation.py:1253) -- `source_marker_counter` comes from `collect_source_markers(manifest_segments, ...)`, which by construction can NEVER name a `(seg, bid)` pair for a segment the manifest does not cite. So an out-of-manifest segment's own `stale_segs`-only outcome (a missing draft, a missing `reviewed_draft_sha1`, or a genuine"
+  },
+  "[\"plugins/literary-translator/tests/verse_footnote_corpus_segpack.test.py\", \"segpack.py:673\", 0]": {
+   "anchors": [
+    "if parent not in seg_block_ids and parent not in footnote_def_block_ids:"
+   ],
+   "claim": "\"\"\"The verse lives inside the footnote's own DEFINITION text (FN:1), which is never a member of this segpack's own blocks[] -- yet the verse is still included in verses[] because its parent is one of this segpack's footnote_def_block_ids (segpack.py:673's ``parent not in seg_block_ids and parent not in footnote_def_block_ids`` guard).\"\"\" pack = _pack_for(\"c\", extract_mod, tmp_path) _assert_valid_and_hashes(pack)"
+  }
+ },
+ "exemptions": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/schemas/canon-adjudication-audit-summary.schema.json\", \"totals.canon_absent_with_senses:1\", 0]": {
+   "reason": "negative/value-shaped literal, not a citation: schema-description prose stating a JSON field's VALUE (paired with gate_passed:false using the identical colon-value idiom), not a source line reference"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/backfill_ever_converged.py\", \"segment_dispatch_driver.py:1207-1262\", 0]": {
+   "reason": "quoted as an EXAMPLE of a stale citation: the surrounding comment's point is that this number has since moved ~100 lines, so repointing it would delete the evidence the sentence is making. The passage cites that file by FUNCTION deliberately."
+  },
+  "[\"plugins/literary-translator/tests/canon_adjudication_audit.test.py\", \"canon_adjudications.jsonschema_version:2\", 0]": {
+   "reason": "not a citation: a JSON field path (canon_adjudications.json's schema_version field) split across a line wrap, so the two halves fuse into a filename-shaped token"
+  },
+  "[\"plugins/literary-translator/tests/canon_adjudication_audit_homonym_split.test.py\", \"by_kind.homonym_split:0\", 0]": {
+   "reason": "JSON summary-field:value path in an assertion/comment, not a source citation"
+  },
+  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"foo.bar:1\", 0]": {
+   "reason": "Illustrative example text about the citation-matching regex's over-matching behavior (looks like a citation but is prose/URL confusable) -- not a citation into source."
+  },
+  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"template.js:12\", 0]": {
+   "reason": "Illustrative example text about the citation-matching regex's under-matching behavior (an earlier `(py|md|json)` alternation would miss it) -- not a citation into source."
+  },
+  "[\"plugins/literary-translator/tests/evidence_verify.test.py\", \"whoswho.final.json:87-98\", 0]": {
+   "reason": "cites the SSK vol.2 real-world Hebrew name registry, confirmed NOT in-tree (no such file anywhere in the repo) -- same class as the historiettes-t3 external-provenance citations already established as legitimate in authoring_hygiene_drift.test.py"
+  },
+  "[\"plugins/literary-translator/tests/fetch_citation.test.py\", \"example.com:8443\", 2]": {
+   "reason": "URL host:port authority string in a fetch-test assertion, not a source citation"
+  },
+  "[\"plugins/literary-translator/tests/manifest_validation.test.py\", \"items.minLength:1\", 0]": {
+   "reason": "JSON Schema keyword path in an assert message, not a source citation"
+  },
+  "[\"plugins/literary-translator/tests/occ_index.test.py\", \"whoswho.final.json:87-98\", 0]": {
+   "reason": "same as evidence_verify.test.py:544 -- external, non-shipped SSK vol.2 data file"
+  }
+ }
+}

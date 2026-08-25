@@ -2577,7 +2577,7 @@ def test_the_disclosure_says_what_is_asserted_rather_than_proved(tmp_path):
 # Design §2, SKILL.md and the changelog) state that the profile is
 # `human_escalation` and therefore requires --only-segs naming the same ids.
 # It is not, and it does not. `status: in_progress` classifies as `recoverable`
-# (select_segments.py:1433), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES
+# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES
 # (:1451), and D3 (:4276) enforces only the ONE direction
 # `claim_requests ⊆ segs`. For --from-cap the subset direction forces
 # --only-segs as a side effect of its population being human_escalation;
