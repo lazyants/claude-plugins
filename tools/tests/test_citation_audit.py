@@ -294,7 +294,8 @@ def test_subject_rule_still_finds_a_real_subject():
     """The R2 counterexample's RED direction: the sentence is ABOUT a named symbol, so an anchor
     that never mentions it can pin a true-but-irrelevant range."""
     sentence = "`derivation_bundle_hash` in DERIVATION_STATE_FIELDS (`select_segments.py:186-193`)"
-    assert "DERIVATION_STATE_FIELDS" in ca._subject_required(sentence, "select_segments.py:186-193", "select_segments.py")
+    assert "DERIVATION_STATE_FIELDS" in ca._subject_required(
+        sentence, "select_segments.py:186-193", "select_segments.py")
 
 
 def test_subject_rule_does_not_fire_on_a_purely_behavioural_sentence():
@@ -893,7 +894,6 @@ def test_a_wrapped_citation_s_tail_is_not_also_read_as_a_continuation(tmp_path, 
     """
     _cont_setup(tmp_path, monkeypatch, "# a.py:1 and t.py\n# :3 is the continuation\n",
                 declare_from="")
-    err = capsys.readouterr().err
     ca.cmd_check(None)
     err = capsys.readouterr().err
     assert _undeclared(err) == ["a.py:1", "t.py:3"], err
@@ -907,7 +907,6 @@ def test_a_re_attribution_reds_on_the_continuation_s_OWN_key(tmp_path, monkeypat
     `b.py` also moves the ordinary pathful key, so a test that only checks the exit code stays red
     with the candidate set deleted from the identity -- the wrong check eating the fixture.
     """
-    rc = None
     _cont_setup(tmp_path, monkeypatch, "beta says `b.py:3` and also :3 here.\n",
                 declare_from="alpha says `a.py:3` and also :3 here.\n")
     rc = ca.cmd_check(None)
@@ -943,7 +942,8 @@ def test_two_named_files_make_the_attribution_the_adjudicator_s(tmp_path, monkey
     rc = ca.cmd_check(None)
     err = capsys.readouterr().err
     assert rc == 1
-    assert "AMBIGUOUS-CONTINUATION" in err and "'a.py', 'b.py'" in err
+    assert "AMBIGUOUS-CONTINUATION" in err, err
+    assert "'a.py', 'b.py'" in err, err
 
     decls['["c.md", "a.py|b.py:3", 0, "continuation"]']["target"] = "a.py"
     assert ca.cmd_check(None) == 0, capsys.readouterr().err
@@ -976,7 +976,7 @@ def test_report_survives_an_ambiguous_continuation_instead_of_raising(tmp_path, 
                 "`a.py:3` and `b.py:3`, then also :3 in resolve_target_name().\n")
     ca.cmd_report(types.SimpleNamespace(scope=None, json=True))
     packets = json.loads(capsys.readouterr().out)
-    bare = [p for p in packets if p.get("is_continuation")]
+    bare = [p for p in packets if p["is_continuation"]]
     assert len(bare) == 1 and bare[0]["resolved"] is None and bare[0]["target"] is None
     # An ambiguous packet has NO filename to exclude, and `str.replace("", " ")` spaces out every
     # character rather than raising -- which shreds every multi-character token and hands the
@@ -1027,6 +1027,6 @@ def test_the_shipped_tree_enumerates_a_nonzero_number_of_continuations():
     r = subprocess.run([sys.executable, os.path.join(TOOLS, "citation_audit.py"),
                         "report", "--json"], cwd=REPO_ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    slash = [p for p in json.loads(r.stdout)
-             if p.get("is_continuation") and p["container"].endswith("chapter-paths.d.mts")]
-    assert sorted(c["cite"] for c in slash) == [":2140", ":2145"], slash
+    slash = [packet for packet in json.loads(r.stdout)
+             if packet["is_continuation"] and packet["container"].endswith("chapter-paths.d.mts")]
+    assert sorted(packet["cite"] for packet in slash) == [":2140", ":2145"], slash

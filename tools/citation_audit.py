@@ -33,11 +33,16 @@ property that makes them worth anything.
 
 BARE CONTINUATIONS (#754). Prose here names a file once and then keeps citing it without repeating the
 name -- "<file> line 194, hashed <colon>335, stale-check <colon>599". `CITATION_RE` requires the
-filename, so until now none of those was enumerated at all: measured on `origin/main` `94618b4c`, 30 such
-tokens across 21 files, FOUR of them already pointing at unrelated code. A bare token is enumerated only
-when the smallest backward window that names any file names exactly one (see `_continuation_candidates`),
-and its declaration key carries that attribution, so a re-attribution cannot inherit the old anchors.
-What is still NOT enumerated, and is the honest residual: 86 citation-shaped bare tokens in 26 files whose
+filename, so until now none of those was enumerated at all. EVERY count in this paragraph is one census
+of `origin/main` `94618b4c` -- the tree before this change, which is the only basis on which the numbers
+mean "what was invisible", since this file's own suite now contributes fixtures of both kinds. On that
+tree: 30 such tokens across 18 files, FIVE of them already pointing at unrelated code. A bare token is enumerated when
+the smallest backward window that names any file names at least one (see `_continuation_candidates`): one
+name is an attribution, several make the gate refuse to guess until an adjudicator declares an explicit
+target. Either way the declaration key carries the whole candidate set, so a re-attribution cannot
+inherit the old anchors.
+What is still NOT enumerated, and is the honest residual: of the 94 bare tokens that same census leaves
+unattributed, 86 are citation-shaped (three digits or a range), across 26 files, and their
 neighbourhood names no file with a line number at all -- `reference-assets.test.sh` citing a reference
 asset it reaches through a shell variable, `chapter-paths.mjs` citing its own body. Attributing those
 needs "no file named => the container itself", and `reference-assets.test.sh` is the counterexample that
@@ -92,8 +97,9 @@ MAX_SCANNED_LINE = 20000
 
 # A bare `:NNN` continuation. The OPENER SET IS THE WHOLE RULE, and it is an allowlist: start of line,
 # whitespace, a backtick, `(`, or `/`. Everything else is a shape that is not a citation and whose false
-# RED a maintainer switches the gate off over. `[` is out because `x[:10]` slice syntax appears ~200 times
-# here (admitting it moves the unattributable pool from 93 to 255, every one of the 162 a slice); `"` is
+# RED a maintainer switches the gate off over. `[` is out because of `x[:10]` slice syntax: on the same
+# `94618b4c` census, admitting it moves the unattributable pool from 94 to 253 and the ENUMERATED count
+# not at all -- 159 more tokens, not one of them a citation; `"` is
 # out because of JSON (`{"const":1}`); a preceding `:` is out because of IPv6 (`2606:4700:4700::1111`).
 # `/` is IN for the opposite reason -- a slash-separated run of line numbers after ONE filename, as one
 # `.d.mts` declaration file writes it, is two real continuations, and a slash followed by a digit outside
@@ -101,11 +107,11 @@ MAX_SCANNED_LINE = 20000
 # tool's own registry, which is not scanned. So the slash gains two and costs nothing measurable.
 BARE_CONTINUATION_RE = re.compile(r"(?:^|(?<=[\s`(/])):(\d+)(?:[-–—](\d+))?\b")
 
-# How far back a continuation may look for the file it continues. Measured window depth actually used by
-# this corpus: 0 for 15 occurrences, 1 for 10, 4 for two, 5 for one. At 3 the three deepest -- in
-# a skill reference and a driver test -- are lost; at 6 they are found and
-# nothing else changes. The bound exists so a citation at the top of a long comment block cannot adopt a
-# `:NNN` sixty lines below it.
+# How far back a continuation may look for the file it continues. Measured window depth actually used
+# by this corpus: 0 for 15 occurrences, 1 for 10, 4 for two, 5 for one. At 3 the three deepest -- in a
+# skill reference and a driver test -- are lost; at 6 they are found and nothing else changes. The
+# bound exists so a citation at the top of a long comment block cannot adopt a `:NNN` sixty lines
+# below it.
 MAX_CONTINUATION_LOOKBACK = 6
 
 MIN_ANCHOR_LEN = 8
@@ -258,10 +264,9 @@ def _continuation_candidates(lines, i, upto):
     """Every distinct citation TARGET in the smallest backward window that names one.
 
     Smallest, not "the paragraph": in the one real case that separates them, the surrounding comment
-    block names two files and the line itself names one, and the attribution is not in doubt. Reading the
-    nearer, more
-    specific evidence first keeps that case out of the ambiguity branch. The walk stops at a blank line,
-    at the top of the file, or at `MAX_CONTINUATION_LOOKBACK`.
+    block names two files and the line itself names one, and the attribution is not in doubt. Reading
+    the nearer, more specific evidence first keeps that case out of the ambiguity branch. The walk
+    stops at a blank line, at the top of the file, or at `MAX_CONTINUATION_LOOKBACK`.
 
     Returns a set: empty means "not enumerated" (the docstring's residual), one means an attribution,
     more than one means the caller must refuse to guess.
@@ -320,8 +325,10 @@ def find_citations(rel, text):
             matches += [(m, None) for m in _wrapped_citations(lines, i)]
         rows = []
         for m, col in matches:
-            target, start, end = m.group(1), int(m.group(2)), m.group(3)
-            rows.append((m.group(0), target, [target], m.group(0), False, col, start, end))
+            rows.append({"col": col, "cite": m.group(0), "key_cite": m.group(0),
+                         "target": m.group(1), "candidates": [m.group(1)],
+                         "is_continuation": False,
+                         "start": int(m.group(2)), "end": int(m.group(3) or m.group(2))})
         # `_consumed_spans` re-runs `CITATION_RE` and the wrapped-citation join over this line, and
         # `find_citations` has already scanned every line once. Doing it unconditionally doubled the
         # calls into `_wrapped_citations` -- measured 735,058 for 368,114 lines -- and the whole gate
@@ -339,33 +346,27 @@ def find_citations(rel, text):
             # an ambiguous occurrence cleared by an explicit "target" keeps a constant key while the
             # window's candidates are swapped underneath it -- `resolve` accepts any tracked explicit
             # target -- and the run stays green against a file the sentence no longer names.
-            rows.append((m.group(0), cands[0] if len(cands) == 1 else None, cands,
-                         "|".join(cands) + m.group(0), True, m.start(),
-                         int(m.group(1)), m.group(2)))
-        for cite, target, cands, key_cite, is_cont, col, start, end in rows:
-            sentence = enclosing_sentence(lines, i)
+            rows.append({"col": m.start(), "cite": m.group(0),
+                         "key_cite": "|".join(cands) + m.group(0),
+                         "target": cands[0] if len(cands) == 1 else None, "candidates": cands,
+                         "is_continuation": True,
+                         "start": int(m.group(1)), "end": int(m.group(2) or m.group(1))})
+        for row in rows:
             # The ordinal is what separates two occurrences of one citation in one file. It is
             # positional by design: identity reads no prose (see `decl_key`). For a continuation it is
             # counted per RAW TOKEN -- `:3` is the second `:3` in this file whatever it was attributed
             # to -- and deliberately NOT per identity string: with the counter keyed on the identity,
             # two paragraphs that exchange their files produce the identical key SET, every declaration
             # stays used, and the swap leaves no trace in the registry. Per raw token it does.
-            key = (rel, cite, is_cont)
+            key = (rel, row["cite"], row["is_continuation"])
             ordinal = seen.get(key, 0)
             seen[key] = ordinal + 1
             out.append(
                 {
                     "container": rel,
                     "line": i + 1,
-                    "col": col,
-                    "cite": cite,
-                    "key_cite": key_cite,
-                    "target": target,
-                    "candidates": cands,
-                    "is_continuation": is_cont,
-                    "start": start,
-                    "end": int(end) if end else start,
-                    "sentence": sentence,
+                    **row,
+                    "sentence": enclosing_sentence(lines, i),
                     "ordinal": ordinal,
                     "raw_line": line,
                 }
@@ -386,16 +387,16 @@ def auto_exempt_reason(c):
     second, real citation would inherit the first one's URL verdict and be exempted with nobody
     writing anything down. The occurrence carries its own column for that reason.
     """
-    if c.get("is_continuation"):
+    if c["is_continuation"]:
         # A continuation NEVER inherits the URL heuristic, and this is not a suppression -- the branch
-        # below tests `"://" in before[-12:]`, which is PROXIMITY, not containment. On
-        # a line that cites a file, then mentions an `https://` URL, then continues with a bare token,
-        # that perfectly good continuation would be auto-exempted -- and `cmd_check` skips an auto-exempt
-        # occurrence unconditionally, so the gate would go green with a real citation neither declared nor
-        # exempted nor ever checked again. The cost of the other direction is bounded and LOUD: a bare
-        # token sitting inside a URL PATH is opener-legal because of the slash before it, and it now reds
-        # until somebody writes an exemption with a reason. No such shape exists in this tree, and a false
-        # RED costs one registry line where a false GREEN costs a citation nobody looks at again.
+        # below tests `"://" in before[-12:]`, which is PROXIMITY, not containment. On a line that cites
+        # a file, then mentions an `https://` URL, then continues with a bare token, that perfectly good
+        # continuation would be auto-exempted -- and `cmd_check` skips an auto-exempt occurrence
+        # unconditionally, so the gate would go green with a real citation neither declared nor exempted
+        # nor ever checked again. The cost of the other direction is bounded and LOUD: a bare token
+        # sitting inside a URL PATH is opener-legal because of the slash before it, and it now reds until
+        # somebody writes an exemption with a reason. No such shape exists in this tree, and a false RED
+        # costs one registry line where a false GREEN costs a citation nobody looks at again.
         return None
     col = c.get("col")
     if col is None:
@@ -526,8 +527,8 @@ def decl_key(c):
     which sentence was recorded. Inserting one ABOVE the other still reds the file rather than
     silently inheriting: the last occurrence's ordinal has no declaration.
     """
-    parts = [c["container"], c.get("key_cite", c["cite"]), c["ordinal"]]
-    if c.get("is_continuation"):
+    parts = [c["container"], c["key_cite"], c["ordinal"]]
+    if c["is_continuation"]:
         # A fourth element ONLY for a continuation, so every pathful key stays byte-identical to the 269
         # already in the registry -- and so a bare token attributed to some file can never collide with
         # a pathful citation of that same file and line in the same container.
@@ -539,7 +540,7 @@ def cite_display(c):
     """What a problem line calls this occurrence. A bare token says nothing on its own, so a continuation
     prints the attribution the gate inferred -- that inference is the thing an adjudicator has to agree
     with before writing anchors, and it must not have to be reconstructed by hand."""
-    if not c.get("is_continuation"):
+    if not c["is_continuation"]:
         return c["cite"]
     if c["target"]:
         return f"{c['cite']} (continuation of {c['target']})"
@@ -633,7 +634,7 @@ def cmd_check(args):
                             f"            sentence: {c['sentence'][:160]}")
             continue
         used_decls.add(key)
-        if c.get("is_continuation") and c["target"] is None and not d.get("target"):
+        if c["is_continuation"] and c["target"] is None and not d.get("target"):
             problems.append(f"AMBIGUOUS-CONTINUATION {c['container']}:{c['line']} -> {c['cite']}: the "
                             f"window names {c['candidates']!r}, so which file this continues is not the "
                             f"gate's to guess; declare an explicit \"target\", or exempt it with a reason")
@@ -699,7 +700,7 @@ def cmd_check(args):
     for key in set(exempts) - used_exempts:
         problems.append(f"STALE-EXEMPTION no live citation matches: {key}")
 
-    continuations = sum(1 for c in cites if c.get("is_continuation"))
+    continuations = sum(1 for c in cites if c["is_continuation"])
     print(f"citation-audit: {len(cites)} citation occurrences in {len(tracked)} tracked text files "
           f"({continuations} of them bare continuations); "
           f"{examined} required a declaration; {len(used_exempts)} exempted.")
