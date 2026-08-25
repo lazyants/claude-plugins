@@ -70,10 +70,15 @@ Read its verdict as three-valued, not two. A profile it could not examine — an
 missing or invalid `config.toml`, a mistyped directory that is not a Codex home at all — is reported as a
 warning naming which check did not run, never as a quiet skip, because a run that did not look at a
 profile must not let a PASS line speak for it. A home that is simply `not-logged-in` is a real state for a
-freshly seeded profile and stays clean. And nothing the script reads is echoed back: the login mode prints
-as one of a fixed set of labels, the account id as a truncated fingerprint, and a matched config pin as the
-dotted key that holds it rather than the value, since one MCP env value can carry a path and a token
-together.
+freshly seeded profile and stays clean.
+
+And nothing the script reads is echoed back. The login mode prints as one of a fixed set of labels and the
+account id as a truncated fingerprint. A matched config pin prints as neither its value nor its real key: it
+is rendered as `mcp_servers.<redacted>.env.CODEX_HOME`, keeping only the names Codex's own schema chooses.
+Both halves earn their place — one MCP env value can carry a path and a token in the same string, and a
+table key can hold a credential just as easily, because TOML bare keys already admit `sk-live-abc123`
+without quoting. To locate a redacted pin, search the config for the other profile's path, which the same
+line names.
 
 ## Seeding a new profile
 

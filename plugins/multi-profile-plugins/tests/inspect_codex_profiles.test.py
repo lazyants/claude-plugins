@@ -67,12 +67,15 @@ def make_home(root: Path, name: str, *, account: str, config: str = "") -> Path:
             }
         )
     )
+    # The caller's config goes BEFORE the probe table, and the probe table goes LAST.
+    # Appending after a table header silently reparents every top-level key the caller
+    # writes: `notify = [...]` became `mcp_servers.probe.env.notify`, and the assertion
+    # looking for "notify[0]" still passed, on a substring of the wrong key path.
     (home / "config.toml").write_text(
         'model = "gpt-5.6-sol"\n'
-        "\n"
+        "\n" + config + "\n"
         "[mcp_servers.probe.env]\n"
         f'API_KEY = "{FAKE_MCP_SECRET}"\n'
-        "\n" + config
     )
     return home
 
@@ -145,16 +148,23 @@ with tempfile.TemporaryDirectory() as td:
     r = run(a, b)
     check("copied config: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
     check("copied config: reports pins", "PIN(S) into another profile" in r.stdout, r.stdout)
+    # Schema-chosen components survive; the MCP server's own name and the env var names do
+    # not, because the file chose those. Asserted as shapes rather than as full key paths.
     for key in (
-        "notify[0]",
-        "marketplaces.openai-bundled.source",
-        "mcp_servers.node_repl.env.CODEX_HOME",
-        "mcp_servers.node_repl.env.NODE_REPL_TRUSTED_CODE_PATHS",
-        "mcp_servers.node_repl.env.PATH_JOINED",
-        "mcp_servers.node_repl.env.NODE_REPL_TRUSTED_SERVICES",
-        "mcp_servers.node_repl.env.SERVICE_BLOB",
+        "notify[0] ",
+        "marketplaces.<redacted>.source",
+        "mcp_servers.<redacted>.env.CODEX_HOME",
+        "mcp_servers.<redacted>.env.<redacted>",
     ):
         check(f"copied config: names {key}", key in r.stdout, r.stdout)
+    # The COUNT must not fall when several pins in one table redact to the same string: six
+    # values pin the other home here, and dedup happens on the real key, not the rendered one.
+    check("copied config: counts every pin", "7 PIN(S)" in r.stdout, r.stdout)
+    check(
+        "copied config: server name redacted",
+        "node_repl" not in r.stdout and "openai-bundled" not in r.stdout,
+        r.stdout,
+    )
     check(
         "copied config: the CLEAN profile is still reported clean",
         ".codex " in r.stdout and "clean" in r.stdout,
@@ -164,6 +174,35 @@ with tempfile.TemporaryDirectory() as td:
     # substring so the check cannot be satisfied by the secrets simply being absent.
     check("copied config: value not echoed", '"root":' not in r.stdout, r.stdout)
     assert_no_secret("copied config", r)
+
+# ---------------------------------------------------------------------------
+# 2b. A TOML table key is FILE CONTENT, not structure. Quoted-key syntax accepts arbitrary
+#     text, and the key path is the one thing this report does print — so a credential in a
+#     table name reached stdout while the value beside it was being carefully dropped. The
+#     marker goes FIRST in the key so a redactor that only trimmed a tail would still fail.
+# ---------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    a = make_home(root, ".codex", account=ACCOUNT_A)
+    b = make_home(
+        root,
+        ".codex2",
+        account=ACCOUNT_B,
+        config=(
+            f'[mcp_servers."{FAKE_API_KEY}-in-key".env]\n'
+            f'CODEX_HOME = "{root / ".codex"}"\n'
+            f'[mcp_servers.plain.env."{FAKE_MCP_SECRET}"]\n'
+            f'NESTED = "{root / ".codex"}/plugins"\n'
+        ),
+    )
+    r = run(a, b)
+    check("quoted key: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
+    check("quoted key: pin still reported", "PIN(S) into another profile" in r.stdout, r.stdout)
+    check("quoted key: position kept", "<redacted>" in r.stdout, r.stdout)
+    # The bare components around it must survive, or the report stops naming the line to edit.
+    check("quoted key: bare parts kept", "mcp_servers." in r.stdout, r.stdout)
+    check("quoted key: CODEX_HOME still named", "CODEX_HOME" in r.stdout, r.stdout)
+    assert_no_secret("quoted key", r)
 
 # ---------------------------------------------------------------------------
 # 3. The boundary case a substring match gets wrong: `.codex` is a substring of
@@ -396,6 +435,10 @@ if os.geteuid() != 0:  # root ignores the mode bits, so the case cannot be stage
         check("blocked store: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
         check("blocked store: named", "is inaccessible" in r.stdout, r.stdout)
         check("blocked store: not called absent", "PASS —" not in r.stdout, r.stdout)
+        # The store ROW must not say "absent" about a directory that is there. This is the
+        # half that has to hold identically on every supported Python: the Path booleans
+        # answer False for a permission error from 3.14 and raise below it.
+        check("blocked store: row says unreadable", "=unreadable" in r.stdout, r.stdout)
 
 # ---------------------------------------------------------------------------
 # 6e. Two DIFFERENT accounts sharing the first eight characters are two accounts. The
@@ -477,7 +520,7 @@ print(f"ran {checks} checks")
 # A case that raises before its checks run, or a fixture block deleted wholesale, subtracts
 # silently: the remaining cases still pass and the run still exits 0. Assert the floor so a
 # suite that stopped exercising most of the script cannot read as a clean one.
-MIN_CHECKS = 84
+MIN_CHECKS = 90
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

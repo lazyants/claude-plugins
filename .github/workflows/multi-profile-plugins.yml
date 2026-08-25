@@ -42,17 +42,27 @@ jobs:
   codex-profiles:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      # BOTH ends of the supported range, because the floor was claimed and not tested and was
+      # wrong. `Path.exists()` and `Path.is_dir()` RAISE PermissionError on 3.11, 3.12 and 3.13
+      # and swallow it only from 3.14, so a directory the process cannot read crashed the
+      # script on every version below the one CI happened to pin -- while the file's own
+      # comment named 3.11 as the floor, because that is where `tomllib` arrives. A single
+      # pinned version cannot catch that; the whole point of naming a floor is that something
+      # runs there.
+      matrix:
+        python-version: ['3.11', '3.14']
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      # 3.14 to mirror this machine, as the sibling workflows do. The floor is lower and load
-      # bearing: the script parses config.toml with `tomllib`, which is stdlib only from 3.11.
-      # Neither the script nor the suite has any other dependency, so there is nothing to install.
+      # 3.14 mirrors this machine, as the sibling workflows do; 3.11 is the floor `tomllib`
+      # sets. Neither the script nor the suite has any other dependency, so nothing installs.
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.14'
+          python-version: ${{ matrix.python-version }}
 
       # The suite prints `ran N checks` and refuses a run below its own floor. A case that raises
       # before its checks execute, or a deleted fixture block, otherwise subtracts silently: the

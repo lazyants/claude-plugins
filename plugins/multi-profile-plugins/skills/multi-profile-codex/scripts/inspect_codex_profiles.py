@@ -29,9 +29,19 @@ Read-only; stdlib only, and nothing it reads is ever echoed back. `auth.json` is
 never walked: two named fields are read, the login mode is reported as one of a
 fixed set of labels rather than as the file's own string, and the account id is
 matched against an identifier shape and then truncated to a short fingerprint.
-A `config.toml` value is never printed at all — a matched pin is reported as the
-dotted key that holds it, because one MCP env value can carry both a path and a
-token in the same string.
+
+From `config.toml`, neither the values NOR the key names are printed. A matched
+pin is reported as its dotted key path with every component the FILE named
+replaced by `<redacted>`, leaving only names Codex's own schema chooses — so a
+pin reads `mcp_servers.<redacted>.env.CODEX_HOME`. Both halves are load-bearing:
+one MCP env value can carry a path and a token in the same string, and a table
+key can hold a credential just as easily, since TOML bare keys already admit
+`sk-live-abc123` with no quoting at all.
+
+Requires Python 3.11 (`tomllib`), and that floor is tested rather than assumed:
+`Path.exists()` and `Path.is_dir()` raise `PermissionError` on 3.11 through 3.13
+and swallow it only from 3.14, so every filesystem probe here goes through
+`probe()` or `os.lstat` instead.
 
 Usage:
     inspect_codex_profiles.py [profile_dir ...]
@@ -64,6 +74,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 import tomllib
 from pathlib import Path
@@ -94,6 +105,31 @@ ACCOUNT_FINGERPRINT_LEN = 8
 # an identifier at all rather than whatever a malformed auth.json happens to hold there.
 ACCOUNT_ID_RE = re.compile(r"[0-9a-fA-F-]{8,64}")
 
+# Key-path components safe to print, because Codex's own config schema chooses them rather
+# than the user or the file. EVERY other component is redacted.
+#
+# The distinction is not quoted-vs-bare, which was the first fix attempted here and was
+# simply wrong: TOML bare keys already admit `[A-Za-z0-9_-]+`, so `sk-live-abc123` is a legal
+# bare key and a redactor keyed on quoting passes it straight through. The real line is who
+# CHOSE the name. A table root and a schema field come from the format; an MCP server's name,
+# a marketplace's name and an env var's name come from whoever wrote the file.
+#
+# This is the third channel by which file content reached stdout in review, after the matched
+# value and auth_mode, and the hardest to see: a key LOOKS like structure, and the value
+# beside it was already being dropped, so the table name felt safe by association.
+SCHEMA_KEYS = frozenset({
+    # top-level tables and scalars, as written by the CLI and the desktop app
+    "analytics", "approval_policy", "approvals_reviewer", "desktop", "features", "feedback",
+    "marketplaces", "mcp_servers", "model", "model_reasoning_effort", "notice", "notify",
+    "personality", "plugins", "projects", "sandbox_mode", "service_tier",
+    "shell_environment_policy", "tui",
+    # schema fields inside those tables
+    "args", "command", "cwd", "enabled", "env", "last_updated", "source", "source_type",
+    "startup_timeout_sec", "trust_level",
+    # the one env var this script exists to talk about
+    "CODEX_HOME",
+})
+
 # Login modes rendered verbatim. Anything else prints as "unknown-mode": the value comes out
 # of a credential file, and echoing an unrecognised one is how that file's contents would
 # reach a terminal. The list holds only modes with a source -- `chatgpt` is what all logins
@@ -122,9 +158,26 @@ def abspath_arg(s: str) -> Path:
     return Path(os.path.abspath(s))
 
 
+def probe(fn) -> bool | None:
+    """Run a filesystem boolean probe; None means "could not tell", never False.
+
+    `Path.exists()` and `Path.is_dir()` RAISE PermissionError on Python 3.11, 3.12 and 3.13
+    and only swallow it from 3.14 -- measured on all four. CI pinned 3.14, so a directory the
+    process cannot read crashed the script on every version this file claims to support and
+    nothing went red. Returning None rather than False is the point: "cannot tell" must not
+    collapse into "absent", which is exactly the lie this script exists to catch.
+    """
+    try:
+        return fn()
+    except OSError:
+        return None
+
+
 def looks_like_profile(p: Path) -> bool:
     """A dir counts as a Codex home if it has a config.toml or an auth.json."""
-    return p.is_dir() and ((p / "config.toml").exists() or (p / "auth.json").exists())
+    if not probe(p.is_dir):
+        return False
+    return bool(probe((p / "config.toml").exists) or probe((p / "auth.json").exists))
 
 
 def discover_profiles(home: Path) -> list[Path]:
@@ -133,13 +186,26 @@ def discover_profiles(home: Path) -> list[Path]:
 
 
 def kind(p: Path) -> str:
-    if os.path.islink(p):
+    """Classify a path for the report, in one stat, identically on every supported version.
+
+    Built on os.lstat rather than the Path booleans on purpose. Those swallow a permission
+    error into False from 3.14 and raise it below, so the same blocked directory would print
+    "absent" on one interpreter and crash on another -- and "absent" is a lie about a
+    directory that is there, which is the class of false statement this script exists to
+    catch. lstat raises on every version, so the three outcomes are told apart by which
+    exception arrives rather than by which Python is running.
+    """
+    try:
+        st = os.lstat(p)
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unreadable"
+    if stat.S_ISLNK(st.st_mode):
         return "symlink"
-    if p.is_dir():
+    if stat.S_ISDIR(st.st_mode):
         return "real-dir"
-    if p.exists():
-        return "real-file"
-    return "absent"
+    return "real-file"
 
 
 def path_occurs_in(needle_dir: str, value: str) -> bool:
@@ -241,6 +307,25 @@ def duplicates(mapping: dict[Path, object]) -> list[list[Path]]:
     return [profs for profs in by_value.values() if len(profs) > 1]
 
 
+def safe_key(dotted: str) -> str:
+    """Render a dotted TOML key path, redacting every component the FILE named.
+
+    `mcp_servers.some-server.env.CODEX_HOME` becomes
+    `mcp_servers.<redacted>.env.CODEX_HOME`. The shape survives, so the report still says
+    which kind of setting is wrong and a reader can find it by searching their config for the
+    other profile's path — which they have, since this line names it. What does not survive is
+    any part of the file that could hold a credential.
+
+    Array indices this script generates itself (`notify[0]`) are structural and pass through.
+    """
+    out = []
+    for part in dotted.split("."):
+        base, _, index = part.partition("[")
+        suffix = f"[{index}" if index else ""
+        out.append((base if base in SCHEMA_KEYS else "<redacted>") + suffix)
+    return ".".join(out)
+
+
 def fingerprint(account: str) -> str:
     """Render an account id for display: a short prefix, never the whole identifier."""
     return account[:ACCOUNT_FINGERPRINT_LEN]
@@ -334,7 +419,7 @@ def main(argv: list[str]) -> int:
                 # Says "no readable", not "no": looks_like_profile is a boolean probe, so a
                 # directory whose contents cannot be read is indistinguishable here from one
                 # that is genuinely empty, and the message must not claim the difference.
-                reason = "does not exist" if not prof.exists() else "no readable config.toml or auth.json"
+                reason = "does not exist" if probe(prof.exists) is False else "no readable config.toml or auth.json"
                 # ONE gap, not one per check. The later checks each record their own gap when
                 # they genuinely cannot run -- and they still run: a chmod-000 directory
                 # reaches the store scan and reports it as inaccessible, which fanning out
@@ -414,6 +499,10 @@ def main(argv: list[str]) -> int:
         # a path and a token in the same string, so printing "the value that matched" leaks a
         # credential on exactly the config a user would most want to run this against. The
         # dotted key names the line to edit, which is all a reader needs.
+        # Deduplicated on the REAL key and redacted only at render. Redacting first would
+        # collapse several distinct pins in one table into a single set member -- four env
+        # vars in the same MCP server all render alike -- and the reported count would fall
+        # below the number of lines the reader has to fix.
         pins = sorted({
             (key, label(other))
             for key, value in walk_values(cfg)
@@ -421,11 +510,11 @@ def main(argv: list[str]) -> int:
             if other != prof and path_occurs_in(str(other), value)
         })
         if pins:
-            keys = ", ".join(f"{k} -> {o}" for k, o in pins)
+            keys = ", ".join(f"{safe_key(k)} -> {o}" for k, o in pins)
             warns.append(f"{label(prof)}/config.toml points into another profile's home: {keys}")
             print(f"  {label(prof):<{width}} {len(pins)} PIN(S) into another profile:")
             for key, other in pins:
-                print(f"      {key} -> {other}")
+                print(f"      {safe_key(key)} -> {other}")
         else:
             print(f"  {label(prof):<{width}} clean")
 
