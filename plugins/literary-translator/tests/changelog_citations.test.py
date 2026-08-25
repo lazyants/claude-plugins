@@ -152,17 +152,25 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # EMPTY ON PURPOSE, and rotated rather than inherited: the 1.69.0 entry --
+    # EMPTY ON PURPOSE, and rotated rather than inherited: the 1.71.0 entry --
     # a BATCH FOLD, whose merges each landed on `main` on their own PR without a
     # version bump -- cites no `file.ext:NNN` anchor at all. It names scripts,
-    # schemas, constants and tuples (`select_segments.py`, `json_stdout.py`,
-    # `SAFE_STALE_CARVEOUT_FIELDS`, `PLUGIN_BUNDLE_MEMBERS`) and never a line
-    # number, deliberately: a fold labels a long run of diffs, so any line it
-    # pinned would have renumbered inside the very range it describes. The
-    # rotation this replaces was 1.67.0's, which was empty for its own reason
-    # (behavioural claims exercised by named tests rather than pinned to lines).
-    # The undeclared-anchor half of this file still runs over the entry, so a
-    # line citation added here later goes RED until it is declared.
+    # templates, constants and tuples (`segment_dispatch_driver.py`,
+    # `bootstrap_names.py`, `SAFE_STALE_CARVEOUT_FIELDS`,
+    # `PLUGIN_BUNDLE_MEMBERS`) and never a line number, deliberately: a fold
+    # labels a long run of diffs, so any line it pinned would have renumbered
+    # inside the very range it describes -- and this range in particular is the
+    # one whose largest single contributor to the hash movement (#579) is a
+    # repo-wide RENUMBERING of exactly such citations. The rotation this
+    # replaces is 1.69.0's -- `git log` on this file shows 1.70.0's cut
+    # (`6d0a2b2`) never touched it, so this dict sat empty and UNROTATED across
+    # that whole release and nothing here attests that 1.70.0's entry was ever
+    # examined for anchors, which is exactly the failure this comment's closing
+    # sentence warns about. The rotation before 1.69.0's was 1.67.0's, empty
+    # because its behavioural claims were exercised by named tests rather than
+    # pinned to lines. The
+    # undeclared-anchor half of this file still runs over the entry, so a line
+    # citation added here later goes RED until it is declared.
 }
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an

@@ -1,5 +1,196 @@
 # Changelog
 
+## 1.71.0 — 2026-08-25
+
+The third batch fold: every merge that landed on `main` after the 1.70.0 cut (`6d0a2b2`) without a
+version of its own. Folded here are #621, #732, #742, #746 and #751, plus the literary-translator
+half of the repo-wide #579. Each is described below in its own right; what a fold owes beyond that
+is one release-level statement of what the whole range costs, and it is the section directly under
+this paragraph.
+
+### What this release costs, measured across the whole range
+
+All three bundle hashes move, and one of them moves for a reason that is worth naming plainly
+rather than folding into a total.
+
+- **`plugin_bundle_hash` moves.** Six of its members carry a byte diff: `segment_dispatch_driver.py`
+  and `select_segments.py`, from #742's gate, and `canon_senses.py`, `claim_record.py`,
+  `ledger_update.py` and `mass-translate-wf.template.js`, from #579 — where the diff is citation
+  text inside comments and docstrings and changes no executable statement. Every converged segment
+  flips to `stale` once on the next Step 0a refresh.
+- **`derivation_bundle_hash` moves — and ONLY from #579's citation renumbering.** `bootstrap_names.py`
+  is the member that changed, and what changed in it is a docstring line number. This is the
+  strongest of the three invalidations: the field exists precisely so a fix to
+  `bootstrap_names.py`/`segpack.py` forces the segpack to REGENERATE before anything retranslates
+  against it, rather than flipping segments to an ordinary `stale`. So the honest statement of this
+  release's cost is that its heaviest invalidation has no behavioural cause at all — the bundle is a
+  literal byte-hash allowlist, which is the property that makes it un-foolable and also the property
+  that makes a comment edit cost exactly what a logic edit costs.
+- **`orchestration_bundle_hash` moves** — `select_segments.py` from #742, plus `claim_record.py`,
+  `language_smoke_report.py` and `ledger_merge.py` from #579. It feeds `resume_setup.py`'s
+  `input_digest`, so a refreshed root's next run mints a fresh `RUN_ID` and reports `resume: false`.
+- **`schemas/` is untouched, so `schema_hash` does NOT move.** That is a decision, not an accident:
+  #742 priced an edit to `profile.schema.json`'s `batch_agent_cap` description — true of the
+  `pipeline()` path and merely ambiguous rather than false for the driver — and deferred it rather
+  than buy a second cache-key migration inside the same release.
+
+Two of the three moved hashes are cache-key fields, and both are machinery-only, so #491's
+carve-out holds for them: `final_audit.py`'s `SAFE_STALE_CARVEOUT_FIELDS` is exactly
+`plugin_bundle_hash`, `schema_hash` and `derivation_bundle_hash`, and a sentinel-bearing segment that
+goes `stale` for one of them alone still assembles and still passes the completeness gate unjudged.
+Of that set, `plugin_bundle_hash` and `derivation_bundle_hash` moved here and `schema_hash` did not
+move at all. The third moved hash, `orchestration_bundle_hash`, is not a cache-key field: it never
+stales a segment, and its whole cost is the fresh `RUN_ID` described above. The two costs have
+separate consumers and are stated separately for that reason. What the refresh costs is the
+regeneration and the fresh `RUN_ID`, not a re-translation of finished prose.
+
+Bundle MEMBERSHIP did not change in this range: `PLUGIN_BUNDLE_MEMBERS` still holds 19 entries,
+`DERIVATION_BUNDLE_MEMBERS` still holds 2 and `ORCHESTRATION_BUNDLE_MEMBERS` still holds 6 — the same
+three tuples 1.70.0 cut. What moved is the BYTES of nine members across them, not any list.
+
+The fresh `RUN_ID` and #742 interact, and an operator refreshing onto this release meets the
+interaction rather than either half: the new run id orphans the `dispatch_token` on every draft still
+in flight, and from this release the driver REFUSES that dispatch instead of retranslating those
+drafts. Finish or resolve in-flight work before refreshing, or expect a halt naming each one.
+
+### #742 — an orphaned in-flight draft refuses instead of retranslating
+
+A fresh `RUN_ID` orphans the `dispatch_token` on every draft still in flight, and the driver then
+re-translated those drafts, discarding hand-applied fixes and reporting it as success. Measured on a
+live 74-segment volume: three segments lost roughly twenty hand edits before the driver was killed,
+with 61 further hand-fixed drafts exposed in the same invocation.
+
+The gate that answers this already existed — `refuse_run_over_foreign_drafts()` compares each
+selected segment's draft token against the resolved run id — but it was called only under
+`--resume-from-run-id`, on the argument that a pin is a declared statement about which run an
+invocation belongs to. Destroying editorial work already on disk does not need a declaration to be
+wrong, so the gate now runs unpinned too. What is unchanged byte for byte is the pinned SEGMENT
+COVERAGE — a pin still checks every selected segment, #458's own scope. The pinned code path itself
+did change: both paths now go through the one shared refusal, which is handed the real `resume` value
+read through `run_resumed()` rather than a truth test, and that reader refuses a non-boolean `resume`
+with exit 2 on either path. Nothing an ordinary run reaches; a sibling-script skew that used to be
+guessed at now halts.
+
+**This is the release's one behaviour change with teeth: a dispatch that used to exit 0 having
+overwritten drafts now exits 1 and names each refused segment with its owner.** Nothing is
+re-stamped automatically — rewriting tokens on the operator's behalf is the same silent mutation
+this refuses — so each named segment is answered by hand: delete the draft, re-stamp it
+deliberately, or pin the run to the owner it names.
+
+What the unpinned path checks is narrowed by an EXEMPTION list rather than an inclusion list: every
+selected segment except `stale`. The exemption is CATEGORICAL — the filter reads the category and
+nothing else — and the case it is written for is the common one: a unit that was converged, whose
+cache key then drifted, so its draft carries the token of the run that converged it and the same
+drift mints the fresh id. Refusing there would refuse every input-change retranslation the cache-key
+design exists to perform. It is not the only `stale` shape, though: `select_segments.py` also calls a
+unit `stale` on a `draft_sha1_mismatch` with no cache-key mismatch at all — a draft hand-edited since
+its review — and that shape is exempted too. What bounds the exemption either way is a SECOND gate
+rather than the classification: dispatching a previously-converged unit already requires an explicit
+`--allow-retranslate-converged`, so what this exemption permits is destruction the operator
+authorised in as many words.
+`not_started` is NOT exempt — classification keys on an absent ledger record alone and never looks
+for a draft, so a partial restore lands surviving work there — and a category added later defaults to
+protected, the only safe direction for a guard whose false-GREEN destroys human work.
+
+### #751 — Step 0 asks the intake questions in the run that creates the profile
+
+Step 0's questionnaire keys on `CHOOSE_` sentinels, and those only exist because
+`profile_validate.py` copies `profile.example.yml` when `profile.yml` is ABSENT. The absence branch
+copied the example and then EXITED, telling the reader to fill in every placeholder and re-run — so
+the questionnaire existed only on a later invocation, and an orchestrator obeying that message
+answered the sentinels from the fresh copy's own inline comments first. Measured: 12 of 12 operator
+profiles across both live books omit `glossary.enabled`, whose default is true, so every one of those
+books ran the W3 glossary pass under a decision nobody was shown.
+
+The window is closed rather than documented: after the copy the same run falls through into its own
+placeholder scan, so the invocation that creates the starter profile is the one that prints its
+questionnaire. That is what the shipped prose already claimed. One case is deliberately left open
+and the shipped message says so on the spot: the dependency preflight runs between the copy and the
+scan,
+so a run with PyYAML or `jsonschema` missing prints the install instruction INSTEAD of the
+questionnaire, with the starter profile already on disk. That is the pre-#751 shape surviving in
+exactly one place, and the creation message names it ("once the dependency preflight below succeeds
+they are listed in full") rather than letting the operator read silence as a complete answer.
+
+R10 gains the missing half of its never-copied entry, the R1–R10 index carries the same rule, and W1
+stops naming `profile.yml` among the placeholders it tells a reader to fill.
+
+Deliberately NOT done: `glossary.enabled` is not made schema-required. A required key does not relay
+a question — it makes the file invalid until the same actor that authored it wrongly fills in a
+guess, which is precisely how the three already-required intake keys came to carry plausible values
+nobody was asked about.
+
+### #621 — the backfill takes the project lease instead of asking to be sequenced
+
+`backfill_ever_converged.py --apply` acquires `runs/.driver.lock` and holds it for the whole run —
+the same lease `segment_dispatch_driver.py` holds across both its `select_segments.py` census and
+every translate it dispatches — so a sentinel can no longer be raised inside the census-to-dispatch
+window. **`--apply` run alongside a dispatch now exits 1 instead of writing markers**; dry runs are
+unaffected, a deliberate carve-out that keeps their pinned write-nothing guarantee.
+
+Chosen over the driver-side recheck, which was priced and rejected: `segment_dispatch_driver.py` is a
+`PLUGIN_BUNDLE_MEMBERS` entry, and that fix would have moved `plugin_bundle_hash` on its own account.
+`backfill_ever_converged.py` is in none of the three bundle tuples, so this change contributes
+nothing to the movement described above.
+
+A follow-up fixes what taking the lease first exposed: moving the acquire to the top of the run made
+its `mkdir(parents=True)` the first thing a mistyped `--durable-root` reached, materializing the whole
+missing tree and then failing with "schemas directory not found" — which reads as an incomplete
+project rather than a nonexistent one. `acquire_project_lease()` now refuses a root that is not a
+directory before creating anything.
+
+### #732 — what changing `engine.effort` / `engine.max_fix_rounds` costs is disclosed at the knob
+
+`engine.batch_agent_cap` spelled out its own change cost in detail while `engine.effort` and
+`engine.max_fix_rounds`, three lines above it and the two that are actually expensive, said nothing.
+Both are members of `compute_agent_config_hash` AND of `DIGEST_SUBST_FIELDS`, so changing either
+restales every converged segment and mints a fresh `RUN_ID`. Each now carries a `# Change cost:`
+paragraph stating both costs, the cheaper `--from-converged` re-review escape, and — for `effort` —
+that LOWERING costs exactly what raising costs, because a hash cannot express an ordinal.
+
+The asymmetry is disclosed rather than removed. #732 asked for a monotone effort admission instead;
+that was descoped after measurement — across all five version-controlled durable roots every
+`effort:` line has exactly one commit, its own creation, so the event has never happened, and the fix
+would have put a second admission path inside the resume identity gate, where a wrong admission is a
+silent false-GREEN. The comments are YAML comments only: the parsed profile is byte-identical to
+1.70.0's, so nothing here moves a hash.
+
+The boundary that pins the shipped cap moved with it. Correcting the constants in
+`profile_example_validation.test.py` had fixed a value and left the class — the test still carried its
+own copy of the template's estimator, and a copy that moves together with its own assertion is how a
+stale pair stays green while the template ships something else. The boundary now lives in
+`batch_size_estimator.test.py`, which instantiates and EXECUTES the real template, drives the shipped
+`batch_agent_cap` and `max_fix_rounds` straight out of `profile.example.yml`, and reads the
+per-segment cost back out of the gate's own reported `estimatedCalls` instead of recomputing it.
+
+### #746 — W6 says that building the enumeration is the fragile step
+
+W6's class-sweep rule was thorough about what to do with a site once it is in the enumeration, and
+silent about where the enumeration comes from: a pattern the operator writes for that round, which is
+the step most likely to be wrong. It fails in both directions and prints a plausible number either
+way. Measured on a live volume, a stem scan for a spelling class returned 89 hits across three stems
+of which exactly one was a defect, because in an inflected language a stem matches forms where the
+property under test is legitimately absent. The remedy is one line of the work already being done:
+print the DISTINCT matched surface forms and decide per form, never per count.
+
+The second bullet is separate because it fails independently: a finding that says a rule is applied
+inconsistently "throughout" and then lists sites has made TWO claims. In that same round, 427 italic
+spans in the source against 831 in the drafts refuted the class claim outright while three of the
+sites that finding named were real defects — so an operator who measures the class and finds it
+refuted has a complete-looking reason to close the finding, and drops real sites.
+
+### #579 — the repo-wide citation gate reaches this plugin's own comments
+
+A `file.ext:NNN` citation is now checked, repo-wide, against what its sentence claims about that
+range. The literary-translator half of that sweep re-anchored citations across this plugin's scripts,
+templates, references and tests. No PRODUCTION statement changed anywhere in it: every shipped
+script and template carries its diff inside a comment or a docstring, which is what makes the hash
+movement above so lopsided. Three test files are the exception worth naming rather than glossing —
+`orchestration_hash_resume_gating.test.py`'s table of pinned citations, and an assertion message in
+each of `segment_dispatch_driver.test.py` and `skeptic_setup.test.py` — where the citation text sits
+in an executable position. It is still citation text, and none of the three is a bundle member, so
+none of it reaches the hashes; the claim is narrowed here rather than left absolute.
+
 ## 1.70.0 — 2026-08-24
 
 The second batch fold: every merge that landed on `main` after the 1.69.0 cut (`b9b20d6`)
