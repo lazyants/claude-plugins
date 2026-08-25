@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """The executable contract for `check_version_surfaces.py`'s `origin/main` baseline.
 
-Nothing in CI runs this file: no workflow's path filter in `.github/workflows/` reaches
-`.claude/**` — between them the five cover the `plugins/<name>/**` trees, their own workflow files,
-and the root `README.md` and `CHANGELOG.md` for enduser-handbook. It is committed anyway,
-because the checker it covers is run by hand before every release commit and the previous change
-to it was verified by an ad-hoc battery that left nothing behind to re-run. Run it yourself:
+`.github/workflows/version-surfaces.yml` runs this file, and then the checker itself, on every
+push to `main` and every pull request to `main` that touches a version surface or this directory.
+Run it yourself as well after touching the checker -- CI only reports once the branch is pushed:
 
     python3 .claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.test.py -v
 

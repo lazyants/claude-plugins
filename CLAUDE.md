@@ -34,19 +34,30 @@ work, never the coverage: skipping a suite locally is right, skipping it remotel
 | `db-guardrails.yml` | `tests/block-destructive-db.test.sh` | bash, python3, jq (preinstalled) |
 | `enduser-handbook.yml` | `node --test tests/*.test.mjs`, then `tests/reference-assets.test.sh` | Node 22, ruby (preinstalled), esbuild (best-effort) |
 | `literary-translator.yml` | `python3 -m pytest -q`, run **from the plugin directory** | Python 3.14 + `requirements.txt`, Node 22 |
+| `version-surfaces.yml` | `.claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.test.py`, then the checker itself over the tree | Python 3.14 (stdlib only) |
 
-`multi-profile-plugins` and `obsidian-project-vault` ship no tests, so they have no workflow.
+`multi-profile-plugins` and `obsidian-project-vault` ship no tests, so they have no suite of their
+own — `version-surfaces.yml` still covers their release surfaces, as it does every plugin's.
 
-Each workflow is path-filtered to its own plugin plus its own file, so a PR touching one plugin
-runs one suite; `workflow_dispatch` runs any of them by hand. Superseded runs on the same ref are
-cancelled, so only the newest commit's run gates anything.
+The five plugin workflows are each path-filtered to their own plugin plus their own file, so a PR
+touching one plugin runs one suite; `workflow_dispatch` runs any of them by hand. Superseded runs on
+the same ref are cancelled, so only the newest commit's run gates anything.
 
-One exception, and the rule behind it: `enduser-handbook.yml` also lists the root `README.md` and
-`CHANGELOG.md`, because `reference-assets.test.sh` reads both directly and pins release copy in
-them. **A path filter must cover every file the suite READS, not only the directory it lives in** —
-otherwise a PR editing just that file merges with the suite never scheduled, which is exactly the
-hole that "CI replaces the local run" is supposed to close. No other suite reaches outside its own
-plugin directory (literary-translator's changelog tests read `PLUGIN_ROOT/CHANGELOG.md`, its own).
+Two workflows deliberately reach outside one plugin directory, and the rule behind both:
+`enduser-handbook.yml` also lists the root `README.md` and `CHANGELOG.md`, because
+`reference-assets.test.sh` reads both directly and pins release copy in them; and
+`version-surfaces.yml` is repo-wide by nature — its checker compares every plugin's manifest
+against `.claude-plugin/marketplace.json`, the README's row and section, and the changelog, so its
+filter lists all of those plus the scripts directory the checker lives in. **A path filter must
+cover every file the suite READS, not only the directory it lives in** — otherwise a PR editing
+just that file merges with the suite never scheduled, which is exactly the hole that "CI replaces
+the local run" is supposed to close. No other suite reaches outside its own plugin directory
+(literary-translator's changelog tests read `PLUGIN_ROOT/CHANGELOG.md`, its own).
+
+`version-surfaces.yml` is the one workflow whose `pull_request` trigger is scoped to `branches:
+[main]`: its checker's baseline is `origin/main`, which is the right comparison only for a PR that
+publishes. A stacked PR based on another branch may legitimately sit behind `main`, and its parent's
+PR to `main` is where the check has to pass.
 
 Runtime versions are pinned to mirror this machine (Python 3.14, Node 22) — a CI result is then
 directly comparable to what a local run would have produced, which is the point of not running one.

@@ -1,0 +1,95 @@
+name: version-surfaces
+
+# The one workflow that is not about a single plugin. It runs
+# `.claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.py`, which asserts that
+# every plugin's version says the same thing on all five surfaces it is written on plus its
+# changelog, and that the tree would not publish a version LOWER than the one on `origin/main`.
+#
+# The checker existed before this workflow did and was run by hand before each release commit.
+# That is discipline, and discipline is what a desync gets past: two have shipped, and both are
+# still readable in git. At `3fad793` (#197, recorded in #276) `plugin.json` and the changelog say
+# 1.12.0 while `.claude-plugin/marketplace.json` says 1.11.0; at `15ed43a` (#537, recorded in #561)
+# they say 1.27.0 against a marketplace still on 1.26.0. Each looked fully released in the commit
+# message, the PR and the CHANGELOG. Merging to `main` IS publishing here, so the check belongs on
+# the merge.
+#
+# `pull_request` is scoped to `main` on purpose: the checker's baseline is hard-coded to
+# `origin/main`, which is the right question only for a PR that publishes. A stacked PR based on
+# another branch can legitimately sit behind `main`, and judging it against `main` would call that
+# a downgrade. Its parent's PR to `main` is where the check has to pass.
+
+# The two path lists are written out twice rather than shared through a YAML anchor: the sibling
+# workflows all spell theirs out, and one list read by two events is not worth being the only file
+# here whose parse depends on a feature GitHub added to its runner in 2025. Keep them identical.
+on:
+  push:
+    branches: [main]
+    # Deliberately a superset of what the checker reads: `plugins/**` covers every manifest, every
+    # per-plugin CHANGELOG and the directory listing itself (a half-added or half-removed plugin is
+    # a finding; a complete addition or removal is not). A filter narrower than what a suite reads
+    # is how a PR merges with the suite never scheduled -- see CLAUDE.md.
+    paths:
+      - 'plugins/**'
+      - '.claude-plugin/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - '.claude/skills/plugin-repo-mechanics/scripts/**'
+      - '.github/workflows/version-surfaces.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'plugins/**'
+      - '.claude-plugin/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - '.claude/skills/plugin-repo-mechanics/scripts/**'
+      - '.github/workflows/version-surfaces.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  surfaces:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # Full history, not the default depth-1 shallow clone: the checker reads
+          # `refs/remotes/origin/main` for the published version and needs a merge base with HEAD
+          # to tell "this branch never moved the number" from "this branch moves it backwards".
+          # The PULL REQUEST run is what needs this -- a depth-1 checkout of a merge ref fetches
+          # neither `main` nor enough history to find a merge base with it. (A push-to-main run
+          # would be fine shallow: checkout writes the triggering commit to `origin/main` itself.)
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      # Both refs are asserted here because their absence is SILENT in the checker: it prints
+      # NOT COMPARED with a reason and still exits 0, which reads exactly like a run that compared
+      # every plugin and found them all current. The per-plugin `absent` bucket is legitimate
+      # (a new plugin has no baseline yet) and is deliberately not asserted away here.
+      - name: The baseline the checker reads is present
+        run: |
+          git rev-parse --verify origin/main
+          git merge-base HEAD origin/main
+
+      # The checker is 700+ lines of Markdown and manifest parsing, and until this workflow existed
+      # its suite ran on no machine but the author's. 33 stdlib `unittest` cases, ~8s; a few skip
+      # according to whether the filesystem folds path spellings, so a Linux run and a macOS run
+      # skip different cases and both are green.
+      - name: check_version_surfaces.test.py
+        run: python3 .claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.test.py
+
+      # Read the `NOT COMPARED` line under the verdict, not just the exit code: `0 disagreeing`
+      # above `0 compared, N NOT COMPARED` is not an all-clear about the published version.
+      - name: check_version_surfaces.py
+        run: python3 .claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.py
