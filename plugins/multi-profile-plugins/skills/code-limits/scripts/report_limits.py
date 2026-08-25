@@ -36,6 +36,7 @@ import http.client
 import json
 import os
 import select
+import stat
 import subprocess
 import sys
 import time
@@ -106,6 +107,7 @@ def _appserver_timeout() -> float:
     return value if 0.5 <= value <= 600.0 else 45.0
 KEYCHAIN_SERVICE_PREFIX = "Claude Code-credentials-"
 WINDOW_LABELS = {300: "5h", 10080: "weekly"}
+MAX_LINE_BYTES = 4 * 1024 * 1024
 
 
 class Malformed(Exception):
@@ -169,11 +171,19 @@ def _decimal(value) -> float:
 
 
 def _from_epoch_seconds(value) -> datetime.datetime:
-    return datetime.datetime.fromtimestamp(_pos_int(value), datetime.timezone.utc)
+    try:
+        parsed = datetime.datetime.fromtimestamp(_pos_int(value), datetime.timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        raise Malformed("field-malformed") from None
+    return _renderable(parsed)
 
 
 def _from_epoch_millis(value) -> datetime.datetime:
-    return datetime.datetime.fromtimestamp(_pos_int(value) / 1000, datetime.timezone.utc)
+    try:
+        parsed = datetime.datetime.fromtimestamp(_pos_int(value) / 1000, datetime.timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        raise Malformed("field-malformed") from None
+    return _renderable(parsed)
 
 
 def _from_iso(value) -> datetime.datetime:
@@ -185,7 +195,21 @@ def _from_iso(value) -> datetime.datetime:
         raise Malformed("field-malformed") from None
     if parsed.tzinfo is None:  # a naive stamp cannot be compared against "now"
         raise Malformed("field-malformed")
-    return parsed
+    return _renderable(parsed)
+
+
+def _renderable(when: datetime.datetime) -> datetime.datetime:
+    """Reject a timestamp that parses but cannot be rendered in the local zone.
+
+    `9999-12-31T23:59:59+00:00` is valid ISO-8601 and raises OverflowError inside astimezone().
+    That happens in the renderer, which runs outside the per-candidate handler, so it would abort
+    the entire report rather than gapping one record.
+    """
+    try:
+        when.astimezone()
+    except (OverflowError, OSError, ValueError):
+        raise Malformed("field-malformed") from None
+    return when
 
 
 def _obj(value):
@@ -252,11 +276,11 @@ class Record:
 
 
 def _window_row(*, name: str, percent: float, resets: datetime.datetime, freshness: str,
-                now: datetime.datetime, active: bool) -> Record:
+                now: datetime.datetime, active: bool,
+                stale_note: str = "current window unknown without --live") -> Record:
     if resets <= now:
         return Record(name, NO_CURRENT, percent=percent, resets=resets, freshness=freshness,
-                      diagnostic="stale-after-reset",
-                      note="current window unknown without --live")
+                      diagnostic="stale-after-reset", note=stale_note)
     if not active:
         return Record(name, NO_CURRENT, percent=percent, resets=resets, freshness=freshness,
                       note="inactive, no current window")
@@ -409,8 +433,8 @@ def _claude_token(profile: Path, now: datetime.datetime) -> str:
     return token
 
 
-def _claude_live(profile: Path, now: datetime.datetime) -> list[Record]:
-    token = _claude_token(profile, now)
+def _claude_live(profile: Path, started: datetime.datetime) -> list[Record]:
+    token = _claude_token(profile, started)
     conn = HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT)
     try:
         try:
@@ -433,6 +457,7 @@ def _claude_live(profile: Path, now: datetime.datetime) -> list[Record]:
         except Exception:
             pass
 
+    now = datetime.datetime.now(datetime.timezone.utc)  # observation time, not run-start time
     if status != 200:  # a 3xx is a non-200 like any other; nothing follows it
         raise Malformed("http-error")
     try:
@@ -499,6 +524,10 @@ def _appserver_result(home: Path) -> dict:
             if not chunk:
                 raise Malformed("appserver-protocol-error")
             buffer += chunk
+            if len(buffer) > MAX_LINE_BYTES:
+                # A child that never emits a newline would otherwise be buffered until the
+                # deadline, which can be ten minutes at the knob's ceiling.
+                raise Malformed("appserver-protocol-error")
             while b"\n" in buffer:
                 line, buffer = buffer.split(b"\n", 1)
                 if not line.strip():
@@ -528,38 +557,61 @@ def _appserver_result(home: Path) -> dict:
             pass
 
 
-def _codex_records(home: Path, now: datetime.datetime) -> list[Record]:
+def _codex_records(home: Path, _started: datetime.datetime) -> list[Record]:
     result = _appserver_result(home)
+    now = datetime.datetime.now(datetime.timezone.utc)  # observation time, not run-start time
     freshness = f"live {_local(now)}"
 
     default = result.get("rateLimits")
     by_id = result.get("rateLimitsByLimitId")
     pools: dict[str, dict] = {}
+    records_pre: list[Record] = []
     if isinstance(by_id, dict) and by_id:
         for key, pool in by_id.items():
-            pools[_text(key, 64)] = _obj(pool)
+            try:
+                pools[_text(key, 64)] = _obj(pool)
+            except Malformed as exc:
+                records_pre.append(Record(f"limitId[{len(records_pre)}]", GAP,
+                                          diagnostic=exc.code))
     elif isinstance(default, dict):
         pools[_text(default.get("limitId", "codex"), 64)] = default
     else:
         raise Malformed("payload-malformed")
 
-    records: list[Record] = []
+    records: list[Record] = list(records_pre)
     for limit_id in sorted(pools):
         pool = pools[limit_id]
         # Identity is (limitId, slot); only the LABEL comes from the duration. Two limit ids were
-        # measured carrying a 10080-minute window at the same time, so the label alone collides.
+        # measured carrying a 10080-minute window at the same time, and one POOL can carry two
+        # windows of equal duration, so the slot is appended whenever the label alone collides.
+        durations: dict[str, int | None] = {}
+        for slot in ("primary", "secondary"):
+            window = pool.get(slot)
+            durations[slot] = None
+            if isinstance(window, dict):
+                raw = window.get("windowDurationMins")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    durations[slot] = raw
+        collide = (durations["primary"] is not None
+                   and durations["primary"] == durations["secondary"])
         for slot in ("primary", "secondary"):
             window = pool.get(slot)
             if window is None:
                 continue
-            window = _obj(window)
+            # Every Codex record is isolated at its OWN boundary, container shape included: a
+            # malformed optional field must not discard the valid windows beside it.
             try:
+                window = _obj(window)
                 minutes = _pos_int(window.get("windowDurationMins"))
+                name = f"{limit_id}/{_window_label(minutes)}"
+                if collide:
+                    name = f"{name}[{slot}]"
                 records.append(_window_row(
-                    name=f"{limit_id}/{_window_label(minutes)}",
+                    name=name,
                     percent=_num(window.get("usedPercent"), 0.0, 100.0),
                     resets=_from_epoch_seconds(window.get("resetsAt")),
                     freshness=freshness, now=now, active=True,
+                    stale_note="the window shown had already reset when this was read",
                 ))
             except Malformed as exc:
                 records.append(Record(f"{limit_id}/{slot}", GAP, diagnostic=exc.code))
@@ -580,8 +632,13 @@ def _codex_records(home: Path, now: datetime.datetime) -> list[Record]:
         ))
 
     credits = default.get("credits") if isinstance(default, dict) else None
-    if isinstance(credits, dict) and _flag(credits.get("hasCredits")):
-        records.append(Record("credits", INFO, freshness=f"{_decimal(credits.get('balance')):.2f}"))
+    if isinstance(credits, dict):
+        try:
+            if _flag(credits.get("hasCredits")):
+                records.append(Record("credits", INFO,
+                                      freshness=f"{_decimal(credits.get('balance')):.2f}"))
+        except Malformed as exc:
+            records.append(Record("credits", GAP, diagnostic=exc.code))
     return records
 
 
@@ -601,12 +658,27 @@ def _explicit(path: Path) -> Candidate:
     this a typo'd or moved profile reaches the producer, finds nothing, and reports a clean
     "no cache" -- a verdict about a profile that was never examined at all.
     """
-    try:
-        if not path.is_dir():
-            return Candidate(path, "candidate-unreadable")
-    except OSError:
+    if _stat_kind(path) != "dir":
         return Candidate(path, "candidate-unreadable")
     return Candidate(path)
+
+
+def _stat_kind(path: Path) -> str:
+    """One of `dir`, `other`, `absent`, `unreadable`. Never a bare boolean.
+
+    Deliberately `os.stat`, not `Path.is_dir()` / `Path.exists()`: those RAISE PermissionError up
+    to 3.13 and SWALLOW it from 3.14, returning False. So neither a try/except nor a truth test
+    can tell "not a directory" from "cannot look", and on exactly the interpreter CI pins an
+    unreadable candidate would silently vanish before the ledger. `os.stat` reports the error on
+    every version. The sibling health check answers this the same way.
+    """
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unreadable"
+    return "dir" if stat.S_ISDIR(info.st_mode) else "other"
 
 
 def _discover(root: Path, prefix: str, markers: tuple[str, ...]) -> list[Candidate]:
@@ -623,18 +695,17 @@ def _discover(root: Path, prefix: str, markers: tuple[str, ...]) -> list[Candida
     for entry in entries:
         if not entry.name.startswith(prefix):
             continue
-        try:
-            if not entry.is_dir():
-                continue
-        except OSError:
+        kind = _stat_kind(entry)
+        if kind == "unreadable":
             out.append(Candidate(entry, "candidate-unreadable"))
             continue
-        try:
-            present = any((entry / marker).exists() for marker in markers)
-        except OSError:
+        if kind != "dir":
+            continue
+        kinds = [_stat_kind(entry / marker) for marker in markers]
+        if "unreadable" in kinds:
             out.append(Candidate(entry, "candidate-unreadable"))
             continue
-        if present:
+        if any(k != "absent" for k in kinds):
             out.append(Candidate(entry))
     return out
 
@@ -672,7 +743,7 @@ def main(argv: list[str] | None = None) -> int:
     now = datetime.datetime.now(datetime.timezone.utc)
 
     claude = ([_explicit(Path(p)) for p in args.claude_profile]
-              or _discover(home, ".claude", (".claude.json",)))
+              or _discover(home, ".claude", (".claude.json", ".credentials.json")))
     codex = ([_explicit(Path(p)) for p in args.codex_home]
              or _discover(home, ".codex", ("auth.json", "config.toml")))
 

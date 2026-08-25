@@ -82,6 +82,10 @@ with open(record, "w", encoding="utf-8") as handle:
 transcript = os.environ["STUB_TRANSCRIPT"]
 if mode == "nonzero-exit":
     sys.exit(3)
+if mode == "flood":
+    while True:
+        sys.stdout.write("x" * 65536)     # no newline, ever, and no end
+        sys.stdout.flush()
 if mode == "silent":
     for _ in range(3):
         if not sys.stdin.readline():
@@ -106,7 +110,13 @@ elif mode == "wrong-id":
     print(json.dumps({"jsonrpc": "2.0", "id": 99, "result": {}}))
 else:
     print(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}))
-    print(json.dumps({"jsonrpc": "2.0", "method": "some/notification", "params": {}}))
+    leaked = ""
+    home = os.environ.get("CODEX_HOME", "")
+    if home and os.path.exists(os.path.join(home, "auth.json")):
+        with open(os.path.join(home, "auth.json"), encoding="utf-8") as handle:
+            leaked = json.load(handle).get("token", "")
+    print(json.dumps({"jsonrpc": "2.0", "method": "log/line", "params": {"text": leaked}}))
+    sys.stderr.write("child stderr carrying " + leaked + "\\n")
     print(json.dumps({"jsonrpc": "2.0", "id": 2, "result": json.loads(os.environ["STUB_RESULT"])}))
 sys.stdout.flush()
 sys.exit(0)
@@ -140,7 +150,10 @@ def make_claude(root: Path, name: str, blob) -> Path:
     return profile
 
 
-def cached(entries=None, flat=None, fetched_ms=None, subscription=None, utilization=None):
+UNSET = object()
+
+
+def cached(entries=None, flat=None, fetched_ms=UNSET, subscription=None, utilization=None):
     blob: dict = {}
     if subscription is not None:
         blob["hasAvailableSubscription"] = subscription
@@ -152,7 +165,7 @@ def cached(entries=None, flat=None, fetched_ms=None, subscription=None, utilizat
     if utilization is not None:
         inner = utilization
     blob["cachedUsageUtilization"] = {
-        "fetchedAtMs": now_ms(-1) if fetched_ms is None else fetched_ms,
+        "fetchedAtMs": now_ms(-1) if fetched_ms is UNSET else fetched_ms,
         "utilization": inner,
     }
     return blob
@@ -213,21 +226,25 @@ def run(args, root: Any = None, stub_mode="ok", stub_result=None, timeout=90,
     # Confine discovery. Without this, a case that passes no explicit candidate falls back to the
     # real home directory, reads the operator's own profiles, and spawns the real app-server
     # against their live Codex homes -- a suite that measures the machine instead of the fixture.
-    sandbox = Path(root) / "home" if root is not None else Path(tempfile.mkdtemp()) / "home"
+    if root is None:
+        root = Path(tempfile.mkdtemp())
+    root = Path(root)
+    sandbox = root / "home"
     sandbox.mkdir(parents=True, exist_ok=True)
     env["HOME"] = str(sandbox)
     if extra_env:
         env.update(extra_env)
-    record = transcript = None
-    if root is not None:
-        bindir = install_stub(root)
-        record = root / "stub-record.json"
-        transcript = root / "stub-transcript.txt"
-        env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
-        env["STUB_RECORD"] = str(record)
-        env["STUB_TRANSCRIPT"] = str(transcript)
-        env["STUB_MODE"] = stub_mode
-        env["STUB_RESULT"] = json.dumps(DEFAULT_RESULT if stub_result is None else stub_result)
+    # ALWAYS, not only when a case supplies a root. A case that omitted it inherited the real
+    # PATH, so a keychain fallback reached the operator's own `security` and could prompt them
+    # from what reads as a nominal fixture test.
+    bindir = install_stub(root)
+    record = root / "stub-record.json"
+    transcript = root / "stub-transcript.txt"
+    env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
+    env["STUB_RECORD"] = str(record)
+    env["STUB_TRANSCRIPT"] = str(transcript)
+    env["STUB_MODE"] = stub_mode
+    env["STUB_RESULT"] = json.dumps(DEFAULT_RESULT if stub_result is None else stub_result)
     done = subprocess.run([sys.executable, str(SCRIPT)] + args, capture_output=True, text=True,
                           env=env, timeout=timeout)
     return done, record, transcript
@@ -272,19 +289,23 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # 7 / 8 / 9 -- absence states, and the precedence between them.
     empty = root / "states"
+    empty.mkdir(exist_ok=True)
+    clean_codex = make_codex_home(empty, ".codexClean")
     make_claude(empty, ".claudeA", {})                                     # no cache key
     make_claude(empty, ".claudeB", {"hasAvailableSubscription": False})    # no subscription
     make_claude(empty, ".claudeC", {"hasAvailableSubscription": False})    # both conditions
     done, _, _ = run(["--claude-profile", str(empty / ".claudeA"),
                       "--claude-profile", str(empty / ".claudeB"),
                       "--claude-profile", str(empty / ".claudeC"),
-                      "--codex-home", str(empty / ".nope")])
+                      "--codex-home", str(clean_codex)], root=empty)
     check("7 absent cache is no-usage-cache, not 0%", "[no-usage-cache]" in done.stdout, done.stdout)
     check("8 no subscription is its own state", "[no-subscription]" in done.stdout, done.stdout)
     check("9 the combined shape resolves to exactly one state",
           done.stdout.count("[no-subscription]") == 2 and done.stdout.count("[no-usage-cache]") == 1,
           done.stdout)
-    check("7/8 neither absence state gaps the run", done.returncode == 1, f"rc={done.returncode}")
+    check("7/8 neither absence state gaps the run", done.returncode == 0,
+          f"rc={done.returncode}\n{done.stdout}")
+    check("7/8 and no warning is emitted for them", "warnings" not in done.stdout, done.stdout)
 
     # 10 / 11 -- the two container shapes.
     shapes = root / "shapes"
@@ -333,6 +354,7 @@ with tempfile.TemporaryDirectory() as tmp:
         ("is_active is truthy not bool", entry(active=1)),
         ("kind is not a string", entry(kind=7)),
         ("kind has a control character", entry(kind="week\x01ly")),
+        ("resets_at parses but cannot be rendered", entry(resets="9999-12-31T23:59:59+00:00")),
     ):
         box = root / f"s-{abs(hash(label))}"
         make_claude(box, ".claudeY", cached(entries=[bad]))
@@ -345,10 +367,15 @@ with tempfile.TemporaryDirectory() as tmp:
     for label, ms in (("fetchedAtMs null", None), ("fetchedAtMs bool", True),
                       ("fetchedAtMs negative", -5)):
         box = root / f"f-{abs(hash(label))}"
+        box.mkdir(parents=True, exist_ok=True)
+        ok_codex = make_codex_home(box, ".codexClean")
         make_claude(box, ".claudeZ", cached(entries=[entry()], fetched_ms=ms))
         done, _, _ = run(["--claude-profile", str(box / ".claudeZ"),
-                          "--codex-home", str(box / ".nope")])
+                          "--codex-home", str(ok_codex)], root=box)
         check(f"13 {label} -> gap", done.returncode == 1, done.stdout)
+        check(f"13 {label} -> the gap is the Claude profile, not the Codex home",
+              ".claudeZ" in done.stdout.split("warnings")[-1]
+              and ".codexClean" not in done.stdout.split("warnings")[-1], done.stdout)
 
     # 14 -- a mixed candidate keeps its valid row AND gaps the candidate.
     #
@@ -385,12 +412,68 @@ with tempfile.TemporaryDirectory() as tmp:
           "[candidate-unreadable]" in done.stdout, done.stdout)
     check("15 and it gaps the run", done.returncode == 1, f"rc={done.returncode}")
 
+    # 15b -- DISCOVERY, not an explicit argument: a profile directory the process cannot look
+    # into must become a gap. `Path.is_dir()`/`.exists()` answer False for a permission error from
+    # 3.14, so a truth test drops it silently on exactly the interpreter CI pins.
+    if os.geteuid() != 0:  # root bypasses the mode bits, so the case would prove nothing
+        blocked_root = root / "blocked"
+        blocked_home = blocked_root / "home"
+        blocked_home.mkdir(parents=True, exist_ok=True)
+        make_codex_home(blocked_home, ".codexClean")
+        shut = blocked_home / ".claudeShut"
+        shut.mkdir(exist_ok=True)
+        (shut / ".claude.json").write_text("{}", encoding="utf-8")
+        shut.chmod(0o000)
+        try:
+            done, _, _ = run([], root=blocked_root)
+            check("15b an unreadable discovered profile is candidate-unreadable",
+                  "[candidate-unreadable]" in done.stdout, done.stdout)
+            check("15b it does not vanish before the ledger",
+                  ".claudeShut" in done.stdout, done.stdout)
+            check("15b and it gaps the run", done.returncode == 1, f"rc={done.returncode}")
+        finally:
+            shut.chmod(0o700)
+
+    # N2 -- os.stat on the CANDIDATE ITSELF fails (a self-referential symlink is ELOOP, not
+    # ENOENT), which is the branch a mode-0 directory never reaches.
+    loop_root = root / "loop"
+    loop_home = loop_root / "home"
+    loop_home.mkdir(parents=True, exist_ok=True)
+    make_codex_home(loop_home, ".codexClean")
+    os.symlink(".claudeLoop", str(loop_home / ".claudeLoop"))
+    done, _, _ = run([], root=loop_root)
+    check("15c a candidate os.stat cannot resolve is candidate-unreadable",
+          "[candidate-unreadable]" in done.stdout, done.stdout)
+    check("15c it is named rather than dropped", ".claudeLoop" in done.stdout, done.stdout)
+    check("15c and it gaps the run", done.returncode == 1, f"rc={done.returncode}")
+
+    # N6 -- a profile carrying credentials but no usage cache is a real shape, and `no-usage-cache`
+    # is a state the report declares; it has to be DISCOVERABLE for that state to be reachable.
+    cred_root = root / "credonly"
+    cred_home = cred_root / "home"
+    cred_home.mkdir(parents=True, exist_ok=True)
+    make_codex_home(cred_home, ".codexClean")
+    cred_profile = cred_home / ".claudeCredOnly"
+    cred_profile.mkdir(exist_ok=True)
+    (cred_profile / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(24)}}),
+        encoding="utf-8")
+    done, _, _ = run([], root=cred_root)
+    check("16b a credentials-only profile is discovered",
+          ".claudeCredOnly" in done.stdout, done.stdout)
+    check("16b and reports no-usage-cache rather than vanishing",
+          "[no-usage-cache]" in done.stdout, done.stdout)
+    assert_no_secret("16b credentials-only discovery", done.stdout, done.stderr)
+
     bare = root / "bare"
     bare.mkdir()
     done, _, _ = run([], root=bare, timeout=90)
-    check("16 zero candidates for a vendor is a gap, not a clean empty report",
-          done.stdout.count("no candidates found") >= 1 or done.returncode == 1,
+    check("16 zero candidates for a vendor says so", "no candidates found" in done.stdout,
           done.stdout)
+    tail = done.stdout.split("warnings")[-1]
+    check("16 both vendors report it", "Claude Code:" in tail and "Codex:" in tail, done.stdout)
+    check("16 and it gaps the run rather than exiting clean", done.returncode == 1,
+          f"rc={done.returncode}")
 
     # 17 / 18 / 19 / 20 -- Codex.
     codex_root = root / "codex"
@@ -421,14 +504,18 @@ with tempfile.TemporaryDirectory() as tmp:
     check("17 a codex window past its reset is not current",
           "stale-after-reset" in done.stdout, done.stdout)
 
+    ok_claude = make_claude(codex_root, ".claudeClean", cached(entries=[entry()]))
     for mode, expect in (("error-reply", "appserver-protocol-error"),
                          ("wrong-id", "appserver-protocol-error"),
                          ("eof", "appserver-protocol-error"),
                          ("nonzero-exit", "appserver-")):
-        done, _, _ = run(["--claude-profile", str(codex_root / ".nope"),
+        done, _, _ = run(["--claude-profile", str(ok_claude),
                           "--codex-home", str(home)], root=codex_root, stub_mode=mode)
         check(f"19 app-server {mode} -> gap", expect in done.stdout, done.stdout)
         check(f"19 app-server {mode} -> exit 1", done.returncode == 1, f"rc={done.returncode}")
+        check(f"19 app-server {mode}: the Claude side stayed clean and visible",
+              "42.0%" in done.stdout and ".claudeClean" not in done.stdout.split("warnings")[-1],
+              done.stdout)
 
     for label, result in (
         ("no rateLimits at all", {"rateLimitsByLimitId": {}}),
@@ -441,9 +528,33 @@ with tempfile.TemporaryDirectory() as tmp:
                 "usedPercent": 5, "windowDurationMins": 10080, "resetsAt": epoch(3)}},
             "rateLimitResetCredits": {"availableCount": True}}),
     ):
-        done, _, _ = run(["--claude-profile", str(codex_root / ".nope"),
+        done, _, _ = run(["--claude-profile", str(ok_claude),
                           "--codex-home", str(home)], root=codex_root, stub_result=result)
         check(f"19 codex payload {label} -> exit 1", done.returncode == 1, done.stdout)
+        check(f"19 codex payload {label}: the Claude row survives", "42.0%" in done.stdout,
+              done.stdout)
+
+    # N7 -- a child that streams without a newline must not be buffered without bound.
+    done, _, _ = run(["--claude-profile", str(codex_root / ".claudeClean"),
+                      "--codex-home", str(home)], root=codex_root, stub_mode="flood", timeout=180,
+                     extra_env={"CODE_LIMITS_APPSERVER_TIMEOUT": "20"})
+    # The CODE matters, not merely that it gapped: without the size cap this run reaches the
+    # deadline instead and answers appserver-failed, which is a different defect being masked.
+    check("19 a newline-free flood is refused by the size cap, not by the deadline",
+          "[appserver-protocol-error]" in done.stdout
+          and "[appserver-failed]" not in done.stdout, done.stdout)
+    check("19 the flood still gaps the run", done.returncode == 1, f"rc={done.returncode}")
+
+    # N4 -- a malformed OPTIONAL field must not discard the valid windows beside it.
+    done, _, _ = run(["--claude-profile", str(codex_root / ".claudeClean"),
+                      "--codex-home", str(home)], root=codex_root, stub_result={
+        "rateLimits": {"limitId": "codex",
+                       "primary": {"usedPercent": 61, "windowDurationMins": 10080,
+                                   "resetsAt": epoch(50)},
+                       "credits": {"hasCredits": True, "balance": "not-a-number"}}})
+    check("19 a malformed credits balance gaps only itself", "61.0%" in done.stdout, done.stdout)
+    check("19 and the malformed record is named", "[field-malformed]" in done.stdout, done.stdout)
+    check("19 and the candidate still gaps", done.returncode == 1, f"rc={done.returncode}")
 
     # 20 -- a child that starts and never answers must not hold up the rest of the run.
     twin = make_codex_home(codex_root, ".codexU")
@@ -461,12 +572,18 @@ with tempfile.TemporaryDirectory() as tmp:
     live_root = root / "live"
     profile = make_claude(live_root, ".claudeL", cached(entries=[entry(percent=88)]))
     (profile / ".credentials.json").unlink()
+    live_codex = make_codex_home(live_root, ".codexClean")
     done, _, _ = run(["--live", "--claude-profile", str(profile),
-                      "--codex-home", str(live_root / ".nope")])
+                      "--codex-home", str(live_codex)], root=live_root)
     check("21 a missing token gaps the profile",
           "[token-absent]" in done.stdout or "[keychain-denied]" in done.stdout, done.stdout)
     check("21 it does NOT silently fall back to the cache", "88.0%" not in done.stdout, done.stdout)
     check("21 and the run gaps", done.returncode == 1, f"rc={done.returncode}")
+    check("21 the gap is the Claude profile, not the Codex home",
+          ".claudeL" in done.stdout.split("warnings")[-1]
+          and ".codexClean" not in done.stdout.split("warnings")[-1], done.stdout)
+    check("21 the fixture `security` was used, not the host keychain",
+          "keychain-denied" in done.stdout or "token-absent" in done.stdout, done.stdout)
 
 # --- 22 / 23: transport safety. These import the module, deliberately, because reaching an HTTPS
 # stub from a subprocess would need a production origin override -- the very defect they prevent.
@@ -552,6 +669,57 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         R.HTTPSConnection = original
 
+    # 25b -- the credential oracle around an execution that ACTUALLY READS the sentinel.
+    #
+    # Without this the oracle was vacuous: its only call sat on a run whose Claude profile did not
+    # exist, so no token was ever opened and `print(token[:12])` inside _claude_live would have
+    # passed. The recorded Authorization header is the proof that the read happened; the captured
+    # streams are the thing under test.
+    import contextlib, io  # noqa: E402
+
+    class Recording:
+        headers: list = []
+
+        def __init__(self, host, timeout=None):
+            self.host = host
+
+        def request(self, method, path, headers=None):
+            Recording.headers.append(dict(headers or {}))
+
+        def getresponse(self):
+            payload = json.dumps({"limits": [
+                {"kind": "weekly_all", "percent": 5, "is_active": True, "resets_at": iso(48)}]})
+
+            class Response:
+                status = 200
+                def read(self):
+                    return payload.encode("utf-8")
+            return Response()
+
+        def close(self):
+            pass
+
+    reader = make_claude(root, ".claudeRead", cached(entries=[entry()]))
+    original = R.HTTPSConnection
+    out_buf, err_buf = io.StringIO(), io.StringIO()
+    try:
+        R.HTTPSConnection = Recording
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+            produced = R._claude_live(reader, datetime.datetime.now(datetime.timezone.utc))
+            for record in produced:
+                print(record.render())
+    finally:
+        R.HTTPSConnection = original
+
+    check("25b the token really WAS read (else the oracle proves nothing)",
+          any(SENTINEL_TOKEN in header.get("Authorization", "")
+              for header in Recording.headers), str(len(Recording.headers)))
+    check("25b the live row rendered, so the renderer was exercised",
+          any(record.state == R.REPORTED for record in produced),
+          str([record.state for record in produced]))
+    assert_no_secret("25b live read", out_buf.getvalue(), err_buf.getvalue(),
+                     repr([vars(record) for record in produced]))
+
     # 24 -- every diagnostic token the script can render is a member of the closed enum.
     check("24 the enum has a total fallback", "internal-error" in R.DIAGNOSTIC_SET)
     check("24 the enum is a frozenset of unique tokens",
@@ -582,7 +750,7 @@ if failures:
         print(f"  {failure}")
     sys.exit(1)
 
-MIN_CHECKS = 95
+MIN_CHECKS = 140
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
