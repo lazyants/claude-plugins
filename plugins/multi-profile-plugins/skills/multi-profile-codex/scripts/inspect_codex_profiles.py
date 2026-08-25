@@ -247,16 +247,17 @@ def main(argv: list[str]) -> int:
         print("Pass explicit profile directories as arguments to check a specific set.")
         return 0
 
-    # Keyed on the full Path, never prof.name — two explicit profile dirs can share
-    # a basename (.../a/.codex and .../b/.codex), and a basename-keyed dict would
-    # collapse them into one entry, hiding a real duplicate/share between them.
-    # `label()` is DISPLAY-only: the basename when unique, else the full path.
-    name_counts: dict[str, int] = {}
-    for prof in profile_paths:
-        name_counts[prof.name] = name_counts.get(prof.name, 0) + 1
-
+    # Every internal map below keys on the full Path, never on prof.name: two explicit
+    # profile dirs can share a basename (.../a/.codex and .../b/.codex), and a
+    # basename-keyed dict would collapse them into one entry, hiding a real duplicate.
+    #
+    # DISPLAY is settled by where the paths came from, which removes the ambiguity instead
+    # of detecting it: discovered profiles are all siblings under one home, so a basename
+    # identifies them; explicitly passed ones can come from anywhere, so they are shown in
+    # full. An earlier version counted basenames and fell back to the full path only on a
+    # collision, which is machinery for a case this rule cannot produce.
     def label(prof: Path) -> str:
-        return prof.name if name_counts[prof.name] == 1 else str(prof)
+        return prof.name if not args.profiles else str(prof)
 
     width = max(15, max(len(label(p)) for p in profile_paths) + 1)
 
@@ -286,7 +287,10 @@ def main(argv: list[str]) -> int:
             if looks_like_profile(prof):
                 print(f"  {label(prof):<{width}} ok")
             else:
-                reason = "does not exist" if not prof.exists() else "no config.toml and no auth.json"
+                # Says "no readable", not "no": looks_like_profile is a boolean probe, so a
+                # directory whose contents cannot be read is indistinguishable here from one
+                # that is genuinely empty, and the message must not claim the difference.
+                reason = "does not exist" if not prof.exists() else "no readable config.toml or auth.json"
                 for check_name in CHECKS:
                     gaps[prof][check_name] = f"not a Codex profile directory ({reason})"
                 print(f"  {label(prof):<{width}} NOT A PROFILE ({reason})")
@@ -316,6 +320,14 @@ def main(argv: list[str]) -> int:
         # cannot be part of a clean verdict about credentials.
         if mode == "unreadable":
             gaps[prof]["credentials"] = "auth.json is unreadable or malformed"
+        elif mode != "not-logged-in" and account is None:
+            # The file is there and parses, but nothing comparable came out of it: no
+            # account_id at all (an api-key login has none), or one that does not match the
+            # identifier shape. Either way this profile silently drops out of the
+            # same-account comparison below -- which is the check most worth having, since
+            # two homes on one account is the outcome the whole split exists to avoid. The
+            # shape gate added in the previous round is itself one way to land here.
+            gaps[prof]["credentials"] = "auth.json has no comparable account id"
         shown = f"account={fingerprint(account)}…" if account else "account=-"
         print(f"  {label(prof):<{width}} {mode:<14} {shown:<20} {inode}")
 
@@ -383,7 +395,14 @@ def main(argv: list[str]) -> int:
         store_targets: dict[Path, str] = {}
         for prof in profile_paths:
             sp = prof / store
-            if not sp.exists():
+            try:
+                os.stat(sp, follow_symlinks=False)
+            except FileNotFoundError:
+                continue  # genuinely absent, which is normal and not a gap
+            except OSError as exc:
+                # Path.exists() answers False for a permission error too, so the store would
+                # read as absent and this profile would reach PASS with the store unexamined.
+                gaps[prof]["stores"] = f"`{store}` is inaccessible ({type(exc).__name__})"
                 continue
             store_targets[prof] = os.path.realpath(sp)
         status = ", ".join(f"{label(p)}={kind(p / store)}" for p in profile_paths)

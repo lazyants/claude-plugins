@@ -219,7 +219,7 @@ with tempfile.TemporaryDirectory() as td:
     empty.mkdir()
     r = run(a, empty)
     check("empty dir: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
-    check("empty dir: named", "no config.toml and no auth.json" in r.stdout, r.stdout)
+    check("empty dir: named", "no readable config.toml or auth.json" in r.stdout, r.stdout)
 
 # ---------------------------------------------------------------------------
 # 3d. A real profile with credentials but no config.toml: its pins were NOT checked, so the
@@ -327,6 +327,46 @@ with tempfile.TemporaryDirectory() as td:
     check("not-logged-in: labelled", "not-logged-in" in r.stdout, r.stdout)
 
 # ---------------------------------------------------------------------------
+# 6f. An auth.json that is present and parses but yields no comparable account id drops out
+#     of the same-account comparison. Two homes on one account is the outcome the whole
+#     split exists to avoid, so silently not checking for it must not read as clean. Both
+#     routes here: no account_id at all, and one that fails the identifier shape.
+# ---------------------------------------------------------------------------
+for label_, tokens in (
+    ("no account_id", {}),
+    ("unusable account_id", {"account_id": "not a uuid at all!!"}),
+):
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
+        b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+        (b / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": tokens}))
+        r = run(a, b)
+        check(f"{label_}: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
+        check(f"{label_}: no PASS line", "PASS —" not in r.stdout, r.stdout)
+        check(f"{label_}: named", "no comparable account id" in r.stdout, r.stdout)
+
+# ---------------------------------------------------------------------------
+# 6g. A store that cannot be stat'ed must not read as absent. Path.exists() answers False
+#     for a permission error exactly as it does for a missing directory, so without this the
+#     profile reaches PASS with the store never examined.
+# ---------------------------------------------------------------------------
+if os.geteuid() != 0:  # root ignores the mode bits, so the case cannot be staged
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
+        b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+        (b / "sessions").mkdir()
+        b.chmod(0o000)
+        try:
+            r = run(a, b)
+        finally:
+            b.chmod(0o700)  # or TemporaryDirectory cannot clean up
+        check("blocked store: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
+        check("blocked store: named", "is inaccessible" in r.stdout, r.stdout)
+        check("blocked store: not called absent", "PASS —" not in r.stdout, r.stdout)
+
+# ---------------------------------------------------------------------------
 # 6e. Two DIFFERENT accounts sharing the first eight characters are two accounts. The
 #     eight-character form exists for display; comparing on it merges them.
 # ---------------------------------------------------------------------------
@@ -406,7 +446,7 @@ print(f"ran {checks} checks")
 # A case that raises before its checks run, or a fixture block deleted wholesale, subtracts
 # silently: the remaining cases still pass and the run still exits 0. Assert the floor so a
 # suite that stopped exercising most of the script cannot read as a clean one.
-MIN_CHECKS = 70
+MIN_CHECKS = 80
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
