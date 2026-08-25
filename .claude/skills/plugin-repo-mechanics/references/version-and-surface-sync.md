@@ -48,8 +48,9 @@ So the only prose question at a bump is **whether the description is still true*
     grep in `merge-and-review-bot.md` is still yours to run.
   - **It still has no baseline for the OTHER four surfaces**, so it cannot separate the surface
     your change forgot from one that was already wrong — that is what the next bullet's grep
-    against `origin/main` is for. Nothing runs it for you; run it before the commit, not after the
-    push.
+    against `origin/main` is for. CI runs it on the PR (below), but run it before the commit
+    yourself: CI judges the merged tree after the push, and only the pre-commit run keeps a desync
+    out of the commit at all.
   - **A baseline it could not read prints `NOT COMPARED` and the reason** — not a git checkout at
     all, no `origin/main` in it, the plugin genuinely not on `origin/main` yet, a manifest there
     that git would not hand over or that holds no X.Y.Z version, no shared history, or the surfaces
@@ -71,9 +72,9 @@ So the only prose question at a bump is **whether the description is still true*
     disk. That has been true of every surface it reads since it was written, and it is why this is
     a pre-commit check rather than a pre-push one.
   - **Its own suite is `scripts/check_version_surfaces.test.py`** — stdlib `unittest`, throwaway
-    git repos in a temp dir, a few seconds. No workflow's path filter reaches `.claude/**` — they
-    cover the five `plugins/<name>/**` trees, their own workflow file, and (for enduser-handbook)
-    the root `README.md` and `CHANGELOG.md` — so nothing runs this for you. A few cases SKIP
+    git repos in a temp dir, a few seconds. `.github/workflows/version-surfaces.yml` runs it and
+    then the checker on every push to `main` and every PR to `main` touching a version surface or
+    this scripts directory; it is the one workflow here that is not about a single plugin. A few cases SKIP
     according to whether the filesystem under them folds path spellings, because the collision
     behaviour only exists where it does: a macOS run and a Linux run skip different cases and both
     are green. Run it yourself after touching the checker:
