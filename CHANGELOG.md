@@ -2,6 +2,54 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.1.0] — 2026-08-25
+
+### Added
+
+- **A second skill, `multi-profile-codex`, for Codex `CODEX_HOME` profiles (#756).** The same shape
+  the plugin already documented for Claude Code recurs one CLI over: `CODEX_HOME` decides where
+  files are read FROM, not what they SAY, so a profile seeded by copying the base `config.toml`
+  inherits every absolute path in it and is sent back into the home it was copied from — including
+  `CODEX_HOME` itself pinned inside an `[mcp_servers.*.env]` block, which re-enters the base home
+  from the MCP subprocess while the CLI that spawned it stays correctly isolated. It ships as a
+  sibling skill rather than as prose in the existing one because a skill's `description` is its load
+  gate, and one description covering both CLIs fires wrongly in both directions.
+- **`skills/multi-profile-codex/scripts/inspect_codex_profiles.py`** — a read-only, stdlib-only
+  health check reporting two homes that share one `auth.json` **or merely the same account**
+  (distinct files, one usage pool — the quiet failure), which dotted TOML key points into another
+  profile's home, and which content stores resolve to a shared target. Its path matching is
+  boundary-aware: a substring test false-positives every sibling (`~/.codex` inside `~/.codex2`) and
+  a `startswith` test then misses the real pins, which sit mid-string inside `:`-joined paths and
+  JSON blobs.
+
+### Changed
+
+- The plugin's `description` and keywords, in both `plugin.json` and `marketplace.json`, now cover
+  config-profile isolation for both CLIs rather than Claude Code alone.
+
+### Notes
+
+- The version is cut here rather than in #756, which deliberately merged without a bump under this
+  repo's batch-fold convention. Merge-to-`main` is the publish, so an unbumped `plugins/` edit makes
+  one version label mean two payloads — and this one is not a doc tweak: a machine that installed
+  1.0.0 does not have the second skill or its health check, while a fresh install from current
+  `main` does.
+
+## [enduser-handbook 1.18.3] — 2026-08-25
+
+### Changed
+
+- **Citation line numbers only, from the repo-wide `file.ext:NNN` gate (#579).** Every changed byte
+  in this plugin sits inside a comment, a docstring, a `.d.mts` doc block, a reference page's prose
+  or a test's explanatory comment: a citation whose target had drifted now names the range its
+  sentence actually claims. `chapter-paths.mjs`, `build-identity.d.mts`, `chapter-paths.d.mts`,
+  `capture-engines.md`, `state-variants.md`, the two publish-target pages and three test files are
+  touched; no executable statement changed in any of them, so nothing a user of this plugin can
+  observe differs from 1.18.2. The version is cut anyway, for the reason 1.18.2 was: merge-to-`main`
+  is the publish here, and leaving `plugins/` content unbumped makes one version label mean two
+  different payloads — the cached copy on a machine that already installed 1.18.2, and a fresh
+  install resolving from current `main`.
+
 ## [ai-cli-optout 1.1.3] — 2026-08-24
 
 ### Changed
