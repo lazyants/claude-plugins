@@ -542,15 +542,38 @@ explains why that is the exact wording and "zero filesystem writes" is not):
 python3 ${durable_root}/scripts/backfill_ever_converged.py
 ```
 
-Run it with no W5 dispatch in flight against this durable root. This is a
-standing operating condition, not a one-time warning: `select_segments.py`'s
-Step 1 gate takes its `.ever_converged` census once, at selection time, and
-nothing rechecks it when the translate work it authorized is actually
-dispatched — so a sentinel this backfill raises in between does not revoke
-an authorization already granted, and the dispatch proceeds anyway,
-retranslating the very work the sentinel was meant to protect. That is why
-this note sequences the backfill strictly before the first W5 dispatch,
-never alongside one.
+Sequence the backfill before the first W5 dispatch, and for the mode that
+writes, that sequencing is enforced rather than asked for.
+`select_segments.py`'s Step 1 gate takes its `.ever_converged` census once,
+at selection time, and nothing rechecks it when the translate work it
+authorized is actually dispatched — so a sentinel raised in between does
+not revoke an authorization already granted, and the dispatch retranslates
+the very work the sentinel was meant to protect, as a green run.
+`backfill_ever_converged.py --apply` therefore acquires the project lease
+`${durable_root}/runs/.driver.lock` (a kernel `flock`, `LOCK_EX|LOCK_NB`)
+before it does anything and holds it for the whole run — the same lease
+`segment_dispatch_driver.py` takes for the entire span of a dispatch, from
+before its `select_segments.py` Step 1 call until the dispatch loop
+finishes — so an `--apply` run inside that window refuses, exit 1, naming
+the lock path, and writes nothing. A dry run (the default, no `--apply`)
+takes no lease, deliberately: it writes no sentinel and so cannot cause
+this at all, and acquiring one would create `runs/.driver.lock` and break
+the dry run's own "issues no mutating operation and changes no project
+content" guarantee. A dry run may therefore still be taken alongside a
+dispatch; what it reports may simply be stale. Two paths the lease does
+not cover, both still governed by convention: running `select_segments.py`
+by hand and then dispatching by hand as a separate command — a standalone
+`select_segments.py --from-stalled` does acquire this same lease, but that
+lease dies with the selector process, leaving the window before a later
+hand-run dispatch open exactly as before; and two machines pointed at one
+durable root through a sync-replicated folder (Synology Drive, Dropbox,
+iCloud), where each takes a valid local flock and neither sees the other —
+pre-existing, and identical for the driver's own lease. On a filesystem
+that cannot lock (some NFS/SMB mounts) — whether `flock` fails outright or
+succeeds without being enforced — the backfill warns on stderr and proceeds
+rather than refusing, since refusing there would block the one-time legacy
+migration entirely, and a root with no sentinels at all loses every segment
+the backfill could have protected.
 
 **Check `$?` first, then** read the printed JSON's
 `missing_sentinels`/`counts` fields — a non-empty `missing_sentinels` means

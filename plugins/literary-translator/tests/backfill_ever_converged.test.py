@@ -37,6 +37,8 @@ root and invokes `python3 {durable_root}/scripts/backfill_ever_converged.py
 with the same small fixture script `ledger_merge.test.py`/
 `select_segments.test.py` use.
 """
+import errno
+import fcntl
 import importlib.util
 import io
 import json
@@ -3452,3 +3454,272 @@ def test_the_body_read_survives_a_short_os_read(tmp_path):
         )
     finally:
         backfill.os.read = real_read
+
+
+# ---------------------------------------------------------------------------
+# #621 -- the project lease. `--apply` must not be able to raise a sentinel
+# inside a driver's census-to-dispatch window. The exclusion is
+# runs/.driver.lock, the same lease segment_dispatch_driver.py holds across
+# its WHOLE run (acquired before its select_segments.py Step 1 call, released
+# only after the dispatch loop), so a backfill that cannot start while it is
+# held cannot land a marker in the middle.
+#
+# A note on why the lifetime tests below run IN-PROCESS. flock is scoped per
+# OPEN FILE DESCRIPTION, not per process, so a second independent os.open() of
+# the same path contends for real against a lease this very process holds and
+# can never self-deadlock -- select_segments.py:_independent_lock_attempt()
+# documents the same property, measured (BlockingIOError, errno 35). That is
+# what lets a test assert "held right now, at this instant of the run". The
+# subprocess harness cannot: process exit releases a kernel flock whether or
+# not release_project_lease() was ever called, so a subprocess "the lock is
+# free afterwards" assertion is vacuous as a release test.
+# ---------------------------------------------------------------------------
+
+
+def _lock_path(root):
+    return root / "runs" / ".driver.lock"
+
+
+@contextlib.contextmanager
+def _external_lease_held(root):
+    """Holds runs/.driver.lock exactly as segment_dispatch_driver.py does --
+    plain O_CREAT|O_RDWR then LOCK_EX|LOCK_NB -- for the duration of the
+    block. Stands in for a driver run being in flight."""
+    path = _lock_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield path
+    finally:
+        os.close(fd)
+
+
+def _independent_acquire_succeeds(root):
+    """True iff a genuinely independent open of runs/.driver.lock can take
+    LOCK_EX|LOCK_NB right now. Never leaves a lease held.
+
+    Only the CONTENTION errnos count as "no, something holds it". Mapping an
+    arbitrary OSError to False would manufacture exactly the evidence this
+    helper exists to gather -- an ENOLCK or EMFILE would read as proof that
+    the lease is held, and the lifetime assertion below would pass without
+    ever having observed a lease. Same discrimination the production probe
+    makes, and the same one select_segments.py measured the cost of omitting.
+    """
+    path = _lock_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                return False
+            raise AssertionError(
+                f"the lease probe could not be RUN ({exc}) -- this test "
+                f"proves nothing, and reporting it as 'held' would be the "
+                f"false green it exists to catch"
+            ) from exc
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True
+    finally:
+        os.close(fd)
+
+
+def test_apply_refuses_while_the_project_lease_is_held_and_writes_nothing(tmp_path):
+    """The refusal itself, and -- the half that actually matters -- that it
+    happens BEFORE any sentinel is written. An implementation that acquired
+    the lease after the census and the create loop would still print this
+    refusal while having already done the damage."""
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    with _external_lease_held(root) as lock_path:
+        # The WHOLE tree, not just the sentinel names. Asserting only on
+        # sentinels left a third mutation alive (named by review): move the
+        # acquire out of the wrapper to just before the sentinel loop, and
+        # this test still passes while an --apply run re-materializes
+        # runs/ledger.json inside a driver's lease -- contradicting this
+        # test's own name, and the docstring's "holds it for this run's
+        # lifetime". `.driver.lock` itself is excluded because the fixture
+        # below creates it: it is the lease being HELD, not a write by the
+        # run under test.
+        before = _snapshot_tree(root)
+        proc = run_backfill(root, "--apply")
+        after = _snapshot_tree(root)
+
+    assert proc.returncode != 0, (
+        "--apply must refuse while another project-lease participant holds "
+        f"runs/.driver.lock\nstdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert str(lock_path) in payload["error"], (
+        "the refusal must name the path an operator has to go look at, not "
+        f"merely say something is locked: {payload['error']!r}"
+    )
+    diff = _tree_diff(before, after)
+    assert diff == {"added": [], "removed": [], "changed": []}, (
+        "a refused run must have written NOTHING anywhere under the durable "
+        "root -- not a sentinel, and not a re-materialized runs/ledger.json. "
+        "The lease has to be taken at the TOP of the run, not around the "
+        f"create loop: {diff}"
+    )
+
+
+def test_the_lease_is_held_across_every_sentinel_write_and_released_after(tmp_path):
+    """THE LIFETIME TEST, and the reason the other three are not enough.
+
+    Codex named the mutation that survives all of them: acquire the lease,
+    stamp the holder JSON, then release it immediately before delegating to
+    _run_holding_lease(). The refusal test still refuses (an external holder
+    still blocks the acquire), the dry-run carve-out is untouched, the holder
+    body is still written -- and the window #621 is about is wide open again,
+    because a driver can take the lease after that premature release, census
+    an absent sentinel, and have this run write it before dispatch.
+
+    So the assertion is not "a lease was taken once". It is that at the
+    instant of EVERY sentinel write, an independent LOCK_EX|LOCK_NB against
+    runs/.driver.lock is REFUSED -- i.e. the lease is genuinely held right
+    then -- and that it is genuinely released once run() returns.
+
+    `writes` is asserted non-zero: a wrapper that never fires prints exactly
+    what a passing one prints."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_lease_lifetime")
+    root = setup_mixed_project(tmp_path)
+
+    real_mark = backfill.mark_ever_converged
+    observations = []
+
+    def mark_observing_the_lease(*a, **kw):
+        observations.append(_independent_acquire_succeeds(root))
+        return real_mark(*a, **kw)
+
+    backfill.mark_ever_converged = mark_observing_the_lease
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        backfill.mark_ever_converged = real_mark
+
+    assert result["created"], "the fixture must actually create sentinels"
+    assert len(observations) >= 1, (
+        "the wrapper never fired -- this test proved nothing, and a "
+        "zero-iteration probe is indistinguishable from a passing one"
+    )
+    assert not any(observations), (
+        f"the project lease must be HELD at every sentinel write; an "
+        f"independent LOCK_EX|LOCK_NB succeeded on "
+        f"{observations.count(True)} of {len(observations)} writes, which "
+        f"means the lease was released (or never taken) while this run was "
+        f"still writing markers a driver's census could race"
+    )
+    assert _independent_acquire_succeeds(root), (
+        "run() must RELEASE the lease when it returns -- this module has "
+        "in-process callers by design, and a leaked descriptor would hold "
+        "the project lease for the life of the interpreter"
+    )
+
+
+def test_a_dry_run_is_not_refused_by_a_held_lease_and_still_writes_nothing(tmp_path):
+    """The carve-out, pinned so that widening or narrowing it later is a
+    visible edit rather than a silent one. A dry run creates no sentinel, so
+    it cannot cause #621's interleaving at all; locking it would create
+    runs/.driver.lock, which is itself a filesystem modification and would
+    break the write-nothing guarantee asserted above."""
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    with _external_lease_held(root):
+        before = _snapshot_tree(root)
+        proc = run_backfill(root)
+        after = _snapshot_tree(root)
+
+    assert proc.returncode == 0, (
+        "a dry run must not be refused by a held project lease\n"
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["ever_converged_segs"] == EVER_CONVERGED
+    assert _tree_diff(before, after) == {"added": [], "removed": [], "changed": []}, (
+        "a dry run must still make ZERO filesystem modifications -- taking a "
+        "lease here would create runs/.driver.lock and break exactly that"
+    )
+
+
+def test_the_lease_file_names_this_script_as_its_holder(tmp_path):
+    """The only channel that tells a human WHICH participant holds the lease.
+    segment_dispatch_driver.py's own refusal says "another driver" and is not
+    edited here (it is a PLUGIN_BUNDLE_MEMBERS entry, so touching it would
+    move plugin_bundle_hash), and select_segments.py's --from-stalled lease
+    stamps no body at all."""
+    root = setup_mixed_project(tmp_path)
+
+    proc = run_backfill(root, "--apply")
+
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    body = _lock_path(root).read_text(encoding="utf-8").strip()
+    assert body, "a successful --apply must leave a diagnostic body behind"
+    record = json.loads(body)
+    assert record["holder"] == "backfill_ever_converged.py", (
+        f"the lease body must name its holder so a refusal elsewhere can be "
+        f"diagnosed without guessing: {record!r}"
+    )
+    assert isinstance(record["pid"], int), (
+        f"the body must carry an integer pid, the driver's own shape: {record!r}"
+    )
+
+
+def test_a_filesystem_that_cannot_flock_at_all_warns_instead_of_claiming_a_holder(
+    tmp_path, capsys
+):
+    """A FAILED acquire is not a HELD lease, and the difference decides
+    whether the one-time migration can run at all.
+
+    Caught by review after the self-test had already been fixed for the
+    identical confusion -- the same misreading shipped twice in one function.
+    With ENOLCK injected on the FIRST flock, the earlier version exited 1
+    saying "another project-lease participant already holds" it, on a mount
+    with no driver anywhere near it, permanently blocking the migration on
+    exactly the filesystems the degraded-mode policy exists to keep working.
+
+    ENOLCK, not a generic OSError: the point is the errno classification, and
+    a test that injected EAGAIN would assert the refusal path instead. The
+    contention direction stays covered by the refusal test above, so the two
+    errnos are pinned against each other rather than one being trusted."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_no_flock")
+    root = setup_mixed_project(tmp_path)
+
+    real_flock = backfill.fcntl.flock
+
+    def flock_unsupported(fd, op):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    backfill.fcntl.flock = flock_unsupported
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        backfill.fcntl.flock = real_flock
+
+    assert result["success"] is True, (
+        "a filesystem that cannot lock must not block the migration -- the "
+        f"documented policy is warn-and-proceed: {result!r}"
+    )
+    assert result["created"], (
+        "the run must still have done its actual work; a degraded lease is "
+        "not a reason to protect nothing"
+    )
+
+    err = capsys.readouterr().err
+    assert "flock could not be performed" in err, (
+        f"the operator must be told no lease is held, in the run they are "
+        f"watching: {err!r}"
+    )
+    assert "No locks available" in err, (
+        "the warning must carry the errno text, or the operator cannot tell "
+        "an unlockable mount from any other degraded state"
+    )
+    assert "already holds" not in err, (
+        "the old bug: an unlockable filesystem reported as another "
+        "participant holding the lease, which is a holder that does not exist"
+    )
