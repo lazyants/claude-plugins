@@ -389,7 +389,7 @@ FIGURES = [
     # declaring one would hardcode its answer -- the `lambda: 17` failure the
     # docstring refuses. The remaining numerals are identifiers, never
     # measurements: the version numbers (1.72.0, 1.37.0), the release date, and
-    # the issue number (#532).
+    # the issue numbers (#461, #527, #532).
 ]
 
 

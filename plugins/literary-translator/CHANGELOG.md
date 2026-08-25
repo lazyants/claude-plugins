@@ -16,12 +16,19 @@ are the operating behaviours that machinery produces which the docs did not name
   The unit never converges and never caps. Measured on a live book: round 4 dispatched 19 of
   20 units and the missing one still carried its round-2 `dispatch_token`. The exit summary
   reports it under `needs_fix`, which reads as "reviewed again, still not clean" rather than
-  "not looked at"; the tell is a `round_label` that does not advance. The release is an
-  `ADJUDICATED:` entry in the draft's `notes[]` — apparatus the reader never sees — and
-  never applying a finding you have evidence is wrong. Two other causes produce the same
-  shape (an operator waiver written where the reviewer does not read, a driver-stranded
-  unit), and one detector catches all three: reconcile the dispatch COUNT against the
-  requested set every round.
+  "not looked at"; the tell is a `round_label` that does not advance. This is the loop #461
+  was filed about, seen from the operator's side, so the release is the mechanism #461
+  shipped: `reject_review.py`, whose marker binds the decision to the review's token,
+  verdict digest and round, and which `derive_next_action()` consumes to advance the round
+  (or, at `final` over a coverage-clean unchanged draft, to converge on the operator's own
+  reason, #527). The section says as plainly what NOT to do, because it is what an operator
+  reaches for first: a refusal marker in `notes[]` is forbidden by `fixPrompt` — that
+  channel is read by the next reviewer, so a marker feeds the dispute back into the loop
+  while moving `draft_sha1` binds nothing — and applying a finding known to be wrong is the
+  one edit that damages correct prose. Two other causes produce the same shape (an operator
+  waiver written where the reviewer takes no criteria from, a driver-stranded unit), and one
+  detector catches all three: reconcile the dispatch COUNT against the requested set every
+  round.
 - **A never-converged unit stranded by a killed driver fits no claim profile**
   (`references/ledger-and-resumability.md`). It stays `in_progress`; `--from-cap` and
   `--from-converged` refuse on status and `--from-stalled` on the `.ever_converged` sentinel
