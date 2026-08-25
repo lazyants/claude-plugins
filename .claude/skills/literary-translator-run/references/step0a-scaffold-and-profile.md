@@ -1,6 +1,6 @@
-# Step 0a scaffold + profile (hand-built)
+# Step 0a scaffold (hand-built) + profile (created by Step 0, never by hand)
 
-Step 0a has NO executable scaffold script — SKILL.md §0a is prose only. A real operator cannot scaffold the run from the shipped artifacts alone; build the `durable_root` by hand, then write and validate the profile.
+Step 0a has NO executable scaffold script — SKILL.md §0a is prose only. A real operator cannot scaffold the run from the shipped artifacts alone; build the `durable_root` by hand, then let Step 0 create the profile and answer the questionnaire it prints. The `durable_root` is hand-built because nothing ships to build it; `profile.yml` is **not**, because something does — see §5.
 
 ## 1. Hand-build the durable_root
 
@@ -52,20 +52,27 @@ Do the same over the **4 orchestration members** — `draft_ready.py, ledger_mer
 
 **`he.json` DOES ship** (since 1.9.0, `6fb80ba`/#195) alongside `fr`/`de`/`es`/`it` — do NOT author or hand-edit it. Its `STOPWORDS` is a curated 40-word list and Step 0a **unconditionally overwrites** every shipped `languages/` filename in `durable_root`, so an edit in place is silently reverted on the next scaffold (and authoring an empty stub would destroy the curated preset for that run). To add a `name_inventory` or otherwise override, ship a **`he.local.json`** — the `.local` suffix is load-bearing; see "Getting uncased names via `name_inventory`" in `uncased-script-and-w3.md`. Only a language with NO shipped preset needs authoring from scratch; the contract for every key is in `{{PLUGIN_ROOT}}/assets/languages/README.md`.
 
-## 5. Write and validate the profile
+## 5. Let Step 0 CREATE the profile, then answer its questionnaire
 
-The profile lives at `${durable_root}/.claude/literary-translator/profile.yml` — Step 0's `--profile` path is THAT, **not** `${durable_root}/profile.yml`.
+**Do not write `profile.yml` by hand, and do not answer a fresh copy's sentinels from its own inline comments.** Everything else in this reference is hand-built because no scaffold script ships; the profile is the one artifact that has a shipped creator, and using it is load-bearing rather than a convenience. Run Step 0 against the ABSENT path first: `profile_validate.py` copies `assets/profile.example.yml` there and, in that same run, prints every `CHOOSE_` sentinel as the intake questionnaire (#751). Those sentinels ARE the questions — a hand-authored profile has none, so the scan finds nothing to ask and Step 0 prints `OK` while every intake decision was made by the orchestrator instead of the user. That is how 12 of 12 profiles across both live books came to omit `glossary.enabled`, whose default is `true`: nobody was ever shown the question.
 
-he→en values:
+So: relay the printed questionnaire to the user intact, get their answers, and write those in. R10 applies here too — for volume N>1, read `<series directory>/decisions.md` first and attach each recorded row to its question as provenance, never as a value written in unasked.
+
+The profile lives at `${durable_root}/.claude/literary-translator/profile.yml` — Step 0's `--profile` path is THAT, **not** `${durable_root}/profile.yml`. Point it at the absent path and it is created there.
+
+**Fields you fill from the material, not from the user** — these are not intake decisions, they describe the source's shape:
 - `source.format: gutenberg_epub`
 - `adapter_config.gutenberg_epub.spine_overrides: {"content.xhtml":"body"}`
 - replace the inert `plain_text` `CHOOSE_` sentinels
-- `verse_policy.mode: literal_only`
-- `apparatus_policy: omit_apparatus`
-- `glossary.research_mode: offline`
-- `engine.effort: high` — schema-const (leave as-is), so there is nothing to override here. (This is the plugin's engine field; it is a DIFFERENT knob from the codex-dispatch prompt's `Effort:` line — see `manual-translation-drive.md`. Do not read this const as a validated tier — no effort tier has been validated as a winner; see `skill:codex-runtime-driving` → `references/model-effort-bakeoff.md`.)
-- `output.v1_scope: assembled_book` + `output.target: obsidian`
 - `max_segment_words: 6000`
+- `engine.effort: high` — schema-const (leave as-is), so there is nothing to override here. (This is the plugin's engine field; it is a DIFFERENT knob from the codex-dispatch prompt's `Effort:` line — see `manual-translation-drive.md`. Do not read this const as a validated tier — no effort tier has been validated as a winner; see `skill:codex-runtime-driving` → `references/model-effort-bakeoff.md`.)
+
+**Fields that come only from the relayed questionnaire.** The values below are what the **ssk he→en** book answered — they are that book's answers, recorded so you can recognise the questions, and R10 forbids carrying any of them into a new volume's profile unasked:
+- `verse_policy.mode: literal_only`
+- `footnotes.apparatus_policy: omit_apparatus`
+- `glossary.research_mode: offline`
+- `glossary.enabled` — **ask it explicitly.** It is the one intake decision that is schema-OPTIONAL and carries `default: true`, so a profile that simply omits it turns the whole W3 glossary/canon pass on with nobody having chosen that. Every profile on this machine omits it.
+- `output.v1_scope: assembled_book` + `output.target: obsidian`
 
 Run Step 0:
 
