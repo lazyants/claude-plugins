@@ -1,0 +1,61 @@
+name: skill-frontmatter
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Every file the suite READS, not only the directory it lives in. The gate
+      # walks both skill roots, so a PR editing only a SKILL.md must schedule it.
+      - '.claude/skills/**'
+      - 'plugins/*/skills/**'
+      # The roots THEMSELVES, not only their contents. A GitHub path pattern
+      # matches the whole changed path, so `plugins/*/skills/**` covers files
+      # inside the directory but not a file or symlink created AT that path --
+      # which is exactly a case the gate stats and refuses by name.
+      - '.claude/skills'
+      - 'plugins/*/skills'
+      # A standalone entry created directly at plugins/<name> -- a symlink, say
+      # -- is a file the gate stats and refuses by name, so it must schedule it.
+      - 'plugins/*'
+      - 'tests/skill-frontmatter-limits.test.rb'
+      - '.github/workflows/skill-frontmatter.yml'
+  pull_request:
+    paths:
+      - '.claude/skills/**'
+      - 'plugins/*/skills/**'
+      - '.claude/skills'
+      - 'plugins/*/skills'
+      - 'plugins/*'
+      - 'tests/skill-frontmatter-limits.test.rb'
+      - '.github/workflows/skill-frontmatter.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Psych IS the gate's root of trust: it is what makes the measured length
+      # the YAML *value* rather than the source bytes. If ruby or psych were
+      # missing the gate could only skip, and a skipped gate reads exactly like
+      # a clean one -- so this step fails loudly instead. It also prints the
+      # versions, so a green run says which parser produced it and a Psych
+      # major-version skew is visible rather than inferred.
+      - name: Toolchain
+        run: |
+          ruby -v
+          ruby -ryaml -e 'puts "psych #{Psych::VERSION}"'
+
+      - name: tests/skill-frontmatter-limits.test.rb
+        run: ruby tests/skill-frontmatter-limits.test.rb
