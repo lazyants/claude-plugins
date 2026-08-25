@@ -18,15 +18,48 @@ sail through ungated. This script closes that gap for an EXISTING project:
 it determines, from the project's own ledger, which segments have converged
 at least once, and raises the missing sentinels for them.
 
-Run this script only when no W5 dispatch is in flight against the same
-durable root -- this script takes no lock, and neither does the read it
-protects. ``select_segments.py`` takes its ``.ever_converged`` census ONCE,
-at selection time, and nothing rechecks it when the translate work it
-authorized is actually dispatched. A sentinel this script raises in between
-does not revoke an authorization already granted: the dispatch proceeds
-anyway and retranslates the very work the sentinel exists to guard. That is
-why the caller sequences this script strictly before the first W5 dispatch,
-never alongside one.
+## The project lease -- why ``--apply`` takes one (#621)
+
+``select_segments.py`` takes its ``.ever_converged`` census ONCE, at selection
+time, and nothing rechecks it when the translate work it authorized is
+actually dispatched (bounded check: ``grep -c ever_converged
+segment_dispatch_driver.py codex_job.py`` finds only prose in the first and
+nothing in the second). A sentinel raised in between therefore does not revoke
+an authorization already granted -- the dispatch proceeds anyway and
+retranslates the very work the sentinel exists to guard, as a GREEN run.
+
+That used to be a sequencing rule stated here and in ``SKILL.md`` and enforced
+by nothing. It is now enforced for the mode that can actually cause it:
+``--apply`` acquires ``${durable_root}/runs/.driver.lock`` -- the same
+project lease ``segment_dispatch_driver.py`` holds across its WHOLE run,
+taken before its ``select_segments.py`` Step 1 call and released only after
+the dispatch loop -- and HOLDS it for this run's lifetime. An ``--apply``
+backfill can no longer land a sentinel inside a driver's census-to-dispatch
+window; it refuses, naming the path, and writes nothing.
+
+A DRY RUN deliberately takes no lease. It creates no sentinel, so it cannot
+cause the interleaving at all, and acquiring one would create
+``runs/.driver.lock`` -- breaking the write-nothing guarantee documented
+below, which is pinned by test. What a dry run reports may be stale relative
+to a concurrent driver; that is a reporting limit, not this defect.
+
+What the lease still does NOT cover, stated so nobody reads it as more than
+it is:
+
+  - **Two separate hand-run commands.** No lease spans them. A standalone
+    ``select_segments.py --from-stalled`` does acquire this same lease (see
+    its ``acquire_and_hold_lease()``), but that lease dies with the selector
+    process, so the window between its census and a separately hand-run
+    dispatch is open exactly as before. Convention still governs that path.
+  - **Two machines sharing one durable root through a sync-replicated folder**
+    (Synology Drive, Dropbox, iCloud). Each takes a valid LOCAL flock, neither
+    sees the other, and the sync daemon reconciles the conflicting writes
+    afterwards. Pre-existing and identical for the driver's own lease -- see
+    ``segment_dispatch_driver.py:acquire_driver_lock()``.
+  - **A filesystem that does not enforce flock** (some NFS/SMB mounts). The
+    self-test in ``acquire_project_lease()`` detects it and WARNS; it does not
+    refuse. See that function for why the direction differs from
+    ``select_segments.py``'s.
 
 ## How "ever converged" is determined
 
@@ -255,6 +288,7 @@ is protected now". Read the field before concluding a project is protected.
 
 import argparse
 import errno
+import fcntl
 import json
 import os
 import re
@@ -262,6 +296,7 @@ import secrets
 import stat
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
 
@@ -1493,7 +1528,186 @@ def resolve_ledger_segments(args, dirs: dict):
 # ---------------------------------------------------------------------------
 
 
+# --- the project lease (#621) ----------------------------------------------
+# THIRD copy of this pathname, deliberately and not by drift: the other two are
+# segment_dispatch_driver.py's driver_lock_path() and select_segments.py's.
+# There is no shared module to import it from -- these scripts are staged
+# standalone into ${durable_root}/scripts/ -- and creating one would enrol a
+# new file in cache_key.py's PLUGIN_BUNDLE_MEMBERS, moving plugin_bundle_hash
+# and reclassifying every already-converged segment `stale` for a pathname.
+DRIVER_LOCK_NAME = ".driver.lock"
+
+
+def driver_lock_path(durable_root: Path) -> Path:
+    """``runs/.driver.lock`` -- byte-identical to the path
+    ``segment_dispatch_driver.py`` and ``select_segments.py`` build. It MUST
+    stay identical: the whole point is contending for the same inode as the
+    driver, and a lease on a path nobody else takes excludes nothing."""
+    return durable_root / "runs" / DRIVER_LOCK_NAME
+
+
+def acquire_project_lease(durable_root: Path) -> int:
+    """Takes ``LOCK_EX|LOCK_NB`` on ``runs/.driver.lock`` and returns the open
+    descriptor. The CALLER must keep it open for as long as the exclusion is
+    needed; closing it (or exiting) is what releases it, kernel-side, with no
+    unlink and no stale-pid probe.
+
+    ``fatal()`` (exit 1, JSON on stdout) if anything else already holds it.
+    Non-blocking by design: a held lease means real work is in flight against
+    this project, and queuing behind it silently is exactly the interleaving
+    #621 is about.
+
+    OPEN FLAGS: plain ``O_CREAT|O_RDWR``, matching
+    ``segment_dispatch_driver.py`` and NOT ``select_segments.py``'s hardened
+    ``_open_lock_file()`` (``O_NOFOLLOW`` plus an fstat for S_ISREG). The
+    asymmetry is deliberate and is the safe direction HERE, which is the
+    reverse of what it is there. This lease exists to exclude the DRIVER, and
+    mutual exclusion requires contending on the inode the driver actually
+    opens -- it follows a symlink at this path, so refusing one would make
+    this script decline a lease the driver takes happily, protecting nothing
+    while blocking the migration. The stated trust boundary is operator
+    mistake and process interleaving on the operator's own durable root, not
+    a local actor planting symlinks; such an actor can rewrite any draft or
+    the ledger directly.
+
+    The file's CONTENT is diagnostic only -- nothing here or in any sibling
+    ever reads it back to decide whether the lease is held (that would
+    reintroduce the liveness-probe race a kernel flock exists to avoid). It
+    carries ``holder`` on top of the driver's ``pid``/``started_at`` shape
+    because a human debugging a refusal has no other channel:
+    ``segment_dispatch_driver.py``'s own refusal says "another driver", and
+    ``select_segments.py``'s ``--from-stalled`` lease stamps nothing at all.
+    """
+    lock_path = driver_lock_path(durable_root)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as exc:
+        fatal(
+            f"could not open the project lease at {lock_path}: {exc}",
+            lock_path=str(lock_path),
+        )
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        fatal(
+            f"another project-lease participant already holds {lock_path} "
+            f"({exc}) -- refusing to write sentinels alongside it. "
+            f"segment_dispatch_driver.py holds this lease for its whole run, "
+            f"across both its select_segments.py census and every translate "
+            f"it dispatches, and select_segments.py --from-stalled holds it "
+            f"standalone. The lease is a kernel flock, released automatically "
+            f"when its holder exits or crashes, so it cannot be stale while a "
+            f"process holds it: wait for that process to finish and re-run. "
+            f"`cat {lock_path}` names the holder when the holder stamped one "
+            f"-- the --from-stalled path deliberately stamps nothing, so an "
+            f"empty or stale body is not evidence that nobody is there.",
+            lock_path=str(lock_path),
+        )
+    try:
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(
+            fd,
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "holder": "backfill_ever_converged.py",
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+            + b"\n",
+        )
+    except OSError:
+        pass  # diagnostic content only -- never fatal to the lease itself
+
+    # ENFORCEMENT SELF-TEST. The dangerous direction is not a false refusal,
+    # it is a silent double acquire: flock is scoped per OPEN FILE
+    # DESCRIPTION, so a second, genuinely independent open of the same path
+    # contends for real against the descriptor above and can never
+    # self-deadlock -- on a conforming filesystem it MUST be refused. If it
+    # SUCCEEDS, this filesystem does not enforce flock and the lease just
+    # "taken" is worthless.
+    #
+    # WARNS AND PROCEEDS, where select_segments.py's acquire_and_hold_lease()
+    # REFUSES. Its reasoning ("refusing costs one profile, the alternative
+    # costs a draft") inverts here and the inversion is the whole
+    # justification: this script is a ONE-TIME LEGACY MIGRATION, and a root
+    # with no sentinels at all has NOTHING protecting it -- SKILL.md's #409
+    # note says such a project retranslates the whole book on its very first
+    # post-upgrade dispatch. Refusing on an NFS/SMB mount would block that
+    # migration outright, trading a narrow, detected window for a certain,
+    # total loss. Same direction segment_dispatch_driver.py takes, for the
+    # same "a detected gap must not become a brand-new outage" reason.
+    probe_fd = None
+    try:
+        probe_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        pass  # expected: a conforming filesystem refuses the second attempt
+    else:
+        sys.stderr.write(
+            f"backfill_ever_converged.py: WARNING: the project lease at "
+            f"{lock_path} is NOT enforced by this filesystem -- a second, "
+            f"independent flock() attempt against the SAME path succeeded "
+            f"instead of being refused, while this process already holds it. "
+            f"A W5 dispatch can therefore run against this project at the "
+            f"same time as this backfill, and the refusal above will never "
+            f"fire. Known on some network filesystems (NFS/SMB). Proceeding, "
+            f"because a project with no sentinels at all is the larger loss "
+            f"-- but sequence this run before the first W5 dispatch by hand, "
+            f"exactly as the pre-#621 rule required.\n"
+        )
+    finally:
+        if probe_fd is not None:
+            try:
+                fcntl.flock(probe_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(probe_fd)
+
+    return fd
+
+
+def release_project_lease(fd: int) -> None:
+    """Best-effort explicit close, mirroring
+    ``segment_dispatch_driver.py``'s ``release_driver_lock()``. Not required
+    for the CLI (process exit releases the kernel flock regardless) but this
+    module has in-process callers by design -- ``run()`` is driven directly by
+    tests and by any library caller -- and for those, leaking the descriptor
+    would hold the project lease for the life of the interpreter."""
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
 def run(args, dirs: dict) -> dict:
+    """Acquires the project lease for a WRITING run, then delegates.
+
+    Thin by design: the lease must be held across the WHOLE of
+    ``_run_holding_lease()`` -- its ledger re-materialization, its census AND
+    every sentinel write -- and wrapping is what makes that span visible in
+    one screen instead of resting on a `finally` 200 lines below its
+    acquisition.
+
+    ``--apply`` only. A dry run creates no sentinel, so it cannot cause the
+    interleaving #621 describes, and acquiring a lease would create
+    ``runs/.driver.lock`` -- a filesystem modification, which is precisely
+    what this script's dry-run guarantee promises not to make. See the module
+    docstring's "The project lease" section.
+    """
+    lease_fd = acquire_project_lease(dirs["durable_root"]) if args.apply else None
+    try:
+        return _run_holding_lease(args, dirs)
+    finally:
+        if lease_fd is not None:
+            release_project_lease(lease_fd)
+
+
+def _run_holding_lease(args, dirs: dict) -> dict:
     ledger_segments, ledger_path, ledger_source = resolve_ledger_segments(args, dirs)
 
     # WHAT THIS CANNOT SEE, and why it is reported rather than silently
