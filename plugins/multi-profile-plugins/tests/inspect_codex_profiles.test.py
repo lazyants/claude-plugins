@@ -347,6 +347,42 @@ for label_, tokens in (
         check(f"{label_}: named", "no comparable account id" in r.stdout, r.stdout)
 
 # ---------------------------------------------------------------------------
+# 6f2. An api-key login carries no account id BY DESIGN. Demanding one would make a valid
+#      profile warn on every run forever — a check nobody can satisfy. It stays clean, and
+#      the verdict says out loud that ownership was not compared rather than implying it was.
+# ---------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
+    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    (b / "auth.json").write_text(json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": FAKE_API_KEY}))
+    r = run(a, b)
+    check("api-key: exit 0", r.returncode == 0, f"exit={r.returncode}\n{r.stdout}")
+    check("api-key: not a gap", "credentials NOT checked" not in r.stdout, r.stdout)
+    check("api-key: limitation stated", "could not be compared" in r.stdout, r.stdout)
+    check(
+        "api-key: does not claim distinct credentials",
+        "every checked profile has its own credentials" not in r.stdout,
+        r.stdout,
+    )
+    assert_no_secret("api-key", r)
+
+# ---------------------------------------------------------------------------
+# 6g0. A BROKEN symlink store points at nothing. Two of them aimed at the same missing
+#      target must not be reported as sharing a directory that does not exist.
+# ---------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
+    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    missing = root / "gone"
+    os.symlink(missing, a / "sessions")
+    os.symlink(missing, b / "sessions")
+    r = run(a, b)
+    check("broken symlink: exit 0", r.returncode == 0, f"exit={r.returncode}\n{r.stdout}")
+    check("broken symlink: no share claim", "share `sessions`" not in r.stdout, r.stdout)
+
+# ---------------------------------------------------------------------------
 # 6g. A store that cannot be stat'ed must not read as absent. Path.exists() answers False
 #     for a permission error exactly as it does for a missing directory, so without this the
 #     profile reaches PASS with the store never examined.
@@ -446,7 +482,7 @@ print(f"ran {checks} checks")
 # A case that raises before its checks run, or a fixture block deleted wholesale, subtracts
 # silently: the remaining cases still pass and the run still exits 0. Assert the floor so a
 # suite that stopped exercising most of the script cannot read as a clean one.
-MIN_CHECKS = 80
+MIN_CHECKS = 88
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

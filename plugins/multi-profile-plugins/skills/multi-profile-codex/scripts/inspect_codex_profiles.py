@@ -43,8 +43,12 @@ against a fixture HOME in a test) — relative paths are normalized to absolute
 (lexically, without resolving symlinks) before any comparison, since the paths
 baked into a config are themselves absolute and unresolved.
 
-Exit 0 = every checked profile has distinct credentials, no cross-profile
-config pins, and no shared content store (PASS).
+Exit 0 = no cross-profile config pins, no shared content store, and no two
+profiles on the same account (PASS). Where a login mode carries no account id
+at all — an api-key login has none — ownership cannot be compared, and the PASS
+line says so instead of claiming a distinctness this never established. That is
+not a failure and not a gap: it is a limit of what the file can answer, and
+warning about it forever would be a check nobody could satisfy.
 Exit 1 = a warning was found (WARN): duplicate credentials, a config pinned
 into another profile's home, or a shared content store — and also any profile
 that could not be fully examined: a missing or unparseable `config.toml`, an
@@ -94,6 +98,13 @@ ACCOUNT_ID_RE = re.compile(r"[0-9a-fA-F-]{8,64}")
 # comes out of a credential file, and echoing an unrecognised one is how that file's
 # contents would reach a terminal.
 KNOWN_AUTH_MODES = ("chatgpt", "apikey", "api_key", "device")
+
+# Modes that carry an account id. An api-key login legitimately has none, so demanding one
+# would make a perfectly good profile warn on every run, forever -- a check nobody can
+# satisfy, which is a worse outcome than the gap it was closing. Those profiles are reported
+# as comparison-unavailable instead, and the final verdict says so rather than claiming a
+# distinctness it could not establish.
+ACCOUNT_BEARING_MODES = ("chatgpt",)
 
 # Every profile must be marked for each of these before the run may report PASS. The
 # marks are what makes "not examined" impossible to confuse with "examined and clean":
@@ -304,6 +315,7 @@ def main(argv: list[str]) -> int:
     print("== credentials (auth.json) ==")
     idents: dict[Path, tuple[int, int]] = {}
     accounts: dict[Path, str] = {}
+    uncomparable: list[Path] = []
     for prof in profile_paths:
         ap = prof / "auth.json"
         mode, account = read_account(prof)
@@ -320,14 +332,17 @@ def main(argv: list[str]) -> int:
         # cannot be part of a clean verdict about credentials.
         if mode == "unreadable":
             gaps[prof]["credentials"] = "auth.json is unreadable or malformed"
-        elif mode != "not-logged-in" and account is None:
-            # The file is there and parses, but nothing comparable came out of it: no
-            # account_id at all (an api-key login has none), or one that does not match the
-            # identifier shape. Either way this profile silently drops out of the
-            # same-account comparison below -- which is the check most worth having, since
-            # two homes on one account is the outcome the whole split exists to avoid. The
-            # shape gate added in the previous round is itself one way to land here.
+        elif mode in ACCOUNT_BEARING_MODES and account is None:
+            # The file is there and parses, and this mode is supposed to carry an id, but
+            # nothing comparable came out: absent, or failing the identifier shape. Either
+            # way the profile drops out of the same-account comparison below -- the check
+            # most worth having, since two homes on one account is what the split exists to
+            # avoid. The shape gate is itself one way to land here.
             gaps[prof]["credentials"] = "auth.json has no comparable account id"
+        elif mode != "not-logged-in" and account is None:
+            # A mode that carries no account id by design. Not a gap -- nothing failed --
+            # but ownership cannot be compared, and the verdict must not imply otherwise.
+            uncomparable.append(prof)
         shown = f"account={fingerprint(account)}…" if account else "account=-"
         print(f"  {label(prof):<{width}} {mode:<14} {shown:<20} {inode}")
 
@@ -396,7 +411,11 @@ def main(argv: list[str]) -> int:
         for prof in profile_paths:
             sp = prof / store
             try:
-                os.stat(sp, follow_symlinks=False)
+                # Follows symlinks deliberately, matching the realpath comparison on the next
+                # line. An lstat here would admit a BROKEN symlink, whose realpath then names
+                # a directory that does not exist -- and two broken links to one missing
+                # target would be reported as sharing a store that nothing has.
+                os.stat(sp)
             except FileNotFoundError:
                 continue  # genuinely absent, which is normal and not a gap
             except OSError as exc:
@@ -430,6 +449,14 @@ def main(argv: list[str]) -> int:
         for w in warns:
             print(f"  - {w}")
         return 1
+    if uncomparable:
+        names = ", ".join(label(p) for p in uncomparable)
+        print(
+            "PASS — no cross-profile pins and no shared content stores. Account ownership "
+            f"could not be compared for {names} (this login mode carries no account id), so "
+            "this verdict does not claim those profiles are on different accounts."
+        )
+        return 0
     print("PASS — every checked profile has its own credentials, config, and content stores.")
     return 0
 
