@@ -63,7 +63,17 @@ Run the bundled `scripts/inspect_codex_profiles.py` read-only against the profil
 Prefer it over an ad hoc `grep` for a home path. A bare substring match reports a false positive on every
 sibling profile, because `~/.codex` is a substring of `~/.codex2`; a `startswith` match fixes that and then
 misses the real pins, which sit mid-string inside a `:`-joined search path or a JSON services blob. The
-script matches on a path boundary, which is the only form that gets both right.
+script matches on a path boundary at both ends, which is the only form that gets those right and also
+declines `/Volumes/backup/…/.codex`, a same-suffix path under a backup mount.
+
+Read its verdict as three-valued, not two. A profile it could not examine — an unreadable `auth.json`, a
+missing or invalid `config.toml`, a mistyped directory that is not a Codex home at all — is reported as a
+warning naming which check did not run, never as a quiet skip, because a run that did not look at a
+profile must not let a PASS line speak for it. A home that is simply `not-logged-in` is a real state for a
+freshly seeded profile and stays clean. And nothing the script reads is echoed back: the login mode prints
+as one of a fixed set of labels, the account id as a truncated fingerprint, and a matched config pin as the
+dotted key that holds it rather than the value, since one MCP env value can carry a path and a token
+together.
 
 ## Seeding a new profile
 

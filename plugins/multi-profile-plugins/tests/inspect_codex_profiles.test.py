@@ -279,6 +279,70 @@ with tempfile.TemporaryDirectory() as td:
     check("shared sessions: named", "share `sessions`" in r.stdout, r.stdout)
 
 # ---------------------------------------------------------------------------
+# 6b. auth_mode is rendered from a fixed set of labels, never echoed. The field sits in
+#     the credential file, so a malformed profile that puts a secret there would print it
+#     if the value were forwarded verbatim.
+# ---------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
+    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    (b / "auth.json").write_text(
+        json.dumps({
+            "auth_mode": FAKE_API_KEY,
+            "tokens": {"account_id": "bbbbbbbb-1111-2222-3333-444444444444"},
+        })
+    )
+    r = run(a, b)
+    assert_no_secret("auth_mode echo", r)
+    check("auth_mode echo: reported as unknown-mode", "unknown-mode" in r.stdout, r.stdout)
+
+# ---------------------------------------------------------------------------
+# 6c. A malformed auth.json means the credentials were NOT examined. Everything else about
+#     the profile can be clean, so without this the run reaches the PASS line and states
+#     that every profile has its own credentials — about a file it could not read.
+# ---------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
+    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    (b / "auth.json").write_text("{not json at all")
+    r = run(a, b)
+    check("bad auth: exit 1", r.returncode == 1, f"exit={r.returncode}\n{r.stdout}")
+    check("bad auth: no PASS line", "PASS —" not in r.stdout, r.stdout)
+    check("bad auth: named", "credentials NOT checked" in r.stdout, r.stdout)
+
+# ---------------------------------------------------------------------------
+# 6d. A freshly seeded home with no auth.json is a real intended state, not a gap: it must
+#     stay clean, or the check above would just be an exit-1 generator.
+# ---------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
+    b = make_home(root, ".codex2", account="bbbbbbbb-1111-2222-3333-444444444444")
+    (b / "auth.json").unlink()
+    r = run(a, b)
+    check("not-logged-in: exit 0", r.returncode == 0, f"exit={r.returncode}\n{r.stdout}")
+    check("not-logged-in: says PASS", "PASS —" in r.stdout, r.stdout)
+    check("not-logged-in: labelled", "not-logged-in" in r.stdout, r.stdout)
+
+# ---------------------------------------------------------------------------
+# 6e. Two DIFFERENT accounts sharing the first eight characters are two accounts. The
+#     eight-character form exists for display; comparing on it merges them.
+# ---------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    a = make_home(root, ".codex", account="aaaaaaaa-1111-2222-3333-444444444444")
+    b = make_home(root, ".codex2", account="aaaaaaaa-9999-8888-7777-666666666666")
+    r = run(a, b)
+    check("same prefix: exit 0", r.returncode == 0, f"exit={r.returncode}\n{r.stdout}")
+    check(
+        "same prefix: not called one account",
+        "logged into the same account" not in r.stdout,
+        r.stdout,
+    )
+
+# ---------------------------------------------------------------------------
 # 7. A config.toml that is not valid TOML must WARN, not pass quietly — an
 #    unparseable config reads exactly like a clean one otherwise.
 # ---------------------------------------------------------------------------
@@ -342,7 +406,7 @@ print(f"ran {checks} checks")
 # A case that raises before its checks run, or a fixture block deleted wholesale, subtracts
 # silently: the remaining cases still pass and the run still exits 0. Assert the floor so a
 # suite that stopped exercising most of the script cannot read as a clean one.
-MIN_CHECKS = 60
+MIN_CHECKS = 70
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
