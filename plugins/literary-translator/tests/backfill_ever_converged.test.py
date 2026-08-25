@@ -3509,17 +3509,20 @@ def _independent_acquire_succeeds(root):
     path = _lock_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    # try/except/else/finally, the same shape the production probe uses for
+    # this identical primitive -- all three exits still pass through `finally`,
+    # and the helper stops reading as a different idiom for the same operation.
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
-                return False
-            raise AssertionError(
-                f"the lease probe could not be RUN ({exc}) -- this test "
-                f"proves nothing, and reporting it as 'held' would be the "
-                f"false green it exists to catch"
-            ) from exc
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+            return False
+        raise AssertionError(
+            f"the lease probe could not be RUN ({exc}) -- this test "
+            f"proves nothing, and reporting it as 'held' would be the "
+            f"false green it exists to catch"
+        ) from exc
+    else:
         fcntl.flock(fd, fcntl.LOCK_UN)
         return True
     finally:
@@ -3541,9 +3544,12 @@ def test_apply_refuses_while_the_project_lease_is_held_and_writes_nothing(tmp_pa
         # this test still passes while an --apply run re-materializes
         # runs/ledger.json inside a driver's lease -- contradicting this
         # test's own name, and the docstring's "holds it for this run's
-        # lifetime". `.driver.lock` itself is excluded because the fixture
-        # below creates it: it is the lease being HELD, not a write by the
-        # run under test.
+        # lifetime". `.driver.lock` itself does not show up as a change, and
+        # the reason is "present in both snapshots", not an exclusion rule
+        # this helper implements: the fixture creates it BEFORE the first
+        # snapshot, and a refused run leaves it byte-identical (an O_CREAT
+        # over an existing file moves neither mtime nor size). It is the
+        # lease being HELD, not a write by the run under test.
         before = _snapshot_tree(root)
         proc = run_backfill(root, "--apply")
         after = _snapshot_tree(root)
@@ -3722,4 +3728,52 @@ def test_a_filesystem_that_cannot_flock_at_all_warns_instead_of_claiming_a_holde
     assert "already holds" not in err, (
         "the old bug: an unlockable filesystem reported as another "
         "participant holding the lease, which is a holder that does not exist"
+    )
+
+
+def test_a_mistyped_durable_root_is_named_and_nothing_is_created(tmp_path):
+    """A regression the LEASE introduced, caught by review after it merged.
+
+    Taking the lease moved to the top of the run, ahead of everything that
+    used to touch the filesystem first, which made its
+    `mkdir(parents=True, exist_ok=True)` the first thing a mistyped
+    --durable-root reached. Measured on the pre-lease script and the lease
+    version with identical argv: the old one wrote NOTHING and said "No such
+    file or directory: <root>"; the new one materialized the entire missing
+    path and then failed one step later with "schemas directory not found".
+
+    Both halves are asserted because only together do they describe the harm.
+    The litter is the smaller one. The diagnostic is the real cost: "missing
+    schemas" reads as an INCOMPLETE project rather than a nonexistent one,
+    and by the time the operator reads it the path exists on disk, so going
+    to look at it corroborates the wrong reading.
+
+    A deep path, not a single missing segment: `parents=True` means one
+    mistyped segment materializes an arbitrarily deep tree, and a one-level
+    fixture would pass against a `mkdir(parents=False)` that still creates
+    the wrong directory."""
+    missing = tmp_path / "typo" / "deep" / "durable_root"
+    real = make_durable_root(tmp_path, name="real_root")
+
+    proc = run_backfill_from(
+        real / "scripts" / "backfill_ever_converged.py",
+        "--durable-root", str(missing), "--apply",
+    )
+
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert str(missing) in payload["error"], (
+        f"the error must NAME the path that is not there -- that sentence is "
+        f"the whole diagnosis of a typo: {payload['error']!r}"
+    )
+    assert "does not exist" in payload["error"], (
+        f"and must say the root is ABSENT, not that something inside it is "
+        f"missing, which reads as an incomplete project: {payload['error']!r}"
+    )
+
+    assert not (tmp_path / "typo").exists(), (
+        "a mistyped --durable-root must not materialize its own path; "
+        "`mkdir(parents=True)` at the top of the run would create the whole "
+        "missing tree before anything validated it"
     )
