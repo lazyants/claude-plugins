@@ -40,6 +40,15 @@ jobs:
         with:
           python-version: '3.14'   # mirrors the dev machine, so a CI result is comparable
 
+      - name: Install pytest
+        # The TOOL is stdlib-only by design -- it runs from a checkout with nothing installed. Its
+        # SUITE is not: it is a pytest suite, and `setup-python` ships no pytest, so without this the
+        # unit-test step dies with "No module named pytest" and the citation gate below never runs.
+        # Pinned rather than floating: a runner that silently changes pytest under the suite makes a
+        # CI result stop being comparable to the local one, which is the point of pinning 3.14.
+        # 9.1.1 is both the current latest on PyPI and the version installed on that machine.
+        run: python3 -m pip install --disable-pip-version-check 'pytest==9.1.1'
+
       - name: Unit tests for the audit tool
         run: |
           set -euo pipefail
