@@ -151,12 +151,25 @@ self-anchored script, since the claim that it could not be was found false.
 
 Order of operations:
 
-1. **Existence check first**, before any dependency preflight or validation:
-   if `.claude/literary-translator/profile.yml` is absent, copy
-   `assets/profile.example.yml` to that exact path (guarded on absence — an
-   existing filled-in profile is never touched again) and HALT, naming the
-   path and instructing the user to fill in every placeholder. Do not run
-   dependency preflight or schema validation in this branch.
+1. **Existence check first**: if `.claude/literary-translator/profile.yml` is
+   absent, copy `assets/profile.example.yml` to that exact path (guarded on
+   absence — an existing filled-in profile is never touched again), name the
+   path, and then CONTINUE into this same run's placeholder scan at item 5,
+   so the one invocation that creates the starter profile is also the one
+   that prints its questionnaire. It does not halt on the spot and it does
+   not tell anyone to fill the file in first: there is deliberately no window
+   in which a sentinel-laden profile exists and its questions have not been
+   relayed. **This branch is the ONLY sanctioned creator of that file.** The
+   orchestrating session must never create
+   `.claude/literary-translator/profile.yml` itself, and must never answer a
+   fresh copy's sentinels from that file's own inline comments: a profile
+   carrying real values instead of `CHOOSE_` sentinels takes the `exists()`
+   branch, item 5's scan finds nothing to ask, and Step 0 prints `OK` without
+   one intake decision having been put to the user — printing exactly what a
+   run that answered all of them prints. Because the scan parses YAML, item
+   2's dependency preflight now runs in this branch too; if a package is
+   missing the operator gets that actionable message instead of the
+   questionnaire, and the starter profile has still been created.
 2. If present, dependency preflight first: `import yaml` and
    `import jsonschema` each wrapped in their own try/except; on
    `ImportError`, print an actionable message naming the specific missing
@@ -1126,6 +1139,21 @@ here, follow the linked doc:
   config of a different source) — unchanged by the ledger rule: no VALUE from a
   previous `profile.yml` is ever copied into a new one, and the marker-only
   legacy read is the sole thing that may open that file at all.
+  **And a new volume's `profile.yml` is not hand-authored either** — not
+  copied is only half of this entry, and the other half is where the file DOES
+  come from: Step 0's existence check is its sole creator, from the plugin's
+  own `assets/profile.example.yml` — R10's input (1), mechanics from the
+  PLUGIN, not a fourth input — and every INTAKE DECISION in it comes only
+  from the user's answers to the questionnaire that same Step 0 run prints.
+  (Its other fields — `source.path`, `durable_root`, the source-format and
+  adapter knobs — are read off this book's own material, and always were;
+  they are not decisions anyone is asked to make.) Writing the file
+  by hand, or answering a fresh copy's sentinels from its own inline comments,
+  produces a complete profile carrying real values instead of `CHOOSE_`
+  sentinels, so the placeholder scan has nothing left to ask, Step 0 prints
+  `OK`, and every intake decision the user was supposed to make is taken
+  instead by whoever typed the file — silently, and printing exactly what a
+  run that answered all of them prints.
   **The check, because a rule nobody can verify is a wish:** after Step 0a and
   before the first dispatch, `select_segments.py --classify-only` must report
   every unit `not_started`. Anything else means state arrived from somewhere.
@@ -1151,7 +1179,11 @@ here, follow the linked doc:
 
 **W1 Scaffold** — not a copy action itself (Step 0/0a already did all
 copying). W1 is the human-facing label for "fill in every placeholder across
-`profile.yml` and every other just-scaffolded file." Mechanically enforced,
+the just-scaffolded files" — `style_bible.md`, `PLAN.md` and their siblings.
+It does NOT cover `profile.yml`: that file's placeholders are the intake
+questionnaire, they were relayed and answered back at Step 0, and Step 0 halts
+fatally until they are gone, so W1 can never be reached with one outstanding.
+Mechanically enforced,
 not just prose: `style_bible.template.md`/`PLAN.template.md` wrap their
 must-fill sections in `<!-- LT_REQUIRED_FILL_BEGIN: <id> -->`/
 `<!-- LT_REQUIRED_FILL_END -->` marker pairs containing the fixed sentinel
