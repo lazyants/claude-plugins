@@ -34,6 +34,7 @@ import datetime
 import hashlib
 import http.client
 import json
+import math
 import os
 import select
 import stat
@@ -104,6 +105,11 @@ API_PATH = "/api/oauth/usage"
 HTTP_TIMEOUT = 15.0
 HTTPSConnection = http.client.HTTPSConnection  # module-level so a test can substitute it
 
+KEYCHAIN_SERVICE_PREFIX = "Claude Code-credentials-"
+WINDOW_LABELS = {300: "5h", 10080: "weekly"}
+MAX_LINE_BYTES = 4 * 1024 * 1024
+
+
 def _appserver_timeout() -> float:
     """Seconds to wait on one app-server. Overridable because a slow machine may need longer.
 
@@ -116,9 +122,6 @@ def _appserver_timeout() -> float:
     except ValueError:
         return 45.0
     return value if 0.5 <= value <= 600.0 else 45.0
-KEYCHAIN_SERVICE_PREFIX = "Claude Code-credentials-"
-WINDOW_LABELS = {300: "5h", 10080: "weekly"}
-MAX_LINE_BYTES = 4 * 1024 * 1024
 
 
 class Malformed(Exception):
@@ -138,7 +141,8 @@ def _num(value, low: float, high: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise Malformed("field-malformed")
     out = float(value)
-    if out != out or out in (float("inf"), float("-inf")) or not low <= out <= high:
+    # isfinite, not the range alone: PERCENT_MAX is +inf, so `low <= inf <= high` is true there.
+    if not math.isfinite(out) or not low <= out <= high:
         raise Malformed("field-malformed")
     return out
 
@@ -186,17 +190,22 @@ def _decimal(value) -> float:
     return _num(value, 0.0, float(2**53))
 
 
-def _from_epoch_seconds(value) -> datetime.datetime:
-    try:
-        parsed = datetime.datetime.fromtimestamp(_pos_int(value), datetime.timezone.utc)
-    except (OverflowError, OSError, ValueError):
-        raise Malformed("field-malformed") from None
-    return _renderable(parsed)
+# Ticks per second, named because a bare literal at the call site would not say which vendor's
+# unit it is: Codex sends `resetsAt` in seconds, Claude Code sends `fetchedAtMs` in milliseconds.
+EPOCH_SECONDS = 1
+EPOCH_MILLIS = 1000
 
 
-def _from_epoch_millis(value) -> datetime.datetime:
+def _from_epoch(value, per_second: int) -> datetime.datetime:
+    """An epoch integer counted in `per_second` ticks: EPOCH_SECONDS or EPOCH_MILLIS.
+
+    The arithmetic stays INSIDE the guard. A 400-digit integer raises OverflowError in the
+    division; hoisting that line out was measured turning `field-malformed` into `internal-error`
+    at the `fetchedAtMs` call site, where the nearest handler is the whole candidate's.
+    """
     try:
-        parsed = datetime.datetime.fromtimestamp(_pos_int(value) / 1000, datetime.timezone.utc)
+        parsed = datetime.datetime.fromtimestamp(_pos_int(value) / per_second,
+                                                 datetime.timezone.utc)
     except (OverflowError, OSError, ValueError):
         raise Malformed("field-malformed") from None
     return _renderable(parsed)
@@ -310,6 +319,24 @@ def _window_row(*, name: str, percent: float, resets: datetime.datetime, freshne
     return Record(name, REPORTED, percent=percent, resets=resets, freshness=freshness)
 
 
+def _row_or_gap(name: str, produce) -> Record:
+    """Run one row producer so that EVERY failure becomes THIS row's gap, never the candidate's.
+
+    The single place the per-record boundary is implemented. Three call sites had written it out
+    by hand and the third had quietly drifted from the other two -- it validated the entry's
+    shape outside its own handler and caught only Malformed, so one bad `five_hour` still took
+    `seven_day` down with it. Both arms are load-bearing: Malformed carries the precise token,
+    and anything else -- OverflowError out of float() on a 400-digit integer, for one -- would
+    otherwise reach the candidate's handler and discard every valid sibling row.
+    """
+    try:
+        return produce()
+    except Malformed as exc:
+        return Record(name, GAP, diagnostic=exc.code)
+    except Exception:
+        return Record(name, GAP, diagnostic="internal-error")
+
+
 # --- Claude Code -------------------------------------------------------------------------------
 
 
@@ -324,34 +351,30 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
             # Per RECORD, not per candidate. One malformed entry must not suppress its siblings:
             # the valid pools are exactly what the operator opened the report to see, and a
             # profile that prints nothing looks identical to one that has nothing. The entry's
-            # own SHAPE is checked inside this handler for the same reason -- a container pass
+            # own SHAPE is validated inside the producer for the same reason -- a container pass
             # that rejected a non-object entry ahead of the loop lost every valid sibling.
-            try:
-                records.append(_claude_row(_obj(item), freshness, now))
-            except Malformed as exc:
-                records.append(Record(f"limits[{index}]", GAP, diagnostic=exc.code))
-            except Exception:
-                # Not only Malformed: a 400-digit integer raises OverflowError inside float(),
-                # and an escaping exception loses every valid sibling -- exactly what this
-                # handler exists to prevent.
-                records.append(Record(f"limits[{index}]", GAP, diagnostic="internal-error"))
+            records.append(_row_or_gap(
+                f"limits[{index}]", lambda: _claude_row(_obj(item), freshness, now)))
         return records
 
     for key in ("five_hour", "seven_day"):
         slot = utilization.get(key)
         if slot is None:
             continue
-        slot = _obj(slot)
-        try:
-            records.append(_window_row(
-                name=f"{key} (flat)",
-                percent=_num(slot.get("utilization"), 0.0, 100.0),
-                resets=_from_iso(slot.get("resets_at")),
-                freshness=freshness, now=now, active=True,
-            ))
-        except Malformed as exc:
-            records.append(Record(f"{key} (flat)", GAP, diagnostic=exc.code))
+        records.append(_row_or_gap(
+            f"{key} (flat)", lambda: _claude_flat_row(key, slot, freshness, now)))
     return records
+
+
+def _claude_flat_row(key: str, slot, freshness: str, now: datetime.datetime) -> Record:
+    """One row of the older flat shape, whose windows are named keys rather than list items."""
+    body = _obj(slot)
+    return _window_row(
+        name=f"{key} (flat)",
+        percent=_num(body.get("utilization"), 0.0, 100.0),
+        resets=_from_iso(body.get("resets_at")),
+        freshness=freshness, now=now, active=True,
+    )
 
 
 def _claude_row(entry: dict, freshness: str, now: datetime.datetime) -> Record:
@@ -416,7 +439,7 @@ def _claude_cached(profile: Path, now: datetime.datetime) -> list[Record]:
         raise Malformed("no-usage-cache")
     cached = _obj(cached)
 
-    fetched = _from_epoch_millis(cached.get("fetchedAtMs"))
+    fetched = _from_epoch(cached.get("fetchedAtMs"), EPOCH_MILLIS)
     freshness = f"cache {_age(fetched, now)}"
     records = _claude_rows(_obj(cached.get("utilization")), freshness, now)
     if not records:
@@ -430,41 +453,8 @@ def _keychain_service(profile: Path) -> str:
     return KEYCHAIN_SERVICE_PREFIX + digest
 
 
-def _claude_token(profile: Path) -> str:
-    """Return the profile's bearer. Never rendered, never logged, never placed in an argv."""
-    now = datetime.datetime.now(datetime.timezone.utc)  # read time, not run-start time
-    creds = profile / ".credentials.json"
-    try:
-        handle = open(creds, encoding="utf-8")
-    except FileNotFoundError:
-        # Absent, or a link to something absent -- open() cannot separate those, and a dangling
-        # .credentials.json symlink therefore takes the keychain path too. Left as it is: the
-        # reachable case is a profile that has no credential file, and adding a symlink probe
-        # would be machinery for an edge nobody has produced.
-        handle = None
-    except OSError:
-        # Present but unreadable. Path.exists() answers False for a permission failure from
-        # 3.14 and raises below it, so testing for the file first would read this as absence
-        # and fall through to the keychain -- reporting a DIFFERENT credential's pool as this
-        # profile's, cleanly. Opening it is the only probe whose failure modes are separable.
-        raise Malformed("candidate-unreadable") from None
-    if handle is not None:
-        with handle:
-            try:
-                blob = json.load(handle)
-            except (OSError, ValueError):
-                raise Malformed("response-malformed") from None
-        oauth = blob.get("claudeAiOauth") if isinstance(blob, dict) else None
-        if not isinstance(oauth, dict):
-            raise Malformed("token-absent")
-        token = oauth.get("accessToken")
-        if not isinstance(token, str) or not token:
-            raise Malformed("token-absent")
-        expires = oauth.get("expiresAt")
-        if expires is not None and _from_epoch_millis(expires) <= now:
-            raise Malformed("token-expired")
-        return token
-
+def _keychain_token(profile: Path) -> str:
+    """The bearer for a profile that has no credential file. Read-only, and never rendered."""
     try:
         done = subprocess.run(
             ["security", "find-generic-password", "-s", _keychain_service(profile), "-w"],
@@ -477,6 +467,40 @@ def _claude_token(profile: Path) -> str:
     token = done.stdout.strip()
     if not token:
         raise Malformed("token-absent")
+    return token
+
+
+def _claude_token(profile: Path) -> str:
+    """Return the profile's bearer. Never rendered, never logged, never placed in an argv."""
+    try:
+        handle = open(profile / ".credentials.json", encoding="utf-8")
+    except FileNotFoundError:
+        # Absent, or a link to something absent -- open() cannot separate those, and a dangling
+        # .credentials.json symlink therefore takes the keychain path too. Left as it is: the
+        # reachable case is a profile that has no credential file, and adding a symlink probe
+        # would be machinery for an edge nobody has produced.
+        return _keychain_token(profile)
+    except OSError:
+        # Present but unreadable. Path.exists() answers False for a permission failure from
+        # 3.14 and raises below it, so testing for the file first would read this as absence
+        # and fall through to the keychain -- reporting a DIFFERENT credential's pool as this
+        # profile's, cleanly. Opening it is the only probe whose failure modes are separable.
+        raise Malformed("candidate-unreadable") from None
+    with handle:
+        try:
+            blob = json.load(handle)
+        except (OSError, ValueError):
+            raise Malformed("response-malformed") from None
+    oauth = blob.get("claudeAiOauth") if isinstance(blob, dict) else None
+    if not isinstance(oauth, dict):
+        raise Malformed("token-absent")
+    token = oauth.get("accessToken")
+    if not isinstance(token, str) or not token:
+        raise Malformed("token-absent")
+    expires = oauth.get("expiresAt")
+    now = datetime.datetime.now(datetime.timezone.utc)  # read time, not run-start time
+    if expires is not None and _from_epoch(expires, EPOCH_MILLIS) <= now:
+        raise Malformed("token-expired")
     return token
 
 
@@ -607,6 +631,46 @@ def _appserver_result(home: Path) -> dict:
             pass
 
 
+def _label_duration(window) -> int | None:
+    """A window's duration in minutes, or None for every shape that has no usable one.
+
+    Deliberately total where `_pos_int` raises: this answers only whether two slots would render
+    under the SAME label, which is asked before either window is validated. A malformed duration
+    still gaps its own record -- through the strict check inside the per-record handler.
+    """
+    if not isinstance(window, dict):
+        return None
+    raw = window.get("windowDurationMins")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+        return raw
+    return None
+
+
+def _codex_window_row(*, limit_id: str, slot: str, window, collide: bool, freshness: str,
+                      now: datetime.datetime) -> Record:
+    """One Codex window. Raises Malformed only for a shape the vendor's schema does not permit."""
+    body = _obj(window)
+    # `windowDurationMins` and `resetsAt` are both `integer | null` in the vendor's own schema,
+    # so a null is the backend declining to provide the value, not drift. Gapping on it would
+    # leave such an account unable to report cleanly whatever its owner did -- a check nobody can
+    # satisfy is worse than the gap it closes.
+    raw_minutes = body.get("windowDurationMins")
+    minutes = None if raw_minutes is None else _pos_int(raw_minutes)
+    name = f"{limit_id}/{slot if minutes is None else _window_label(minutes)}"
+    if collide:
+        name = f"{name}({slot})"
+    percent = _num(body.get("usedPercent"), 0.0, PERCENT_MAX)
+    raw_resets = body.get("resetsAt")
+    if raw_resets is None:
+        return Record(name, NO_CURRENT, percent=percent, freshness=freshness,
+                      note="no reset time reported by the backend")
+    return _window_row(
+        name=name, percent=percent, resets=_from_epoch(raw_resets, EPOCH_SECONDS),
+        freshness=freshness, now=now, active=True,
+        stale_note="the window shown had already reset when this was read",
+    )
+
+
 def _codex_records(home: Path) -> list[Record]:
     result = _appserver_result(home)
     now = datetime.datetime.now(datetime.timezone.utc)  # observation time, not run-start time
@@ -614,17 +678,17 @@ def _codex_records(home: Path) -> list[Record]:
 
     default = result.get("rateLimits")
     by_id = result.get("rateLimitsByLimitId")
-    pools: dict[str, dict] = {}
-    records_pre: list[Record] = []
     if by_id is not None and not isinstance(by_id, dict):
         raise Malformed("payload-malformed")
-    if isinstance(by_id, dict) and by_id:
+
+    pools: dict[str, dict] = {}
+    records: list[Record] = []
+    if by_id:  # a dict by the guard above, so truthiness is the emptiness test and nothing more
         for key, pool in by_id.items():
             try:
                 pools[_text(key, 64)] = _obj(pool)
             except Malformed as exc:
-                records_pre.append(Record(f"limitId[{len(records_pre)}]", GAP,
-                                          diagnostic=exc.code))
+                records.append(Record(f"limitId[{len(records)}]", GAP, diagnostic=exc.code))
     elif isinstance(default, dict):
         # `limitId` is `string | null`, and a .get default answers only the ABSENT case.
         raw_id = default.get("limitId")
@@ -632,60 +696,21 @@ def _codex_records(home: Path) -> list[Record]:
     else:
         raise Malformed("payload-malformed")
 
-    records: list[Record] = list(records_pre)
     for limit_id in sorted(pools):
         pool = pools[limit_id]
         # Identity is (limitId, slot); only the LABEL comes from the duration. Two limit ids were
         # measured carrying a 10080-minute window at the same time, and one POOL can carry two
         # windows of equal duration, so the slot is appended whenever the label alone collides.
-        durations: dict[str, int | None] = {}
-        for slot in ("primary", "secondary"):
-            window = pool.get(slot)
-            durations[slot] = None
-            if isinstance(window, dict):
-                raw = window.get("windowDurationMins")
-                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
-                    durations[slot] = raw
-        collide = (durations["primary"] is not None
-                   and durations["primary"] == durations["secondary"])
+        primary_mins = _label_duration(pool.get("primary"))
+        collide = (primary_mins is not None
+                   and primary_mins == _label_duration(pool.get("secondary")))
         for slot in ("primary", "secondary"):
             window = pool.get(slot)
             if window is None:
                 continue
-            # Every Codex record is isolated at its OWN boundary, container shape included: a
-            # malformed optional field must not discard the valid windows beside it.
-            try:
-                window = _obj(window)
-                # `windowDurationMins` and `resetsAt` are both `integer | null` in the vendor's
-                # own schema, so a null is the backend declining to provide the value, not drift.
-                # Gapping on it would leave such an account unable to report cleanly whatever its
-                # owner did -- a check nobody can satisfy is worse than the gap it closes.
-                raw_minutes = window.get("windowDurationMins")
-                minutes = None if raw_minutes is None else _pos_int(raw_minutes)
-                label = slot if minutes is None else _window_label(minutes)
-                name = f"{limit_id}/{label}"
-                if collide:
-                    name = f"{name}({slot})"
-                percent = _num(window.get("usedPercent"), 0.0, PERCENT_MAX)
-                raw_resets = window.get("resetsAt")
-                if raw_resets is None:
-                    records.append(Record(name, NO_CURRENT, percent=percent, freshness=freshness,
-                                          note="no reset time reported by the backend"))
-                    continue
-                records.append(_window_row(
-                    name=name,
-                    percent=percent,
-                    resets=_from_epoch_seconds(raw_resets),
-                    freshness=freshness, now=now, active=True,
-                    stale_note="the window shown had already reset when this was read",
-                ))
-            except Malformed as exc:
-                records.append(Record(f"{limit_id}/{slot}", GAP, diagnostic=exc.code))
-            except Exception:
-                # Not only Malformed. A 400-digit integer raises OverflowError inside float(),
-                # and any exception escaping here loses every valid window beside it -- the exact
-                # outcome this per-record handler exists to prevent.
-                records.append(Record(f"{limit_id}/{slot}", GAP, diagnostic="internal-error"))
+            records.append(_row_or_gap(f"{limit_id}/{slot}", lambda: _codex_window_row(
+                limit_id=limit_id, slot=slot, window=window, collide=collide,
+                freshness=freshness, now=now)))
     if not records:
         raise Malformed("payload-malformed")
 

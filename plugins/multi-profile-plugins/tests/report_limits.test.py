@@ -532,6 +532,16 @@ with tempfile.TemporaryDirectory() as tmp:
           "codex/weekly" in done.stdout and "codex_bengalfox/weekly" in done.stdout, done.stdout)
     check("18 the 300-minute window is labelled 5h",
           "codex_bengalfox/5h" in done.stdout, done.stdout)
+    # The UNIT, not merely the presence. Read as milliseconds, epoch(72) lands in January 1970
+    # and every future window renders `stale-after-reset` -- a KNOWN_ABSENT-adjacent state that
+    # exits 0 and prints no warning, so every other assertion in this file stays green.
+    check("18 a FUTURE codex reset renders as a current row, not a stale one",
+          "[stale-after-reset]" not in done.stdout, done.stdout)
+    expected_day = (datetime.datetime.now(datetime.timezone.utc)
+                    + datetime.timedelta(hours=72)).astimezone().strftime("%d %b")
+    check("18 and its reset lands in the present, which is what pins the epoch unit",
+          f"resets {expected_day}" in done.stdout,
+          f"expected 'resets {expected_day}'\n{done.stdout}")
     check("18 two windows of ONE pool sharing a duration carry their slot",
           "codex_twin/5h(primary)" in done.stdout and "codex_twin/5h(secondary)" in done.stdout,
           done.stdout)
@@ -550,7 +560,6 @@ with tempfile.TemporaryDirectory() as tmp:
     assert_no_secret("25 codex run", done.stdout, done.stderr,
                      json.dumps(json.loads(record.read_text(encoding="utf-8"))))
 
-    inactive = dict(DEFAULT_RESULT)
     done, _, _ = run(["--claude-profile", str(codex_root / ".nope"),
                       "--codex-home", str(home)], root=codex_root,
                      stub_result={"rateLimits": {"limitId": "codex", "primary": {
@@ -894,6 +903,57 @@ with tempfile.TemporaryDirectory() as tmp:
           str(coupon_rows_33b))
     check("33b no traceback escaped", "Traceback" not in done.stderr, done.stderr)
 
+    # 33c -- a non-finite percentage, on the CODEX side, which is the only side where the guard
+    # can bite. `json.dumps` writes float("inf") as the bare literal `Infinity` and `json.loads`
+    # reads it back by default, so this is a shape a vendor really can send. Claude percentages
+    # are bounded 0..100, so the range comparison refuses inf there whatever the guard does --
+    # a Claude-side fixture left the mutant GREEN. Codex `usedPercent` is bounded by PERCENT_MAX,
+    # which is +inf precisely because the vendor's schema puts no ceiling on it, so there the
+    # range test admits inf and the row would render "inf%" as though it were a measurement.
+    nonfinite = root / "nonfinite"
+    make_claude(nonfinite, ".claudeF", cached(entries=[entry(percent=42)]))
+    done, _, _ = run(["--claude-profile", str(nonfinite / ".claudeF"),
+                      "--codex-home", str(make_codex_home(nonfinite, ".codexF"))],
+                     root=nonfinite,
+                     stub_result={"rateLimits": {"limitId": "codex", "primary": {
+                         "usedPercent": float("inf"), "windowDurationMins": 10080,
+                         "resetsAt": epoch(30)}},
+                         "rateLimitResetCredits": {"availableCount": 1}})
+    check("33c an infinite codex percentage gaps its own window",
+          "codex/primary" in done.stdout and "[field-malformed]" in done.stdout, done.stdout)
+    check("33c it is never rendered as a measurement", "inf%" not in done.stdout, done.stdout)
+    check("33c the coupon row beside it still reports",
+          "reset coupons" in done.stdout, done.stdout)
+    check("33c and the Claude side stays clean and visible",
+          "42.0%" in done.stdout and ".claudeF" not in done.stdout.split("warnings")[-1],
+          done.stdout)
+    check("33c the run gaps", done.returncode == 1, f"rc={done.returncode}")
+
+    # 33d -- the FLAT shape's own per-record boundary. This is the site that had drifted: it
+    # validated the entry outside its handler and caught only Malformed, so one bad `five_hour`
+    # took `seven_day` with it. Both failure kinds are pinned, because the two arms of the shared
+    # boundary are reached by different shapes.
+    for label, bad, token in (
+        ("a non-object slot", "not-an-object", "[payload-malformed]"),
+        ("an overflowing utilization", {"utilization": 10 ** 400, "resets_at": iso(3)},
+         "[internal-error]"),
+    ):
+        flat = root / f"flat-{abs(hash(label))}"
+        make_claude(flat, ".claudeV", cached(flat={
+            "five_hour": bad,
+            "seven_day": {"utilization": 22, "resets_at": iso(50)},
+        }))
+        done, _, _ = run(["--claude-profile", str(flat / ".claudeV"),
+                          "--codex-home", str(make_codex_home(flat, ".codexClean"))], root=flat)
+        body = done.stdout.split("warnings")[0]
+        check(f"33d flat {label} gaps only its own row",
+              "five_hour (flat)" in body and token in body, done.stdout)
+        check(f"33d flat {label}: the seven_day sibling still reports",
+              "22.0%" in body, done.stdout)
+        check(f"33d flat {label}: the run gaps rather than tracebacking",
+              done.returncode == 1 and "Traceback" not in done.stderr,
+              f"rc={done.returncode}\n{done.stderr}")
+
     # 34 -- the report's own claim that only `_FRAMES` reaches the child. The AST literal gate
     # cannot see `dict([("method", operation)])`, so it is not on its own a statement about what
     # can be SENT. This pair is: the bytes written are frames, and the frames are these three.
@@ -913,11 +973,34 @@ with tempfile.TemporaryDirectory() as tmp:
           "/security" not in source_34, "an absolute path to a security binary appears")
 
 
+# --- 21b: the token expiry comparison, which nothing else in this file holds --------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    expired_root = root / "expired"
+    profile = make_claude(expired_root, ".claudeE", cached(entries=[entry(percent=88)]))
+    (profile / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(-1)}
+    }), encoding="utf-8")
+    done, _, _ = run(["--live", "--claude-profile", str(profile),
+                      "--codex-home", str(make_codex_home(expired_root, ".codexClean"))],
+                     root=expired_root)
+    check("21b an expired bearer is named as expired rather than sent",
+          "[token-expired]" in done.stdout, done.stdout)
+    check("21b the keychain is not consulted as a fallback for it",
+          not (expired_root / "security-called.txt").exists(),
+          (expired_root / "security-called.txt").read_text(encoding="utf-8")
+          if (expired_root / "security-called.txt").exists() else "")
+    check("21b it does NOT fall back to the cache either", "88.0%" not in done.stdout, done.stdout)
+    check("21b and the run gaps", done.returncode == 1, f"rc={done.returncode}")
+    assert_no_secret("21b expired token", done.stdout, done.stderr)
+
+
 # --- 22 / 23: transport safety. These import the module, deliberately, because reaching an HTTPS
 # stub from a subprocess would need a production origin override -- the very defect they prevent.
 sys.path.insert(0, str(SCRIPT.parent))
-import contextlib as contextlib_module  # noqa: E402
-import io as io_module  # noqa: E402
+import contextlib  # noqa: E402
+import io  # noqa: E402
 import report_limits as R  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -940,8 +1023,6 @@ with tempfile.TemporaryDirectory() as tmp:
             self.requests.append({"method": method, "path": path, "headers": dict(headers or {})})
 
         def getresponse(self):
-            outer = self
-
             class Response:
                 status = 302
                 def read(self):
@@ -989,10 +1070,10 @@ with tempfile.TemporaryDirectory() as tmp:
             "claudeAiOauth": {"accessToken": SENTINEL_TOKEN + "\n", "expiresAt": now_ms(24)}
         }), encoding="utf-8")
         R.HTTPSConnection = Raising
-        raise_out, raise_err = io_module.StringIO(), io_module.StringIO()
+        raise_out, raise_err = io.StringIO(), io.StringIO()
         try:
-            with contextlib_module.redirect_stdout(raise_out), \
-                    contextlib_module.redirect_stderr(raise_err):
+            with contextlib.redirect_stdout(raise_out), \
+                    contextlib.redirect_stderr(raise_err):
                 R._claude_live(bad)
             code = "no-error"
         except R.Malformed as exc:
@@ -1012,7 +1093,6 @@ with tempfile.TemporaryDirectory() as tmp:
     # exist, so no token was ever opened and `print(token[:12])` inside _claude_live would have
     # passed. The recorded Authorization header is the proof that the read happened; the captured
     # streams are the thing under test.
-    import contextlib, io  # noqa: E402
 
     class Recording:
         headers: list = []
@@ -1079,7 +1159,6 @@ with tempfile.TemporaryDirectory() as tmp:
           str(sorted(R.TERMINAL_STATES)))
 
     # 24 -- every diagnostic token the script can render is a member of the closed enum.
-    check("24 the enum has a total fallback", "internal-error" in R.DIAGNOSTIC_SET)
     check("24 the enum is a frozenset of unique tokens",
           len(R.DIAGNOSTICS) == len(R.DIAGNOSTIC_SET))
     check("24 every diagnostic this suite actually RENDERED is a member of the enum",
