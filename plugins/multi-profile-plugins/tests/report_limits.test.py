@@ -389,23 +389,31 @@ with tempfile.TemporaryDirectory() as tmp:
         check(f"12 container {label} -> the CLAUDE candidate is what gapped",
               ".claudeX" in done.stdout.split("warnings")[-1], done.stdout)
 
-    # 13 -- scalar table.
-    for label, bad in (
-        ("percent null", entry(percent=None)),
-        ("percent is a bool", entry(percent=True)),
-        ("percent out of range", entry(percent=140)),
-        ("percent is a string", entry(percent="42")),
-        ("resets_at unparseable", entry(resets="not-a-date")),
-        ("resets_at naive", entry(resets="2026-08-27T03:00:00")),
-        ("is_active is truthy not bool", entry(active=1)),
-        ("kind is not a string", entry(kind=7)),
-        ("kind has a control character", entry(kind="week\x01ly")),
-        ("resets_at parses but cannot be rendered", entry(resets="9999-12-31T23:59:59+00:00")),
+    # 13 -- scalar table. The last two rows pin TZ, and that is not incidental: whether a
+    # timestamp at the edge of the range can be rendered depends on the SIGN of the local UTC
+    # offset, so an unpinned fixture tests the runner rather than the code. The max stamp
+    # overflows only east of Greenwich and the min stamp only west of it -- on a UTC runner both
+    # render cleanly, which is how the first version of this passed locally (CET) and went red in
+    # CI. POSIX offset strings are used rather than zone names so no tzdata is required.
+    for label, bad, env in (
+        ("percent null", entry(percent=None), None),
+        ("percent is a bool", entry(percent=True), None),
+        ("percent out of range", entry(percent=140), None),
+        ("percent is a string", entry(percent="42"), None),
+        ("resets_at unparseable", entry(resets="not-a-date"), None),
+        ("resets_at naive", entry(resets="2026-08-27T03:00:00"), None),
+        ("is_active is truthy not bool", entry(active=1), None),
+        ("kind is not a string", entry(kind=7), None),
+        ("kind has a control character", entry(kind="week\x01ly"), None),
+        ("a max resets_at east of Greenwich cannot be rendered",
+         entry(resets="9999-12-31T23:59:59+00:00"), {"TZ": "XXX-14"}),
+        ("a min resets_at west of Greenwich cannot be rendered",
+         entry(resets="0001-01-01T00:00:00+00:00"), {"TZ": "XXX+12"}),
     ):
         box = root / f"s-{abs(hash(label))}"
         make_claude(box, ".claudeY", cached(entries=[bad]))
         done, _, _ = run(["--claude-profile", str(box / ".claudeY"),
-                          "--codex-home", str(box / ".nope")])
+                          "--codex-home", str(box / ".nope")], extra_env=env)
         check(f"13 scalar {label} -> field-malformed", "[field-malformed]" in done.stdout,
               done.stdout)
         check(f"13 scalar {label} -> the CLAUDE candidate is what gapped",

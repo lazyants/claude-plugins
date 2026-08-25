@@ -226,7 +226,10 @@ def _from_iso(value) -> datetime.datetime:
 def _renderable(when: datetime.datetime) -> datetime.datetime:
     """Reject a timestamp that parses but cannot be rendered in the local zone.
 
-    `9999-12-31T23:59:59+00:00` is valid ISO-8601 and raises OverflowError inside astimezone().
+    `9999-12-31T23:59:59+00:00` is valid ISO-8601 and raises OverflowError inside astimezone() --
+    but only east of Greenwich, where the offset pushes it past year 9999. West of Greenwich the
+    same happens to a minimum stamp instead, and on a UTC machine neither overflows at all, so
+    which timestamps this rejects is a property of the reader's zone, not of the value.
     That happens in the renderer, which runs outside the per-candidate handler, so it would abort
     the entire report rather than gapping one record.
     """
