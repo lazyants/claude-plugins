@@ -398,8 +398,9 @@ def _keychain_service(profile: Path) -> str:
     return KEYCHAIN_SERVICE_PREFIX + digest
 
 
-def _claude_token(profile: Path, now: datetime.datetime) -> str:
+def _claude_token(profile: Path) -> str:
     """Return the profile's bearer. Never rendered, never logged, never placed in an argv."""
+    now = datetime.datetime.now(datetime.timezone.utc)  # read time, not run-start time
     creds = profile / ".credentials.json"
     if creds.exists():
         try:
@@ -433,8 +434,8 @@ def _claude_token(profile: Path, now: datetime.datetime) -> str:
     return token
 
 
-def _claude_live(profile: Path, started: datetime.datetime) -> list[Record]:
-    token = _claude_token(profile, started)
+def _claude_live(profile: Path) -> list[Record]:
+    token = _claude_token(profile)
     conn = HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT)
     try:
         try:
@@ -482,10 +483,13 @@ def _claude_live(profile: Path, started: datetime.datetime) -> list[Record]:
 def _appserver_result(home: Path) -> dict:
     """Spawn the app-server, exchange the three frozen messages, return the reply's result.
 
-    The deadline starts AFTER a successful spawn and covers the handshake, the reply, termination
-    and the reap. It is not wrapped around the blocking spawn itself: that would need extra
-    threading machinery for a case never observed, while the reachable failure is a child that
-    starts and then stalls, holding up every remaining candidate in the run.
+    The deadline starts AFTER a successful spawn and bounds the PROTOCOL phase: the handshake
+    and the reply. Cleanup then adds its own bounded tail -- a kill followed by `wait(timeout=10)`
+    -- so the knob is not a total per-home bound and an abnormally unkillable child can add up to
+    ten seconds. That tail is disclosed rather than removed: making it part of one deadline needs
+    extra machinery for a case never observed. The deadline is likewise not wrapped around the
+    blocking spawn itself; the reachable failure is a child that starts and then stalls, holding
+    up every remaining candidate in the run.
     """
     env = dict(os.environ, CODEX_HOME=str(home))
     try:
@@ -557,7 +561,7 @@ def _appserver_result(home: Path) -> dict:
             pass
 
 
-def _codex_records(home: Path, _started: datetime.datetime) -> list[Record]:
+def _codex_records(home: Path) -> list[Record]:
     result = _appserver_result(home)
     now = datetime.datetime.now(datetime.timezone.utc)  # observation time, not run-start time
     freshness = f"live {_local(now)}"
@@ -566,6 +570,8 @@ def _codex_records(home: Path, _started: datetime.datetime) -> list[Record]:
     by_id = result.get("rateLimitsByLimitId")
     pools: dict[str, dict] = {}
     records_pre: list[Record] = []
+    if by_id is not None and not isinstance(by_id, dict):
+        raise Malformed("payload-malformed")
     if isinstance(by_id, dict) and by_id:
         for key, pool in by_id.items():
             try:
@@ -605,7 +611,7 @@ def _codex_records(home: Path, _started: datetime.datetime) -> list[Record]:
                 minutes = _pos_int(window.get("windowDurationMins"))
                 name = f"{limit_id}/{_window_label(minutes)}"
                 if collide:
-                    name = f"{name}[{slot}]"
+                    name = f"{name}({slot})"
                 records.append(_window_row(
                     name=name,
                     percent=_num(window.get("usedPercent"), 0.0, 100.0),
@@ -632,7 +638,9 @@ def _codex_records(home: Path, _started: datetime.datetime) -> list[Record]:
         ))
 
     credits = default.get("credits") if isinstance(default, dict) else None
-    if isinstance(credits, dict):
+    if credits is not None and not isinstance(credits, dict):
+        records.append(Record("credits", GAP, diagnostic="payload-malformed"))
+    elif isinstance(credits, dict):
         try:
             if _flag(credits.get("hasCredits")):
                 records.append(Record("credits", INFO,
@@ -753,16 +761,19 @@ def main(argv: list[str] | None = None) -> int:
     print("  Reading Codex limits starts its app-server, which touches that home's own state")
     print("  databases exactly as any codex invocation does. Nothing here is ever redeemed.")
 
-    claude_producer = ((lambda p: _claude_live(p, now)) if args.live
-                       else (lambda p: _claude_cached(p, now)))
+    # Only the cached reader takes the run's clock: it dates rows from a file that was
+    # written before the run. The live readers time-stamp their own observation, because
+    # a keychain prompt or a stalled app-server can put minutes between run start and the
+    # answer they are describing.
+    claude_producer = _claude_live if args.live else (lambda p: _claude_cached(p, now))
     for group, candidates, producer in (
         ("Claude Code", claude, claude_producer),
-        ("Codex", codex, lambda p: _codex_records(p, now)),
+        ("Codex", codex, _codex_records),
     ):
         print(f"\n{group}")
         if not candidates:
             warnings.append(f"{group}: no candidates found -- NOT checked")
-            print("    [gap] no candidates found")
+            print("    no candidates found -- NOT checked")
             continue
         for candidate in candidates:
             state, records, code = _examine(candidate, producer)

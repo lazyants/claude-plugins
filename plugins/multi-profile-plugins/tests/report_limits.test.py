@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,9 @@ def slices_of(secret: str) -> list[str]:
 
 failures: list[str] = []
 checks = 0
+# Every `[token]` the script printed anywhere in this run. Collected from real output, so it can
+# actually disagree with the enum -- unlike a set intersected with the enum, which cannot.
+RENDERED_TOKENS: set[str] = set()
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -69,6 +73,17 @@ def assert_no_secret(name: str, *streams: str) -> None:
 
 
 # --- fixtures ---------------------------------------------------------------------------------
+
+STUB_SECURITY = '''#!/usr/bin/env python3
+"""Stand-in for macOS `security`. Never touches a real keychain, and leaves a marker proving so."""
+import os, sys
+
+marker = os.environ.get("STUB_SECURITY_MARKER")
+if marker:
+    with open(marker, "a", encoding="utf-8") as handle:
+        print(" ".join(sys.argv[1:]), file=handle)
+sys.exit(int(os.environ.get("STUB_SECURITY_RC", "1")))
+'''
 
 STUB_CODEX = '''#!/usr/bin/env python3
 """Stand-in for `codex app-server`: records what it was sent, replies as the mode dictates."""
@@ -191,9 +206,13 @@ def make_codex_home(root: Path, name: str) -> Path:
 def install_stub(root: Path) -> Path:
     bindir = root / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
-    stub = bindir / "codex"
-    stub.write_text(STUB_CODEX, encoding="utf-8")
-    stub.chmod(0o755)
+    for name, body in (("codex", STUB_CODEX), ("security", STUB_SECURITY)):
+        # A stub with a syntax error exits non-zero, which is exactly what the failure it stands
+        # in for looks like. Compile it here so a broken fixture cannot pass as a real result.
+        compile(body, f"<stub {name}>", "exec")
+        stub = bindir / name
+        stub.write_text(body, encoding="utf-8")
+        stub.chmod(0o755)
     return bindir
 
 
@@ -213,6 +232,13 @@ DEFAULT_RESULT = {
             "limitId": "codex_bengalfox",
             "primary": {"usedPercent": 3, "windowDurationMins": 300, "resetsAt": epoch(4)},
             "secondary": {"usedPercent": 7, "windowDurationMins": 10080, "resetsAt": epoch(96)},
+        },
+        # One pool whose two windows share a duration: this is the shape the slot suffix exists
+        # for, and equal durations across DIFFERENT limit ids do not exercise it.
+        "codex_twin": {
+            "limitId": "codex_twin",
+            "primary": {"usedPercent": 11, "windowDurationMins": 300, "resetsAt": epoch(2)},
+            "secondary": {"usedPercent": 22, "windowDurationMins": 300, "resetsAt": epoch(5)},
         },
     },
     "rateLimitResetCredits": {"availableCount": 1, "credits": [{"id": "x"}]},
@@ -245,8 +271,10 @@ def run(args, root: Any = None, stub_mode="ok", stub_result=None, timeout=90,
     env["STUB_TRANSCRIPT"] = str(transcript)
     env["STUB_MODE"] = stub_mode
     env["STUB_RESULT"] = json.dumps(DEFAULT_RESULT if stub_result is None else stub_result)
+    env["STUB_SECURITY_MARKER"] = str(root / "security-called.txt")
     done = subprocess.run([sys.executable, str(SCRIPT)] + args, capture_output=True, text=True,
                           env=env, timeout=timeout)
+    RENDERED_TOKENS.update(re.findall(r"\[([a-z-]+)\]", done.stdout))
     return done, record, transcript
 
 
@@ -341,7 +369,8 @@ with tempfile.TemporaryDirectory() as tmp:
                           "--codex-home", str(box / ".nope")])
         check(f"12 container {label} -> payload-malformed",
               done.stdout.count("[payload-malformed]") == 1, done.stdout)
-        check(f"12 container {label} -> exit 1", done.returncode == 1, f"rc={done.returncode}")
+        check(f"12 container {label} -> the CLAUDE candidate is what gapped",
+              ".claudeX" in done.stdout.split("warnings")[-1], done.stdout)
 
     # 13 -- scalar table.
     for label, bad in (
@@ -362,7 +391,8 @@ with tempfile.TemporaryDirectory() as tmp:
                           "--codex-home", str(box / ".nope")])
         check(f"13 scalar {label} -> field-malformed", "[field-malformed]" in done.stdout,
               done.stdout)
-        check(f"13 scalar {label} -> exit 1", done.returncode == 1, f"rc={done.returncode}")
+        check(f"13 scalar {label} -> the CLAUDE candidate is what gapped",
+              ".claudeY" in done.stdout.split("warnings")[-1], done.stdout)
 
     for label, ms in (("fetchedAtMs null", None), ("fetchedAtMs bool", True),
                       ("fetchedAtMs negative", -5)):
@@ -485,8 +515,15 @@ with tempfile.TemporaryDirectory() as tmp:
           "codex/weekly" in done.stdout and "codex_bengalfox/weekly" in done.stdout, done.stdout)
     check("18 the 300-minute window is labelled 5h",
           "codex_bengalfox/5h" in done.stdout, done.stdout)
-    check("4 the coupon count is printed", "reset coupons" in done.stdout and
-          "1" in done.stdout, done.stdout)
+    check("18 two windows of ONE pool sharing a duration carry their slot",
+          "codex_twin/5h(primary)" in done.stdout and "codex_twin/5h(secondary)" in done.stdout,
+          done.stdout)
+    # The count itself, not merely the label: "1" occurs in every percentage on the page, so
+    # `"1" in stdout` would stay green for any count the script chose to print.
+    coupon_rows = [ln for ln in done.stdout.splitlines() if ln.strip().startswith("reset coupons")]
+    check("4 exactly one coupon row is printed", len(coupon_rows) == 1, done.stdout)
+    check("4 and it carries the fixture's own count",
+          bool(coupon_rows) and coupon_rows[0].split()[2] == "1", str(coupon_rows))
     check("4 the credit balance is printed", "347.89" in done.stdout, done.stdout)
     check("2 the transcript is exactly the three allowed messages, in order",
           [json.loads(line).get("method") for line in
@@ -537,9 +574,13 @@ with tempfile.TemporaryDirectory() as tmp:
     # N7 -- a child that streams without a newline must not be buffered without bound.
     done, _, _ = run(["--claude-profile", str(codex_root / ".claudeClean"),
                       "--codex-home", str(home)], root=codex_root, stub_mode="flood", timeout=180,
-                     extra_env={"CODE_LIMITS_APPSERVER_TIMEOUT": "20"})
+                     extra_env={"CODE_LIMITS_APPSERVER_TIMEOUT": "3"})
     # The CODE matters, not merely that it gapped: without the size cap this run reaches the
     # deadline instead and answers appserver-failed, which is a different defect being masked.
+    # The deadline is deliberately short. The cap is reached in milliseconds either way, but the
+    # UNCAPPED run buffers for the whole deadline, and a long one lets the parent exhaust memory
+    # first -- which ends the child, reads as EOF, and answers appserver-protocol-error after
+    # all. That would make this assertion pass for the wrong reason, on some machines only.
     check("19 a newline-free flood is refused by the size cap, not by the deadline",
           "[appserver-protocol-error]" in done.stdout
           and "[appserver-failed]" not in done.stdout, done.stdout)
@@ -582,12 +623,18 @@ with tempfile.TemporaryDirectory() as tmp:
     check("21 the gap is the Claude profile, not the Codex home",
           ".claudeL" in done.stdout.split("warnings")[-1]
           and ".codexClean" not in done.stdout.split("warnings")[-1], done.stdout)
-    check("21 the fixture `security` was used, not the host keychain",
-          "keychain-denied" in done.stdout or "token-absent" in done.stdout, done.stdout)
+    marker = live_root / "security-called.txt"
+    check("21 the FIXTURE security ran -- proved by a marker the host binary cannot write",
+          marker.exists() and "find-generic-password" in marker.read_text(encoding="utf-8"),
+          marker.read_text(encoding="utf-8") if marker.exists() else "no marker written")
+    check("21 the keychain failure maps to a closed code",
+          "[keychain-denied]" in done.stdout, done.stdout)
 
 # --- 22 / 23: transport safety. These import the module, deliberately, because reaching an HTTPS
 # stub from a subprocess would need a production origin override -- the very defect they prevent.
 sys.path.insert(0, str(SCRIPT.parent))
+import contextlib as contextlib_module  # noqa: E402
+import io as io_module  # noqa: E402
 import report_limits as R  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -627,7 +674,7 @@ with tempfile.TemporaryDirectory() as tmp:
     try:
         R.HTTPSConnection = Redirecting
         try:
-            R._claude_live(profile, now)
+            R._claude_live(profile)
             outcome = "no-error"
         except R.Malformed as exc:
             outcome = exc.code
@@ -659,13 +706,20 @@ with tempfile.TemporaryDirectory() as tmp:
             "claudeAiOauth": {"accessToken": SENTINEL_TOKEN + "\n", "expiresAt": now_ms(24)}
         }), encoding="utf-8")
         R.HTTPSConnection = Raising
+        raise_out, raise_err = io_module.StringIO(), io_module.StringIO()
         try:
-            R._claude_live(bad, now)
+            with contextlib_module.redirect_stdout(raise_out), \
+                    contextlib_module.redirect_stderr(raise_err):
+                R._claude_live(bad)
             code = "no-error"
         except R.Malformed as exc:
             code = exc.code
         check("22 the header ValueError maps to a closed code", code == "http-error", code)
         check("22 the code is a member of the closed enum", code in R.DIAGNOSTIC_SET, code)
+        # The exception text embeds the whole bearer. Asserting only the code left a `print(exc)`
+        # on this path green, and this is the load-bearing failure path.
+        assert_no_secret("22 invalid-header path", raise_out.getvalue(), raise_err.getvalue(),
+                         code)
     finally:
         R.HTTPSConnection = original
 
@@ -705,7 +759,7 @@ with tempfile.TemporaryDirectory() as tmp:
     try:
         R.HTTPSConnection = Recording
         with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
-            produced = R._claude_live(reader, datetime.datetime.now(datetime.timezone.utc))
+            produced = R._claude_live(reader)
             for record in produced:
                 print(record.render())
     finally:
@@ -724,15 +778,12 @@ with tempfile.TemporaryDirectory() as tmp:
     check("24 the enum has a total fallback", "internal-error" in R.DIAGNOSTIC_SET)
     check("24 the enum is a frozenset of unique tokens",
           len(R.DIAGNOSTICS) == len(R.DIAGNOSTIC_SET))
-    import ast as _ast
-    tree = _ast.parse(SCRIPT.read_text(encoding="utf-8"))
-    strings = {node.value for node in _ast.walk(tree)
-               if isinstance(node, _ast.Constant) and isinstance(node.value, str)}
-    used = {token for token in R.DIAGNOSTIC_SET if token in strings}
-    check("24 every token the source uses is a member of the enum",
-          used <= R.DIAGNOSTIC_SET, str(sorted(used - R.DIAGNOSTIC_SET)))
-    check("24 the enum has no member the source never uses",
-          R.DIAGNOSTIC_SET == used, str(sorted(R.DIAGNOSTIC_SET - used)))
+    check("24 every diagnostic this suite actually RENDERED is a member of the enum",
+          RENDERED_TOKENS <= R.DIAGNOSTIC_SET, str(sorted(RENDERED_TOKENS - R.DIAGNOSTIC_SET)))
+    check("24 the suite rendered a substantial share of the enum, not one token",
+          len(RENDERED_TOKENS) >= 8, str(sorted(RENDERED_TOKENS)))
+    check("24 the enum has a total fallback so nothing must invent a message",
+          "internal-error" in R.DIAGNOSTIC_SET)
 
     # 25 -- the fragment oracle itself: three truncation shapes must each be caught.
     for label, mutated in (
