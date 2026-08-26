@@ -208,6 +208,17 @@ _ISO8601_Z_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{
 # reason: it is stored, so it is bounded.
 _FINDING_INDEX_RE = re.compile(r"[0-9]{1,4}")
 
+# The SAME ceiling, spelled as a number because the write path compares against
+# it before it has a string to match. The two must agree: the writer stores
+# str(index) and the reader tests it with _FINDING_INDEX_RE, so an index this
+# constant admits and that pattern rejects would write a file the very next
+# invocation calls foreign -- a script poisoning its own artifact, reported as
+# success. Reachable through a schema-valid review with 10 001 findings
+# (review.schema.json sets no maxItems). Belt: the writer also runs the
+# assembled record through _record_problem() below, so the class is closed at
+# the boundary and not only at this one field.
+MAX_FINDING_INDEX = 9999
+
 # U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR, spelled with chr()
 # and NEVER as the literal characters. Written literally they are invisible in
 # this file: a later edit, a copy-paste, or a reviewer's eye cannot see whether
@@ -382,6 +393,27 @@ def _finding_issue_digest(issue: str) -> str:
     return hashlib.sha256(issue.encode("utf-8")).hexdigest()
 
 
+def _issue_digest_problem(issue: str) -> "str | None":
+    """None, or why `issue` cannot be digested at all.
+
+    The issue text is the one untrusted string this script HASHES without
+    storing, so the bounded-domain guards below never see it -- and hashing is
+    where it fails: json.loads() accepts "\\ud800" and returns a str that
+    .encode("utf-8") refuses, so _finding_issue_digest() raises
+    UnicodeEncodeError and the process dies on a traceback having printed no
+    JSON line. Checked rather than caught, so the caller gets the same shaped
+    refusal every other gate here produces. Reported by code point, never by
+    echoing the character."""
+    for index, ch in enumerate(issue):
+        if unicodedata.category(ch) == "Cs":
+            return (
+                f"the stored finding's issue carries an unpaired surrogate "
+                f"(U+{ord(ch):04X}) at offset {index}, which has no UTF-8 "
+                f"encoding, so no digest can be computed for it."
+            )
+    return None
+
+
 def _control_char_problem(value: str, what: str) -> "str | None":
     """None, or an error naming the first control character in `value`.
 
@@ -394,9 +426,18 @@ def _control_char_problem(value: str, what: str) -> "str | None":
     instruction. Reported by CODE POINT, never by echoing the character --
     an error message is a second place the character would travel."""
     for index, ch in enumerate(value):
-        if unicodedata.category(ch) == "Cc" or ch in _LINE_SEPARATORS:
+        # Cs -- an unpaired surrogate. It belongs in THIS guard and not in a
+        # separate one, because it is the same class of defect one step
+        # earlier: json.loads() accepts "\\ud800" and hands back a str that
+        # .encode("utf-8") refuses, so without this the byte measurement below
+        # raises UnicodeEncodeError and the script exits on a traceback having
+        # printed no JSON line at all -- breaking the promise every path here
+        # makes to a caller that branches on `success`. Measured: a stored loc
+        # of "PARA:seg12:00\\ud800" did exactly that.
+        if unicodedata.category(ch) in ("Cc", "Cs") or ch in _LINE_SEPARATORS:
             return (
-                f"{what} carries a control character (U+{ord(ch):04X}) at offset "
+                f"{what} carries a control or surrogate code point "
+                f"(U+{ord(ch):04X}) at offset "
                 f"{index}. Refusing rather than record it: this value is spliced "
                 f"verbatim into the next fix turn's prompt, where a control "
                 f"character can break the surrounding line, hide text from anyone "
@@ -540,6 +581,22 @@ def read_existing_refusals(path: Path, seg: str) -> "tuple[list | None, str | No
     if not isinstance(refusals, list):
         return None, _foreign_file_error(
             path, f"its `refusals` is a JSON {type(refusals).__name__}, not an array"
+        )
+    if len(refusals) > MAX_REFUSALS:
+        # CARDINALITY IS A PROPERTY OF THE FILE, so it is checked HERE and not
+        # only on the append path. The append cap further down is never reached
+        # when the invocation matches a record already stored: that branch
+        # renews durability and returns success, so without this an over-cap
+        # file would be accepted, reported durable, and -- the part that
+        # matters -- spliced whole into the next fix turn's prompt. This script
+        # never writes more than MAX_REFUSALS, so a file over it was not
+        # written by this script, which is exactly what _foreign_file_error()
+        # is for. `>` and not `>=`: a file holding exactly the cap is one the
+        # writer itself produces.
+        return None, _foreign_file_error(
+            path, f"it carries {len(refusals)} records, over this file's cap of "
+                  f"{MAX_REFUSALS}. Every record here is spliced into the next fix "
+                  f"turn's prompt, and an unbounded array is an unbounded prompt"
         )
     for index, record in enumerate(refusals):
         problem = _record_problem(record)
@@ -923,14 +980,22 @@ def _print_finding_digests(seg: str, dirs: dict) -> NoReturn:
             _bound_problem(loc, "the stored finding's loc", MAX_LOC_BYTES)
             if isinstance(loc, str) else "the stored finding's loc is not a string"
         )
+        issue_problem = (
+            _issue_digest_problem(issue) if isinstance(issue, str)
+            else "the stored finding's issue is not a string"
+        )
         rows.append({
             "finding_index": index,
             "loc": None if loc_problem else loc,
             "loc_problem": loc_problem,
             "severity": finding.get("severity"),
             "issue_digest": (
-                _finding_issue_digest(issue) if isinstance(issue, str) else None
+                None if issue_problem else _finding_issue_digest(issue)
             ),
+            # Symmetric with loc_problem, and present for the same reason: a
+            # row whose digest is null tells the operator nothing about WHY,
+            # and this mode exists to be read by a person deciding what to do.
+            "issue_problem": issue_problem,
         })
     # EVERY key is always present, `null` when unavailable, rather than some
     # appearing only sometimes: a caller that has to branch on which keys
@@ -1069,6 +1134,14 @@ def main():
             f"--finding-index must be 0 or greater; got {args.finding_index}. "
             f"Negative indices would silently select from the end of findings[]."
         )
+    if args.finding_index > MAX_FINDING_INDEX:
+        _refuse(
+            f"--finding-index must be at most {MAX_FINDING_INDEX}; got "
+            f"{args.finding_index}. The index is STORED, so it is bounded like "
+            f"every other stored field: a wider one writes a record this "
+            f"script's own reader calls foreign, which would report success now "
+            f"and lose every later refusal for this segment."
+        )
 
     reason = (args.reason or "").strip()
     if not reason:
@@ -1173,6 +1246,9 @@ def main():
             f"the stored finding at index {args.finding_index} has no string issue, "
             f"so no digest can be computed for it."
         )
+    issue_problem = _issue_digest_problem(stored_issue)
+    if issue_problem is not None:
+        _refuse(issue_problem)
     actual_digest = _finding_issue_digest(stored_issue)
     if actual_digest != expect_digest:
         _refuse(
@@ -1283,16 +1359,19 @@ def main():
             }],
         }
         for record in payload["refusals"]:
-            if set(record) != REFUSAL_RECORD_KEYS:
-                # The key set is pinned and read_existing_refusals() refuses
-                # anything else, so a field added or dropped above must fail
-                # LOUDLY at the writer rather than produce a file this script's
-                # own reader would call foreign on the next run. Cheap, and the
-                # only place the two can be compared.
+            # THE READER'S OWN GATE, run against what is about to be written.
+            # It subsumes the key-set check this loop used to make and closes
+            # the class rather than one field: whatever the writer assembles,
+            # it cannot produce a file read_existing_refusals() would call
+            # foreign on the next invocation -- the failure mode that reports
+            # success now and silently loses every later refusal. Nothing is
+            # written when it fires.
+            problem = _record_problem(record)
+            if problem is not None:
                 _refuse(
-                    "internal: a refusal record's key set does not match "
-                    f"REFUSAL_RECORD_KEYS ({sorted(REFUSAL_RECORD_KEYS)}). Nothing "
-                    "was written."
+                    f"internal: a refusal record this run assembled is not one "
+                    f"this script's own reader would accept ({problem}). Nothing "
+                    f"was written."
                 )
 
         write_problem = write_refusals_file(rpath, payload, claim_record_mod)

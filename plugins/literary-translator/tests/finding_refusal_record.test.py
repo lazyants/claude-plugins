@@ -905,3 +905,186 @@ def test_a_rerun_after_a_directory_sync_failure_does_not_report_durable_success(
     healed, rc = invoke(ok_root)
     assert rc == 0 and healed["already_recorded"] is True, healed
     assert len(read_file(root)["refusals"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Round 2: cardinality, the index ceiling, and code points with no encoding
+# ---------------------------------------------------------------------------
+
+def _stored_record(loc=SHARED_LOC, index="0", label=ROUND_LABEL, digest=None,
+                   reason="a reasoned refusal"):
+    return {"loc": loc, "finding_index": index, "round_label": label,
+            "issue_digest": DIGEST_A if digest is None else digest,
+            "reason": reason, "refused_at": "2026-08-26T09:00:00Z"}
+
+
+def _write_existing(root, records):
+    (root / "segments" / f"{SEG}.findings_refused.json").write_text(
+        json.dumps({"seg": SEG, "refusals": records}), encoding="utf-8")
+
+
+def test_an_over_cap_existing_file_is_foreign_even_on_the_duplicate_path(tmp_path):
+    """THE CAP IS A PROPERTY OF THE FILE, NOT OF THE APPEND.
+
+    The append cap is never reached when the invocation matches a record already
+    stored: that branch renews durability and returns success. So an over-cap
+    file used to be accepted, reported durable, and -- the part that matters --
+    spliced whole into the next fix turn's prompt, which is the exact harm the
+    cap's own message names ("an unbounded array is an unbounded prompt").
+
+    The fixture is deliberately the WORST case for the old code: every record is
+    individually valid, so _record_problem() passes on all of them, and the
+    FIRST one matches this invocation exactly, so the duplicate branch is taken
+    before any append-side check could fire."""
+    root = make_root(tmp_path)
+    records = [_stored_record(label=str(i + 100)) for i in range(65)]
+    # index "1", so it matches record_args(1, ...) below EXACTLY -- otherwise
+    # the append cap fires and this test proves nothing about the duplicate path.
+    records[0] = _stored_record(index="1")
+    _write_existing(root, records)
+
+    out, rc = run(root, *record_args(1, DIGEST_A))
+    assert rc == 1 and out["success"] is False, (
+        "an over-cap file was accepted on the duplicate path: %r" % out)
+    assert "65 records" in out["error"], out["error"]
+    assert "cap of 64" in out["error"], out["error"]
+
+    # CONTROL 1: exactly the cap is a file the writer itself produces, so it is
+    # NOT foreign -- the duplicate path still renews it.
+    root_ok = make_root(tmp_path / "at-cap")
+    at_cap = [_stored_record(label=str(i + 100)) for i in range(64)]
+    at_cap[0] = _stored_record(index="1")
+    _write_existing(root_ok, at_cap)
+    out, rc = run(root_ok, *record_args(1, DIGEST_A))
+    assert rc == 0 and out["already_recorded"] is True, out
+
+    # CONTROL 2: at the cap with NO match, the append cap refuses -- a different
+    # message, so the two guards are distinguishable and neither is standing in
+    # for the other.
+    root_full = make_root(tmp_path / "full")
+    _write_existing(root_full, [_stored_record(label=str(i + 100)) for i in range(64)])
+    out, rc = run(root_full, *record_args(1, DIGEST_A))
+    assert rc == 1 and "already carries 64 refusal records" in out["error"], out
+
+
+def test_an_index_the_reader_would_reject_is_refused_before_anything_is_written(tmp_path):
+    """A WRITER MUST NOT BE ABLE TO POISON ITS OWN ARTIFACT.
+
+    Existing records must carry a one-to-four-digit finding_index, but the write
+    path bounded the index only by findings[] length -- and review.schema.json
+    sets no maxItems. So a schema-valid review with 10 001 findings let index
+    10000 be stored, reported success, and made the very next invocation call
+    the file foreign: every later refusal for that segment silently lost.
+
+    10 001 findings is a large fixture, so it is built once and both halves --
+    the refusal and its in-range control -- run against it."""
+    findings = [{"loc": f"PARA:seg12:{i % 10000:04d}", "severity": "minor",
+                 "issue": f"claim {i}", "suggest": "s"} for i in range(10001)]
+    findings[10000] = {"loc": SHARED_LOC, "severity": "major",
+                       "issue": ISSUE_A, "suggest": "y"}
+    findings[9999] = {"loc": SHARED_LOC, "severity": "major",
+                      "issue": ISSUE_B, "suggest": "y"}
+    review = _review()
+    review["findings"] = findings
+    root = make_root(tmp_path, review=review)
+
+    out, rc = run(root, *record_args(10000, DIGEST_A))
+    assert rc == 1 and out["success"] is False, out
+    assert "at most 9999" in out["error"], out["error"]
+    assert not (root / "segments" / f"{SEG}.findings_refused.json").exists(), (
+        "the refused invocation must not have created the file")
+
+    # CONTROL: the last index the reader WOULD accept still writes, and the file
+    # it produces is one this script can read back -- which is the property the
+    # refusal above exists to protect.
+    out, rc = run(root, *record_args(9999, DIGEST_B))
+    assert rc == 0 and out["success"] is True, out
+    assert read_file(root)["refusals"][0]["finding_index"] == "9999"
+    again, rc = run(root, *record_args(9999, DIGEST_B))
+    assert rc == 0 and again["already_recorded"] is True, again
+
+
+# An unpaired surrogate: json.loads() accepts the escape and hands back a str
+# that .encode("utf-8") refuses. Each case puts it where that string actually
+# originates. `loc` and `reason` are stored and bounded; `issue` is only ever
+# HASHED, so it reaches the encode through a different door.
+_SURROGATE_REVIEW_HEAD = (
+    '{"clean": false, "coverage_ok": true, '
+    '"draft_sha1": "0123456789abcdef0123456789abcdef01234567", '
+    '"dispatch_token": "%s", "findings": [' % TOKEN
+)
+# Spelled as an ESCAPE inside a JSON document, never as a Python surrogate: a
+# real one cannot be written to a UTF-8 source file at all, which is how this
+# fixture was first written and how it failed.
+_LONE_SURROGATE_JSON = r"\ud800"
+
+
+def _surrogate_root(tmp_path, name, loc_json, issue_json):
+    root = make_root(tmp_path / name)
+    (root / "segments" / f"{SEG}.review.json").write_text(
+        _SURROGATE_REVIEW_HEAD
+        + '{"loc": %s, "severity": "major", "issue": %s, "suggest": "y"}]}'
+        % (loc_json, issue_json),
+        encoding="utf-8")
+    return root
+
+
+def test_a_surrogate_in_the_stored_loc_is_refused_with_a_json_line(tmp_path):
+    """NOT A TRACEBACK. Every path in this script promises the caller one JSON
+    line to branch on, and an uncaught UnicodeEncodeError out of the byte
+    measurement broke that promise while printing nothing at all on stdout."""
+    root = _surrogate_root(tmp_path, "loc",
+                           '"PARA:seg12:00%s"' % _LONE_SURROGATE_JSON,
+                           '"%s"' % ISSUE_A)
+    out, rc = run(root, "--print-finding-digests", plugin_root=False)
+    assert rc == 0 and out["success"] is True, out
+    row = out["findings"][0]
+    assert row["loc"] is None and "surrogate" in row["loc_problem"], row
+    assert "U+D800" in row["loc_problem"], row["loc_problem"]
+    assert row["issue_digest"] == DIGEST_A, row
+
+
+def test_a_surrogate_in_the_stored_issue_leaves_the_digest_null_and_says_why(tmp_path):
+    """The issue is HASHED and never stored, so the bounded-field guards never
+    see it -- it needs its own check, and the read mode has to say WHY the
+    digest is missing rather than print a bare null."""
+    root = _surrogate_root(tmp_path, "issue", '"%s"' % SHARED_LOC,
+                           '"cl%said"' % _LONE_SURROGATE_JSON)
+    out, rc = run(root, "--print-finding-digests", plugin_root=False)
+    assert rc == 0 and out["success"] is True, out
+    row = out["findings"][0]
+    assert row["issue_digest"] is None, row
+    assert "surrogate" in row["issue_problem"], row
+    assert "U+D800" in row["issue_problem"], row["issue_problem"]
+    assert row["loc"] == SHARED_LOC and row["loc_problem"] is None, row
+
+    # And the WRITE path refuses on the same string rather than raising.
+    out, rc = run(root, *record_args(0, "0" * 64))
+    assert rc == 1 and out["success"] is False, out
+    assert "surrogate" in out["error"], out["error"]
+
+
+def test_an_undecodable_argv_byte_in_the_reason_is_refused_with_a_json_line(tmp_path):
+    """The other door: POSIX argv is bytes, and Python decodes an undecodable
+    one with surrogateescape -- so a raw 0x80 in --reason arrives as U+DC80 in
+    sys.argv with no JSON involved at all. Driven with a bytes argv, because
+    subprocess cannot exec a str carrying a surrogate."""
+    root = make_root(tmp_path)
+    cmd = [os.fsencode(sys.executable),
+           os.fsencode(str(root / "scripts" / "refuse_finding.py")),
+           SEG.encode(), b"--durable-root", os.fsencode(str(root)),
+           b"--plugin-root", os.fsencode(str(SKILL_ROOT)),
+           b"--finding-index", b"1", b"--reason", b"a bad \x80 reason",
+           b"--round-label", ROUND_LABEL.encode(), b"--expect-token", TOKEN.encode(),
+           b"--expect-loc", SHARED_LOC.encode(), b"--expect-issue-digest",
+           DIGEST_A.encode()]
+    proc = subprocess.run(cmd, capture_output=True, timeout=60)
+    stdout = proc.stdout.decode("utf-8", "replace").strip()
+    assert stdout, (
+        "refuse_finding.py printed nothing on stdout -- an undecodable argv byte "
+        "escaped as a traceback.\nstderr:\n"
+        + proc.stderr.decode("utf-8", "replace"))
+    out = json.loads(stdout.splitlines()[-1])
+    assert proc.returncode == 1 and out["success"] is False, out
+    assert "U+DC80" in out["error"], out["error"]
+    assert not (root / "segments" / f"{SEG}.findings_refused.json").exists()
