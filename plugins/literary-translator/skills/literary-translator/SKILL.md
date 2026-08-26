@@ -3059,13 +3059,13 @@ rendered prompt out as `needs_fix` and truncates the template before every
 top-level preflight, so no audit call site exists on this route. Say what
 that check actually is, because "the fix turn is unaudited" understates it:
 it is a COPY-FIDELITY comparison of every file Step 0a copied into the
-durable root against the plugin bytes it came from — 45 scripts, the three
-workflow templates, 24 schemas and the 6 language files, 78 artifacts — run
+durable root against the plugin bytes it came from — 47 scripts, the three
+workflow templates, 24 schemas and the 6 language files, 80 artifacts — run
 after every dispatched fix call on the fallback. What the default path has
 in its place is the #396 rule below: `scaffold_setup.py --verify` before
-each driver launch, which compares the two BUNDLES — 19 scripts plus
-`mass-translate-wf.template.js` and `glossary-pass-wf.template.js`, 21
-members. So 57 copied artifacts have no byte comparison on this path,
+each driver launch, which compares the two BUNDLES — 20 scripts plus
+`mass-translate-wf.template.js` and `glossary-pass-wf.template.js`, 22
+members. So 58 copied artifacts have no byte comparison on this path,
 including every durable schema, every language preset,
 `skeptic-pass-wf.template.js`, and the W7/W8 entry points `final_audit.py`
 and `assemble.py` — and `final_audit.py` is in NO bundle hash by design (see
@@ -3143,6 +3143,108 @@ NOT that every segment converged; read the printed JSON's
 `summary.failed`/`summary.needs_fix`. Exit 1 means a gate refused before any
 dispatch (lock contention, the Step 1 re-translate gate, the volume cap, a
 `--resume-from-run-id` refusal). Exit 2 is a usage/environment error.
+
+**While it runs: `driver_status.py` (#765).** The driver prints its one JSON
+line only when the batch is over, so for the hours in between there was no
+supported way to ask *is this still working, how far along is it, or did it
+already finish?* — and two book projects independently hand-rolled the same
+`status.sh` to fill the gap. That surface now ships:
+
+```
+python3 {durable_root}/scripts/driver_status.py [--durable-root PATH]
+```
+
+It is safe to run at any moment against a live run: it takes NO lock, writes
+nothing, and never invokes `select_segments.py` (that path shells
+`ledger_merge.py`, which rewrites `runs/ledger.json` and shells `cache_key.py`
+per converged fragment — a durable write, however read-only the classification
+itself is). It shells out to exactly one thing, `ps`. There is no
+`--plugin-root`, because it resolves no sibling script.
+
+**It publishes observations, never a lifecycle verdict**, and that is the
+design rather than an omission. Every artifact it can read is advisory:
+`append_journal()` is best-effort by its own docstring, `runs/.driver.lock`'s
+CONTENT is documented as diagnostic-only and written best-effort, POSIX permits
+`ps` to truncate `args`, and both the session id and every journal timestamp
+come from a non-monotonic wall clock. So there is no `state: "running"` field
+to be wrong; there is `run.recorded_exit` (an object or `null`),
+`lock_diagnostic.pid_alive`, `lock_diagnostic.ps_command`, and
+`run.last_recorded_event.age_sec`. Compose them:
+
+```
+python3 {durable_root}/scripts/driver_status.py | jq -r '
+  "run     \(.run.session_id // "none")  selected_by \(.run.selected_by // "-")",
+  "exit    \(if .run == null then "unknown" elif .run.recorded_exit then "recorded at \(.run.recorded_exit.ts)" else "none recorded" end)",
+  "lock    pid \(.lock_diagnostic.pid // "?")  alive=\(if .lock_diagnostic == null then "?" else .lock_diagnostic.pid_alive end)  is-driver=\(if .lock_diagnostic == null then "?" else .lock_diagnostic.ps_names_driver_script end)",
+  "last    \(.run.last_recorded_event.type // "-")  \(.run.last_recorded_event.age_sec // "?")s ago",
+  "jobs    \(if .run == null then "?" else (.run.recorded_codex_dispatches.in_flight | length) end) in flight",
+  "batch   \(.run.batch_progress.recorded_fragment_status_counts.converged // "?")/\(.run.batch_progress.dispatched // "?") converged (this run)",
+  "project \(.progress.recorded_fragment_status_counts.converged // "?")/\(.units.total) converged (whole manifest)"'
+```
+
+An exit recorded twenty minutes ago with a dead lock pid READS as a finished
+batch; no recorded exit, a live pid whose `ps` line names the driver, and a
+last-event age of seconds reads as a working one; a live pid with an hour-old
+last event is the wedge worth looking at. "Reads as", not "is" — each line is an
+observation, and the paragraph above is why none of them is a proof. Note the
+`?`s: an absent lock or an absent run renders as unknown rather than as `false`
+or `0`, because those would be answers.
+
+The counts named `recorded_*` are counts of journal ENTRIES — a lost
+best-effort write lowers the count without lowering the work, which is why they
+are not called anything stronger.
+
+**What `selected_by: lock_diagnostic_pid` does and does not assert.** That
+branch requires the lock's pid to be alive AND its `ps` line to name
+`segment_dispatch_driver.py`; without both, the ordinary
+`greatest_recorded_driver_started_ts` ordering is used and says so. It does NOT
+additionally require the `ps` line to name THIS durable root, and that is
+deliberate: the documented launch recipe uses an absolute path, but a driver
+started as `python3 scripts/segment_dispatch_driver.py` from inside the durable
+root is a real and current pattern, and its command line legitimately contains
+no absolute root — measured `false` on a live book while this was written.
+Requiring it would demote every such run to the fallback. The residual it leaves
+— a stale lock pid, reused by a live driver of a DIFFERENT book, matching an
+epoch recorded under that same pid here — is visible in the payload rather than
+hidden: `ps_names_this_durable_root` and `pid_matches_lock_diagnostic` are both
+published.
+
+**Two progress numbers, and they answer different questions.**
+`run.batch_progress` is scoped to the segment ids THIS run's Step 1 gate
+selected, and is the one to read while a batch is live; `progress` is the whole
+manifest. They diverge exactly when they should: a run launched with
+`--only-segs` for ten fresh units in a book where seventy already converged is
+`0/10` on the first and `70/80` on the second. `batch_progress` is `null` when
+the epoch records no `step1_gate_passed`, and ONLY then — a gate that has fired
+but whose units have no fragment yet (the ordinary state of a fresh run;
+`runs/ledger.d/` does not exist until the first fragment is written) is `0/N`
+with every id counted missing, never unknown. The gate's ids are validated with
+the same regex `manifest.json`'s are, because they are joined onto
+`runs/ledger.d/` to build a path and the journal is written best-effort; ids
+that fail it are excluded from the census and COUNTED as
+`batch_progress.unsafe_recorded_ids`, so the gap against
+`run.recorded_dispatched_segs` — which stays the number the journal recorded —
+is visible rather than a quiet shrink.
+
+Both come from the per-segment fragments under `runs/ledger.d/`, intersected
+with `manifest.json`, with all five `ledger-fragment.schema.json` statuses
+zero-filled and `manifest_ids_without_fragment` /
+`fragment_ids_not_in_manifest` published rather than folded away — the next
+paragraph is why they cannot come from `runs/ledger.json`. Two caveats travel in
+the payload rather than being left implied: `staleness_checked: false` (a
+`converged` fragment may have staled since, and only the classifier can say),
+and `schema_validated: false` (a fragment is read as "a JSON object with a
+string `status`", so a hand-edited artifact `ledger_update.py` would refuse is
+still counted). Symlinks and non-regular files are refused rather than followed
+at every read, ANCESTOR directories included — a symlinked `runs/` or
+`runs/ledger.d` would count another book's population as this one's, and a FIFO
+named like a fragment would block the read forever, which is the one thing a
+surface you run against a live batch must never do. Every read path is required
+to resolve inside the durable root.
+
+It reports no draft-file count on purpose: a draft exists from round 1 onward
+and never goes away, so the count saturates, and `segments/*.draft.json` also
+matches `codex_job.py`'s private `.att.<seg>.<INV>.draft.json` staging slots.
 
 **The driver does not refresh `runs/ledger.json`.** Its only ledger write is
 the per-segment fragment at `runs/ledger.d/<seg>.json`; `ledger.json` itself

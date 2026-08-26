@@ -120,7 +120,11 @@ is the orchestration-level summary of what each stage hands to the next):
 - **W5 Mass-translate** — the main event. On W5's DEFAULT launcher since
   #516, `segment_dispatch_driver.py` runs `select_segments.py` itself and
   drives the same per-segment loop locally, with no agent-call budget to
-  estimate. What follows is the retained FALLBACK path: `select_segments.py`
+  estimate. While that batch runs, `scripts/driver_status.py` (#765) is the
+  read-only surface for "is it still working, how far along, or did it already
+  finish" — it takes no lock, writes nothing, never invokes
+  `select_segments.py`, and publishes observations rather than a lifecycle
+  verdict (SKILL.md, "While it runs"). What follows is the retained FALLBACK path: `select_segments.py`
   classifies
   every candidate segment and emits `SEGS`, the batch-size preflight
   estimates the worst-case agent-call count against `engine.batch_agent_cap`,

@@ -71,7 +71,7 @@ paragraph and its `assets/templates/` exception, are the authority):
     They are copied VERBATIM (tokens unsubstituted); the instantiated
     workflow is written elsewhere, per run.
   * `assets/schemas/*.json` -> `${durable_root}/schemas/`. FLAT only:
-    `assets/schemas/registry/` is deliberately plugin-only (SKILL.md:4418-4420)
+    `assets/schemas/registry/` is deliberately plugin-only (SKILL.md:4521-4523)
     and is never copied, so it is never compared.
   * `assets/languages/*` -> `${durable_root}/languages/`, every shipped file
     including `README.md`.
