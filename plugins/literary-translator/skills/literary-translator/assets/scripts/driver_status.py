@@ -268,11 +268,18 @@ def load_manifest_segs(manifest_path: Path, root: Path) -> list:
         raise StatusError(f"cannot read manifest.json ({reason})")
     try:
         manifest = json.loads(text)
-    # RecursionError, not just JSONDecodeError: a nested document that exhausts
-    # the C stack raises that instead -- another way a malformed artifact could
-    # escape as a traceback with no JSON line, which is the one output contract
-    # every caller of this script depends on.
-    except (json.JSONDecodeError, RecursionError) as exc:
+    # ValueError and RecursionError, never JSONDecodeError alone. Every artifact
+    # this script reads is parsed under this pair, because `json.loads` has two
+    # documented ways out that a handler naming only the subclass misses:
+    #   * a nested document that exhausts the C stack raises RecursionError,
+    #     which is not a ValueError at all;
+    #   * an integer token past `sys.get_int_max_str_digits()` (4300 by default
+    #     since 3.11) raises a PLAIN ValueError from `int()`. JSONDecodeError IS
+    #     a ValueError, but the reverse does not hold.
+    # Either one uncaught is a traceback and NO JSON line -- the one output
+    # contract every caller of this script depends on. The try wraps nothing but
+    # the parse, so the broader catch cannot swallow anything else.
+    except (ValueError, RecursionError) as exc:
         raise StatusError(f"manifest.json at {manifest_path} is not valid JSON ({exc})")
     if not isinstance(manifest, dict) or not isinstance(manifest.get("segments"), list):
         raise StatusError(f"manifest.json at {manifest_path} has no 'segments' array")
@@ -306,7 +313,7 @@ def fragment_status_enum(schemas_dir: Path, root: Path):
         return None, "observed"
     try:
         schema = json.loads(text)
-    except (json.JSONDecodeError, RecursionError):
+    except (ValueError, RecursionError):
         return None, "observed"
     # Walked with a type check at EVERY level, not just the top: valid JSON is
     # not a valid schema, and `{"properties": []}` would make a chained
@@ -348,7 +355,7 @@ def read_fragment_statuses(frag_dir: Path, segs: list, root: Path):
             continue
         try:
             fragment = json.loads(text)
-        except (json.JSONDecodeError, RecursionError):
+        except (ValueError, RecursionError):
             unreadable += 1
             continue
         status = fragment.get("status") if isinstance(fragment, dict) else None
@@ -524,7 +531,7 @@ def read_lock_diagnostic(durable_root: Path):
         return None, f"{lock_path} is empty -- the driver's diagnostic write is best-effort"
     try:
         payload = json.loads(text)
-    except (json.JSONDecodeError, RecursionError) as exc:
+    except (ValueError, RecursionError) as exc:
         return None, f"{lock_path} is not valid JSON ({exc})"
     pid = payload.get("pid") if isinstance(payload, dict) else None
     # `bool` is an `int` subclass, and a zero/negative pid means something else
@@ -598,7 +605,7 @@ def read_journal(path: Path, root: Path):
             continue
         try:
             entry = json.loads(line)
-        except (json.JSONDecodeError, RecursionError):
+        except (ValueError, RecursionError):
             malformed += 1
             continue
         if not isinstance(entry, dict):

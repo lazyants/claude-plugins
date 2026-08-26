@@ -1140,3 +1140,115 @@ def test_a_structurally_malformed_status_schema_falls_back_to_observed(tmp_path,
     # The fallback zero-fills nothing it did not see, so the census is exactly
     # the statuses on disk -- proving the report is real, not an empty shell.
     assert report["progress"]["recorded_fragment_status_counts"] == {"converged": 1}
+
+
+# A JSON number whose integer token exceeds CPython's int-string digit limit
+# (`sys.set_int_max_str_digits`, 4300 by default since 3.11). `json.loads` calls
+# `int()` on the token and that raises a PLAIN ValueError -- and while
+# `JSONDecodeError` IS a ValueError, the reverse does not hold, so a handler
+# naming only the subclass lets this one through.
+_OVER_LIMIT_INT = "1" * (sys.get_int_max_str_digits() + 100)
+
+
+def test_the_over_limit_int_fixture_really_escapes_jsondecodeerror():
+    """Pins the premise the five cases below rest on. If a future interpreter
+    parses this cleanly, or raises JSONDecodeError for it, those cases stop
+    testing what they say they test and go vacuously green."""
+    with pytest.raises(ValueError) as caught:
+        json.loads(_OVER_LIMIT_INT)
+    assert not isinstance(caught.value, json.JSONDecodeError)
+
+
+def test_an_over_limit_int_in_the_manifest_exits_1_with_a_reason(tmp_path):
+    root = make_durable_root(tmp_path)
+    (root / "manifest.json").write_text(_OVER_LIMIT_INT, encoding="utf-8")
+    report = run_status(root, expect_code=1)
+    assert report["success"] is False
+    assert "not valid JSON" in report["error"]
+
+
+def test_an_over_limit_int_in_the_status_schema_falls_back_to_observed(tmp_path):
+    root = make_durable_root(tmp_path, with_schema=False)
+    (root / "schemas" / "ledger-fragment.schema.json").write_text(
+        _OVER_LIMIT_INT, encoding="utf-8"
+    )
+    write_fragments(root, {"seg01": "converged"})
+    report = run_status(root)
+    assert report["progress"]["status_enum_source"] == "observed"
+    assert report["progress"]["recorded_fragment_status_counts"] == {"converged": 1}
+
+
+def test_an_over_limit_int_in_a_fragment_is_counted_unreadable(tmp_path):
+    root = make_durable_root(tmp_path)
+    write_fragments(root, {"seg01": "converged"})
+    (root / "runs" / "ledger.d" / "seg02.json").write_text(
+        _OVER_LIMIT_INT, encoding="utf-8"
+    )
+    report = run_status(root)
+    assert report["progress"]["unreadable_fragments"] == 1
+    assert report["progress"]["recorded_fragment_status_counts"]["converged"] == 1
+
+
+def test_an_over_limit_int_in_the_lock_is_a_reason_not_a_traceback(tmp_path):
+    root = make_durable_root(tmp_path)
+    write_fragments(root, {"seg01": "converged"})
+    write_lock(root, raw=_OVER_LIMIT_INT)
+    report = run_status(root)
+    assert report["lock_diagnostic"] is None
+    assert "not valid JSON" in report["lock_diagnostic_unavailable_reason"]
+
+
+def test_an_over_limit_int_in_a_journal_line_is_counted_malformed(tmp_path):
+    root = make_durable_root(tmp_path)
+    write_fragments(root, {"seg01": "converged"})
+    path = write_journal(root, "20260826T093010Z", [started(), gate_passed(["seg01"])])
+    path.write_text(
+        path.read_text(encoding="utf-8") + _OVER_LIMIT_INT + "\n", encoding="utf-8"
+    )
+    report = run_status(root)
+    assert report["run"]["malformed_journal_lines"] == 1
+    assert report["run"]["journal_parse_complete"] is False
+    # The rest of the epoch still reports -- one bad line is not a lost run.
+    assert report["run"]["recorded_dispatched_segs"] == 1
+
+
+def test_every_json_loads_site_catches_both_escapes():
+    """A STRUCTURAL guard over the whole file, not five point regressions. The
+    five cases above pin the artifacts that exist today; a sixth `json.loads`
+    added later would reintroduce the same traceback with nothing red, because
+    no existing test would read it. Every call must sit under a handler naming
+    both ValueError (which subsumes JSONDecodeError, and covers the integer
+    digit-limit escape that JSONDecodeError alone does not) and RecursionError.
+    """
+    tree = ast.parse(STATUS_SRC.read_text(encoding="utf-8"))
+    guarded = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        names = set()
+        for handler in node.handlers:
+            for n in ast.walk(handler.type) if handler.type is not None else []:
+                if isinstance(n, ast.Name):
+                    names.add(n.id)
+        if {"ValueError", "RecursionError"} <= names:
+            guarded.extend(
+                id(n)
+                for stmt in node.body
+                for n in ast.walk(stmt)
+                if isinstance(n, ast.Call)
+            )
+    guarded = set(guarded)
+
+    sites = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "loads"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "json"
+    ]
+    # A walk that iterates zero times prints exactly what a passing one prints.
+    assert len(sites) == 5, f"expected 5 json.loads sites, found {len(sites)}"
+    unguarded = [node.lineno for node in sites if id(node) not in guarded]
+    assert not unguarded, f"json.loads not under (ValueError, RecursionError) at lines {unguarded}"
