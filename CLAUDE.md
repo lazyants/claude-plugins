@@ -34,15 +34,16 @@ work, never the coverage: skipping a suite locally is right, skipping it remotel
 | `db-guardrails.yml` | `tests/block-destructive-db.test.sh` | bash, python3, jq (preinstalled) |
 | `enduser-handbook.yml` | `node --test tests/*.test.mjs`, then `tests/reference-assets.test.sh` | Node 22, ruby (preinstalled), esbuild (best-effort) |
 | `literary-translator.yml` | `python3 -m pytest -q`, run **from the plugin directory** | Python 3.14 + `requirements.txt`, Node 22 |
-| `multi-profile-plugins.yml` | `tests/inspect_codex_profiles.test.py` and `tests/report_limits.test.py`, then the report script and the Codex script, each against an empty `HOME` | Python 3.11 and 3.14 matrix (stdlib only) |
+| `multi-profile-plugins.yml` | `tests/inspect_codex_profiles.test.py`, `tests/report_limits.test.py` and `tests/install_code_limit.test.py`, then the report script and the Codex script, each against an empty `HOME` | Python 3.11 and 3.14 matrix (stdlib only) |
 | `skill-frontmatter.yml` | `tests/skill-frontmatter-limits.test.rb` | ruby (preinstalled) |
 | `citation-audit.yml` | `tools/tests` (pytest), then `tools/citation_audit.py check` over the tree | Python 3.14 + `pytest` (the tool itself is stdlib-only) |
 | `version-surfaces.yml` | `.claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.test.py`, then the checker itself over the tree | Python 3.14 (stdlib only) |
 
 `obsidian-project-vault` ships no tests, so it has no suite of its own — `version-surfaces.yml`
 still covers its release surfaces, as it does every plugin's. `multi-profile-plugins` ships suites
-for its Codex health check and its usage-limit report; its older Claude Code script
-(`inspect_profiles.py`) still has none, so the workflow being green says nothing about that half.
+for its Codex health check, its usage-limit report and that report's `code-limit` install step; its
+older Claude Code script (`inspect_profiles.py`) still has none, so the workflow being green says
+nothing about that half.
 
 The six plugin workflows are each path-filtered to their own plugin plus their own file, so a PR
 touching one plugin runs one suite; `workflow_dispatch` runs any of them by hand. Superseded runs on
