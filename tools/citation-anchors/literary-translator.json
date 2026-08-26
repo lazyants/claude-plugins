@@ -157,7 +157,7 @@
    ],
    "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/fix_scope_audit.py\", \"SKILL.md:4472-4474\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/fix_scope_audit.py\", \"SKILL.md:4496-4498\", 0]": {
    "anchors": [
     "registry schemas ship under",
     "never copied into a durable root"
@@ -965,7 +965,7 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4188-4194\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4212-4218\", 0]": {
    "anchors": [
     "Excluded from every bundle hash",
     "nor of `orchestration_bundle_hash`",

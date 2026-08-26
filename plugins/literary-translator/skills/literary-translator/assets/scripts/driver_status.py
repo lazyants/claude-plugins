@@ -53,12 +53,18 @@ classification itself is), and spawns exactly one subprocess: `ps -ww -p PID -o
 command=`. `sys.dont_write_bytecode` is set before the `json_stdout.py` sibling
 import below, because that import would otherwise leave
 `${durable_root}/scripts/__pycache__/*.pyc` behind -- the one write this design
-would otherwise make. `tests/driver_status.test.py` guards each of those
-structurally (an AST import allowlist plus an enumerated write/lock construct
-set, every clause mutation-tested) and behaviourally (a run against a durable
-root whose directories are 0555 and files 0444, with a private empty TMPDIR and
-the plugin tree snapshotted). Those are regression GUARDS on this
-implementation, not a proof about every possible one.
+would otherwise make. Every read also refuses a
+symlink or a non-regular file before opening it: a symlinked `runs/ledger.d`
+would count another book's population as this one's, and a FIFO named like a
+fragment would block forever -- which would break the one property that matters
+most here. `tests/driver_status.test.py` guards each of those structurally (an
+AST import allowlist plus an enumerated write/lock construct set -- metadata
+mutators included, since a `chmod` changes nothing a content-only snapshot would
+notice -- every clause mutation-tested) and behaviourally (a run against a
+durable root whose directories are 0555 and files 0444, with a private empty
+TMPDIR and a before/after snapshot that covers mode and mtime, the root's
+included). Those are regression GUARDS on this implementation, not a proof about
+every possible one.
 
 ## Where each number comes from
 
@@ -66,7 +72,15 @@ implementation, not a proof about every possible one.
 DERIVED, never configured: both hand-rolled copies hard-coded their book's unit
 count (`/ 74`, `/ 79`) and #765 proposed substituting it at scaffold time.
 
-Progress is the per-segment fragments under `runs/ledger.d/`, intersected with
+Progress comes in TWO scopes, because they answer different questions and
+diverge exactly when it matters: `run.batch_progress` is restricted to the
+segment ids THIS run's Step 1 gate selected, and `progress` covers the whole
+manifest. A run launched with `--only-segs` for ten fresh units in a book where
+seventy already converged is 0/10 on the first and 70/80 on the second; showing
+only the second would answer "how far along is this batch" over the wrong
+population.
+
+Both are the per-segment fragments under `runs/ledger.d/`, intersected with
 the manifest -- NOT `runs/ledger.json`. SKILL.md states the reason itself:
 "The driver does not refresh `runs/ledger.json`... it still reports PRE-run
 state". `select_segments.py` materializes that file at run START and the driver
@@ -154,12 +168,12 @@ _LEASE_WARNING = "lock_self_test_failed"
 
 
 class StatusError(Exception):
-    """No report is possible. Carries this script's exit code."""
+    """No report is possible -- always this script's exit 1. A usage error is
+    the OTHER path (exit 2) and never raises this."""
 
-    def __init__(self, message, exit_code=1):
+    def __init__(self, message):
         super().__init__(message)
         self.message = message
-        self.exit_code = exit_code
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +185,16 @@ class StatusError(Exception):
 def _read_text(path: Path):
     """Read `path` as UTF-8 text, or return (None, reason).
 
+    REFUSES anything that is not a real regular file, before opening it. Two
+    distinct reasons, and the second is why the check is here rather than at one
+    call site: a SYMLINK can point at another tree, so following it would count
+    an artifact that is not this durable root's; and a FIFO or device named
+    `seg01.json` would BLOCK this read forever, which would break the one
+    property that matters most -- safe to run at any moment. `is_file()` is
+    already False for a FIFO, a socket and a directory; `is_symlink()` adds the
+    link case, which `is_file()` follows. `fix_scope_audit.py` refuses the same
+    class for the same reason, under its own `irregular` verdict.
+
     `read_bytes` + a replacing decode rather than `read_text`: a journal being
     appended to right now can be truncated mid-codepoint, and a UnicodeDecodeError
     there would lose every well-formed line before it. The replacement character
@@ -178,6 +202,8 @@ def _read_text(path: Path):
     malformed -- which is exactly what it is.
     """
     try:
+        if path.is_symlink() or not path.is_file():
+            return None, f"{path} is not a real regular file"
         return path.read_bytes().decode("utf-8", "replace"), None
     except OSError as exc:
         return None, f"{path}: {exc}"
@@ -257,37 +283,25 @@ def fragment_status_enum(schemas_dir: Path):
     return list(enum), "schemas/ledger-fragment.schema.json"
 
 
-def read_progress(durable_root: Path, manifest_segs: list, schemas_dir: Path):
-    """The per-segment fragment census, intersected with the manifest.
+def read_fragment_statuses(frag_dir: Path, segs: list):
+    """The recorded `status` of every one of `segs` that has a fragment.
 
-    Returns (progress, reason). `reason` is non-None exactly when `progress` is
-    None -- an absent `runs/ledger.d/` is an ABSENCE, and reporting it as five
-    zeroes would be indistinguishable from a book nothing has run against.
+    Returns (statuses, unreadable, missing): a {seg: status} map, the count of
+    fragments present but not readable as an object with a string status, and
+    the manifest ids with no fragment at all. Keyed by EXACT filename, never by
+    prefix, so `seg1` and `seg11` cannot be confused for one another.
     """
-    frag_dir = durable_root / "runs" / "ledger.d"
-    if not frag_dir.is_dir():
-        return None, f"{frag_dir} does not exist -- no fragment has been written yet"
-    try:
-        entries = sorted(p.name for p in frag_dir.iterdir())
-    except OSError as exc:
-        return None, f"{frag_dir} is not readable ({exc})"
-
-    statuses, enum_source = fragment_status_enum(schemas_dir)
-    counts = {name: 0 for name in (statuses or [])}
-    unrecognized = 0
+    statuses = {}
     unreadable = 0
-
-    manifest_set = set(manifest_segs)
-    on_disk = {name[: -len(".json")] for name in entries if name.endswith(".json")}
-    missing = [seg for seg in manifest_segs if seg not in on_disk]
-    extra = sorted(name for name in on_disk if name not in manifest_set)
-
-    for seg in manifest_segs:
-        if seg not in on_disk:
-            continue
-        text, _reason = _read_text(frag_dir / f"{seg}.json")
+    missing = []
+    for seg in segs:
+        path = frag_dir / f"{seg}.json"
+        text, _reason = _read_text(path)
         if text is None:
-            unreadable += 1
+            if path.exists() or path.is_symlink():
+                unreadable += 1
+            else:
+                missing.append(seg)
             continue
         try:
             fragment = json.loads(text)
@@ -295,15 +309,63 @@ def read_progress(durable_root: Path, manifest_segs: list, schemas_dir: Path):
             unreadable += 1
             continue
         status = fragment.get("status") if isinstance(fragment, dict) else None
-        if not isinstance(status, str):
+        if isinstance(status, str):
+            statuses[seg] = status
+        else:
             unreadable += 1
-        elif statuses is not None and status not in counts:
+    return statuses, unreadable, missing
+
+
+def census(statuses: dict, enum):
+    """Per-status counts, with every schema status zero-filled when the enum is
+    known. Returns (counts, unrecognized): a status outside the enum is COUNTED
+    separately rather than dropped, because a dropped one is invisible in a total
+    that still looks complete."""
+    counts = {name: 0 for name in (enum or [])}
+    unrecognized = 0
+    for status in statuses.values():
+        if enum is not None and status not in counts:
             unrecognized += 1
         else:
             counts[status] = counts.get(status, 0) + 1
+    return counts, unrecognized
+
+
+def read_progress(durable_root: Path, manifest_segs: list, schemas_dir: Path):
+    """The per-segment fragment census over the WHOLE manifest.
+
+    Returns (progress, reason). `reason` is non-None exactly when `progress` is
+    None -- an absent `runs/ledger.d/` is an ABSENCE, and reporting it as five
+    zeroes would be indistinguishable from a book nothing has run against.
+
+    `scope` is published because this is the DURABLE ROOT's progress, not the
+    running batch's: a run launched with `--only-segs` for ten fresh units in a
+    book where seventy already converged is 0/10, while this census correctly
+    reads 70/80. The batch-scoped number lives on `run.batch_progress`, taken
+    from the gate's own segment list.
+    """
+    frag_dir = durable_root / "runs" / "ledger.d"
+    if frag_dir.is_symlink() or not frag_dir.is_dir():
+        return None, (
+            f"{frag_dir} is not a real directory -- no fragment has been written "
+            f"yet, or the path is a symlink into another tree"
+        )
+    try:
+        entries = sorted(p.name for p in frag_dir.iterdir())
+    except OSError as exc:
+        return None, f"{frag_dir} is not readable ({exc})"
+
+    enum, enum_source = fragment_status_enum(schemas_dir)
+    statuses, unreadable, missing = read_fragment_statuses(frag_dir, manifest_segs)
+    counts, unrecognized = census(statuses, enum)
+
+    manifest_set = set(manifest_segs)
+    on_disk = {name[: -len(".json")] for name in entries if name.endswith(".json")}
+    extra = sorted(name for name in on_disk if name not in manifest_set)
 
     progress = {
         "source": "runs/ledger.d",
+        "scope": "manifest",
         "status_enum_source": enum_source,
         "recorded_fragment_status_counts": counts,
         "unrecognized_status": unrecognized,
@@ -314,8 +376,37 @@ def read_progress(durable_root: Path, manifest_segs: list, schemas_dir: Path):
         # still current is `select_segments.py --classify-only`'s answer, and
         # that path writes runs/ledger.json. Stated rather than implied.
         "staleness_checked": False,
+        # And the fragment is read as "a JSON object with a string status",
+        # NOT validated against ledger-fragment.schema.json -- which requires a
+        # timestamp, and for a converged record a cache key, round count and
+        # reviewed sha1. A hand-edited or half-written artifact the producer
+        # would refuse is therefore counted here. Stated rather than implied,
+        # for the same reason as the line above.
+        "schema_validated": False,
     }
     return progress, None
+
+
+def batch_progress(durable_root: Path, gate_segs, schemas_dir: Path):
+    """The same census restricted to the segments THIS run's Step 1 gate
+    selected -- the number an operator watching a live batch actually wants.
+    None when the epoch records no `step1_gate_passed`, which is a different
+    fact from a batch of zero units."""
+    if not isinstance(gate_segs, list):
+        return None
+    frag_dir = durable_root / "runs" / "ledger.d"
+    if frag_dir.is_symlink() or not frag_dir.is_dir():
+        return None
+    enum, _source = fragment_status_enum(schemas_dir)
+    statuses, unreadable, missing = read_fragment_statuses(frag_dir, gate_segs)
+    counts, unrecognized = census(statuses, enum)
+    return {
+        "dispatched": len(gate_segs),
+        "recorded_fragment_status_counts": counts,
+        "unrecognized_status": unrecognized,
+        "unreadable_fragments": unreadable,
+        "dispatched_ids_without_fragment": len(missing),
+    }
 
 
 def ps_command(pid: int):
@@ -333,6 +424,12 @@ def ps_command(pid: int):
             capture_output=True,
             text=True,
             timeout=10,
+            # A FIXED minimal PATH rather than the inherited environment: this
+            # is the only executable this script ever spawns, and inheriting
+            # PATH would let a shim earlier on it be what actually runs. The
+            # argv stays the literal "ps" so the test's AST allowlist can still
+            # read it.
+            env={"PATH": "/usr/bin:/bin"},
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -361,10 +458,23 @@ def read_lock_diagnostic(durable_root: Path):
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
         return None, f"{lock_path} is not valid JSON ({exc})"
-    if not isinstance(payload, dict) or not isinstance(payload.get("pid"), int):
-        return None, f"{lock_path} carries no integer 'pid'"
+    pid = payload.get("pid") if isinstance(payload, dict) else None
+    # `bool` is an `int` subclass, and a zero/negative pid means something else
+    # entirely to kill(2) (0 = this process group, -1 = every process). The
+    # upper bound is `pid_t`, a signed 32-bit int on every platform this runs
+    # on: a larger value raises OverflowError from os.kill, which is NOT an
+    # OSError -- uncaught it would print a traceback and no JSON line at all,
+    # breaking the one-line stdout contract on a malformed input. Refused
+    # rather than probed, because a pid that cannot be probed is not an
+    # observation about anything.
+    if (
+        isinstance(pid, bool)
+        or not isinstance(pid, int)
+        or pid <= 0
+        or pid > 2 ** 31 - 1
+    ):
+        return None, f"{lock_path} carries no usable positive integer 'pid'"
 
-    pid = payload["pid"]
     try:
         os.kill(pid, 0)
         alive = True
@@ -373,7 +483,7 @@ def read_lock_diagnostic(durable_root: Path):
     except PermissionError:
         # The pid exists and belongs to another user. Alive is the honest read.
         alive = True
-    except OSError:
+    except (OSError, OverflowError, ValueError):
         alive = False
 
     command = ps_command(pid) if alive else None
@@ -483,8 +593,13 @@ def summarize_epoch(entries: list, now: datetime) -> dict:
 
     last = entries[-1]
     dispatched = gate_entry.get("segs") if gate_entry is not None else None
+    gate_segs = dispatched if isinstance(dispatched, list) else None
 
     return {
+        # Consumed by build_report() to scope the batch census, then dropped
+        # from the payload: 59 ids is a wall of text, and the census is the
+        # answer the list exists to produce.
+        "_gate_segs": gate_segs,
         "recorded_start": start.get("ts"),
         "recorded_pid": start.get("pid"),
         "recorded_exit": (
@@ -515,21 +630,29 @@ def summarize_epoch(entries: list, now: datetime) -> dict:
 def collect_runs(durable_root: Path, now: datetime):
     """Every journal under runs/*/driver_journal.jsonl, reduced to its LAST epoch.
 
-    Returns (candidates, journals_found, journals_without_recorded_start).
+    Returns (candidates, journals_found, journals_without_recorded_start,
+    journals_unreadable). The last two are SEPARATE counts on purpose: a journal
+    this script could not read at all is "could not establish", and folding it
+    into "readable but records no start" would turn an unknown into an assertion
+    about the driver.
     """
     runs_dir = durable_root / "runs"
-    if not runs_dir.is_dir():
-        return [], 0, 0
+    if runs_dir.is_symlink() or not runs_dir.is_dir():
+        return [], 0, 0, 0
     try:
         journals = sorted(runs_dir.glob("*/driver_journal.jsonl"))
     except OSError:
-        return [], 0, 0
+        return [], 0, 0, 0
 
     candidates = []
     without_start = 0
+    unreadable = 0
     for journal in journals:
         epochs, malformed, lease_warning, reason = read_journal(journal)
-        if reason is not None or not epochs:
+        if reason is not None:
+            unreadable += 1
+            continue
+        if not epochs:
             without_start += 1
             continue
         record = summarize_epoch(epochs[-1], now)
@@ -544,7 +667,7 @@ def collect_runs(durable_root: Path, now: datetime):
             }
         )
         candidates.append(record)
-    return candidates, len(journals), without_start
+    return candidates, len(journals), without_start, unreadable
 
 
 def select_run(candidates: list, lock_diagnostic):
@@ -560,7 +683,19 @@ def select_run(candidates: list, lock_diagnostic):
     """
     if not candidates:
         return None
-    if lock_diagnostic is not None and lock_diagnostic["pid_alive"]:
+    # BOTH conditions, not just liveness. The lock's content is written
+    # best-effort -- its truncate/write failure is caught and ignored by the
+    # driver -- so a stale pid can survive there while a newer run holds the
+    # real lease. If that stale pid is then REUSED by any unrelated live
+    # process, liveness alone would hand this selector an old epoch and it would
+    # report the wrong invocation's exit, summary and last event. Requiring the
+    # command text to name the driver script is the corroboration that rules
+    # that out; without it the ordinary ordering wins and says so.
+    if (
+        lock_diagnostic is not None
+        and lock_diagnostic["pid_alive"]
+        and lock_diagnostic["ps_names_driver_script"]
+    ):
         matches = [c for c in candidates if c["recorded_pid"] == lock_diagnostic["pid"]]
         if len(matches) == 1:
             chosen = matches[0]
@@ -573,12 +708,13 @@ def select_run(candidates: list, lock_diagnostic):
 
 def build_report(durable_root: Path) -> dict:
     now = datetime.now(timezone.utc)
+    schemas_dir = durable_root / "schemas"
     manifest_segs = load_manifest_segs(durable_root / "manifest.json")
-    progress, progress_reason = read_progress(
-        durable_root, manifest_segs, durable_root / "schemas"
-    )
+    progress, progress_reason = read_progress(durable_root, manifest_segs, schemas_dir)
     lock_diagnostic, lock_reason = read_lock_diagnostic(durable_root)
-    candidates, journals_found, without_start = collect_runs(durable_root, now)
+    candidates, journals_found, without_start, unreadable_journals = collect_runs(
+        durable_root, now
+    )
     run = select_run(candidates, lock_diagnostic)
 
     if run is not None:
@@ -587,14 +723,23 @@ def build_report(durable_root: Path) -> dict:
             if lock_diagnostic is None
             else run["recorded_pid"] == lock_diagnostic["pid"]
         )
-        run_reason = None
-    elif journals_found:
-        run_reason = (
-            f"{journals_found} journal(s) found under runs/, none with a recorded "
-            f"{_START} entry"
+        run["batch_progress"] = batch_progress(
+            durable_root, run.pop("_gate_segs"), schemas_dir
         )
+        run_reason = None
     else:
-        run_reason = "no driver journal found under runs/"
+        parts = []
+        if without_start:
+            parts.append(f"{without_start} with no recorded {_START} entry")
+        if unreadable_journals:
+            parts.append(f"{unreadable_journals} unreadable")
+        run_reason = (
+            f"{journals_found} journal(s) found under runs/: " + ", ".join(parts)
+            if parts
+            else "no driver journal found under runs/"
+        )
+    for candidate in candidates:
+        candidate.pop("_gate_segs", None)
 
     return {
         "success": True,
@@ -609,6 +754,7 @@ def build_report(durable_root: Path) -> dict:
         "run_unavailable_reason": run_reason,
         "journals_found": journals_found,
         "journals_without_recorded_start": without_start,
+        "journals_unreadable": unreadable_journals,
     }
 
 
@@ -652,7 +798,7 @@ def main():
         report = build_report(durable_root)
     except StatusError as exc:
         print(dumps_line({"success": False, "error": exc.message}))
-        sys.exit(exc.exit_code)
+        sys.exit(1)
 
     print(dumps_line(report))
     sys.exit(0)

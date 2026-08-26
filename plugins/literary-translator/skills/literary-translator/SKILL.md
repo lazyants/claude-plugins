@@ -3174,28 +3174,52 @@ to be wrong; there is `run.recorded_exit` (an object or `null`),
 ```
 python3 {durable_root}/scripts/driver_status.py | jq -r '
   "run     \(.run.session_id // "none")  selected_by \(.run.selected_by // "-")",
-  "exit    \(if .run.recorded_exit then "recorded at \(.run.recorded_exit.ts)" else "none recorded" end)",
-  "lock    pid \(.lock_diagnostic.pid // "-")  alive=\(.lock_diagnostic.pid_alive // false)  is-driver=\(.lock_diagnostic.ps_names_driver_script // false)",
-  "last    \(.run.last_recorded_event.type // "-")  \(.run.last_recorded_event.age_sec // "-")s ago",
-  "jobs    \(.run.recorded_codex_dispatches.in_flight | length) in flight",
-  "units   \(.progress.recorded_fragment_status_counts.converged // "?")/\(.units.total) converged (staleness not checked)"'
+  "exit    \(if .run == null then "unknown" elif .run.recorded_exit then "recorded at \(.run.recorded_exit.ts)" else "none recorded" end)",
+  "lock    pid \(.lock_diagnostic.pid // "?")  alive=\(if .lock_diagnostic == null then "?" else .lock_diagnostic.pid_alive end)  is-driver=\(if .lock_diagnostic == null then "?" else .lock_diagnostic.ps_names_driver_script end)",
+  "last    \(.run.last_recorded_event.type // "-")  \(.run.last_recorded_event.age_sec // "?")s ago",
+  "jobs    \(if .run == null then "?" else (.run.recorded_codex_dispatches.in_flight | length) end) in flight",
+  "batch   \(.run.batch_progress.recorded_fragment_status_counts.converged // "?")/\(.run.batch_progress.dispatched // "?") converged (this run)",
+  "project \(.progress.recorded_fragment_status_counts.converged // "?")/\(.units.total) converged (whole manifest)"'
 ```
 
-An exit recorded twenty minutes ago with a dead lock pid is a finished batch; no
-recorded exit with a live pid whose `ps` line names the driver and a
-last-event age of seconds is a working one; a live pid with an hour-old last
-event is the wedge worth looking at. The counts named `recorded_*` are counts
-of journal ENTRIES — a lost best-effort write lowers the count without lowering
-the work, which is why they are not called anything stronger.
+An exit recorded twenty minutes ago with a dead lock pid READS as a finished
+batch; no recorded exit, a live pid whose `ps` line names the driver, and a
+last-event age of seconds reads as a working one; a live pid with an hour-old
+last event is the wedge worth looking at. "Reads as", not "is" — each line is an
+observation, and the paragraph above is why none of them is a proof. Note the
+`?`s: an absent lock or an absent run renders as unknown rather than as `false`
+or `0`, because those would be answers.
 
-Progress comes from the per-segment fragments under `runs/ledger.d/`,
-intersected with `manifest.json`, with all five `ledger-fragment.schema.json`
-statuses zero-filled and `manifest_ids_without_fragment` /
+The counts named `recorded_*` are counts of journal ENTRIES — a lost
+best-effort write lowers the count without lowering the work, which is why they
+are not called anything stronger.
+
+**Two progress numbers, and they answer different questions.**
+`run.batch_progress` is scoped to the segment ids THIS run's Step 1 gate
+selected, and is the one to read while a batch is live; `progress` is the whole
+manifest. They diverge exactly when they should: a run launched with
+`--only-segs` for ten fresh units in a book where seventy already converged is
+`0/10` on the first and `70/80` on the second. `batch_progress` is `null` when
+the epoch records no `step1_gate_passed`, which is not the same as a batch of
+zero.
+
+Both come from the per-segment fragments under `runs/ledger.d/`, intersected
+with `manifest.json`, with all five `ledger-fragment.schema.json` statuses
+zero-filled and `manifest_ids_without_fragment` /
 `fragment_ids_not_in_manifest` published rather than folded away — the next
-paragraph is why it cannot come from `runs/ledger.json`. It reports no
-draft-file count on purpose: a draft exists from round 1 onward and never goes
-away, so the count saturates, and `segments/*.draft.json` also matches
-`codex_job.py`'s private `.att.<seg>.<INV>.draft.json` staging slots.
+paragraph is why they cannot come from `runs/ledger.json`. Two caveats travel in
+the payload rather than being left implied: `staleness_checked: false` (a
+`converged` fragment may have staled since, and only the classifier can say),
+and `schema_validated: false` (a fragment is read as "a JSON object with a
+string `status`", so a hand-edited artifact `ledger_update.py` would refuse is
+still counted). Symlinks and non-regular files are refused rather than followed
+at every read — a symlinked `runs/ledger.d` would count another book's
+population, and a FIFO named like a fragment would block the read forever,
+which is the one thing a surface you run against a live batch must never do.
+
+It reports no draft-file count on purpose: a draft exists from round 1 onward
+and never goes away, so the count saturates, and `segments/*.draft.json` also
+matches `codex_job.py`'s private `.att.<seg>.<INV>.draft.json` staging slots.
 
 **The driver does not refresh `runs/ledger.json`.** Its only ledger write is
 the per-segment fragment at `runs/ledger.d/<seg>.json`; `ledger.json` itself

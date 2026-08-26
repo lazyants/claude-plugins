@@ -71,11 +71,27 @@ def write_manifest(root, segs):
 
 
 def write_fragments(root, statuses: dict):
+    """Fragments in the shape `ledger_update.py` really writes -- every field a
+    converged record carries, not just `status`. A fixture that hand-builds a
+    thinner artifact than the producer would blesses a shape the producer would
+    refuse, and then the test proves nothing about real data."""
     frag_dir = root / "runs" / "ledger.d"
     frag_dir.mkdir(parents=True, exist_ok=True)
     for seg, status in statuses.items():
         (frag_dir / f"{seg}.json").write_text(
-            json.dumps({"status": status, "rounds": 1}), encoding="utf-8"
+            json.dumps(
+                {
+                    "status": status,
+                    "timestamp": "2026-08-26T09:30:00Z",
+                    "rounds": 2,
+                    "n_blocks": 38,
+                    "n_footnotes": 0,
+                    "n_verses": 0,
+                    "reviewed_draft_sha1": "e894d71854e86fcee454d3037208b0115b5b4e21",
+                    "cache_key": {"pipeline_version": "v1"},
+                }
+            ),
+            encoding="utf-8",
         )
     return frag_dir
 
@@ -232,7 +248,8 @@ def test_journal_without_a_recorded_start_is_not_a_run(tmp_path):
     assert report["run"] is None
     assert report["journals_found"] == 1
     assert report["journals_without_recorded_start"] == 1
-    assert "none with a recorded driver_started" in report["run_unavailable_reason"]
+    assert "no recorded driver_started" in report["run_unavailable_reason"]
+    assert report["journals_unreadable"] == 0
 
 
 def test_no_journal_at_all_is_an_absence_with_a_reason(tmp_path):
@@ -303,17 +320,23 @@ def test_pid_matches_lock_diagnostic_is_false_when_the_live_pid_names_no_epoch(t
         child.wait()
 
 
-def test_ps_unavailable_degrades_to_null_and_still_reports(tmp_path):
+def test_a_stripped_caller_path_does_not_break_the_ps_probe(tmp_path):
+    """The `ps` spawn pins its own minimal PATH instead of inheriting the
+    caller's, so that a shim earlier on the inherited PATH cannot be what runs.
+    The observable consequence: stripping PATH entirely does not degrade the
+    probe -- which is the inverse of what an inheriting implementation does."""
     root = make_durable_root(tmp_path)
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)",
+         str(root / "scripts" / "segment_dispatch_driver.py")]
+    )
     try:
         write_journal(root, "20260826T093010Z", [started(pid=child.pid)])
         write_lock(root, child.pid)
-        env = dict(os.environ, PATH="")
-        report = run_status(root, env=env)
+        report = run_status(root, env=dict(os.environ, PATH=""))
         assert report["lock_diagnostic"]["pid_alive"] is True
-        assert report["lock_diagnostic"]["ps_command"] is None
-        assert report["lock_diagnostic"]["ps_names_driver_script"] is False
+        assert report["lock_diagnostic"]["ps_command"] is not None
+        assert report["lock_diagnostic"]["ps_names_driver_script"] is True
     finally:
         child.terminate()
         child.wait()
@@ -460,7 +483,7 @@ def test_absent_fragment_dir_is_null_progress_not_zero_counts(tmp_path):
     root = make_durable_root(tmp_path)
     report = run_status(root)
     assert report["progress"] is None
-    assert "does not exist" in report["progress_unavailable_reason"]
+    assert "is not a real directory" in report["progress_unavailable_reason"]
 
 
 def test_lock_absent_empty_or_unparseable_is_null_with_a_reason(tmp_path):
@@ -545,6 +568,12 @@ FORBIDDEN_NAMES = {"open", "eval", "exec", "__import__", "compile", "input"}
 FORBIDDEN_ATTRS = {
     "flock", "lockf", "write_text", "write_bytes", "mkdir", "makedirs", "touch",
     "unlink", "rmtree", "rmdir", "import_module", "system", "popen",
+    # Metadata is a WRITE. `chmod` and `utime` change nothing a naive
+    # content-only snapshot would notice, which is exactly why they belong in
+    # the enumerated set rather than being left to the snapshot to catch.
+    "chmod", "lchmod", "chown", "utime", "symlink_to", "hardlink_to",
+    # `Path.open` is the same capability as the builtin under another name.
+    "open",
 }
 
 # The MODULE-QUALIFIED half. `replace`, `remove` and `rename` are deliberately
@@ -556,6 +585,9 @@ FORBIDDEN_QUALIFIED = {
     ("os", "open"), ("os", "replace"), ("os", "remove"), ("os", "rename"),
     ("os", "write"), ("os", "truncate"), ("os", "ftruncate"), ("os", "system"),
     ("os", "popen"), ("os", "mkdir"), ("os", "makedirs"), ("os", "unlink"),
+    ("os", "chmod"), ("os", "chown"), ("os", "utime"), ("os", "link"),
+    ("os", "symlink"), ("os", "rmdir"), ("os", "removedirs"), ("os", "mknod"),
+    ("os", "mkfifo"), ("os", "fdopen"),
     ("importlib", "import_module"),
 }
 
@@ -650,6 +682,11 @@ def test_shipped_script_contains_no_write_or_lock_construct():
         "def _m():\n    return os.system('touch x')\n",
         "def _m(p):\n    return open(p, 'w')\n",
         "def _m(p):\n    return shutil.rmtree(p)\n",
+        "def _m(p):\n    return Path(p).chmod(0o777)\n",
+        "def _m(p):\n    return os.chmod(p, 0o777)\n",
+        "def _m(p):\n    return os.utime(p, None)\n",
+        "def _m(p):\n    return Path(p).open('w')\n",
+        "def _m(p):\n    return os.rename(p, p)\n",
     ],
 )
 def test_the_write_and_lock_guard_bites(mutation):
@@ -668,13 +705,20 @@ def test_the_subprocess_allowlist_bites():
 
 
 def _snapshot(root: Path):
+    """Content AND metadata, for directories and for the root itself.
+
+    An earlier version stored `None` for every directory and skipped the root
+    entirely, so `durable_root.chmod(0o777)` -- a real mutation of the tree this
+    script promises not to touch -- left the snapshot identical. Mode and mtime
+    are part of what "mutates nothing" means."""
     entries = {}
+    root_stat = root.lstat()
+    entries["."] = (None, root_stat.st_mode, root_stat.st_mtime_ns)
     for path in sorted(root.rglob("*")):
-        if path.is_dir():
-            entries[str(path.relative_to(root)) + "/"] = None
-        else:
-            stat = path.stat()
-            entries[str(path.relative_to(root))] = (path.read_bytes(), stat.st_mtime_ns)
+        stat = path.lstat()
+        key = str(path.relative_to(root)) + ("/" if path.is_dir() else "")
+        content = None if path.is_dir() else path.read_bytes()
+        entries[key] = (content, stat.st_mode, stat.st_mtime_ns)
     return entries
 
 
@@ -765,7 +809,127 @@ def test_a_held_project_lease_does_not_block_the_report(tmp_path):
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         report = run_status(root)
         assert report["run"]["session_id"] == "20260826T093010Z"
-        # And the lease is still ours afterwards: nothing released or took it.
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     finally:
         os.close(fd)
+
+
+def test_a_live_pid_that_is_not_the_driver_does_not_win_selection(tmp_path):
+    """The lock's content is written best-effort, so a stale pid can survive
+    there; if that pid is then REUSED by an unrelated live process, liveness
+    alone would hand the selector an old epoch and report the wrong
+    invocation's exit and summary. The command-text corroboration is what rules
+    that out, so it is required, not merely reported."""
+    root = make_durable_root(tmp_path)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        write_journal(root, "20260826T090000Z",
+                      [started(ts="2026-08-26T09:00:00Z", pid=child.pid)])
+        write_journal(root, "20260826T093010Z",
+                      [started(ts="2026-08-26T09:30:10Z", pid=999999), exited()])
+        write_lock(root, child.pid)
+        report = run_status(root)
+        assert report["lock_diagnostic"]["pid_alive"] is True
+        assert report["lock_diagnostic"]["ps_names_driver_script"] is False
+        assert report["run"]["selected_by"] == "greatest_recorded_driver_started_ts"
+        assert report["run"]["session_id"] == "20260826T093010Z"
+    finally:
+        child.terminate()
+        child.wait()
+
+
+def test_an_unreadable_journal_is_counted_apart_from_one_with_no_start(tmp_path):
+    """"Could not establish" and "the driver recorded no start" are different
+    facts. Folding the first into the second turns an unknown into an assertion
+    about the driver."""
+    root = make_durable_root(tmp_path)
+    write_journal(root, "20260826T090000Z",
+                  [{"type": "lock_self_test_failed", "ts": "2026-08-26T09:00:00Z"}])
+    bad = root / "runs" / "20260826T093010Z"
+    bad.mkdir(parents=True)
+    (bad / "driver_journal.jsonl").symlink_to(root / "runs" / "nowhere.jsonl")
+    report = run_status(root)
+    assert report["journals_found"] == 2
+    assert report["journals_without_recorded_start"] == 1
+    assert report["journals_unreadable"] == 1
+    assert report["run"] is None
+    assert "unreadable" in report["run_unavailable_reason"]
+
+
+def test_a_symlinked_fragment_dir_is_refused_not_followed(tmp_path):
+    """A symlink can point at another tree, and counting through it would report
+    an artifact that is not this durable root's population."""
+    root = make_durable_root(tmp_path)
+    elsewhere = tmp_path / "someone_elses_book"
+    elsewhere.mkdir()
+    (elsewhere / "seg01.json").write_text(json.dumps({"status": "converged"}), encoding="utf-8")
+    (root / "runs" / "ledger.d").symlink_to(elsewhere)
+    report = run_status(root)
+    assert report["progress"] is None
+    assert "symlink" in report["progress_unavailable_reason"]
+
+
+def test_a_symlinked_fragment_is_refused_not_followed(tmp_path):
+    root = make_durable_root(tmp_path)
+    frag_dir = write_fragments(root, {"seg01": "converged"})
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps({"status": "converged"}), encoding="utf-8")
+    (frag_dir / "seg02.json").symlink_to(elsewhere)
+    progress = run_status(root)["progress"]
+    assert progress["recorded_fragment_status_counts"]["converged"] == 1
+    assert progress["unreadable_fragments"] == 1
+
+
+def test_a_fifo_fragment_does_not_hang_the_read(tmp_path):
+    """Safe to run at any moment is the property that matters most, and a FIFO
+    named like a fragment would block the read forever. `is_file()` is already
+    False for one, so it never gets opened."""
+    root = make_durable_root(tmp_path)
+    frag_dir = write_fragments(root, {"seg01": "converged"})
+    os.mkfifo(frag_dir / "seg02.json")
+    progress = run_status(root)["progress"]
+    assert progress["recorded_fragment_status_counts"]["converged"] == 1
+    assert progress["unreadable_fragments"] == 1
+
+
+def test_batch_progress_is_scoped_to_the_gate_and_differs_from_the_manifest(tmp_path):
+    """The census an operator watching a live batch actually wants. A run
+    launched for two fresh units in a book where two already converged is 0/2,
+    while the manifest census correctly reads 2/4 -- the same durable root, two
+    different populations, and only one of them answers "how far along is THIS
+    batch"."""
+    root = make_durable_root(tmp_path, segs=("seg01", "seg02", "seg03", "seg04"))
+    write_fragments(root, {"seg01": "converged", "seg02": "converged",
+                           "seg03": "in_progress", "seg04": "in_progress"})
+    write_journal(root, "20260826T093010Z", [
+        started(),
+        {"type": "step1_gate_passed", "segs": ["seg03", "seg04"], "ts": TS},
+    ])
+    report = run_status(root)
+    assert report["progress"]["scope"] == "manifest"
+    assert report["progress"]["recorded_fragment_status_counts"]["converged"] == 2
+    batch = report["run"]["batch_progress"]
+    assert batch["dispatched"] == 2
+    assert batch["recorded_fragment_status_counts"]["converged"] == 0
+    assert batch["recorded_fragment_status_counts"]["in_progress"] == 2
+    assert batch["dispatched_ids_without_fragment"] == 0
+
+
+def test_batch_progress_is_null_without_a_gate_entry_and_ids_never_leak(tmp_path):
+    root = make_durable_root(tmp_path)
+    write_fragments(root, {"seg01": "converged"})
+    write_journal(root, "20260826T093010Z", [started()])
+    report = run_status(root)
+    assert report["run"]["batch_progress"] is None
+    assert "_gate_segs" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("pid", [0, -1, True, 2 ** 70, "4242", None])
+def test_a_lock_pid_that_cannot_be_probed_is_a_reason_not_a_traceback(tmp_path, pid):
+    """An out-of-range integer raises OverflowError from os.kill -- not an
+    OSError -- and uncaught it would print a traceback and NO JSON line, which
+    is the one output contract every caller depends on."""
+    root = make_durable_root(tmp_path)
+    write_lock(root, None, raw=json.dumps({"pid": pid, "started_at": TS}))
+    report = run_status(root)
+    assert report["lock_diagnostic"] is None
+    assert "positive integer" in report["lock_diagnostic_unavailable_reason"]
