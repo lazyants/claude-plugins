@@ -283,12 +283,90 @@ def _window_label(minutes: int) -> str:
     return WINDOW_LABELS.get(minutes, f"{minutes}min")
 
 
+VOUCHER_NAME = "reset vouchers"
+CREDITS_NAME = "credits"
+BAR_CELLS = 10
+
+# ANSI, applied to finished cells only. Width arithmetic runs on the PLAIN strings -- an escape
+# sequence inside a `:<12` would pad the visible text by however many bytes the escape happens to
+# be, which is the classic way a coloured table goes crooked exactly when colour is on.
+DIM, BOLD, RED, YELLOW, GREEN, CYAN = "2", "1", "31", "33", "32", "36"
+
+
+class Paint:
+    """Colour, or the identity function. One object so no call site has to test a flag."""
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+    def __call__(self, text: str, code: str) -> str:
+        return f"\x1b[{code}m{text}\x1b[0m" if self.enabled else text
+
+
+def _use_colour(choice: str, stream) -> bool:
+    """`never` off, `always` on, `auto` = a terminal with NO_COLOR unset.
+
+    `auto` is the default and the only branch with any logic in it: piping the report -- into a
+    file, a pager, or this plugin's own test harness -- must yield plain text, or every consumer
+    that compares output would be comparing escape sequences.
+    """
+    if choice == "never":
+        return False
+    if choice == "always":
+        return True
+    return bool(getattr(stream, "isatty", lambda: False)()) and not os.environ.get("NO_COLOR")
+
+
+def _bar(percent: float) -> str:
+    """A ten-cell gauge. Derived from the same float the number is, never a second measurement."""
+    filled = min(BAR_CELLS, max(0, math.floor(percent / (100 / BAR_CELLS) + 0.5)))
+    return "\u2588" * filled + "\u2591" * (BAR_CELLS - filled)
+
+
+def _hue(percent: float) -> str:
+    return RED if percent >= 80 else YELLOW if percent >= 50 else GREEN
+
+
+def _source(freshness: str) -> str:
+    """Shorten a row's provenance to the part that varies.
+
+    The producers spell freshness out per record -- `live 26 Aug 19:43 CEST`, `cache 2d04h old`.
+    In a table every live row repeats the same stamp, which is already in the header, so the
+    column becomes a wall of identical text and the reader stops reading it. What still varies
+    is WHICH source and, for a cache, how old. Nothing is dropped that the header does not say.
+    """
+    if freshness.startswith("live"):
+        return "live"
+    if freshness.startswith("cache "):
+        return freshness[len("cache "):].replace(" old", "")
+    return freshness
+
+
+def _relative(when: datetime.datetime, now: datetime.datetime) -> str:
+    """`in 8h`, `in 5d 21h`, `reset 3d ago`. Absolute stamps are for the header and the vouchers.
+
+    A window's usefulness is how long is LEFT, and a reader should not have to subtract dates to
+    get it. The absolute time survives where it is the fact itself -- a voucher's expiry date.
+    """
+    delta = when - now
+    seconds = int(abs(delta.total_seconds()))
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    if days:
+        span = f"{days}d {hours:02d}h"
+    elif hours:
+        span = f"{hours}h"
+    else:
+        span = f"{max(1, rest // 60)}m"
+    return f"in {span}" if delta.total_seconds() > 0 else f"reset {span} ago"
+
+
 class Record:
     """One pool observation, one reason there is no current value for it, or one info line."""
 
     def __init__(self, name: str, state: str, *, percent=None, resets=None,
                  freshness: str = "", diagnostic: str = "", note: str = "",
-                 info: bool = False) -> None:
+                 info: bool = False, expires=None, title: str = "") -> None:
         if state not in TERMINAL_STATES:
             raise Malformed("internal-error")
         self.name = name
@@ -302,27 +380,24 @@ class Record:
         self.freshness = freshness
         self.diagnostic = diagnostic
         self.note = note
+        # Voucher detail. Both are optional in the vendor's payload and neither may ever gap a
+        # run: a home that reports a count and nothing else still renders, just with less to say.
+        self.expires = expires
+        self.title = title
 
-    def render(self) -> str:
-        head = f"    {self.name:<30}"
+    # Row classes the table lays out. Deliberately derived HERE, beside the fields they read,
+    # rather than re-derived by the renderer from a pile of `if`s -- there is one definition of
+    # what "stale" means and the renderer cannot disagree with it.
+    def kind(self) -> str:
         if self.info:
-            body = self.freshness
-        elif self.state == REPORTED and self.resets is not None and self.percent is not None:
-            pct = f"{self.percent:.1f}".rjust(5)
-            body = f"{pct}%  resets {_local(self.resets):<21}  {self.freshness}"
-        elif self.diagnostic and self.percent is not None:
-            reset = f", reset {_local(self.resets)}" if self.resets is not None else ""
-            body = (f"[{self.diagnostic}] previous window {self.percent:.1f}%"
-                    f"{reset}  {self.freshness}")
-        elif self.diagnostic:
-            body = f"[{self.diagnostic}]"
-        else:
-            # An inactive pool: a real percentage, no current window, and deliberately no
-            # diagnostic token -- "inactive" is a state the vendor reports, not a failure.
-            reset = f"  resets {_local(self.resets)}" if self.resets is not None else ""
-            pct = f"{self.percent:.1f}".rjust(5)
-            body = f"{pct}%{reset}  {self.freshness}"
-        return (head + body).rstrip() + (f"  -- {self.note}" if self.note else "")
+            return "voucher" if self.name == VOUCHER_NAME else "info"
+        if self.state == GAP:
+            return "gap"
+        if self.diagnostic:
+            return "stale"
+        if self.state == NO_CURRENT:
+            return "inactive"
+        return "current"
 
 
 def _window_row(*, name: str, percent: float, resets: datetime.datetime, freshness: str,
@@ -775,30 +850,46 @@ def _codex_records(home: Path) -> list[Record]:
     coupons = result.get("rateLimitResetCredits")
     if coupons is None:
         records.append(Record(
-            "reset coupons", NO_CURRENT, freshness="not reported", info=True,
+            VOUCHER_NAME, NO_CURRENT, freshness="not reported", info=True,
             note="the backend provided no reset-credit data",
         ))
     else:
         try:
             count = _nonneg_int(_obj(coupons).get("availableCount"))
         except Malformed as exc:
-            records.append(Record("reset coupons", GAP, diagnostic=exc.code))
+            records.append(Record(VOUCHER_NAME, GAP, diagnostic=exc.code))
         else:
+            # Expiry and title are read from the FIRST available credit. Both are optional in the
+            # payload and neither may gap the run: a home reporting a count and nothing else
+            # still renders, with less to say. A voucher that silently expires unnoticed is the
+            # whole reason the date is worth surfacing -- the count alone never says when.
+            expires, title = None, ""
+            for credit in (_obj(coupons).get("credits") or []):
+                if not isinstance(credit, dict) or credit.get("status") != "available":
+                    continue
+                try:
+                    expires = _from_epoch(credit.get("expiresAt"), 1)
+                except Malformed:
+                    expires = None
+                raw = credit.get("title")
+                title = _text(raw, 40) if isinstance(raw, str) else ""
+                break
             records.append(Record(
-                "reset coupons", REPORTED, freshness=str(count), info=True,
+                VOUCHER_NAME, REPORTED, freshness=str(count), info=True,
+                expires=expires, title=title,
                 note="read only; redeem one in the Codex TUI with /usage, never from here",
             ))
 
     credits = default.get("credits") if isinstance(default, dict) else None
     if credits is not None and not isinstance(credits, dict):
-        records.append(Record("credits", GAP, diagnostic="payload-malformed"))
+        records.append(Record(CREDITS_NAME, GAP, diagnostic="payload-malformed"))
     elif isinstance(credits, dict):
         try:
             if _flag(credits.get("hasCredits")):
-                records.append(Record("credits", REPORTED, info=True,
+                records.append(Record(CREDITS_NAME, REPORTED, info=True,
                                       freshness=f"{_decimal(credits.get('balance')):.2f}"))
         except Malformed as exc:
-            records.append(Record("credits", GAP, diagnostic=exc.code))
+            records.append(Record(CREDITS_NAME, GAP, diagnostic=exc.code))
     return records
 
 
@@ -897,6 +988,117 @@ def _examine(candidate: Candidate, producer) -> tuple[str, list[Record], str]:
     return NO_CURRENT, records, ""
 
 
+def _pool_cells(where: str, record: Record, now: datetime.datetime) -> tuple[str, str, str, str]:
+    """(where, pool, used, reset) as PLAIN text. Painting happens after the widths are known."""
+    used = "" if record.percent is None else f"{_bar(record.percent)} {record.percent:>5.1f}%"
+    if record.state == GAP:
+        used = f"[{record.diagnostic}]"
+        reset = ""
+    elif record.resets is None:
+        # No reset time is not one condition. A pool the vendor calls inactive and a pool whose
+        # `resetsAt` the vendor simply did not send both arrive here, and an empty cell would
+        # make them the same row. The record's own note is the only thing that separates them,
+        # so it becomes the cell rather than being dropped with the rest of the prose.
+        reset = record.note
+    else:
+        reset = _relative(record.resets, now)
+    return where, _safe_name(record.name), used, reset
+
+
+def _sorted_rows(rows: list[tuple[str, Record]]) -> list[tuple[str, Record]]:
+    """Most consumed first, and TOTAL -- no row's position may depend on discovery order.
+
+    The key stops at "most consumed"; it is deliberately not a projected-exhaustion score, which
+    would need a burn rate nobody here measures and would put an invented number in the column
+    read first. Ordering across lifecycle classes is handled by SECTIONING, not by this key:
+    a stale 99% is not more urgent than a live 40%, it is not comparable to it.
+    """
+    return sorted(rows, key=lambda item: (
+        -(item[1].percent if item[1].percent is not None else -1.0),
+        item[1].resets.timestamp() if item[1].resets is not None else float("inf"),
+        item[0], item[1].name,
+    ))
+
+
+def _render(groups: list[tuple[str, str, list[Record]]], notes: list[str],
+            now: datetime.datetime, paint: Paint) -> None:
+    """The whole report: a voucher band, one table of pools, then the classes that are not
+    current usage, each under a heading that says why they are apart."""
+    buckets: dict[str, list[tuple[str, Record]]] = {
+        "current": [], "stale": [], "inactive": [], "gap": [], "voucher": [], "info": []}
+    for _group, where, records in groups:
+        for record in records:
+            buckets[record.kind()].append((where, record))
+
+    print(f"\n{paint('code-limits', BOLD)}  {paint(_local(now), DIM)}\n")
+
+    if buckets["voucher"] or buckets["info"]:
+        print(f"  {paint('RESET VOUCHERS', CYAN + ';' + BOLD)}   "
+              + paint("a one-shot rate-limit reset -- redeem in the Codex TUI with /usage", DIM))
+        home_width = max([len(_safe_name(w)) for w, _ in buckets["voucher"]]
+                         + [len(_safe_name(r.name)) for _, r in buckets["info"]] + [8]) + 2
+        for where, record in buckets["voucher"]:
+            if record.state == GAP:
+                body = paint(f"[{record.diagnostic}]", RED)
+            elif record.state == NO_CURRENT:
+                body = paint(record.freshness, DIM)
+            elif record.freshness == "0":
+                body = paint("none", DIM)
+            else:
+                body = paint(record.freshness, BOLD + ";" + GREEN)
+                if record.title:
+                    body += f"  {record.title}"
+                if record.expires is not None:
+                    body += ("  " + paint(f"expires {_local(record.expires)}", DIM)
+                             + "  " + paint(_relative(record.expires, now), YELLOW))
+            print(f"    {_safe_name(where):<{home_width}}{body}")
+        for where, record in buckets["info"]:
+            value = (paint(f"[{record.diagnostic}]", RED) if record.state == GAP
+                     else paint(record.freshness, BOLD))
+            print(f"    {_safe_name(record.name):<{home_width}}"
+                  f"{paint(_safe_name(where), DIM)} {value}")
+        print()
+
+    def table(rows: list[tuple[str, Record]], heading: str = "") -> None:
+        if not rows:
+            return
+        cells = [_pool_cells(where, record, now) for where, record in rows]
+        widths = [max(len(cell[i]) for cell in cells) + 2 for i in range(4)]
+        if heading:
+            print(paint(f"  {heading}", DIM))
+        else:
+            head = (f"  {'WHERE':<{widths[0]}}{'POOL':<{widths[1]}}"
+                    f"{'USED':<{widths[2]}}{'RESET':<{widths[3]}}SOURCE")
+            print(paint(head, DIM))
+            print(paint("  " + "\u2500" * (sum(widths) + 6), DIM))
+        for (where, pool, used, reset), (_w, record) in zip(cells, rows):
+            body = used
+            if record.percent is not None and record.state != GAP:
+                gauge, number = used.split(" ", 1)
+                body = paint(gauge, _hue(record.percent)) + " " + paint(number,
+                                                                       _hue(record.percent))
+            elif record.state == GAP:
+                body = paint(used, RED)
+            pad = " " * (widths[2] - len(used))
+            line = (f"  {where:<{widths[0]}}{pool:<{widths[1]}}{body}{pad}"
+                    f"{reset:<{widths[3]}}{paint(_source(record.freshness), DIM)}")
+            print(paint(line, DIM) if heading else line)
+        print()
+
+    table(_sorted_rows(buckets["current"]))
+    table(_sorted_rows(buckets["stale"]),
+          "stale -- the % is the PREVIOUS window, not current  [stale-after-reset]")
+    table(_sorted_rows(buckets["inactive"]), "inactive -- no current window")
+    table(_sorted_rows(buckets["gap"]), "NOT CHECKED")
+
+    for note in notes:
+        print(paint(f"  {note}", DIM))
+    print(paint("  --live fetches current Claude numbers instead of the on-disk cache", DIM))
+    print(paint("  reading Codex starts its app-server, which migrates that home's own state"
+                " databases", DIM))
+    print(paint("  exactly as any codex invocation does. Nothing here is ever redeemed.", DIM))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Report Claude Code and Codex usage limits.")
     parser.add_argument("--live", action="store_true",
@@ -905,7 +1107,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="examine this Claude profile (repeatable; replaces discovery)")
     parser.add_argument("--codex-home", action="append", default=[], metavar="PATH",
                         help="examine this Codex home (repeatable; replaces discovery)")
+    parser.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                        help="colourise the report (default: auto -- a terminal, NO_COLOR unset)")
     args = parser.parse_args(argv)
+    paint = Paint(_use_colour(args.color, sys.stdout))
 
     # Neither vendor labels nor profile directory names are under this script's control, and an
     # unencodable character in either raises out of print() -- past every per-candidate handler,
@@ -925,43 +1130,39 @@ def main(argv: list[str] | None = None) -> int:
              or _discover(home, ".codex", ("auth.json", "config.toml")))
 
     warnings: list[str] = []
-    print(f"code-limits  {_local(now)}")
-    print("  Claude rows come from an on-disk cache unless --live; Codex rows are always live.")
-    print("  Reading Codex limits starts its app-server, which touches that home's own state")
-    print("  databases exactly as any codex invocation does. Nothing here is ever redeemed.")
+    notes: list[str] = []
+    groups: list[tuple[str, str, list[Record]]] = []
 
     # Only the cached reader takes the run's clock: it dates rows from a file that was
     # written before the run. The live readers time-stamp their own observation, because
     # a keychain prompt or a stalled app-server can put minutes between run start and the
     # answer they are describing.
-    claude_producer = _claude_live if args.live else (lambda p: _claude_cached(p, now))
+    claude_producer = _claude_live if args.live else (lambda profile: _claude_cached(profile, now))
     for group, candidates, producer in (
         ("Claude Code", claude, claude_producer),
         ("Codex", codex, _codex_records),
     ):
-        print(f"\n{group}")
         if not candidates:
             warnings.append(f"{group}: no candidates found -- NOT checked")
-            print("    no candidates found -- NOT checked")
+            notes.append(f"{group}: no candidates found -- NOT checked")
             continue
         for candidate in candidates:
             state, records, code = _examine(candidate, producer)
-            print(f"  {_safe_name(candidate.path.name)}")
-            for record in records:
-                print(record.render())
+            where = _safe_name(candidate.path.name)
             if code:
-                print(f"    [{code}]")
+                # A candidate-level outcome has no pool to hang a row on, so it becomes a note.
+                # It still decides the exit status below, exactly as before.
+                notes.append(f"{where} [{code}]")
+            groups.append((group, where, records))
             if state == GAP:
-                # A candidate-level code, or -- when the gap came from individual records -- the
-                # rows themselves. The old fallback printed a fixed token that no record had
-                # necessarily reported, which is a warning inventing its own reason.
                 detail = code or ", ".join(f"{r.name} [{r.diagnostic}]"
                                            for r in records if r.state == GAP)
-                warnings.append(
-                    f"{group} {_safe_name(candidate.path.name)}: NOT checked -- {detail}")
+                warnings.append(f"{group} {where}: NOT checked -- {detail}")
+
+    _render(groups, notes, now, paint)
 
     if warnings:
-        print("\nwarnings")
+        print(paint("\nwarnings", RED))
         for warning in warnings:
             print(f"  {warning}")
         return 1
