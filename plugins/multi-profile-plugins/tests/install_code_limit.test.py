@@ -216,6 +216,26 @@ def install(root: Path, source: Path, bin_dir: Path, *, force: bool = False,
                           env=sandbox_env(root) if env is None else env)
 
 
+def coupon_field(line: str) -> str:
+    """The value the `reset coupons` row reports, without its trailing explanatory note."""
+    return line.split("reset coupons", 1)[1].strip().split("  ", 1)[0].strip()
+
+
+def unrunnable(path: Path, env: dict) -> bool:
+    """Whether the file at `path` cannot be run as a command AT ALL.
+
+    Not a return code: a shebang naming `/bin/sh\r`, or a file without execute bits, fails inside
+    `execve` and surfaces as an OSError in the PARENT -- there is no child to report a status. A
+    check written as `returncode != 0` never reaches its assertion on either.
+    """
+    try:
+        done = subprocess.run([str(path)], capture_output=True, text=True, timeout=60,
+                              env=env, cwd="/")
+    except OSError:
+        return True
+    return done.returncode != 0
+
+
 def run_command(path: Path, args: list[str], env: dict, cwd: Any = "/",
                 timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run([str(path)] + args, capture_output=True, text=True,
@@ -325,8 +345,11 @@ with tempfile.TemporaryDirectory() as tmp:
     zero = run_command(shim, ["--claude-profile", str(profile), "--codex-home", str(home)],
                        zero_env, cwd="/")
     voucher = [ln for ln in zero.stdout.splitlines() if "reset coupons" in ln]
-    check("15 availableCount 0 renders as 0, not as an absence",
-          len(voucher) == 1 and "0" in voucher[0], str(voucher))
+    # The FIELD, not a substring: `"0" in line` is also true of a row reading 10, and a
+    # falsy-boundary mutant rendering `count or 10` would sail through that. The row carries a
+    # trailing note after a double space, so the field is what precedes it.
+    check("15 availableCount 0 renders as exactly 0, not as an absence",
+          len(voucher) == 1 and coupon_field(voucher[0]) == "0", str(voucher))
     check("15 a zero count is still a clean run", zero.returncode == 0,
           f"rc={zero.returncode}\n{zero.stdout}")
     gone_env = sandbox_env(root)
@@ -334,8 +357,8 @@ with tempfile.TemporaryDirectory() as tmp:
     gone = run_command(shim, ["--claude-profile", str(profile), "--codex-home", str(home)],
                        gone_env, cwd="/")
     absent = [ln for ln in gone.stdout.splitlines() if "reset coupons" in ln]
-    check("15 an omitted field renders as not reported",
-          len(absent) == 1 and "not reported" in absent[0], str(absent))
+    check("15 an omitted field renders as exactly `not reported`",
+          len(absent) == 1 and coupon_field(absent[0]) == "not reported", str(absent))
     check("15 an omitted field is still a clean run", gone.returncode == 0,
           f"rc={gone.returncode}\n{gone.stdout}")
 
@@ -519,6 +542,118 @@ with tempfile.TemporaryDirectory() as tmp:
     fourth = install(root, source, bin_dir)
     check("16 a fourth line makes the file foreign", fourth.returncode == 1, fourth.stdout)
 
+# 18 -- a crafted file that KEEPS the exec prefix and suffix but smuggles a second command.
+# The predicate this kills accepted `'.+'` between them, so `'x' ; echo mine # '` matched: a
+# quoted region, another command, and a comment that eats the closing quote.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    source = make_source(root, "stable", "skills", "code-limits")
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    crafted = (f"#!/bin/sh\n{MARKER}\n"
+               "exec python3 'x' ; echo foreign-owned # ' \"$@\"\n")
+    planted = bin_dir / "code-limit"
+    planted.write_text(crafted, encoding="utf-8")
+    planted.chmod(0o755)
+    done = install(root, source, bin_dir)
+    check("18 a crafted exec line is NOT adopted", done.returncode == 1, done.stdout)
+    check("18 its bytes are untouched", planted.read_text(encoding="utf-8") == crafted)
+    check("18 it is reported as not ours", "not this plugin's shim" in done.stdout, done.stdout)
+
+# 19 -- a genuine shim mangled to CRLF. `read_text` translates newlines, so it compares EQUAL to
+# the real thing while `#!/bin/sh\r` makes the command exit 127.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    source = make_source(root, "stable", "skills", "code-limits")
+    bin_dir = root / "bin"
+    install(root, source, bin_dir)
+    shim = bin_dir / "code-limit"
+    shim.write_bytes(expected_shim(report_of(source)).replace("\n", "\r\n").encode("utf-8"))
+    check("19 the CRLF copy really is unrunnable", unrunnable(shim, sandbox_env(root)))
+    done = install(root, source, bin_dir)
+    check("19 a CRLF copy is not reported as already installed",
+          "already installed" not in done.stdout, done.stdout)
+    check("19 it is treated as foreign", done.returncode == 1, done.stdout)
+    forced = install(root, source, bin_dir, force=True)
+    check("19 --force repairs it", forced.returncode == 0, forced.stdout + forced.stderr)
+    check("19 the bytes are the shim's again",
+          shim.read_bytes() == expected_shim(report_of(source)).encode("utf-8"))
+    fixed = run_command(shim, [], sandbox_env(root), cwd="/")
+    check("19 and it runs again", "code-limits" in fixed.stdout, fixed.stdout[:200])
+
+# 20 -- an exact shim whose execute bits were lost. Content equality is not "installed": the
+# command exits 126, and reporting success over that is the same lie as reporting it over a
+# missing file.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    source = make_source(root, "stable", "skills", "code-limits")
+    bin_dir = root / "bin"
+    install(root, source, bin_dir)
+    shim = bin_dir / "code-limit"
+    shim.chmod(0o644)
+    check("20 a mode-644 shim really is unrunnable", unrunnable(shim, sandbox_env(root)))
+    done = install(root, source, bin_dir)
+    check("20 the rerun does not claim it was already installed",
+          "already installed" not in done.stdout, done.stdout)
+    check("20 the rerun exits 0", done.returncode == 0, done.stdout + done.stderr)
+    check("20 the mode is restored", stat.S_IMODE(shim.stat().st_mode) == 0o755,
+          oct(stat.S_IMODE(shim.stat().st_mode)))
+    alive = run_command(shim, [], sandbox_env(root), cwd="/")
+    check("20 and the command runs again", "code-limits" in alive.stdout, alive.stdout[:200])
+
+# 21 -- a managed name that cannot be written. Without a handler the OSError ends the run past
+# every remaining name as a traceback, and the staging file it leaves behind is invisible.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    source = make_source(root, "stable", "skills", "code-limits")
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "code-limit").mkdir()
+    done = install(root, source, bin_dir, force=True)
+    check("21 an unwritable managed name exits 1", done.returncode == 1,
+          done.stdout + done.stderr)
+    check("21 it does not traceback", "Traceback" not in done.stderr, done.stderr[:300])
+    check("21 the warning names it", "NOT installed" in done.stdout, done.stdout)
+    staged = [q.name for q in bin_dir.iterdir() if q.name.startswith(".code-limit.")]
+    check("21 no staging file is left behind", staged == [], str(staged))
+
+# 22 -- the staging primitive itself, imported rather than driven, because the window it closes
+# cannot be produced from outside: `place` only reaches the no-clobber path when the name did NOT
+# exist a moment earlier. So this pins the primitive's contract and says plainly that the race
+# between the check and the link is NOT covered by any test here.
+sys.path.insert(0, str(SCRIPTS))
+import install_code_limit as installer                                      # noqa: E402
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    occupied = root / "taken"
+    occupied.write_text("someone else's", encoding="utf-8")
+    refused = False
+    try:
+        installer.write_atomically(occupied, b"ours", clobber=False)
+    except FileExistsError:
+        refused = True
+    check("22 clobber=False refuses an existing name", refused)
+    check("22 and leaves its bytes alone",
+          occupied.read_text(encoding="utf-8") == "someone else's")
+    check("22 no staging file survives the refusal",
+          [q.name for q in root.iterdir() if q.name.startswith(".taken.")] == [])
+    installer.write_atomically(occupied, b"ours", clobber=True)
+    check("22 clobber=True does replace it", occupied.read_bytes() == b"ours")
+    check("22 and cleans up after itself",
+          [q.name for q in root.iterdir() if q.name.startswith(".taken.")] == [])
+
+# 23 -- the shim grammar, at the level the predicate reasons about.
+check("23 a canonical quote round-trips",
+      installer.unquote_canonical(installer.posix_quote("it's /a b")) == "it's /a b")
+for evil in ("'x' ; echo mine # '", "'a'b'", "no quotes", "'", ""):
+    check(f"23 {evil!r} is not canonical", installer.unquote_canonical(evil) is None)
+check("23 a fourth line is not a shim",
+      installer.shim_target((expected_shim(REPORT) + "echo x\n").encode("utf-8")) is None)
+check("23 CRLF bytes are not a shim",
+      installer.shim_target(expected_shim(REPORT).replace("\n", "\r\n").encode("utf-8")) is None)
+check("23 the real thing is a shim",
+      installer.shim_target(expected_shim(REPORT).encode("utf-8")) == str(REPORT))
+
 # 17 -- the installer refuses a source whose report is missing, rather than shimming onto nothing.
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
@@ -538,7 +673,7 @@ if failures:
 
 # A case that raises before its checks run, or a deleted fixture block, otherwise subtracts
 # silently: the remaining cases pass, the run exits 0, and that reads exactly like full coverage.
-MIN_CHECKS = 80
+MIN_CHECKS = 115
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

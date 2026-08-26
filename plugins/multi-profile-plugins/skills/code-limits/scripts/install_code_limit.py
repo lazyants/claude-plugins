@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -50,12 +49,8 @@ PRIMARY = "code-limit"
 LEGACY = ("claude-limit", "claude-limits")
 MARKER = "# multi-profile-plugins code-limits shim -- regenerate with install_code_limit.py"
 
-# Anchored over the WHOLE file, not a marker substring. A file that merely quotes the marker in a
-# comment is somebody else's script, and treating it as ours would replace a user-owned executable
-# with no confirmation -- the one thing the install step must never do. `.` does not match a
-# newline here, so this admits exactly three lines and nothing longer.
-SHIM_PATTERN = re.compile(
-    r"#!/bin/sh\n" + re.escape(MARKER) + r"\nexec python3 '.+' " + re.escape('"$@"') + r"\n")
+EXEC_PREFIX = "exec python3 "
+EXEC_SUFFIX = ' "$@"'
 
 
 def posix_quote(text: str) -> str:
@@ -66,6 +61,45 @@ def posix_quote(text: str) -> str:
     reopening quote is the POSIX way to carry a quote through single quotes.
     """
     return "'" + text.replace("'", "'\"'\"'") + "'"
+
+
+def unquote_canonical(text: str) -> str | None:
+    """Reverse `posix_quote`, and ONLY for output `posix_quote` could have produced.
+
+    This is where an "is it one of ours" test has to be exact rather than plausible. A pattern
+    like `'.+'` accepts `'x' ; echo mine # '` -- a quoted region, a second command, and a comment
+    that swallows the closing quote -- so an unrelated executable planted at a managed name is
+    adopted and rewritten with no confirmation. Canonical output has one property that string
+    cannot fake: outside the `'"'"'` escape, the interior holds no quote at all.
+    """
+    if len(text) < 2 or not text.startswith("'") or not text.endswith("'"):
+        return None
+    inner = text[1:-1]
+    if "'" in inner.replace("'\"'\"'", "\x00"):
+        return None
+    return inner.replace("'\"'\"'", "'")
+
+
+def shim_target(content: bytes) -> str | None:
+    """The path a shim execs, or None when `content` is not a shim this installer wrote.
+
+    Takes BYTES. `Path.read_text` translates newlines, so a CRLF-mangled copy of a genuine shim
+    compares equal to the real thing while its `#!/bin/sh\r` line makes the command exit 127 --
+    an installer reporting success over a command that cannot run.
+    """
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    lines = text.split("\n")
+    # Exactly three lines and a trailing newline: `split` yields a final empty element for the
+    # trailing newline, and any fourth line of somebody else's making shows up here.
+    if len(lines) != 4 or lines[3] != "" or lines[0] != "#!/bin/sh" or lines[1] != MARKER:
+        return None
+    body = lines[2]
+    if not body.startswith(EXEC_PREFIX) or not body.endswith(EXEC_SUFFIX):
+        return None
+    return unquote_canonical(body[len(EXEC_PREFIX):len(body) - len(EXEC_SUFFIX)])
 
 
 def shim_text(report: Path) -> str:
@@ -98,47 +132,74 @@ def is_ours(path: Path) -> bool:
     if not stat.S_ISREG(info.st_mode):
         return False
     try:
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        content = path.read_bytes()
+    except OSError:
         return False
-    return SHIM_PATTERN.fullmatch(content) is not None
+    return shim_target(content) is not None
 
 
-def write_atomically(dest: Path, text: str) -> None:
-    """Write the shim beside `dest`, then move it into place with one `os.replace`.
+def write_atomically(dest: Path, data: bytes, *, clobber: bool) -> None:
+    """Stage the shim beside `dest`, then put it in place in one step.
 
-    Deliberately NO unlink first. `rename(2)` replaces the destination's own directory entry and
-    never writes through a symlink to its target, so the previous entry survives intact until the
-    replacement is complete -- while an unlink-then-write leaves a window with neither.
+    Deliberately NO unlink first. Both `rename(2)` and `link(2)` act on the destination's own
+    directory entry and never write through a symlink to its target, so the previous entry
+    survives intact until the replacement is complete -- while an unlink-then-write leaves a
+    window with neither.
+
+    `clobber=False` uses `link(2)`, which FAILS when the name already exists. That closes the gap
+    between deciding a name is free and taking it: without it, an entry that appears in between
+    is destroyed by a run that never decided to replace anything. Replacing something this run
+    DID classify -- a shim of ours, or anything at all under `--force` -- stays a plain rename;
+    re-checking there would only narrow a window, never close it, and narrowing a window is the
+    kind of machinery that reads as a guarantee without being one.
     """
     handle, temporary = tempfile.mkstemp(dir=str(dest.parent), prefix=f".{dest.name}.")
     try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(text)
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(data)
         os.chmod(temporary, 0o755)
-        os.replace(temporary, dest)
+        if clobber:
+            os.replace(temporary, dest)
+        else:
+            os.link(temporary, dest)
     except BaseException:
         try:
             os.unlink(temporary)
         except OSError:
             pass
         raise
+    if not clobber:
+        # The link succeeded, so the install is done; a failure to tidy the staging name must not
+        # undo it or be reported as a failed install.
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
 
 
 def place(dest: Path, text: str, force: bool) -> str:
     """Install one managed name. Returns the action, and `foreign` when nothing was written."""
-    if os.path.lexists(dest):
-        if is_ours(dest):
-            if dest.read_text(encoding="utf-8") == text:
-                return "already installed"
-            action = "refreshed"
-        elif force:
-            action = "replaced"
-        else:
+    data = text.encode("utf-8")
+    if not os.path.lexists(dest):
+        try:
+            write_atomically(dest, data, clobber=False)
+        except FileExistsError:
+            # Something took the name between the check and the link. It was never classified,
+            # so it is exactly the user-owned executable this must not overwrite.
             return "foreign"
+        return "created"
+    if is_ours(dest):
+        # Content alone is not "installed": a shim that lost its execute bits is a command that
+        # exits 126, and reporting success over that is the same lie as reporting it over a
+        # missing file. Rewriting restores the mode as well as the bytes.
+        if dest.read_bytes() == data and stat.S_IMODE(dest.stat().st_mode) == 0o755:
+            return "already installed"
+        action = "refreshed"
+    elif force:
+        action = "replaced"
     else:
-        action = "created"
-    write_atomically(dest, text)
+        return "foreign"
+    write_atomically(dest, data, clobber=True)
     return action
 
 
@@ -205,9 +266,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"report:  {report}")
     print(f"bin dir: {bin_dir}")
     foreign: list[Path] = []
+    broken: list[str] = []
     for name in managed:
         dest = bin_dir / name
-        action = place(dest, text, args.force)
+        try:
+            action = place(dest, text, args.force)
+        except OSError as exc:
+            # A name that cannot be written -- a directory sitting there, a read-only bin dir --
+            # is reported as the gap it is. Letting it out as a traceback would end the run past
+            # every remaining name with no warning naming what did not happen.
+            broken.append(f"{dest}: {exc.strerror or exc}")
+            print(f"  {name}: FAILED -- {exc.strerror or exc}")
+            continue
         if action == "foreign":
             foreign.append(dest)
             print(f"  {name}: left alone -- not this plugin's shim")
@@ -221,11 +291,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"note: {bin_dir} is not on PATH. Add it, e.g.:\n"
               f"  export PATH={posix_quote(str(bin_dir))}:$PATH")
 
-    if foreign:
+    if foreign or broken:
         print("\nwarnings")
         for dest in foreign:
             print(f"  {dest} is not this plugin's shim and was NOT replaced -- "
                   "re-run with --force to replace it, or remove it first")
+        for failure in broken:
+            print(f"  {failure} -- NOT installed")
         return 1
     return 0
 

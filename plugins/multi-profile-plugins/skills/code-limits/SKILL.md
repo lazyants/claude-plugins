@@ -176,11 +176,19 @@ because it cannot bind what your shell will resolve later.
 
 **Nothing you own is overwritten silently.** `code-limit`, `claude-limit` and `claude-limits` are
 names that may already belong to something else. An entry counts as this plugin's only when it is
-a regular file whose whole content is exactly the shim the installer generates -- a symlink never
-counts, whatever it points at, and neither does a file that merely quotes the marker comment.
-Anything else is left untouched, named in a warning, and the run exits 1; `--force` replaces it.
-The replacement is one `os.replace`, which swaps the name's own directory entry rather than
-writing through a symlink to whatever it targets.
+a regular file whose bytes are exactly the shim the installer generates: read as bytes, matched
+line by line, with the quoted path required to be in the exact form the installer emits. A symlink
+never counts, whatever it points at; neither does a file quoting the marker in a comment, nor one
+that keeps the `exec python3 ... "$@"` shape around a second command, nor a copy of a real shim
+whose newlines became CRLF -- that last one compares equal as text while its `#!/bin/sh` line is
+no longer runnable. Anything else is left untouched, named in a warning, and the run exits 1;
+`--force` replaces it.
+
+Taking a name that was free uses `link`, which fails rather than overwriting if something claimed
+it in between; replacing an entry this run has classified uses `replace`. Both act on the name's
+own directory entry, so neither writes through a symlink to whatever it targets. A shim that still
+has the right bytes but lost its execute bits is rewritten rather than reported as already
+installed -- a command that exits 126 is not an installed command.
 
 **Legacy `claude-limit` / `claude-limits`.** The installer manages those two names when they
 already exist in the chosen directory -- it never manufactures them for someone who never had
