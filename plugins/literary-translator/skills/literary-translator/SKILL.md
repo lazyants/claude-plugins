@@ -3059,12 +3059,12 @@ rendered prompt out as `needs_fix` and truncates the template before every
 top-level preflight, so no audit call site exists on this route. Say what
 that check actually is, because "the fix turn is unaudited" understates it:
 it is a COPY-FIDELITY comparison of every file Step 0a copied into the
-durable root against the plugin bytes it came from — 47 scripts, the three
-workflow templates, 24 schemas and the 6 language files, 80 artifacts — run
+durable root against the plugin bytes it came from — 48 scripts, the three
+workflow templates, 24 schemas and the 6 language files, 81 artifacts — run
 after every dispatched fix call on the fallback. What the default path has
 in its place is the #396 rule below: `scaffold_setup.py --verify` before
-each driver launch, which compares the two BUNDLES — 20 scripts plus
-`mass-translate-wf.template.js` and `glossary-pass-wf.template.js`, 22
+each driver launch, which compares the two BUNDLES — 21 scripts plus
+`mass-translate-wf.template.js` and `glossary-pass-wf.template.js`, 23
 members. So 58 copied artifacts have no byte comparison on this path,
 including every durable schema, every language preset,
 `skeptic-pass-wf.template.js`, and the W7/W8 entry points `final_audit.py`
@@ -3397,11 +3397,52 @@ CONVERGED — the completeness half is satisfied by whatever fragment happens
 to exist, so a `needs_fix` or `failed` id in the list makes an unfinished
 batch read as verified.
 
-**When the finding is WRONG (#461) — rejecting a verdict instead of
-applying it.** Since #532 the fix turn refuses a finding it cannot substantiate
-and leaves the text alone — but a refusal is a REPORT, not a record: it changes
-no file, and this script remains the only way to say durably that a verdict does
-not bind. A
+**When ONE finding of several was refused (#764) — recording the refusal.**
+Since #532 the fix turn refuses a finding it cannot substantiate and leaves the
+text alone, and it reports that refusal in prose above its `FIXED` line. Record
+each such refusal before you move on. Not bookkeeping: the turn's only durable
+output is the draft, so a draft where four of five findings were applied and the
+fifth refused is byte-for-byte identical to one where the fifth was **missed**.
+The next round's reviewer re-raises it, and the next round's fix agent — which
+since #541 sees the previous round's verdict but never its disposition — reads
+the gap as *dropped* and applies it. Measured on a live book: a conventional
+biblical patronymic, correctly refused at r4, split into two `<person>` tags at
+r5 against a standing project ruling, minting an index entry for a referent the
+book never mentions. Both forms are well-formed, so every gate passed.
+
+Two invocations, the read before the write, exactly as below:
+
+```
+# 1. The read mode -- a PURE READ (writes nothing) that prints the stored
+#    review's dispatch_token and round label plus every finding's index, loc
+#    and issue digest, all from ONE read.
+python3 {durable_root}/scripts/refuse_finding.py SEG --print-finding-digests \
+    --durable-root {durable_root}
+
+# 2. The record. --finding-index selects (an INDEX, not a loc: one block
+#    routinely carries several findings, so a loc would select the wrong one);
+#    every --expect-* value is copied VERBATIM from step 1 and is the
+#    attestation that a human read that exact finding.
+python3 {durable_root}/scripts/refuse_finding.py SEG --finding-index N \
+    --reason "the fix turn's own ground for refusing it" --round-label LABEL \
+    --expect-token TOK --expect-loc LOC --expect-issue-digest HEX64 \
+    --durable-root {durable_root} --plugin-root {plugin_root}
+```
+
+The record lands at `segments/<seg>.findings_refused.json` and **releases
+nothing**: no gate reads it, `derive_next_action()` never opens it, the round
+still costs what it cost, and a re-raised finding stays entirely legitimate.
+The one thing it buys is that the NEXT fix turn's prompt can show the refusal
+and its reason, so an unapplied finding reads as considered rather than
+overlooked. Re-running the same command is a no-op success, not a second
+record. It is deliberately NOT given to the next REVIEWER — see `#529`: the
+artifact under review is never the authority it is reviewed against, and a
+fixer-authored "do not raise this" list would suppress valid findings.
+
+**When the WHOLE VERDICT is wrong (#461) — rejecting it instead of
+applying it.** A refusal recorded above is still a report about ONE finding; it
+changes no routing, and `reject_review.py` remains the only way to say durably
+that a verdict does not bind. A
 review can be schema-valid, carry an authentic `loc`, pass the
 `fabricated_loc` gate, and still be FALSE about the source — verified on a
 live segment whose sole finding claimed a Hebrew string that occurs zero

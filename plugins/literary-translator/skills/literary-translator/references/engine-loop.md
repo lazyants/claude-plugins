@@ -570,6 +570,24 @@ was written against, over a reviewer-asserted `coverage_ok`, terminates the unit
 as converged on the operator's own `reason` (#527). `reject_review.py` is the
 sole writer and `derive_next_action()` only ever reads it.
 
+**A per-finding refusal now has a durable record too, and it RELEASES NOTHING
+(#764).** Keep the two apart, because the second one looks like the first and
+does none of its work. `refuse_finding.py` writes
+`segments/<seg>.findings_refused.json`, one entry per finding a fix turn
+considered and declined on the merits. No gate reads it, `derive_next_action()`
+never opens it, the round still costs what it cost, and it can neither advance a
+round nor converge a unit — everything above about releasing a live-lock remains
+`reject_review.py`'s and only `reject_review.py`'s. What it closes is a
+different hole in the same loop: a refusal changes no file, so one round later
+it is byte-for-byte indistinguishable from an oversight, and the next fix agent
+reads the unapplied finding as dropped and applies it. That record is read by
+`fixPrompt` at round ≥ 2, as CONTEXT that explains the gap — never as authority,
+and deliberately never by the next REVIEWER (#529: the artifact under review is
+not the authority it is reviewed against). Note how the stale-artifact warning
+below binds it: a refusal recorded rounds ago describes a draft that may since
+have changed, which is exactly why the prompt makes the fixer re-substantiate
+rather than defer to the record.
+
 **Do NOT release it by writing a refusal marker into the draft.** `fixPrompt`
 forbids exactly that, and the reason is the one that matters here: `notes[]` is
 the translator's channel and is READ BY THE NEXT REVIEWER, so a marker there

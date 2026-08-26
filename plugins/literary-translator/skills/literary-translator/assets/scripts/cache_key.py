@@ -225,6 +225,24 @@ PLUGIN_BUNDLE_MEMBERS = (
     # already moves this hash through segment_dispatch_driver.py, so it costs
     # no reclassification beyond what that release pays anyway.
     "reject_review.py",
+    # #764. Registered on the tuple's FALSE-GREEN criterion rather than on the
+    # decision-authority one, and the distinction is worth stating because this
+    # script is emphatically NOT a decision authority: nothing in the driver
+    # reads segments/{seg}.findings_refused.json, no gate consults it, and its
+    # only consumer is fixPrompt's own text. What makes it a member anyway is
+    # that it is the SOLE PRODUCER of durable state that a prompt splices
+    # verbatim into a turn authorized to rewrite the draft, and every field it
+    # writes is admitted by a bound this script owns -- a byte cap on `reason`
+    # and on the stored `loc`, a length-bounded re-validation of the derived
+    # round label, a per-file record cap. Tighten any of those tomorrow and the
+    # records written under the looser rule are still on disk and still reach
+    # the prompt: durable state authorized under the OLD rules coexisting with
+    # a consumer enforcing the new ones, which is precisely the shape the rest
+    # of this tuple exists to refuse. Added in a release that already moves
+    # this hash through mass-translate-wf.template.js (the fixPrompt block that
+    # reads the record), so it costs no reclassification beyond what that
+    # release pays anyway.
+    "refuse_finding.py",
     "select_segments.py",
     # #369: json_stdout.py owns the one-line stdout serialiser that
     # canon_validate.py, cache_key.py, resume_setup.py, glossary_batch_plan.py,
