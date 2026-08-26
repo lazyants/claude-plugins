@@ -813,21 +813,35 @@ def test_re_running_either_of_those_two_is_still_a_no_op(tmp_path):
 # Parse failures are refusals, not tracebacks
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name,body", [
-    # json.loads() has THREE failure modes and `except json.JSONDecodeError`
-    # catches one. JSONDecodeError IS a ValueError; the reverse does not hold.
-    ("deep-nesting", "[" * 300000 + "]" * 300000),      # RecursionError (C stack)
-    ("huge-int-token", '{"clean": ' + "9" * 5000 + "}"),  # plain ValueError
-    ("plain-garbage", "not json at all"),                 # JSONDecodeError
-])
-def test_an_unparseable_review_refuses_with_a_json_line_not_a_traceback(tmp_path, name, body):
+# json.loads() has THREE failure modes and `except json.JSONDecodeError` catches
+# one. JSONDecodeError IS a ValueError; the reverse does not hold.
+#
+# THE BODIES ARE BUILT HERE, NOT PASSED AS A PARAMETER. pytest puts a
+# parameter's value in the test's node ID and exports that ID to every child
+# process as PYTEST_CURRENT_TEST -- and Linux caps a single execve() string at
+# MAX_ARG_STRLEN, 32 pages = 131 072 bytes. Parameterised, the deep-nesting
+# body made that variable 600 051 bytes, so the subprocess below died with
+# E2BIG ("Argument list too long") before refuse_finding.py ever started, and
+# the assertion about the parser was never reached. macOS accepts it, so the
+# case passed locally and failed only on the Linux runner -- which is the whole
+# reason a local green is not CI's answer.
+_UNPARSEABLE_REVIEWS = {
+    "deep-nesting": lambda: "[" * 300000 + "]" * 300000,   # RecursionError (C stack)
+    "huge-int-token": lambda: '{"clean": ' + "9" * 5000 + "}",  # plain ValueError
+    "plain-garbage": lambda: "not json at all",             # JSONDecodeError
+}
+
+
+@pytest.mark.parametrize("name", sorted(_UNPARSEABLE_REVIEWS))
+def test_an_unparseable_review_refuses_with_a_json_line_not_a_traceback(tmp_path, name):
     """Every path in this script must emit one JSON line -- the house contract,
     and the module docstring's own "never raises past main()" promise.
 
-    The first two escaped a JSONDecodeError-only handler and printed a bare
+    Two of the three escaped a JSONDecodeError-only handler and printed a bare
     traceback with nothing on stdout, so a caller branching on `success` had
     nothing to branch on. `sys.get_int_max_str_digits()` is 4300 since 3.11; the
     nesting threshold is the C stack, not sys.getrecursionlimit()."""
+    body = _UNPARSEABLE_REVIEWS[name]()
     root = make_root(tmp_path)
     (root / "segments" / f"{SEG}.review.json").write_text(body, encoding="utf-8")
     cmd = [sys.executable, str(root / "scripts" / "refuse_finding.py"), SEG,
@@ -1113,3 +1127,35 @@ def test_both_success_payloads_carry_the_same_key_set(tmp_path):
     # branches describe the same record or one of them is lying.
     assert {k: v for k, v in appended.items() if k != "already_recorded"} == \
            {k: v for k, v in renewed.items() if k != "already_recorded"}
+
+
+def test_no_node_id_in_this_file_can_break_a_child_process():
+    """THE GUARD FOR THE FIX ABOVE, and it is about the FILE, not that one case.
+
+    pytest exports the node ID to every child as PYTEST_CURRENT_TEST, and Linux
+    caps one execve() string at MAX_ARG_STRLEN (32 pages). Every test in this
+    file drives the real CLI as a subprocess, so any parameter large enough to
+    reach that cap kills its own case with E2BIG before the script runs -- on
+    Linux only, which is where this suite is gated, so the case reads GREEN on
+    the machine it was written on. Collected from the real file rather than
+    reasoned about, so a parameter added later is covered too.
+
+    Measured when this guard was written: the deep-nesting case's node ID was
+    600 051 bytes against a 131 072-byte limit."""
+    max_arg_strlen = 32 * 4096
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(Path(__file__).resolve()),
+         "--collect-only", "--no-header", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, timeout=120,
+        cwd=str(Path(__file__).resolve().parents[1]))
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    ids = [ln for ln in proc.stdout.splitlines() if "::" in ln]
+    assert len(ids) > 50, (
+        f"collected only {len(ids)} node ids -- a collection that iterates too "
+        f"few times prints exactly what a passing one prints:\n{proc.stdout[-1500:]}")
+    oversized = [(len(i.encode("utf-8")), i[:120]) for i in ids
+                 if len(i.encode("utf-8")) > max_arg_strlen]
+    assert not oversized, (
+        f"{len(oversized)} node id(s) exceed Linux's {max_arg_strlen}-byte "
+        f"execve() string cap, so their subprocess dies with E2BIG before the "
+        f"CLI starts (and passes on macOS, hiding it): {oversized}")
