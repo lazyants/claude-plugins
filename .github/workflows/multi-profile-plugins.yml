@@ -84,6 +84,17 @@ jobs:
       - name: report_limits.test.py
         run: python3 plugins/multi-profile-plugins/tests/report_limits.test.py
 
+      # The `code-limit` install step's own suite. It installs the shim into fixture bin
+      # directories, then runs the INSTALLED command from `/` -- so what it measures is a file on
+      # PATH reaching the plugin's report, not a helper called in-process. Its spine is one
+      # exact-bytes assertion on the three-line shim: a wrapper that merely mentions the shipped
+      # report while executing a copy of it passes every behavioural check until the copy drifts,
+      # which is precisely the outcome this command exists to prevent. It also needs a writable
+      # `/tmp` for one fixture that must sit at a genuinely shallow path -- the per-user temp root
+      # is deep enough that the installer's parent-count guard goes untested there.
+      - name: install_code_limit.test.py
+        run: python3 plugins/multi-profile-plugins/tests/install_code_limit.test.py
+
       # The report's own entry point against the same empty HOME: with no profile of either
       # vendor present it must say so and exit 1, rather than tracebacking or printing a clean
       # table over nothing.

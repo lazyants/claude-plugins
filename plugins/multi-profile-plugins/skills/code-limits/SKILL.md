@@ -7,12 +7,12 @@ description: >-
   `~/.codex*` (`CODEX_HOME`).
   Use when asked how much usage-limit budget is left, when a five-hour or weekly window resets,
   which profile or account is nearly out, or how many Codex "usage limit reset" coupons remain.
-  Ships `scripts/report_limits.py`, one table covering both CLIs: Claude Code read from its
-  on-disk usage cache by default (or live with `--live`) and Codex read live over `codex
-  app-server`'s `account/rateLimits/read` JSON-RPC call. Not the sibling `multi-profile-plugins`
-  skill (plugin-store topology, `installLocation` errors) or `multi-profile-codex` (`CODEX_HOME`
-  architecture, seeding, config pins) -- this one is only about usage-limit consumption and reset
-  timing.
+  Ships `scripts/report_limits.py`, installable on PATH as `code-limit`, one table covering both
+  CLIs: Claude Code read from its on-disk usage cache by default (or live with `--live`) and Codex
+  read live over `codex app-server`'s `account/rateLimits/read` JSON-RPC call. Not the sibling
+  `multi-profile-plugins` skill (plugin-store topology, `installLocation` errors) or
+  `multi-profile-codex` (`CODEX_HOME` architecture, seeding, config pins) -- this one is only
+  about usage-limit consumption and reset timing.
 ---
 
 # Usage-limit report across Claude Code and Codex profiles
@@ -130,3 +130,76 @@ The script ships mode 644, so it is run through `python3`, never executed direct
 the Claude Code side into the token path; the Codex side is always live. `--claude-profile PATH`
 and `--codex-home PATH` are repeatable and, for whichever vendor at least one is given, replace
 auto-discovery entirely for that vendor -- a vendor left unspecified still auto-discovers.
+
+## `code-limit`, the installed command
+
+The same report, as one command on `PATH`, taking the same options and returning the same exit
+codes:
+
+```
+code-limit
+code-limit --live
+code-limit --claude-profile ~/.claude2 --codex-home ~/.codex3
+```
+
+Install it with the setup step this skill ships:
+
+```
+python3 scripts/install_code_limit.py                       # into ~/.local/bin
+python3 scripts/install_code_limit.py --bin-dir ~/bin
+```
+
+What lands on `PATH` is a three-line shell file whose only statement is
+`exec python3 '<...>/scripts/report_limits.py' "$@"`. There is no second copy of the report and
+nothing for one to drift from: `exec` hands the process over, so the report's own exit status is
+the command's and stdin, stdout and stderr pass straight through. Re-running the installer is how
+you refresh it after the plugin moves; an already-current shim is reported as such and rewritten
+identically.
+
+**Run the installer from a version-stable copy.** Claude Code keeps plugins at
+`<CONFIG_DIR>/plugins/cache/<marketplace>/<plugin>/<version>/`, and startup GC deletes any version
+directory the acting profile's catalogue stops referencing -- the sibling `multi-profile-plugins`
+skill documents that mechanism. A command installed out of there names one version: after an
+update it keeps running the old report while that directory survives, then breaks when it is
+collected, and neither is announced. The installer therefore refuses that source outright and
+names what to use instead -- the marketplace checkout at
+`~/.claude/plugins/marketplaces/<marketplace>/.../skills/code-limits/scripts/`, or a clone of the
+repo.
+
+**The interpreter is resolved at run time, not baked.** The shim calls `python3` off `PATH`,
+exactly as this skill's own `python3 scripts/report_limits.py` invocation does, because every
+absolute interpreter path available at install time is less durable than the command is meant to
+be -- a Homebrew Cellar path carries a patch version, a virtualenv gets deleted. The report needs
+**Python 3.11+**, so that is what `python3` must resolve to in the shell you run `code-limit` from.
+The installer prints which `python3` it found and that binary's version; it does not refuse on it,
+because it cannot bind what your shell will resolve later.
+
+**Nothing you own is overwritten silently.** `code-limit`, `claude-limit` and `claude-limits` are
+names that may already belong to something else. An entry counts as this plugin's only when it is
+a regular file whose bytes are exactly the shim the installer generates: read as bytes, matched
+line by line, with the quoted path required to be in the exact form the installer emits. A symlink
+never counts, whatever it points at; neither does a file quoting the marker in a comment, nor one
+that keeps the `exec python3 ... "$@"` shape around a second command, nor a copy of a real shim
+whose newlines became CRLF -- that last one compares equal as text while its `#!/bin/sh` line is
+no longer runnable. Anything else is left untouched, named in a warning, and the run exits 1;
+`--force` replaces it.
+
+Taking a name that was free uses `link`, which fails rather than overwriting if something claimed
+it in between; replacing an entry this run has classified uses `replace`. Both act on the name's
+own directory entry, so neither writes through a symlink to whatever it targets. A shim that still
+has the right bytes but lost its execute bits is rewritten rather than reported as already
+installed -- a command that exits 126 is not an installed command.
+
+**Legacy `claude-limit` / `claude-limits`.** The installer manages those two names when they
+already exist in the chosen directory -- it never manufactures them for someone who never had
+them. It reaches only inside `--bin-dir`, so check the rest of your `PATH` by hand:
+
+```
+command -v code-limit claude-limit claude-limits
+```
+
+If either legacy name resolves somewhere else, re-run the installer with that directory and
+`--force`, or delete the old command. Leaving it is the one outcome to avoid: it keeps answering
+with whatever provider-specific logic it had, which is the gap this command closes.
+
+To uninstall, remove the files -- they are the whole installation.
