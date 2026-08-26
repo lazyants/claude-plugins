@@ -1592,6 +1592,129 @@ with tempfile.TemporaryDirectory() as tmp:
     widest = max((len(ln) for ln in done.stdout.splitlines()), default=0)
     check("44 no rendered line runs past 110 columns", widest <= 110, f"{widest}: {done.stdout}")
 
+# --- 45 -- the voucher contract under a zero count and hostile optional detail ------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    claude_ok = make_claude(root, ".claudeZ", cached(entries=[entry()]))
+    home = make_codex_home(root, ".codexZ")
+
+    # A REPORTED zero is an integer, and must not be reworded. `0` and `not reported` are two
+    # different facts -- a measured empty balance, and a backend that sent no voucher data at all
+    # -- and a renderer that prints a word for the number erases the difference.
+    zero, _, _ = run(["--claude-profile", str(claude_ok), "--codex-home", str(home)], root=root,
+                     stub_result=dict(DEFAULT_RESULT,
+                                      rateLimitResetCredits={"availableCount": 0}))
+    band = [row for row in voucher_band(zero.stdout) if not row.startswith("credits")]
+    check("45 a reported zero prints the integer 0", len(band) == 1
+          and band[0].split()[1] == "0", str(band))
+    check("45 and never the word none", "none" not in " ".join(band), str(band))
+    check("45 a zero count is still a clean run", zero.returncode == 0, zero.stdout)
+
+    # Optional detail may NEVER gap the candidate. Each of these is a shape the vendor could
+    # send; every one must still print the validated count and every usage row beside it.
+    for label, credits in (
+        ("credits is not a list", 7),
+        ("credits is a string", "nope"),
+        ("a credit is not an object", [42]),
+        ("an overlong title", [{"status": "available", "title": "T" * 400,
+                                "expiresAt": epoch(48)}]),
+        ("a control-bearing title", [{"status": "available", "title": "a\u0007b",
+                                      "expiresAt": epoch(48)}]),
+        ("an unusable expiry", [{"status": "available", "title": "Full reset",
+                                 "expiresAt": "tomorrow"}]),
+        ("no available credit", [{"status": "spent", "title": "Full reset"}]),
+    ):
+        done, _, _ = run(["--claude-profile", str(claude_ok), "--codex-home", str(home)],
+                         root=root, stub_result=dict(DEFAULT_RESULT, rateLimitResetCredits={
+                             "availableCount": 2, "credits": credits}))
+        rows = [row for row in voucher_band(done.stdout) if not row.startswith("credits")]
+        check(f"45 {label} does not gap the run", done.returncode == 0,
+              f"rc={done.returncode}\n{done.stdout}")
+        check(f"45 {label} still prints the validated count",
+              len(rows) == 1 and rows[0].split()[1] == "2", str(rows))
+        check(f"45 {label} keeps the usage rows beside it", "54.0%" in done.stdout, done.stdout)
+
+# --- 46 -- a candidate-level diagnostic must still REACH stdout ---------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # The suite harvests `[token]`s from stdout and checks them against the enum. That oracle is
+    # only as good as the tokens that actually print, so this pins the candidate-level path
+    # explicitly: blanking the code after _examine still exits 1 and still warns, and would
+    # otherwise pass every other check while the token silently vanished from the report.
+    unreadable = root / ".claudeNo"
+    unreadable.mkdir()
+    (unreadable / ".claude.json").write_text("{ not json", encoding="utf-8")
+    done, _, _ = run(["--claude-profile", str(unreadable)], root=root)
+    body = done.stdout.split("warnings")[0]
+    check("46 the candidate's diagnostic token reaches the report body, not just the warning",
+          "[payload-malformed]" in body, done.stdout)
+    check("46 and the run gaps", done.returncode == 1, f"rc={done.returncode}")
+
+# --- 47 -- column arithmetic is measured in terminal columns, not code points -------------------
+
+check("47 a CJK character counts as two columns", R._width("\u4e2d") == 2)
+check("47 an ASCII character counts as one", R._width("a") == 1)
+check("47 a combining mark adds nothing", R._width("e\u0301") == 1, str(R._width("e\u0301")))
+check("47 the gauge is one column per cell", R._width(R._bar(50.0)) == R.BAR_CELLS)
+check("47 padding fills to the column count, not the code-point count",
+      R._width(R._pad("\u4e2d\u4e2d", 8)) == 8, repr(R._pad("\u4e2d\u4e2d", 8)))
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    wide = make_claude(root, ".claude\u4e2d\u6587", cached(entries=[entry(percent=42)]))
+    # A Codex home too: with none, the Codex side reports no candidates and gaps the run, which
+    # would make the clean-exit assertion below about the fixture rather than about the name.
+    done, _, _ = run(["--claude-profile", str(wide),
+                      "--codex-home", str(make_codex_home(root, ".codexW"))], root=root)
+    check("47 a wide profile name does not gap the run", done.returncode == 0, done.stdout)
+    rows = [ln for ln in done.stdout.splitlines() if "42.0%" in ln]
+    header = [ln for ln in done.stdout.splitlines() if "SOURCE" in ln]
+    # The USED column starts where the gauge starts. Compare THAT prefix against the header's
+    # prefix before "USED": a `len()`-based renderer under-counts the wide name and the whole
+    # row slides left, which is exactly the defect this fixture exists for.
+    gauge_at = min((rows[0].find(cell) for cell in ("\u2588", "\u2591") if cell in rows[0]),
+                   default=-1)
+    check("47 and the row's USED column starts at the header's column",
+          gauge_at > 0 and R._width(rows[0][:gauge_at]) == R._width(header[0].split("USED")[0]),
+          f"{rows[0][:gauge_at]!r} vs {header[0].split('USED')[0]!r}")
+
+# --- 48 -- the vendor stays readable off the row, and the tie-break is complete -----------------
+
+# Under --live BOTH vendors are live, and two candidates can share a directory basename, so the
+# source cell has to distinguish them or the flat table can print two indistinguishable rows.
+check("48 a live Claude row reads `api`", R._source("live 26 Aug 19:00 CEST", R.CLAUDE_GROUP)
+      == "api")
+check("48 a live Codex row reads `live`", R._source("live 26 Aug 19:00 CEST", R.CODEX_GROUP)
+      == "live")
+check("48 a cached Claude row reads its age", R._source("cache 2d04h old", R.CLAUDE_GROUP)
+      == "2d04h")
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    same = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=6)
+    live_row = R.Record("weekly_all", R.REPORTED, percent=40.0, resets=same,
+                        freshness="live 26 Aug 19:00 CEST")
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        R._render([(R.CLAUDE_GROUP, ".dup", [live_row])], [],
+                  datetime.datetime.now(datetime.timezone.utc), R.Paint(False))
+    check("48 and the renderer prints it, so the vendor is recoverable from the row",
+          " api" in out.getvalue(), out.getvalue())
+
+# The tie-break must reach freshness: two rows alike in every earlier key but visibly different
+# on the page would otherwise swap places when the arguments are reversed.
+twins = [(".x", R.Record("pool", R.REPORTED, percent=50.0, resets=same, freshness="cache 9h old")),
+         (".x", R.Record("pool", R.REPORTED, percent=50.0, resets=same, freshness="cache 1h old"))]
+check("48 the ordering is total down to freshness",
+      [r.freshness for _, r in R._sorted_rows(twins)]
+      == [r.freshness for _, r in R._sorted_rows(list(reversed(twins)))],
+      str([r.freshness for _, r in R._sorted_rows(twins)]))
+check("48 and it is the earlier cache that sorts first",
+      R._sorted_rows(twins)[0][1].freshness == "cache 1h old",
+      R._sorted_rows(twins)[0][1].freshness)
+
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -1599,7 +1722,7 @@ if failures:
         print(f"  {failure}")
     sys.exit(1)
 
-MIN_CHECKS = 300
+MIN_CHECKS = 400
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

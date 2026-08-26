@@ -38,6 +38,7 @@ import math
 import os
 import select
 import stat
+import unicodedata
 import subprocess
 import sys
 import time
@@ -283,6 +284,8 @@ def _window_label(minutes: int) -> str:
     return WINDOW_LABELS.get(minutes, f"{minutes}min")
 
 
+CLAUDE_GROUP = "Claude Code"
+CODEX_GROUP = "Codex"
 VOUCHER_NAME = "reset vouchers"
 CREDITS_NAME = "credits"
 BAR_CELLS = 10
@@ -317,6 +320,29 @@ def _use_colour(choice: str, stream) -> bool:
     return bool(getattr(stream, "isatty", lambda: False)()) and not os.environ.get("NO_COLOR")
 
 
+def _width(text: str) -> int:
+    """Terminal columns, not code points.
+
+    A profile directory or a vendor pool name may hold wide characters, and `len()` counts a CJK
+    ideograph as one while a terminal draws it as two -- every column after it then shifts by the
+    difference. Combining marks are the same error pointed the other way. The gauge's own blocks
+    are East-Asian AMBIGUOUS, which the overwhelmingly common configuration renders narrow, so
+    they count as one here; a terminal configured otherwise draws a wider gauge, not a crooked
+    table, because every row's gauge is the same length.
+    """
+    total = 0
+    for character in unicodedata.normalize("NFC", text):
+        if unicodedata.combining(character):
+            continue
+        total += 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
+    return total
+
+
+def _pad(text: str, width: int) -> str:
+    """`f"{text:<width}"` but measured in columns."""
+    return text + " " * max(0, width - _width(text))
+
+
 def _bar(percent: float) -> str:
     """A ten-cell gauge. Derived from the same float the number is, never a second measurement."""
     filled = min(BAR_CELLS, max(0, math.floor(percent / (100 / BAR_CELLS) + 0.5)))
@@ -327,7 +353,7 @@ def _hue(percent: float) -> str:
     return RED if percent >= 80 else YELLOW if percent >= 50 else GREEN
 
 
-def _source(freshness: str) -> str:
+def _source(freshness: str, group: str) -> str:
     """Shorten a row's provenance to the part that varies.
 
     The producers spell freshness out per record -- `live 26 Aug 19:43 CEST`, `cache 2d04h old`.
@@ -336,7 +362,10 @@ def _source(freshness: str) -> str:
     is WHICH source and, for a cache, how old. Nothing is dropped that the header does not say.
     """
     if freshness.startswith("live"):
-        return "live"
+        # `api` vs `live` also keeps the VENDOR readable off the row. Under --live both sides are
+        # live, and two candidates may share a directory basename, so without this the flat table
+        # can show two rows that are genuinely indistinguishable.
+        return "api" if group == CLAUDE_GROUP else "live"
     if freshness.startswith("cache "):
         return freshness[len("cache "):].replace(" old", "")
     return freshness
@@ -864,15 +893,24 @@ def _codex_records(home: Path) -> list[Record]:
             # still renders, with less to say. A voucher that silently expires unnoticed is the
             # whole reason the date is worth surfacing -- the count alone never says when.
             expires, title = None, ""
-            for credit in (_obj(coupons).get("credits") or []):
+            # Every read below is DETAIL, and detail may never gap a candidate: the count has
+            # already validated, and a home whose optional extras are malformed still has a
+            # number worth printing. So `credits` must be a list before it is iterated -- a bare
+            # `7` there would raise TypeError straight past this handler and take every valid
+            # usage row in the home with it -- and a title this module would refuse is simply
+            # dropped rather than raised.
+            listed = _obj(coupons).get("credits")
+            for credit in (listed if isinstance(listed, list) else []):
                 if not isinstance(credit, dict) or credit.get("status") != "available":
                     continue
                 try:
                     expires = _from_epoch(credit.get("expiresAt"), 1)
                 except Malformed:
                     expires = None
-                raw = credit.get("title")
-                title = _text(raw, 40) if isinstance(raw, str) else ""
+                try:
+                    title = _text(credit.get("title"), 40)
+                except Malformed:
+                    title = ""
                 break
             records.append(Record(
                 VOUCHER_NAME, REPORTED, freshness=str(count), info=True,
@@ -1016,7 +1054,7 @@ def _sorted_rows(rows: list[tuple[str, Record]]) -> list[tuple[str, Record]]:
     return sorted(rows, key=lambda item: (
         -(item[1].percent if item[1].percent is not None else -1.0),
         item[1].resets.timestamp() if item[1].resets is not None else float("inf"),
-        item[0], item[1].name,
+        item[0], item[1].name, item[1].freshness,
     ))
 
 
@@ -1026,8 +1064,10 @@ def _render(groups: list[tuple[str, str, list[Record]]], notes: list[str],
     current usage, each under a heading that says why they are apart."""
     buckets: dict[str, list[tuple[str, Record]]] = {
         "current": [], "stale": [], "inactive": [], "gap": [], "voucher": [], "info": []}
-    for _group, where, records in groups:
+    vendor: dict[int, str] = {}
+    for group, where, records in groups:
         for record in records:
+            vendor[id(record)] = group
             buckets[record.kind()].append((where, record))
 
     print(f"\n{paint('code-limits', BOLD)}  {paint(_local(now), DIM)}\n")
@@ -1035,15 +1075,16 @@ def _render(groups: list[tuple[str, str, list[Record]]], notes: list[str],
     if buckets["voucher"] or buckets["info"]:
         print(f"  {paint('RESET VOUCHERS', CYAN + ';' + BOLD)}   "
               + paint("a one-shot rate-limit reset -- redeem in the Codex TUI with /usage", DIM))
-        home_width = max([len(_safe_name(w)) for w, _ in buckets["voucher"]]
-                         + [len(_safe_name(r.name)) for _, r in buckets["info"]] + [8]) + 2
+        home_width = max([_width(_safe_name(w)) for w, _ in buckets["voucher"]]
+                         + [_width(_safe_name(r.name)) for _, r in buckets["info"]] + [8]) + 2
         for where, record in buckets["voucher"]:
             if record.state == GAP:
                 body = paint(f"[{record.diagnostic}]", RED)
-            elif record.state == NO_CURRENT:
+            elif record.state == NO_CURRENT or record.freshness == "0":
+                # Dimmed, never reworded. `0` is a REPORTED count and must read as the integer it
+                # is -- printing "none" for it makes a measured zero indistinguishable from the
+                # `not reported` a backend sends when it has no voucher data at all.
                 body = paint(record.freshness, DIM)
-            elif record.freshness == "0":
-                body = paint("none", DIM)
             else:
                 body = paint(record.freshness, BOLD + ";" + GREEN)
                 if record.title:
@@ -1051,27 +1092,28 @@ def _render(groups: list[tuple[str, str, list[Record]]], notes: list[str],
                 if record.expires is not None:
                     body += ("  " + paint(f"expires {_local(record.expires)}", DIM)
                              + "  " + paint(_relative(record.expires, now), YELLOW))
-            print(f"    {_safe_name(where):<{home_width}}{body}")
+            print("    " + _pad(_safe_name(where), home_width) + body)
         for where, record in buckets["info"]:
             value = (paint(f"[{record.diagnostic}]", RED) if record.state == GAP
                      else paint(record.freshness, BOLD))
-            print(f"    {_safe_name(record.name):<{home_width}}"
-                  f"{paint(_safe_name(where), DIM)} {value}")
+            print("    " + _pad(_safe_name(record.name), home_width)
+                  + paint(_safe_name(where), DIM) + " " + value)
         print()
 
     def table(rows: list[tuple[str, Record]], heading: str = "") -> None:
         if not rows:
             return
         cells = [_pool_cells(where, record, now) for where, record in rows]
-        widths = [max(len(cell[i]) for cell in cells) + 2 for i in range(4)]
+        widths = [max(_width(cell[i]) for cell in cells) + 2 for i in range(4)]
         if heading:
             print(paint(f"  {heading}", DIM))
         else:
-            head = (f"  {'WHERE':<{widths[0]}}{'POOL':<{widths[1]}}"
-                    f"{'USED':<{widths[2]}}{'RESET':<{widths[3]}}SOURCE")
+            head = ("  " + _pad("WHERE", widths[0]) + _pad("POOL", widths[1])
+                    + _pad("USED", widths[2]) + _pad("RESET", widths[3]) + "SOURCE")
             print(paint(head, DIM))
             print(paint("  " + "\u2500" * (sum(widths) + 6), DIM))
         for (where, pool, used, reset), (_w, record) in zip(cells, rows):
+            group = vendor.get(id(record), CODEX_GROUP)
             body = used
             if record.percent is not None and record.state != GAP:
                 gauge, number = used.split(" ", 1)
@@ -1079,9 +1121,10 @@ def _render(groups: list[tuple[str, str, list[Record]]], notes: list[str],
                                                                        _hue(record.percent))
             elif record.state == GAP:
                 body = paint(used, RED)
-            pad = " " * (widths[2] - len(used))
-            line = (f"  {where:<{widths[0]}}{pool:<{widths[1]}}{body}{pad}"
-                    f"{reset:<{widths[3]}}{paint(_source(record.freshness), DIM)}")
+            # `body` may carry escapes; the padding is computed from the PLAIN `used`.
+            pad = " " * max(0, widths[2] - _width(used))
+            line = ("  " + _pad(where, widths[0]) + _pad(pool, widths[1]) + body + pad
+                    + _pad(reset, widths[3]) + paint(_source(record.freshness, group), DIM))
             print(paint(line, DIM) if heading else line)
         print()
 
@@ -1139,8 +1182,8 @@ def main(argv: list[str] | None = None) -> int:
     # answer they are describing.
     claude_producer = _claude_live if args.live else (lambda profile: _claude_cached(profile, now))
     for group, candidates, producer in (
-        ("Claude Code", claude, claude_producer),
-        ("Codex", codex, _codex_records),
+        (CLAUDE_GROUP, claude, claude_producer),
+        (CODEX_GROUP, codex, _codex_records),
     ):
         if not candidates:
             warnings.append(f"{group}: no candidates found -- NOT checked")
