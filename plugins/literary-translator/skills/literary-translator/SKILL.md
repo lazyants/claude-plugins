@@ -3194,14 +3194,31 @@ The counts named `recorded_*` are counts of journal ENTRIES — a lost
 best-effort write lowers the count without lowering the work, which is why they
 are not called anything stronger.
 
+**What `selected_by: lock_diagnostic_pid` does and does not assert.** That
+branch requires the lock's pid to be alive AND its `ps` line to name
+`segment_dispatch_driver.py`; without both, the ordinary
+`greatest_recorded_driver_started_ts` ordering is used and says so. It does NOT
+additionally require the `ps` line to name THIS durable root, and that is
+deliberate: the documented launch recipe uses an absolute path, but a driver
+started as `python3 scripts/segment_dispatch_driver.py` from inside the durable
+root is a real and current pattern, and its command line legitimately contains
+no absolute root — measured `false` on a live book while this was written.
+Requiring it would demote every such run to the fallback. The residual it leaves
+— a stale lock pid, reused by a live driver of a DIFFERENT book, matching an
+epoch recorded under that same pid here — is visible in the payload rather than
+hidden: `ps_names_this_durable_root` and `pid_matches_lock_diagnostic` are both
+published.
+
 **Two progress numbers, and they answer different questions.**
 `run.batch_progress` is scoped to the segment ids THIS run's Step 1 gate
 selected, and is the one to read while a batch is live; `progress` is the whole
 manifest. They diverge exactly when they should: a run launched with
 `--only-segs` for ten fresh units in a book where seventy already converged is
 `0/10` on the first and `70/80` on the second. `batch_progress` is `null` when
-the epoch records no `step1_gate_passed`, which is not the same as a batch of
-zero.
+the epoch records no `step1_gate_passed`, and ONLY then — a gate that has fired
+but whose units have no fragment yet (the ordinary state of a fresh run;
+`runs/ledger.d/` does not exist until the first fragment is written) is `0/N`
+with every id counted missing, never unknown.
 
 Both come from the per-segment fragments under `runs/ledger.d/`, intersected
 with `manifest.json`, with all five `ledger-fragment.schema.json` statuses
@@ -3213,9 +3230,11 @@ the payload rather than being left implied: `staleness_checked: false` (a
 and `schema_validated: false` (a fragment is read as "a JSON object with a
 string `status`", so a hand-edited artifact `ledger_update.py` would refuse is
 still counted). Symlinks and non-regular files are refused rather than followed
-at every read — a symlinked `runs/ledger.d` would count another book's
-population, and a FIFO named like a fragment would block the read forever,
-which is the one thing a surface you run against a live batch must never do.
+at every read, ANCESTOR directories included — a symlinked `runs/` or
+`runs/ledger.d` would count another book's population as this one's, and a FIFO
+named like a fragment would block the read forever, which is the one thing a
+surface you run against a live batch must never do. Every read path is required
+to resolve inside the durable root.
 
 It reports no draft-file count on purpose: a draft exists from round 1 onward
 and never goes away, so the count saturates, and `segments/*.draft.json` also

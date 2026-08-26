@@ -44,6 +44,22 @@ FRAGMENT_SCHEMA_SRC = SCHEMAS_SRC_DIR / "ledger-fragment.schema.json"
 
 TS = "2026-08-26T09:30:10Z"
 
+# The FIFTEEN fields ledger-record-base.schema.json requires of a cache key,
+# taken from a real fragment. A fixture thinner than the producer's own output
+# blesses a shape `ledger_update.py` would refuse, and then proves nothing about
+# real data -- which is what a one-field stand-in did here before.
+_CACHE_KEY = {
+    name: "0" * 40
+    for name in (
+        "agent_config_hash", "derivation_bundle_hash", "input_sha1",
+        "note_map_hash", "particle_config_hash", "plugin_bundle_hash",
+        "profile_semantics_hash", "prompt_hash", "schema_hash",
+        "source_extraction_hash", "source_input_hash", "style_contract_hash",
+        "used_terms_hash", "verse_map_hash",
+    )
+}
+_CACHE_KEY["pipeline_version"] = "v1"
+
 
 # ---------------------------------------------------------------------------
 # Fixture builders
@@ -88,7 +104,7 @@ def write_fragments(root, statuses: dict):
                     "n_footnotes": 0,
                     "n_verses": 0,
                     "reviewed_draft_sha1": "e894d71854e86fcee454d3037208b0115b5b4e21",
-                    "cache_key": {"pipeline_version": "v1"},
+                    "cache_key": _CACHE_KEY,
                 }
             ),
             encoding="utf-8",
@@ -571,7 +587,8 @@ FORBIDDEN_ATTRS = {
     # Metadata is a WRITE. `chmod` and `utime` change nothing a naive
     # content-only snapshot would notice, which is exactly why they belong in
     # the enumerated set rather than being left to the snapshot to catch.
-    "chmod", "lchmod", "chown", "utime", "symlink_to", "hardlink_to",
+    "chmod", "lchmod", "chown", "utime", "chflags", "lchflags",
+    "symlink_to", "hardlink_to",
     # `Path.open` is the same capability as the builtin under another name.
     "open",
 }
@@ -586,6 +603,7 @@ FORBIDDEN_QUALIFIED = {
     ("os", "write"), ("os", "truncate"), ("os", "ftruncate"), ("os", "system"),
     ("os", "popen"), ("os", "mkdir"), ("os", "makedirs"), ("os", "unlink"),
     ("os", "chmod"), ("os", "chown"), ("os", "utime"), ("os", "link"),
+    ("os", "chflags"), ("os", "lchflags"),
     ("os", "symlink"), ("os", "rmdir"), ("os", "removedirs"), ("os", "mknod"),
     ("os", "mkfifo"), ("os", "fdopen"),
     ("importlib", "import_module"),
@@ -687,6 +705,8 @@ def test_shipped_script_contains_no_write_or_lock_construct():
         "def _m(p):\n    return os.utime(p, None)\n",
         "def _m(p):\n    return Path(p).open('w')\n",
         "def _m(p):\n    return os.rename(p, p)\n",
+        "def _m(p):\n    return os.chflags(p, 1)\n",
+        "def _m(p):\n    return Path(p).chmod(0o400)\n",
     ],
 )
 def test_the_write_and_lock_guard_bites(mutation):
@@ -712,13 +732,19 @@ def _snapshot(root: Path):
     script promises not to touch -- left the snapshot identical. Mode and mtime
     are part of what "mutates nothing" means."""
     entries = {}
+    def metadata(stat):
+        # st_flags is macOS/BSD-only and is the one mutator `os.chflags` moves
+        # without touching mode, mtime or a single byte of content -- the exact
+        # shape of write a content-only snapshot was already shown to miss.
+        return (stat.st_mode, stat.st_mtime_ns, getattr(stat, "st_flags", None))
+
     root_stat = root.lstat()
-    entries["."] = (None, root_stat.st_mode, root_stat.st_mtime_ns)
+    entries["."] = (None,) + metadata(root_stat)
     for path in sorted(root.rglob("*")):
         stat = path.lstat()
         key = str(path.relative_to(root)) + ("/" if path.is_dir() else "")
         content = None if path.is_dir() else path.read_bytes()
-        entries[key] = (content, stat.st_mode, stat.st_mtime_ns)
+        entries[key] = (content,) + metadata(stat)
     return entries
 
 
@@ -933,3 +959,57 @@ def test_a_lock_pid_that_cannot_be_probed_is_a_reason_not_a_traceback(tmp_path, 
     report = run_status(root)
     assert report["lock_diagnostic"] is None
     assert "positive integer" in report["lock_diagnostic_unavailable_reason"]
+
+
+def test_a_gate_with_no_fragments_yet_is_a_zero_batch_not_an_unknown(tmp_path):
+    """`runs/ledger.d/` does not exist until the first fragment is written, so
+    the ordinary state of a fresh run is a fired gate and no fragment dir. That
+    is `0/N`, not `null`: the surface knows the number and must not print `?`."""
+    root = make_durable_root(tmp_path)
+    write_journal(root, "20260826T093010Z", [
+        started(),
+        {"type": "step1_gate_passed", "segs": ["seg01", "seg02"], "ts": TS},
+    ])
+    report = run_status(root)
+    assert report["progress"] is None, "the project census is genuinely absent"
+    batch = report["run"]["batch_progress"]
+    assert batch is not None
+    assert batch["dispatched"] == 2
+    assert batch["dispatched_ids_without_fragment"] == 2
+    assert batch["recorded_fragment_status_counts"]["converged"] == 0
+
+
+def test_both_censuses_carry_the_same_caveats(tmp_path):
+    """A caveat that rides only one of two sibling numbers reads as if the other
+    were stronger."""
+    root = make_durable_root(tmp_path)
+    write_fragments(root, {"seg01": "converged"})
+    write_journal(root, "20260826T093010Z", [
+        started(), {"type": "step1_gate_passed", "segs": ["seg01"], "ts": TS},
+    ])
+    report = run_status(root)
+    for census in (report["progress"], report["run"]["batch_progress"]):
+        assert census["staleness_checked"] is False
+        assert census["schema_validated"] is False
+
+
+@pytest.mark.parametrize("link_name", ["runs", "schemas"])
+def test_a_symlinked_ancestor_directory_is_refused(tmp_path, link_name):
+    """The final-component check catches a symlinked artifact; it does not catch
+    a symlinked PARENT. A durable tree whose `runs/` or `schemas/` links into
+    another book would otherwise have that book's fragments, lock and status
+    enum read and reported as this root's."""
+    root = make_durable_root(tmp_path)
+    write_fragments(root, {"seg01": "converged", "seg02": "converged"})
+    elsewhere = tmp_path / "other_tree"
+    shutil.move(str(root / link_name), str(elsewhere))
+    (root / link_name).symlink_to(elsewhere)
+    report = run_status(root)
+    if link_name == "runs":
+        assert report["progress"] is None
+        assert report["run"] is None
+        assert report["lock_diagnostic"] is None
+    else:
+        # The status enum is read from schemas/; escaping it must degrade to the
+        # observed-statuses fallback rather than silently using another tree's.
+        assert report["progress"]["status_enum_source"] == "observed"

@@ -167,6 +167,23 @@ _DISPATCH_FINISHED = "codex_dispatch_finished"
 _LEASE_WARNING = "lock_self_test_failed"
 
 
+def _within(path: Path, root: Path) -> bool:
+    """True when `path` resolves INSIDE `root`, symlinks and all.
+
+    The final-component checks in `_read_text` catch a symlinked artifact and a
+    FIFO, but not a symlinked ANCESTOR: a durable tree whose `runs/` or
+    `schemas/` is a link into another book would otherwise have its fragments,
+    its lock and its status enum read from that other tree and reported as this
+    root's. Resolving and testing containment covers every level at once, and a
+    link that stays inside the root is fine -- it is an ESCAPE that is refused,
+    not a link.
+    """
+    try:
+        return path.resolve().is_relative_to(root)
+    except (OSError, ValueError):
+        return False
+
+
 class StatusError(Exception):
     """No report is possible -- always this script's exit 1. A usage error is
     the OTHER path (exit 2) and never raises this."""
@@ -182,7 +199,7 @@ class StatusError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _read_text(path: Path):
+def _read_text(path: Path, root: Path = None):
     """Read `path` as UTF-8 text, or return (None, reason).
 
     REFUSES anything that is not a real regular file, before opening it. Two
@@ -202,6 +219,8 @@ def _read_text(path: Path):
     malformed -- which is exactly what it is.
     """
     try:
+        if root is not None and not _within(path, root):
+            return None, f"{path} resolves outside the durable root"
         if path.is_symlink() or not path.is_file():
             return None, f"{path} is not a real regular file"
         return path.read_bytes().decode("utf-8", "replace"), None
@@ -225,14 +244,14 @@ def _age_sec(ts_value, now):
     return int((now - parsed).total_seconds())
 
 
-def load_manifest_segs(manifest_path: Path) -> list:
+def load_manifest_segs(manifest_path: Path, root: Path) -> list:
     """The distinct `segments[].seg` of manifest.json, in manifest order.
 
     Refuses rather than reporting a zero, matching `load_candidate_segments()`
     in select_segments.py: an empty `segments[]` is a broken project, not a
     project with no work.
     """
-    text, reason = _read_text(manifest_path)
+    text, reason = _read_text(manifest_path, root)
     if text is None:
         raise StatusError(f"cannot read manifest.json ({reason})")
     try:
@@ -258,7 +277,7 @@ def load_manifest_segs(manifest_path: Path) -> list:
     return segs
 
 
-def fragment_status_enum(schemas_dir: Path):
+def fragment_status_enum(schemas_dir: Path, root: Path):
     """The five statuses ledger_update.py may write, read from the schema that
     owns them rather than restated as a literal here -- a hand-copied member list
     is the restated-list-goes-stale trap this repo has been bitten by twice.
@@ -266,7 +285,7 @@ def fragment_status_enum(schemas_dir: Path):
     read, and the caller then zero-fills nothing it did not see.
     """
     schema_path = schemas_dir / "ledger-fragment.schema.json"
-    text, _reason = _read_text(schema_path)
+    text, _reason = _read_text(schema_path, root)
     if text is None:
         return None, "observed"
     try:
@@ -283,7 +302,7 @@ def fragment_status_enum(schemas_dir: Path):
     return list(enum), "schemas/ledger-fragment.schema.json"
 
 
-def read_fragment_statuses(frag_dir: Path, segs: list):
+def read_fragment_statuses(frag_dir: Path, segs: list, root: Path):
     """The recorded `status` of every one of `segs` that has a fragment.
 
     Returns (statuses, unreadable, missing): a {seg: status} map, the count of
@@ -296,7 +315,7 @@ def read_fragment_statuses(frag_dir: Path, segs: list):
     missing = []
     for seg in segs:
         path = frag_dir / f"{seg}.json"
-        text, _reason = _read_text(path)
+        text, _reason = _read_text(path, root)
         if text is None:
             if path.exists() or path.is_symlink():
                 unreadable += 1
@@ -345,7 +364,11 @@ def read_progress(durable_root: Path, manifest_segs: list, schemas_dir: Path):
     from the gate's own segment list.
     """
     frag_dir = durable_root / "runs" / "ledger.d"
-    if frag_dir.is_symlink() or not frag_dir.is_dir():
+    if (
+        not _within(frag_dir, durable_root)
+        or frag_dir.is_symlink()
+        or not frag_dir.is_dir()
+    ):
         return None, (
             f"{frag_dir} is not a real directory -- no fragment has been written "
             f"yet, or the path is a symlink into another tree"
@@ -355,8 +378,10 @@ def read_progress(durable_root: Path, manifest_segs: list, schemas_dir: Path):
     except OSError as exc:
         return None, f"{frag_dir} is not readable ({exc})"
 
-    enum, enum_source = fragment_status_enum(schemas_dir)
-    statuses, unreadable, missing = read_fragment_statuses(frag_dir, manifest_segs)
+    enum, enum_source = fragment_status_enum(schemas_dir, durable_root)
+    statuses, unreadable, missing = read_fragment_statuses(
+        frag_dir, manifest_segs, durable_root
+    )
     counts, unrecognized = census(statuses, enum)
 
     manifest_set = set(manifest_segs)
@@ -390,15 +415,29 @@ def read_progress(durable_root: Path, manifest_segs: list, schemas_dir: Path):
 def batch_progress(durable_root: Path, gate_segs, schemas_dir: Path):
     """The same census restricted to the segments THIS run's Step 1 gate
     selected -- the number an operator watching a live batch actually wants.
-    None when the epoch records no `step1_gate_passed`, which is a different
-    fact from a batch of zero units."""
+
+    `None` ONLY when the epoch records no `step1_gate_passed`, which is a
+    different fact from a batch of zero units. In particular a gate that HAS
+    fired but whose units have no fragment yet -- the ordinary state of a fresh
+    run, since `runs/ledger.d/` does not exist until `ledger_update.py` writes
+    the first fragment -- is `0/N` with every id counted missing, never `null`.
+    Reporting the surface as unknown there would hide a number this script
+    knows.
+    """
     if not isinstance(gate_segs, list):
         return None
+    enum, _source = fragment_status_enum(schemas_dir, durable_root)
     frag_dir = durable_root / "runs" / "ledger.d"
-    if frag_dir.is_symlink() or not frag_dir.is_dir():
-        return None
-    enum, _source = fragment_status_enum(schemas_dir)
-    statuses, unreadable, missing = read_fragment_statuses(frag_dir, gate_segs)
+    if (
+        not _within(frag_dir, durable_root)
+        or frag_dir.is_symlink()
+        or not frag_dir.is_dir()
+    ):
+        statuses, unreadable, missing = {}, 0, list(gate_segs)
+    else:
+        statuses, unreadable, missing = read_fragment_statuses(
+            frag_dir, gate_segs, durable_root
+        )
     counts, unrecognized = census(statuses, enum)
     return {
         "dispatched": len(gate_segs),
@@ -406,6 +445,12 @@ def batch_progress(durable_root: Path, gate_segs, schemas_dir: Path):
         "unrecognized_status": unrecognized,
         "unreadable_fragments": unreadable,
         "dispatched_ids_without_fragment": len(missing),
+        # MAJOR 4 round 2: the two caveats travel with BOTH progress numbers,
+        # because both come from the same unvalidated, staleness-unchecked read.
+        # A caveat that rides only one of two sibling censuses reads as if the
+        # other one were stronger.
+        "staleness_checked": False,
+        "schema_validated": False,
     }
 
 
@@ -449,7 +494,7 @@ def read_lock_diagnostic(durable_root: Path):
     lock_path = durable_root / "runs" / ".driver.lock"
     if not lock_path.is_file():
         return None, f"{lock_path} does not exist"
-    text, reason = _read_text(lock_path)
+    text, reason = _read_text(lock_path, durable_root)
     if text is None:
         return None, f"{lock_path} is not readable ({reason})"
     if not text.strip():
@@ -505,7 +550,7 @@ def read_lock_diagnostic(durable_root: Path):
 # ---------------------------------------------------------------------------
 
 
-def read_journal(path: Path):
+def read_journal(path: Path, root: Path):
     """Parse one driver journal into (epochs, malformed, lease_warning, reason).
 
     An EPOCH is the run of entries from one `driver_started` up to the next.
@@ -518,7 +563,7 @@ def read_journal(path: Path):
     before `run()` journals its start, so a journal's first line legitimately is
     not a start at all.
     """
-    text, reason = _read_text(path)
+    text, reason = _read_text(path, root)
     if text is None:
         return [], 0, False, reason
 
@@ -637,7 +682,11 @@ def collect_runs(durable_root: Path, now: datetime):
     about the driver.
     """
     runs_dir = durable_root / "runs"
-    if runs_dir.is_symlink() or not runs_dir.is_dir():
+    if (
+        not _within(runs_dir, durable_root)
+        or runs_dir.is_symlink()
+        or not runs_dir.is_dir()
+    ):
         return [], 0, 0, 0
     try:
         journals = sorted(runs_dir.glob("*/driver_journal.jsonl"))
@@ -648,7 +697,7 @@ def collect_runs(durable_root: Path, now: datetime):
     without_start = 0
     unreadable = 0
     for journal in journals:
-        epochs, malformed, lease_warning, reason = read_journal(journal)
+        epochs, malformed, lease_warning, reason = read_journal(journal, durable_root)
         if reason is not None:
             unreadable += 1
             continue
@@ -709,7 +758,7 @@ def select_run(candidates: list, lock_diagnostic):
 def build_report(durable_root: Path) -> dict:
     now = datetime.now(timezone.utc)
     schemas_dir = durable_root / "schemas"
-    manifest_segs = load_manifest_segs(durable_root / "manifest.json")
+    manifest_segs = load_manifest_segs(durable_root / "manifest.json", durable_root)
     progress, progress_reason = read_progress(durable_root, manifest_segs, schemas_dir)
     lock_diagnostic, lock_reason = read_lock_diagnostic(durable_root)
     candidates, journals_found, without_start, unreadable_journals = collect_runs(
