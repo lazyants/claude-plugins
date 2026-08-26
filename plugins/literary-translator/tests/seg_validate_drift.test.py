@@ -91,6 +91,7 @@ ALL_SCRIPTS = [
     "draft_sha1.py",
     "ledger_update.py",
     "reject_review.py",
+    "refuse_finding.py",
     "resume_setup.py",
     "review_artifact_check.py",
     "review_ready.py",

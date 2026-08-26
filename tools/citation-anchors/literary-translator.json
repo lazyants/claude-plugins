@@ -8,11 +8,11 @@
    ],
    "claim": "Keep the declaration stable across the whole W7→W9 chain; toggling it between steps is the only way a normal run can make the two gates disagree about the same book. (They read the moved-field list from different authorities -- W7 from `select_segments.py`'s recomputation against the CURRENT cache key, W9 from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887` drops any inherited value and re-derives that list from the same diff, so the two agree by construction on anything a run produces. Hand-editing the materialized `ledger.json` between the two steps can split them; so can editing one segment's `status` to `converged`, which skips both carve-outs"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json\", \"cache_key.py:514\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json\", \"cache_key.py:532\", 0]": {
    "anchors": [
     "compute_profile_semantics_hash"
    ],
-   "claim": "}, \"enabled\": { \"type\": \"boolean\", \"default\": true, \"description\": \"Master switch for the W3 glossary/canon RESEARCH pass. When false, W3 still runs the mandatory language smoke test (W3a's segpack.py re-runs that same extractor over every segment and W5 acts on its new_names, so name detection stays load-bearing), but skips glossary_batch_plan.py, resume_setup.py, the glossary Workflow, the canon merge, and the skeptic pass; it bootstraps an empty, fully stamped canon.json with canon_validate.py --init and rejoins at the mandatory homonym-split evidence gate exactly as the no_new_candidates SKIP branch does. An existing canon.json is NOT discarded -- --init is create-only, so its entries keep reaching every segpack. Absent means true, so every existing profile keeps validating unchanged. Outside compute_profile_semantics_hash()'s named-six allowlist (cache_key.py:514), so adding or flipping this key never re-translates a converged segment on its own -- but enabling it later and canonizing names does change affected segments' used_terms_hash and makes them dispatch-eligible again. Adding this property to profile.schema.json itself moves resume_setup.py's own _schemas_dir_hash() (it hashes every top-level *.schema.json file's raw bytes under durable_root/schemas/ into input_digest), so the FIRST Step 0a refresh after this release is a one-time resume-identity reset: any in-flight mass-translate or glossary run cannot resume across it -- it starts a fresh run_id and re-dispatches from scratch, including any partial glossary batch.\" }, \"min_candidate_freq\": { \"type\": \"integer\", \"minimum\": 1"
+   "claim": "}, \"enabled\": { \"type\": \"boolean\", \"default\": true, \"description\": \"Master switch for the W3 glossary/canon RESEARCH pass. When false, W3 still runs the mandatory language smoke test (W3a's segpack.py re-runs that same extractor over every segment and W5 acts on its new_names, so name detection stays load-bearing), but skips glossary_batch_plan.py, resume_setup.py, the glossary Workflow, the canon merge, and the skeptic pass; it bootstraps an empty, fully stamped canon.json with canon_validate.py --init and rejoins at the mandatory homonym-split evidence gate exactly as the no_new_candidates SKIP branch does. An existing canon.json is NOT discarded -- --init is create-only, so its entries keep reaching every segpack. Absent means true, so every existing profile keeps validating unchanged. Outside compute_profile_semantics_hash()'s named-six allowlist (cache_key.py:532), so adding or flipping this key never re-translates a converged segment on its own -- but enabling it later and canonizing names does change affected segments' used_terms_hash and makes them dispatch-eligible again. Adding this property to profile.schema.json itself moves resume_setup.py's own _schemas_dir_hash() (it hashes every top-level *.schema.json file's raw bytes under durable_root/schemas/ into input_digest), so the FIRST Step 0a refresh after this release is a one-time resume-identity reset: any in-flight mass-translate or glossary run cannot resume across it -- it starts a fresh run_id and re-dispatches from scratch, including any partial glossary batch.\" }, \"min_candidate_freq\": { \"type\": \"integer\", \"minimum\": 1"
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:104-107\", 0]": {
    "anchors": [
@@ -37,24 +37,24 @@
    ],
    "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:255\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:273\", 0]": {
    "anchors": [
     "style_contract_hash\","
    ],
-   "claim": "# allowlist above. That set means \"can never change what the prose should # say\", which is FALSE for the style contract: a contract edit CAN change what # the prose should say, and a REVERSED rule actively demanded the wrong choice # in every segment converged under it. One global style_contract_hash # (cache_key.py:255, GLOBAL_CACHE_KEY_FIELDS at :274) cannot tell an addition # from a reversal, so this population is admitted only when the operator # DECLARES it, per project, and every admitted segment is named. Widening the # allowlist instead would also silently move final_audit.py's own # project_complete arithmetic and select_segments.py's D6 semantics, which"
+   "claim": "# allowlist above. That set means \"can never change what the prose should # say\", which is FALSE for the style contract: a contract edit CAN change what # the prose should say, and a REVERSED rule actively demanded the wrong choice # in every segment converged under it. One global style_contract_hash # (cache_key.py:273, GLOBAL_CACHE_KEY_FIELDS at :292) cannot tell an addition # from a reversal, so this population is admitted only when the operator # DECLARES it, per project, and every admitted segment is named. Widening the # allowlist instead would also silently move final_audit.py's own # project_complete arithmetic and select_segments.py's D6 semantics, which"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:274\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:292\", 0, \"continuation\"]": {
    "anchors": [
     "GLOBAL_CACHE_KEY_FIELDS = frozenset"
    ],
-   "claim": "# in every segment converged under it. One global style_contract_hash # (cache_key.py:255, GLOBAL_CACHE_KEY_FIELDS at :274) cannot tell an addition # from a reversal, so this population is admitted only when the operator"
+   "claim": "# in every segment converged under it. One global style_contract_hash # (cache_key.py:273, GLOBAL_CACHE_KEY_FIELDS at :292) cannot tell an addition # from a reversal, so this population is admitted only when the operator"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:287-291\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:305-309\", 0]": {
    "anchors": [
     "def fail(message: str)",
     "Fail loudly, naming the problem"
    ],
-   "claim": "Every exception a computer can raise -- including the SystemExit cache_key.py's own fail() raises (cache_key.py:287-291), which is how a missing style_bible.md, an absent particle config and an unresolvable manifest source input all surface -- is converted by the caller into an AssembleError naming the segment and the field. \"Cannot confirm this input\" must never read as \"this input is unchanged\". (A PyYAML-less"
+   "claim": "Every exception a computer can raise -- including the SystemExit cache_key.py's own fail() raises (cache_key.py:305-309), which is how a missing style_bible.md, an absent particle config and an unresolvable manifest source input all surface -- is converted by the caller into an AssembleError naming the segment and the field. \"Cannot confirm this input\" must never read as \"this input is unchanged\". (A PyYAML-less"
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"final_audit.py:1811-1893\", 0]": {
    "anchors": [
@@ -157,7 +157,7 @@
    ],
    "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/fix_scope_audit.py\", \"SKILL.md:4521-4523\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/fix_scope_audit.py\", \"SKILL.md:4562-4564\", 0]": {
    "anchors": [
     "registry schemas ship under",
     "never copied into a durable root"
@@ -375,17 +375,17 @@
    ],
    "claim": "\".driver.lock, segments/.codex_job.<seg>.lock) -- it cannot \" \"prove the rest, and does not pretend to. If the assertion is \" \"wrong, a concurrent fix turn writes the canonical draft \" \"directly and copies whatever dispatch_token it read \" \"(mass-translate-wf.template.js:1288): depending on timing it \" \"either loses its own work, or leaves the claim's re-stamped \" \"draft carrying content that nobody has re-reviewed. Never a \" \"blanket authorization: only the ids named here.\""
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"mass-translate-wf.template.js:2257\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"mass-translate-wf.template.js:2302\", 0]": {
    "anchors": [
     "seg, { status: \"blocked\", reason: \"draft-missing\" },"
    ],
-   "claim": "Why _translate_redispatched_since()'s own mtime-only test above is NOT reusable here, unmodified, at THIS call site: the workflow also writes `{\"status\": \"blocked\", \"reason\": \"draft-missing\"}` AFTER a numbered review (mass-translate-wf.template.js:2257), and a segment left `blocked` is explicitly retried via `--only-segs` under the SAME run_id (resume_setup.py resolves it to the same run by matching the same input digest). A mtime-only guard would hold the round label for that recovery too -- a paid same-label review dispatched over a draft"
+   "claim": "Why _translate_redispatched_since()'s own mtime-only test above is NOT reusable here, unmodified, at THIS call site: the workflow also writes `{\"status\": \"blocked\", \"reason\": \"draft-missing\"}` AFTER a numbered review (mass-translate-wf.template.js:2302), and a segment left `blocked` is explicitly retried via `--only-segs` under the SAME run_id (resume_setup.py resolves it to the same run by matching the same input digest). A mtime-only guard would hold the round label for that recovery too -- a paid same-label review dispatched over a draft"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"mass-translate-wf.template.js:2367\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"mass-translate-wf.template.js:2412\", 0]": {
    "anchors": [
     "async function translateStage(seg) {"
    ],
-   "claim": "`{\"status\": \"in_progress\"}` immediately BEFORE the dispatch: this driver's own translate branch (see process_segment()'s `if action[\"action\"] == \"translate\":`, just before its codex dispatch) and the shipped workflow's translateStage() (mass-translate-wf.template.js:2367). A fix turn goes through neither, so it writes no fragment at all -- which is what makes the discriminator work at all."
+   "claim": "`{\"status\": \"in_progress\"}` immediately BEFORE the dispatch: this driver's own translate branch (see process_segment()'s `if action[\"action\"] == \"translate\":`, just before its codex dispatch) and the shipped workflow's translateStage() (mass-translate-wf.template.js:2412). A fix turn goes through neither, so it writes no fragment at all -- which is what makes the discriminator work at all."
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"mass-translate-wf.template.js:753-765\", 0]": {
    "anchors": [
@@ -447,39 +447,39 @@
    ],
    "claim": "# json\"), and _read_review_obj()'s copy of the same. The REAL protection is # cross-file, not \"this script never does it\": select_segments.py's own # load_candidate_segments() fatals on any manifest.json `seg` failing its # validate_seg() (select_segments.py:1316-1332, the regex check at :1251) -- # every `seg` this script ever operates on already came from THAT # validated output (the `segs` list Step 1's own gate returns), never from # an unvalidated source, before this script ever builds a path from one."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2049\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2094\", 0]": {
    "anchors": [
     "async function runRound(seg, round, isFinal) {"
    ],
-   "claim": "Mirrors mass-translate-wf.template.js's own runRound(seg, round, isFinal) exactly (template.js:2049): `recordLedgerCall(seg, {status: \"converged\", rounds: round, ...})` (template.js:2077) always writes the NUMERIC loop variable `round`, never a value derived from the \"final\" round LABEL -- and on the mandatory final call that variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`,",
+   "claim": "Mirrors mass-translate-wf.template.js's own runRound(seg, round, isFinal) exactly (template.js:2094): `recordLedgerCall(seg, {status: \"converged\", rounds: round, ...})` (template.js:2122) always writes the NUMERIC loop variable `round`, never a value derived from the \"final\" round LABEL -- and on the mandatory final call that variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`,",
    "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2077\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2122\", 0]": {
    "anchors": [
     "seg, { status: \"converged\", rounds: round, needsCacheKey: true },"
    ],
-   "claim": "# round_label is REQUIRED here, not decoration: the caller needs # it to compute the ledger's own `rounds` field (a real integer, # per mass-translate-wf.template.js's own runRound(), # template.js:2077 -- `rounds: round`, the NUMERIC loop # variable, which equals MAXFIX + 1 on the mandatory final call, # template.js:2343). Without this, a segment that converges on # the FINAL round -- an entirely ordinary outcome -- could never # be told apart from one that converged on a numbered round.",
+   "claim": "# round_label is REQUIRED here, not decoration: the caller needs # it to compute the ledger's own `rounds` field (a real integer, # per mass-translate-wf.template.js's own runRound(), # template.js:2122 -- `rounds: round`, the NUMERIC loop # variable, which equals MAXFIX + 1 on the mandatory final call, # template.js:2388). Without this, a segment that converges on # the FINAL round -- an entirely ordinary outcome -- could never # be told apart from one that converged on a numbered round.",
    "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2077\", 1]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2122\", 1]": {
    "anchors": [
     "seg, { status: \"converged\", rounds: round, needsCacheKey: true },"
    ],
-   "claim": "Mirrors mass-translate-wf.template.js's own runRound(seg, round, isFinal) exactly (template.js:2049): `recordLedgerCall(seg, {status: \"converged\", rounds: round, ...})` (template.js:2077) always writes the NUMERIC loop variable `round`, never a value derived from the \"final\" round LABEL -- and on the mandatory final call that variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`, template.js:2343). So round_label == \"final\" -> max_fix_rounds + 1;",
+   "claim": "Mirrors mass-translate-wf.template.js's own runRound(seg, round, isFinal) exactly (template.js:2094): `recordLedgerCall(seg, {status: \"converged\", rounds: round, ...})` (template.js:2122) always writes the NUMERIC loop variable `round`, never a value derived from the \"final\" round LABEL -- and on the mandatory final call that variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`, template.js:2388). So round_label == \"final\" -> max_fix_rounds + 1;",
    "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2343\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2388\", 0]": {
    "anchors": [
     "const finalRound = await runRound(seg, MAXFIX + 1, true);"
    ],
-   "claim": "# it to compute the ledger's own `rounds` field (a real integer, # per mass-translate-wf.template.js's own runRound(), # template.js:2077 -- `rounds: round`, the NUMERIC loop # variable, which equals MAXFIX + 1 on the mandatory final call, # template.js:2343). Without this, a segment that converges on # the FINAL round -- an entirely ordinary outcome -- could never # be told apart from one that converged on a numbered round.",
+   "claim": "# it to compute the ledger's own `rounds` field (a real integer, # per mass-translate-wf.template.js's own runRound(), # template.js:2122 -- `rounds: round`, the NUMERIC loop # variable, which equals MAXFIX + 1 on the mandatory final call, # template.js:2388). Without this, a segment that converges on # the FINAL round -- an entirely ordinary outcome -- could never # be told apart from one that converged on a numbered round.",
    "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2343\", 1]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:2388\", 1]": {
    "anchors": [
     "const finalRound = await runRound(seg, MAXFIX + 1, true);"
    ],
-   "claim": "\"converged\", rounds: round, ...})` (template.js:2077) always writes the NUMERIC loop variable `round`, never a value derived from the \"final\" round LABEL -- and on the mandatory final call that variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`, template.js:2343). So round_label == \"final\" -> max_fix_rounds + 1; every other round_label is already the decimal round number as a string and converts directly. This REPLACES the former `_round_number()`, which parsed the trailing digit out of a dispatch_token string and returned None for a \"...:rfinal\" token --",
+   "claim": "\"converged\", rounds: round, ...})` (template.js:2122) always writes the NUMERIC loop variable `round`, never a value derived from the \"final\" round LABEL -- and on the mandatory final call that variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`, template.js:2388). So round_label == \"final\" -> max_fix_rounds + 1; every other round_label is already the decimal round number as a string and converts directly. This REPLACES the former `_round_number()`, which parsed the trailing digit out of a dispatch_token string and returned None for a \"...:rfinal\" token --",
    "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"template.js:545\", 0]": {
@@ -703,11 +703,11 @@
    ],
    "claim": "note's frontmatter `title` / filename fall back to the raw seg id instead of the heading text (`assembly-and-output.md`'s algorithm section spells out the fallback). This is a silent misclassification, not a validation failure — schema validation and the self-check suite both pass on it, since `type` is intentionally open-ended (`manifest.schema.json:18`). Declaring `heading_types` is the only way to opt a custom tag in."
   },
-  "[\"plugins/literary-translator/tests/assemble_live_inputs.test.py\", \"cache_key.py:644\", 0]": {
+  "[\"plugins/literary-translator/tests/assemble_live_inputs.test.py\", \"cache_key.py:662\", 0]": {
    "anchors": [
     "the plugin_bundle_hash marker file"
    ],
-   "claim": "That case rewrites `runs/.plugin_bundle_hash`, the marker Step 0a writes and `cache_key.py:644` reads back, and asserts the recomputed field really moved before asserting assembly survived it: editing a bundle script's bytes would leave the field unchanged and make the test vacuous;"
+   "claim": "That case rewrites `runs/.plugin_bundle_hash`, the marker Step 0a writes and `cache_key.py:662` reads back, and asserts the recomputed field really moved before asserting assembly survived it: editing a bundle script's bytes would leave the field unchanged and make the test vacuous;"
   },
   "[\"plugins/literary-translator/tests/authoring_hygiene_drift.test.py\", \"engine-loop.md:11\", 0]": {
    "anchors": [
@@ -782,20 +782,20 @@
    ],
    "claim": "# `resolve_cache_key_script`/`_stamp_generation_hash` are shared code, but # each of these three threads its OWN `plugin_root_str` parameter through # from `main()`'s dispatch (canon_validate.py:3970-4017) to its own # `_stamp_write_verify` call -- a regression in any one of those three # threading sites would not be caught by the `--init` test above."
   },
-  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"cache_key.py:202-246\", 0]": {
+  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"cache_key.py:202-264\", 0]": {
    "anchors": [
     "PLUGIN_BUNDLE_MEMBERS = (",
     "\"select_segments.py\",",
     "glossary-pass-wf.template.js"
    ],
-   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-246`, # `cache_key.py:253-274` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
+   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-264`, # `cache_key.py:271-292` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
   },
-  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"cache_key.py:253-274\", 0]": {
+  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"cache_key.py:271-292\", 0]": {
    "anchors": [
     "CACHE_KEY_FIELD_ORDER = (",
     "GLOBAL_CACHE_KEY_FIELDS = frozenset(CACHE_KEY_FIELD_ORDER)"
    ],
-   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-246`, # `cache_key.py:253-274` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
+   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-264`, # `cache_key.py:271-292` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
   },
   "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"resume_setup.py:837-856\", 0]": {
    "anchors": [
@@ -803,7 +803,7 @@
     "DIGEST_SUBST_FIELDS, never SUBST_FIELDS (#735)",
     "return _sha256_hex(_canonical_json_bytes(digest_input))"
    ],
-   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-246`, # `cache_key.py:253-274` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
+   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-264`, # `cache_key.py:271-292` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
   },
   "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:1741-1778\", 0]": {
    "anchors": [
@@ -824,23 +824,23 @@
    ],
    "claim": "construct DispatchContext directly and inject `claims=` themselves, so they prove `claim_capability_refusal_for_translate()` works but prove NOTHING about whether run() actually populates `ctx.claims` from the selector's own output -- deleting `claims=claims` from the real construction at segment_dispatch_driver.py:7517 leaves all eleven of them green, because none of them ever go through run() at all."
   },
-  "[\"plugins/literary-translator/tests/claim_prompt_contract.test.py\", \"mass-translate-wf.template.js:1628\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_prompt_contract.test.py\", \"mass-translate-wf.template.js:1673\", 0]": {
    "anchors": [
     "byte for byte into your rewritten draft, unchanged; never invent, drop, or recompute it."
    ],
-   "claim": "\"\"\"D9's actual protection on the fallback template path (PLAN.md D9, mass-translate-wf.template.js:1628): the claim survives a fix round ONLY because fixPrompt()'s own rendered text instructs the fixer to copy the draft's existing dispatch_token byte for byte, unchanged. This is exercised against the ACTUAL rendered fixPrompt() output produced by the real, currently-shipped template running under Node -- never a"
+   "claim": "\"\"\"D9's actual protection on the fallback template path (PLAN.md D9, mass-translate-wf.template.js:1673): the claim survives a fix round ONLY because fixPrompt()'s own rendered text instructs the fixer to copy the draft's existing dispatch_token byte for byte, unchanged. This is exercised against the ACTUAL rendered fixPrompt() output produced by the real, currently-shipped template running under Node -- never a"
   },
-  "[\"plugins/literary-translator/tests/claim_prompt_contract.test.py\", \"mass-translate-wf.template.js:2368\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_prompt_contract.test.py\", \"mass-translate-wf.template.js:2413\", 0]": {
    "anchors": [
     "recordLedgerCall(seg, { status: \"in_progress\" }, \"ledger:in_progress:\" + seg);"
    ],
-   "claim": "\"\"\"PLAN.md D8's residual, pinned so it stays visible in the suite rather than only in prose: `recordLedgerCall(seg, {status: \"in_progress\"})` (mass-translate-wf.template.js:2368) completes BEFORE `agent(translateDrivePrompt(seg))` (:2371) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of this file's scope) fires strictly AFTER the ledger has already been full-replaced to a two-key in_progress row. This is why that chokepoint"
+   "claim": "\"\"\"PLAN.md D8's residual, pinned so it stays visible in the suite rather than only in prose: `recordLedgerCall(seg, {status: \"in_progress\"})` (mass-translate-wf.template.js:2413) completes BEFORE `agent(translateDrivePrompt(seg))` (:2416) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of this file's scope) fires strictly AFTER the ledger has already been full-replaced to a two-key in_progress row. This is why that chokepoint"
   },
-  "[\"plugins/literary-translator/tests/claim_prompt_contract.test.py\", \"mass-translate-wf.template.js:2371\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/tests/claim_prompt_contract.test.py\", \"mass-translate-wf.template.js:2416\", 0, \"continuation\"]": {
    "anchors": [
     "await agent(translateDrivePrompt(seg)"
    ],
-   "claim": "\"in_progress\"})` (mass-translate-wf.template.js:2368) completes BEFORE `agent(translateDrivePrompt(seg))` (:2371) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of"
+   "claim": "\"in_progress\"})` (mass-translate-wf.template.js:2413) completes BEFORE `agent(translateDrivePrompt(seg))` (:2416) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of"
   },
   "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5000\", 0]": {
    "anchors": [
@@ -965,7 +965,7 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4237-4243\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4278-4284\", 0]": {
    "anchors": [
     "Excluded from every bundle hash",
     "nor of `orchestration_bundle_hash`",
@@ -1064,19 +1064,19 @@
    ],
    "claim": "CORRECTED (this docstring previously claimed the reason was \"no schemas/ dir to even load review.schema.json from\" -- FALSE, and it was already false before this fix, not a regression this branch caused): review_ready.py's own main() (review_ready.py:319-349) checks the review FILE's presence/non-emptiness at line 332, strictly BEFORE it ever reaches `_load_review_schema()` at line 339 -- so the orphan location's missing segments/{seg}.review.json is what's actually reached first, never the missing schemas/ dir. Verified by running the"
   },
-  "[\"plugins/literary-translator/tests/scaffold_setup.test.py\", \"cache_key.py:638-644\", 0]": {
+  "[\"plugins/literary-translator/tests/scaffold_setup.test.py\", \"cache_key.py:656-662\", 0]": {
    "anchors": [
     "def compute_plugin_bundle_hash(profile: dict, durable_root: Path) -> str:",
     "the plugin_bundle_hash marker file"
    ],
-   "claim": "THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:638-644) READS ``${durable_root}/runs/.plugin_bundle_hash`` and ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before #194 SKILL.md's Step 0a only PROSE-described \"computes/writes\" them: no"
+   "claim": "THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:656-662) READS ``${durable_root}/runs/.plugin_bundle_hash`` and ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before #194 SKILL.md's Step 0a only PROSE-described \"computes/writes\" them: no"
   },
   "[\"plugins/literary-translator/tests/scaffold_setup.test.py\", \"resume_setup.py:837-843\", 0]": {
    "anchors": [
     "dirs[\"runs_dir\"] / \".plugin_bundle_hash\", \"plugin_bundle_hash\"",
     "dirs[\"runs_dir\"] / \".orchestration_bundle_hash\", \"orchestration_bundle_hash\""
    ],
-   "claim": "THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:638-644) READS ``${durable_root}/runs/.plugin_bundle_hash`` and ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before #194 SKILL.md's Step 0a only PROSE-described \"computes/writes\" them: no shipped script actually wrote either marker, so a real run failed with \"has Step 0a run for this project?\". ``scaffold_setup.py`` is the shipped"
+   "claim": "THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:656-662) READS ``${durable_root}/runs/.plugin_bundle_hash`` and ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before #194 SKILL.md's Step 0a only PROSE-described \"computes/writes\" them: no shipped script actually wrote either marker, so a real run failed with \"has Step 0a run for this project?\". ``scaffold_setup.py`` is the shipped"
   },
   "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"codex_job.py:1750-1784\", 0]": {
    "anchors": [
@@ -1101,7 +1101,7 @@
    "anchors": [
     "\"rounds\": {"
    ],
-   "claim": "`runRound(seg, MAXFIX + 1, true)`, template.js:2343, which records `rounds: round` == MAXFIX + 1, template.js:2077 -- a plain integer, never derived from the \"final\" round LABEL) is an entirely normal outcome, not an edge case. The ledger schema requires `rounds` to be an integer (ledger-record-base.schema.json:15) and REQUIRES it outright for status=converged (same file's allOf block, :78-86) -- so a write that can't produce a real number for the final round is rejected twice over."
+   "claim": "`runRound(seg, MAXFIX + 1, true)`, template.js:2388, which records `rounds: round` == MAXFIX + 1, template.js:2122 -- a plain integer, never derived from the \"final\" round LABEL) is an entirely normal outcome, not an edge case. The ledger schema requires `rounds` to be an integer (ledger-record-base.schema.json:15) and REQUIRES it outright for status=converged (same file's allOf block, :78-86) -- so a write that can't produce a real number for the final round is rejected twice over."
   },
   "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"ledger-record-base.schema.json:78-86\", 0, \"continuation\"]": {
    "anchors": [
@@ -1129,20 +1129,20 @@
    "anchors": [
     "function fixPrompt(seg, round, revObj) {"
    ],
-   "claim": "\"\"\"Pins (as a real assertion, not a comment) that fixPrompt's 3-argument signature (mass-translate-wf.template.js:1562, documented at :1513-1520 as deliberate: \"revObj is still passed through ... but fixPrompt itself no longer splices it into the prompt as the findings source\") really does hold. Verified against the real template directly: fixPrompt's own 70-line body (:1563-1632) never references `revObj` at all --"
+   "claim": "\"\"\"Pins (as a real assertion, not a comment) that fixPrompt's 3-argument signature (mass-translate-wf.template.js:1562, documented at :1513-1520 as deliberate: \"revObj is still passed through ... but fixPrompt itself no longer splices it into the prompt as the findings source\") really does hold. Verified against the real template directly: fixPrompt's own 70-line body (:1563-1677) never references `revObj` at all --"
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"mass-translate-wf.template.js:1563-1632\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"mass-translate-wf.template.js:1563-1677\", 0, \"continuation\"]": {
    "anchors": [
     "You are the Claude editor applying review findings",
     "End your reply with the line: FIXED "
    ],
-   "claim": "does hold. Verified against the real template directly: fixPrompt's own 70-line body (:1563-1632) never references `revObj` at all -- findings are only ever REFERENCED by file path in the rendered prompt"
+   "claim": "does hold. Verified against the real template directly: fixPrompt's own 70-line body (:1563-1677) never references `revObj` at all -- findings are only ever REFERENCED by file path in the rendered prompt"
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"mass-translate-wf.template.js:2257\", 0]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"mass-translate-wf.template.js:2302\", 0]": {
    "anchors": [
     "seg, { status: \"blocked\", reason: \"draft-missing\" },"
    ],
-   "claim": "\"\"\"Codex's admitted MAJOR against an earlier revision of this fix, reproduced directly: the shipped workflow writes `{\"status\": \"blocked\", \"reason\": \"draft-missing\"}` AFTER a numbered review (mass-translate-wf.template.js:2257), and a `blocked` segment is retried via `--only-segs` under the SAME run_id. A guard that only checked the fragment's mtime (reusing _translate_redispatched_since() unmodified at this call site, as an earlier revision of this fix proposed) would misread that recovery as \"a translate is in progress\""
+   "claim": "\"\"\"Codex's admitted MAJOR against an earlier revision of this fix, reproduced directly: the shipped workflow writes `{\"status\": \"blocked\", \"reason\": \"draft-missing\"}` AFTER a numbered review (mass-translate-wf.template.js:2302), and a `blocked` segment is retried via `--only-segs` under the SAME run_id. A guard that only checked the fragment's mtime (reusing _translate_redispatched_since() unmodified at this call site, as an earlier revision of this fix proposed) would misread that recovery as \"a translate is in progress\""
   },
   "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"profile.schema.json:494\", 0]": {
    "anchors": [
@@ -1198,33 +1198,33 @@
    ],
    "claim": "draft matches\" branch (segment_dispatch_driver.py:4957, feeding the already_converged decision at :4984) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable"
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:1755-1765\", 0]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:1800-1810\", 0]": {
    "anchors": [
     "function verifyReviewArtifactPrompt(seg, revObj) {",
     "The script already did the comparison -- do not re-judge it."
    ],
-   "claim": "JSON-embedded bytes. Genuinely stronger than a delimiter-in-a-string scheme: a prompt-injection payload sitting in findings[].issue/suggest has nothing in the rendered prompt to attach to. This branch strictly reduces the surface relative to the Workflow it replaces, whose verifyReviewArtifactPrompt (template.js:1755-1765) splices revObj in directly -- a function this driver deliberately never calls.",
+   "claim": "JSON-embedded bytes. Genuinely stronger than a delimiter-in-a-string scheme: a prompt-injection payload sitting in findings[].issue/suggest has nothing in the rendered prompt to attach to. This branch strictly reduces the surface relative to the Workflow it replaces, whose verifyReviewArtifactPrompt (template.js:1800-1810) splices revObj in directly -- a function this driver deliberately never calls.",
    "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:2077\", 0]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:2122\", 0]": {
    "anchors": [
     "seg, { status: \"converged\", rounds: round, needsCacheKey: true },"
    ],
-   "claim": "\"\"\"codex #384-class BLOCKER: a segment that converges on the mandatory FINAL confirming review (mass-translate-wf.template.js's own `runRound(seg, MAXFIX + 1, true)`, template.js:2343, which records `rounds: round` == MAXFIX + 1, template.js:2077 -- a plain integer, never derived from the \"final\" round LABEL) is an entirely normal outcome, not an edge case. The ledger schema requires `rounds` to be an integer (ledger-record-base.schema.json:15) and REQUIRES it outright for status=converged (same file's allOf block, :78-86) -- so a write that",
+   "claim": "\"\"\"codex #384-class BLOCKER: a segment that converges on the mandatory FINAL confirming review (mass-translate-wf.template.js's own `runRound(seg, MAXFIX + 1, true)`, template.js:2388, which records `rounds: round` == MAXFIX + 1, template.js:2122 -- a plain integer, never derived from the \"final\" round LABEL) is an entirely normal outcome, not an edge case. The ledger schema requires `rounds` to be an integer (ledger-record-base.schema.json:15) and REQUIRES it outright for status=converged (same file's allOf block, :78-86) -- so a write that",
    "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:2343\", 0]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:2388\", 0]": {
    "anchors": [
     "const finalRound = await runRound(seg, MAXFIX + 1, true);"
    ],
-   "claim": "\"\"\"codex #384-class BLOCKER: a segment that converges on the mandatory FINAL confirming review (mass-translate-wf.template.js's own `runRound(seg, MAXFIX + 1, true)`, template.js:2343, which records `rounds: round` == MAXFIX + 1, template.js:2077 -- a plain integer, never derived from the \"final\" round LABEL) is an entirely normal outcome, not an edge case. The ledger schema requires `rounds` to be an integer (ledger-record-base.schema.json:15) and REQUIRES it outright for",
+   "claim": "\"\"\"codex #384-class BLOCKER: a segment that converges on the mandatory FINAL confirming review (mass-translate-wf.template.js's own `runRound(seg, MAXFIX + 1, true)`, template.js:2388, which records `rounds: round` == MAXFIX + 1, template.js:2122 -- a plain integer, never derived from the \"final\" round LABEL) is an entirely normal outcome, not an edge case. The ledger schema requires `rounds` to be an integer (ledger-record-base.schema.json:15) and REQUIRES it outright for",
    "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:2343\", 1]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:2388\", 1]": {
    "anchors": [
     "const finalRound = await runRound(seg, MAXFIX + 1, true);"
    ],
-   "claim": "fragment = json.loads((root / \"runs\" / \"ledger.d\" / \"seg01.json\").read_text(encoding=\"utf-8\")) assert fragment[\"status\"] == \"converged\" assert fragment[\"rounds\"] == max_fix_rounds + 1, ( f\"the mandatory final round is round number max_fix_rounds+1={max_fix_rounds + 1} \" f\"in the template's own runRound(seg, MAXFIX + 1, true) call (template.js:2343) -- \" f\"got rounds={fragment.get('rounds')!r}\" )",
+   "claim": "fragment = json.loads((root / \"runs\" / \"ledger.d\" / \"seg01.json\").read_text(encoding=\"utf-8\")) assert fragment[\"status\"] == \"converged\" assert fragment[\"rounds\"] == max_fix_rounds + 1, ( f\"the mandatory final round is round number max_fix_rounds+1={max_fix_rounds + 1} \" f\"in the template's own runRound(seg, MAXFIX + 1, true) call (template.js:2388) -- \" f\"got rounds={fragment.get('rounds')!r}\" )",
    "target": "plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js"
   },
   "[\"plugins/literary-translator/tests/skeptic_confident_mismerge.test.py\", \"canon-senses.schema.json:11-26\", 0]": {

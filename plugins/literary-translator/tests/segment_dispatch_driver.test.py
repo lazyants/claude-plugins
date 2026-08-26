@@ -3334,8 +3334,8 @@ def _fixture_ctx(root, run_id, translate_cfg=None, claims=None):
 def test_a_segment_converged_on_the_mandatory_final_round_records_a_real_rounds_number(tmp_path):
     """codex #384-class BLOCKER: a segment that converges on the mandatory
     FINAL confirming review (mass-translate-wf.template.js's own
-    `runRound(seg, MAXFIX + 1, true)`, template.js:2343, which records
-    `rounds: round` == MAXFIX + 1, template.js:2077 -- a plain integer,
+    `runRound(seg, MAXFIX + 1, true)`, template.js:2388, which records
+    `rounds: round` == MAXFIX + 1, template.js:2122 -- a plain integer,
     never derived from the "final" round LABEL) is an entirely normal
     outcome, not an edge case. The ledger schema requires `rounds` to be an
     integer (ledger-record-base.schema.json:15) and REQUIRES it outright for
@@ -3374,7 +3374,7 @@ def test_a_segment_converged_on_the_mandatory_final_round_records_a_real_rounds_
     assert fragment["status"] == "converged"
     assert fragment["rounds"] == max_fix_rounds + 1, (
         f"the mandatory final round is round number max_fix_rounds+1={max_fix_rounds + 1} "
-        f"in the template's own runRound(seg, MAXFIX + 1, true) call (template.js:2343) -- "
+        f"in the template's own runRound(seg, MAXFIX + 1, true) call (template.js:2388) -- "
         f"got rounds={fragment.get('rounds')!r}"
     )
 
@@ -6930,7 +6930,7 @@ def test_derive_next_action_still_advances_over_a_blocked_fragment_newer_than_th
     """Codex's admitted MAJOR against an earlier revision of this fix,
     reproduced directly: the shipped workflow writes `{"status": "blocked",
     "reason": "draft-missing"}` AFTER a numbered review
-    (mass-translate-wf.template.js:2257), and a `blocked` segment is
+    (mass-translate-wf.template.js:2302), and a `blocked` segment is
     retried via `--only-segs` under the SAME run_id. A guard that only
     checked the fragment's mtime (reusing _translate_redispatched_since()
     unmodified at this call site, as an earlier revision of this fix
@@ -6985,14 +6985,14 @@ def test_render_fix_prompt_never_inlines_poisoned_review_findings_text(tmp_path)
     as deliberate: "revObj is still passed through ... but fixPrompt itself
     no longer splices it into the prompt as the findings source") really
     does hold. Verified against the real template directly: fixPrompt's
-    own 70-line body (:1563-1632) never references `revObj` at all --
+    own 70-line body (:1563-1677) never references `revObj` at all --
     findings are only ever REFERENCED by file path in the rendered prompt
     text (an instruction to go read seg.review.json), never inlined as
     JSON-embedded bytes. Genuinely stronger than a delimiter-in-a-string
     scheme: a prompt-injection payload sitting in findings[].issue/suggest
     has nothing in the rendered prompt to attach to. This branch strictly
     reduces the surface relative to the Workflow it replaces, whose
-    verifyReviewArtifactPrompt (template.js:1755-1765) splices revObj in
+    verifyReviewArtifactPrompt (template.js:1800-1810) splices revObj in
     directly -- a function this driver deliberately never calls.
 
     review.schema.json types findings[].issue/suggest as bare strings with

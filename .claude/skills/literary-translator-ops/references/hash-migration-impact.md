@@ -56,7 +56,7 @@ verified wrong against `select_segments.py`'s field→function mapping directly;
 text here can drift again and must be re-checked, not trusted at face value.
 "Cache-key member = mass re-translation" is the FLOOR; a derivation-bundle edit costs
 regen-THEN-retranslate. The hash itself is a raw-byte SHA1 of the concatenated members
-(`compute_derivation_bundle_hash`, `cache_key.py:632-635`) — no comment-stripping, so even a comment
+(`compute_derivation_bundle_hash`, `cache_key.py:650-653`) — no comment-stripping, so even a comment
 reword flips it.
 
 **Batching rule — a `derivation_bundle_hash` flip SUBSUMES a `plugin_bundle_hash` / `schema_hash` flip
@@ -116,7 +116,7 @@ the resume digest.
 ## Surface 5 — editing canon.json DATA (not a file's bytes): `used_terms_hash`
 
 The four surfaces above are about editing a SCHEMA or SCRIPT **file**. A distinct surface is editing
-`canon.json` **content**: `used_terms_hash` (15-field cache-key field #3, `cache_key.py:735-741`) hashes
+`canon.json` **content**: `used_terms_hash` (15-field cache-key field #3, `cache_key.py:753-759`) hashes
 the **WHOLE referenced canon ENTRY object** (`{name: entries[name]}` for every name a segment
 references, via `canonical_json_bytes`). So **adding ANY field to a canon `entries{}` record
 re-translates every converged segment that references that `source_form`** — even a purely descriptive
@@ -128,7 +128,7 @@ nothing).
 re-translating, put it in a SIDE-STORE keyed by `source_form`** — a sibling file
 (`canon_adjudications.json` is the existing precedent, or a new `canon_senses.json`) — **NEVER in the
 `entries{}` body.** No sidecar file is among the 15 cache-key fields (`schema_hash` = draft/review/
-segpack schemas only, `cache_key.py:480-488`), so sidecar DATA edits are cache-neutral. This is why a
+segpack schemas only, `cache_key.py:498-506`), so sidecar DATA edits are cache-neutral. This is why a
 homonym-split / evidence design stores `senses[]` / evidence in a sidecar, not in canon entries.
 Belt-and-braces: `CANON_ENTRY_FIELDS` (`canon_validate.py:658-667`) is the projection
 `_entry_from_accepted_item` writes, so a stray field on an accepted batch item is silently STRIPPED —
