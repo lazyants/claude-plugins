@@ -617,6 +617,45 @@ with tempfile.TemporaryDirectory() as tmp:
     staged = [q.name for q in bin_dir.iterdir() if q.name.startswith(".code-limit.")]
     check("21 no staging file is left behind", staged == [], str(staged))
 
+# 24 -- a planted file whose target is canonically quoted but carries a control character.
+# The installer refuses to EMIT such a path, so a decoder that accepts one recognises a shim it
+# could never have written -- and adopts somebody else's executable on the strength of it.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    source = make_source(root, "stable", "skills", "code-limits")
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    planted = bin_dir / "code-limit"
+    tabbed = (f"#!/bin/sh\n{MARKER}\n"
+              f"exec python3 {quoted('/tmp/foreign\ttool')} \"$@\"\n")
+    planted.write_text(tabbed, encoding="utf-8")
+    planted.chmod(0o755)
+    done = install(root, source, bin_dir)
+    check("24 a control-bearing target is NOT ours", done.returncode == 1, done.stdout)
+    check("24 its bytes are untouched", planted.read_text(encoding="utf-8") == tabbed)
+    check("24 it is reported as not ours", "not this plugin's shim" in done.stdout, done.stdout)
+    forced = install(root, source, bin_dir, force=True)
+    check("24 --force still replaces it", forced.returncode == 0, forced.stdout + forced.stderr)
+    check("24 and installs the real shim",
+          planted.read_text(encoding="utf-8") == expected_shim(report_of(source)))
+
+# 25 -- an exact shim that is over-permissive. 0755 is the mode, not "some execute bit": a
+# world-writable command on PATH is a worse outcome than a missing one, and reporting it as
+# already installed leaves it there.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    source = make_source(root, "stable", "skills", "code-limits")
+    bin_dir = root / "bin"
+    install(root, source, bin_dir)
+    shim = bin_dir / "code-limit"
+    shim.chmod(0o777)
+    done = install(root, source, bin_dir)
+    check("25 an 0777 shim is not reported as already installed",
+          "already installed" not in done.stdout, done.stdout)
+    check("25 the rerun exits 0", done.returncode == 0, done.stdout + done.stderr)
+    check("25 the mode is brought back to 0755", stat.S_IMODE(shim.stat().st_mode) == 0o755,
+          oct(stat.S_IMODE(shim.stat().st_mode)))
+
 # 22 -- the staging primitive itself, imported rather than driven, because the window it closes
 # cannot be produced from outside: `place` only reaches the no-clobber path when the name did NOT
 # exist a moment earlier. So this pins the primitive's contract and says plainly that the race
@@ -653,6 +692,14 @@ check("23 CRLF bytes are not a shim",
       installer.shim_target(expected_shim(REPORT).replace("\n", "\r\n").encode("utf-8")) is None)
 check("23 the real thing is a shim",
       installer.shim_target(expected_shim(REPORT).encode("utf-8")) == str(REPORT))
+# The decoder's language must equal the emitter's, checked on the predicate they share.
+for bad in ("/tmp/a\tb", "/tmp/a\nb", "/tmp/a\x00b", ""):
+    check(f"23 {bad!r} is not emittable", not installer.emittable(bad))
+    check(f"23 and a shim naming it is not ours",
+          installer.shim_target(
+              f"#!/bin/sh\n{MARKER}\nexec python3 {quoted(bad)} \"$@\"\n".encode("utf-8"))
+          is None)
+check("23 an ordinary path is emittable", installer.emittable("/tmp/a b/it's.py"))
 
 # 17 -- the installer refuses a source whose report is missing, rather than shimming onto nothing.
 with tempfile.TemporaryDirectory() as tmp:
@@ -673,7 +720,7 @@ if failures:
 
 # A case that raises before its checks run, or a deleted fixture block, otherwise subtracts
 # silently: the remaining cases pass, the run exits 0, and that reads exactly like full coverage.
-MIN_CHECKS = 115
+MIN_CHECKS = 130
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

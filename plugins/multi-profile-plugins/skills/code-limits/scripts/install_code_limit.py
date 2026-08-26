@@ -63,6 +63,19 @@ def posix_quote(text: str) -> str:
     return "'" + text.replace("'", "'\"'\"'") + "'"
 
 
+def emittable(target: str) -> bool:
+    """Whether this installer could ever have written `target` into a shim.
+
+    Emission and classification have to accept the SAME language, and this is the one predicate
+    both use. `main` refuses a report path carrying a control character rather than escaping it
+    into a shell file; a decoder that accepts one anyway lets a file this installer could never
+    have produced count as its own -- and a planted file at a managed name is exactly the
+    untrusted surface the ownership test exists for. An empty target is impossible for the same
+    reason.
+    """
+    return target != "" and not any(ord(character) < 32 for character in target)
+
+
 def unquote_canonical(text: str) -> str | None:
     """Reverse `posix_quote`, and ONLY for output `posix_quote` could have produced.
 
@@ -99,7 +112,8 @@ def shim_target(content: bytes) -> str | None:
     body = lines[2]
     if not body.startswith(EXEC_PREFIX) or not body.endswith(EXEC_SUFFIX):
         return None
-    return unquote_canonical(body[len(EXEC_PREFIX):len(body) - len(EXEC_SUFFIX)])
+    target = unquote_canonical(body[len(EXEC_PREFIX):len(body) - len(EXEC_SUFFIX)])
+    return target if target is not None and emittable(target) else None
 
 
 def shim_text(report: Path) -> str:
@@ -234,8 +248,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {report} is not a file -- nothing to install a shim onto", file=sys.stderr)
         return 1
     # A control character would be emitted into a shell file and, in the case of a newline, split
-    # the one exec statement in two. Refused rather than escaped: no path here needs one.
-    if any(ord(character) < 32 for character in str(report)):
+    # the one exec statement in two. Refused rather than escaped: no path here needs one. The same
+    # predicate decides what counts as one of our shims, so the two languages cannot drift apart.
+    if not emittable(str(report)):
         print(f"error: the report's path carries a control character: {report!r}", file=sys.stderr)
         return 1
     if in_version_cache(report):
