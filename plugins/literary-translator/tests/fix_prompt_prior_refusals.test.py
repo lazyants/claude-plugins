@@ -143,6 +143,22 @@ def _fix_prompt(tmp_path, seg=_SEG, round_num=2):
                   [seg, round_num, _rev(seg, round_num)])
 
 
+def _producer():
+    """The REAL refuse_finding.py, imported so the two seam tests below can read
+    its own constants instead of a copy typed here. Loaded once for both: a
+    second loader block is a second thing to keep in step with the file it
+    exists to avoid duplicating."""
+    import importlib.util
+
+    src = (PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
+           / "refuse_finding.py")
+    spec = importlib.util.spec_from_file_location("refuse_finding_seam", str(src))
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _refusal_line(prompt):
     """The ONE line carrying the block. Asserted to be exactly one: the clause
     assertions below all search within it, and if the block were ever split
@@ -194,15 +210,7 @@ def test_the_block_names_the_exact_path_the_producer_writes(tmp_path):
     Derived from the producer's OWN function rather than from a second string
     literal typed here -- a hand-typed copy would agree with whatever this test
     expected and could not notice the two drifting apart."""
-    import importlib.util
-
-    src = (PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
-           / "refuse_finding.py")
-    spec = importlib.util.spec_from_file_location("refuse_finding_seam", str(src))
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    producer_path = str(mod.refusals_path(_SEG, Path(_ROOT) / "segments"))
+    producer_path = str(_producer().refusals_path(_SEG, Path(_ROOT) / "segments"))
 
     line = _refusal_line(_fix_prompt(tmp_path))
     assert producer_path in line, (
@@ -362,14 +370,7 @@ def test_the_record_shape_the_block_declares_matches_what_the_producer_writes(tm
     for a field that is not there -- or hides one that is.
 
     Read out of the producer's own constant, never a hand-typed list here."""
-    import importlib.util
-
-    src = (PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
-           / "refuse_finding.py")
-    spec = importlib.util.spec_from_file_location("refuse_finding_shape", str(src))
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = _producer()
 
     line = _refusal_line(_fix_prompt(tmp_path))
     declared = re.search(r"entries of the form \{([^}]*)\}", line)

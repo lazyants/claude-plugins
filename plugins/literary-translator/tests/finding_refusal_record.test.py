@@ -911,13 +911,6 @@ def test_a_rerun_after_a_directory_sync_failure_does_not_report_durable_success(
 # Round 2: cardinality, the index ceiling, and code points with no encoding
 # ---------------------------------------------------------------------------
 
-def _stored_record(loc=SHARED_LOC, index="0", label=ROUND_LABEL, digest=None,
-                   reason="a reasoned refusal"):
-    return {"loc": loc, "finding_index": index, "round_label": label,
-            "issue_digest": DIGEST_A if digest is None else digest,
-            "reason": reason, "refused_at": "2026-08-26T09:00:00Z"}
-
-
 def _write_existing(root, records):
     (root / "segments" / f"{SEG}.findings_refused.json").write_text(
         json.dumps({"seg": SEG, "refusals": records}), encoding="utf-8")
@@ -937,10 +930,10 @@ def test_an_over_cap_existing_file_is_foreign_even_on_the_duplicate_path(tmp_pat
     FIRST one matches this invocation exactly, so the duplicate branch is taken
     before any append-side check could fire."""
     root = make_root(tmp_path)
-    records = [_stored_record(label=str(i + 100)) for i in range(65)]
+    records = [_planted(label=str(i + 100)) for i in range(65)]
     # index "1", so it matches record_args(1, ...) below EXACTLY -- otherwise
     # the append cap fires and this test proves nothing about the duplicate path.
-    records[0] = _stored_record(index="1")
+    records[0] = _planted(index="1", digest=DIGEST_A)
     _write_existing(root, records)
 
     out, rc = run(root, *record_args(1, DIGEST_A))
@@ -952,8 +945,8 @@ def test_an_over_cap_existing_file_is_foreign_even_on_the_duplicate_path(tmp_pat
     # CONTROL 1: exactly the cap is a file the writer itself produces, so it is
     # NOT foreign -- the duplicate path still renews it.
     root_ok = make_root(tmp_path / "at-cap")
-    at_cap = [_stored_record(label=str(i + 100)) for i in range(64)]
-    at_cap[0] = _stored_record(index="1")
+    at_cap = [_planted(label=str(i + 100)) for i in range(64)]
+    at_cap[0] = _planted(index="1", digest=DIGEST_A)
     _write_existing(root_ok, at_cap)
     out, rc = run(root_ok, *record_args(1, DIGEST_A))
     assert rc == 0 and out["already_recorded"] is True, out
@@ -962,7 +955,7 @@ def test_an_over_cap_existing_file_is_foreign_even_on_the_duplicate_path(tmp_pat
     # message, so the two guards are distinguishable and neither is standing in
     # for the other.
     root_full = make_root(tmp_path / "full")
-    _write_existing(root_full, [_stored_record(label=str(i + 100)) for i in range(64)])
+    _write_existing(root_full, [_planted(label=str(i + 100)) for i in range(64)])
     out, rc = run(root_full, *record_args(1, DIGEST_A))
     assert rc == 1 and "already carries 64 refusal records" in out["error"], out
 
@@ -1088,3 +1081,35 @@ def test_an_undecodable_argv_byte_in_the_reason_is_refused_with_a_json_line(tmp_
     assert proc.returncode == 1 and out["success"] is False, out
     assert "U+DC80" in out["error"], out["error"]
     assert not (root / "segments" / f"{SEG}.findings_refused.json").exists()
+
+
+def test_both_success_payloads_carry_the_same_key_set(tmp_path):
+    """main() builds its success payload TWICE -- once on the append path and
+    once on the idempotent renewal path -- and no other assertion in this file
+    reads more than the individual keys it needs. So a field added to one branch
+    and not the other ships an inconsistent CLI contract with every test green,
+    which is the shape a caller that has to branch on which keys exist gets
+    wrong exactly once.
+
+    Pinned as a test rather than closed by folding the two literals into one
+    helper: this is the last change before the branch ships, main() is the
+    script's safety-critical path, and an assertion that fails on drift buys the
+    same protection without touching it. The full key set is spelled out here on
+    purpose -- comparing the two payloads to each other alone would stay green
+    if a key were dropped from both."""
+    expected = {"success", "seg", "path", "already_recorded", "loc",
+                "round_label", "issue_digest", "refusals"}
+    root = make_root(tmp_path)
+
+    appended, rc = run(root, *record_args(1, DIGEST_A))
+    assert rc == 0 and appended["already_recorded"] is False, appended
+    assert set(appended) == expected, sorted(set(appended) ^ expected)
+
+    renewed, rc = run(root, *record_args(1, DIGEST_A))
+    assert rc == 0 and renewed["already_recorded"] is True, renewed
+    assert set(renewed) == expected, sorted(set(renewed) ^ expected)
+
+    # Same keys, and every value that is not the flag agrees -- the two
+    # branches describe the same record or one of them is lying.
+    assert {k: v for k, v in appended.items() if k != "already_recorded"} == \
+           {k: v for k, v in renewed.items() if k != "already_recorded"}

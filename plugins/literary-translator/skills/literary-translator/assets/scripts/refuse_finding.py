@@ -41,8 +41,37 @@ operator's job, never yours". Both still hold. The operator reads the turn's
 prose refusal report -- which fixPrompt already requires it to print -- and
 records it here, exactly as reject_review.py is run from the same report.
 
+WHY THIS RECORD IS NOT GATED ON A TOKEN, WHERE #541's ARCHIVE IS. One line
+above this one's in fixPrompt, the previous round's verdict is admitted only
+if its dispatch_token equals a literal the prompt names -- and a security
+review asked why this read has no equivalent. Three reasons, recorded here so
+the asymmetry is not re-raised as an oversight:
+
+  * A CROSS-ROUND RECORD IS THE FEATURE. #541's archive is about ONE named
+    prior round, so pinning it to that round's token is exactly right. A
+    refusal made at r4 has to stay legible at r5 and r6 -- that is the whole
+    of #764 -- so a current-token gate would reject every record it exists to
+    surface. The prompt says outright that entries may name other rounds.
+  * A RUN-ID GATE WOULD NOT DEFEND ANYTHING. The threat it was proposed
+    against is a turn that writes into segments/ in violation of its own
+    single-write-target instruction. That turn can read the run id out of
+    {seg}.review.json in the directory it just wrote to, so it would satisfy
+    any such gate on the first try.
+  * THE SAME PRECONDITION ALREADY GRANTS MORE. A turn able to create
+    {seg}.findings_refused.json is a turn able to write {seg}.draft.json --
+    the deliverable itself. Planting a hint for a later turn is strictly
+    weaker than editing the book directly, so this file adds no capability an
+    attacker at that precondition does not already hold.
+
+The bounds below are therefore about a COOPERATING writer's output staying
+small and inert, which is what they can be about; they were never a claim to
+authenticate the file against a hostile one, and no gate in this pipeline is.
+
 EVERY FIELD IS COMPUTED, DERIVED-AND-REVALIDATED, OR BOUNDED. That is the
-whole safety story of this script and it is not a caveat on it. Nothing
+whole safety story of this script and it is not a caveat on it. It is a claim
+about the RECORD's fields -- the values a prompt reads. Refusal messages on
+the foreign-file path quote what they found, are operator-facing, reach no
+prompt, and are outside it. Nothing
 upstream bounds any string in review.json: review.schema.json types `loc` and
 `dispatch_token` as bare strings, and findingsAuthentic()'s AUTHENTIC_LOC_RE
 tests a loc's SHAPE (colon-delimited vs bare token), never its size -- its own
