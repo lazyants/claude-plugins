@@ -612,8 +612,10 @@ with stable_case() as (root, source, bin_dir):
 with stable_case() as (root, source, bin_dir):
     bin_dir.mkdir()
     planted = bin_dir / "code-limit"
-    tabbed = (f"#!/bin/sh\n{MARKER}\n"
-              f"exec python3 {quoted('/tmp/foreign\ttool')} \"$@\"\n")
+    # The quoted value is built OUTSIDE the f-string: a backslash inside an f-string expression
+    # is a syntax error before Python 3.12, and this suite's floor is 3.11.
+    tab_target = quoted("/tmp/foreign\ttool")
+    tabbed = f"#!/bin/sh\n{MARKER}\nexec python3 {tab_target} \"$@\"\n"
     planted.write_text(tabbed, encoding="utf-8")
     planted.chmod(0o755)
     done = install(root, source, bin_dir)
