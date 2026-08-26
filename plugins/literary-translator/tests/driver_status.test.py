@@ -1025,3 +1025,89 @@ def test_a_symlinked_ancestor_directory_is_refused(tmp_path, link_name):
         # The status enum is read from schemas/; escaping it must degrade to the
         # observed-statuses fallback rather than silently using another tree's.
         assert report["progress"]["status_enum_source"] == "observed"
+
+
+# ---------------------------------------------------------------------------
+# Malformed artifacts must degrade, never break the one-JSON-line contract
+# ---------------------------------------------------------------------------
+
+
+def _overflows(depth: int) -> bool:
+    """Does `json.loads` raise RecursionError at this nesting depth here?"""
+    try:
+        json.loads("[" * depth + "]" * depth)
+    except RecursionError:
+        return True
+    except json.JSONDecodeError:
+        return False
+    return False
+
+
+def test_two_journals_whose_recorded_start_types_differ_still_report(tmp_path):
+    """`recorded_start` is whatever the journal's `driver_started` entry carried.
+    Sorting candidates on the raw value pairs a str against an int the moment
+    two journals disagree, and Python raises TypeError comparing them -- a
+    traceback and NO JSON line, which is the one contract every caller has. The
+    fallback selector has to survive a malformed artifact with a worse ORDERING,
+    not a crash."""
+    root = make_durable_root(tmp_path)
+    write_journal(root, "20260826T093010Z", [{"type": "driver_started", "pid": 1, "ts": 1756200000}])
+    write_journal(root, "20260826T093020Z", [started(ts="2026-08-26T09:30:20Z", pid=2)])
+    report = run_status(root)
+    assert report["run"] is not None
+    assert report["run"]["selected_by"] == "greatest_recorded_driver_started_ts"
+    assert report["journals_found"] == 2
+
+
+def test_a_deeply_nested_fragment_is_counted_unreadable_not_a_traceback(tmp_path):
+    """`json.loads` raises RecursionError, not JSONDecodeError, once a nested
+    document exhausts the C stack. Catching only the latter lets a malformed
+    fragment escape as a traceback with no JSON line."""
+    root = make_durable_root(tmp_path)
+    write_fragments(root, {"seg01": "converged"})
+    # The depth is MEASURED on this interpreter, never assumed: CPython's C
+    # scanner handles nesting far past `sys.getrecursionlimit()` and raises only
+    # when the real C stack runs out, so a depth guessed from the recursion
+    # limit parses cleanly and the test goes vacuously green. Whatever runtime
+    # CI has, the fixture is the first depth that actually raises there.
+    depth = next(
+        (d for d in (10**5, 2 * 10**5, 5 * 10**5, 10**6, 2 * 10**6) if _overflows(d)),
+        None,
+    )
+    assert depth is not None, (
+        "json.loads no longer raises RecursionError at any tested depth on this "
+        "runtime; the guard it pins is unreachable and should be reconsidered"
+    )
+    (root / "runs" / "ledger.d" / "seg02.json").write_text(
+        "[" * depth + "]" * depth, encoding="utf-8"
+    )
+    report = run_status(root)
+    assert report["progress"]["unreadable_fragments"] == 1
+    assert report["progress"]["recorded_fragment_status_counts"]["converged"] == 1
+
+
+def test_a_traversing_gate_seg_id_is_refused_and_counted(tmp_path):
+    """`step1_gate_passed.segs` is joined onto `runs/ledger.d/` to build a path,
+    and the journal is written best-effort, so a truncated or hand-edited entry
+    can carry anything. `_within` alone would still admit an id naming a real
+    in-root file -- whose `status` would then be censused as a segment's. The
+    refusal is the same regex the manifest path applies, and the refused ids are
+    COUNTED so the gap against `recorded_dispatched_segs` is visible."""
+    root = make_durable_root(tmp_path)
+    write_fragments(root, {"seg01": "converged"})
+    (root / "runs" / "ledger.d" / "sneaky.json").write_text(
+        json.dumps({"status": "SHOULD_NOT_APPEAR"}), encoding="utf-8"
+    )
+    write_journal(root, "20260826T093010Z", [
+        started(),
+        gate_passed(["seg01", "../ledger.d/sneaky", "seg/../../etc", 17]),
+    ])
+    report = run_status(root)
+    batch = report["run"]["batch_progress"]
+    assert batch["dispatched"] == 1
+    assert batch["unsafe_recorded_ids"] == 3
+    # The raw count the journal recorded is preserved, so the two disagree
+    # visibly rather than one of them quietly shrinking.
+    assert report["run"]["recorded_dispatched_segs"] == 4
+    assert batch["unrecognized_status"] == 0
+    assert "SHOULD_NOT_APPEAR" not in json.dumps(report)

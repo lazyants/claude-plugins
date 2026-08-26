@@ -268,7 +268,11 @@ def load_manifest_segs(manifest_path: Path, root: Path) -> list:
         raise StatusError(f"cannot read manifest.json ({reason})")
     try:
         manifest = json.loads(text)
-    except json.JSONDecodeError as exc:
+    # RecursionError, not just JSONDecodeError: a nested document that exhausts
+    # the C stack raises that instead -- another way a malformed artifact could
+    # escape as a traceback with no JSON line, which is the one output contract
+    # every caller of this script depends on.
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise StatusError(f"manifest.json at {manifest_path} is not valid JSON ({exc})")
     if not isinstance(manifest, dict) or not isinstance(manifest.get("segments"), list):
         raise StatusError(f"manifest.json at {manifest_path} has no 'segments' array")
@@ -302,7 +306,7 @@ def fragment_status_enum(schemas_dir: Path, root: Path):
         return None, "observed"
     try:
         schema = json.loads(text)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         return None, "observed"
     enum = (
         schema.get("properties", {}).get("status", {}).get("enum")
@@ -336,7 +340,7 @@ def read_fragment_statuses(frag_dir: Path, segs: list, root: Path):
             continue
         try:
             fragment = json.loads(text)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             unreadable += 1
             continue
         status = fragment.get("status") if isinstance(fragment, dict) else None
@@ -422,7 +426,7 @@ def read_progress(durable_root: Path, manifest_segs: list, enum, enum_source: st
     return progress, None
 
 
-def batch_progress(durable_root: Path, gate_segs, enum):
+def batch_progress(durable_root: Path, gate_segs, refused: int, enum):
     """The same census restricted to the segments THIS run's Step 1 gate
     selected -- the number an operator watching a live batch actually wants.
 
@@ -448,6 +452,10 @@ def batch_progress(durable_root: Path, gate_segs, enum):
     counts, unrecognized = census(statuses, enum)
     return {
         "dispatched": len(gate_segs),
+        # Non-zero means the epoch's `step1_gate_passed.segs` held ids that are
+        # not segment ids; those are excluded from `dispatched` and from the
+        # census, so this is the difference against `recorded_dispatched_segs`.
+        "unsafe_recorded_ids": refused,
         "recorded_fragment_status_counts": counts,
         "unrecognized_status": unrecognized,
         "unreadable_fragments": unreadable,
@@ -508,7 +516,7 @@ def read_lock_diagnostic(durable_root: Path):
         return None, f"{lock_path} is empty -- the driver's diagnostic write is best-effort"
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         return None, f"{lock_path} is not valid JSON ({exc})"
     pid = payload.get("pid") if isinstance(payload, dict) else None
     # `bool` is an `int` subclass, and a zero/negative pid means something else
@@ -582,7 +590,7 @@ def read_journal(path: Path, root: Path):
             continue
         try:
             entry = json.loads(line)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             malformed += 1
             continue
         if not isinstance(entry, dict):
@@ -647,12 +655,30 @@ def summarize_epoch(entries: list, now: datetime) -> dict:
     gate_segs = gate_entry.get("segs") if gate_entry is not None else None
     if not isinstance(gate_segs, list):
         gate_segs = None
+        gate_segs_refused = 0
+    else:
+        # Validated with the SAME regex load_manifest_segs() applies, and for
+        # the same reason: these ids are joined onto `runs/ledger.d/` to build a
+        # path. The journal is written best-effort by the driver, so a truncated
+        # or hand-edited entry can carry anything -- and `_within` alone would
+        # still let `../manifest` name a real in-root file whose `status` would
+        # then be counted as a segment's. Refused ids are COUNTED, not dropped
+        # silently: `recorded_dispatched_segs` stays the number the journal
+        # recorded, so the gap against `batch_progress.dispatched` is visible.
+        gate_segs_recorded = len(gate_segs)
+        gate_segs = [
+            seg
+            for seg in gate_segs
+            if isinstance(seg, str) and _SEG_ID_RE.fullmatch(seg)
+        ]
+        gate_segs_refused = gate_segs_recorded - len(gate_segs)
 
     return {
         # Consumed by build_report() to scope the batch census, then dropped
         # from the payload: 59 ids is a wall of text, and the census is the
         # answer the list exists to produce.
         "_gate_segs": gate_segs,
+        "_gate_segs_refused": gate_segs_refused,
         "recorded_start": start.get("ts"),
         "recorded_pid": start.get("pid"),
         "recorded_exit": (
@@ -671,7 +697,9 @@ def summarize_epoch(entries: list, now: datetime) -> dict:
         },
         # null, never 0: an epoch that records no step1_gate_passed has not told
         # us how many units it selected, which is a different fact from zero.
-        "recorded_dispatched_segs": None if gate_segs is None else len(gate_segs),
+        "recorded_dispatched_segs": (
+            None if gate_segs is None else len(gate_segs) + gate_segs_refused
+        ),
         "recorded_codex_dispatches": {
             "started": dispatch_started,
             "finished": dispatch_finished,
@@ -754,7 +782,16 @@ def select_run(candidates: list, lock_diagnostic):
             chosen = matches[0]
             chosen["selected_by"] = "lock_diagnostic_pid"
             return chosen
-    chosen = max(candidates, key=lambda c: (c["recorded_start"] or "", c["session_id"]))
+    # `str()`, not the raw value: `recorded_start` is whatever the journal's
+    # `driver_started` entry carried, and two journals holding a string and a
+    # number would make this tuple comparison raise TypeError -- a traceback and
+    # NO JSON line, which is the one output contract every caller depends on.
+    # Same shape as the pid path's OverflowError guard: a malformed artifact
+    # gets a worse ORDERING, never a crash.
+    chosen = max(
+        candidates,
+        key=lambda c: (str(c["recorded_start"] or ""), str(c["session_id"])),
+    )
     chosen["selected_by"] = "greatest_recorded_driver_started_ts"
     return chosen
 
@@ -785,7 +822,7 @@ def build_report(durable_root: Path) -> dict:
         # Popped, not read: `_gate_segs` is scratch for the census below, and
         # the selected run is the only candidate this payload publishes.
         run["batch_progress"] = batch_progress(
-            durable_root, run.pop("_gate_segs"), enum
+            durable_root, run.pop("_gate_segs"), run.pop("_gate_segs_refused"), enum
         )
         run_reason = None
     else:

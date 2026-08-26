@@ -3218,7 +3218,13 @@ manifest. They diverge exactly when they should: a run launched with
 the epoch records no `step1_gate_passed`, and ONLY then — a gate that has fired
 but whose units have no fragment yet (the ordinary state of a fresh run;
 `runs/ledger.d/` does not exist until the first fragment is written) is `0/N`
-with every id counted missing, never unknown.
+with every id counted missing, never unknown. The gate's ids are validated with
+the same regex `manifest.json`'s are, because they are joined onto
+`runs/ledger.d/` to build a path and the journal is written best-effort; ids
+that fail it are excluded from the census and COUNTED as
+`batch_progress.unsafe_recorded_ids`, so the gap against
+`run.recorded_dispatched_segs` — which stays the number the journal recorded —
+is visible rather than a quiet shrink.
 
 Both come from the per-segment fragments under `runs/ledger.d/`, intersected
 with `manifest.json`, with all five `ledger-fragment.schema.json` statuses
