@@ -154,7 +154,10 @@ def voucher_band(stdout: str) -> list[str]:
     somewhere else on the page."""
     lines = stdout.splitlines()
     for index, line in enumerate(lines):
-        if line.strip().startswith("RESET VOUCHERS"):
+        # Matched on containment, not on a prefix: with --color=always the heading opens with an
+        # escape, and a prefix test would silently find no band at all -- which reads exactly
+        # like a report that printed none.
+        if "RESET VOUCHERS" in line:
             rows = []
             for row in lines[index + 1:]:
                 if not row.strip():
@@ -1611,6 +1614,24 @@ with tempfile.TemporaryDirectory() as tmp:
     check("45 and never the word none", "none" not in " ".join(band), str(band))
     check("45 a zero count is still a clean run", zero.returncode == 0, zero.stdout)
 
+    # ... and it must not be STYLED as a voucher there is one of. Every assertion above runs
+    # through a pipe with painting off, so a renderer that dropped the zero branch would paint a
+    # measured zero bold green -- correct text, and a colour that says the opposite.
+    lit, _, _ = run(["--claude-profile", str(claude_ok), "--codex-home", str(home),
+                     "--color=always"], root=root,
+                    stub_result=dict(DEFAULT_RESULT,
+                                     rateLimitResetCredits={"availableCount": 0}))
+    zero_line = [r for r in voucher_band(lit.stdout) if not r.startswith("credits")]
+    check("45 a coloured zero is dimmed, not painted as available",
+          len(zero_line) == 1 and "\x1b[2m0\x1b[0m" in zero_line[0], repr(zero_line))
+    one, _, _ = run(["--claude-profile", str(claude_ok), "--codex-home", str(home),
+                     "--color=always"], root=root,
+                    stub_result=dict(DEFAULT_RESULT,
+                                     rateLimitResetCredits={"availableCount": 1}))
+    one_line = [r for r in voucher_band(one.stdout) if not r.startswith("credits")]
+    check("45 a coloured non-zero IS painted as available",
+          len(one_line) == 1 and "\x1b[1;32m1\x1b[0m" in one_line[0], repr(one_line))
+
     # Optional detail may NEVER gap the candidate. Each of these is a shape the vendor could
     # send; every one must still print the validated count and every usage row beside it.
     for label, credits in (
@@ -1715,6 +1736,66 @@ check("48 and it is the earlier cache that sorts first",
       R._sorted_rows(twins)[0][1].freshness == "cache 1h old",
       R._sorted_rows(twins)[0][1].freshness)
 
+# --- 49 -- what a vendor may put on the page ----------------------------------------------------
+
+# Every string `_text` guards is PRINTED, so the rule is about forging report structure, not
+# about tidiness. Authored with chr() throughout: pasting these characters literally into a
+# source file is how they end up invisible in a diff and silently wrong.
+LINE_SEPARATOR, PARAGRAPH_SEPARATOR, RIGHT_TO_LEFT_OVERRIDE = chr(0x2028), chr(0x2029), chr(0x202E)
+for label, character, allowed in (
+    ("U+2028 LINE SEPARATOR", LINE_SEPARATOR, False),
+    ("U+2029 PARAGRAPH SEPARATOR", PARAGRAPH_SEPARATOR, False),
+    ("U+202E RIGHT-TO-LEFT OVERRIDE", RIGHT_TO_LEFT_OVERRIDE, False),
+    ("U+200D ZERO WIDTH JOINER", chr(0x200D), False),
+    ("U+0007 BEL", chr(0x07), False),
+    ("a lone surrogate", chr(0xD800), False),
+    # Zs is deliberately allowed: a vendor label may hold a no-break space, and refusing it would
+    # be a check the field's owner could never clear.
+    ("U+00A0 NO-BREAK SPACE", chr(0xA0), True),
+    ("U+3000 IDEOGRAPHIC SPACE", chr(0x3000), True),
+):
+    try:
+        R._text("a" + character + "b")
+        verdict = True
+    except R.Malformed:
+        verdict = False
+    check(f"49 _text {'accepts' if allowed else 'refuses'} {label}", verdict == allowed)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # The whole point, end to end: `str.splitlines()` breaks on U+2028, so a title carrying one
+    # would add lines to the report that look like the report's own -- forged structure out of
+    # vendor JSON, on a run that stays clean.
+    forged = f"Full{LINE_SEPARATOR}warnings{LINE_SEPARATOR}  trusted"
+    done, _, _ = run(["--claude-profile", str(make_claude(root, ".claudeU", cached(
+        entries=[entry()]))), "--codex-home", str(make_codex_home(root, ".codexU"))],
+        root=root, stub_result=dict(DEFAULT_RESULT, rateLimitResetCredits={
+            "availableCount": 1, "credits": [{"status": "available", "title": forged,
+                                              "expiresAt": epoch(48)}]}))
+    check("49 a separator-bearing title cannot forge a line",
+          not any(line.strip() == "trusted" for line in done.stdout.splitlines()), done.stdout)
+    check("49 nor a second warnings heading",
+          done.stdout.count("warnings") == 0, done.stdout)
+    check("49 the title is simply dropped, and the count still prints",
+          any(row.split()[1:2] == ["1"] for row in voucher_band(done.stdout)),
+          str(voucher_band(done.stdout)))
+    check("49 and the run stays clean", done.returncode == 0, done.stdout)
+
+# --- 50 -- width is per GRAPHEME CLUSTER, not per code point ------------------------------------
+
+for label, text, columns in (
+    ("a thumbs-up with a skin tone", chr(0x1F44D) + chr(0x1F3FD), 2),
+    ("an emoji with a variation selector", chr(0x1F600) + chr(0xFE0F), 2),
+    ("a ZWJ family cluster", chr(0x1F468) + chr(0x200D) + chr(0x1F469), 2),
+    ("a bare wide emoji", chr(0x1F600), 2),
+    ("a CJK ideograph", chr(0x4E2D), 2),
+    ("plain ASCII", "abc", 3),
+):
+    check(f"50 {label} measures {columns} columns", R._width(text) == columns,
+          f"{text!r} -> {R._width(text)}")
+check("50 padding a cluster fills to the column count",
+      R._width(R._pad(chr(0x1F44D) + chr(0x1F3FD), 6)) == 6)
+
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -1722,7 +1803,7 @@ if failures:
         print(f"  {failure}")
     sys.exit(1)
 
-MIN_CHECKS = 400
+MIN_CHECKS = 420
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

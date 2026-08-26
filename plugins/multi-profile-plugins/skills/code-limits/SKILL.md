@@ -25,8 +25,9 @@ profile under `~/.claude*` and every discovered Codex home under `~/.codex*`.
 It opens with the **reset vouchers** -- the one-shot rate-limit resets the Codex TUI redeems --
 because a voucher expires whether or not anyone looks, and the count alone never says when. Each
 home's row carries the vendor's own title and expiry date, and the time left beside it. A home
-that reported no voucher reads `none`; one whose backend sent no voucher data at all reads
-`not reported`. The credit balance follows in the same band, labelled with the home it belongs to.
+that reported a count of zero reads `0` -- the integer it measured, never a word standing in for
+it -- while one whose backend sent no voucher data at all reads `not reported`. Those are two
+different facts and the report keeps them apart. The credit balance follows in the same band, labelled with the home it belongs to.
 
 Then one **flat table of pools**, most consumed first. Profile is a column rather than a heading,
 so the row that needs attention is the top row rather than something to hunt for under a group.

@@ -167,15 +167,21 @@ def _flag(value) -> bool:
     return value
 
 
+_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+
+
 def _text(value, limit: int = 200) -> str:
     if not isinstance(value, str) or not value or len(value) > limit:
         raise Malformed("field-malformed")
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
-        raise Malformed("field-malformed")
-    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
-        # An escaped lone surrogate passes json.loads and raises UnicodeEncodeError only when
-        # something encodes it -- which happens in the renderer, outside this record's handler.
-        # Refusing it here keeps the failure inside the record it belongs to.
+    # Every string this guards is PRINTED into the report, so the rule is about what a vendor
+    # may put on the page. C0 and DEL were never enough: U+2028 LINE SEPARATOR is what
+    # `str.splitlines()` breaks on, so a title reading "Full\u2028warnings\u2028  trusted" adds a
+    # line to the report that looks like the report's own -- forged structure out of vendor JSON,
+    # on a run that stays clean. U+202E can reverse a pool name in place. Rejected by CATEGORY:
+    # controls, format characters, surrogates, private use, unassigned, and the line/paragraph
+    # separators. Zs is deliberately NOT in the set -- a label may legitimately hold a no-break
+    # space, and refusing that would be a check its owner could never clear.
+    if any(unicodedata.category(ch) in _FORBIDDEN_CATEGORIES for ch in value):
         raise Malformed("field-malformed")
     return value
 
@@ -331,8 +337,18 @@ def _width(text: str) -> int:
     table, because every row's gauge is the same length.
     """
     total = 0
+    join_next = False
     for character in unicodedata.normalize("NFC", text):
-        if unicodedata.combining(character):
+        point = ord(character)
+        if unicodedata.combining(character) or 0xFE00 <= point <= 0xFE0F:
+            continue                                    # a mark or a variation selector
+        if 0x1F3FB <= point <= 0x1F3FF:
+            continue                                    # a skin-tone modifier
+        if point == 0x200D:
+            join_next = True                            # ZWJ: the next glyph joins this cluster
+            continue
+        if join_next:
+            join_next = False
             continue
         total += 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
     return total
