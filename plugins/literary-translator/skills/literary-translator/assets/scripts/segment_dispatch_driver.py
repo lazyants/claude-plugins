@@ -4619,7 +4619,7 @@ def _translate_in_progress_since(dirs: dict, seg: str, review_path: Path) -> boo
     driver's own translate branch (see process_segment()'s
     `if action["action"] == "translate":`, just before its codex
     dispatch) and the shipped workflow's translateStage()
-    (mass-translate-wf.template.js:2367). A fix turn goes through neither,
+    (mass-translate-wf.template.js:2412). A fix turn goes through neither,
     so it writes no fragment at all -- which is what makes the discriminator
     work at all.
 
@@ -4657,7 +4657,7 @@ def _translate_in_progress_since(dirs: dict, seg: str, review_path: Path) -> boo
     Why _translate_redispatched_since()'s own mtime-only test above is NOT
     reusable here, unmodified, at THIS call site: the workflow also writes
     `{"status": "blocked", "reason": "draft-missing"}` AFTER a numbered
-    review (mass-translate-wf.template.js:2257), and a segment left
+    review (mass-translate-wf.template.js:2302), and a segment left
     `blocked` is explicitly retried via `--only-segs` under the SAME
     run_id (resume_setup.py resolves it to the same run by matching the
     same input digest). A mtime-only guard would hold the round label for
@@ -4967,9 +4967,9 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
             # round_label is REQUIRED here, not decoration: the caller needs
             # it to compute the ledger's own `rounds` field (a real integer,
             # per mass-translate-wf.template.js's own runRound(),
-            # template.js:2077 -- `rounds: round`, the NUMERIC loop
+            # template.js:2122 -- `rounds: round`, the NUMERIC loop
             # variable, which equals MAXFIX + 1 on the mandatory final call,
-            # template.js:2343). Without this, a segment that converges on
+            # template.js:2388). Without this, a segment that converges on
             # the FINAL round -- an entirely ordinary outcome -- could never
             # be told apart from one that converged on a numbered round.
             # reviewed_sha1/reviewed_token/reviewed_digest travel with this
@@ -6925,12 +6925,12 @@ def _ledger_rounds_value(round_label: str, max_fix_rounds: int) -> int:
     `null` satisfies neither.
 
     Mirrors mass-translate-wf.template.js's own runRound(seg, round,
-    isFinal) exactly (template.js:2049): `recordLedgerCall(seg, {status:
-    "converged", rounds: round, ...})` (template.js:2077) always
+    isFinal) exactly (template.js:2094): `recordLedgerCall(seg, {status:
+    "converged", rounds: round, ...})` (template.js:2122) always
     writes the NUMERIC loop variable `round`, never a value derived from
     the "final" round LABEL -- and on the mandatory final call that
     variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`,
-    template.js:2343). So round_label == "final" -> max_fix_rounds + 1;
+    template.js:2388). So round_label == "final" -> max_fix_rounds + 1;
     every other round_label is already the decimal round number as a
     string and converts directly. This REPLACES the former
     `_round_number()`, which parsed the trailing digit out of a
