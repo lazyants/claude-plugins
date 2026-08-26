@@ -167,6 +167,13 @@ def voucher_band(stdout: str) -> list[str]:
     return []
 
 
+def voucher_rows(stdout: str) -> list[str]:
+    """The band's voucher rows only. The credits balance shares the block and is keyed by POOL
+    rather than by home, so its fields sit one column across -- reading a count off it would be
+    reading the wrong row entirely."""
+    return [row for row in voucher_band(stdout) if not row.startswith("credits")]
+
+
 def iso(delta_hours: float) -> str:
     when = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=delta_hours)
     return when.isoformat()
@@ -1477,11 +1484,11 @@ with tempfile.TemporaryDirectory() as tmp:
     # The sort key is TOTAL: equal percent and equal reset must still order deterministically,
     # or two runs over the same data can disagree.
     same = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5)
-    twins = [(".b", R.Record("pool", R.REPORTED, percent=50.0, resets=same)),
-             (".a", R.Record("pool", R.REPORTED, percent=50.0, resets=same))]
+    twins = [R.Row(".b", R.CLAUDE_GROUP, R.Record("pool", R.REPORTED, percent=50.0, resets=same)),
+             R.Row(".a", R.CLAUDE_GROUP, R.Record("pool", R.REPORTED, percent=50.0, resets=same))]
     check("40 the ordering is total -- a tie falls back to the candidate name",
-          [w for w, _ in R._sorted_rows(twins)] == [".a", ".b"],
-          str([w for w, _ in R._sorted_rows(twins)]))
+          [row.where for row in R._sorted_rows(twins)] == [".a", ".b"],
+          str([row.where for row in R._sorted_rows(twins)]))
     check("40 and it is stable across the reversed input",
           R._sorted_rows(twins) == R._sorted_rows(list(reversed(twins))))
 
@@ -1516,7 +1523,6 @@ with tempfile.TemporaryDirectory() as tmp:
     # The load-bearing one: colour may change how the report LOOKS and nothing else. Widths are
     # computed on the plain cells, so stripping the escapes must give back the plain run exactly.
     check("42 stripping the colour yields byte-identical text",
-          stripped == forced.stdout.replace(forced.stdout, stripped) and
           [ln.rstrip() for ln in stripped.splitlines()][2:]
           == [ln.rstrip() for ln in plain.stdout.splitlines()][2:],
           "\n".join(difflib.unified_diff(plain.stdout.splitlines(),
@@ -1608,7 +1614,7 @@ with tempfile.TemporaryDirectory() as tmp:
     zero, _, _ = run(["--claude-profile", str(claude_ok), "--codex-home", str(home)], root=root,
                      stub_result=dict(DEFAULT_RESULT,
                                       rateLimitResetCredits={"availableCount": 0}))
-    band = [row for row in voucher_band(zero.stdout) if not row.startswith("credits")]
+    band = voucher_rows(zero.stdout)
     check("45 a reported zero prints the integer 0", len(band) == 1
           and band[0].split()[1] == "0", str(band))
     check("45 and never the word none", "none" not in " ".join(band), str(band))
@@ -1621,14 +1627,14 @@ with tempfile.TemporaryDirectory() as tmp:
                      "--color=always"], root=root,
                     stub_result=dict(DEFAULT_RESULT,
                                      rateLimitResetCredits={"availableCount": 0}))
-    zero_line = [r for r in voucher_band(lit.stdout) if not r.startswith("credits")]
+    zero_line = voucher_rows(lit.stdout)
     check("45 a coloured zero is dimmed, not painted as available",
           len(zero_line) == 1 and "\x1b[2m0\x1b[0m" in zero_line[0], repr(zero_line))
     one, _, _ = run(["--claude-profile", str(claude_ok), "--codex-home", str(home),
                      "--color=always"], root=root,
                     stub_result=dict(DEFAULT_RESULT,
                                      rateLimitResetCredits={"availableCount": 1}))
-    one_line = [r for r in voucher_band(one.stdout) if not r.startswith("credits")]
+    one_line = voucher_rows(one.stdout)
     check("45 a coloured non-zero IS painted as available",
           len(one_line) == 1 and "\x1b[1;32m1\x1b[0m" in one_line[0], repr(one_line))
 
@@ -1649,7 +1655,7 @@ with tempfile.TemporaryDirectory() as tmp:
         done, _, _ = run(["--claude-profile", str(claude_ok), "--codex-home", str(home)],
                          root=root, stub_result=dict(DEFAULT_RESULT, rateLimitResetCredits={
                              "availableCount": 2, "credits": credits}))
-        rows = [row for row in voucher_band(done.stdout) if not row.startswith("credits")]
+        rows = voucher_rows(done.stdout)
         check(f"45 {label} does not gap the run", done.returncode == 0,
               f"rc={done.returncode}\n{done.stdout}")
         check(f"45 {label} still prints the validated count",
@@ -1726,15 +1732,19 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # The tie-break must reach freshness: two rows alike in every earlier key but visibly different
 # on the page would otherwise swap places when the arguments are reversed.
-twins = [(".x", R.Record("pool", R.REPORTED, percent=50.0, resets=same, freshness="cache 9h old")),
-         (".x", R.Record("pool", R.REPORTED, percent=50.0, resets=same, freshness="cache 1h old"))]
+twins = [R.Row(".x", R.CLAUDE_GROUP,
+               R.Record("pool", R.REPORTED, percent=50.0, resets=same,
+                        freshness="cache 9h old")),
+         R.Row(".x", R.CLAUDE_GROUP,
+               R.Record("pool", R.REPORTED, percent=50.0, resets=same,
+                        freshness="cache 1h old"))]
 check("48 the ordering is total down to freshness",
-      [r.freshness for _, r in R._sorted_rows(twins)]
-      == [r.freshness for _, r in R._sorted_rows(list(reversed(twins)))],
-      str([r.freshness for _, r in R._sorted_rows(twins)]))
+      [row.record.freshness for row in R._sorted_rows(twins)]
+      == [row.record.freshness for row in R._sorted_rows(list(reversed(twins)))],
+      str([row.record.freshness for row in R._sorted_rows(twins)]))
 check("48 and it is the earlier cache that sorts first",
-      R._sorted_rows(twins)[0][1].freshness == "cache 1h old",
-      R._sorted_rows(twins)[0][1].freshness)
+      R._sorted_rows(twins)[0].record.freshness == "cache 1h old",
+      R._sorted_rows(twins)[0].record.freshness)
 
 # --- 49 -- what a vendor may put on the page ----------------------------------------------------
 
@@ -1796,6 +1806,86 @@ for label, text, columns in (
 check("50 padding a cluster fills to the column count",
       R._width(R._pad(chr(0x1F44D) + chr(0x1F3FD), 6)) == 6)
 
+# --- 51 -- the voucher band's own vocabulary and its one unescaped field ------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    claude_v = make_claude(root, ".claudeV2", cached(entries=[entry()]))
+    home_v = make_codex_home(root, ".codexV2")
+
+    def voucher_run(credit, colour=False):
+        argv = ["--claude-profile", str(claude_v), "--codex-home", str(home_v)]
+        if colour:
+            argv.append("--color=always")
+        done, _, _ = run(argv, root=root, stub_result=dict(
+            DEFAULT_RESULT, rateLimitResetCredits={"availableCount": 1, "credits": [credit]}))
+        return done
+
+    # The title is the ONE printed vendor string that used to skip _safe_name, and it lands in
+    # exactly the slot the report's own `expires <date>  in <N>d` pair occupies -- so a title
+    # spelling that pair out reads as the report's own claim about when the voucher lapses.
+    forged = voucher_run({"status": "available", "title": "expires 31 Dec 2099 CEST  in 9999d"})
+    band = [r for r in voucher_band(forged.stdout) if not r.startswith("credits")]
+    check("51 a title is quoted, so it cannot pose as the report's own expiry",
+          len(band) == 1 and '"expires 31 Dec 2099 CEST  in 9999d"' in band[0], str(band))
+    check("51 and no genuine expiry is claimed beside it",
+          band and band[0].count("expires") == 1, str(band))
+
+    # A no-break space is legitimate in a vendor label and _text allows it -- but it must PRINT
+    # as an escape like every other name, not as an invisible space.
+    nbsp = voucher_run({"status": "available", "title": "Full" + chr(0xA0) + "reset"})
+    band = [r for r in voucher_band(nbsp.stdout) if not r.startswith("credits")]
+    check("51 an invisible space in a title is escaped, not printed",
+          bool(band) and chr(0xA0) not in band[0] and "xa0" in band[0], str(band))
+
+    # An expired voucher is not a window that reset. `_relative`'s "reset ... ago" is the wrong
+    # noun, and a lapsed voucher is exactly the case the operator needs stated plainly.
+    lapsed = voucher_run({"status": "available", "title": "Full reset", "expiresAt": epoch(-400 * 24)})
+    band = [r for r in voucher_band(lapsed.stdout) if not r.startswith("credits")]
+    check("51 a lapsed voucher reads `expired`",
+          bool(band) and "expired" in band[0] and "ago" not in band[0], str(band))
+    live_v = voucher_run({"status": "available", "title": "Full reset", "expiresAt": epoch(48)})
+    band = [r for r in voucher_band(live_v.stdout) if not r.startswith("credits")]
+    check("51 and one still in date reads the time left",
+          bool(band) and "in 1d" in band[0] and "expired" not in band[0], str(band))
+
+# --- 52 -- a dimmed section is dim all the way across -------------------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    mixed = make_claude(root, ".claudeDim", cached(entries=[
+        entry(kind="weekly_all", percent=40, resets=iso(20)),
+        entry(kind="session", percent=95, resets=iso(-3)),
+    ]))
+    done, _, _ = run(["--claude-profile", str(mixed), "--color=always"], root=root)
+    stale_rows = [ln for ln in done.stdout.splitlines() if "95.0%" in ln]
+    # Every paint() emits its own reset, so wrapping a finished line in DIM cancels the dim at
+    # the first inner reset and the row renders half dim. Each RUN of cells must carry it.
+    # Not "every painted run is dim" -- that stays true when a run is left UNPAINTED, which is
+    # the exact shape of the defect. Every visible character has to sit inside a dim run, so the
+    # row opens with one and no gap between runs carries text.
+    def undimmed(row: str) -> str:
+        visible, index = "", 0
+        dim = False
+        while index < len(row):
+            if row[index] == "\x1b":
+                close = row.index("m", index)
+                code = row[index + 2:close]
+                dim = code.startswith("2") and code != "0"
+                index = close + 1
+                continue
+            if not dim and row[index] != " ":
+                visible += row[index]
+            index += 1
+        return visible
+
+    check("52 a stale row has no character outside a dim run",
+          len(stale_rows) == 1 and undimmed(stale_rows[0]) == "",
+          f"{undimmed(stale_rows[0])!r} in {stale_rows[0]!r}")
+    live_rows = [ln for ln in done.stdout.splitlines() if "40.0%" in ln]
+    check("52 while a current row keeps its reset at full weight",
+          len(live_rows) == 1 and "\x1b[2min 19h" not in live_rows[0], repr(live_rows))
+
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -1803,7 +1893,7 @@ if failures:
         print(f"  {failure}")
     sys.exit(1)
 
-MIN_CHECKS = 420
+MIN_CHECKS = 435
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

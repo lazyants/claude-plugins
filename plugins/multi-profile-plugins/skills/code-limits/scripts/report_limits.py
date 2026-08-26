@@ -43,6 +43,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 # --- the complete diagnostic vocabulary -------------------------------------------------------
 # Closed on purpose, with `internal-error` as the total fallback: an unforeseen failure must never
@@ -115,7 +116,9 @@ MAX_LINE_BYTES = 4 * 1024 * 1024
 def _appserver_timeout() -> float:
     """Seconds to wait on one app-server. Overridable because a slow machine may need longer.
 
-    Deliberately the ONLY environment knob in this module: it can lengthen or shorten a wait and
+    Deliberately the only environment knob in this module that can change what is READ or where a
+    request goes -- `NO_COLOR` is read too, but it can only restyle what has already been decided.
+    This one can lengthen or shorten a wait and
     can move nothing anywhere. The request destination has no such knob, which is the point.
     """
     raw = os.environ.get("CODE_LIMITS_APPSERVER_TIMEOUT", "")
@@ -443,6 +446,21 @@ class Record:
         if self.state == NO_CURRENT:
             return "inactive"
         return "current"
+
+
+class Row(NamedTuple):
+    """One bucketed observation: the candidate it came from, whose vendor it is, and the record.
+
+    The vendor group travels WITH the row because `_source` needs it to keep a live Claude row
+    distinguishable from a live Codex one, and the bucketing loop is the last place that still
+    knows it. The obvious alternative -- looking the group back up out of a side table keyed on
+    `id(record)` -- needs a default for the miss, and any default there prints a wrong vendor
+    with a right one's confidence, unfalsifiable from the page.
+    """
+
+    where: str
+    group: str
+    record: Record
 
 
 def _window_row(*, name: str, percent: float, resets: datetime.datetime, freshness: str,
@@ -1059,7 +1077,7 @@ def _pool_cells(where: str, record: Record, now: datetime.datetime) -> tuple[str
     return where, _safe_name(record.name), used, reset
 
 
-def _sorted_rows(rows: list[tuple[str, Record]]) -> list[tuple[str, Record]]:
+def _sorted_rows(rows: list[Row]) -> list[Row]:
     """Most consumed first, and TOTAL -- no row's position may depend on discovery order.
 
     The key stops at "most consumed"; it is deliberately not a projected-exhaustion score, which
@@ -1067,88 +1085,125 @@ def _sorted_rows(rows: list[tuple[str, Record]]) -> list[tuple[str, Record]]:
     read first. Ordering across lifecycle classes is handled by SECTIONING, not by this key:
     a stale 99% is not more urgent than a live 40%, it is not comparable to it.
     """
-    return sorted(rows, key=lambda item: (
-        -(item[1].percent if item[1].percent is not None else -1.0),
-        item[1].resets.timestamp() if item[1].resets is not None else float("inf"),
-        item[0], item[1].name, item[1].freshness,
+    return sorted(rows, key=lambda row: (
+        -(row.record.percent if row.record.percent is not None else -1.0),
+        row.record.resets.timestamp() if row.record.resets is not None else float("inf"),
+        row.where, row.record.name, row.record.freshness,
     ))
+
+
+def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
+                  paint: Paint) -> None:
+    """The block above the table: a voucher count per home, then any credit balance.
+
+    Keyed by HOME rather than by a pool name, because that is the only thing that varies -- every
+    row here would otherwise read `reset vouchers` down the page.
+    """
+    if not vouchers and not infos:
+        return
+    print(f"  {paint('RESET VOUCHERS', CYAN + ';' + BOLD)}   "
+          + paint("a one-shot rate-limit reset -- redeem in the Codex TUI with /usage", DIM))
+    home_width = max([_width(_safe_name(row.where)) for row in vouchers]
+                     + [_width(_safe_name(row.record.name)) for row in infos] + [8]) + 2
+    for where, _group, record in vouchers:
+        if record.state == GAP:
+            body = paint(f"[{record.diagnostic}]", RED)
+        elif record.state == NO_CURRENT or record.freshness == "0":
+            # Dimmed, never reworded. `0` is a REPORTED count and must read as the integer it
+            # is -- printing "none" for it makes a measured zero indistinguishable from the
+            # `not reported` a backend sends when it has no voucher data at all.
+            body = paint(record.freshness, DIM)
+        else:
+            body = paint(record.freshness, BOLD + ";" + GREEN)
+            if record.title:
+                # QUOTED, and through _safe_name like every other printed vendor string. This is
+                # the slot the report's own `expires <date>  in <N>d` pair occupies, so a title
+                # reading "expires 31 Dec 2099 CEST  in 9999d" sits exactly where the real thing
+                # would when the payload omits `expiresAt`. It is also the one printed field that
+                # would otherwise render a no-break space as an invisible space rather than as an
+                # escape, because it is the only one that never passed through _safe_name.
+                body += f'  "{_safe_name(record.title)}"'
+            if record.expires is not None:
+                # A voucher that has already lapsed is not a window that reset: `_relative` would
+                # say "reset 400d ago", which is the wrong vocabulary for the wrong noun, and a
+                # lapsed voucher is exactly the case worth stating plainly.
+                left = "expired" if record.expires <= now else _relative(record.expires, now)
+                body += ("  " + paint(f"expires {_local(record.expires)}", DIM)
+                         + "  " + paint(left, YELLOW))
+        print("    " + _pad(_safe_name(where), home_width) + body)
+    for where, _group, record in infos:
+        value = (paint(f"[{record.diagnostic}]", RED) if record.state == GAP
+                 else paint(record.freshness, BOLD))
+        print("    " + _pad(_safe_name(record.name), home_width)
+              + paint(_safe_name(where), DIM) + " " + value)
+    print()
+
+
+def _pool_table(rows: list[Row], now: datetime.datetime, paint: Paint, heading: str = "") -> None:
+    """One block of pool rows. A heading marks a section that is NOT current usage, and dims the
+    whole block to say so; without one this is the main table and carries the column header."""
+    if not rows:
+        return
+    cells = [_pool_cells(row.where, row.record, now) for row in rows]
+    widths = [max(_width(cell[i]) for cell in cells) + 2 for i in range(4)]
+    if heading:
+        print(paint(f"  {heading}", DIM))
+    else:
+        head = ("  " + _pad("WHERE", widths[0]) + _pad("POOL", widths[1])
+                + _pad("USED", widths[2]) + _pad("RESET", widths[3]) + "SOURCE")
+        print(paint(head, DIM))
+        print(paint("  " + "\u2500" * (sum(widths) + 6), DIM))
+    # A section's dim is applied PER CELL, not by wrapping the finished line. Every paint() emits
+    # its own reset, so wrapping a line that already contains one cancels the dim for everything
+    # after that cell -- the row then renders half dim and half not, which reads as an artefact
+    # rather than as a section.
+    tone = DIM + ";" if heading else ""
+    for (where, pool, used, reset), row in zip(cells, rows):
+        record = row.record
+        if record.state == GAP:
+            # `used` is the diagnostic token here, not a gauge -- see _pool_cells.
+            body = paint(used, tone + RED)
+        elif record.percent is not None:
+            # One paint over the finished cell. The gauge and the number always take the same
+            # hue, so painting them apart bought nothing and cost a `used.split(" ", 1)` -- a
+            # ValueError the day _pool_cells formats this cell without a space in it.
+            body = paint(used, tone + _hue(record.percent))
+        else:
+            body = paint(used, DIM) if heading else used
+        # `body` may carry escapes; the padding is computed from the PLAIN `used`.
+        pad = " " * max(0, widths[2] - _width(used))
+        head_cells = _pad(where, widths[0]) + _pad(pool, widths[1])
+        source = _source(record.freshness, row.group)
+        if heading:
+            # A whole row of a non-current section is dim, one paint per run of cells.
+            tail = paint(_pad(reset, widths[3]) + source, DIM)
+            head = paint(head_cells, DIM)
+        else:
+            # In the current section only the provenance recedes; the reset is a fact worth
+            # reading at full weight.
+            tail = _pad(reset, widths[3]) + paint(source, DIM)
+            head = head_cells
+        print("  " + head + body + pad + tail)
+    print()
 
 
 def _render(groups: list[tuple[str, str, list[Record]]], notes: list[str],
             now: datetime.datetime, paint: Paint) -> None:
     """The whole report: a voucher band, one table of pools, then the classes that are not
     current usage, each under a heading that says why they are apart."""
-    buckets: dict[str, list[tuple[str, Record]]] = {
+    buckets: dict[str, list[Row]] = {
         "current": [], "stale": [], "inactive": [], "gap": [], "voucher": [], "info": []}
-    vendor: dict[int, str] = {}
     for group, where, records in groups:
         for record in records:
-            vendor[id(record)] = group
-            buckets[record.kind()].append((where, record))
+            buckets[record.kind()].append(Row(where, group, record))
 
     print(f"\n{paint('code-limits', BOLD)}  {paint(_local(now), DIM)}\n")
-
-    if buckets["voucher"] or buckets["info"]:
-        print(f"  {paint('RESET VOUCHERS', CYAN + ';' + BOLD)}   "
-              + paint("a one-shot rate-limit reset -- redeem in the Codex TUI with /usage", DIM))
-        home_width = max([_width(_safe_name(w)) for w, _ in buckets["voucher"]]
-                         + [_width(_safe_name(r.name)) for _, r in buckets["info"]] + [8]) + 2
-        for where, record in buckets["voucher"]:
-            if record.state == GAP:
-                body = paint(f"[{record.diagnostic}]", RED)
-            elif record.state == NO_CURRENT or record.freshness == "0":
-                # Dimmed, never reworded. `0` is a REPORTED count and must read as the integer it
-                # is -- printing "none" for it makes a measured zero indistinguishable from the
-                # `not reported` a backend sends when it has no voucher data at all.
-                body = paint(record.freshness, DIM)
-            else:
-                body = paint(record.freshness, BOLD + ";" + GREEN)
-                if record.title:
-                    body += f"  {record.title}"
-                if record.expires is not None:
-                    body += ("  " + paint(f"expires {_local(record.expires)}", DIM)
-                             + "  " + paint(_relative(record.expires, now), YELLOW))
-            print("    " + _pad(_safe_name(where), home_width) + body)
-        for where, record in buckets["info"]:
-            value = (paint(f"[{record.diagnostic}]", RED) if record.state == GAP
-                     else paint(record.freshness, BOLD))
-            print("    " + _pad(_safe_name(record.name), home_width)
-                  + paint(_safe_name(where), DIM) + " " + value)
-        print()
-
-    def table(rows: list[tuple[str, Record]], heading: str = "") -> None:
-        if not rows:
-            return
-        cells = [_pool_cells(where, record, now) for where, record in rows]
-        widths = [max(_width(cell[i]) for cell in cells) + 2 for i in range(4)]
-        if heading:
-            print(paint(f"  {heading}", DIM))
-        else:
-            head = ("  " + _pad("WHERE", widths[0]) + _pad("POOL", widths[1])
-                    + _pad("USED", widths[2]) + _pad("RESET", widths[3]) + "SOURCE")
-            print(paint(head, DIM))
-            print(paint("  " + "\u2500" * (sum(widths) + 6), DIM))
-        for (where, pool, used, reset), (_w, record) in zip(cells, rows):
-            group = vendor.get(id(record), CODEX_GROUP)
-            body = used
-            if record.percent is not None and record.state != GAP:
-                gauge, number = used.split(" ", 1)
-                body = paint(gauge, _hue(record.percent)) + " " + paint(number,
-                                                                       _hue(record.percent))
-            elif record.state == GAP:
-                body = paint(used, RED)
-            # `body` may carry escapes; the padding is computed from the PLAIN `used`.
-            pad = " " * max(0, widths[2] - _width(used))
-            line = ("  " + _pad(where, widths[0]) + _pad(pool, widths[1]) + body + pad
-                    + _pad(reset, widths[3]) + paint(_source(record.freshness, group), DIM))
-            print(paint(line, DIM) if heading else line)
-        print()
-
-    table(_sorted_rows(buckets["current"]))
-    table(_sorted_rows(buckets["stale"]),
-          "stale -- the % is the PREVIOUS window, not current  [stale-after-reset]")
-    table(_sorted_rows(buckets["inactive"]), "inactive -- no current window")
-    table(_sorted_rows(buckets["gap"]), "NOT CHECKED")
+    _voucher_band(buckets["voucher"], buckets["info"], now, paint)
+    _pool_table(_sorted_rows(buckets["current"]), now, paint)
+    _pool_table(_sorted_rows(buckets["stale"]), now, paint,
+                "stale -- the % is the PREVIOUS window, not current  [stale-after-reset]")
+    _pool_table(_sorted_rows(buckets["inactive"]), now, paint, "inactive -- no current window")
+    _pool_table(_sorted_rows(buckets["gap"]), now, paint, "NOT CHECKED")
 
     for note in notes:
         print(paint(f"  {note}", DIM))
@@ -1202,8 +1257,11 @@ def main(argv: list[str] | None = None) -> int:
         (CODEX_GROUP, codex, _codex_records),
     ):
         if not candidates:
-            warnings.append(f"{group}: no candidates found -- NOT checked")
-            notes.append(f"{group}: no candidates found -- NOT checked")
+            # The same sentence in both places on purpose: the report body says what was not
+            # looked at, and the warning block is what sets the exit status on it.
+            missing = f"{group}: no candidates found -- NOT checked"
+            warnings.append(missing)
+            notes.append(missing)
             continue
         for candidate in candidates:
             state, records, code = _examine(candidate, producer)

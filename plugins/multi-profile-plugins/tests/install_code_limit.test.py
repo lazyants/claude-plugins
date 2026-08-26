@@ -226,17 +226,22 @@ def voucher_field(stdout: str) -> str:
     the second field. Read structurally rather than by substring: `"0" in line` is also true of a
     row reading 10, and the credits row lives in the same band.
     """
-    lines = stdout.splitlines()
-    for index, line in enumerate(lines):
-        if line.strip().startswith("RESET VOUCHERS"):
-            for row in lines[index + 1:]:
-                stripped = row.strip()
-                if not stripped:
-                    break
-                if stripped.startswith("credits"):
-                    continue
-                fields = stripped.split(None, 1)
-                return fields[1].split("  ", 1)[0].strip() if len(fields) > 1 else ""
+    rows = [line.strip() for line in stdout.splitlines()]
+    # Containment, not a prefix: with colour on, the heading opens with an escape sequence, and a
+    # prefix test would then find no band at all -- which reads exactly like a report that
+    # printed none.
+    heading = next((i for i, row in enumerate(rows) if "RESET VOUCHERS" in row), None)
+    if heading is None:
+        return ""
+    for row in rows[heading + 1:]:
+        if not row:               # a blank line ends the band
+            break
+        if row.startswith("credits"):
+            continue
+        fields = row.split(None, 1)
+        if len(fields) < 2:
+            return ""
+        return fields[1].split("  ", 1)[0].strip()
     return ""
 
 
