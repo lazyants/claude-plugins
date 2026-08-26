@@ -184,6 +184,18 @@ def _within(path: Path, root: Path) -> bool:
         return False
 
 
+def _real_dir(path: Path, root: Path) -> bool:
+    """True when `path` is a real directory INSIDE `root`.
+
+    The directory-granular twin of `_read_text`'s refusal, and named once
+    because all three directories this script walks -- `runs/`, `runs/ledger.d`
+    for the manifest census and the same for the batch census -- have to refuse
+    the identical class. A symlinked `runs/ledger.d` would otherwise count
+    another book's population as this root's.
+    """
+    return _within(path, root) and path.is_dir()
+
+
 class StatusError(Exception):
     """No report is possible -- always this script's exit 1. A usage error is
     the OTHER path (exit 2) and never raises this."""
@@ -199,7 +211,7 @@ class StatusError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _read_text(path: Path, root: Path = None):
+def _read_text(path: Path, root: Path):
     """Read `path` as UTF-8 text, or return (None, reason).
 
     REFUSES anything that is not a real regular file, before opening it. Two
@@ -219,7 +231,7 @@ def _read_text(path: Path, root: Path = None):
     malformed -- which is exactly what it is.
     """
     try:
-        if root is not None and not _within(path, root):
+        if not _within(path, root):
             return None, f"{path} resolves outside the durable root"
         if path.is_symlink() or not path.is_file():
             return None, f"{path} is not a real regular file"
@@ -350,7 +362,7 @@ def census(statuses: dict, enum):
     return counts, unrecognized
 
 
-def read_progress(durable_root: Path, manifest_segs: list, schemas_dir: Path):
+def read_progress(durable_root: Path, manifest_segs: list, enum, enum_source: str):
     """The per-segment fragment census over the WHOLE manifest.
 
     Returns (progress, reason). `reason` is non-None exactly when `progress` is
@@ -364,28 +376,26 @@ def read_progress(durable_root: Path, manifest_segs: list, schemas_dir: Path):
     from the gate's own segment list.
     """
     frag_dir = durable_root / "runs" / "ledger.d"
-    if (
-        not _within(frag_dir, durable_root)
-        or frag_dir.is_symlink()
-        or not frag_dir.is_dir()
-    ):
+    if not _real_dir(frag_dir, durable_root):
         return None, (
             f"{frag_dir} is not a real directory -- no fragment has been written "
             f"yet, or the path is a symlink into another tree"
         )
     try:
-        entries = sorted(p.name for p in frag_dir.iterdir())
+        on_disk = {
+            entry.name[: -len(".json")]
+            for entry in frag_dir.iterdir()
+            if entry.name.endswith(".json")
+        }
     except OSError as exc:
         return None, f"{frag_dir} is not readable ({exc})"
 
-    enum, enum_source = fragment_status_enum(schemas_dir, durable_root)
     statuses, unreadable, missing = read_fragment_statuses(
         frag_dir, manifest_segs, durable_root
     )
     counts, unrecognized = census(statuses, enum)
 
     manifest_set = set(manifest_segs)
-    on_disk = {name[: -len(".json")] for name in entries if name.endswith(".json")}
     extra = sorted(name for name in on_disk if name not in manifest_set)
 
     progress = {
@@ -412,7 +422,7 @@ def read_progress(durable_root: Path, manifest_segs: list, schemas_dir: Path):
     return progress, None
 
 
-def batch_progress(durable_root: Path, gate_segs, schemas_dir: Path):
+def batch_progress(durable_root: Path, gate_segs, enum):
     """The same census restricted to the segments THIS run's Step 1 gate
     selected -- the number an operator watching a live batch actually wants.
 
@@ -426,18 +436,15 @@ def batch_progress(durable_root: Path, gate_segs, schemas_dir: Path):
     """
     if not isinstance(gate_segs, list):
         return None
-    enum, _source = fragment_status_enum(schemas_dir, durable_root)
     frag_dir = durable_root / "runs" / "ledger.d"
-    if (
-        not _within(frag_dir, durable_root)
-        or frag_dir.is_symlink()
-        or not frag_dir.is_dir()
-    ):
-        statuses, unreadable, missing = {}, 0, list(gate_segs)
-    else:
+    if _real_dir(frag_dir, durable_root):
         statuses, unreadable, missing = read_fragment_statuses(
             frag_dir, gate_segs, durable_root
         )
+    else:
+        # No fragment directory yet is the ordinary state of a fresh run, so
+        # every dispatched id is simply missing -- 0/N, never an unknown.
+        statuses, unreadable, missing = {}, 0, list(gate_segs)
     counts, unrecognized = census(statuses, enum)
     return {
         "dispatched": len(gate_segs),
@@ -637,8 +644,9 @@ def summarize_epoch(entries: list, now: datetime) -> dict:
     ]
 
     last = entries[-1]
-    dispatched = gate_entry.get("segs") if gate_entry is not None else None
-    gate_segs = dispatched if isinstance(dispatched, list) else None
+    gate_segs = gate_entry.get("segs") if gate_entry is not None else None
+    if not isinstance(gate_segs, list):
+        gate_segs = None
 
     return {
         # Consumed by build_report() to scope the batch census, then dropped
@@ -663,7 +671,7 @@ def summarize_epoch(entries: list, now: datetime) -> dict:
         },
         # null, never 0: an epoch that records no step1_gate_passed has not told
         # us how many units it selected, which is a different fact from zero.
-        "recorded_dispatched_segs": len(dispatched) if isinstance(dispatched, list) else None,
+        "recorded_dispatched_segs": None if gate_segs is None else len(gate_segs),
         "recorded_codex_dispatches": {
             "started": dispatch_started,
             "finished": dispatch_finished,
@@ -682,11 +690,7 @@ def collect_runs(durable_root: Path, now: datetime):
     about the driver.
     """
     runs_dir = durable_root / "runs"
-    if (
-        not _within(runs_dir, durable_root)
-        or runs_dir.is_symlink()
-        or not runs_dir.is_dir()
-    ):
+    if not _real_dir(runs_dir, durable_root):
         return [], 0, 0, 0
     try:
         journals = sorted(runs_dir.glob("*/driver_journal.jsonl"))
@@ -757,9 +761,15 @@ def select_run(candidates: list, lock_diagnostic):
 
 def build_report(durable_root: Path) -> dict:
     now = datetime.now(timezone.utc)
-    schemas_dir = durable_root / "schemas"
     manifest_segs = load_manifest_segs(durable_root / "manifest.json", durable_root)
-    progress, progress_reason = read_progress(durable_root, manifest_segs, schemas_dir)
+    # Read ONCE and handed to both censuses. Two reads of a file this script
+    # does not lock could disagree, and two numbers zero-filled over different
+    # status sets are not comparable -- which is the whole point of publishing
+    # them side by side.
+    enum, enum_source = fragment_status_enum(durable_root / "schemas", durable_root)
+    progress, progress_reason = read_progress(
+        durable_root, manifest_segs, enum, enum_source
+    )
     lock_diagnostic, lock_reason = read_lock_diagnostic(durable_root)
     candidates, journals_found, without_start, unreadable_journals = collect_runs(
         durable_root, now
@@ -772,8 +782,10 @@ def build_report(durable_root: Path) -> dict:
             if lock_diagnostic is None
             else run["recorded_pid"] == lock_diagnostic["pid"]
         )
+        # Popped, not read: `_gate_segs` is scratch for the census below, and
+        # the selected run is the only candidate this payload publishes.
         run["batch_progress"] = batch_progress(
-            durable_root, run.pop("_gate_segs"), schemas_dir
+            durable_root, run.pop("_gate_segs"), enum
         )
         run_reason = None
     else:
@@ -787,8 +799,6 @@ def build_report(durable_root: Path) -> dict:
             if parts
             else "no driver journal found under runs/"
         )
-    for candidate in candidates:
-        candidate.pop("_gate_segs", None)
 
     return {
         "success": True,

@@ -24,6 +24,7 @@ No test stages `segment_dispatch_driver.py` itself: this script shells out to no
 sibling and reads only artifacts, so a real driver would add nothing but time.
 """
 import ast
+import contextlib
 import fcntl
 import json
 import os
@@ -125,7 +126,7 @@ def write_journal(root, session_id, entries, trailing_partial=None):
     return run_dir / "driver_journal.jsonl"
 
 
-def write_lock(root, pid, started_at=TS, raw=None):
+def write_lock(root, pid=None, started_at=TS, raw=None):
     lock = root / "runs" / ".driver.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     if raw is not None:
@@ -148,6 +149,53 @@ def exited(ts="2026-08-26T10:00:00Z", summary=None):
         "ts": ts,
         "summary": summary if summary is not None else {"converged": ["seg01"]},
     }
+
+
+def gate_passed(segs, ts=TS):
+    return {"type": "step1_gate_passed", "segs": segs, "ts": ts}
+
+
+def lock_self_test_failed(ts="2026-08-26T09:30:09Z"):
+    """The entry acquire_driver_lock() writes when its flock self-test fails --
+    journalled BEFORE run() records driver_started, which is why a journal's
+    first line legitimately is not a start."""
+    return {"type": "lock_self_test_failed", "lock_path": "runs/.driver.lock", "ts": ts}
+
+
+@contextlib.contextmanager
+def sleeping_child(*extra_argv):
+    """A live pid for the lock diagnostic to name, reaped on the way out.
+
+    `extra_argv` lands in the child's command line, which is what `ps` reports:
+    passing the driver script's path is how a test makes `ps_names_driver_script`
+    true without paying for a real driver."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", *extra_argv]
+    )
+    try:
+        yield child
+    finally:
+        child.terminate()
+        child.wait()
+
+
+@contextlib.contextmanager
+def read_only_tree(root: Path):
+    """Directories 0555 and regular files 0444 for the body, restored after.
+
+    Deepest-first, so a parent is still writable while its children are being
+    locked down; the restore runs whatever the body did, because a tree left
+    read-only would break tmp_path teardown."""
+    paths = sorted(root.rglob("*"), reverse=True)
+    try:
+        for path in paths:
+            path.chmod(0o555 if path.is_dir() else 0o444)
+        root.chmod(0o555)
+        yield
+    finally:
+        root.chmod(0o755)
+        for path in sorted(root.rglob("*")):
+            path.chmod(0o755 if path.is_dir() else 0o644)
 
 
 def _walk(node, prefix=""):
@@ -221,7 +269,7 @@ def test_same_second_epoch_collision_reports_only_the_last_epoch(tmp_path):
             started(pid=1111),
             exited(ts="2026-08-26T09:30:10Z", summary={"converged": ["seg01"]}),
             started(ts="2026-08-26T09:30:10Z", pid=2222),
-            {"type": "step1_gate_passed", "segs": ["seg02"], "ts": "2026-08-26T09:30:11Z"},
+            gate_passed(["seg02"], ts="2026-08-26T09:30:11Z"),
         ],
     )
     report = run_status(root)
@@ -238,14 +286,7 @@ def test_prelude_entry_before_the_first_start_is_not_an_epoch(tmp_path):
     enforced on this filesystem."""
     root = make_durable_root(tmp_path)
     write_journal(
-        root,
-        "20260826T093010Z",
-        [
-            {"type": "lock_self_test_failed", "lock_path": "runs/.driver.lock",
-             "ts": "2026-08-26T09:30:09Z"},
-            started(),
-            exited(),
-        ],
+        root, "20260826T093010Z", [lock_self_test_failed(), started(), exited()]
     )
     report = run_status(root)
     assert report["run"]["epochs_in_journal"] == 1
@@ -255,11 +296,7 @@ def test_prelude_entry_before_the_first_start_is_not_an_epoch(tmp_path):
 
 def test_journal_without_a_recorded_start_is_not_a_run(tmp_path):
     root = make_durable_root(tmp_path)
-    write_journal(
-        root,
-        "20260826T093010Z",
-        [{"type": "lock_self_test_failed", "ts": "2026-08-26T09:30:09Z"}],
-    )
+    write_journal(root, "20260826T093010Z", [lock_self_test_failed()])
     report = run_status(root)
     assert report["run"] is None
     assert report["journals_found"] == 1
@@ -282,11 +319,7 @@ def test_selection_prefers_the_epoch_the_live_lock_pid_names(tmp_path):
     carry, so it wins over the greater recorded start time -- and the basis is
     published either way."""
     root = make_durable_root(tmp_path)
-    child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)",
-         str(root / "scripts" / "segment_dispatch_driver.py")]
-    )
-    try:
+    with sleeping_child(str(root / "scripts" / "segment_dispatch_driver.py")) as child:
         write_journal(root, "20260826T090000Z",
                       [started(ts="2026-08-26T09:00:00Z", pid=child.pid)])
         write_journal(root, "20260826T093010Z",
@@ -298,9 +331,6 @@ def test_selection_prefers_the_epoch_the_live_lock_pid_names(tmp_path):
         assert report["run"]["pid_matches_lock_diagnostic"] is True
         assert report["lock_diagnostic"]["pid_alive"] is True
         assert report["lock_diagnostic"]["ps_names_driver_script"] is True
-    finally:
-        child.terminate()
-        child.wait()
 
 
 def test_backward_clock_step_selects_by_recorded_time_and_says_so(tmp_path):
@@ -322,8 +352,7 @@ def test_backward_clock_step_selects_by_recorded_time_and_says_so(tmp_path):
 
 def test_pid_matches_lock_diagnostic_is_false_when_the_live_pid_names_no_epoch(tmp_path):
     root = make_durable_root(tmp_path)
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    try:
+    with sleeping_child() as child:
         write_journal(root, "20260826T093010Z", [started(pid=999999)])
         write_lock(root, child.pid)
         report = run_status(root)
@@ -331,9 +360,6 @@ def test_pid_matches_lock_diagnostic_is_false_when_the_live_pid_names_no_epoch(t
         assert report["run"]["pid_matches_lock_diagnostic"] is False
         assert report["lock_diagnostic"]["pid_alive"] is True
         assert report["lock_diagnostic"]["ps_names_driver_script"] is False
-    finally:
-        child.terminate()
-        child.wait()
 
 
 def test_a_stripped_caller_path_does_not_break_the_ps_probe(tmp_path):
@@ -342,20 +368,13 @@ def test_a_stripped_caller_path_does_not_break_the_ps_probe(tmp_path):
     The observable consequence: stripping PATH entirely does not degrade the
     probe -- which is the inverse of what an inheriting implementation does."""
     root = make_durable_root(tmp_path)
-    child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)",
-         str(root / "scripts" / "segment_dispatch_driver.py")]
-    )
-    try:
+    with sleeping_child(str(root / "scripts" / "segment_dispatch_driver.py")) as child:
         write_journal(root, "20260826T093010Z", [started(pid=child.pid)])
         write_lock(root, child.pid)
         report = run_status(root, env=dict(os.environ, PATH=""))
         assert report["lock_diagnostic"]["pid_alive"] is True
         assert report["lock_diagnostic"]["ps_command"] is not None
         assert report["lock_diagnostic"]["ps_names_driver_script"] is True
-    finally:
-        child.terminate()
-        child.wait()
 
 
 def test_a_zombie_pid_passes_the_kill_probe_but_ps_says_defunct(tmp_path):
@@ -363,11 +382,7 @@ def test_a_zombie_pid_passes_the_kill_probe_but_ps_says_defunct(tmp_path):
     `<defunct>`. This is why liveness alone is never published as a conclusion --
     the ps text is what distinguishes the two."""
     root = make_durable_root(tmp_path)
-    child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)",
-         str(root / "scripts" / "segment_dispatch_driver.py")]
-    )
-    try:
+    with sleeping_child(str(root / "scripts" / "segment_dispatch_driver.py")) as child:
         child.kill()
         for _ in range(50):
             time.sleep(0.1)
@@ -382,8 +397,6 @@ def test_a_zombie_pid_passes_the_kill_probe_but_ps_says_defunct(tmp_path):
         report = run_status(root)
         assert report["lock_diagnostic"]["pid_alive"] is True
         assert report["lock_diagnostic"]["ps_names_driver_script"] is False
-    finally:
-        child.wait()
 
 
 def test_mid_write_journal_counts_the_partial_line_and_keeps_the_rest(tmp_path):
@@ -391,7 +404,7 @@ def test_mid_write_journal_counts_the_partial_line_and_keeps_the_rest(tmp_path):
     write_journal(
         root,
         "20260826T093010Z",
-        [started(), {"type": "step1_gate_passed", "segs": ["seg01", "seg02"], "ts": TS}],
+        [started(), gate_passed(["seg01", "seg02"])],
         trailing_partial='{"type": "codex_dispatch_start',
     )
     report = run_status(root)
@@ -508,12 +521,12 @@ def test_lock_absent_empty_or_unparseable_is_null_with_a_reason(tmp_path):
     assert report["lock_diagnostic"] is None
     assert "does not exist" in report["lock_diagnostic_unavailable_reason"]
 
-    write_lock(root, None, raw="")
+    write_lock(root, raw="")
     report = run_status(root)
     assert report["lock_diagnostic"] is None
     assert "is empty" in report["lock_diagnostic_unavailable_reason"]
 
-    write_lock(root, None, raw="{oops")
+    write_lock(root, raw="{oops")
     report = run_status(root)
     assert report["lock_diagnostic"] is None
     assert "not valid JSON" in report["lock_diagnostic_unavailable_reason"]
@@ -777,17 +790,8 @@ def test_a_run_against_a_read_only_tree_still_reports(tmp_path):
     tmpdir = tmp_path / "private_tmp"
     tmpdir.mkdir()
 
-    paths = sorted(root.rglob("*"), reverse=True)
-    try:
-        for path in paths:
-            path.chmod(0o555 if path.is_dir() else 0o444)
-        root.chmod(0o555)
-        env = dict(os.environ, TMPDIR=str(tmpdir))
-        report = run_status(root, env=env)
-    finally:
-        root.chmod(0o755)
-        for path in sorted(root.rglob("*")):
-            path.chmod(0o755 if path.is_dir() else 0o644)
+    with read_only_tree(root):
+        report = run_status(root, env=dict(os.environ, TMPDIR=str(tmpdir)))
 
     assert report["progress"]["recorded_fragment_status_counts"]["converged"] == 1
     assert list(tmpdir.iterdir()) == [], "the run left something in TMPDIR"
@@ -808,18 +812,10 @@ def test_the_read_only_tree_guard_bites(tmp_path):
         ),
         encoding="utf-8",
     )
-    paths = sorted(root.rglob("*"), reverse=True)
-    try:
-        for path in paths:
-            path.chmod(0o555 if path.is_dir() else 0o444)
-        root.chmod(0o555)
+    with read_only_tree(root):
         proc = subprocess.run(
             [sys.executable, str(mutant)], capture_output=True, text=True, timeout=120
         )
-    finally:
-        root.chmod(0o755)
-        for path in sorted(root.rglob("*")):
-            path.chmod(0o755 if path.is_dir() else 0o644)
     assert proc.returncode != 0, "a writing mutant survived the read-only tree"
 
 
@@ -846,8 +842,7 @@ def test_a_live_pid_that_is_not_the_driver_does_not_win_selection(tmp_path):
     invocation's exit and summary. The command-text corroboration is what rules
     that out, so it is required, not merely reported."""
     root = make_durable_root(tmp_path)
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    try:
+    with sleeping_child() as child:
         write_journal(root, "20260826T090000Z",
                       [started(ts="2026-08-26T09:00:00Z", pid=child.pid)])
         write_journal(root, "20260826T093010Z",
@@ -858,9 +853,6 @@ def test_a_live_pid_that_is_not_the_driver_does_not_win_selection(tmp_path):
         assert report["lock_diagnostic"]["ps_names_driver_script"] is False
         assert report["run"]["selected_by"] == "greatest_recorded_driver_started_ts"
         assert report["run"]["session_id"] == "20260826T093010Z"
-    finally:
-        child.terminate()
-        child.wait()
 
 
 def test_an_unreadable_journal_is_counted_apart_from_one_with_no_start(tmp_path):
@@ -869,7 +861,7 @@ def test_an_unreadable_journal_is_counted_apart_from_one_with_no_start(tmp_path)
     about the driver."""
     root = make_durable_root(tmp_path)
     write_journal(root, "20260826T090000Z",
-                  [{"type": "lock_self_test_failed", "ts": "2026-08-26T09:00:00Z"}])
+                  [lock_self_test_failed(ts="2026-08-26T09:00:00Z")])
     bad = root / "runs" / "20260826T093010Z"
     bad.mkdir(parents=True)
     (bad / "driver_journal.jsonl").symlink_to(root / "runs" / "nowhere.jsonl")
@@ -928,7 +920,7 @@ def test_batch_progress_is_scoped_to_the_gate_and_differs_from_the_manifest(tmp_
                            "seg03": "in_progress", "seg04": "in_progress"})
     write_journal(root, "20260826T093010Z", [
         started(),
-        {"type": "step1_gate_passed", "segs": ["seg03", "seg04"], "ts": TS},
+        gate_passed(["seg03", "seg04"]),
     ])
     report = run_status(root)
     assert report["progress"]["scope"] == "manifest"
@@ -955,7 +947,7 @@ def test_a_lock_pid_that_cannot_be_probed_is_a_reason_not_a_traceback(tmp_path, 
     OSError -- and uncaught it would print a traceback and NO JSON line, which
     is the one output contract every caller depends on."""
     root = make_durable_root(tmp_path)
-    write_lock(root, None, raw=json.dumps({"pid": pid, "started_at": TS}))
+    write_lock(root, raw=json.dumps({"pid": pid, "started_at": TS}))
     report = run_status(root)
     assert report["lock_diagnostic"] is None
     assert "positive integer" in report["lock_diagnostic_unavailable_reason"]
@@ -968,7 +960,7 @@ def test_a_gate_with_no_fragments_yet_is_a_zero_batch_not_an_unknown(tmp_path):
     root = make_durable_root(tmp_path)
     write_journal(root, "20260826T093010Z", [
         started(),
-        {"type": "step1_gate_passed", "segs": ["seg01", "seg02"], "ts": TS},
+        gate_passed(["seg01", "seg02"]),
     ])
     report = run_status(root)
     assert report["progress"] is None, "the project census is genuinely absent"
@@ -985,7 +977,7 @@ def test_both_censuses_carry_the_same_caveats(tmp_path):
     root = make_durable_root(tmp_path)
     write_fragments(root, {"seg01": "converged"})
     write_journal(root, "20260826T093010Z", [
-        started(), {"type": "step1_gate_passed", "segs": ["seg01"], "ts": TS},
+        started(), gate_passed(["seg01"]),
     ])
     report = run_status(root)
     for census in (report["progress"], report["run"]["batch_progress"]):
