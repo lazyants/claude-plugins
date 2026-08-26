@@ -886,6 +886,26 @@ def test_a_symlinked_fragment_dir_is_refused_not_followed(tmp_path):
     assert "symlink" in report["progress_unavailable_reason"]
 
 
+def test_a_fragment_dir_symlinked_INSIDE_the_root_is_still_refused(tmp_path):
+    """The containment check alone does not cover this: a link whose target is
+    inside the durable root passes `_within` and would be followed. `ledger.d`
+    is a directory the driver's own writer creates, so one that is a link at all
+    means something other than `ledger_update.py` made it, and the honest read is
+    "not a real directory" rather than a census taken through it.
+
+    This case exists because a refactor briefly dropped the `is_symlink()` clause
+    from `_real_dir` and every test stayed green -- the only symlink fixture
+    pointed OUTSIDE the root, where `_within` catches it either way."""
+    root = make_durable_root(tmp_path)
+    inside = root / "runs" / "actual_fragments"
+    inside.mkdir(parents=True)
+    (inside / "seg01.json").write_text(json.dumps({"status": "converged"}), encoding="utf-8")
+    (root / "runs" / "ledger.d").symlink_to(inside)
+    report = run_status(root)
+    assert report["progress"] is None
+    assert "symlink" in report["progress_unavailable_reason"]
+
+
 def test_a_symlinked_fragment_is_refused_not_followed(tmp_path):
     root = make_durable_root(tmp_path)
     frag_dir = write_fragments(root, {"seg01": "converged"})

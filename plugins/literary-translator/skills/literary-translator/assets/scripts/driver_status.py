@@ -193,7 +193,7 @@ def _real_dir(path: Path, root: Path) -> bool:
     the identical class. A symlinked `runs/ledger.d` would otherwise count
     another book's population as this root's.
     """
-    return _within(path, root) and path.is_dir()
+    return _within(path, root) and not path.is_symlink() and path.is_dir()
 
 
 class StatusError(Exception):
