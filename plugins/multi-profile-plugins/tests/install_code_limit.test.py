@@ -19,6 +19,7 @@ Dependency-free: run it with `python3 install_code_limit.test.py`.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
 import os
@@ -27,6 +28,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -192,7 +194,7 @@ def make_codex_home(root: Path, name: str) -> Path:
     return home
 
 
-def sandbox_env(root: Path, *, on_path: Any = None) -> dict:
+def sandbox_env(root: Path, *, on_path: Path | None = None) -> dict:
     """An environment that cannot reach this machine's profiles, keychain or codex binary."""
     bindir = make_stub_bin(root)
     home = root / "home"
@@ -208,7 +210,7 @@ def sandbox_env(root: Path, *, on_path: Any = None) -> dict:
 
 
 def install(root: Path, source: Path, bin_dir: Path, *, force: bool = False,
-            env: Any = None) -> subprocess.CompletedProcess:
+            env: dict | None = None) -> subprocess.CompletedProcess:
     argv = [sys.executable, str(source / "install_code_limit.py"), "--bin-dir", str(bin_dir)]
     if force:
         argv.append("--force")
@@ -236,19 +238,29 @@ def unrunnable(path: Path, env: dict) -> bool:
     return done.returncode != 0
 
 
-def run_command(path: Path, args: list[str], env: dict, cwd: Any = "/",
+def run_command(path: Path, args: list[str], env: dict, cwd: Path | str = "/",
                 timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run([str(path)] + args, capture_output=True, text=True,
                           timeout=timeout, env=env, cwd=str(cwd))
 
 
+@contextlib.contextmanager
+def stable_case() -> Generator[tuple[Path, Path, Path], None, None]:
+    """A temp root, the shipped scripts under a version-STABLE layout, and a bin dir path.
+
+    The layout is the one case 14 contrasts against, so it is named once here rather than spelled
+    out per case. The bin dir is only NAMED: cases that need it to exist, or to already hold a
+    foreign file, say so themselves, and the ones that leave it absent are testing exactly that.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        yield root, make_source(root, "stable", "skills", "code-limits"), root / "bin"
+
+
 # --- cases ------------------------------------------------------------------------------------
 
 # 1 -- the exact shim, and the exec target.
-with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp)
-    source = make_source(root, "stable", "skills", "code-limits")
-    bin_dir = root / "bin"
+with stable_case() as (root, source, bin_dir):
     done = install(root, source, bin_dir)
     shim = bin_dir / "code-limit"
     check("1 a fresh install exits 0", done.returncode == 0, done.stdout + done.stderr)
@@ -367,10 +379,7 @@ for label, body in (
     ("8", "#!/bin/sh\necho somebody else's tool\n"),
     ("9", f"#!/usr/bin/env python3\n# documents the shim: {MARKER}\nprint('mine')\n"),
 ):
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        source = make_source(root, "stable", "skills", "code-limits")
-        bin_dir = root / "bin"
+    with stable_case() as (root, source, bin_dir):
         bin_dir.mkdir()
         foreign = bin_dir / "code-limit"
         foreign.write_text(body, encoding="utf-8")
@@ -387,10 +396,7 @@ for label, body in (
         check(f"{label} --force reports a replacement", "replaced" in forced.stdout, forced.stdout)
 
 # 10 -- a symlink is foreign even when its target is a genuine shim.
-with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp)
-    source = make_source(root, "stable", "skills", "code-limits")
-    bin_dir = root / "bin"
+with stable_case() as (root, source, bin_dir):
     other = root / "elsewhere"
     other.mkdir()
     install(root, source, other)                      # a genuine shim, somewhere else
@@ -415,10 +421,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # 11 -- both legacy names, parameterised so neither can be implemented and the other forgotten.
 for legacy in ("claude-limit", "claude-limits"):
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        source = make_source(root, "stable", "skills", "code-limits")
-        bin_dir = root / "bin"
+    with stable_case() as (root, source, bin_dir):
         bin_dir.mkdir()
         body = f"#!/bin/sh\necho stale {legacy}\n"
         old = bin_dir / legacy
@@ -428,7 +431,8 @@ for legacy in ("claude-limit", "claude-limits"):
         check(f"11 {legacy} present and foreign is refused", done.returncode == 1, done.stdout)
         check(f"11 {legacy} is named in the output", legacy in done.stdout, done.stdout)
         check(f"11 {legacy} keeps its bytes", old.read_text(encoding="utf-8") == body)
-        check(f"11 code-limit itself is still installed", (bin_dir / "code-limit").is_file())
+        check(f"11 code-limit itself is still installed alongside {legacy}",
+              (bin_dir / "code-limit").is_file())
         forced = install(root, source, bin_dir, force=True)
         check(f"11 --force migrates {legacy}", forced.returncode == 0,
               forced.stdout + forced.stderr)
@@ -525,10 +529,7 @@ finally:
 
 # 16 -- the marker is not a substring test in the other direction either: a shim whose exec line
 # was edited by hand is no longer ours, so it is not silently rewritten.
-with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp)
-    source = make_source(root, "stable", "skills", "code-limits")
-    bin_dir = root / "bin"
+with stable_case() as (root, source, bin_dir):
     install(root, source, bin_dir)
     shim = bin_dir / "code-limit"
     tampered = shim.read_text(encoding="utf-8").replace(
@@ -545,10 +546,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # 18 -- a crafted file that KEEPS the exec prefix and suffix but smuggles a second command.
 # The predicate this kills accepted `'.+'` between them, so `'x' ; echo mine # '` matched: a
 # quoted region, another command, and a comment that eats the closing quote.
-with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp)
-    source = make_source(root, "stable", "skills", "code-limits")
-    bin_dir = root / "bin"
+with stable_case() as (root, source, bin_dir):
     bin_dir.mkdir()
     crafted = (f"#!/bin/sh\n{MARKER}\n"
                "exec python3 'x' ; echo foreign-owned # ' \"$@\"\n")
@@ -562,10 +560,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # 19 -- a genuine shim mangled to CRLF. `read_text` translates newlines, so it compares EQUAL to
 # the real thing while `#!/bin/sh\r` makes the command exit 127.
-with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp)
-    source = make_source(root, "stable", "skills", "code-limits")
-    bin_dir = root / "bin"
+with stable_case() as (root, source, bin_dir):
     install(root, source, bin_dir)
     shim = bin_dir / "code-limit"
     shim.write_bytes(expected_shim(report_of(source)).replace("\n", "\r\n").encode("utf-8"))
@@ -584,10 +579,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # 20 -- an exact shim whose execute bits were lost. Content equality is not "installed": the
 # command exits 126, and reporting success over that is the same lie as reporting it over a
 # missing file.
-with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp)
-    source = make_source(root, "stable", "skills", "code-limits")
-    bin_dir = root / "bin"
+with stable_case() as (root, source, bin_dir):
     install(root, source, bin_dir)
     shim = bin_dir / "code-limit"
     shim.chmod(0o644)
@@ -603,10 +595,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # 21 -- a managed name that cannot be written. Without a handler the OSError ends the run past
 # every remaining name as a traceback, and the staging file it leaves behind is invisible.
-with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp)
-    source = make_source(root, "stable", "skills", "code-limits")
-    bin_dir = root / "bin"
+with stable_case() as (root, source, bin_dir):
     bin_dir.mkdir()
     (bin_dir / "code-limit").mkdir()
     done = install(root, source, bin_dir, force=True)
@@ -620,10 +609,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # 24 -- a planted file whose target is canonically quoted but carries a control character.
 # The installer refuses to EMIT such a path, so a decoder that accepts one recognises a shim it
 # could never have written -- and adopts somebody else's executable on the strength of it.
-with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp)
-    source = make_source(root, "stable", "skills", "code-limits")
-    bin_dir = root / "bin"
+with stable_case() as (root, source, bin_dir):
     bin_dir.mkdir()
     planted = bin_dir / "code-limit"
     tabbed = (f"#!/bin/sh\n{MARKER}\n"
@@ -642,10 +628,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # 25 -- an exact shim that is over-permissive. 0755 is the mode, not "some execute bit": a
 # world-writable command on PATH is a worse outcome than a missing one, and reporting it as
 # already installed leaves it there.
-with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp)
-    source = make_source(root, "stable", "skills", "code-limits")
-    bin_dir = root / "bin"
+with stable_case() as (root, source, bin_dir):
     install(root, source, bin_dir)
     shim = bin_dir / "code-limit"
     shim.chmod(0o777)
@@ -678,6 +661,9 @@ with tempfile.TemporaryDirectory() as tmp:
           [q.name for q in root.iterdir() if q.name.startswith(".taken.")] == [])
     installer.write_atomically(occupied, b"ours", clobber=True)
     check("22 clobber=True does replace it", occupied.read_bytes() == b"ours")
+    check("22 and the staged file arrives as 0755, set on the DESCRIPTOR",
+          stat.S_IMODE(occupied.stat().st_mode) == 0o755,
+          oct(stat.S_IMODE(occupied.stat().st_mode)))
     check("22 and cleans up after itself",
           [q.name for q in root.iterdir() if q.name.startswith(".taken.")] == [])
 
@@ -695,18 +681,23 @@ check("23 the real thing is a shim",
 # The decoder's language must equal the emitter's, checked on the predicate they share.
 for bad in ("/tmp/a\tb", "/tmp/a\nb", "/tmp/a\x00b", ""):
     check(f"23 {bad!r} is not emittable", not installer.emittable(bad))
-    check(f"23 and a shim naming it is not ours",
+    check(f"23 a shim naming {bad!r} is not ours",
           installer.shim_target(
               f"#!/bin/sh\n{MARKER}\nexec python3 {quoted(bad)} \"$@\"\n".encode("utf-8"))
           is None)
 check("23 an ordinary path is emittable", installer.emittable("/tmp/a b/it's.py"))
+# A lone surrogate is how a non-UTF-8 path arrives on Linux. Screened here rather than left to
+# raise UnicodeEncodeError out of the encode step, past every handler, as a traceback.
+check("23 a lone surrogate is not emittable", not installer.emittable("/tmp/x\udcffy.py"))
+check("23 the surrogate range boundaries are rejected",
+      not installer.emittable("/tmp/\ud800.py") and not installer.emittable("/tmp/\udfff.py"))
+check("23 a non-ASCII but well-formed path is still emittable",
+      installer.emittable("/tmp/\u00e9\u4e2d.py"))
 
 # 17 -- the installer refuses a source whose report is missing, rather than shimming onto nothing.
-with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp)
-    source = make_source(root, "stable", "skills", "code-limits")
+with stable_case() as (root, source, bin_dir):
     (source / "report_limits.py").unlink()
-    done = install(root, source, root / "bin")
+    done = install(root, source, bin_dir)
     check("17 a missing report is refused", done.returncode == 1, done.stdout + done.stderr)
     check("17 the refusal names the missing file",
           "report_limits.py" in done.stderr and "Traceback" not in done.stderr, done.stderr[:300])
@@ -720,7 +711,7 @@ if failures:
 
 # A case that raises before its checks run, or a deleted fixture block, otherwise subtracts
 # silently: the remaining cases pass, the run exits 0, and that reads exactly like full coverage.
-MIN_CHECKS = 130
+MIN_CHECKS = 140
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

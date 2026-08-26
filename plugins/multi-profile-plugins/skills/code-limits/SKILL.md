@@ -7,12 +7,12 @@ description: >-
   `~/.codex*` (`CODEX_HOME`).
   Use when asked how much usage-limit budget is left, when a five-hour or weekly window resets,
   which profile or account is nearly out, or how many Codex "usage limit reset" coupons remain.
-  Ships `scripts/report_limits.py`, installable on PATH as `code-limit`, one table covering both CLIs: Claude Code read from its
-  on-disk usage cache by default (or live with `--live`) and Codex read live over `codex
-  app-server`'s `account/rateLimits/read` JSON-RPC call. Not the sibling `multi-profile-plugins`
-  skill (plugin-store topology, `installLocation` errors) or `multi-profile-codex` (`CODEX_HOME`
-  architecture, seeding, config pins) -- this one is only about usage-limit consumption and reset
-  timing.
+  Ships `scripts/report_limits.py`, installable on PATH as `code-limit`, one table covering both
+  CLIs: Claude Code read from its on-disk usage cache by default (or live with `--live`) and Codex
+  read live over `codex app-server`'s `account/rateLimits/read` JSON-RPC call. Not the sibling
+  `multi-profile-plugins` skill (plugin-store topology, `installLocation` errors) or
+  `multi-profile-codex` (`CODEX_HOME` architecture, seeding, config pins) -- this one is only
+  about usage-limit consumption and reset timing.
 ---
 
 # Usage-limit report across Claude Code and Codex profiles

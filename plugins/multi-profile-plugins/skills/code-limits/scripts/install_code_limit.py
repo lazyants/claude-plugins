@@ -52,6 +52,17 @@ MARKER = "# multi-profile-plugins code-limits shim -- regenerate with install_co
 EXEC_PREFIX = "exec python3 "
 EXEC_SUFFIX = ' "$@"'
 
+# Emitted when the source is a version-scoped plugin cache. The path gets a line of its own: it is
+# the one part of this a user has to read character by character.
+VERSION_CACHE_REFUSAL = """\
+error: {report}
+  is inside a version-scoped plugin cache. Those directories name ONE version and are
+  garbage-collected, so a command installed from here silently keeps running an old report and
+  then breaks when it is removed. Run this installer from a version-stable copy instead -- the
+  marketplace checkout,
+  ~/.claude/plugins/marketplaces/<marketplace>/.../skills/code-limits/scripts/,
+  or a clone of the repo."""
+
 
 def posix_quote(text: str) -> str:
     """Single-quote for `sh`, ALWAYS -- one shape, whatever the path contains.
@@ -73,7 +84,8 @@ def emittable(target: str) -> bool:
     untrusted surface the ownership test exists for. An empty target is impossible for the same
     reason.
     """
-    return target != "" and not any(ord(character) < 32 for character in target)
+    return target != "" and not any(ord(character) < 32 or 0xD800 <= ord(character) <= 0xDFFF
+                                    for character in target)
 
 
 def unquote_canonical(text: str) -> str | None:
@@ -112,13 +124,17 @@ def shim_target(content: bytes) -> str | None:
     body = lines[2]
     if not body.startswith(EXEC_PREFIX) or not body.endswith(EXEC_SUFFIX):
         return None
-    target = unquote_canonical(body[len(EXEC_PREFIX):len(body) - len(EXEC_SUFFIX)])
+    target = unquote_canonical(body[len(EXEC_PREFIX):-len(EXEC_SUFFIX)])
     return target if target is not None and emittable(target) else None
 
 
 def shim_text(report: Path) -> str:
-    """The whole shim. One statement, and the report's path is the only thing interpolated."""
-    return f"#!/bin/sh\n{MARKER}\nexec python3 {posix_quote(str(report))} \"$@\"\n"
+    """The whole shim. One statement, and the report's path is the only thing interpolated.
+
+    Built from the SAME prefix and suffix `shim_target` decomposes, so the emitter and the
+    ownership test cannot drift into disagreeing about the shape of the one line that matters.
+    """
+    return f"#!/bin/sh\n{MARKER}\n{EXEC_PREFIX}{posix_quote(str(report))}{EXEC_SUFFIX}\n"
 
 
 def in_version_cache(report: Path) -> bool:
@@ -136,9 +152,11 @@ def in_version_cache(report: Path) -> bool:
 
 
 def is_ours(path: Path) -> bool:
-    """Whether this installer wrote `path`. lstat FIRST: a symlink is never ours, whatever it
-    points at -- following one would read a genuine shim through a link the user placed by hand
-    and then replace that link without asking."""
+    """Whether this installer wrote `path`.
+
+    lstat FIRST: a symlink is never ours, whatever it points at -- following one would read a
+    genuine shim through a link the user placed by hand and then replace that link without asking.
+    """
     try:
         info = os.lstat(path)
     except OSError:
@@ -150,6 +168,19 @@ def is_ours(path: Path) -> bool:
     except OSError:
         return False
     return shim_target(content) is not None
+
+
+def discard_staging(path: str) -> None:
+    """Remove a staging file, never raising -- tidying it is not the job the caller was given.
+
+    On the failure path an exception is already on its way up and must not be replaced by this
+    one; on the success path the install has already happened and a leftover dot-file must not be
+    reported as a failure.
+    """
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def write_atomically(dest: Path, data: bytes, *, clobber: bool) -> None:
@@ -171,24 +202,21 @@ def write_atomically(dest: Path, data: bytes, *, clobber: bool) -> None:
     try:
         with os.fdopen(handle, "wb") as stream:
             stream.write(data)
-        os.chmod(temporary, 0o755)
+            stream.flush()
+            # By DESCRIPTOR, not by name. `mkstemp` opens O_EXCL at 0600 under an unpredictable
+            # name, so nothing can be sitting there -- but resolving that name a second time
+            # after the descriptor closes is a window that does not need to exist.
+            os.fchmod(stream.fileno(), 0o755)
         if clobber:
             os.replace(temporary, dest)
         else:
             os.link(temporary, dest)
     except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        discard_staging(temporary)
         raise
     if not clobber:
-        # The link succeeded, so the install is done; a failure to tidy the staging name must not
-        # undo it or be reported as a failed install.
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        # `link` leaves the staging name behind; `replace` consumed it.
+        discard_staging(temporary)
 
 
 def place(dest: Path, text: str, force: bool) -> str:
@@ -254,15 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: the report's path carries a control character: {report!r}", file=sys.stderr)
         return 1
     if in_version_cache(report):
-        print(f"error: {report}\n"
-              "  is inside a version-scoped plugin cache. Those directories name ONE version and "
-              "are garbage-collected,\n"
-              "  so a command installed from here silently keeps running an old report and then "
-              "breaks when it is removed.\n"
-              "  Run this installer from a version-stable copy instead -- the marketplace "
-              "checkout,\n"
-              "  ~/.claude/plugins/marketplaces/<marketplace>/.../skills/code-limits/scripts/, "
-              "or a clone of the repo.", file=sys.stderr)
+        print(VERSION_CACHE_REFUSAL.format(report=report), file=sys.stderr)
         return 1
 
     bin_dir = Path(os.path.expanduser(args.bin_dir))
