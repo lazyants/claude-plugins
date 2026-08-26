@@ -1111,3 +1111,32 @@ def test_a_traversing_gate_seg_id_is_refused_and_counted(tmp_path):
     assert report["run"]["recorded_dispatched_segs"] == 4
     assert batch["unrecognized_status"] == 0
     assert "SHOULD_NOT_APPEAR" not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('{"properties": []}', id="properties-is-a-list"),
+        pytest.param('{"properties": {"status": []}}', id="status-is-a-list"),
+        pytest.param('{"properties": "status"}', id="properties-is-a-string"),
+        pytest.param('{"properties": {"status": {"enum": "converged"}}}', id="enum-is-a-string"),
+        pytest.param('[]', id="schema-is-a-list"),
+        pytest.param('"a schema"', id="schema-is-a-string"),
+        pytest.param('null', id="schema-is-null"),
+    ],
+)
+def test_a_structurally_malformed_status_schema_falls_back_to_observed(tmp_path, body):
+    """Valid JSON is not a valid SCHEMA. Chaining `.get()` through
+    `properties` -> `status` -> `enum` assumes an object at every level, and a
+    non-object at any of them raises AttributeError -- which `build_report()`
+    does not catch, so the command prints a traceback and NO JSON line. Every
+    shape here must reach the documented `observed` fallback instead: the enum
+    is a convenience for zero-filling, never a reason to fail the report."""
+    root = make_durable_root(tmp_path, with_schema=False)
+    (root / "schemas" / "ledger-fragment.schema.json").write_text(body, encoding="utf-8")
+    write_fragments(root, {"seg01": "converged"})
+    report = run_status(root)
+    assert report["progress"]["status_enum_source"] == "observed"
+    # The fallback zero-fills nothing it did not see, so the census is exactly
+    # the statuses on disk -- proving the report is real, not an empty shell.
+    assert report["progress"]["recorded_fragment_status_counts"] == {"converged": 1}

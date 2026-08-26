@@ -308,11 +308,19 @@ def fragment_status_enum(schemas_dir: Path, root: Path):
         schema = json.loads(text)
     except (json.JSONDecodeError, RecursionError):
         return None, "observed"
-    enum = (
-        schema.get("properties", {}).get("status", {}).get("enum")
-        if isinstance(schema, dict)
-        else None
-    )
+    # Walked with a type check at EVERY level, not just the top: valid JSON is
+    # not a valid schema, and `{"properties": []}` would make a chained
+    # `.get()` raise AttributeError -- uncaught, a traceback and NO JSON line,
+    # the same contract break a malformed pid and a nested document each got a
+    # guard for. The enum is a convenience for zero-filling; nothing about it
+    # is worth failing the report over.
+    node = schema
+    for key in ("properties", "status", "enum"):
+        if not isinstance(node, dict):
+            node = None
+            break
+        node = node.get(key)
+    enum = node
     if not isinstance(enum, list) or not all(isinstance(x, str) for x in enum) or not enum:
         return None, "observed"
     return list(enum), "schemas/ledger-fragment.schema.json"
