@@ -137,8 +137,8 @@
     {
       "name": "multi-profile-plugins",
       "source": "./plugins/multi-profile-plugins",
-      "description": "Understand and diagnose config-profile isolation on a machine running several Claude Code CLAUDE_CONFIG_DIR profiles or several Codex CODEX_HOME profiles. Explains why Claude Code profiles that share a plugins store hit recurring \"corrupted installLocation\" errors and cross-profile plugin deletion, and why a Codex profile seeded by copying config.toml keeps reading the home it was copied from, including an MCP server that re-enters it. Ships a read-only health-check script for each, and documents the reverse-engineered Claude Code CLI validation and garbage-collection mechanism behind the first.",
-      "version": "1.1.0",
+      "description": "Understand and diagnose config-profile isolation on a machine running several Claude Code CLAUDE_CONFIG_DIR profiles or several Codex CODEX_HOME profiles. Explains why Claude Code profiles that share a plugins store hit recurring \"corrupted installLocation\" errors and cross-profile plugin deletion, and why a Codex profile seeded by copying config.toml keeps reading the home it was copied from, including an MCP server that re-enters it. Ships a read-only health-check script for each, a usage-limit report covering every Claude Code profile and Codex home with reset times and Codex reset-voucher counts and expiry -- installable on PATH as `code-limit` -- and documents the reverse-engineered Claude Code CLI validation and garbage-collection mechanism behind the first.",
+      "version": "1.2.0",
       "author": {
         "name": "Lazy Ants"
       },
