@@ -1076,7 +1076,17 @@ def _codex_records(home: Path) -> list[Record]:
     else:
         raise Malformed("payload-malformed")
 
-    pools = _codex_spent_from(default, pools)
+    try:
+        pools = _codex_spent_from(default, pools)
+    except Malformed as exc:
+        # One unreadable thing may not suppress its siblings -- the per-record boundary the rest
+        # of this reader already holds, applied to the selector. WHICH pool the CLI spends from
+        # is unresolvable, and that gaps; the voucher count and the credit balance below were
+        # never part of that question and are still perfectly readable. Raising here took them
+        # down with it. The record is named for the vendor's own field, so the column it opens
+        # says what could not be read.
+        records.append(Record("rateLimits", GAP, diagnostic=exc.code))
+        pools = {}
     labels = _codex_labels(pools)
     for limit_id in sorted(pools):
         pool = pools[limit_id]
@@ -1534,6 +1544,24 @@ def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
     print(paint("  exactly as any codex invocation does. Nothing here is ever redeemed.", DIM))
 
 
+def _refreshed(cached: list[Record], live_state: str, live: list[Record], live_code: str,
+               cached_state: str, cached_code: str):
+    """Which of the two reads answers this candidate, as one decision in one place.
+
+    A row comes from ONE read, whole -- gaps included. Merging the two per window looked strictly
+    better and was worse: with a live gap suppressed by a cached cell, nothing was left to gap the
+    run, and the row rendered a CACHED figure under the live provenance its first cell carried. A
+    stale number labelled `api`, no note, exit 0. So whatever the live read produced is the answer
+    whenever it produced anything at all, and the cache answers only when it produced nothing.
+
+    A function rather than three lines inline because the live half cannot be reached from a test
+    without a socket, and a rule that no test can state is a rule that quietly changes.
+    """
+    if live:
+        return live_state, live, live_code
+    return cached_state, cached, cached_code
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Report Claude Code and Codex usage limits.")
     parser.add_argument("--live", action="store_true",
@@ -1603,19 +1631,12 @@ def main(argv: list[str] | None = None) -> int:
                 # be the worse trade. Its reason is a NOTE, deliberately not a warning: the
                 # default mode promised to read a cache and it read one.
                 live_state, live_records, live_code = _examine(candidate, _claude_live)
-                if live_records:
-                    # A row comes from ONE read, whole -- gaps included. Merging the two per
-                    # window looked strictly better and was worse: with the live gap suppressed
-                    # by a cached cell, nothing was left to gap the run, and the row rendered a
-                    # CACHED figure under the live provenance the first cell carried. A stale
-                    # number labelled `api`, no note, exit 0. Whatever the live read says is what
-                    # this row says; the cache is kept only when that read produced nothing.
-                    state, records, code = live_state, live_records, live_code
-                else:
-                    detail = live_code or ", ".join(f"{r.name} [{r.diagnostic}]"
-                                                    for r in live_records if r.state == GAP)
+                if not live_records:
+                    detail = live_code or "the backend returned nothing to read"
                     notes.append(f"{where}: the cache describes a window that is over, and the"
                                  f" live retry did not answer -- {detail}")
+                state, records, code = _refreshed(records, live_state, live_records, live_code,
+                                                  state, code)
             if code:
                 # A candidate-level outcome has no pool to hang a row on, so it becomes a note.
                 # It still decides the exit status below, exactly as before.

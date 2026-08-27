@@ -34,8 +34,9 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   `base_model_inference` (`gpt-reserve`) -- and the top-level `rateLimits` object already names
   the one that answers "how much can I still use here". Read from that pointer rather than a
   hardcoded id. When the map does not hold the pool that pointer names, the top-level object IS
-  that pool and answers for it; a selector that resolves to neither gaps the home rather than
-  substituting a pool nobody asked about.
+  that pool and answers for it; a selector that resolves to neither gaps rather than substituting
+  a pool nobody asked about -- gapping the QUOTA only, since the voucher count and credit balance
+  beside it were never part of the question and are still readable.
 - **A cached window that has already reset is re-read live.** The file cannot answer once its
   window is over, and signing in does not refresh it: the CLI rewrites `.claude.json` at login
   but refreshes `cachedUsageUtilization` only after a request that carries usage back, so a

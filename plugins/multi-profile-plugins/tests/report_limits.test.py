@@ -672,13 +672,18 @@ with tempfile.TemporaryDirectory() as tmp:
                            stub_result=dict(DEFAULT_RESULT,
                                             rateLimits={"limitId": "codex_absent"}))
     pools_kept = {pool for where, pool, _l in pool_rows(windowless.stdout) if where == ".codexT"}
-    check("18 a selector that resolves to nothing shows no pool at all",
-          pools_kept == set(), str(sorted(pools_kept)))
-    check("18 it gaps the home rather than substituting another pool",
+    check("18 a selector that resolves to nothing shows no usage pool at all",
+          pools_kept == {"rateLimits"}, str(sorted(pools_kept)))
+    check("18 it gaps rather than substituting another pool",
           "[payload-malformed]" in windowless.stdout and windowless.returncode == 1,
           f"rc={windowless.returncode}\n{windowless.stdout}")
     check("18 and names no other pool on the page",
           "codex_bengalfox" not in windowless.stdout, windowless.stdout)
+    # One unreadable thing may not suppress its siblings: the voucher count was never part of
+    # the question "which pool does the CLI spend from", and is still perfectly readable.
+    vouchers_kept = [row for row in voucher_rows(windowless.stdout) if ".codexT" in row]
+    check("18 while the voucher count beside it survives the gap",
+          len(vouchers_kept) == 1 and vouchers_kept[0].split()[1] == "1", str(vouchers_kept))
     # The count itself, not merely the label: "1" occurs in every percentage on the page, so
     # `"1" in stdout` would stay green for any count the script chose to print.
     coupon_rows = [row for row in voucher_band(done.stdout) if not row.startswith("credits")]
@@ -2432,6 +2437,70 @@ with tempfile.TemporaryDirectory() as tmp:
     check("61 the run gaps, because a window went unread", done.returncode == 1,
           f"rc={done.returncode}")
 
+# --- 62 -- the three fixes a mutation could still have reverted unnoticed ----------------------
+
+# Fix 1, the refresh rule. Its live half cannot be reached from this suite without a socket, so
+# the DECISION is a function and the function is stated here: whatever the live read produced is
+# the answer whenever it produced anything, and the cache answers only when it produced nothing.
+# Restoring a per-window merge would have to change this.
+cached_two = [R.Record("session", R.NO_CURRENT, percent=88.0, freshness="cache 3d00h old",
+                       diagnostic="stale-after-reset", family="all", window="5h"),
+              R.Record("weekly_all", R.REPORTED, percent=40.0, freshness="cache 3d00h old",
+                       family="all", window="weekly")]
+live_partial = [R.Record("session", R.REPORTED, percent=2.0, freshness="live now",
+                         family="all", window="5h"),
+                R.Record("weekly_all", R.GAP, diagnostic="field-malformed",
+                         family="all", window="weekly")]
+state, records, code = R._refreshed(cached_two, R.GAP, live_partial, "", R.NO_CURRENT, "")
+check("62 a live read that produced anything answers the row, whole",
+      records == live_partial and state == R.GAP, str([r.name for r in records]))
+check("62 so no cached cell can survive beside a live one",
+      not any(r.freshness.startswith("cache") for r in records),
+      str([r.freshness for r in records]))
+state, records, code = R._refreshed(cached_two, R.GAP, [], "token-expired", R.NO_CURRENT, "")
+check("62 while a live read that produced nothing leaves the cache untouched",
+      records == cached_two and state == R.NO_CURRENT and code == "", str(state))
+
+# Fix 3, the removed collision machinery, rests on one property: the selector yields AT MOST one
+# pool. Two ids can only ever share a label if that is false, so the property is what to pin.
+WIN = {"usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1}
+many = {"codex": {"limitId": "codex", "primary": WIN},
+        "codex_other": {"limitId": "codex_other", "primary": WIN}}
+picked = R._codex_spent_from({"limitId": "codex", "primary": WIN}, many)
+check("62 a resolvable selector yields exactly one pool", list(picked) == ["codex"], str(picked))
+picked = R._codex_spent_from({"limitId": "codex_top", "primary": WIN}, many)
+check("62 and so does one answered by the top-level object",
+      list(picked) == ["codex_top"], str(picked))
+try:
+    R._codex_spent_from({"limitId": "codex_none"}, many)
+    resolved = True
+except R.Malformed:
+    resolved = False
+check("62 an unresolvable selector yields none of them, rather than all", not resolved)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # Fix 5. An unknown kind keeps its OWN name for both its row and its column. Placed by a
+    # guess about its prefix it would join `all`, where it either overwrites the weekly figure
+    # beside it or hides behind it -- and this fixture would look identical either way unless
+    # the family and the column are both checked.
+    unknown = make_claude(root, ".claudeKind", cached(entries=[
+        entry(kind="weekly_bonus", percent=33, resets=iso(30)),
+        entry(kind="weekly_all", percent=44, resets=iso(30)),
+    ]))
+    done, _, _ = run(["--claude-profile", str(unknown),
+                      "--codex-home", str(make_codex_home(root, ".codexKind"))], root=root)
+    rows = [(pool, line) for where, pool, line in pool_rows(done.stdout)
+            if where == ".claudeKind"]
+    header = [ln for ln in done.stdout.splitlines() if "SOURCE" in ln][0]
+    check("62 an unknown kind takes a row of its own, under its own name",
+          sorted(pool for pool, _l in rows) == ["all", "weekly_bonus"], str(rows))
+    check("62 and a column of its own, so it overwrites nothing",
+          "WEEKLY_BONUS" in header and "WEEKLY " in header, repr(header))
+    check("62 with both figures still on the page",
+          "33%" in done.stdout and "44%" in done.stdout, done.stdout)
+    check("62 the run stays clean", done.returncode == 0, done.stdout)
+
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -2442,7 +2511,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 517
+MIN_CHECKS = 528
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
