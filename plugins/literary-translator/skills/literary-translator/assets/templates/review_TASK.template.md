@@ -1,46 +1,4 @@
 <!-- PROMPT_CONTRACT_VERSION: 3 -->
-<!--
-  review_TASK.template.md -- one-time-seed prompt contract for the
-  per-segment review agent.
-
-  Step 0a copies this file ONCE to `${durable_root}/review_TASK.md` and
-  never re-copies over it once it exists (see SKILL.md's Step 0a and
-  references/ledger-and-resumability.md's canonical-path invariants).
-  Hand-adapt the bracketed [PLACEHOLDER] spots below for THIS project right
-  after the copy, then leave the file alone -- mass-translate-wf.template.js's
-  `reviewDispatchPrompt()` re-reads `${durable_root}/review_TASK.md` fresh
-  for every segment it dispatches, so any later edit here applies
-  retroactively to every not-yet-reviewed segment.
-
-  1.2.0: `reviewDispatchPrompt()`'s own generated prompt text carries the
-  FULL review contract inline -- the dispatch/wait/consume shape, the
-  `dispatch_token` this file's own output section below now requires, and
-  the exact write path -- and SUPERSEDES this durable file's own
-  instructions on any point of conflict. This file may predate that change
-  on a project resumed from an older plugin version; a drift between this
-  file's prose and `reviewDispatchPrompt()`'s generated contract is
-  expected on such a project, not a bug to reconcile by hand -- the
-  generated prompt always wins. This file still matters for the
-  hand-adapted PLACEHOLDER content (source/target language, project title,
-  the era/domain trap example) that `reviewDispatchPrompt()` reads back out
-  of it.
-
-  This file is deliberately verse-policy-NEUTRAL, for the same reason
-  translate_TASK.template.md is: verse-handling expectations for THIS run
-  are spliced into each segment's own dispatch prompt from the current
-  profile.yml (`verse_policy.mode`, see references/verse-policy.md), never
-  duplicated here. There is also no `verse_status` field anywhere in this
-  file's own output contract below -- a verse-specific problem is just an
-  ordinary `findings[]` entry (`loc`: `"VERSE:{vid}"`); verse COVERAGE
-  itself is exclusively `validate_draft.py`'s job, never review judgment.
-
-  On a resumed project, `scripts/profile_validate.py` checks the
-  `PROMPT_CONTRACT_VERSION` marker above against its own hardcoded
-  `CURRENT_PROMPT_CONTRACT_VERSION` and FATALs on a missing, malformed,
-  duplicated, or non-leading marker. Bump this marker (and that constant)
-  only when this file's own I/O contract changes in a way an existing
-  project must consciously re-adopt -- never silently.
--->
 
 # Task: Review One Segment's Translation (single reviewer, accuracy AND literary quality)
 

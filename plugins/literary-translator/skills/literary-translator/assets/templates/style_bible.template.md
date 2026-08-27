@@ -1,38 +1,4 @@
 <!--
-  style_bible.template.md -- one-time-seed style-authority scaffold.
-
-  Step 0a copies this file ONCE to `${durable_root}/style_bible.md` and
-  never re-copies over it once it exists (see SKILL.md's Step 0a).
-  Hand-adapt every `LT_REQUIRED_FILL_BEGIN`/`LT_REQUIRED_FILL_END`
-  HTML-comment marker span below for THIS project before W2 (Extract)
-  starts -- `scripts/scaffold_validate.py` FATALLY rejects any span that
-  still contains the literal sentinel `LT_PLACEHOLDER_UNFILLED`, naming
-  the file and the specific marker id. NOTE: this very sentence
-  deliberately never writes the marker's own opening/closing HTML-comment
-  delimiters back to back -- doing so here, inside this explanatory
-  header, would itself parse as a real (accidental) marker span to that
-  same regex-based scanner, which does not understand comment nesting.
-
-  Unlike `PLAN.md`, this file stays load-bearing for the whole life of the
-  project: `translate_TASK.md`/`review_TASK.md` both name it as the style
-  authority every translator (codex) and reviewer (codex) call must read
-  in full, and `glossary-pass-wf.template.js`'s own dispatch prompt quotes
-  two of its sections literally ("style_bible.md section C-translit").
-  Section labels A-G below are therefore load-bearing identifiers, not
-  free-form headings -- do not renumber or relabel them.
-
-  Two different roles maintain this document, never conflated: Claude (or
-  the human) curates its FORM -- structure, wording, which sections are
-  even applicable to this language pair. Every ACCURACY decision it
-  eventually records -- a name's canonical target form, whether a basis is
-  `established` or `transliterated` -- is made by codex, through the
-  codex-glossary-pass, never by Claude directly (see
-  `references/canon-and-glossary.md`). style_contract (sections A-F) and
-  glossary (section G) also have different invalidation scope: a
-  style_contract edit is global and legitimately invalidates every
-  segment; a glossary/canon edit invalidates only the segments that
-  actually used the changed term (see `references/ledger-and-resumability.md`).
-
   The style_contract span (sections A-F) is wrapped in a pair of
   STYLE_CONTRACT_BEGIN / STYLE_CONTRACT_END HTML-comment markers -- placed
   immediately before section A and immediately after section F, section G
@@ -42,8 +8,19 @@
   enforces at W1 that exactly one of each exists, in order. These markers
   are therefore load-bearing: never remove, duplicate, or reorder them, and
   never move section G inside them. (This paragraph deliberately spells the
-  marker names without their comment delimiters, for the same
-  regex-nesting reason explained above.)
+  marker names without their comment delimiters: nothing parses this file as
+  HTML -- `scaffold_validate.py` counts marker occurrences file-wide and
+  `cache_key.py` requires each to be unique, so a second literal copy here
+  would read as a duplicated marker and FATAL.)
+
+  Section labels A-G below are load-bearing identifiers, not free-form
+  headings -- do not renumber or relabel them. Fourteen shipped sites address
+  them by label: the glossary worker's own prompt (`glossary_TASK.template.md`),
+  `references/canon-and-glossary.md`, `references/language-pair-parameterization.md`,
+  and `canon_validate.py`, which prints "style_bible.md section C" into an
+  operator-facing refusal. Nothing validates any of those references, so a
+  relabelled section leaves every one of them aimed at a heading that no
+  longer exists, silently.
 
   What belongs inside those markers: rule text a translator or reviewer
   must APPLY, plus the boundary case that keeps each rule from being
