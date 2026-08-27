@@ -14,12 +14,13 @@
   would read as a duplicated marker and FATAL.)
 
   Section labels A-G below are load-bearing identifiers, not free-form
-  headings -- do not renumber or relabel them. Shipped prose addresses them
-  by label, including the glossary worker's own prompt
-  (`glossary_TASK.template.md`, `references/canon-and-glossary.md`,
-  `references/language-pair-parameterization.md`), and nothing validates the
-  reference: a relabelled section leaves those pointers aimed at a heading
-  that no longer exists, silently.
+  headings -- do not renumber or relabel them. Fourteen shipped sites address
+  them by label: the glossary worker's own prompt (`glossary_TASK.template.md`),
+  `references/canon-and-glossary.md`, `references/language-pair-parameterization.md`,
+  and `canon_validate.py`, which prints "style_bible.md section C" into an
+  operator-facing refusal. Nothing validates any of those references, so a
+  relabelled section leaves every one of them aimed at a heading that no
+  longer exists, silently.
 
   What belongs inside those markers: rule text a translator or reviewer
   must APPLY, plus the boundary case that keeps each rule from being
