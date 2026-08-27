@@ -442,22 +442,16 @@ fixer to READ `review_path(seg)` itself and work through its on-disk
 `findings[]` array. (Since #532 the fixer applies an entry it can
 substantiate against the source and refuses one it cannot, without
 recording the refusal in the draft; the disk read this section is about is
-unchanged by that.) `review_ready.py` already token-validated this
-exact file fresh THIS round before the fix call was ever dispatched. In the
-SUPPORTED single-orchestrator obedient model the review for `<seg>` round R is
-written once by its own detached `codex_job.py --kind review` driver — not
-concurrently with the fixer's read — so this read is race-free; OUTSIDE that model
-`review_ready.py` (which reads `review.json` in-memory ONCE and checks only
-schema + expected-token + current-`draft_sha1`, NOT content quality or writer
-identity) can pass a schema-valid same-token/current-hash FORGERY that is STABLE
-through acceptance, and a mutation mid-gate or after consume is the §6 residual (see
-`references/engine-loop.md` R1). This is what closes the fix-step-input question:
-the fixer's own disk read, not this gate. The narrowed `{loc, severity}`
-compare below no longer needs to bind the free-text `issue`/`suggest`
-bodies for that same reason — the fixer never consumes the CONSUME agent's
-transcribed copy of them at all, so a transcription slip there can no
-longer reach the fixer, regardless of what this gate's own compare does or
-doesn't catch. This gate still protects `scripts/ledger_update.py`'s
+unchanged by that.) `review_ready.py` already token-validated this exact
+file fresh THIS round before the fix call was ever dispatched.
+`references/engine-loop.md` R1 owns the rest of that argument — why the
+read is race-free in the SUPPORTED single-orchestrator model, the narrower
+guarantee outside it, and the three named residuals. What closes the
+fix-step-input question is the fixer's own disk read, not this gate. The
+narrowed `{loc, severity}` compare below no longer needs to bind the
+free-text `issue`/`suggest` bodies for that same reason — the fixer never
+consumes the CONSUME agent's transcribed copy of them at all.
+This gate still protects `scripts/ledger_update.py`'s
 `reviewed_draft_sha1`/`dispatch_token` binding check at the convergence
 write (see `references/ledger-and-resumability.md`) and any later
 audit-trail inspection — both of which still read `review_path(seg)` from

@@ -259,16 +259,16 @@ def test_proximity_detector_catches_a_recased_historiettes_t3_mention():
 
 
 def test_proximity_detector_does_not_flag_the_gutenberg_epub_provenance_paragraph():
-    """False-positive guard: the real, current `gutenberg-epub.md` provenance
-    block (which `_paragraphs` sees as ONE paragraph -- its bullets have no
-    blank lines between them) mentions "historiettes-t3" several times and
-    also contains "directly", "read", and "read verbatim" -- but every
-    read/directly pair is >4 words apart and refers to reading the SHIPPED doc
-    itself, not a non-shipped origin path. If the proximity window were too
-    loose (e.g. co-occur-anywhere-in-paragraph), this legitimate paragraph
-    would be wrongly banned. Hardcoded byte-verbatim from the live file (the
-    full multi-bullet paragraph, exactly as the splitter segments it) so a
-    future widening of the regex trips this test."""
+    """False-positive guard: the `gutenberg-epub.md` provenance block as it
+    shipped through 1.72.0 (which `_paragraphs` sees as ONE paragraph -- its
+    bullets have no blank lines between them) mentions "historiettes-t3"
+    several times and also contains "directly", "read", and "read verbatim" --
+    but every read/directly pair is >4 words apart and refers to reading the
+    SHIPPED doc itself, not a non-shipped origin path. If the proximity window
+    were too loose (e.g. co-occur-anywhere-in-paragraph), this legitimate
+    paragraph would be wrongly banned. The paragraph has since been cut from
+    the doc, so this frozen copy is now the ONLY near-miss the detector is ever
+    tested against -- do not delete it with the doc it came from."""
     gutenberg_paragraph = (
         "- **Proven**: the spine-classification heuristic, the custom block-boundary\n"
         "  text extractor, the footnote anchor↔definition bijection, the\n"

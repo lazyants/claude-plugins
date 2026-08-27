@@ -121,18 +121,7 @@ being semantically wrong for the active mode (missing `literal_gloss` under
 `full_rhymed_plus_literal`) — every one of those failures is caught **only**
 by `validate_draft.py`.
 
-## Why an enum, not booleans or a `manual` mode
-
-Design decision 3 (kept `verse_policy` as an enum): the source project's own
-plan document shows it went through three prior verse policies before
-locking `full_rhymed_plus_literal` — a future project translating, say, a
-prose-only philosophical text with two decorative epigraphs has no reason to
-pay for `full_rhymed_plus_literal`'s cost on 50 poems, and a future project
-centered entirely on a verse epic has no reason to accept
-`rhythmic_approximation`'s lighter bar. That is why this is a table keyed by
-one enum field, not a compositional set of independent boolean flags a
-profile author could combine into an unspecified or contradictory
-combination.
+## No `manual` mode in v1
 
 There is **no `manual` mode** in v1 — cut for lacking any machine-readable
 marker/range contract a validator could actually check. A verse-handling case

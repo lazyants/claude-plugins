@@ -2,47 +2,11 @@
 
 `source.format: gutenberg_epub` selects this adapter for a Project
 Gutenberg-style EPUB — the input shape `historiettes-t3` was actually built
-against. This is the one adapter in
-[`README.md`](./README.md)'s three-way table whose **extraction/translation
-fidelity is source-proven** — read that claim narrowly, see "What
-'source-proven' actually means" below before trusting any part of this file
-as more broadly validated than it is.
-
-## What "source-proven" actually means here — and what it does not
-
-The claim is specific, not general:
-
-- **Proven**: the spine-classification heuristic, the custom block-boundary
-  text extractor, the footnote anchor↔definition bijection, the
-  cross-notes-file footnote grouping, and the verse-container detection
-  below are generalized directly from `historiettes-t3`'s real, executed
-  `extract.py` — read verbatim in this file where it matters — and that
-  script ran successfully, with its checks passing, against one real book
-  (`Les Historiettes de Tallemant des Réaux`, tome 3, Project Gutenberg
-  ebook 39314, 76 segments, 423 footnotes).
-- **Proven against**: *that one EPUB's* specific markup conventions — its
-  particular `x-ebookmaker-pageno` class, its particular
-  `FNanchor_N`/`Footnote_N` id convention, its particular
-  `.poetry-container`/`.stanza`/`.line` verse markup, its particular
-  Project-Gutenberg-generated front/back boilerplate. It is **not** proven
-  against Gutenberg EPUBs in general — a different Gutenberg-sourced book
-  can and often will use different id conventions, different front-matter
-  markup, or no verse markup at all. Any new project using this adapter
-  against a *different* source still needs the same design discipline this
-  file documents (classify by content, never by filename; verify the
-  bijection; never use `get_text(" ")`), but treat every literal
-  regex/id-convention/class-name below as a **starting template to adapt**,
-  not a guarantee that it will match a different book's markup unchanged.
-- **Not proven at all — regardless of the extraction claim above**: the
-  ledger/cache-key/derivation-state machinery this plugin wraps around
-  extraction (`ledger-and-resumability.md`), and specifically the
-  `FRONTBACK:{id}` → `segments[]` → ledger → review pipeline described
-  below. Both are new for this plugin. `historiettes-t3`'s real, shipped
-  code never ran front/back matter through anything like a ledger at all —
-  see "`FRONTBACK:{id}` handling" below for the direct-inspection evidence.
-  Treat that specific mechanism with the same "carefully designed, not yet
-  run at scale" confidence as the rest of the ledger subsystem, independent
-  of this adapter's older and narrower extraction-fidelity claim.
+against. This is the one adapter in [`README.md`](./README.md)'s three-way
+table whose **extraction/translation fidelity is source-proven** — and that
+claim is narrow: it covers the extraction heuristics below, proven against ONE
+book's markup conventions, and nothing else. See `README.md`'s own caveat row
+and [`../gotchas.md`](../gotchas.md) §2 for what is not proven.
 
 ## Files ≠ chapters
 
@@ -196,47 +160,19 @@ position for every block.
 
 ## `classify_frontback_block` — decision + reason, never silent
 
-Real, proven code (`extract.py`):
+The shipped hook lives at `assets/templates/extract.py.template`'s
+`classify_frontback_block` (ADAPT-POINT, ~line 473). Read it there; the copy
+that used to sit here had drifted from it in nine places, including the
+`_TOC_KEYWORDS` generalization of the literal `"TABLE DES MATIÈRES"` test and
+a `.lower()`/`.upper()` inversion.
 
-```python
-def classify_frontback_block(tag):
-    cls = tag.get("class") or []
-    txt = normalize_text(tag.get_text(" "))
-    if tag.name == "div" and ("pgheader" in cls or "pgmonospaced" in cls):
-        return "omit", "Project Gutenberg boilerplate header"
-    if tag.name == "div" and "box" in cls and txt.lower().startswith("note sur la transcription"):
-        return "omit", "transcriber note"
-    low = txt.strip().upper().rstrip(":")
-    if tag.name == "hr":
-        return "regenerate", "rule (structural)"
-    if "TABLE DES MATI" in txt.upper():
-        return "regenerate", "table of contents rebuilt in Russian from segments"
-    if low == "NOTES":
-        return "regenerate", "notes-section divider rebuilt in Russian"
-    if tag.find("img"):
-        return "regenerate", "decorative image kept as-is in assembly"
-    if not txt:
-        return "regenerate", "empty structural block"
-    return "translate", "title-page / front-matter text"
-```
-
-Every front/back top-level child gets exactly one of three decisions plus a
-human-readable `reason` string — never an unclassified pass-through. In
-order: Gutenberg's own boilerplate header divs and the transcriber's note
-are `omit` (pure noise, never worth translating or regenerating); a
-horizontal rule, a "TABLE DES MATIÈRES" block, and a bare "NOTES" divider
-are `regenerate` (structural — rebuilt from the segment/footnote data at
-assembly time rather than translated verbatim, since a TOC's page numbers
-and a notes-divider's position are derived, not authored, text); a
-decorative image is `regenerate` (kept as-is, nothing to translate); an
-empty block is `regenerate` (nothing there); anything else — actual
-title-page or front-matter *prose* — is `translate`.
-
-**The real self-check `frontback_inventory`** asserts every element has a
-`decision` in `{translate, regenerate, omit}` and a non-empty `reason`, and
-additionally that every `omit` decision's reason string actually mentions
-`"boilerplate"` or `"transcriber"` — a deliberate guard against silently
-widening `omit` to swallow real content over time.
+Every front/back top-level child gets exactly one of three decisions —
+`translate`, `regenerate`, `omit` — plus a non-empty, human-readable `reason`
+string; never an unclassified pass-through. Gutenberg's own boilerplate divs
+and the transcriber's note are `omit`; structural items (a rule, a TOC block,
+a bare notes divider, a decorative image, an empty block) are `regenerate`,
+rebuilt from segment/footnote data at assembly rather than translated;
+anything else — actual title-page or front-matter prose — is `translate`.
 
 `extract.py` calls this both for pre-first-`<h2>` front-matter blocks inside
 body-classified files (ids `FRONTBACK:fm{n:02d}`) and for every top-level
@@ -452,25 +388,11 @@ reproduce the equivalent invariants itself — see
   extraction completes, `cache_key.py --field source_extraction_hash` /
   `--field source_input_hash` stamp `manifest.json`'s
   `generation_hashes.source_extraction_hash`/`.source_input_hash`.
-  For `gutenberg_epub`, `source_extraction_hash` is the sha1 of canonical JSON
-  `{format: source.format, adapter_config: <the ONE sub-block of source.adapter_config matching the resolved source.format, here source.adapter_config.gutenberg_epub>}`
-  concatenated with `${durable_root}/extract.py`'s raw bytes.
-  `source_input_hash` is the sha1 of canonical JSON
-  `{source_path: <resolved source.path STRING itself>, source_bytes_sha1: <sha1 of the EPUB source file's raw bytes>}`;
-  the manifest also populates `source_inputs: [source.path]` for consistency.
-  The two-phase write is exact: first write a draft manifest with
-  `source_inputs[]` populated and both generation hashes absent, deliberately
-  not yet schema-valid and never schema-validated at this draft point; run
-  `cache_key.py --field source_input_hash` and
-  `cache_key.py --field source_extraction_hash` against that draft's own
-  `source_inputs[]`/format/adapter config; merge both hashes into the in-memory
-  manifest; then perform one final validated write. `manifest.json` is then
-  validated against `manifest.schema.json` immediately afterward,
-  **alongside, never instead of**, the round-trip self-check suite above — the
-  schema catches a malformed shape, the self-check suite catches a malformed
-  semantic invariant; neither substitutes for the other. See
-  [`../ledger-and-resumability.md`](../ledger-and-resumability.md) for the
-  full two-phase-write / cache-key mechanics.
+  The exact formulas for both fields, the two-phase write (draft manifest with
+  `source_inputs[]` populated and both hashes absent → compute → merge → one
+  final validated write), and the rule that schema validation runs alongside,
+  never instead of, the self-check suite above are stated once for all three
+  adapters in [`README.md`](./README.md)'s "The shared output contract".
 
 ### What does *not* generalize — project-specific regression pins in the real file
 

@@ -481,9 +481,10 @@ def test_repeatable_overwrite_helper_actually_overwrites(tmp_path):
 # a divergent file automatically via rename-then-copy: that shape has
 # three real failure modes -- symlink-through, pointer-only backups,
 # concurrent-backup races -- none of which Step 0a's own
-# orchestrating-session-executed prose can close for real. See
-# SKILL.md's own "Migration note" in its Step 0a section for the full
-# reasoning this transcribes literally.
+# orchestrating-session-executed prose can close for real. This module is
+# now where that reasoning lives: SKILL.md's Step 0a section keeps the
+# operative three-outcome list and the imperative not to re-improve it,
+# and points here for why.
 # ===========================================================================
 
 
@@ -510,8 +511,7 @@ def apply_resolve_codex_companion_migration(shipped_source: Path, dest_path: Pat
     after a naive copy, since copying OVER a symlink writes THROUGH it
     rather than replacing it; a divergent symlink's "backup" preserves
     only a pointer, not the adapted bytes it points at; and two
-    concurrent migrations can race on the same backup name -- see
-    SKILL.md's own note for the full reasoning. A halt has none of them,
+    concurrent migrations can race on the same backup name. A halt has none of them,
     because it performs no automatic write to a non-regular destination at
     all.
 
@@ -656,11 +656,11 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
     """codex's finding on the reference implementation above: it is tested
     thoroughly, but nothing here ties it back to what SKILL.md's own
     prose actually instructs a Claude session to do -- someone could
-    revert SKILL.md's migration note to the earlier backup-and-copy shape
+    revert SKILL.md's copy-pass check to the earlier backup-and-copy shape
     (the one this design deliberately replaced) while leaving THIS file's
     reference implementation and its own tests untouched, and every test
-    above would keep passing green. Pins the actual prose: the migration
-    note names HALT explicitly, and does not instruct a
+    above would keep passing green. Pins the actual prose: the copy-pass
+    check names HALT explicitly, and does not instruct a
     `.pre-upgrade-backup`-style rename-then-copy (the literal filename
     pattern the earlier, superseded design used) -- catching a reversion
     of the DOCUMENTED CONTRACT itself, independent of whether this file's
@@ -684,17 +684,29 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
     an unasserted contract is the one that quietly reverts."""
     skill_md = PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md"
     text = skill_md.read_text(encoding="utf-8")
-    start = text.find("Migration note, mandatory before")
-    assert start != -1, "could not locate SKILL.md's resolve_codex_companion.py migration note"
-    # Narrower than the whole note: JUST the operative instruction (the
-    # three-outcome list), stopping before the "deliberately a REFUSAL"
-    # paragraph -- which legitimately explains, and therefore legitimately
-    # NAMES, the superseded backup-and-copy shape it replaced. Checking
-    # the whole note would make this test fail against its own correct,
-    # historical prose -- the same trap fetch_citation_bundle.test.py's
-    # own exclusion-span technique exists to route around.
-    end = text.find("**This is deliberately a REFUSAL", start)
-    assert end != -1, "could not locate the end of the migration note's operative instruction"
+    start = text.find("So THIS ONE FILE, and only this one,")
+    assert start != -1, (
+        "could not locate SKILL.md's resolve_codex_companion.py copy-pass check -- "
+        "the operative three-outcome list opens with 'So THIS ONE FILE, and only "
+        "this one,', which is also the sentence that scopes the check to this ONE "
+        "bundle member rather than the whole copy pass"
+    )
+    # Bounded at BOTH ends by text that has to be there, not by whichever
+    # paragraph happens to follow. The window is JUST the operative
+    # instruction (the three-outcome list); it stops at the retained
+    # "do not re-improve this" rule, which is the one sentence the
+    # historical rationale collapsed into when that rationale moved down
+    # into this file's own transcription. Bounding there means a reversion
+    # that DELETES that rule fails here too, rather than silently widening
+    # the window -- and it keeps the "pre-upgrade-backup" assertion below
+    # scoped to the instruction, never to prose that may legitimately name
+    # the superseded shape historically.
+    end = text.find('**Do not "improve" this into an automatic backup-and-copy', start)
+    assert end != -1, (
+        "could not locate the retained \'do not re-improve this into an automatic "
+        "backup-and-copy\' rule that closes the operative instruction -- deleting "
+        "it removes the only imperative form of the refusal in SKILL.md"
+    )
     instruction_section = text[start:end]
 
     # Checking for "HALT" and
