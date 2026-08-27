@@ -2,6 +2,45 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.2.0] — 2026-08-27
+
+### Added
+
+- **A third skill, `code-limits`** — one report over every usage-limit pool this machine draws on:
+  every discovered Claude Code profile under `~/.claude*` and every discovered Codex home under
+  `~/.codex*`. Claude Code is read from its on-disk cache by default and `--live` fetches instead;
+  Codex is read live over `codex app-server`'s read-only `account/rateLimits/read`. A window whose
+  reset has already passed describes the PREVIOUS window, so it renders as `stale-after-reset` and
+  is never presented as current usage.
+- **`code-limit`, the report as one command on `PATH`** — installed by
+  `skills/code-limits/scripts/install_code_limit.py` as three lines of POSIX `sh` whose only
+  statement execs the shipped script, so there is no second copy to drift. The installer refuses a
+  version-scoped plugin cache as its source (those directories name one version and are garbage
+  collected), and treats any file at a managed name that is not byte-exactly its own shim —
+  symlinks included — as somebody else's, left untouched unless `--force`. Legacy `claude-limit`
+  and `claude-limits` are managed only where they already exist.
+- **Codex reset vouchers are reported with the vendor's own title and expiry**, not just a count.
+  A voucher lapses whether or not anyone looks at it, and the count alone never says when.
+
+### Changed
+
+- **The report is a table rather than a log.** One flat table of pools, most consumed first, with
+  the profile as a column instead of a heading; rows that are not current usage sit below in their
+  own sections, each headed by the reason, on columns shared with the table above. Caveats are
+  stated once per section instead of once per row. Ordering is total, so two runs over the same
+  data cannot disagree, and it is deliberately not a projected-exhaustion estimate — that would
+  need a burn rate nothing here measures.
+- **Colour**, via `--color=auto|always|never`. `auto` requires a terminal with `NO_COLOR` unset, so
+  piping the report still yields plain text; stripping the escapes from a coloured run reproduces
+  the uncoloured one byte for byte.
+
+### Fixed
+
+- **A vendor string can no longer forge a line in the report.** Strings from the Codex backend are
+  now refused by Unicode category rather than by a control-character range: a voucher title
+  carrying U+2028 LINE SEPARATOR added lines that looked like the report's own, on a run that
+  stayed clean. The voucher title is escaped and quoted like every other printed vendor value.
+
 ## [multi-profile-plugins 1.1.0] — 2026-08-25
 
 ### Added
