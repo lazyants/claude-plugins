@@ -161,10 +161,22 @@ def test_glossary_template_dispatches_the_judge_by_that_agent_type():
 CURRENT_STATE_PROSE = (
     PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md",
     PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "canon-and-glossary.md",
+    PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "pre-merge-citation-review.md",
     PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "orchestration-and-batching.md",
     PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "profile.example.yml",
     PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts" / "fetch_citation.py",
     GLOSSARY_TEMPLATE,
+)
+
+# The presence-before check reads these files AT A FROZEN COMMIT, so it can only
+# name files that existed there. `pre-merge-citation-review.md` was split out of
+# `canon-and-glossary.md` after that commit; at the baseline its text WAS
+# `canon-and-glossary.md`, which is already listed, so the historical evidence is
+# unchanged and nothing goes uncovered. Keeping one tuple for both checks would
+# fail the historical one on a `git show` of a path that does not exist yet --
+# which says nothing about the claim it is supposed to be proving.
+BASELINE_PROSE = tuple(
+    path for path in CURRENT_STATE_PROSE if path.name != "pre-merge-citation-review.md"
 )
 
 # Each pattern is a claim that was TRUE before #353 and is false after it. They
@@ -260,7 +272,7 @@ def test_every_stale_judge_claim_actually_existed_before_this_change():
     for pattern in STALE_JUDGE_CLAIMS:
         hits = sum(
             len(re.findall(pattern, _baseline_text(path), re.IGNORECASE))
-            for path in CURRENT_STATE_PROSE
+            for path in BASELINE_PROSE
         )
         if not hits:
             unmatched.append(pattern)
