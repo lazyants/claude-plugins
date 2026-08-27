@@ -333,10 +333,11 @@ def _width(text: str) -> int:
 
     A profile directory or a vendor pool name may hold wide characters, and `len()` counts a CJK
     ideograph as one while a terminal draws it as two -- every column after it then shifts by the
-    difference. Combining marks are the same error pointed the other way. The gauge's own blocks
-    are East-Asian AMBIGUOUS, which the overwhelmingly common configuration renders narrow, so
-    they count as one here; a terminal configured otherwise draws a wider gauge, not a crooked
-    table, because every row's gauge is the same length.
+    difference. Combining marks are the same error pointed the other way. East-Asian AMBIGUOUS
+    counts as ONE here, which the overwhelmingly common configuration renders narrow -- what
+    reaches this rule now is a vendor pool name or a profile directory name, and a terminal
+    configured otherwise draws every one of them wider, which shifts a whole column rather than
+    one row inside it.
     """
     total = 0
     join_next = False
@@ -466,7 +467,7 @@ class Record:
 class Row(NamedTuple):
     """One bucketed observation: the candidate it came from, whose vendor it is, and the record.
 
-`ident` is the candidate's own absolute path and is what rows are GROUPED by; `where` is
+    `ident` is the candidate's own absolute path and is what rows are GROUPED by; `where` is
     only ever printed. They are different fields because the printable name is lossy: two
     candidates can share a basename (`--claude-profile` is repeatable, and takes paths under
     different parents), and a directory name carrying a non-printable character is escaped to
@@ -562,8 +563,13 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
         # a shape the code says the vendor does not produce -- `session` and `weekly_all` ship
         # beside it. Should it ever occur, the container yields no record and the profile gaps
         # visibly, which is the answer to a payload nobody can read as asked.
-        shown = [item for item in entries if not _is_scoped(item)]
-        for index, item in enumerate(shown):
+        # Skipped inside the loop rather than filtered ahead of it, so `index` stays the entry's
+        # position in the PAYLOAD: over a filtered list, one scoped entry ahead of a malformed one
+        # shifted every label under it, and a warning reading `limits[1]` named payload entry 2 --
+        # against what _claude_raw_place's own docstring promises the number means.
+        for index, item in enumerate(entries):
+            if _is_scoped(item):
+                continue
             # Per RECORD, not per candidate. One malformed entry must not suppress its siblings:
             # the valid pools are exactly what the operator opened the report to see, and a
             # profile that prints nothing looks identical to one that has nothing. The entry's
@@ -578,8 +584,14 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
         slot = utilization.get(key)
         if slot is None:
             continue
+        # The place needs no vendor data here -- it follows from `key`, which is one of the two
+        # names this branch loops over. The list shape needed `_claude_raw_place` for the same
+        # guarantee; leaving it off this one put a gapped flat window in a row and a column of its
+        # own while its healthy twin sat under `all (flat)`.
+        family, window = _claude_place(key)
         records.append(_row_or_gap(
-            f"{key} (flat)", lambda: _claude_flat_row(key, slot, freshness, now)))
+            f"{key} (flat)", lambda: _claude_flat_row(key, slot, freshness, now),
+            family=f"{family} (flat)", window=window))
     return records
 
 
@@ -830,8 +842,6 @@ def _claude_live(profile: Path) -> list[Record]:
             response = conn.getresponse()
             body = response.read()
             status = response.status
-        except Malformed:
-            raise
         except Exception:
             # Deliberately bare and deliberately silent: rendering any exception text here can
             # print the bearer, which http.client embeds in an invalid-header ValueError.
@@ -960,7 +970,7 @@ def _label_duration(window) -> int | None:
     return None
 
 
-def _codex_spent_from(default, pools: dict[str, dict]) -> dict[str, str]:
+def _codex_spent_from(default, pools: dict[str, dict]) -> dict[str, dict]:
     """Only the pool the CLI actually spends from, out of everything the backend lists.
 
     `rateLimitsByLimitId` enumerates pools that are not what a person at a terminal is asking
@@ -1064,17 +1074,20 @@ def _codex_records(home: Path) -> list[Record]:
     pools: dict[str, dict] = {}
     records: list[Record] = []
     if by_id:  # a dict by the guard above, so truthiness is the emptiness test and nothing more
-        for key, pool in by_id.items():
+        for index, (key, pool) in enumerate(by_id.items()):
             try:
                 pools[_text(key, 64)] = _obj(pool)
             except Malformed as exc:
-                records.append(Record(f"limitId[{len(records)}]", GAP, diagnostic=exc.code))
-    elif isinstance(default, dict):
-        # `limitId` is `string | null`, and a .get default answers only the ABSENT case.
-        raw_id = default.get("limitId")
-        pools["codex" if raw_id is None else _text(raw_id, 64)] = default
-    else:
+                # The index is the entry's position in the PAYLOAD. Numbering by how many gaps
+                # had accumulated so far named a position nothing on the vendor's side has.
+                records.append(Record(f"limitId[{index}]", GAP, diagnostic=exc.code))
+    elif not isinstance(default, dict):
         raise Malformed("payload-malformed")
+    # No branch body for the single-pool shape: _codex_spent_from already answers a pointer the
+    # map does not hold from the top-level object, which IS that shape. Deriving the pointer here
+    # too stated the rule this whole reader turns on -- which pool the CLI spends from -- in two
+    # places, and left the corner where that object carries no window gapping the entire home
+    # rather than the quota alone, against what the handler below says should happen.
 
     try:
         pools = _codex_spent_from(default, pools)
@@ -1149,7 +1162,7 @@ def _codex_records(home: Path) -> list[Record]:
                 if not isinstance(credit, dict) or credit.get("status") != "available":
                     continue
                 try:
-                    expires = _from_epoch(credit.get("expiresAt"), 1)
+                    expires = _from_epoch(credit.get("expiresAt"), EPOCH_SECONDS)
                 except Malformed:
                     expires = None
                 try:
@@ -1314,7 +1327,7 @@ def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
                 body += f'  "{_safe_name(record.title)}"'
             if record.expires is not None:
                 # A voucher that has already lapsed is not a window that reset: `_relative` would
-                # say "reset 400d ago", which is the wrong vocabulary for the wrong noun, and a
+                # say "400d ago", which is the wrong vocabulary for the wrong noun, and a
                 # lapsed voucher is exactly the case worth stating plainly.
                 left = "expired" if record.expires <= now else _relative(record.expires, now)
                 body += ("  " + paint(f"expires {_local(record.expires)}", DIM)
@@ -1412,7 +1425,7 @@ def _cell(record, now: datetime.datetime) -> str:
     """One window's cell as PLAIN text. Painting happens after the widths are known.
 
     A cell says what it is without a section heading above it to explain it. A window whose
-    reset is already past renders its own `reset 3d 02h ago`, which is exactly why the figure
+    reset is already past renders its own `3d 02h ago`, which is exactly why the figure
     beside it is the PREVIOUS window -- and the reason those rows no longer need a block of
     their own, repeating a caveat the cell already carries.
     """
@@ -1531,7 +1544,7 @@ def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
 
     if any(record.diagnostic == "stale-after-reset"
            for pool in pools for record in pool.cells.values()):
-        # Printed only when such a cell is on the page. The cell already says `reset ... ago`;
+        # Printed only when such a cell is on the page. The cell already says `... ago`;
         # what it cannot say is why a report would show a window that is over, or how to get the
         # current one -- and a legend for a row nobody is looking at is just noise.
         notes = notes + ["a cell reading `... ago` is the PREVIOUS window -- the cache"
@@ -1544,8 +1557,7 @@ def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
     print(paint("  exactly as any codex invocation does. Nothing here is ever redeemed.", DIM))
 
 
-def _refreshed(cached: list[Record], live_state: str, live: list[Record], live_code: str,
-               cached_state: str, cached_code: str):
+def _refreshed(live: tuple[str, list[Record], str], cached: tuple[str, list[Record], str]):
     """Which of the two reads answers this candidate, as one decision in one place.
 
     A row comes from ONE read, whole -- gaps included. Merging the two per window looked strictly
@@ -1555,11 +1567,12 @@ def _refreshed(cached: list[Record], live_state: str, live: list[Record], live_c
     whenever it produced anything at all, and the cache answers only when it produced nothing.
 
     A function rather than three lines inline because the live half cannot be reached from a test
-    without a socket, and a rule that no test can state is a rule that quietly changes.
+    without a socket, and a rule that no test can state is a rule that quietly changes. Both
+    arguments are whole `(state, records, code)` triples, exactly as `_examine` returns them --
+    six interleaved positionals could not be read at a call site without the signature open
+    beside it.
     """
-    if live:
-        return live_state, live, live_code
-    return cached_state, cached, cached_code
+    return live if live[1] else cached
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1595,7 +1608,7 @@ def main(argv: list[str] | None = None) -> int:
 
     warnings: list[str] = []
     notes: list[str] = []
-    groups: list[tuple[str, str, list[Record]]] = []
+    groups: list[tuple[str, str, str, list[Record]]] = []
 
     # Only the cached reader takes the run's clock: it dates rows from a file that was
     # written before the run. The live readers time-stamp their own observation, because
@@ -1635,8 +1648,8 @@ def main(argv: list[str] | None = None) -> int:
                     detail = live_code or "the backend returned nothing to read"
                     notes.append(f"{where}: the cache describes a window that is over, and the"
                                  f" live retry did not answer -- {detail}")
-                state, records, code = _refreshed(records, live_state, live_records, live_code,
-                                                  state, code)
+                state, records, code = _refreshed((live_state, live_records, live_code),
+                                                  (state, records, code))
             if code:
                 # A candidate-level outcome has no pool to hang a row on, so it becomes a note.
                 # It still decides the exit status below, exactly as before.

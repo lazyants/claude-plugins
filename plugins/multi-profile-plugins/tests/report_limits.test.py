@@ -240,13 +240,17 @@ def cached(entries=None, flat=None, fetched_ms=UNSET, subscription=None, utiliza
     blob: dict = {}
     if subscription is not None:
         blob["hasAvailableSubscription"] = subscription
+    # `utilization` REPLACES the container; the precedence is written first so it cannot look
+    # like it composes with the two below it, which is how a fixture passing both would silently
+    # lose them.
     inner: dict = {}
-    if entries is not None:
-        inner["limits"] = entries
-    if flat is not None:
-        inner.update(flat)
     if utilization is not None:
         inner = utilization
+    else:
+        if entries is not None:
+            inner["limits"] = entries
+        if flat is not None:
+            inner.update(flat)
     blob["cachedUsageUtilization"] = {
         "fetchedAtMs": now_ms(-1) if fetched_ms is UNSET else fetched_ms,
         "utilization": inner,
@@ -686,7 +690,7 @@ with tempfile.TemporaryDirectory() as tmp:
           len(vouchers_kept) == 1 and vouchers_kept[0].split()[1] == "1", str(vouchers_kept))
     # The count itself, not merely the label: "1" occurs in every percentage on the page, so
     # `"1" in stdout` would stay green for any count the script chose to print.
-    coupon_rows = [row for row in voucher_band(done.stdout) if not row.startswith("credits")]
+    coupon_rows = voucher_rows(done.stdout)
     check("4 exactly one voucher row is printed", len(coupon_rows) == 1, done.stdout)
     check("4 and it carries the fixture's own count",
           bool(coupon_rows) and coupon_rows[0].split()[1] == "1", str(coupon_rows))
@@ -858,7 +862,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("28 an omitted voucher container is reported as a known absence, not a gap",
           any("not reported" in row for row in voucher_band(done.stdout)), done.stdout)
     check("28 it is not a silent omission either -- the row is printed",
-          len([r for r in voucher_band(done.stdout) if not r.startswith("credits")]) == 1,
+          len(voucher_rows(done.stdout)) == 1,
           str(voucher_band(done.stdout)))
     check("28 the usage window beside it still reports", "61%" in done.stdout, done.stdout)
     check("28 and the run stays clean", done.returncode == 0,
@@ -1056,8 +1060,7 @@ with tempfile.TemporaryDirectory() as tmp:
           gapped == ["codex_bad"], str(gapped))
     check("33b the VALID sibling window on that same pool still reports",
           any("5%" in line for _w, _p, line in pool_rows(done.stdout)), done.stdout)
-    coupon_rows_33b = [row for row in voucher_band(done.stdout)
-                       if not row.startswith("credits")]
+    coupon_rows_33b = voucher_rows(done.stdout)
     check("33b and the voucher row beside it still reports its own count",
           len(coupon_rows_33b) == 1 and coupon_rows_33b[0].split()[1] == "2",
           str(coupon_rows_33b))
@@ -1107,10 +1110,20 @@ with tempfile.TemporaryDirectory() as tmp:
         done, _, _ = run(["--claude-profile", str(flat / ".claudeV"),
                           "--codex-home", str(make_codex_home(flat, ".codexClean"))], root=flat)
         body = done.stdout.split("warnings")[0]
-        check(f"33d flat {label} gaps only its own row",
-              "five_hour (flat)" in body and token in body, done.stdout)
+        # Its own CELL, not its own row: the flat shape's place follows from its key, so the
+        # gapped window sits under 5H on the same `all (flat)` row as its healthy sibling rather
+        # than opening a row and a column of its own. The record name still names the entry in
+        # the warning, which is what identifies what could not be read.
+        # Matched on the whole LINE: `pool_rows` splits the pool cell on whitespace, and this
+        # allowance is named `all (flat)` -- two words, because which container shape answered is
+        # part of what the row discloses.
+        rows = [line for _w, _p, line in pool_rows(body) if "all (flat)" in line]
+        check(f"33d flat {label} gaps only its own cell",
+              len(rows) == 1 and token in rows[0], str(rows))
         check(f"33d flat {label}: the seven_day sibling still reports",
-              "22%" in body, done.stdout)
+              bool(rows) and "22%" in rows[0], str(rows))
+        check(f"33d flat {label}: the warning still names the entry",
+              "five_hour (flat)" in done.stdout.split("warnings")[-1], done.stdout)
         check(f"33d flat {label}: the run gaps rather than tracebacking",
               done.returncode == 1 and "Traceback" not in done.stderr,
               f"rc={done.returncode}\n{done.stderr}")
@@ -1564,7 +1577,7 @@ with tempfile.TemporaryDirectory() as tmp:
         caught = any(piece in mutated for piece in slices_of(SENTINEL_TOKEN))
         check(f"25 the oracle catches a {label}", caught, f"{mutated!r} evaded every slice")
 
-# --- 40 -- the table: ordering, gauge, partition, colour ----------------------------------------
+# --- 40 -- the table: one row per allowance, ordering, colour ----------------------------------------
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
@@ -1988,7 +2001,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # exactly the slot the report's own `expires <date>  in <N>d` pair occupies -- so a title
     # spelling that pair out reads as the report's own claim about when the voucher lapses.
     forged = voucher_run({"status": "available", "title": "expires 31 Dec 2099 CEST  in 9999d"})
-    band = [r for r in voucher_band(forged.stdout) if not r.startswith("credits")]
+    band = voucher_rows(forged.stdout)
     check("51 a title is quoted, so it cannot pose as the report's own expiry",
           len(band) == 1 and '"expires 31 Dec 2099 CEST  in 9999d"' in band[0], str(band))
     check("51 and no genuine expiry is claimed beside it",
@@ -1997,18 +2010,18 @@ with tempfile.TemporaryDirectory() as tmp:
     # A no-break space is legitimate in a vendor label and _text allows it -- but it must PRINT
     # as an escape like every other name, not as an invisible space.
     nbsp = voucher_run({"status": "available", "title": "Full" + chr(0xA0) + "reset"})
-    band = [r for r in voucher_band(nbsp.stdout) if not r.startswith("credits")]
+    band = voucher_rows(nbsp.stdout)
     check("51 an invisible space in a title is escaped, not printed",
           bool(band) and chr(0xA0) not in band[0] and "xa0" in band[0], str(band))
 
     # An expired voucher is not a window that reset. `_relative`'s "reset ... ago" is the wrong
     # noun, and a lapsed voucher is exactly the case the operator needs stated plainly.
     lapsed = voucher_run({"status": "available", "title": "Full reset", "expiresAt": epoch(-400 * 24)})
-    band = [r for r in voucher_band(lapsed.stdout) if not r.startswith("credits")]
+    band = voucher_rows(lapsed.stdout)
     check("51 a lapsed voucher reads `expired`",
           bool(band) and "expired" in band[0] and "ago" not in band[0], str(band))
     live_v = voucher_run({"status": "available", "title": "Full reset", "expiresAt": epoch(48)})
-    band = [r for r in voucher_band(live_v.stdout) if not r.startswith("credits")]
+    band = voucher_rows(live_v.stdout)
     check("51 and one still in date reads the time left",
           bool(band) and "in 1d" in band[0] and "expired" not in band[0], str(band))
 
@@ -2451,13 +2464,14 @@ live_partial = [R.Record("session", R.REPORTED, percent=2.0, freshness="live now
                          family="all", window="5h"),
                 R.Record("weekly_all", R.GAP, diagnostic="field-malformed",
                          family="all", window="weekly")]
-state, records, code = R._refreshed(cached_two, R.GAP, live_partial, "", R.NO_CURRENT, "")
+state, records, code = R._refreshed((R.GAP, live_partial, ""), (R.NO_CURRENT, cached_two, ""))
 check("62 a live read that produced anything answers the row, whole",
       records == live_partial and state == R.GAP, str([r.name for r in records]))
 check("62 so no cached cell can survive beside a live one",
       not any(r.freshness.startswith("cache") for r in records),
       str([r.freshness for r in records]))
-state, records, code = R._refreshed(cached_two, R.GAP, [], "token-expired", R.NO_CURRENT, "")
+state, records, code = R._refreshed((R.GAP, [], "token-expired"),
+                                   (R.NO_CURRENT, cached_two, ""))
 check("62 while a live read that produced nothing leaves the cache untouched",
       records == cached_two and state == R.NO_CURRENT and code == "", str(state))
 
@@ -2501,6 +2515,29 @@ with tempfile.TemporaryDirectory() as tmp:
           "33%" in done.stdout and "44%" in done.stdout, done.stdout)
     check("62 the run stays clean", done.returncode == 0, done.stdout)
 
+# --- 63 -- the corner the de-duplicated pool pointer moved ------------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # No `rateLimitsByLimitId` at all, and a top-level object carrying neither window. The
+    # pointer used to be derived twice -- once here, once in the selector -- and this shape hit
+    # the copy that gapped the whole home, taking the voucher count with it. Derived once, it
+    # follows the rule the selector's own handler states: the quota gaps, its siblings report.
+    done, _, _ = run(["--claude-profile", str(make_claude(root, ".claudeDup",
+                                                          cached(entries=[entry()]))),
+                      "--codex-home", str(make_codex_home(root, ".codexDup"))], root=root,
+                     stub_result={"rateLimits": {"limitId": "codex"},
+                                  "rateLimitResetCredits": {"availableCount": 3}})
+    rows = [pool for where, pool, _l in pool_rows(done.stdout) if where == ".codexDup"]
+    check("63 a windowless single-pool payload gaps the quota", rows == ["rateLimits"], str(rows))
+    check("63 with the diagnostic naming what could not be read",
+          "[payload-malformed]" in done.stdout and done.returncode == 1,
+          f"rc={done.returncode}\n{done.stdout}")
+    kept = [row for row in voucher_rows(done.stdout) if ".codexDup" in row]
+    check("63 while the voucher count beside it still reports",
+          len(kept) == 1 and kept[0].split()[1] == "3", str(kept))
+    check("63 and the Claude side is untouched by it", "42%" in done.stdout, done.stdout)
+
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -2511,7 +2548,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 528
+MIN_CHECKS = 534
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
