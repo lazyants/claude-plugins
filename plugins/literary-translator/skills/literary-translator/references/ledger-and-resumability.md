@@ -18,45 +18,13 @@ the engine loop itself (translate → gate → review → fix, see
 per-segment `status`/`reason`/`rounds` map used as a human-readable status
 report.
 
-**New hardening for this plugin, never run at scale:** the per-segment
-fragment ledger (`runs/ledger.d/*.json`), the atomic tmp-write-then-rename
-writer (`scripts/ledger_update.py`), the merge/stale materializer
-(`scripts/ledger_merge.py`), the shared cache-key implementation
-(`scripts/cache_key.py`), every schema-confirmed write path
-(`recordLedgerPrompt` / `mergeLedgerPrompt`), and `engine.batch_agent_cap`'s
-preflight estimator. This bucket also includes the plugin's
-FRONTBACK-through-segment-loop treatment: the real project's own plan stated
-that intent, but the implemented project handled front/back matter through a
-separate, hand-maintained `frontmatter_ru.json`, entirely outside the
-ledger/review pipeline. The real reference project ran its ~75 segments
-against a single hand-maintained `ledger.json` with no fragment directory, no
-atomic writer, and no composite cache key implemented in code (the cache-key
-idea existed only as prose in that project's own planning doc).
-
-This is not a reason to simplify or cut the subsystem — the concurrent-write
-race a single shared `ledger.json` has under a real batch run is real, and
-fragment-per-segment is the standard fix for it. It is a reason to treat it
-as a careful first design, not as something already proven free of
-surprises at scale. A dedicated pilot/soak on the first real plugin project
-is necessary before trusting it unconditionally.
-
-A pilot/soak alone is not sufficient. `tests/ledger_e2e_acceptance.test.py`
-is a mandatory fixture (mocked agent outputs, no real agent calls) that must
-pass first, in one continuous run: (1) batch 1 dispatches segments A/B/C —
-B converges and C hits `max_fix_rounds` and goes `non_converged`; (2) a
-simulated interruption leaves A's genuine `recoverable` fragment after its
-`in_progress` write but before its terminal write; (3) B's `style_bible.md`
-fixture is edited between batches, so the second classification pass must
-reclassify B `stale`; (4) batch 2's `select_segments.py` asserts A is
-`recoverable` (dispatched like `not_started`), B is `stale` (re-dispatched,
-full-replace fragment, no stale fields surviving); (5) `--only-segs <C>`
-retries the `human_escalation` segment C, re-enters `SEGS`, and its stale
-terminal fragment gets replaced; (6) `ledger_merge.py --expected-segs`
-completeness check passes even though `ledger.json` now accumulates fragments
-from both batches; (7) a final assertion on the merged `ledger.json`'s
-end-to-end correctness. This
-acceptance test is a prerequisite for the pilot/soak, not a replacement for
-it.
+**New hardening for this plugin, never run at scale:** everything else in this
+document — the per-segment fragment ledger (`runs/ledger.d/*.json`), the atomic
+writer, the merge/stale materializer, `cache_key.py`'s composite key, every
+schema-confirmed write path, and `engine.batch_agent_cap`'s preflight
+estimator. `references/gotchas.md` item 2 enumerates that bucket, the mandatory
+`tests/ledger_e2e_acceptance.test.py` fixture and its seven steps, and the
+release gate under which neither the fixture nor a pilot substitutes for the other.
 
 ## Canonical path invariants
 
@@ -652,71 +620,21 @@ membership.
 - **`plugin_bundle_hash`** (global, read from
   `${durable_root}/runs/.plugin_bundle_hash` — a marker file Step 0a writes
   once per run, not recomputed per segment) — covers exactly **eighteen
-  scripts** (six pre-1.2.0, plus `review_ready.py` and `resume_setup.py`,
-  new in 1.2.0, `glossary_batch_plan.py`, new in 1.3.5, `codex_job.py`,
-  new in 1.4.7, `canon_senses.py`, added for RFC #215's homonym-split
-  adjudication gate — it is a dependency of `canon_validate.py` and
-  `glossary_batch_plan.py`, both already bundle members, so its own bytes
-  must be registered too, `fetch_citation.py`, added in 1.16.1 as the
-  validated retrieval boundary for the W3 citation audit (#347) -- it
-  decides which citations may be fetched at all, so its bytes shape review
-  content as directly as any validator, `segment_dispatch_driver.py`,
-  added in #409 Step 4 as the W5 local driver — see below, and
-  `claim_record.py`, added in #438 as the re-review claim predicate: it
-  decides whether a segment was authorized for re-review at all, so a bug
-  in it either grants an authorization nobody named or drops one the
-  operator did, and `select_segments.py`, added in #446 as the script that
-  owns the EXISTING dispatch gate: the Step 1 ever-converged refusal, the
-  claim admission arms, and the classification every one of those decisions
-  reads — `cache_key.py`'s own comment block holds why it was left out until
-  then, and `refuse_finding.py`, added in #764 as the sole producer of the
-  per-finding refusal record: it is NOT a decision authority — nothing in the
-  driver reads that record and no gate consults it — but it is the only writer
-  of durable state that `fixPrompt` splices verbatim into a turn authorized to
-  rewrite the draft, and every field it writes is admitted by a bound that
-  script owns, so a later tightening of those bounds must not leave records
-  written under the looser rule invisible to this hash) plus the two
-  workflow templates: `validate_draft.py`, `canon_validate.py`,
-  `cache_key.py`, `draft_sha1.py`, `review_artifact_check.py`,
-  `ledger_update.py`, `review_ready.py`, `resume_setup.py`,
-  `glossary_batch_plan.py`, `codex_job.py`, `canon_senses.py`,
-  `fetch_citation.py`, `segment_dispatch_driver.py`, `claim_record.py`,
-  `reject_review.py`, `refuse_finding.py`, `select_segments.py`,
-  `json_stdout.py`, plus
-  `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`.
-  `json_stdout.py` (#369) is registered for exactly the reason
-  `canon_senses.py` was — this is a byte-hash allowlist, so a dependency
-  six members of it now load is otherwise invisible to it — and it owns the
-  one-line stdout serialiser, which reaches durable content: the cache-key
-  CLI's printed object is parsed back as the live cache key by the selector
-  and copied verbatim into a ledger payload by the mass-translate template. These are
-  scripts that directly shape extraction/translation/review/validation
-  content, or determine whether a convergence verdict was correctly
-  recorded — `review_ready.py` (the review-side readiness counterpart, but
-  gating and correctness-critical rather than a diagnostic poll: it's what
-  certifies a `review.json` safe to consume) and `resume_setup.py`
-  (computes the resume-integrity digest itself) both meet that bar, as does
-  `glossary_batch_plan.py` (W3's candidate→batch curation: it decides which
-  candidates are dispatched to the glossary pass, so its bytes directly
-  shape glossary content — note that `plugin_bundle_hash` is itself member
-  15 of the cache-key composite, so a change here re-invalidates converged
-  mass segments coarsely, the same as any plugin-bundle member; that is the
-  accepted cost of the correct bucket, chosen because — unlike
-  `derivation_bundle_hash` — it actually reaches the glossary digest and
-  leaves the canon generation stamp intact), `codex_job.py` (the W5
-  translate/review driver: it launches codex and VALIDATES the isolated
-  attempt before atomically promoting it to canonical, so its bytes directly
-  determine whether a draft/review is correctly produced and accepted — an
-  old buggy driver may have wrongly accepted an artifact, so a driver-only
-  change must re-invalidate converged work), and `segment_dispatch_driver.py`
-  (#409 Step 4, the W5 LOCAL driver: it owns the ACCEPT decision for
-  dispatched work — which segments even get dispatched, via the Step 1
-  re-translate gate, and whether a lease/volume refusal is honored — the
-  identical reasoning `codex_job.py` is registered under, applied to the
-  process that decides what reaches `codex_job.py` in the first place).
-  **Part
-  of the cache key** (as `plugin_bundle_hash`) — a mismatch flips a segment
-  straight to `stale`.
+  scripts** plus the two workflow templates: `validate_draft.py`,
+  `canon_validate.py`, `cache_key.py`, `draft_sha1.py`,
+  `review_artifact_check.py`, `ledger_update.py`, `review_ready.py`,
+  `resume_setup.py`, `glossary_batch_plan.py`, `codex_job.py`,
+  `canon_senses.py`, `fetch_citation.py`, `segment_dispatch_driver.py`,
+  `claim_record.py`, `reject_review.py`, `refuse_finding.py`,
+  `select_segments.py`, `json_stdout.py`, plus
+  `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`. Membership
+  is decided by one criterion — a file whose bytes shape
+  extraction/translation/review/validation content, or determine whether a
+  convergence verdict was correctly recorded — and it extends to a dependency
+  that members merely import, because this is a literal byte-hash allowlist.
+  `cache_key.py`'s `PLUGIN_BUNDLE_MEMBERS` tuple carries the per-member reason
+  beside each entry and is the authority. **Part of the cache key** (as
+  `plugin_bundle_hash`) — a mismatch flips a segment straight to `stale`.
 - **`orchestration_bundle_hash`** (global, sibling marker file
   `${durable_root}/runs/.orchestration_bundle_hash`, same computation
   timing) — covers exactly **six scripts**: `claim_record.py`,
@@ -1432,41 +1350,3 @@ after.** After any driver death, classify first and then read the ledger record 
 every `recoverable`/`in_progress` id — the category label alone reports none of
 the three independent facts (status, sentinel, `reviewed_draft_sha1`) that decide
 which route the unit needs.
-
-## Related tests
-
-`tests/ledger_update.test.py` (fragment-replace transitions — a
-`non_converged`→`in_progress` transition asserts no `reason`/`rounds`
-survive; a `converged`→`in_progress` transition asserts no
-`rounds`/`cache_key`/`n_blocks`/etc. survive; an object-shaped `rounds`
-payload is rejected; a payload-intent mismatch is caught; 1.2.0 adds the
-converged-write token/sha commit-gate cases — draft-token mismatch,
-review-token mismatch, and sha mismatch each independently refuse the
-write), `tests/ledger_merge.test.py` (1.2.0 adds the batch-final
-per-segment token/sha re-check cases — a straggler old-token pair restored
-after an individual segment's own convergence write still fails
-`batchComplete`), `tests/ledger_composite_key.test.py` (one case per of the
-15 hash fields, plus the two asymmetric `used_terms_hash` cases),
-`tests/draft_path_convention.test.py` (repointed from the removed
-`reviewPrompt`/`verifyReviewArtifactPrompt` builders to
-`reviewDispatchPrompt`/`reviewWaitPrompt`/`readReviewPrompt`/`verifyReviewArtifactPrompt`,
-`fixPrompt` unchanged), `tests/select_segments.test.py`
-(`--only-segs`/`--allow-empty` cases), `tests/ledger_confirmation_schema.test.py`
-(1.2.0, new — the flat `LEDGER_WRITE_SCHEMA`/`LEDGER_MERGE_SCHEMA` accept-side
-driven via real `ledger_update.py`/`ledger_merge.py` subprocess calls,
-reject-side crossover/missing/unknown fixtures against both the on-disk
-strong schema and the JS-guard field sets), and
-`tests/ledger_e2e_acceptance.test.py` (the mandatory 7-step mocked-batch
-fixture described above) together cover this subsystem. Per the plugin's
-own release gate, the plugin is not ship-ready until
-`tests/ledger_e2e_acceptance.test.py` **and** a genuine pilot run against a
-second real book have both actually run and passed against real data —
-CI-green on synthetic fixtures alone is not sufficient. The 1.2.0
-resume-integrity regression cases (a metadata-only candidate change, a
-changed segment `cache_key`, a changed `.plugin_bundle_hash`/
-`.orchestration_bundle_hash`, a schema-only edit, a legacy tokenless
-`review.json`, and a straggler-token draft/review pair restored at each of
-the five commit-gate points above) live alongside
-`resume_setup.py`'s own test file — see
-`references/orchestration-and-batching.md` for the digest definition they
-exercise.

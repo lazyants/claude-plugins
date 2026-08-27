@@ -157,31 +157,16 @@ and never reads an exit code.
 
 `validate_draft.py` also runs a structural self-check of the draft file
 against `draft.schema.json` (hand-rolled, no external `jsonschema`
-dependency for this one script). The ownership split here is deliberate and
-must not be blurred:
-
-- **`draft.schema.json`** is a MODE-NEUTRAL structural superset only —
-  container shapes (`{seg, blocks{}, footnotes{}, verses{}, names[],
-  notes[]}`), the same across every `verse_policy.mode` including `skip`.
-  There is no `if/then` in the schema keyed on `verse_policy.mode` — six-way
-  branching in a schema was judged more complexity than the value
-  warrants, so the verse-policy table is documented as plain-English
-  rules, not a formal discriminated union in JSON Schema.
-- **Within draft validation, `validate_draft.py` is the sole authority for
-  anything that varies BY `verse_policy.mode`** — which of
-  `rendered`/`literal_gloss` are required, forbidden, or conditional
-  (check 5 above). It also owns the draft-validation checks that branch on
-  `footnotes.apparatus_policy` (checks 4 and 6 above) and the
-  untranslated-sentinel scan (read from `validation.untranslated_sentinel`
-  in `profile.yml`, never a hardcoded literal — see the shipped
-  `profile.example.yml`'s `"нет перевода"` example value).
-
-A draft can be fully `draft.schema.json`-valid while still failing
-`validate_draft.py` outright (a missing verse key, a duplicated
-placeholder) — or being semantically wrong for the active mode (a missing
-`literal_gloss` under `full_rhymed_plus_literal`). Every one of those
-failures is caught only by `validate_draft.py`, never by the schema alone.
-There is no standalone `verse.schema.json` file.
+dependency for this one script). The ownership split is deliberate and must
+not be blurred: `draft.schema.json` is a MODE-NEUTRAL structural superset
+only, and `validate_draft.py` is the sole authority for anything that varies
+BY `verse_policy.mode`, for the draft-validation checks that branch on
+`footnotes.apparatus_policy` (checks 4 and 6 above), and for the
+untranslated-sentinel scan. `references/verse-policy.md`'s "Ownership split
+(critical, don't get this wrong)" section states it in full — including why
+there is no `if/then` keyed on `verse_policy.mode`, why a draft can be
+schema-valid and still fail `validate_draft.py`, and that there is no
+standalone `verse.schema.json` file.
 
 ## Adapt points (what a generalizing implementation branches on)
 
@@ -383,16 +368,11 @@ it is deliberately kept out of `run_derivable_checks()`'s results so no existing
 check tuple or exit-code contract moves.
 
 **What it is for.** A source EPUB converted from a PDF can carry RTL text in
-VISUAL order. Extraction is byte-faithful — measured byte-identical against the
-raw EPUB, and `segpack.py` is a pass-through by construction — so the mangling
-is upstream and correct to preserve. But no deterministic gate in this pipeline
-can see it: token counts, digests, schema validation and `validate_draft` never
-read what a fragment MEANS. The victims are the LLM turns. On a live book this
-produced both false reviewer findings against correct drafts and one
-mistranslation, with subject and object swapped, that reached a converged draft
-a full review round had already called clean. That is the gap this advisory
-exists to make audible — it is the one class this document's gates cannot cover
-by construction.
+VISUAL order. Extraction is byte-faithful, so the mangling is upstream and
+correct to preserve — but no deterministic gate in this pipeline can see it:
+token counts, digests, schema validation and `validate_draft` never read what a
+fragment MEANS. The victims are the LLM turns. SKILL.md's W2 section and
+`validate_extraction.py`'s advisory header carry the measured live-book case.
 
 **What it detects, named honestly.** It is a *leading-terminal-punctuation
 screen*: a token whose first character is terminal punctuation followed —
@@ -407,21 +387,6 @@ Three false-negative classes, stated rather than implied away:
 - word **reordering** generally, for the same reason;
 - any mangling whose punctuation is **not adjacent** to an RTL letter.
 
-Do not "improve" this by swapping in a reversal-scoring detector. Two were
-MEASURED against the known positive control and both returned clean: whole-block
-reversal scoring and tail-window reversal scoring. A clean sweep from either
-would have read as *no visual-order input found* — a false all-clear, which is
-the exact failure this document exists to prevent.
-
-**Measured behaviour, both directions.** On the positive control book: 921 hits
-across 476 of 1212 RTL-bearing text units, 41 of 42 units flagged (the miss is a
-front-matter unit whose RTL content is a single block), and both named control
-blocks hit. Against known logical-order corpora — Hebrew pointed with 267
-sof-pasuq occurrences and unpointed, Arabic, Persian, Urdu — **0 hits in 46 762
-RTL tokens**. The ellipsis is excluded from the terminal set because a
-sentence-initial elision is legitimate logical order; it contributed zero of the
-921 hits, so the exclusion costs nothing measured.
-
 **Scan population.** `blocks[*].plain_text` **plus** `verse.store[*].plain_text`
 where `mount == "embedded"`. An embedded verse's text is lifted OUT of its
 carrier block and replaced by a `⟦VERSE_…⟧` placeholder, so a blocks-only scan
@@ -434,13 +399,6 @@ emitted `\uXXXX` / `U+XXXX`. A bidi-reordering terminal renders a corrupted RTL
 token identically to an intact one — a finding on this very book was filed and
 then retracted for exactly that reason — so evidence meant to be ADJUDICATED
 cannot be rendered text.
-
-**The verdict is not the scan's.** The WARN routes an operator to an
-adjudication turn that reads the sampled units against the source and decides;
-on a positive, the condition is recorded in the project's own `style_bible.md`
-under `### E-traps`, which is the one artifact the translate, review and fix
-turns all read. SKILL.md's W2 section carries the procedure and the clause, and
-states the `style_contract_hash` cost of pasting it.
 
 ## The block-size census (`block_size_census`, #504)
 
@@ -456,14 +414,6 @@ check tuple or exit-code contract moves.
 A census that cannot be BUILT prints no NOTE and is named as a `scan
 unavailable` advisory instead; one that cannot be PRINTED stays silent. Neither
 touches the exit decision.
-
-**What it is for.** A source block — a member of some segment's `block_ids` —
-can be a wrap/extraction artifact: a converter joining a whole narrative, or
-several paragraphs, into one block. Extraction preserves whatever the converter
-produced, faithfully; the artifact is upstream. No check in this gate is
-size-aware at the block level to catch it — the only existing size check is the
-per-segment word count, and a block many times the size of this book's other
-blocks passes it exactly as an ordinary one does.
 
 **What it detects, named honestly.** It is a *relative size outlier screen*: a
 block whose character count is at least 10x this book's own p90 block size,
@@ -485,17 +435,6 @@ False-negative classes, stated rather than implied away:
 - the threshold is calibrated on five manifests, of which only one is
   positive.
 
-**Measured behaviour.** Over the five manifests measured (max block size over its
-own p90): 21.03 on the book carrying the known artifact (`ssk-he-en/vol2`, block
-`PARA:seg21:0001`, 17 896 characters), and 4.97 / 4.86 / 5.78 / 6.04 on four
-clean books. 10 clears the noisiest clean book (6.04) by a 1.66x margin, and
-the true positive (21.03) clears 10 by a 2.10x margin — measured as the widest
-two-sided margin among p90/p95/p99 reference choices. The median is not used as
-the reference for the same reason it cannot serve as a general baseline: on the
-positive book the median block is six characters (1170 short dialogue
-paragraphs), and 600 of that book's 1212 blocks sit at or above 10x it — a
-threshold keyed to the median would flag half the book.
-
 **Scan population.** The distinct blocks named by some segment's `block_ids`
 whose `plain_text` is non-empty — never a `kind` filter, since a real manifest
 on disk carries `kind` values outside the schema enum and filtering on it can
@@ -507,17 +446,6 @@ no derivable check rejects one -- measured, by feeding a manifest whose
 `block_ids` repeats an id through `run_derivable_checks()` and watching all
 fourteen pass -- so counting occurrences would move both the population and the
 reference with no block behind the difference.
-
-**The verdict is not the census's.** A fired WARN routes an operator to an
-adjudication turn that reads the named block(s) against the printed source and
-decides whether it is a genuinely long paragraph or an artifact; on the latter,
-the finding is recorded in that segment's own draft `notes[]` array, not the
-manifest — no draft exists yet at W2, and a manifest segment object is
-`additionalProperties: false` with no `notes` field. SKILL.md's W2 section,
-'Oversized source block', carries the procedure. Nothing is re-paragraphed
-automatically: re-cutting a block changes the segpack's block-key set, which
-`validate_draft.py` locks 1:1 against the draft.
-
 
 ## See also
 

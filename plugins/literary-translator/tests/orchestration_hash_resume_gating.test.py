@@ -319,9 +319,9 @@ STALE_PHRASES = [
     ("cache_key.py:129", CACHE_KEY_SCRIPT, "orchestration_bundle_hash's diagnostic-only bucket"),
     ("review_ready.py:74", REVIEW_READY_SCRIPT, "orchestration_bundle_hash's diagnostic-only bucket"),
     ("draft_ready.py:12", DRAFT_READY_SCRIPT, "which is diagnostic-only"),
-    ("SKILL.md:525", SKILL_MD, "sibling, non-gating"),
-    ("SKILL.md:527", SKILL_MD, "provenance-only for W8 reporting"),
-    ("SKILL.md:3892-3898", SKILL_MD, "non-gating `orchestration_bundle_hash` instead"),
+    ("SKILL.md:478", SKILL_MD, "sibling, non-gating"),
+    ("SKILL.md:480", SKILL_MD, "provenance-only for W8 reporting"),
+    ("SKILL.md:3813-3819", SKILL_MD, "non-gating `orchestration_bundle_hash` instead"),
     ("ledger:607", LEDGER_DOC, "non-gating `orchestration_bundle_hash` instead"),
     ("ledger:719", LEDGER_DOC, "purely diagnostic/provenance"),
     ("schema_literal_drift.test.py:556-558", SCHEMA_LITERAL_DRIFT_TEST, "purely diagnostic/provenance"),
@@ -367,7 +367,7 @@ def test_reworded_site_mentions_resume(label, path):
 
 
 def test_ledger_already_accurate_ledger_merge_aside_not_flagged():
-    """references/ledger-and-resumability.md:198's `ledger_merge.py` aside
+    """references/ledger-and-resumability.md:166's `ledger_merge.py` aside
     ("diagnostic-only, never part of any segment's cache key") is already
     accurate -- qualified in the very next sentence by the resume-integrity
     digest note -- and must survive untouched. None of the STALE_PHRASES

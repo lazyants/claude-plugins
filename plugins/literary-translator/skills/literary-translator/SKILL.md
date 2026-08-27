@@ -380,8 +380,10 @@ release that edits the resolver, so from that release onward the byte-identity
 halt fired on every ordinary project — the majority path — while still not
 identifying a single adaptation. Separating the populations for real needs a
 prior-version digest or a per-file managed marker, permanent machinery this
-design refuses to carry for a population measured at zero; see the paragraph
-below. A resumed project that DID adapt this file must re-apply its adaptation
+design refuses to carry for a population measured at zero; the reasoning is
+transcribed in `tests/scaffold_idempotency.test.py`'s
+`apply_resolve_codex_companion_migration` docstring. A resumed project that DID
+adapt this file must re-apply its adaptation
 after the upgrade, which the launch fix this copy delivers makes unnecessary
 in the first place.
 
@@ -399,8 +401,10 @@ place while reporting success:
     stale managed copy is exactly what the rest of this copy pass
     overwrites unconditionally, and this file is now no different. This
     branch USED to demand byte-identity to the shipped source; that
-    condition was cut in #287 and must not come back — see the paragraph
-    below for why.
+    condition was cut in #287 and must not come back — byte-identity
+    stands in for "is this copy MANAGED?" only until a release edits the
+    resolver, after which every ordinary project's own managed copy reads
+    as divergent and the halt fires on the majority path.
   - **Anything else** — a symlink (identical-looking target or not — lstat
     does not resolve it, so its target content is never compared), a
     directory, or any other non-absent, non-regular entry `os.lstat()`
@@ -422,62 +426,11 @@ place while reporting success:
         contents as a unit.
     Then re-run.
 
-**This is deliberately a REFUSAL, not a clever preserving copy.** An earlier
-version of this note specified renaming a divergent file aside to a
-`.pre-upgrade-backup` sibling before copying over it, so the copy could
-proceed unattended. That shape has three real failure modes none of this
-document's own instructions can close, because Step 0a's copy pass is
-orchestrating-session prose executed by hand, not atomic code with the
-guarantees the shape would need: (1) a byte-identical-looking SYMLINK is
-still a symlink after a naive copy-over-the-path — the copy follows it and
-writes through to wherever it points, so the shipped file never actually
-lands at the expected destination, silently defeating the very launch fix
-this correction exists to deliver; (2) a DIVERGENT symlink's "backup" is
-just the symlink renamed, preserving a pointer rather than the adapted
-bytes it points at, which can go stale or vanish independently; (3) two
-concurrent scaffolds of the same durable_root can both pick the same free
-backup name and the second overwrites the first's backup. **A HALT closes
-exactly these three** — it performs no automatic write to a NON-REGULAR
-destination at all, so there is no automatic-copy-through-a-symlink, no
-pointer-only backup, and no concurrent-backup-name race, because none of
-those three OPERATIONS ever run. It does NOT close every race this check
-could conceivably have: `os.lstat()`'s classification and the copy that
-follows it, in the absent and regular-file branches above, are still two
-separate operations, not one atomic one — an entry classified absent or
-regular can change before the copy actually runs. That window is real,
-it is not closed by refusing (refusing only ever applies to the non-regular
-branch, which performs no copy at all), and it is not being claimed closed
-here; it is simply much less consequential in this shape (prose a session
-executes by hand, once, rather than a machine loop an attacker can race
-repeatedly) than the automatic-backup shape's three failure modes were,
-which is why THOSE three, and not this one, are what this refusal exists
-to close. Do not "improve" this back into an automatic backup-and-copy
-without also closing all three of ITS failure modes for real, not just
-for the ordinary sequential-regular-file case that happens to look safe
-in testing.
-
-This check has no "runs once, ever" property to claim, and does not need
-one: a halt-based check is memoryless and correctly re-fires on any future
-NON-REGULAR entry at this exact path, with no marker or prior-version digest
-required. **What memorylessness could not do is tell a stale managed copy
-from a workaround**, and an earlier version of this note claimed it did — it
-enumerated the divergent-regular-file population as "an old, never-cleaned-up
-workaround or a genuinely new one", which silently assumed the shipped bytes
-never move. They move on any release that edits the resolver, and then the
-enumeration is missing its largest member. Step 0a has been writing this exact path since the
-correction above, so from the first release that edits the resolver onward
-every ordinary project presents a divergent regular file here: an older
-MANAGED copy, not an operator's adaptation, and the halt fired on the majority
-path instead of the exceptional one. Measured before that branch was cut, on
-both live books — `historiettes-fr-ru/tome1` and `ssk-he-en/vol2/run` each held
-a plain regular file byte-identical to the then-shipped resolver, i.e. two
-managed copies and zero hand adaptations, both of which would have halted.
-Telling those two apart needs exactly the prior-version digest this design refused to carry, which is why
-the regular-file limb was CUT rather than made cleverer: no digest, no
-marker, no growing table of historical hashes. Every OTHER bundle member
-never needed the non-regular check either, and that has not changed — but
-they never needed the byte-identity one either, and now neither does this
-file.
+**Do not "improve" this into an automatic backup-and-copy, and do not re-add
+the byte-identity condition (#287).** Both have been tried and retired; the
+reasoning is transcribed in `tests/scaffold_idempotency.test.py`'s
+`apply_resolve_codex_companion_migration` docstring, which the tests below it
+enforce against this section.
 
 Also, separately, `scaffold_setup.py` — Step 0a's own bundle-hash marker writer
 (#194), which likewise runs only from the plugin path: it is invoked below as
@@ -1248,19 +1201,15 @@ advances to W3 ONLY on its exit `0` (see R2 / `references/false-green-gate.md`).
 
 The gate can also print, on stderr, a **`WARN visual_order_scan:`** line, and
 name the advisory count in its final status. It is REPORT-ONLY: it never
-changes the exit code in either direction, so an advisory neither blocks a book
-you legitimately want to translate nor rescues a failing extraction.
+changes the exit code in either direction.
 
 It means a source EPUB is probably in **visual order** rather than logical
-order — the usual result of a PDF-to-EPUB conversion. Extraction is byte-faithful
-and correct; the mangling is upstream. **Do not send a fix to the extraction
-stage.** The damage lands on the LLM turns instead: a visual-order run tears
-words apart, so a reviewer reads a stranded fragment as a real word and files a
-finding against a CORRECT draft, and a translator can invert who did what to
-whom. Both have happened on a live book, the second reaching a converged draft
-that a full review round had already called clean. No deterministic gate can
-catch this class — token counts, digests, schema validation and `validate_draft`
-never read what a fragment MEANS.
+order — the usual result of a PDF-to-EPUB conversion. Extraction is
+byte-faithful and correct; the mangling is upstream. **Do not send a fix to
+the extraction stage.** The damage lands on the LLM turns instead, and on a
+live book it reached a converged draft a full review round had already called
+clean. `references/false-green-gate.md`'s "The visual-order advisory" section
+carries why no deterministic gate can catch this class.
 
 **The scan is a SCREEN, not a verdict.** It detects visual-order *handling* (a
 terminal punctuation mark leading an RTL token, which logical order cannot
@@ -1452,22 +1401,11 @@ ingestion nor rescue a failing one.
 It means one of the blocks some segment claims — a member of that segment's
 `block_ids` — is disproportionately large next to the rest of this book's own
 blocks. The usual cause is a wrap/extraction artifact: a converter joining a
-whole narrative, or several paragraphs, into a single block. Nothing else in
-this pipeline is size-aware at the block level to catch it — the only existing
-size check is the per-segment word count, and a 17 896-character block passes
-that exactly as a 400-character one does.
-
-**The census is a SCREEN, not a verdict.** The reference is this book's own p90
-block size; the threshold is 10x that reference, computed only over the
-distinct blocks some segment's `block_ids` names whose `plain_text` is
-non-empty (this excludes `FN:` footnote-definition blocks, unattached
-front/back matter such as the Project Gutenberg licence block, and an embedded
-verse's text, which is lifted out of its carrier block). Below 30 such blocks
-the check is silent about outliers — the reference would sit inside the
-outlier's own neighbourhood — but the NOTE still prints the count, so the
-silence is visible rather than absent. A genuinely long paragraph looks
-identical here to an artifact; the census cannot tell them apart, and does not
-try to.
+whole narrative, or several paragraphs, into a single block.
+`references/false-green-gate.md`'s "The block-size census" section carries the
+rest — the p90 reference and the 10x threshold, which blocks the population
+excludes, the silence below 30 blocks, the false-negative classes, and why a
+genuinely long paragraph is indistinguishable from an artifact here.
 
 Adjudicate a WARN the same way as the visual-order advisory above:
 
@@ -2018,27 +1956,14 @@ a conclusion from stated preconditions, not a filesystem guarantee, and they
 are deliberately NOT enumerated here — read them in
 `references/canon-and-glossary.md`,
 "What the approved snapshot guarantees, and the preconditions it rests on".
-The snapshot stays inside PREPARE's own turn rather than becoming a step of
-its own, but no longer to save a call: the **1.16.1** split already spends
-one, taking the live ceiling from `1 + 3*(MAX_CITATION_RETRIES+1)` to
-`1 + 4*(MAX_CITATION_RETRIES+1)`; **1.16.2** then took it to
-`1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` = **19**, the wait having
-stopped being a single agent call; **#723** then took it to
-`2 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` = **20** for the approval
-record, which sits outside the ladder and is spent once per approved batch;
-**#724** then took it to `1 + (2 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` =
-**16**, by deleting the resume precheck (the leading `2` back to `1`, now
-meaning the record) and folding PREPARE's two commands into whichever wait turn
-already saw `--check-batch` exit 0. What survives is the structural reason —
-prepare is the one point both entry points into the review loop converge on,
-so a resume-skipped batch, which runs neither the dispatch nor the wait,
-still gets a snapshot and its evidence. That batch is now the only one whose
-prepare is still a call of its own: there is no wait on that path to fold it
-into, which is why both prompt builders remain and `batchStep` chooses the
-reader by which path produced the reply, never by inspecting the reply. The
-fold moves neither side of **#347**'s boundary — the folded turn still opens
-nothing either command wrote, so the agent that launches retrieval is still not
-the agent that reads what came back.
+The snapshot stays inside PREPARE's own turn because prepare is the one point
+both entry points into the review loop converge on: a resume-skipped batch runs
+neither the dispatch nor the wait, and still gets a snapshot and its evidence.
+**#724** folded PREPARE's two commands into whichever wait turn already saw
+`--check-batch` exit 0, without moving either side of **#347**'s boundary — the
+folded turn still opens nothing either command wrote. The call-ceiling
+arithmetic that placement costs lives in `references/canon-and-glossary.md`,
+"Pre-merge citation review".
 `offline` is the one exception: no citation, no reviewer, no snapshot, so the
 merge consumes the attempt path there.
 
@@ -2047,11 +1972,7 @@ and (**#723**) the approval record's: a reply carrying the failure sentinel
 ANYWHERE in it rejects, because matching whole lines alone let a fail sentinel
 glued to prose slip past and a trailing clean OK line then approve. The cost is
 a false REJECT on a reply that only *discusses* its own fail sentinel, and no
-remaining site recovers from that DETERMINISTICALLY inside the run. One used
-to — the resume precheck, which fell through to the dispatch it would have run
-anyway — and **#724** removed it, along with the reply it read: the resume
-decision is now computed by `resume_setup.py` and substituted as
-`{{RESUMED_BATCH_INDICES}}`, so there is no phrasing left to misread.
+remaining site recovers from that DETERMINISTICALLY inside the run.
 **The citation review does not recover RELIABLY**, however much
 its retry ladder looks like it should: the ladder regenerates the fragment,
 while what tripped the guard is the phrasing of prepare's or the judge's own
