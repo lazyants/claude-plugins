@@ -653,11 +653,24 @@ with tempfile.TemporaryDirectory() as tmp:
     check("18 two windows of ONE pool sharing a duration carry their slot",
           {"codex_twin(primary)", "codex_twin(secondary)"} <= set(pools_twin),
           str(sorted(pools_twin)))
-    # Total in the other direction too: a pointer naming a pool the map does not hold keeps
-    # every pool. Showing more than was asked for is recoverable; showing none is not.
-    _all, pools_all = pointed_at("codex_absent")
-    check("18 a pointer naming no known pool keeps them all",
-          {"codex", "codex_bengalfox"} <= set(pools_all), str(sorted(pools_all)))
+    # A pointer the MAP does not hold is answered by the TOP-LEVEL object, which carries that
+    # same pool's windows -- returning the whole map there dropped the only pool the operator
+    # asked about and printed the others instead, on a run that exited 0.
+    _named, pools_named = pointed_at("codex_absent")
+    check("18 a pointer the map lacks is answered by the top-level pool",
+          set(pools_named) == {"codex_absent"}, str(sorted(pools_named)))
+    check("18 and that pool carries the top-level figure, not another pool's",
+          "54%" in "".join(pools_named.values()), str(pools_named))
+
+    # Keeping every pool is the LAST resort: only when the top-level object has no window either,
+    # so there is nothing better to show. Showing more than was asked for is recoverable.
+    windowless, _, _ = run(["--claude-profile", str(codex_root / ".nope"),
+                            "--codex-home", str(home)], root=codex_root,
+                           stub_result=dict(DEFAULT_RESULT,
+                                            rateLimits={"limitId": "codex_absent"}))
+    pools_kept = {pool for where, pool, _l in pool_rows(windowless.stdout) if where == ".codexT"}
+    check("18 a pointer with no window anywhere keeps every pool",
+          {"codex", "codex_bengalfox"} <= pools_kept, str(sorted(pools_kept)))
     # The count itself, not merely the label: "1" occurs in every percentage on the page, so
     # `"1" in stdout` would stay green for any count the script chose to print.
     coupon_rows = [row for row in voucher_band(done.stdout) if not row.startswith("credits")]
@@ -2133,6 +2146,12 @@ with tempfile.TemporaryDirectory() as tmp:
           any("11%" in ln for ln in twins) and any("22%" in ln for ln in twins), str(twins))
     check("54 each naming the slot it came from",
           all(("(primary)" in ln) != ("(secondary)" in ln) for ln in twins), str(twins))
+    # Reading only the POOL column left the WINDOW wiring unpinned: both rows would still name
+    # their slot with the column derived from the RPC slot name instead of the duration.
+    header = [ln for ln in done.stdout.splitlines() if "SOURCE" in ln][0]
+    check("54 and both sit under the column their duration names",
+          "5H" in header and all(ln.index("11%" if "11%" in ln else "22%")
+                                 >= header.index("5H") for ln in twins), repr(header))
     check("54 the run stays clean", done.returncode == 0, done.stdout)
 
 # A record built without a place keeps its own name for both, so it opens its own row and its
@@ -2215,13 +2234,12 @@ with tempfile.TemporaryDirectory() as tmp:
     home_n = make_codex_home(root, ".codexN")
 
     def named_run(by_id, spends_from="codex_absent"):
-        # `spends_from` defaults to a pool the map does not hold, so every pool renders and the
-        # naming rule can be read off all of them at once -- the filter has its own cases.
+        # The top-level object names a pool the map does not hold AND carries no window of its
+        # own, which is the one state where every pool renders -- so the naming rule can be read
+        # off all of them at once. The pool FILTER has its own cases in 18.
         done, _, _ = run(["--claude-profile", str(claude_n), "--codex-home", str(home_n)],
                          root=root, stub_result={
-                             "rateLimits": {"limitId": spends_from, "primary": {
-                                 "usedPercent": 4, "windowDurationMins": 10080,
-                                 "resetsAt": epoch(70)}},
+                             "rateLimits": {"limitId": spends_from},
                              "rateLimitsByLimitId": by_id,
                              "rateLimitResetCredits": {"availableCount": 0}})
         return done, [pool for where, pool, _l in pool_rows(done.stdout) if where == ".codexN"]
@@ -2378,9 +2396,7 @@ with tempfile.TemporaryDirectory() as tmp:
     home_b = make_codex_home(root, ".codexBlank")
     done, _, _ = run(["--claude-profile", str(claude_b), "--codex-home", str(home_b)],
                      root=root, stub_result={
-                         "rateLimits": {"limitId": "codex_absent", "primary": {
-                             "usedPercent": 4, "windowDurationMins": 10080,
-                             "resetsAt": epoch(70)}},
+                         "rateLimits": {"limitId": "codex_absent"},
                          "rateLimitsByLimitId": {"codex_w": {
                              "limitId": "codex_w", "limitName": "   ",
                              "primary": {"usedPercent": 4, "windowDurationMins": 10080,
@@ -2388,6 +2404,65 @@ with tempfile.TemporaryDirectory() as tmp:
                          "rateLimitResetCredits": {"availableCount": 0}})
     blank = [pool for where, pool, _l in pool_rows(done.stdout) if where == ".codexBlank"]
     check("60 a whitespace-only limitName is not a name", blank == ["codex_w"], str(blank))
+
+# --- 61 -- the round-2 review fixes ------------------------------------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # A Codex window that GAPS is placed by its DURATION, exactly as its healthy sibling is.
+    # Falling back to the RPC slot name put a malformed five-hour window under a column called
+    # PRIMARY, beside the very 5H column it belongs in.
+    done, _, _ = run(["--claude-profile", str(make_claude(root, ".claudeSlot",
+                                                          cached(entries=[entry()]))),
+                      "--codex-home", str(make_codex_home(root, ".codexSlot"))], root=root,
+                     stub_result={
+                         "rateLimits": {"limitId": "codex", "primary": {
+                             "usedPercent": "not-a-number", "windowDurationMins": 300,
+                             "resetsAt": epoch(4)}},
+                         "rateLimitResetCredits": {"availableCount": 0}})
+    header = [ln for ln in done.stdout.splitlines() if "SOURCE" in ln][0]
+    gapped = [line for where, _p, line in pool_rows(done.stdout) if where == ".codexSlot"]
+    check("61 a malformed Codex window opens no column of its own",
+          "PRIMARY" not in header and "5H" in header, repr(header))
+    check("61 and its diagnostic sits under the column its duration names",
+          len(gapped) == 1 and "[field-malformed]" in gapped[0]
+          and gapped[0].index("[field-malformed]") >= header.index("5H"), str(gapped))
+    check("61 the run gaps, because a window went unread", done.returncode == 1,
+          f"rc={done.returncode}")
+
+# The refresh merge is a pure function over records, and the live path it serves cannot be
+# reached from this suite without a socket -- so the RULE is unit-tested and the WIRING is
+# asserted against main's own source, which is what a guard called from nowhere would fail.
+now_61 = datetime.datetime.now(datetime.timezone.utc)
+soon = now_61 + datetime.timedelta(hours=3)
+
+
+def rec(window, state, percent=None, diagnostic=""):
+    return R.Record(f"pool/{window}", state, percent=percent, resets=soon,
+                    diagnostic=diagnostic, family="all", window=window)
+
+
+cached_pair = [rec("5h", R.NO_CURRENT, 88.0, "stale-after-reset"), rec("weekly", R.REPORTED, 40.0)]
+merged = R._merge_refresh(cached_pair, [rec("5h", R.REPORTED, 2.0),
+                                        rec("weekly", R.GAP, diagnostic="field-malformed")])
+by_window = {r.window: r for r in merged}
+check("61 the merge keeps one record per window", len(merged) == 2, str(sorted(by_window)))
+check("61 a live record replaces the stale cell it refreshes",
+      by_window["5h"].percent == 2.0 and by_window["5h"].state == R.REPORTED,
+      str(by_window["5h"].percent))
+check("61 while a live record that GAPPED loses to the cached figure",
+      by_window["weekly"].percent == 40.0 and by_window["weekly"].state == R.REPORTED,
+      str(by_window["weekly"].state))
+only_gap = R._merge_refresh([], [rec("weekly", R.GAP, diagnostic="field-malformed")])
+check("61 but a gap with no cached counterpart is kept, so the run still gaps",
+      len(only_gap) == 1 and only_gap[0].state == R.GAP, str(only_gap))
+
+main_src = [node for node in ast.parse(SCRIPT.read_text(encoding="utf-8")).body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"]
+called = {node.func.id for node in ast.walk(main_src[0])
+          if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+check("61 and main actually calls it -- a merge wired to nothing passes every test above",
+      len(main_src) == 1 and "_merge_refresh" in called, str(sorted(called)))
 
 print(f"ran {checks} checks")
 if failures:
@@ -2399,7 +2474,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 510
+MIN_CHECKS = 521
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

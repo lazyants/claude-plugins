@@ -33,14 +33,19 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   a person at a terminal is not asking about -- `codex_bengalfox` (`GPT-5.3-Codex-Spark`) and
   `base_model_inference` (`gpt-reserve`) -- and the top-level `rateLimits` object already names
   the one that answers "how much can I still use here". Read from that pointer rather than a
-  hardcoded id; a pointer naming a pool the map does not hold keeps every pool.
+  hardcoded id. When the map does not hold the pool that pointer names, the top-level object IS
+  that pool and answers for it; every pool is kept only when there is no window anywhere else to
+  show.
 - **A cached window that has already reset is re-read live.** The file cannot answer once its
   window is over, and signing in does not refresh it: the CLI rewrites `.claude.json` at login
   but refreshes `cachedUsageUtilization` only after a request that carries usage back, so a
   freshly authenticated profile could sit at a three-day-old figure with nothing on the page to
   suggest signing in again was not the fix. Only that profile is re-read, only when its window
   is over; a retry that fails keeps the cached rows and states its reason as a note rather than
-  a warning. `SOURCE` reads `api` for a refreshed row and a cache age for one that was not.
+  a warning. `SOURCE` reads `api` for a refreshed row and a cache age for one that was not. A
+  retry that PARTLY succeeds is merged per window: a live record wins unless it gapped and the
+  cache holds that window, so one malformed entry in the response cannot throw away a window that
+  refreshed cleanly and leave the stale figure this feature exists to replace.
 - **Claude Code's model-scoped weekly pool is no longer shown.** It read `0%` on every account
   measured, and a `WEEKLY/<model>` column empty on every row but one cost more table width than
   the pool was worth. A profile that carries nothing else still shows it, rather than being

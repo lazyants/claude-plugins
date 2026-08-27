@@ -980,9 +980,15 @@ def _codex_spent_from(default, pools: dict[str, dict]) -> dict[str, str]:
     them answers "how much can I still use here", and the backend already says which: the
     top-level `rateLimits` object carries that pool's `limitId`.
 
-    Read from the vendor's own pointer rather than from a hardcoded `"codex"`, and total in both
-    directions -- a pointer this module cannot read, or that names a pool the map does not hold,
-    keeps every pool. Showing more than was asked for is recoverable; showing none is not.
+    Read from the vendor's own pointer rather than from a hardcoded `"codex"`. When the map does
+    not hold the pool that pointer names, the TOP-LEVEL object is that pool -- it carries the same
+    windows under the same id, which is why the no-map path already reads it. Returning the whole
+    map there dropped the only pool the operator asked about and printed the reserve instead, on a
+    run that exited 0: the exact inversion of what this filter is for.
+
+    Keeping every pool stays the last resort, for a pointer this module cannot read at all or one
+    whose top-level object carries no window either. Showing more than was asked for is
+    recoverable; showing the wrong pool and calling it the answer is not.
     """
     if not isinstance(default, dict):
         return pools
@@ -993,7 +999,11 @@ def _codex_spent_from(default, pools: dict[str, dict]) -> dict[str, str]:
         chosen = "codex" if raw_id is None else _text(raw_id, 64)
     except Malformed:
         return pools
-    return {chosen: pools[chosen]} if chosen in pools else pools
+    if chosen in pools:
+        return {chosen: pools[chosen]}
+    if any(isinstance(default.get(slot), dict) for slot in ("primary", "secondary")):
+        return {chosen: default}
+    return pools
 
 
 def _codex_labels(pools: dict[str, dict]) -> dict[str, str]:
@@ -1106,10 +1116,16 @@ def _codex_records(home: Path) -> list[Record]:
             # The place is passed IN, not left to the fallback: a window that gaps still
             # belongs to the pool it was read from, and a gap that names itself opens a row of
             # its own -- the operator then cannot see which allowance went unread.
+            # The column comes from the DURATION where one is readable, exactly as the healthy
+            # sibling's does -- `_label_duration` is already total and answers None for every
+            # shape that has no usable one. Falling back to the RPC slot name put a malformed 5h
+            # window under a column called PRIMARY, beside the very `5H` column it belongs in.
+            minutes = _label_duration(window)
             records.append(_row_or_gap(f"{limit_id}/{slot}", lambda: _codex_window_row(
                 limit_id=limit_id, label=labels[limit_id], slot=slot, window=window,
                 collide=collide, freshness=freshness, now=now),
-                family=labels[limit_id], window=slot))
+                family=labels[limit_id],
+                window=slot if minutes is None else _window_label(minutes)))
     if not records:
         raise Malformed("payload-malformed")
 
@@ -1541,6 +1557,23 @@ def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
     print(paint("  exactly as any codex invocation does. Nothing here is ever redeemed.", DIM))
 
 
+def _merge_refresh(cached: list[Record], live: list[Record]) -> list[Record]:
+    """Cached records overlaid by a live re-read, one window at a time.
+
+    Keyed on (family, window), which is the same key the renderer lays the table out on -- so a
+    cached cell and its live replacement can never both survive into two rows for one window. A
+    live record that GAPPED loses to a cached one for that window: the cached figure is stale,
+    which its own cell says, and a stale number the operator can read beats a diagnostic token
+    where a number used to be. A gap with no cached counterpart is kept, and still gaps the run.
+    """
+    merged: dict[tuple[str, str], Record] = {(r.family, r.window): r for r in cached}
+    for record in live:
+        key = (record.family, record.window)
+        if record.state != GAP or key not in merged:
+            merged[key] = record
+    return list(merged.values())
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Report Claude Code and Codex usage limits.")
     parser.add_argument("--live", action="store_true",
@@ -1610,13 +1643,23 @@ def main(argv: list[str] | None = None) -> int:
                 # be the worse trade. Its reason is a NOTE, deliberately not a warning: the
                 # default mode promised to read a cache and it read one.
                 live_state, live_records, live_code = _examine(candidate, _claude_live)
-                if live_state == GAP:
+                if any(record.state != GAP for record in live_records):
+                    # PARTLY succeeded is not failed. A live response carrying one malformed
+                    # entry gapped the whole result, so a window that refreshed cleanly was
+                    # thrown away with it and the report showed the very stale figure this retry
+                    # exists to replace. Merge per window: a live record wins unless it gapped
+                    # and the cache has that window, in which case the stale cell -- which says
+                    # so in its own words -- is still the better of the two.
+                    records = _merge_refresh(records, live_records)
+                    state = (GAP if any(r.state == GAP for r in records)
+                             else REPORTED if any(r.state == REPORTED for r in records)
+                             else NO_CURRENT)
+                    code = ""
+                else:
                     detail = live_code or ", ".join(f"{r.name} [{r.diagnostic}]"
                                                     for r in live_records if r.state == GAP)
                     notes.append(f"{where}: the cache describes a window that is over, and the"
                                  f" live retry did not answer -- {detail}")
-                else:
-                    state, records, code = live_state, live_records, live_code
             if code:
                 # A candidate-level outcome has no pool to hang a row on, so it becomes a note.
                 # It still decides the exit status below, exactly as before.
