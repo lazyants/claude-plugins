@@ -1253,7 +1253,7 @@ with tempfile.TemporaryDirectory() as tmp:
             produced = R._claude_live(reader)
             # Drive the REAL renderer, not a per-record helper: the oracle below asks whether a
             # secret can reach stdout, and only what actually prints can answer that.
-            R._render([("Claude Code", ".claudeRead", produced)], [],
+            R._render([("Claude Code", "/tmp/read/.claudeRead", ".claudeRead", produced)], [],
                       datetime.datetime.now(datetime.timezone.utc), R.Paint(False))
     finally:
         R.HTTPSConnection = original
@@ -1596,7 +1596,7 @@ with tempfile.TemporaryDirectory() as tmp:
     same = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5)
 
     def one_pool(where: str, freshness: str = "cache 1h old") -> Any:
-        pool = R.Pool(where, R.CLAUDE_GROUP, "all")
+        pool = R.Pool(f"/tmp{where}", where, R.CLAUDE_GROUP, "all")
         pool.cells["weekly"] = R.Record("weekly_all", R.REPORTED, percent=50.0, resets=same,
                                         freshness=freshness, family="all", window="weekly")
         return pool
@@ -1853,7 +1853,7 @@ with tempfile.TemporaryDirectory() as tmp:
                         freshness="live 26 Aug 19:00 CEST")
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        R._render([(R.CLAUDE_GROUP, ".dup", [live_row])], [],
+        R._render([(R.CLAUDE_GROUP, "/tmp/dup/.dup", ".dup", [live_row])], [],
                   datetime.datetime.now(datetime.timezone.utc), R.Paint(False))
     check("48 and the renderer prints it, so the vendor is recoverable from the row",
           " api" in out.getvalue(), out.getvalue())
@@ -1861,7 +1861,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # The tie-break must reach freshness: two rows alike in every earlier key but visibly different
 # on the page would otherwise swap places when the arguments are reversed.
 def freshness_twin(age: str) -> Any:
-    pool = R.Pool(".x", R.CLAUDE_GROUP, "all")
+    pool = R.Pool("/tmp/.x", ".x", R.CLAUDE_GROUP, "all")
     pool.cells["weekly"] = R.Record("weekly_all", R.REPORTED, percent=50.0, resets=same,
                                     freshness=age, family="all", window="weekly")
     return pool
@@ -2303,6 +2303,92 @@ with tempfile.TemporaryDirectory() as tmp:
     check("59 and it reports from the file", "12%" in done.stdout and done.returncode == 0,
           done.stdout)
 
+# --- 60 -- the round-1 review fixes, each pinned where it would silently regress ---------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    codex_60 = make_codex_home(root, ".codex60")
+
+    # A pool is grouped by the CANDIDATE, never by its printable name. `--claude-profile` is
+    # repeatable and takes paths under different parents, so two candidates can share a basename;
+    # grouped by the printed name they merged into ONE row -- one account supplying the 5h figure
+    # and the other the weekly, under one account's freshness, on a run that exited 0.
+    (root / "a").mkdir(); (root / "b").mkdir()
+    left = make_claude(root / "a", ".claude", cached(entries=[
+        entry(kind="session", percent=10, resets=iso(3))]), token=False)
+    right = make_claude(root / "b", ".claude", cached(entries=[
+        entry(kind="weekly_all", percent=90, resets=iso(50))]), token=False)
+    done, _, _ = run(["--claude-profile", str(left), "--claude-profile", str(right),
+                      "--codex-home", str(codex_60)], root=root)
+    same_name = [line for where, _pool, line in pool_rows(done.stdout) if where == ".claude"]
+    check("60 two candidates sharing a basename stay two rows", len(same_name) == 2,
+          str(same_name))
+    check("60 and neither account's figure is attributed to the other",
+          not any("10%" in line and "90%" in line for line in same_name), str(same_name))
+    # Blanking the repeated WHERE is what would present them as one group, so it reads identity
+    # too: both rows print the name, because they are not the same account.
+    check("60 the second row is not blanked into the first's group",
+          sum(1 for line in same_name if ".claude" in line) == 2, str(same_name))
+
+    # The default profile keeps its config BESIDE its directory, so an installation that
+    # authenticates through the Keychain has neither in-directory marker. Discovery dropped it
+    # before the ledger, with no diagnostic, on a report that still exited 0 because the other
+    # profiles kept the candidate list non-empty.
+    sandbox = root / "home"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    make_claude(sandbox, ".claude", None, token=False)          # the directory, and nothing in it
+    (sandbox / ".claude.json").write_text(json.dumps(cached(entries=[
+        entry(kind="weekly_all", percent=63, resets=iso(30))])), encoding="utf-8")
+    inner = list((sandbox / ".claude").iterdir())
+    check("60 the fixture really has no marker inside the directory", inner == [], str(inner))
+    done, _, _ = run(["--codex-home", str(codex_60)], root=root)
+    check("60 a default profile with no in-directory marker is still discovered",
+          "63%" in done.stdout, done.stdout)
+    check("60 and the run stays clean", done.returncode == 0, done.stdout)
+
+    # A window that GAPS has no validated kind to place it by, and the fallback names it after
+    # its INDEX in the payload -- so a malformed `session` opened a row AND a column both called
+    # `limits[0]`, while its healthy weekly sibling sat under `all`.
+    broken = make_claude(root, ".claudeBroken", cached(entries=[
+        entry(kind="session", percent="not-a-number", resets=iso(3)),
+        entry(kind="weekly_all", percent=44, resets=iso(50)),
+    ]), token=False)
+    done, _, _ = run(["--claude-profile", str(broken), "--codex-home", str(codex_60)], root=root)
+    rows = [(pool, line) for where, pool, line in pool_rows(done.stdout)
+            if where == ".claudeBroken"]
+    check("60 a gapped window stays on its own pool's row",
+          len(rows) == 1 and rows[0][0] == "all", str(rows))
+    check("60 carrying its diagnostic beside the healthy sibling",
+          bool(rows) and "[field-malformed]" in rows[0][1] and "44%" in rows[0][1], str(rows))
+    # The payload index survives in the WARNING, which is where it belongs -- that line names
+    # WHICH entry could not be read. What it may no longer do is name a pool or a column.
+    check("60 and the payload index names no pool and opens no column",
+          not any("limits[" in line for _w, _p, line in pool_rows(done.stdout))
+          and "LIMITS[" not in done.stdout, done.stdout)
+    check("60 while the warning still says which entry it was",
+          "limits[0]" in done.stdout.split("warnings")[-1], done.stdout)
+    check("60 the run still gaps, because a window went unread",
+          done.returncode == 1, f"rc={done.returncode}")
+
+# A `limitName` of nothing but spaces passes `_text`, which allows Zs deliberately, and would
+# render a pool with no visible name at all.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    claude_b = make_claude(root, ".claudeBlank", cached(entries=[entry()]))
+    home_b = make_codex_home(root, ".codexBlank")
+    done, _, _ = run(["--claude-profile", str(claude_b), "--codex-home", str(home_b)],
+                     root=root, stub_result={
+                         "rateLimits": {"limitId": "codex_absent", "primary": {
+                             "usedPercent": 4, "windowDurationMins": 10080,
+                             "resetsAt": epoch(70)}},
+                         "rateLimitsByLimitId": {"codex_w": {
+                             "limitId": "codex_w", "limitName": "   ",
+                             "primary": {"usedPercent": 4, "windowDurationMins": 10080,
+                                         "resetsAt": epoch(70)}}},
+                         "rateLimitResetCredits": {"availableCount": 0}})
+    blank = [pool for where, pool, _l in pool_rows(done.stdout) if where == ".codexBlank"]
+    check("60 a whitespace-only limitName is not a name", blank == ["codex_w"], str(blank))
+
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -2310,7 +2396,10 @@ if failures:
         print(f"  {failure}")
     sys.exit(1)
 
-MIN_CHECKS = 445
+# The count this revision actually runs, not a floor left behind by an older one. A stale floor
+# lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
+# the point this was noticed. Raise it with the suite.
+MIN_CHECKS = 510
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

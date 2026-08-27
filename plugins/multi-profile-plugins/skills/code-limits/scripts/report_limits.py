@@ -466,6 +466,15 @@ class Record:
 class Row(NamedTuple):
     """One bucketed observation: the candidate it came from, whose vendor it is, and the record.
 
+`ident` is the candidate's own absolute path and is what rows are GROUPED by; `where` is
+    only ever printed. They are different fields because the printable name is lossy: two
+    candidates can share a basename (`--claude-profile` is repeatable, and takes paths under
+    different parents), and a directory name carrying a non-printable character is escaped to
+    print, which maps two distinct directories onto one string. Grouped by the printed name, two
+    accounts merged into ONE row -- one supplying the 5h figure, the other the weekly, under one
+    account's freshness, exiting 0. The ambiguity of two rows both reading `.claude` is older
+    than this and stays; silently attributing one account's usage to another does not.
+
     The vendor group travels WITH the row because `_source` needs it to keep a live Claude row
     distinguishable from a live Codex one, and the bucketing loop is the last place that still
     knows it. The obvious alternative -- looking the group back up out of a side table keyed on
@@ -473,6 +482,7 @@ class Row(NamedTuple):
     with a right one's confidence, unfalsifiable from the page.
     """
 
+    ident: str
     where: str
     group: str
     record: Record
@@ -568,7 +578,8 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
             # own SHAPE is validated inside the producer for the same reason -- a container pass
             # that rejected a non-object entry ahead of the loop lost every valid sibling.
             records.append(_row_or_gap(
-                f"limits[{index}]", lambda: _claude_row(_obj(item), freshness, now)))
+                f"limits[{index}]", lambda: _claude_row(_obj(item), freshness, now),
+                **_claude_raw_place(item)))
         return records
 
     for key in ("five_hour", "seven_day"):
@@ -594,6 +605,28 @@ def _claude_flat_row(key: str, slot, freshness: str, now: datetime.datetime) -> 
         resets=_from_iso(body.get("resets_at")),
         freshness=freshness, now=now, family=family, window=window,
     )
+
+
+def _claude_raw_place(item) -> dict:
+    """(family, window) read off the RAW entry, before anything validates it.
+
+    A record that GAPS has no validated kind to place it by, and the fallback names it after its
+    INDEX in the payload -- so a malformed `session` opened a row AND a column both called
+    `limits[0]`, while its healthy weekly sibling sat under `all`. The placement is derivable
+    without trusting the entry: read the two fields defensively, and answer nothing at all if
+    they are not the plain printable strings the vendor's schema says they are.
+    """
+    if not isinstance(item, dict):
+        return {}
+    kind = item.get("kind")
+    if not isinstance(kind, str) or not kind or not kind.isprintable():
+        return {}
+    scope = item.get("scope")
+    model = scope.get("model") if isinstance(scope, dict) else None
+    raw = model.get("display_name") if isinstance(model, dict) else None
+    display = raw if isinstance(raw, str) and raw.isprintable() else ""
+    family, window = _claude_place(kind, display)
+    return {"family": family, "window": window}
 
 
 def _is_scoped(item) -> bool:
@@ -980,7 +1013,11 @@ def _codex_labels(pools: dict[str, dict]) -> dict[str, str]:
     for limit_id, pool in pools.items():
         raw = pool.get("limitName")
         try:
-            labels[limit_id] = ("" if raw is None else _text(raw, 64)) or limit_id
+            # `.strip()` decides only whether a name EXISTS -- the name itself is printed as the
+            # vendor spelled it. A `limitName` of nothing but spaces passes `_text`, which allows
+            # Zs deliberately, and would render a pool with no visible name at all.
+            name = "" if raw is None else _text(raw, 64)
+            labels[limit_id] = name if name.strip() else limit_id
         except Malformed:
             labels[limit_id] = limit_id
     # A label two ids share identifies neither, and two rows reading the same name are two rows
@@ -1183,11 +1220,18 @@ def _stat_kind(path: Path) -> str:
     return "dir" if stat.S_ISDIR(info.st_mode) else "other"
 
 
-def _discover(root: Path, prefix: str, markers: tuple[str, ...]) -> list[Candidate]:
+def _discover(root: Path, prefix: str, markers: tuple[str, ...], external=None) -> list[Candidate]:
     """Directories matching the prefix that carry a vendor marker.
 
     A marker probe that ERRORS yields a candidate carrying `candidate-unreadable`, rather than
     being filtered out: a profile that cannot be examined must not vanish before the ledger.
+
+    `external` maps a candidate to one further file to probe, OUTSIDE the directory. The default
+    Claude profile keeps its config beside `~/.claude` rather than inside it, so an installation
+    that authenticates through the Keychain has neither in-directory marker -- and the account
+    was dropped before the ledger, with no diagnostic, on a report that still exited 0 because
+    the OTHER profiles made the candidate list non-empty. An absent-marker profile vanishing
+    quietly is the one failure this whole discovery step exists to prevent.
     """
     out: list[Candidate] = []
     try:
@@ -1203,7 +1247,10 @@ def _discover(root: Path, prefix: str, markers: tuple[str, ...]) -> list[Candida
             continue
         if kind != "dir":
             continue
-        kinds = [_stat_kind(entry / marker) for marker in markers]
+        probes = [entry / marker for marker in markers]
+        if external is not None:
+            probes.append(external(entry))
+        kinds = [_stat_kind(path) for path in probes]
         if "unreadable" in kinds:
             out.append(Candidate(entry, "candidate-unreadable"))
             continue
@@ -1244,7 +1291,7 @@ def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
           + paint("a one-shot rate-limit reset -- redeem in the Codex TUI with /usage", DIM))
     home_width = max([_width(_safe_name(row.where)) for row in vouchers]
                      + [_width(_safe_name(row.record.name)) for row in infos] + [8]) + 2
-    for where, _group, record in vouchers:
+    for _ident, where, _group, record in vouchers:
         if record.state == GAP:
             body = paint(f"[{record.diagnostic}]", RED)
         elif record.state == NO_CURRENT or record.freshness == "0":
@@ -1270,7 +1317,7 @@ def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
                 body += ("  " + paint(f"expires {_local(record.expires)}", DIM)
                          + "  " + paint(left, YELLOW))
         print("    " + _pad(_safe_name(where), home_width) + body)
-    for where, _group, record in infos:
+    for _ident, where, _group, record in infos:
         value = (paint(f"[{record.diagnostic}]", RED) if record.state == GAP
                  else paint(record.freshness, BOLD))
         print("    " + _pad(_safe_name(record.name), home_width)
@@ -1302,7 +1349,8 @@ class Pool:
     across it.
     """
 
-    def __init__(self, where: str, group: str, family: str) -> None:
+    def __init__(self, ident: str, where: str, group: str, family: str) -> None:
+        self.ident = ident
         self.where = where
         self.group = group
         self.family = family
@@ -1330,10 +1378,10 @@ def _pivot(rows: list[Row]) -> list[Pool]:
     pools: list[Pool] = []
     latest: dict[tuple[str, str, str], Pool] = {}
     for row in rows:
-        key = (row.where, row.group, row.record.family)
+        key = (row.ident, row.group, row.record.family)
         pool = latest.get(key)
         if pool is None or row.record.window in pool.cells:
-            pool = Pool(row.where, row.group, row.record.family)
+            pool = Pool(row.ident, row.where, row.group, row.record.family)
             pools.append(pool)
             latest[key] = pool
         pool.cells[row.record.window] = row.record
@@ -1411,7 +1459,7 @@ def _sorted_pools(pools: list[Pool]) -> list[Pool]:
     ordering numbers that are not comparable in the first place.
     """
     return sorted(pools, key=lambda pool: (
-        pool.where, pool.group, pool.family,
+        pool.where, pool.ident, pool.group, pool.family,
         "\u0000".join(sorted(pool.cells)), pool.freshness()))
 
 
@@ -1440,12 +1488,14 @@ def _pool_table(pools: list[Pool], now: datetime.datetime, paint: Paint) -> None
     print(paint("  " + "\u2500" * (sum(widths) + 6), DIM))
     previous = None
     for pool, cells in zip(pools, grid):
+        # Compared on IDENTITY, never on the printed name: two candidates that happen to print
+        # alike are still two accounts, and blanking the second would show them as one group.
         # A candidate's rows are adjacent (see _sorted_pools), so repeating its name down the
         # group is noise the eye has to filter -- the reason one home reading `.codex` three
         # times over looked like three unrelated accounts. Blanked, never abbreviated: the name
         # is either there or it is the row above's, which is what the indentation already says.
-        head = "" if cells[0] == previous else cells[0]
-        previous = cells[0]
+        head = "" if pool.ident == previous else cells[0]
+        previous = pool.ident
         line = _pad(head, widths[0]) + _pad(cells[1], widths[1])
         for index, label in enumerate(labels, start=len(COLUMNS)):
             text = cells[index]
@@ -1461,15 +1511,15 @@ def _pool_table(pools: list[Pool], now: datetime.datetime, paint: Paint) -> None
     print()
 
 
-def _render(groups: list[tuple[str, str, list[Record]]], notes: list[str],
+def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
             now: datetime.datetime, paint: Paint) -> None:
     """The whole report: a voucher band, then one table -- one line per allowance."""
     buckets: dict[str, list[Row]] = {"pool": [], "voucher": [], "info": []}
-    for group, where, records in groups:
+    for group, ident, where, records in groups:
         for record in records:
             kind = record.kind()
             buckets[kind if kind in ("voucher", "info") else "pool"].append(
-                Row(where, group, record))
+                Row(ident, where, group, record))
 
     print(f"\n{paint('code-limits', BOLD)}  {paint(_local(now), DIM)}\n")
     _voucher_band(buckets["voucher"], buckets["info"], now, paint)
@@ -1517,7 +1567,8 @@ def main(argv: list[str] | None = None) -> int:
     now = datetime.datetime.now(datetime.timezone.utc)
 
     claude = ([_explicit(Path(p)) for p in args.claude_profile]
-              or _discover(home, ".claude", (".claude.json", ".credentials.json")))
+              or _discover(home, ".claude", (".claude.json", ".credentials.json"),
+                           external=_claude_config))
     codex = ([_explicit(Path(p)) for p in args.codex_home]
              or _discover(home, ".codex", ("auth.json", "config.toml")))
 
@@ -1570,7 +1621,7 @@ def main(argv: list[str] | None = None) -> int:
                 # A candidate-level outcome has no pool to hang a row on, so it becomes a note.
                 # It still decides the exit status below, exactly as before.
                 notes.append(f"{where} [{code}]")
-            groups.append((group, where, records))
+            groups.append((group, str(candidate.path), where, records))
             if state == GAP:
                 detail = code or ", ".join(f"{r.name} [{r.diagnostic}]"
                                            for r in records if r.state == GAP)

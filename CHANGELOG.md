@@ -10,8 +10,7 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   weekly figures are two readings of one quota; printing them as two rows repeated the profile and
   the pool on both and made an account compete with itself for the top of the page. They now sit
   side by side under a `5H` and a `WEEKLY` column on one line. The window columns are discovered
-  from the data, so a Claude weekly pool scoped to one model joins that account's line as
-  `WEEKLY/<model>` and any other window the backend reports opens a column of its own rather than
+  from the data, so any other window the backend reports opens a column of its own rather than
   being folded into somebody else's. Two windows of equal duration under one pool -- which the
   Codex schema permits -- take two rows of the same column, because a cell holds one number and
   dropping the second would be silent.
@@ -59,7 +58,18 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   config dir falls back to `$HOME` -- so the file sits BESIDE `~/.claude`, which is that profile's
   data directory. Reading `~/.claude/.claude.json` found a stale copy left by an older release and
   reported `no-usage-cache` for an account whose weekly pool was at 87%, under a diagnostic that
-  exits 0.
+  exits 0. That external config now also counts as the profile's DISCOVERY marker: an
+  installation authenticating through the Keychain has neither in-directory marker, and the
+  account was dropped before the ledger with no diagnostic at all.
+- **A row is grouped by the candidate itself, not by its printed name.** Two candidates can share
+  a basename -- `--claude-profile` is repeatable and takes paths under different parents -- and a
+  name carrying a non-printable character is escaped to print, mapping two directories onto one
+  string. Grouped by the printed name, two accounts merged into one row: one supplying the 5h
+  figure, the other the weekly, under one account's freshness, exiting 0.
+- **A Claude window that gaps stays on its own pool's row.** Its placement is now read off the
+  raw entry, so a malformed `session` reports under `all` / `5H` instead of opening both a row
+  and a column named after its index in the payload. The warning still names that index, which
+  is what identifies the entry that could not be read.
 - **`hasAvailableSubscription: false` no longer suppresses a profile that has usage to report.**
   The flag is now read only as the REASON a cache is absent. Accounts ship it beside a full,
   freshly fetched `limits` array -- one of them at 100% of its weekly pool -- so treating it as

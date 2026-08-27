@@ -112,8 +112,8 @@ cache to fall back to on the Codex side -- the number is current at the moment i
 
 A window whose `resets_at` (or `resetsAt`) has already passed describes the PREVIOUS window --
 neither current usage nor zero. The report never presents an expired window as current: the cell
-reads how long ago that window reset (`14h ago`), is dimmed beside whatever current cells share
-its row, and its row ranks below every row that has a current window. One legend line under the
+reads how long ago that window reset (`14h ago`) and is dimmed beside whatever current cells
+share its row. One legend line under the
 table carries the `[stale-after-reset]` token and says the current figure needs `--live`; it is
 printed only when such a cell is actually on the page.
 
