@@ -1,31 +1,4 @@
 <!-- PROMPT_CONTRACT_VERSION: 3 -->
-<!--
-  translate_TASK.template.md -- one-time-seed prompt contract for the
-  per-segment translator agent.
-
-  Step 0a copies this file ONCE to `${durable_root}/translate_TASK.md` and
-  never re-copies over it once it exists (see SKILL.md's Step 0a and
-  references/ledger-and-resumability.md's canonical-path invariants).
-  Hand-adapt the bracketed [PLACEHOLDER] spots below for THIS project right
-  after the copy, then leave the file alone -- mass-translate-wf.template.js's
-  `translatePrompt()` re-reads `${durable_root}/translate_TASK.md` fresh for
-  every segment it dispatches, so any later edit here applies retroactively
-  to every not-yet-drafted segment.
-
-  This file is deliberately verse-policy-NEUTRAL: it never hardcodes which
-  verses[] fields a draft must contain. Those instructions are spliced into
-  each segment's own dispatch prompt at run time from the current
-  profile.yml (`verse_policy.mode`, see references/verse-policy.md) --
-  never duplicated or pre-baked here, so this file never goes stale when
-  that setting changes later.
-
-  On a resumed project, `scripts/profile_validate.py` checks the
-  `PROMPT_CONTRACT_VERSION` marker above against its own hardcoded
-  `CURRENT_PROMPT_CONTRACT_VERSION` and FATALs on a missing, malformed,
-  duplicated, or non-leading marker. Bump this marker (and that constant)
-  only when this file's own I/O contract changes in a way an existing
-  project must consciously re-adopt -- never silently.
--->
 
 # Task: Literary Translation of One Segment ([SOURCE LANGUAGE] -> [TARGET LANGUAGE])
 

@@ -1,46 +1,4 @@
 <!-- PROMPT_CONTRACT_VERSION: 3 -->
-<!--
-  glossary_TASK.template.md -- one-time-seed prompt contract for the
-  canon/glossary-pass agent (the codex-glossary-pass).
-
-  Step 0a copies this file ONCE to `${durable_root}/glossary_TASK.md` and
-  never re-copies over it once it exists (see SKILL.md's Step 0a and
-  references/ledger-and-resumability.md's canonical-path invariants).
-  Hand-adapt the bracketed [PLACEHOLDER] spots below for THIS project right
-  after the copy, then leave the file alone -- glossary-pass-wf.template.js's
-  `batchDispatchPrompt()` re-reads `${durable_root}/glossary_TASK.md` fresh
-  for every batch it dispatches, so any later edit here applies
-  retroactively to every not-yet-resolved batch.
-
-  This file holds the canonicalization RULES and PHILOSOPHY -- it is not
-  the sole enforcement of the per-item output shape. That shape is
-  schema-enforced by `scripts/canon_validate.py`, never by an `agent()`
-  `schema` param: the batch dispatch call in `glossary-pass-wf.template.js`
-  is deliberately schema-less fire-and-forget (see
-  references/workflow-schema-validation.md's "shared codex work-call
-  pattern"), so the dispatched agent is instead required to self-check its
-  own fragment, before returning, by running
-  `canon_validate.py --check-batch` against `canon-batch.schema.json` --
-  and, later, a separate disk-independent `--verify-merged` call re-checks
-  the eventual `canon.json` merge itself (see references/canon-and-glossary.md).
-  This file never overrides or loosens that contract -- it exists to carry
-  THIS project's own naming conventions and judgment guidance, which no
-  schema can express, and to restate the contract in full so a call
-  reading only this file (plus its own dispatch prompt) is self-contained.
-  The dispatch prompt's OWN self-check command is always authoritative over
-  this file's own self-check prose below -- `glossary-pass-wf.template.js`
-  is regenerated fresh from the plugin's current copy every run (never a
-  one-time-seed file the way this file is), so a resumed project whose
-  copy of this file predates a plugin update still gets the current
-  command from its dispatch prompt.
-
-  On a resumed project, `scripts/profile_validate.py` checks the
-  `PROMPT_CONTRACT_VERSION` marker above against its own hardcoded
-  `CURRENT_PROMPT_CONTRACT_VERSION` and FATALs on a missing, malformed,
-  duplicated, or non-leading marker. Bump this marker (and that constant)
-  only when this file's own I/O contract changes in a way an existing
-  project must consciously re-adopt -- never silently.
--->
 
 # Task: Canon and Glossary Resolution ([SOURCE LANGUAGE] -> [TARGET LANGUAGE])
 
