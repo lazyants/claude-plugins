@@ -6,7 +6,7 @@ description: >-
   profile under `~/.claude*` (`CLAUDE_CONFIG_DIR`) and every discovered Codex home under
   `~/.codex*` (`CODEX_HOME`).
   Use when asked how much usage-limit budget is left, when a five-hour or weekly window resets,
-  which profile or account is nearly out, or how many Codex "usage limit reset" coupons remain.
+  which profile or account is nearly out, or how many Codex "usage limit reset" vouchers remain.
   Ships `scripts/report_limits.py`, installable on PATH as `code-limit`, one table covering both
   CLIs: Claude Code read from its on-disk usage cache by default (or live with `--live`) and Codex
   read live over `codex app-server`'s `account/rateLimits/read` JSON-RPC call. Not the sibling
@@ -19,17 +19,37 @@ description: >-
 
 ## What it covers
 
-One report, one table, across every usage-limit pool this machine draws on: every discovered
-Claude Code profile under `~/.claude*` and every discovered Codex home under `~/.codex*`. Each
-usage-window row states how much of the window is used, when that window resets, and how fresh
-the number is. The reset-coupon count and the credit balance render as a plain info line
-instead: neither carries a reset time, and neither names its own source -- only the group
-heading above it (`Claude Code` or `Codex`) does.
+One report across every usage-limit pool this machine draws on: every discovered Claude Code
+profile under `~/.claude*` and every discovered Codex home under `~/.codex*`.
+
+It opens with the **reset vouchers** -- the one-shot rate-limit resets the Codex TUI redeems --
+because a voucher expires whether or not anyone looks, and the count alone never says when. Each
+home's row carries the vendor's own title and expiry date, and the time left beside it. A home
+that reported a count of zero reads `0` -- the integer it measured, never a word standing in for
+it -- while one whose backend sent no voucher data at all reads `not reported`. Those are two
+different facts and the report keeps them apart. The credit balance follows in the same band, labelled with the home it belongs to.
+
+Then one **flat table of pools**, most consumed first. Profile is a column rather than a heading,
+so the row that needs attention is the top row rather than something to hunt for under a group.
+Each row is one pool: where it lives, which pool it is under the vendor's own identifier, a gauge
+and the percentage used, how long until the window resets, and where the number came from.
+
+Rows that are not current usage do not compete with rows that are, because their percentages are
+not comparable. They sit below in their own sections, each headed by the reason: **stale** (an
+expired window, whose percentage describes the PREVIOUS one), **inactive -- no current window**,
+and **NOT CHECKED** for anything that gapped. Candidate-level outcomes -- a profile with no cache,
+one with no subscription, an unreadable directory -- become one footnote line each, with their
+diagnostic token intact.
+
+Ordering inside the table is by consumption, descending, with ties broken by the sooner reset and
+then by name, so two runs over the same data agree. It is deliberately NOT a projected-exhaustion
+score: that needs a burn rate nothing here measures, and an invented number in the column read
+first is worse than an honest one.
 
 ## Two sources, different in kind
 
-The Claude Code side and the Codex side are read differently. Every row prints under one of the
-two group headings, `Claude Code` or `Codex`, that say which.
+The Claude Code side and the Codex side are read differently, and every row says which in its
+last column: `live` for Codex, and the cache's age for Claude Code.
 
 **Claude Code is a cache on disk.** `<profile>/.claude.json` carries `cachedUsageUtilization`, a
 snapshot taken at some past `fetchedAtMs`. Reading it costs nothing and needs no credential, but
@@ -83,15 +103,15 @@ declared nullable or optional. A value the schema allows to be absent or null ne
 check a profile's owner could never clear would be worse than the absence it reports -- but what
 renders instead varies by field: some rows still report normally under a different label, some
 print an explicit absence, and some produce no row at all. An omitted `rateLimitResetCredits`, for
-instance, now prints a `reset coupons` row reading "not reported" instead of gapping the run,
+instance, now prints a voucher row reading "not reported" instead of gapping the run,
 and because `usedPercent` is an unbounded int32 in that schema, a pool reported past 100%
 renders as given rather than being refused, which would gap the report exactly when it is most
 worth reading. A shape the schema does not permit at all still gaps, as before.
 
-## Reset coupons
+## Reset vouchers
 
 `rateLimitResetCredits.availableCount` is what the Codex TUI's own `/usage` calls "usage limit
-reset available" -- a coupon that lifts a rate limit early. The report READS this count and
+reset available" -- a voucher that lifts a rate limit early. The report READS this count and
 prints it.
 
 It never redeems one, and the guarantee is about what can be SENT. The module writes to the
@@ -103,8 +123,14 @@ in the source is a second, static check on top of that -- it catches an extra me
 dict appearing anywhere in the file, but on its own says nothing about a method assembled some
 other way (`dict([("method", operation)])` would not be a literal), which is why it is a CI gate
 rather than a runtime guard: it stops a fourth method from being merged, not one already
-running. To redeem a reset coupon, use the Codex TUI's own `/usage`; this tool deliberately will
+running. To redeem a voucher, use the Codex TUI's own `/usage`; this tool deliberately will
 not do it.
+
+Beside the count, the report reads the vendor's own `title` and `expiresAt` off the first
+available credit and renders them in the voucher band. Both are optional in that payload and
+neither may ever gap a run: a home reporting a bare count still renders, with less to say. The
+expiry is worth surfacing precisely because a voucher lapses whether or not anyone is watching,
+and the count on its own never says when.
 
 An omitted or null `rateLimitResetCredits` renders as a known absence -- the row reads "not
 reported" and the run stays clean -- because the vendor's schema allows the field to be absent.
@@ -124,12 +150,21 @@ replies -- means exit 1, with a warning naming which check did not run.
 python3 scripts/report_limits.py
 python3 scripts/report_limits.py --live
 python3 scripts/report_limits.py --claude-profile ~/.claude2 --codex-home ~/.codex3
+python3 scripts/report_limits.py --color=always | less -R
 ```
 
 The script ships mode 644, so it is run through `python3`, never executed directly. `--live` opts
 the Claude Code side into the token path; the Codex side is always live. `--claude-profile PATH`
 and `--codex-home PATH` are repeatable and, for whichever vendor at least one is given, replace
 auto-discovery entirely for that vendor -- a vendor left unspecified still auto-discovers.
+
+`--color` takes `auto` (the default), `always` or `never`. `auto` colours only when stdout is a
+terminal and `NO_COLOR` is unset, so piping the report -- into a file, a pager, or this plugin's
+own test suite -- yields plain text. Colour is applied to finished cells after the column widths
+are computed from the plain strings, so it changes how the table looks and nothing else: strip the
+escapes from an `--color=always` run and you get the `--color=never` run back, byte for byte.
+The gauge is red at 80% and above, yellow from 50, green below; sections that are not current
+usage are dimmed; a voucher count is bold, and green when there is one to spend.
 
 ## `code-limit`, the installed command
 

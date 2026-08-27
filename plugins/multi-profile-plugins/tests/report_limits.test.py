@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import ast
 import datetime
+import difflib
 import hashlib
 import json
 import os
+import pty
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -142,6 +145,33 @@ else:
 sys.stdout.flush()
 sys.exit(0)
 '''
+
+
+def voucher_band(stdout: str) -> list[str]:
+    """The rows of the RESET VOUCHERS band, which is a block above the table rather than a row
+    inside it. Parsed structurally -- a row is keyed by its HOME, so there is no per-row label to
+    grep for, and slicing the band is the only way to read a count without matching a percentage
+    somewhere else on the page."""
+    lines = stdout.splitlines()
+    for index, line in enumerate(lines):
+        # Matched on containment, not on a prefix: with --color=always the heading opens with an
+        # escape, and a prefix test would silently find no band at all -- which reads exactly
+        # like a report that printed none.
+        if "RESET VOUCHERS" in line:
+            rows = []
+            for row in lines[index + 1:]:
+                if not row.strip():
+                    break
+                rows.append(row.strip())
+            return rows
+    return []
+
+
+def voucher_rows(stdout: str) -> list[str]:
+    """The band's voucher rows only. The credits balance shares the block and is keyed by POOL
+    rather than by home, so its fields sit one column across -- reading a count off it would be
+    reading the wrong row entirely."""
+    return [row for row in voucher_band(stdout) if not row.startswith("credits")]
 
 
 def iso(delta_hours: float) -> str:
@@ -333,10 +363,13 @@ with tempfile.TemporaryDirectory() as tmp:
                       "--codex-home", str(stale_root / ".nope")])
     check("5 past reset renders stale-after-reset", "stale-after-reset" in done.stdout, done.stdout)
     check("5 the stale percentage is labelled as the previous window",
-          "previous window 67.0%" in done.stdout, done.stdout)
+          "the % is the PREVIOUS window" in done.stdout and "67.0%" in done.stdout, done.stdout)
+    # The row sits UNDER that heading, not among the current ones -- the label is stated once
+    # for the section instead of repeated per row, so what pins it is the partition.
+    before, _, after = done.stdout.partition("stale -- the % is the PREVIOUS window")
     check("5 it is not presented as a current row",
-          "  67.0%  resets" not in done.stdout, done.stdout)
-    check("6 the row carries its own cache age", "3d00h old" in done.stdout, done.stdout)
+          "67.0%" in after and "67.0%" not in before, done.stdout)
+    check("6 the row carries its own cache age", "3d00h" in done.stdout, done.stdout)
 
     # 7 / 8 / 9 -- absence states, and the precedence between them.
     empty = root / "states"
@@ -552,18 +585,20 @@ with tempfile.TemporaryDirectory() as tmp:
           "[stale-after-reset]" not in done.stdout, done.stdout)
     expected_day = (datetime.datetime.now(datetime.timezone.utc)
                     + datetime.timedelta(hours=72)).astimezone().strftime("%d %b")
+    # Relative now. A SECONDS epoch read as milliseconds lands ~55 000 years out and a
+    # milliseconds epoch read as seconds lands in 1970, so a plausible three-day span is what
+    # pins the unit -- more directly than the calendar date it used to print.
     check("18 and its reset lands in the present, which is what pins the epoch unit",
-          f"resets {expected_day}" in done.stdout,
-          f"expected 'resets {expected_day}'\n{done.stdout}")
+          "in 2d 23h" in done.stdout or "in 3d 00h" in done.stdout, done.stdout)
     check("18 two windows of ONE pool sharing a duration carry their slot",
           "codex_twin/5h(primary)" in done.stdout and "codex_twin/5h(secondary)" in done.stdout,
           done.stdout)
     # The count itself, not merely the label: "1" occurs in every percentage on the page, so
     # `"1" in stdout` would stay green for any count the script chose to print.
-    coupon_rows = [ln for ln in done.stdout.splitlines() if ln.strip().startswith("reset coupons")]
-    check("4 exactly one coupon row is printed", len(coupon_rows) == 1, done.stdout)
+    coupon_rows = [row for row in voucher_band(done.stdout) if not row.startswith("credits")]
+    check("4 exactly one voucher row is printed", len(coupon_rows) == 1, done.stdout)
     check("4 and it carries the fixture's own count",
-          bool(coupon_rows) and coupon_rows[0].split()[2] == "1", str(coupon_rows))
+          bool(coupon_rows) and coupon_rows[0].split()[1] == "1", str(coupon_rows))
     check("4 the credit balance is printed", "347.89" in done.stdout, done.stdout)
     check("2 the transcript is exactly the three allowed messages, in order",
           [json.loads(line).get("method") for line in
@@ -729,10 +764,11 @@ with tempfile.TemporaryDirectory() as tmp:
     # The vendor's schema makes this container optional AND nullable, so its absence is the
     # backend declining to answer -- reported as a known absence, never gapped. What must still
     # gap is a container the schema does NOT allow, which is the second half below.
-    check("28 an omitted coupon container is reported as a known absence, not a gap",
-          "reset coupons" in done.stdout and "not reported" in done.stdout, done.stdout)
+    check("28 an omitted voucher container is reported as a known absence, not a gap",
+          any("not reported" in row for row in voucher_band(done.stdout)), done.stdout)
     check("28 it is not a silent omission either -- the row is printed",
-          done.stdout.count("reset coupons") == 1, done.stdout)
+          len([r for r in voucher_band(done.stdout) if not r.startswith("credits")]) == 1,
+          str(voucher_band(done.stdout)))
     check("28 the usage window beside it still reports", "61.0%" in done.stdout, done.stdout)
     check("28 and the run stays clean", done.returncode == 0,
           f"rc={done.returncode}\n{done.stdout}")
@@ -746,7 +782,7 @@ with tempfile.TemporaryDirectory() as tmp:
                          "usedPercent": 61, "windowDurationMins": 10080, "resetsAt": epoch(30)}},
                          "rateLimitResetCredits": {"notTheCount": 1}})
     check("28b a present container missing its required count gaps",
-          "reset coupons" in done.stdout and "[field-malformed]" in done.stdout, done.stdout)
+          "reset vouchers" in done.stdout and "[field-malformed]" in done.stdout, done.stdout)
     check("28b the run exits 1", done.returncode == 1, f"rc={done.returncode}")
     check("28b the warning names the Codex home, not the clean Claude profile",
           ".codexBad" in done.stdout.split("warnings")[-1]
@@ -851,7 +887,7 @@ with tempfile.TemporaryDirectory() as tmp:
           "rateLimitResetCredits": COUPONS}, "codex/primary"),
         ("resetsAt null",
          {"rateLimits": {"limitId": "codex", "primary": dict(OK_WINDOW, resetsAt=None)},
-          "rateLimitResetCredits": COUPONS}, "no reset time reported by the backend"),
+          "rateLimitResetCredits": COUPONS}, "not reported"),
         ("limitId null",
          {"rateLimits": {"limitId": None, "primary": OK_WINDOW},
           "rateLimitResetCredits": COUPONS}, "codex/weekly"),
@@ -909,10 +945,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("33b the overflowing codex window gaps under its own pool and slot",
           "codex_bad/primary" in done.stdout and "[internal-error]" in done.stdout, done.stdout)
     check("33b the OTHER pool still reports", "codex/weekly" in done.stdout, done.stdout)
-    coupon_rows_33b = [ln for ln in done.stdout.splitlines()
-                       if ln.strip().startswith("reset coupons")]
-    check("33b and the coupon row beside it still reports its own count",
-          len(coupon_rows_33b) == 1 and coupon_rows_33b[0].split()[2] == "2",
+    coupon_rows_33b = [row for row in voucher_band(done.stdout)
+                       if not row.startswith("credits")]
+    check("33b and the voucher row beside it still reports its own count",
+          len(coupon_rows_33b) == 1 and coupon_rows_33b[0].split()[1] == "2",
           str(coupon_rows_33b))
     check("33b no traceback escaped", "Traceback" not in done.stderr, done.stderr)
 
@@ -935,8 +971,9 @@ with tempfile.TemporaryDirectory() as tmp:
     check("33c an infinite codex percentage gaps its own window",
           "codex/primary" in done.stdout and "[field-malformed]" in done.stdout, done.stdout)
     check("33c it is never rendered as a measurement", "inf%" not in done.stdout, done.stdout)
-    check("33c the coupon row beside it still reports",
-          "reset coupons" in done.stdout, done.stdout)
+    check("33c the voucher row beside it still reports",
+          any(row.split()[1:2] == ["1"] for row in voucher_band(done.stdout)),
+          str(voucher_band(done.stdout)))
     check("33c and the Claude side stays clean and visible",
           "42.0%" in done.stdout and ".claudeF" not in done.stdout.split("warnings")[-1],
           done.stdout)
@@ -1136,8 +1173,10 @@ with tempfile.TemporaryDirectory() as tmp:
         R.HTTPSConnection = Recording
         with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
             produced = R._claude_live(reader)
-            for record in produced:
-                print(record.render())
+            # Drive the REAL renderer, not a per-record helper: the oracle below asks whether a
+            # secret can reach stdout, and only what actually prints can answer that.
+            R._render([("Claude Code", ".claudeRead", produced)], [],
+                      datetime.datetime.now(datetime.timezone.utc), R.Paint(False))
     finally:
         R.HTTPSConnection = original
 
@@ -1414,6 +1453,499 @@ with tempfile.TemporaryDirectory() as tmp:
         caught = any(piece in mutated for piece in slices_of(SENTINEL_TOKEN))
         check(f"25 the oracle catches a {label}", caught, f"{mutated!r} evaded every slice")
 
+# --- 40 -- the table: ordering, gauge, partition, colour ----------------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # Percentages chosen so that a wrong sort is visible: descending order is NOT the order the
+    # entries are written in, nor alphabetical by pool name.
+    ordered = make_claude(root, ".claudeOrd", cached(entries=[
+        entry(kind="weekly_all", percent=12, resets=iso(40)),
+        entry(kind="session", percent=91, resets=iso(2)),
+        entry(kind="weekly_scoped", percent=55, resets=iso(30),
+              scope={"model": {"id": None, "display_name": "Fable"}, "surface": None}),
+    ]))
+    done, _, _ = run(["--claude-profile", str(ordered)], root=root)
+    rows = [ln for ln in done.stdout.splitlines() if "%" in ln and ".claudeOrd" in ln]
+    percents = [float(ln.split("%")[0].split()[-1]) for ln in rows]
+    check("40 the table is sorted by consumption, descending",
+          percents == sorted(percents, reverse=True), str(percents))
+    check("40 every pool still gets its own row -- nothing is collapsed",
+          len(rows) == 3, str(rows))
+
+    # The gauge is a function of the percentage and of nothing else.
+    for percent, filled in ((0, 0), (4, 0), (5, 1), (47, 5), (99, 10), (100, 10), (137, 10)):
+        bar = R._bar(float(percent))
+        check(f"40 the gauge for {percent}% has {filled} filled cells",
+              bar.count("\u2588") == filled and len(bar) == R.BAR_CELLS, f"{percent} -> {bar!r}")
+    check("40 a pool past 100% fills the gauge AND prints its real figure",
+          R._bar(137.0).count("\u2588") == R.BAR_CELLS)
+
+    # The sort key is TOTAL: equal percent and equal reset must still order deterministically,
+    # or two runs over the same data can disagree.
+    same = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5)
+    twins = [R.Row(".b", R.CLAUDE_GROUP, R.Record("pool", R.REPORTED, percent=50.0, resets=same)),
+             R.Row(".a", R.CLAUDE_GROUP, R.Record("pool", R.REPORTED, percent=50.0, resets=same))]
+    check("40 the ordering is total -- a tie falls back to the candidate name",
+          [row.where for row in R._sorted_rows(twins)] == [".a", ".b"],
+          str([row.where for row in R._sorted_rows(twins)]))
+    check("40 and it is stable across the reversed input",
+          R._sorted_rows(twins) == R._sorted_rows(list(reversed(twins))))
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # A stale row and a live row in one run: they must land in DIFFERENT sections, because a
+    # previous window's percentage is not comparable to a current one and sorting them together
+    # is what put an expired 67% above a live 46% in the first draft.
+    mixed = make_claude(root, ".claudeMix", cached(entries=[
+        entry(kind="weekly_all", percent=40, resets=iso(20)),
+        entry(kind="session", percent=95, resets=iso(-3)),
+    ]))
+    done, _, _ = run(["--claude-profile", str(mixed)], root=root)
+    before, marker, after = done.stdout.partition("stale -- the % is the PREVIOUS window")
+    check("41 the stale section exists and names itself", bool(marker), done.stdout)
+    check("41 the live row is above it", "40.0%" in before, done.stdout)
+    check("41 the stale row is below it", "95.0%" in after and "95.0%" not in before, done.stdout)
+    check("41 the stale heading still carries the diagnostic token",
+          "[stale-after-reset]" in done.stdout, done.stdout)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    coloured = make_claude(root, ".claudeCol", cached(entries=[entry(percent=42)]))
+    plain, _, _ = run(["--claude-profile", str(coloured), "--color=never"], root=root)
+    forced, _, _ = run(["--claude-profile", str(coloured), "--color=always"], root=root)
+    auto, _, _ = run(["--claude-profile", str(coloured)], root=root)
+    check("42 --color=never emits no escape", "\x1b" not in plain.stdout, repr(plain.stdout[:200]))
+    check("42 auto over a pipe emits no escape either -- this suite compares plain text",
+          "\x1b" not in auto.stdout, repr(auto.stdout[:200]))
+    check("42 --color=always does emit escapes", "\x1b" in forced.stdout)
+    stripped = re.sub(r"\x1b\[[0-9;]*m", "", forced.stdout)
+    # The load-bearing one: colour may change how the report LOOKS and nothing else. Widths are
+    # computed on the plain cells, so stripping the escapes must give back the plain run exactly.
+    check("42 stripping the colour yields byte-identical text",
+          [ln.rstrip() for ln in stripped.splitlines()][2:]
+          == [ln.rstrip() for ln in plain.stdout.splitlines()][2:],
+          "\n".join(difflib.unified_diff(plain.stdout.splitlines(),
+                                          stripped.splitlines(), lineterm=""))[:1200])
+    check("42 the percentage really is painted, not just the title",
+          "42.0%" in re.sub(r"\x1b\[[0-9;]*m", "", forced.stdout)
+          and any("42.0%" in seg for seg in forced.stdout.split("\x1b[")), forced.stdout[:300])
+
+    # `auto` must actually turn colour ON at a terminal -- over a pipe every branch looks alike,
+    # so a renderer that only ever coloured under `--color=always` would pass everything above.
+    controller, follower = pty.openpty()
+    seen_chunks: list[bytes] = []
+
+    def drain() -> None:
+        while True:
+            try:
+                chunk = os.read(controller, 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            seen_chunks.append(chunk)
+
+    reader_thread = threading.Thread(target=drain, daemon=True)
+    reader_thread.start()
+    env = dict(os.environ)
+    env["HOME"] = str(root / "home")
+    env["PATH"] = f"{install_stub(root)}{os.pathsep}{env['PATH']}"
+    env["STUB_RECORD"] = str(root / "rec.json")
+    env["STUB_TRANSCRIPT"] = str(root / "tr.txt")
+    env["STUB_MODE"] = "ok"
+    env["STUB_RESULT"] = json.dumps(DEFAULT_RESULT)
+    env["STUB_SECURITY_MARKER"] = str(root / "sec.txt")
+    env.pop("NO_COLOR", None)
+    subprocess.run([sys.executable, str(SCRIPT), "--claude-profile", str(coloured)],
+                   stdout=follower, stderr=subprocess.DEVNULL, env=env, timeout=90)
+    os.close(follower)
+    reader_thread.join(timeout=20)
+    os.close(controller)
+    seen = b"".join(seen_chunks)
+    check("42 auto AT A TERMINAL turns colour on", b"\x1b[" in seen, repr(seen[:200]))
+
+    env["NO_COLOR"] = "1"
+    done_no, _, _ = run(["--claude-profile", str(coloured)], root=root,
+                        extra_env={"NO_COLOR": "1"})
+    check("42 NO_COLOR is honoured", "\x1b" not in done_no.stdout)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    home = make_codex_home(root, ".codexVoucher")
+    granted = epoch(-1)
+    expires = epoch(24 * 20)
+    done, _, _ = run(["--claude-profile", str(make_claude(root, ".claudeV", cached(
+        entries=[entry()]))), "--codex-home", str(home)], root=root, stub_result=dict(
+        DEFAULT_RESULT, rateLimitResetCredits={"availableCount": 1, "credits": [
+            {"id": "x", "status": "available", "grantedAt": granted, "expiresAt": expires,
+             "title": "Full reset"}]}))
+    band = voucher_band(done.stdout)
+    check("43 the voucher band carries the vendor's own title", any("Full reset" in r for r in band),
+          str(band))
+    check("43 and says when it expires", any("expires" in r for r in band), str(band))
+    check("43 with the time left beside it", any("in 19d" in r or "in 20d" in r for r in band),
+          str(band))
+    check("43 the run stays clean", done.returncode == 0, done.stdout)
+
+    # Expiry and title are OPTIONAL in the payload. A home that reports a bare count must render,
+    # not gap -- the same rule the count itself already lives under.
+    bare, _, _ = run(["--claude-profile", str(root / ".claudeV"), "--codex-home", str(home)],
+                     root=root, stub_result=dict(DEFAULT_RESULT, rateLimitResetCredits={
+                         "availableCount": 3}))
+    check("43 a bare count with no credit list still renders",
+          any(row.split()[1:2] == ["3"] for row in voucher_band(bare.stdout)),
+          str(voucher_band(bare.stdout)))
+    check("43 and does not gap the run", bare.returncode == 0, bare.stdout)
+
+    widest = max((len(ln) for ln in done.stdout.splitlines()), default=0)
+    check("44 no rendered line runs past 110 columns", widest <= 110, f"{widest}: {done.stdout}")
+
+# --- 45 -- the voucher contract under a zero count and hostile optional detail ------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    claude_ok = make_claude(root, ".claudeZ", cached(entries=[entry()]))
+    home = make_codex_home(root, ".codexZ")
+
+    # A REPORTED zero is an integer, and must not be reworded. `0` and `not reported` are two
+    # different facts -- a measured empty balance, and a backend that sent no voucher data at all
+    # -- and a renderer that prints a word for the number erases the difference.
+    zero, _, _ = run(["--claude-profile", str(claude_ok), "--codex-home", str(home)], root=root,
+                     stub_result=dict(DEFAULT_RESULT,
+                                      rateLimitResetCredits={"availableCount": 0}))
+    band = voucher_rows(zero.stdout)
+    check("45 a reported zero prints the integer 0", len(band) == 1
+          and band[0].split()[1] == "0", str(band))
+    check("45 and never the word none", "none" not in " ".join(band), str(band))
+    check("45 a zero count is still a clean run", zero.returncode == 0, zero.stdout)
+
+    # ... and it must not be STYLED as a voucher there is one of. Every assertion above runs
+    # through a pipe with painting off, so a renderer that dropped the zero branch would paint a
+    # measured zero bold green -- correct text, and a colour that says the opposite.
+    lit, _, _ = run(["--claude-profile", str(claude_ok), "--codex-home", str(home),
+                     "--color=always"], root=root,
+                    stub_result=dict(DEFAULT_RESULT,
+                                     rateLimitResetCredits={"availableCount": 0}))
+    zero_line = voucher_rows(lit.stdout)
+    check("45 a coloured zero is dimmed, not painted as available",
+          len(zero_line) == 1 and "\x1b[2m0\x1b[0m" in zero_line[0], repr(zero_line))
+    one, _, _ = run(["--claude-profile", str(claude_ok), "--codex-home", str(home),
+                     "--color=always"], root=root,
+                    stub_result=dict(DEFAULT_RESULT,
+                                     rateLimitResetCredits={"availableCount": 1}))
+    one_line = voucher_rows(one.stdout)
+    check("45 a coloured non-zero IS painted as available",
+          len(one_line) == 1 and "\x1b[1;32m1\x1b[0m" in one_line[0], repr(one_line))
+
+    # Optional detail may NEVER gap the candidate. Each of these is a shape the vendor could
+    # send; every one must still print the validated count and every usage row beside it.
+    for label, credits in (
+        ("credits is not a list", 7),
+        ("credits is a string", "nope"),
+        ("a credit is not an object", [42]),
+        ("an overlong title", [{"status": "available", "title": "T" * 400,
+                                "expiresAt": epoch(48)}]),
+        ("a control-bearing title", [{"status": "available", "title": "a\u0007b",
+                                      "expiresAt": epoch(48)}]),
+        ("an unusable expiry", [{"status": "available", "title": "Full reset",
+                                 "expiresAt": "tomorrow"}]),
+        ("no available credit", [{"status": "spent", "title": "Full reset"}]),
+    ):
+        done, _, _ = run(["--claude-profile", str(claude_ok), "--codex-home", str(home)],
+                         root=root, stub_result=dict(DEFAULT_RESULT, rateLimitResetCredits={
+                             "availableCount": 2, "credits": credits}))
+        rows = voucher_rows(done.stdout)
+        check(f"45 {label} does not gap the run", done.returncode == 0,
+              f"rc={done.returncode}\n{done.stdout}")
+        check(f"45 {label} still prints the validated count",
+              len(rows) == 1 and rows[0].split()[1] == "2", str(rows))
+        check(f"45 {label} keeps the usage rows beside it", "54.0%" in done.stdout, done.stdout)
+
+# --- 46 -- a candidate-level diagnostic must still REACH stdout ---------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # The suite harvests `[token]`s from stdout and checks them against the enum. That oracle is
+    # only as good as the tokens that actually print, so this pins the candidate-level path
+    # explicitly: blanking the code after _examine still exits 1 and still warns, and would
+    # otherwise pass every other check while the token silently vanished from the report.
+    unreadable = root / ".claudeNo"
+    unreadable.mkdir()
+    (unreadable / ".claude.json").write_text("{ not json", encoding="utf-8")
+    done, _, _ = run(["--claude-profile", str(unreadable)], root=root)
+    body = done.stdout.split("warnings")[0]
+    check("46 the candidate's diagnostic token reaches the report body, not just the warning",
+          "[payload-malformed]" in body, done.stdout)
+    check("46 and the run gaps", done.returncode == 1, f"rc={done.returncode}")
+
+# --- 47 -- column arithmetic is measured in terminal columns, not code points -------------------
+
+check("47 a CJK character counts as two columns", R._width("\u4e2d") == 2)
+check("47 an ASCII character counts as one", R._width("a") == 1)
+check("47 a combining mark adds nothing", R._width("e\u0301") == 1, str(R._width("e\u0301")))
+check("47 the gauge is one column per cell", R._width(R._bar(50.0)) == R.BAR_CELLS)
+check("47 padding fills to the column count, not the code-point count",
+      R._width(R._pad("\u4e2d\u4e2d", 8)) == 8, repr(R._pad("\u4e2d\u4e2d", 8)))
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    wide = make_claude(root, ".claude\u4e2d\u6587", cached(entries=[entry(percent=42)]))
+    # A Codex home too: with none, the Codex side reports no candidates and gaps the run, which
+    # would make the clean-exit assertion below about the fixture rather than about the name.
+    done, _, _ = run(["--claude-profile", str(wide),
+                      "--codex-home", str(make_codex_home(root, ".codexW"))], root=root)
+    check("47 a wide profile name does not gap the run", done.returncode == 0, done.stdout)
+    rows = [ln for ln in done.stdout.splitlines() if "42.0%" in ln]
+    header = [ln for ln in done.stdout.splitlines() if "SOURCE" in ln]
+    # The USED column starts where the gauge starts. Compare THAT prefix against the header's
+    # prefix before "USED": a `len()`-based renderer under-counts the wide name and the whole
+    # row slides left, which is exactly the defect this fixture exists for.
+    gauge_at = min((rows[0].find(cell) for cell in ("\u2588", "\u2591") if cell in rows[0]),
+                   default=-1)
+    check("47 and the row's USED column starts at the header's column",
+          gauge_at > 0 and R._width(rows[0][:gauge_at]) == R._width(header[0].split("USED")[0]),
+          f"{rows[0][:gauge_at]!r} vs {header[0].split('USED')[0]!r}")
+
+# --- 48 -- the vendor stays readable off the row, and the tie-break is complete -----------------
+
+# Under --live BOTH vendors are live, and two candidates can share a directory basename, so the
+# source cell has to distinguish them or the flat table can print two indistinguishable rows.
+check("48 a live Claude row reads `api`", R._source("live 26 Aug 19:00 CEST", R.CLAUDE_GROUP)
+      == "api")
+check("48 a live Codex row reads `live`", R._source("live 26 Aug 19:00 CEST", R.CODEX_GROUP)
+      == "live")
+check("48 a cached Claude row reads its age", R._source("cache 2d04h old", R.CLAUDE_GROUP)
+      == "2d04h")
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    same = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=6)
+    live_row = R.Record("weekly_all", R.REPORTED, percent=40.0, resets=same,
+                        freshness="live 26 Aug 19:00 CEST")
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        R._render([(R.CLAUDE_GROUP, ".dup", [live_row])], [],
+                  datetime.datetime.now(datetime.timezone.utc), R.Paint(False))
+    check("48 and the renderer prints it, so the vendor is recoverable from the row",
+          " api" in out.getvalue(), out.getvalue())
+
+# The tie-break must reach freshness: two rows alike in every earlier key but visibly different
+# on the page would otherwise swap places when the arguments are reversed.
+twins = [R.Row(".x", R.CLAUDE_GROUP,
+               R.Record("pool", R.REPORTED, percent=50.0, resets=same,
+                        freshness="cache 9h old")),
+         R.Row(".x", R.CLAUDE_GROUP,
+               R.Record("pool", R.REPORTED, percent=50.0, resets=same,
+                        freshness="cache 1h old"))]
+check("48 the ordering is total down to freshness",
+      [row.record.freshness for row in R._sorted_rows(twins)]
+      == [row.record.freshness for row in R._sorted_rows(list(reversed(twins)))],
+      str([row.record.freshness for row in R._sorted_rows(twins)]))
+check("48 and it is the earlier cache that sorts first",
+      R._sorted_rows(twins)[0].record.freshness == "cache 1h old",
+      R._sorted_rows(twins)[0].record.freshness)
+
+# --- 49 -- what a vendor may put on the page ----------------------------------------------------
+
+# Every string `_text` guards is PRINTED, so the rule is about forging report structure, not
+# about tidiness. Authored with chr() throughout: pasting these characters literally into a
+# source file is how they end up invisible in a diff and silently wrong.
+LINE_SEPARATOR, PARAGRAPH_SEPARATOR, RIGHT_TO_LEFT_OVERRIDE = chr(0x2028), chr(0x2029), chr(0x202E)
+for label, character, allowed in (
+    ("U+2028 LINE SEPARATOR", LINE_SEPARATOR, False),
+    ("U+2029 PARAGRAPH SEPARATOR", PARAGRAPH_SEPARATOR, False),
+    ("U+202E RIGHT-TO-LEFT OVERRIDE", RIGHT_TO_LEFT_OVERRIDE, False),
+    ("U+200D ZERO WIDTH JOINER", chr(0x200D), False),
+    ("U+0007 BEL", chr(0x07), False),
+    ("a lone surrogate", chr(0xD800), False),
+    # Zs is deliberately allowed: a vendor label may hold a no-break space, and refusing it would
+    # be a check the field's owner could never clear.
+    ("U+00A0 NO-BREAK SPACE", chr(0xA0), True),
+    ("U+3000 IDEOGRAPHIC SPACE", chr(0x3000), True),
+):
+    try:
+        R._text("a" + character + "b")
+        verdict = True
+    except R.Malformed:
+        verdict = False
+    check(f"49 _text {'accepts' if allowed else 'refuses'} {label}", verdict == allowed)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # The whole point, end to end: `str.splitlines()` breaks on U+2028, so a title carrying one
+    # would add lines to the report that look like the report's own -- forged structure out of
+    # vendor JSON, on a run that stays clean.
+    forged = f"Full{LINE_SEPARATOR}warnings{LINE_SEPARATOR}  trusted"
+    done, _, _ = run(["--claude-profile", str(make_claude(root, ".claudeU", cached(
+        entries=[entry()]))), "--codex-home", str(make_codex_home(root, ".codexU"))],
+        root=root, stub_result=dict(DEFAULT_RESULT, rateLimitResetCredits={
+            "availableCount": 1, "credits": [{"status": "available", "title": forged,
+                                              "expiresAt": epoch(48)}]}))
+    check("49 a separator-bearing title cannot forge a line",
+          not any(line.strip() == "trusted" for line in done.stdout.splitlines()), done.stdout)
+    check("49 nor a second warnings heading",
+          done.stdout.count("warnings") == 0, done.stdout)
+    check("49 the title is simply dropped, and the count still prints",
+          any(row.split()[1:2] == ["1"] for row in voucher_band(done.stdout)),
+          str(voucher_band(done.stdout)))
+    check("49 and the run stays clean", done.returncode == 0, done.stdout)
+
+# --- 50 -- width is per GRAPHEME CLUSTER, not per code point ------------------------------------
+
+for label, text, columns in (
+    ("a thumbs-up with a skin tone", chr(0x1F44D) + chr(0x1F3FD), 2),
+    ("an emoji with a variation selector", chr(0x1F600) + chr(0xFE0F), 2),
+    ("a ZWJ family cluster", chr(0x1F468) + chr(0x200D) + chr(0x1F469), 2),
+    ("a bare wide emoji", chr(0x1F600), 2),
+    ("a CJK ideograph", chr(0x4E2D), 2),
+    ("plain ASCII", "abc", 3),
+):
+    check(f"50 {label} measures {columns} columns", R._width(text) == columns,
+          f"{text!r} -> {R._width(text)}")
+check("50 padding a cluster fills to the column count",
+      R._width(R._pad(chr(0x1F44D) + chr(0x1F3FD), 6)) == 6)
+
+# --- 51 -- the voucher band's own vocabulary and its one unescaped field ------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    claude_v = make_claude(root, ".claudeV2", cached(entries=[entry()]))
+    home_v = make_codex_home(root, ".codexV2")
+
+    def voucher_run(credit, colour=False):
+        argv = ["--claude-profile", str(claude_v), "--codex-home", str(home_v)]
+        if colour:
+            argv.append("--color=always")
+        done, _, _ = run(argv, root=root, stub_result=dict(
+            DEFAULT_RESULT, rateLimitResetCredits={"availableCount": 1, "credits": [credit]}))
+        return done
+
+    # The title is the ONE printed vendor string that used to skip _safe_name, and it lands in
+    # exactly the slot the report's own `expires <date>  in <N>d` pair occupies -- so a title
+    # spelling that pair out reads as the report's own claim about when the voucher lapses.
+    forged = voucher_run({"status": "available", "title": "expires 31 Dec 2099 CEST  in 9999d"})
+    band = [r for r in voucher_band(forged.stdout) if not r.startswith("credits")]
+    check("51 a title is quoted, so it cannot pose as the report's own expiry",
+          len(band) == 1 and '"expires 31 Dec 2099 CEST  in 9999d"' in band[0], str(band))
+    check("51 and no genuine expiry is claimed beside it",
+          band and band[0].count("expires") == 1, str(band))
+
+    # A no-break space is legitimate in a vendor label and _text allows it -- but it must PRINT
+    # as an escape like every other name, not as an invisible space.
+    nbsp = voucher_run({"status": "available", "title": "Full" + chr(0xA0) + "reset"})
+    band = [r for r in voucher_band(nbsp.stdout) if not r.startswith("credits")]
+    check("51 an invisible space in a title is escaped, not printed",
+          bool(band) and chr(0xA0) not in band[0] and "xa0" in band[0], str(band))
+
+    # An expired voucher is not a window that reset. `_relative`'s "reset ... ago" is the wrong
+    # noun, and a lapsed voucher is exactly the case the operator needs stated plainly.
+    lapsed = voucher_run({"status": "available", "title": "Full reset", "expiresAt": epoch(-400 * 24)})
+    band = [r for r in voucher_band(lapsed.stdout) if not r.startswith("credits")]
+    check("51 a lapsed voucher reads `expired`",
+          bool(band) and "expired" in band[0] and "ago" not in band[0], str(band))
+    live_v = voucher_run({"status": "available", "title": "Full reset", "expiresAt": epoch(48)})
+    band = [r for r in voucher_band(live_v.stdout) if not r.startswith("credits")]
+    check("51 and one still in date reads the time left",
+          bool(band) and "in 1d" in band[0] and "expired" not in band[0], str(band))
+
+# --- 52 -- a dimmed section is dim all the way across -------------------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    mixed = make_claude(root, ".claudeDim", cached(entries=[
+        entry(kind="weekly_all", percent=40, resets=iso(20)),
+        entry(kind="session", percent=95, resets=iso(-3)),
+    ]))
+    done, _, _ = run(["--claude-profile", str(mixed), "--color=always"], root=root)
+    stale_rows = [ln for ln in done.stdout.splitlines() if "95.0%" in ln]
+    # Every paint() emits its own reset, so wrapping a finished line in DIM cancels the dim at
+    # the first inner reset and the row renders half dim. Each RUN of cells must carry it.
+    # Not "every painted run is dim" -- that stays true when a run is left UNPAINTED, which is
+    # the exact shape of the defect. Every visible character has to sit inside a dim run, so the
+    # row opens with one and no gap between runs carries text.
+    def undimmed(row: str) -> str:
+        visible, index = "", 0
+        dim = False
+        while index < len(row):
+            if row[index] == "\x1b":
+                close = row.index("m", index)
+                code = row[index + 2:close]
+                dim = code.startswith("2") and code != "0"
+                index = close + 1
+                continue
+            if not dim and row[index] != " ":
+                visible += row[index]
+            index += 1
+        return visible
+
+    check("52 a stale row has no character outside a dim run",
+          len(stale_rows) == 1 and undimmed(stale_rows[0]) == "",
+          f"{undimmed(stale_rows[0])!r} in {stale_rows[0]!r}")
+    live_rows = [ln for ln in done.stdout.splitlines() if "40.0%" in ln]
+    check("52 while a current row keeps its reset at full weight",
+          len(live_rows) == 1 and "\x1b[2min 19h" not in live_rows[0], repr(live_rows))
+
+# --- 53 -- one layout for every pool block ------------------------------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # Short values in one block and long ones in another. Measured per block, the header would be
+    # wider than its own columns (printing `WHEREPOOLUSED` with nothing between the labels) and
+    # each section would pick its own column starts -- a table whose columns move between
+    # sections is not a table.
+    mixed = make_claude(root, ".a", cached(entries=[
+        entry(kind="s", percent=40, resets=iso(20)),
+        entry(kind="a-considerably-longer-pool-name", percent=95, resets=iso(-3)),
+    ]))
+    # BOTH candidate names are two characters, so the WHERE column's widest value is narrower
+    # than the word WHERE. That is the only column a real report can drive under its own label,
+    # and without the floor the header prints `WHEREPOOL` with nothing between them.
+    done, _, _ = run(["--claude-profile", str(mixed),
+                      "--codex-home", str(make_codex_home(root, ".b"))], root=root)
+    header = [ln for ln in done.stdout.splitlines() if "SOURCE" in ln][0]
+    # Not "a space follows each label" -- that stays true when a LATER column is too narrow. Each
+    # label must occupy its own column, so the header must equal the labels padded to the widths
+    # the rows use, which is what the floor exists to guarantee.
+    for label in ("WHERE", "POOL", "USED", "RESET"):
+        check(f"53 the header keeps a gap after {label}", f"{label} " in header, repr(header))
+    starts_at = [header.index(label) for label in ("WHERE", "POOL", "USED", "RESET", "SOURCE")]
+    check("53 the header's labels are in column order and never run together",
+          starts_at == sorted(starts_at)
+          and all(b - a > len(label) for a, b, label in
+                  zip(starts_at, starts_at[1:], ("WHERE", "POOL", "USED", "RESET"))),
+          repr(header))
+    body = [ln for ln in done.stdout.splitlines()
+            if "40.0%" in ln or "95.0%" in ln]
+    starts = {ln.index("\u2588") if "\u2588" in ln else ln.index("\u2591") for ln in body}
+    check("53 every block starts its USED column at the same place",
+          len(body) == 2 and len(starts) == 1, f"{starts} in {body}")
+    check("53 and that is where the header puts it",
+          starts and starts.pop() == R._width(header.split("USED")[0]), repr(header))
+
+    # A report whose pools are ALL stale still needs column names.
+    # No Codex home on purpose: a Codex row would be CURRENT and would put a row in the first
+    # block, which is exactly the condition that hides this defect. The run gaps on the absent
+    # Codex side, which is beside the point being made here.
+    stale_only = make_claude(root, ".claudeAllStale", cached(entries=[
+        entry(kind="session", percent=71, resets=iso(-5))]))
+    done, _, _ = run(["--claude-profile", str(stale_only)], root=root)
+    check("53 a report with no current rows still prints the header",
+          any("WHERE" in ln and "SOURCE" in ln for ln in done.stdout.splitlines()), done.stdout)
+    check("53 above the stale block it belongs to",
+          done.stdout.index("WHERE") < done.stdout.index("stale --"), done.stdout)
+    check("53 and that report has no current rows at all",
+          "71.0%" in done.stdout
+          and done.stdout.index("stale --") < done.stdout.index("71.0%"), done.stdout)
+
+# The short RESET labels stay distinguishable -- that distinction is why the cell carries the
+# note at all, and the long prose would set the column width for every block.
+check("53 an inactive pool and an absent reset time still read differently",
+      R.RESET_LABELS["inactive, no current window"]
+      != R.RESET_LABELS["no reset time reported by the backend"])
+check("53 an unmapped note falls through to itself, wide but correct",
+      R.RESET_LABELS.get("something new", "something new") == "something new")
+
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -1421,7 +1953,7 @@ if failures:
         print(f"  {failure}")
     sys.exit(1)
 
-MIN_CHECKS = 250
+MIN_CHECKS = 445
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

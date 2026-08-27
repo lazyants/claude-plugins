@@ -218,9 +218,31 @@ def install(root: Path, source: Path, bin_dir: Path, *, force: bool = False,
                           env=sandbox_env(root) if env is None else env)
 
 
-def coupon_field(line: str) -> str:
-    """The value the `reset coupons` row reports, without its trailing explanatory note."""
-    return line.split("reset coupons", 1)[1].strip().split("  ", 1)[0].strip()
+def voucher_field(stdout: str) -> str:
+    """The value the voucher band reports for the single Codex home in these fixtures.
+
+    The band is a block above the table, keyed by HOME rather than by a row label, so there is no
+    `reset ...` prefix to split on any more -- the row is `<home>  <value> ...` and the value is
+    the second field. Read structurally rather than by substring: `"0" in line` is also true of a
+    row reading 10, and the credits row lives in the same band.
+    """
+    rows = [line.strip() for line in stdout.splitlines()]
+    # Containment, not a prefix: with colour on, the heading opens with an escape sequence, and a
+    # prefix test would then find no band at all -- which reads exactly like a report that
+    # printed none.
+    heading = next((i for i, row in enumerate(rows) if "RESET VOUCHERS" in row), None)
+    if heading is None:
+        return ""
+    for row in rows[heading + 1:]:
+        if not row:               # a blank line ends the band
+            break
+        if row.startswith("credits"):
+            continue
+        fields = row.split(None, 1)
+        if len(fields) < 2:
+            return ""
+        return fields[1].split("  ", 1)[0].strip()
+    return ""
 
 
 def unrunnable(path: Path, env: dict) -> bool:
@@ -356,21 +378,17 @@ with stable_case() as (root, source, bin_dir):
     zero_env["STUB_RESULT"] = json.dumps(codex_result({"availableCount": 0, "credits": []}))
     zero = run_command(shim, ["--claude-profile", str(profile), "--codex-home", str(home)],
                        zero_env, cwd="/")
-    voucher = [ln for ln in zero.stdout.splitlines() if "reset coupons" in ln]
-    # The FIELD, not a substring: `"0" in line` is also true of a row reading 10, and a
-    # falsy-boundary mutant rendering `count or 10` would sail through that. The row carries a
-    # trailing note after a double space, so the field is what precedes it.
     check("15 availableCount 0 renders as exactly 0, not as an absence",
-          len(voucher) == 1 and coupon_field(voucher[0]) == "0", str(voucher))
+          voucher_field(zero.stdout) == "0", zero.stdout)
+    check("15 and never as the word none", "none" not in zero.stdout, zero.stdout)
     check("15 a zero count is still a clean run", zero.returncode == 0,
           f"rc={zero.returncode}\n{zero.stdout}")
     gone_env = sandbox_env(root)
     gone_env["STUB_RESULT"] = json.dumps(codex_result("omitted"))
     gone = run_command(shim, ["--claude-profile", str(profile), "--codex-home", str(home)],
                        gone_env, cwd="/")
-    absent = [ln for ln in gone.stdout.splitlines() if "reset coupons" in ln]
     check("15 an omitted field renders as exactly `not reported`",
-          len(absent) == 1 and coupon_field(absent[0]) == "not reported", str(absent))
+          voucher_field(gone.stdout) == "not reported", gone.stdout)
     check("15 an omitted field is still a clean run", gone.returncode == 0,
           f"rc={gone.returncode}\n{gone.stdout}")
 
