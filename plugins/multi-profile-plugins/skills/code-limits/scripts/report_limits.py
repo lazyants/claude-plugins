@@ -297,7 +297,6 @@ CLAUDE_GROUP = "Claude Code"
 CODEX_GROUP = "Codex"
 VOUCHER_NAME = "reset vouchers"
 CREDITS_NAME = "credits"
-BAR_CELLS = 10
 
 # ANSI, applied to finished cells only. Width arithmetic runs on the PLAIN strings -- an escape
 # sequence inside a `:<12` would pad the visible text by however many bytes the escape happens to
@@ -362,10 +361,15 @@ def _pad(text: str, width: int) -> str:
     return text + " " * max(0, width - _width(text))
 
 
-def _bar(percent: float) -> str:
-    """A ten-cell gauge. Derived from the same float the number is, never a second measurement."""
-    filled = min(BAR_CELLS, max(0, math.floor(percent / (100 / BAR_CELLS) + 0.5)))
-    return "\u2588" * filled + "\u2591" * (BAR_CELLS - filled)
+def _figure(percent: float) -> str:
+    """A percentage with no trailing zero to pad the column out: `0`, `7.5`, `100`.
+
+    Three window columns each spending a fixed `%5.1f` pushed the table past the width a
+    terminal shows without wrapping, and the `.0` it bought that room for was never a
+    measurement: every vendor here reports whole numbers today, and the one whose schema allows
+    a fraction still prints it.
+    """
+    return f"{percent:.1f}".rstrip("0").rstrip(".") or "0"
 
 
 def _hue(percent: float) -> str:
@@ -391,10 +395,14 @@ def _source(freshness: str, group: str) -> str:
 
 
 def _relative(when: datetime.datetime, now: datetime.datetime) -> str:
-    """`in 8h`, `in 5d 21h`, `reset 3d ago`. Absolute stamps are for the header and the vouchers.
+    """`in 8h`, `in 5d 21h`, `3d 02h ago`. Absolute stamps are for the header and the vouchers.
 
     A window's usefulness is how long is LEFT, and a reader should not have to subtract dates to
     get it. The absolute time survives where it is the fact itself -- a voucher's expiry date.
+
+    The past direction says only `ago`. It used to open with the word `reset`, which cost six
+    columns in the widest cell on the page -- enough to wrap the table on a terminal that would
+    otherwise hold it -- to repeat what the column heading and the legend below already say.
     """
     delta = when - now
     seconds = int(abs(delta.total_seconds()))
@@ -406,7 +414,7 @@ def _relative(when: datetime.datetime, now: datetime.datetime) -> str:
         span = f"{hours}h"
     else:
         span = f"{max(1, rest // 60)}m"
-    return f"in {span}" if delta.total_seconds() > 0 else f"reset {span} ago"
+    return f"in {span}" if delta.total_seconds() > 0 else f"{span} ago"
 
 
 class Record:
@@ -414,11 +422,18 @@ class Record:
 
     def __init__(self, name: str, state: str, *, percent=None, resets=None,
                  freshness: str = "", diagnostic: str = "", note: str = "",
-                 info: bool = False, expires=None, title: str = "") -> None:
+                 info: bool = False, expires=None, title: str = "",
+                 family: str = "", window: str = "") -> None:
         if state not in TERMINAL_STATES:
             raise Malformed("internal-error")
         self.name = name
         self.state = state
+        # WHERE this observation sits in the table: `family` names the allowance -- one line --
+        # and `window` names the column across it. Both default to the record's own name, so a
+        # record built without them opens its own row and its own column instead of silently
+        # sharing a cell with a pool it has nothing to do with.
+        self.family = family or name
+        self.window = window or name
         # A RENDER kind, deliberately not a state: a coupon count or a credit balance was read
         # successfully, so it is `reported` for the exit contract and only the renderer needs to
         # know it carries no percentage.
@@ -464,18 +479,27 @@ class Row(NamedTuple):
 
 
 def _window_row(*, name: str, percent: float, resets: datetime.datetime, freshness: str,
-                now: datetime.datetime, active: bool,
+                now: datetime.datetime, family: str = "", window: str = "",
                 stale_note: str = "current window unknown without --live") -> Record:
+    """A window with a reset time. What decides whether it is CURRENT is that time and nothing
+    else -- past means the figure describes the previous window, future means it describes this
+    one.
+
+    `is_active` deliberately does not enter here. MEASURED across four accounts: exactly one pool
+    per account carries it, and it is whichever one is currently BINDING -- `.claude` had it on
+    `weekly_all` while its five-hour window, 9% used and resetting in 17 minutes, carried
+    `is_active: false`. Treated as "no current window" that greyed out a perfectly current
+    number as not comparable to the cell beside it, and greyed out the reset time with it. Which
+    pool binds first is worth knowing; it is not a reason to withdraw a figure from the page.
+    """
+    place = {"family": family, "window": window}
     if resets <= now:
         return Record(name, NO_CURRENT, percent=percent, resets=resets, freshness=freshness,
-                      diagnostic="stale-after-reset", note=stale_note)
-    if not active:
-        return Record(name, NO_CURRENT, percent=percent, resets=resets, freshness=freshness,
-                      note="inactive, no current window")
-    return Record(name, REPORTED, percent=percent, resets=resets, freshness=freshness)
+                      diagnostic="stale-after-reset", note=stale_note, **place)
+    return Record(name, REPORTED, percent=percent, resets=resets, freshness=freshness, **place)
 
 
-def _row_or_gap(name: str, produce) -> Record:
+def _row_or_gap(name: str, produce, *, family: str = "", window: str = "") -> Record:
     """Run one row producer so that EVERY failure becomes THIS row's gap, never the candidate's.
 
     The single place the per-record boundary is implemented. Three call sites had written it out
@@ -488,12 +512,39 @@ def _row_or_gap(name: str, produce) -> Record:
     try:
         return produce()
     except Malformed as exc:
-        return Record(name, GAP, diagnostic=exc.code)
+        return Record(name, GAP, diagnostic=exc.code, family=family, window=window)
     except Exception:
-        return Record(name, GAP, diagnostic="internal-error")
+        return Record(name, GAP, diagnostic="internal-error", family=family, window=window)
 
 
 # --- Claude Code -------------------------------------------------------------------------------
+
+# The allowance a `session`/`weekly_all` pair belongs to. They are two windows on ONE quota,
+# which is exactly why they belong on one line rather than on two that repeat the profile name.
+CLAUDE_ALL = "all"
+CLAUDE_KINDS = {"session": (CLAUDE_ALL, "5h"), "weekly_all": (CLAUDE_ALL, "weekly"),
+                "five_hour": (CLAUDE_ALL, "5h"), "seven_day": (CLAUDE_ALL, "weekly")}
+
+
+def _claude_place(kind: str, display: str) -> tuple[str, str]:
+    """(allowance, window) for one vendor kind. Total -- an unknown kind is never folded away.
+
+    A `weekly_*` kind this table has no entry for is still a weekly window, and it names its own
+    quota through the model it is scoped to, so it joins the weekly column on a row of its own.
+    Anything else keeps its own name in both places: it then opens its own row AND its own
+    column, which is wide but honest -- being folded into another pool's cell would either
+    overwrite a real number or hide behind one.
+    """
+    known = CLAUDE_KINDS.get(kind)
+    if known is not None:
+        return known
+    if kind.startswith("weekly"):
+        # A weekly window scoped to one model is a sub-limit of the SAME account, not a second
+        # account, so it stays on that account's line and takes a column named for its scope.
+        # Its own kind is the fallback name, because a scope that arrives without a display name
+        # still has to be told apart from the unscoped weekly column beside it.
+        return CLAUDE_ALL, f"weekly/{display or kind}"
+    return kind, kind
 
 
 def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> list[Record]:
@@ -503,7 +554,14 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
     if entries is not None:
         if not isinstance(entries, list):
             raise Malformed("payload-malformed")
-        for index, item in enumerate(entries):
+        # The model-scoped weekly pool is not shown. It read `0%` on every account measured, and
+        # a column that is empty on every row but one costs the table more width than the pool
+        # is worth. FALLING BACK to the whole list when nothing else survives: an account
+        # carrying only a scoped pool is not a shape the vendor produces -- `session` and
+        # `weekly_all` ship beside it -- but if it ever did, showing the pool this report
+        # normally hides beats reporting a perfectly well-formed payload as malformed.
+        shown = [item for item in entries if not _is_scoped(item)]
+        for index, item in enumerate(shown or entries):
             # Per RECORD, not per candidate. One malformed entry must not suppress its siblings:
             # the valid pools are exactly what the operator opened the report to see, and a
             # profile that prints nothing looks identical to one that has nothing. The entry's
@@ -525,24 +583,42 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
 def _claude_flat_row(key: str, slot, freshness: str, now: datetime.datetime) -> Record:
     """One row of the older flat shape, whose windows are named keys rather than list items."""
     body = _obj(slot)
+    # `(flat)` rides the ALLOWANCE, which is the only cell on the row that names it now that
+    # the window is a column heading. Which container shape answered is worth disclosing: the
+    # flat one is a fallback, and a report that used it silently reads like the current shape.
+    family, window = _claude_place(key, "")
+    family = f"{family} (flat)"
     return _window_row(
         name=f"{key} (flat)",
         percent=_num(body.get("utilization"), 0.0, 100.0),
         resets=_from_iso(body.get("resets_at")),
-        freshness=freshness, now=now, active=True,
+        freshness=freshness, now=now, family=family, window=window,
     )
+
+
+def _is_scoped(item) -> bool:
+    """Whether an entry is the model-scoped weekly pool, which the report does not show.
+
+    Read off the RAW entry, before anything validates it, so it may only answer yes for
+    something that unambiguously IS one -- anything else falls through to the normal path and
+    gaps there on its own terms rather than being quietly dropped by a guess made here.
+    """
+    return isinstance(item, dict) and item.get("kind") == "weekly_scoped"
 
 
 def _claude_row(entry: dict, freshness: str, now: datetime.datetime) -> Record:
     kind = _text(entry.get("kind"), 64)
     name = kind
+    display = ""
     scope = entry.get("scope")
     if scope is not None:
         model = _obj(scope).get("model")
         if model is not None:
-            display = _obj(model).get("display_name")
-            if display is not None:
-                name = f"{kind} ({_text(display, 64)})"
+            raw = _obj(model).get("display_name")
+            if raw is not None:
+                display = _text(raw, 64)
+                name = f"{kind} ({display})"
+    family, window = _claude_place(kind, display)
     active = _flag(entry.get("is_active")) if "is_active" in entry else True
     percent = _num(entry.get("percent"), 0.0, 100.0)
     if entry.get("resets_at") is None:
@@ -553,15 +629,36 @@ def _claude_row(entry: dict, freshness: str, now: datetime.datetime) -> Record:
         if active:
             raise Malformed("field-malformed")
         return Record(name, NO_CURRENT, percent=percent, freshness=freshness,
-                      note="inactive, no reset time reported")
+                      note="inactive, no reset time reported", family=family, window=window)
     return _window_row(
         name=name,
         percent=percent,
         resets=_from_iso(entry.get("resets_at")),
         freshness=freshness,
         now=now,
-        active=active,
+        family=family,
+        window=window,
     )
+
+
+def _claude_config(profile: Path) -> Path:
+    """The file a Claude profile keeps its cached usage in.
+
+    MEASURED, not assumed. The vendor's own diagnostics name "CLAUDE_CONFIG_DIR, the HOME it
+    defaults from" as where settings are found and call the file `~/.claude.json`, so the path
+    is `<CLAUDE_CONFIG_DIR or $HOME>/.claude.json` -- and the DEFAULT profile's config sits
+    BESIDE `~/.claude`, not inside it. `~/.claude` is that profile's data directory only.
+
+    Reproduced here: `~/.claude/.claude.json` also exists, as a leftover from an older layout --
+    weeks stale, carrying an account but no `cachedUsageUtilization` at all. So "a config file
+    is there" was mistaken for "the right config file is there", and the default account
+    reported `no-usage-cache` while its weekly pool sat at 87%. A profile named explicitly by
+    its own path is treated the same way, because it is the same directory either way.
+    """
+    home = Path(os.path.expanduser("~"))
+    if profile == home / ".claude":
+        return home / ".claude.json"
+    return profile / ".claude.json"
 
 
 def _claude_cached(profile: Path, now: datetime.datetime) -> list[Record]:
@@ -571,7 +668,7 @@ def _claude_cached(profile: Path, now: datetime.datetime) -> list[Record]:
     loop that runs zero times otherwise prints exactly what a passing one prints.
     """
     try:
-        with open(profile / ".claude.json", encoding="utf-8") as handle:
+        with open(_claude_config(profile), encoding="utf-8") as handle:
             blob = json.load(handle)
     except FileNotFoundError:
         raise Malformed("no-usage-cache") from None
@@ -581,17 +678,21 @@ def _claude_cached(profile: Path, now: datetime.datetime) -> list[Record]:
     if not isinstance(blob, dict):
         raise Malformed("payload-malformed")
 
-    # Decided BEFORE the cache is inspected, so a profile that is both unsubscribed and cacheless
-    # lands in exactly one class instead of matching two rules.
-    if "hasAvailableSubscription" in blob and not _flag(blob["hasAvailableSubscription"]):
-        # Key MEMBERSHIP, and _flag rather than `is False`: a vendor type change is schema
-        # drift and must gap, where `is False` fell through to no-usage-cache -- a KNOWN_ABSENT
-        # state that exits 0 -- and a `subscription is not None` guard did the same for null,
-        # which is a present key holding a non-boolean like any other.
-        raise Malformed("no-subscription")
-
     cached = blob.get("cachedUsageUtilization")
     if cached is None:
+        # The flag is only ever the REASON a cache is absent -- never a reason to ignore one
+        # that is present. MEASURED: two accounts on this machine ship
+        # `hasAvailableSubscription: false` beside a full, freshly fetched `limits` array, one
+        # of them at 100% of its weekly pool. Read as "not subscribed", the flag suppressed
+        # exactly the account whose number mattered most, and did it under a diagnostic that
+        # exits 0, so nothing anywhere said a pool had gone unread.
+        #
+        # Key MEMBERSHIP, and _flag rather than `is False`: a vendor type change is schema drift
+        # and must gap, where `is False` fell through to no-usage-cache -- a KNOWN_ABSENT state
+        # that exits 0 -- and a `subscription is not None` guard did the same for null, which is
+        # a present key holding a non-boolean like any other.
+        if "hasAvailableSubscription" in blob and not _flag(blob["hasAvailableSubscription"]):
+            raise Malformed("no-subscription")
         raise Malformed("no-usage-cache")
     cached = _obj(cached)
 
@@ -837,8 +938,66 @@ def _label_duration(window) -> int | None:
     return None
 
 
-def _codex_window_row(*, limit_id: str, slot: str, window, collide: bool, freshness: str,
-                      now: datetime.datetime) -> Record:
+def _codex_spent_from(default, pools: dict[str, dict]) -> dict[str, str]:
+    """Only the pool the CLI actually spends from, out of everything the backend lists.
+
+    `rateLimitsByLimitId` enumerates pools that are not what a person at a terminal is asking
+    about -- a model-specific one (`codex_bengalfox`, which the backend calls
+    `GPT-5.3-Codex-Spark`) and a reserve (`base_model_inference`, `gpt-reserve`). Only one of
+    them answers "how much can I still use here", and the backend already says which: the
+    top-level `rateLimits` object carries that pool's `limitId`.
+
+    Read from the vendor's own pointer rather than from a hardcoded `"codex"`, and total in both
+    directions -- a pointer this module cannot read, or that names a pool the map does not hold,
+    keeps every pool. Showing more than was asked for is recoverable; showing none is not.
+    """
+    if not isinstance(default, dict):
+        return pools
+    raw_id = default.get("limitId")
+    try:
+        # `limitId` is `string | null`; a .get default answers only the ABSENT case, and null is
+        # the backend using the same name the single-pool path already falls back to.
+        chosen = "codex" if raw_id is None else _text(raw_id, 64)
+    except Malformed:
+        return pools
+    return {chosen: pools[chosen]} if chosen in pools else pools
+
+
+def _codex_labels(pools: dict[str, dict]) -> dict[str, str]:
+    """The name to PRINT for each limit id -- the vendor's own `limitName` where it sent one.
+
+    `limitName` is `string | null` and optional in the schema, and it is the only readable name
+    the backend offers: `codex_bengalfox` and `base_model_inference` are internal ids for pools
+    it calls `GPT-5.3-Codex-Spark` and `gpt-reserve`. Printing the id put a name nobody outside
+    the vendor can read in the column the report is scanned by, with the readable one sitting
+    unused in the same object.
+
+    Detail may never gap a candidate -- the same rule the voucher title lives under: a name this
+    module would refuse is dropped and the id stands in, because a home whose optional extras are
+    malformed still has numbers worth printing.
+    """
+    labels: dict[str, str] = {}
+    for limit_id, pool in pools.items():
+        raw = pool.get("limitName")
+        try:
+            labels[limit_id] = ("" if raw is None else _text(raw, 64)) or limit_id
+        except Malformed:
+            labels[limit_id] = limit_id
+    # A label two ids share identifies neither, and two rows reading the same name are two rows
+    # the operator cannot tell apart -- so both fall back to the ids, which are unique by
+    # construction. A `limitName` that collides with some OTHER pool's id lands here too.
+    clashes: dict[str, list[str]] = {}
+    for limit_id, label in labels.items():
+        clashes.setdefault(label, []).append(limit_id)
+    for shared in clashes.values():
+        if len(shared) > 1:
+            for limit_id in shared:
+                labels[limit_id] = limit_id
+    return labels
+
+
+def _codex_window_row(*, limit_id: str, label: str, slot: str, window, collide: bool,
+                      freshness: str, now: datetime.datetime) -> Record:
     """One Codex window. Raises Malformed only for a shape the vendor's schema does not permit."""
     body = _obj(window)
     # `windowDurationMins` and `resetsAt` are both `integer | null` in the vendor's own schema,
@@ -847,17 +1006,23 @@ def _codex_window_row(*, limit_id: str, slot: str, window, collide: bool, freshn
     # satisfy is worse than the gap it closes.
     raw_minutes = body.get("windowDurationMins")
     minutes = None if raw_minutes is None else _pos_int(raw_minutes)
-    name = f"{limit_id}/{slot if minutes is None else _window_label(minutes)}"
+    window = slot if minutes is None else _window_label(minutes)
+    name = f"{limit_id}/{window}"
+    # Identity is (limitId, slot). When one pool carries two windows of EQUAL duration the label
+    # alone no longer separates them, so the slot joins the allowance's name and the two land on
+    # two rows of the same column -- never in one cell, where the second would overwrite the
+    # first and the report would be short a number it was handed.
+    family = f"{label}({slot})" if collide else label
     if collide:
         name = f"{name}({slot})"
     percent = _num(body.get("usedPercent"), 0.0, PERCENT_MAX)
     raw_resets = body.get("resetsAt")
     if raw_resets is None:
         return Record(name, NO_CURRENT, percent=percent, freshness=freshness,
-                      note="no reset time reported by the backend")
+                      note="no reset time reported by the backend", family=family, window=window)
     return _window_row(
         name=name, percent=percent, resets=_from_epoch(raw_resets, EPOCH_SECONDS),
-        freshness=freshness, now=now, active=True,
+        freshness=freshness, now=now, family=family, window=window,
         stale_note="the window shown had already reset when this was read",
     )
 
@@ -887,6 +1052,8 @@ def _codex_records(home: Path) -> list[Record]:
     else:
         raise Malformed("payload-malformed")
 
+    pools = _codex_spent_from(default, pools)
+    labels = _codex_labels(pools)
     for limit_id in sorted(pools):
         pool = pools[limit_id]
         # Identity is (limitId, slot); only the LABEL comes from the duration. Two limit ids were
@@ -899,9 +1066,13 @@ def _codex_records(home: Path) -> list[Record]:
             window = pool.get(slot)
             if window is None:
                 continue
+            # The place is passed IN, not left to the fallback: a window that gaps still
+            # belongs to the pool it was read from, and a gap that names itself opens a row of
+            # its own -- the operator then cannot see which allowance went unread.
             records.append(_row_or_gap(f"{limit_id}/{slot}", lambda: _codex_window_row(
-                limit_id=limit_id, slot=slot, window=window, collide=collide,
-                freshness=freshness, now=now)))
+                limit_id=limit_id, label=labels[limit_id], slot=slot, window=window,
+                collide=collide, freshness=freshness, now=now),
+                family=labels[limit_id], window=slot))
     if not records:
         raise Malformed("payload-malformed")
 
@@ -1060,40 +1231,6 @@ def _examine(candidate: Candidate, producer) -> tuple[str, list[Record], str]:
     return NO_CURRENT, records, ""
 
 
-def _pool_cells(where: str, record: Record, now: datetime.datetime) -> tuple[str, str, str, str]:
-    """(where, pool, used, reset) as PLAIN text. Painting happens after the widths are known."""
-    used = "" if record.percent is None else f"{_bar(record.percent)} {record.percent:>5.1f}%"
-    if record.state == GAP:
-        used = f"[{record.diagnostic}]"
-        reset = ""
-    elif record.resets is None:
-        # No reset time is not one condition. A pool the vendor calls inactive and a pool whose
-        # `resetsAt` the vendor simply did not send both arrive here, and an empty cell would
-        # make them the same row. The note is what separates them, so it becomes the cell -- in
-        # its short form, keyed on the exact strings the producers write. The full sentence would
-        # set the RESET column's width for EVERY block, since the blocks share one layout, so one
-        # inactive pool's prose would stretch the column the current rows are read in.
-        reset = RESET_LABELS.get(record.note, record.note)
-    else:
-        reset = _relative(record.resets, now)
-    return where, _safe_name(record.name), used, reset
-
-
-def _sorted_rows(rows: list[Row]) -> list[Row]:
-    """Most consumed first, and TOTAL -- no row's position may depend on discovery order.
-
-    The key stops at "most consumed"; it is deliberately not a projected-exhaustion score, which
-    would need a burn rate nobody here measures and would put an invented number in the column
-    read first. Ordering across lifecycle classes is handled by SECTIONING, not by this key:
-    a stale 99% is not more urgent than a live 40%, it is not comparable to it.
-    """
-    return sorted(rows, key=lambda row: (
-        -(row.record.percent if row.record.percent is not None else -1.0),
-        row.record.resets.timestamp() if row.record.resets is not None else float("inf"),
-        row.where, row.record.name, row.record.freshness,
-    ))
-
-
 def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
                   paint: Paint) -> None:
     """The block above the table: a voucher count per home, then any credit balance.
@@ -1141,104 +1278,211 @@ def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
     print()
 
 
-COLUMNS = ("WHERE", "POOL", "USED", "RESET")
+# The two fixed columns every row carries; the window columns are discovered from the data and
+# appended after them, so a vendor that starts reporting a third window is not silently dropped.
+COLUMNS = ("WHERE", "POOL")
+# Reading order for the window columns. A label this report has no opinion about sorts after
+# both, alphabetically, rather than displacing the two an operator actually scans for.
+WINDOW_ORDER = {"5h": 0, "weekly": 1}
 
 # Keyed on the producers' exact notes, never on a substring of them: a note that drifts falls
 # through to itself, which is wide but correct, rather than being silently mislabelled.
 RESET_LABELS = {
-    "inactive, no current window": "inactive",
     "inactive, no reset time reported": "inactive",
     "no reset time reported by the backend": "not reported",
 }
 
 
-def _column_widths(blocks: list[list[Row]], now: datetime.datetime) -> list[int]:
-    """One width per column, measured across EVERY pool block and floored by the header labels.
+class Pool:
+    """One allowance on one candidate: every window of it, keyed by window label.
 
-    Two failures come from measuring a block on its own. Sections would each pick their own column
-    starts, so the stale block below the table would not line up with it -- a table whose columns
-    move between sections is not a table. And a run of short values (a profile named `.a`, a
-    one-character pool id) would make a column narrower than the word naming it, printing
-    `WHEREPOOLUSED` with nothing between the labels. The header labels are therefore a FLOOR, not
-    an afterthought.
+    The report's unit used to be the WINDOW, so a profile's 5h and weekly figures took two rows
+    that repeated the same candidate and the same quota -- one account read twice, competing
+    with itself for the reader's attention. The unit is the allowance; the windows are columns
+    across it.
     """
-    cells = [_pool_cells(row.where, row.record, now) for block in blocks for row in block]
-    return [max([_width(cell[index]) for cell in cells] + [len(COLUMNS[index])]) + 2
-            for index in range(4)]
+
+    def __init__(self, where: str, group: str, family: str) -> None:
+        self.where = where
+        self.group = group
+        self.family = family
+        self.cells: dict[str, Record] = {}
+
+    def current(self) -> list[Record]:
+        return [record for record in self.cells.values() if record.kind() == "current"]
+
+    def freshness(self) -> str:
+        """The row's provenance. Every cell on a row comes from ONE read of ONE candidate, so
+        the first non-empty answer is the row's; the loop is there so an empty one cannot win."""
+        for record in self.cells.values():
+            if record.freshness:
+                return record.freshness
+        return ""
 
 
-def _pool_table(rows: list[Row], widths: list[int], now: datetime.datetime, paint: Paint,
-                heading: str = "") -> None:
-    """One block of pool rows, laid out on widths shared with every other block."""
-    if not rows:
+def _pivot(rows: list[Row]) -> list[Pool]:
+    """Rows to pools: one line per (candidate, allowance), one column per window label.
+
+    A second record for a window a pool ALREADY holds opens a new line rather than overwriting
+    it. Two windows of equal duration under one limit id is a shape the vendor's schema permits,
+    and a report that silently drops one of them is worse than one that prints a family twice.
+    """
+    pools: list[Pool] = []
+    latest: dict[tuple[str, str, str], Pool] = {}
+    for row in rows:
+        key = (row.where, row.group, row.record.family)
+        pool = latest.get(key)
+        if pool is None or row.record.window in pool.cells:
+            pool = Pool(row.where, row.group, row.record.family)
+            pools.append(pool)
+            latest[key] = pool
+        pool.cells[row.record.window] = row.record
+    return pools
+
+
+def _column_head(label: str) -> str:
+    """The heading for one window column.
+
+    The part before the slash is this report's own vocabulary and reads as a heading, so it is
+    upper-cased. Anything after it is a VENDOR string -- a model's display name -- and keeps the
+    spelling its owner gave it, escaped like every other printed name rather than case-folded
+    into something the vendor never wrote.
+    """
+    head, slash, rest = label.partition("/")
+    return _safe_name(head.upper() + slash + rest)
+
+
+def _window_columns(pools: list[Pool]) -> list[str]:
+    labels = {label for pool in pools for label in pool.cells}
+    return sorted(labels, key=lambda label: (WINDOW_ORDER.get(label, len(WINDOW_ORDER)), label))
+
+
+def _cell(record, now: datetime.datetime) -> str:
+    """One window's cell as PLAIN text. Painting happens after the widths are known.
+
+    A cell says what it is without a section heading above it to explain it. A window whose
+    reset is already past renders its own `reset 3d 02h ago`, which is exactly why the figure
+    beside it is the PREVIOUS window -- and the reason those rows no longer need a block of
+    their own, repeating a caveat the cell already carries.
+    """
+    if record is None:
+        return ""
+    if record.state == GAP:
+        return f"[{record.diagnostic}]"
+    # No reset time is not one condition. A pool the vendor calls inactive and a pool whose
+    # `resetsAt` the vendor simply did not send both arrive here, and an empty cell would make
+    # them the same. The note is what separates them, so it becomes the cell -- in its short
+    # form, keyed on the exact strings the producers write, because the full sentence would set
+    # this column's width for every row on the page.
+    tail = RESET_LABELS.get(record.note, record.note) if record.resets is None \
+        else _relative(record.resets, now)
+    if record.percent is None:
+        return tail or "-"
+    used = f"{_figure(record.percent):>4}%"
+    return f"{used}  {tail}" if tail else used
+
+
+def _paint_cell(text: str, record, paint: Paint) -> str:
+    """Hue by consumption; anything that is not the CURRENT window recedes.
+
+    Dim is the whole of what used to be a separate section with a heading. A stale or inactive
+    figure is a real measurement and is printed at full precision, but it is not comparable to
+    the live cell beside it and must not read as though it were.
+    """
+    if record is None or record.percent is None:
+        return paint(text, DIM) if text else text
+    if record.state == GAP:
+        return paint(text, RED)
+    hue = _hue(record.percent)
+    return paint(text, hue if record.kind() == "current" else DIM + ";" + hue)
+
+
+def _sorted_pools(pools: list[Pool]) -> list[Pool]:
+    """By candidate, then by allowance, alphabetically -- and TOTAL.
+
+    A candidate's rows sit TOGETHER, in the same order on every run, so the report reads as a
+    list of the accounts on this machine rather than as a ranking whose membership shifts with
+    every window that rolls over. Ranking by consumption scattered one Codex home's pools down
+    the page and put the same directory name in four places.
+
+    Nothing about a row's POSITION means anything now, which is the point: consumption is read
+    off the figure and its hue, and the cell that is not a current window says so in its own
+    words. A rank cannot say that, and a rank over a mix of current and expired windows was
+    ordering numbers that are not comparable in the first place.
+    """
+    return sorted(pools, key=lambda pool: (
+        pool.where, pool.group, pool.family,
+        "\u0000".join(sorted(pool.cells)), pool.freshness()))
+
+
+def _pool_table(pools: list[Pool], now: datetime.datetime, paint: Paint) -> None:
+    """The one table. Every row is an allowance; every window column is shared by all of them.
+
+    Widths are measured across EVERY row at once and floored by the header labels. A column
+    narrower than the word naming it printed `WHEREPOOL` with nothing between the labels, and
+    per-block widths made the columns move down the page -- a table whose columns move is not
+    a table.
+    """
+    if not pools:
         return
-    cells = [_pool_cells(row.where, row.record, now) for row in rows]
-    if heading:
-        print(paint(f"  {heading}", DIM))
-    # A section's dim is applied PER CELL, not by wrapping the finished line. Every paint() emits
-    # its own reset, so wrapping a line that already contains one cancels the dim for everything
-    # after that cell -- the row then renders half dim and half not, which reads as an artefact
-    # rather than as a section.
-    tone = DIM + ";" if heading else ""
-    for (where, pool, used, reset), row in zip(cells, rows):
-        record = row.record
-        if record.state == GAP:
-            # `used` is the diagnostic token here, not a gauge -- see _pool_cells.
-            body = paint(used, tone + RED)
-        elif record.percent is not None:
-            # One paint over the finished cell. The gauge and the number always take the same
-            # hue, so painting them apart bought nothing and cost a `used.split(" ", 1)` -- a
-            # ValueError the day _pool_cells formats this cell without a space in it.
-            body = paint(used, tone + _hue(record.percent))
-        else:
-            body = paint(used, DIM) if heading else used
-        # `body` may carry escapes; the padding is computed from the PLAIN `used`.
-        pad = " " * max(0, widths[2] - _width(used))
-        head_cells = _pad(where, widths[0]) + _pad(pool, widths[1])
-        source = _source(record.freshness, row.group)
-        if heading:
-            # A whole row of a non-current section is dim, one paint per run of cells.
-            tail = paint(_pad(reset, widths[3]) + source, DIM)
-            head = paint(head_cells, DIM)
-        else:
-            # In the current section only the provenance recedes; the reset is a fact worth
-            # reading at full weight.
-            tail = _pad(reset, widths[3]) + paint(source, DIM)
-            head = head_cells
-        print("  " + head + body + pad + tail)
+    labels = _window_columns(pools)
+    heads = list(COLUMNS) + [_column_head(label) for label in labels]
+    grid = [[_safe_name(pool.where), _safe_name(pool.family)]
+            + [_cell(pool.cells.get(label), now) for label in labels] for pool in pools]
+    # `_width`, not `len`, on the heading too: a window column is headed partly by a VENDOR
+    # string, and a CJK display name counts one per code point but draws two -- the floor would
+    # then be shorter than the label it exists to protect.
+    widths = [max([_width(row[index]) for row in grid] + [_width(heads[index])]) + 2
+              for index in range(len(heads))]
+
+    print(paint("  " + "".join(_pad(head, width) for head, width in zip(heads, widths))
+                + "SOURCE", DIM))
+    print(paint("  " + "\u2500" * (sum(widths) + 6), DIM))
+    previous = None
+    for pool, cells in zip(pools, grid):
+        # A candidate's rows are adjacent (see _sorted_pools), so repeating its name down the
+        # group is noise the eye has to filter -- the reason one home reading `.codex` three
+        # times over looked like three unrelated accounts. Blanked, never abbreviated: the name
+        # is either there or it is the row above's, which is what the indentation already says.
+        head = "" if cells[0] == previous else cells[0]
+        previous = cells[0]
+        line = _pad(head, widths[0]) + _pad(cells[1], widths[1])
+        for index, label in enumerate(labels, start=len(COLUMNS)):
+            text = cells[index]
+            # `_paint_cell` may return escapes; the padding is computed from the PLAIN text, or
+            # a coloured table goes crooked exactly when colour is on.
+            line += (_paint_cell(text, pool.cells.get(label), paint)
+                     + " " * max(0, widths[index] - _width(text)))
+        # A row whose every cell gapped has no provenance to print, and the padding that was
+        # holding a column open for it becomes trailing whitespace on the page.
+        source = _source(pool.freshness(), pool.group)
+        line = line + paint(source, DIM) if source else line.rstrip()
+        print("  " + line)
     print()
 
 
 def _render(groups: list[tuple[str, str, list[Record]]], notes: list[str],
             now: datetime.datetime, paint: Paint) -> None:
-    """The whole report: a voucher band, one table of pools, then the classes that are not
-    current usage, each under a heading that says why they are apart."""
-    buckets: dict[str, list[Row]] = {
-        "current": [], "stale": [], "inactive": [], "gap": [], "voucher": [], "info": []}
+    """The whole report: a voucher band, then one table -- one line per allowance."""
+    buckets: dict[str, list[Row]] = {"pool": [], "voucher": [], "info": []}
     for group, where, records in groups:
         for record in records:
-            buckets[record.kind()].append(Row(where, group, record))
+            kind = record.kind()
+            buckets[kind if kind in ("voucher", "info") else "pool"].append(
+                Row(where, group, record))
 
     print(f"\n{paint('code-limits', BOLD)}  {paint(_local(now), DIM)}\n")
     _voucher_band(buckets["voucher"], buckets["info"], now, paint)
-    blocks = [_sorted_rows(buckets[name]) for name in ("current", "stale", "inactive", "gap")]
-    if any(blocks):
-        # The header goes above the FIRST non-empty block, whichever it is. Printing it only with
-        # the current block meant a report whose pools were all stale or all gapped had a table
-        # with no column names at all.
-        widths = _column_widths(blocks, now)
-        head = ("  " + _pad("WHERE", widths[0]) + _pad("POOL", widths[1])
-                + _pad("USED", widths[2]) + _pad("RESET", widths[3]) + "SOURCE")
-        print(paint(head, DIM))
-        print(paint("  " + "\u2500" * (sum(widths) + 6), DIM))
-    else:
-        widths = [0, 0, 0, 0]
-    _pool_table(blocks[0], widths, now, paint)
-    _pool_table(blocks[1], widths, now, paint,
-                "stale -- the % is the PREVIOUS window, not current  [stale-after-reset]")
-    _pool_table(blocks[2], widths, now, paint, "inactive -- no current window")
-    _pool_table(blocks[3], widths, now, paint, "NOT CHECKED")
+    pools = _sorted_pools(_pivot(buckets["pool"]))
+    _pool_table(pools, now, paint)
 
+    if any(record.diagnostic == "stale-after-reset"
+           for pool in pools for record in pool.cells.values()):
+        # Printed only when such a cell is on the page. The cell already says `reset ... ago`;
+        # what it cannot say is why a report would show a window that is over, or how to get the
+        # current one -- and a legend for a row nobody is looking at is just noise.
+        notes = notes + ["a cell reading `... ago` is the PREVIOUS window -- the cache"
+                         " predates its reset  [stale-after-reset]"]
     for note in notes:
         print(paint(f"  {note}", DIM))
     print(paint("  --live fetches current Claude numbers instead of the on-disk cache", DIM))
@@ -1286,9 +1530,9 @@ def main(argv: list[str] | None = None) -> int:
     # a keychain prompt or a stalled app-server can put minutes between run start and the
     # answer they are describing.
     claude_producer = _claude_live if args.live else (lambda profile: _claude_cached(profile, now))
-    for group, candidates, producer in (
-        (CLAUDE_GROUP, claude, claude_producer),
-        (CODEX_GROUP, codex, _codex_records),
+    for group, candidates, producer, refresh in (
+        (CLAUDE_GROUP, claude, claude_producer, not args.live),
+        (CODEX_GROUP, codex, _codex_records, False),
     ):
         if not candidates:
             # The same sentence in both places on purpose: the report body says what was not
@@ -1300,6 +1544,28 @@ def main(argv: list[str] | None = None) -> int:
         for candidate in candidates:
             state, records, code = _examine(candidate, producer)
             where = _safe_name(candidate.path.name)
+            if refresh and any(record.diagnostic == "stale-after-reset" for record in records):
+                # The one case where reading the file again cannot help: its window is over, so
+                # no percentage in it is about the present, and the report goes and asks instead.
+                #
+                # Logging in does NOT fix this, which is what makes it worth doing automatically.
+                # The CLI rewrites `.claude.json` at login but refreshes `cachedUsageUtilization`
+                # only after a request that carries usage back -- so a profile can be freshly
+                # authenticated and still be describing a window three days gone, with nothing on
+                # the page to suggest that signing in again was not the answer.
+                #
+                # A retry that fails keeps the cached rows exactly as they were. They are stale,
+                # which their cells already say, and losing them to a failed network call would
+                # be the worse trade. Its reason is a NOTE, deliberately not a warning: the
+                # default mode promised to read a cache and it read one.
+                live_state, live_records, live_code = _examine(candidate, _claude_live)
+                if live_state == GAP:
+                    detail = live_code or ", ".join(f"{r.name} [{r.diagnostic}]"
+                                                    for r in live_records if r.state == GAP)
+                    notes.append(f"{where}: the cache describes a window that is over, and the"
+                                 f" live retry did not answer -- {detail}")
+                else:
+                    state, records, code = live_state, live_records, live_code
             if code:
                 # A candidate-level outcome has no pool to hang a row on, so it becomes a note.
                 # It still decides the exit status below, exactly as before.

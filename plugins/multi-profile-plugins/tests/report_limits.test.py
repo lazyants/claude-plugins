@@ -167,6 +167,31 @@ def voucher_band(stdout: str) -> list[str]:
     return []
 
 
+def pool_rows(stdout: str) -> list[tuple[str, str, str]]:
+    """(where, pool, whole line) per row of the pool table, read STRUCTURALLY.
+
+    A row whose candidate repeats the row above prints a blank WHERE cell, so `line.split()[0]`
+    is the candidate on some rows and the POOL on others -- a test that indexes into the split
+    reads the wrong column on exactly the rows the grouping exists for. The candidate is carried
+    down here the same way the eye carries it.
+    """
+    lines = stdout.splitlines()
+    for index, line in enumerate(lines):
+        if "\u2500\u2500" not in line:
+            continue
+        head = lines[index - 1]
+        where_at, pool_at = head.index("WHERE"), head.index("POOL")
+        rows, carried = [], ""
+        for row in lines[index + 1:]:
+            if not row.strip():
+                break
+            where = row[where_at:pool_at].strip() or carried
+            carried = where
+            rows.append((where, row[pool_at:].split()[0], row))
+        return rows
+    return []
+
+
 def voucher_rows(stdout: str) -> list[str]:
     """The band's voucher rows only. The credits balance shares the block and is keyed by POOL
     rather than by home, so its fields sit one column across -- reading a count off it would be
@@ -189,15 +214,22 @@ def now_ms(delta_hours: float = 0.0) -> int:
     return int(when.timestamp() * 1000)
 
 
-def make_claude(root: Path, name: str, blob) -> Path:
+def make_claude(root: Path, name: str, blob, token: bool = True) -> Path:
     profile = root / name
     profile.mkdir(parents=True, exist_ok=True)
     if blob is not None:
         (profile / ".claude.json").write_text(json.dumps(blob), encoding="utf-8")
     # Planted in every profile: the script reads this file on the --live path.
-    (profile / ".credentials.json").write_text(json.dumps({
-        "claudeAiOauth": {"accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(24)}
-    }), encoding="utf-8")
+    #
+    # `token=False` withholds it, and every STALE fixture uses that. Default mode retries a
+    # cached window whose reset has passed against the API, so a stale fixture holding a usable
+    # credential would send this suite's sentinel bearer to the real api.anthropic.com -- on
+    # every developer machine and every CI run. Withheld, the retry stops at `token-absent`,
+    # before any socket, which is also the only outcome an offline runner could agree on.
+    if token:
+        (profile / ".credentials.json").write_text(json.dumps({
+            "claudeAiOauth": {"accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(24)}
+        }), encoding="utf-8")
     return profile
 
 
@@ -358,17 +390,18 @@ with tempfile.TemporaryDirectory() as tmp:
     # 5 / 6 -- a window whose reset has passed, and per-row freshness.
     stale_root = root / "stale"
     make_claude(stale_root, ".claude9", cached(entries=[entry(resets=iso(-5), percent=67)],
-                                               fetched_ms=now_ms(-72)))
+                                               fetched_ms=now_ms(-72)), token=False)
     done, _, _ = run(["--claude-profile", str(stale_root / ".claude9"),
                       "--codex-home", str(stale_root / ".nope")])
     check("5 past reset renders stale-after-reset", "stale-after-reset" in done.stdout, done.stdout)
     check("5 the stale percentage is labelled as the previous window",
-          "the % is the PREVIOUS window" in done.stdout and "67.0%" in done.stdout, done.stdout)
-    # The row sits UNDER that heading, not among the current ones -- the label is stated once
-    # for the section instead of repeated per row, so what pins it is the partition.
-    before, _, after = done.stdout.partition("stale -- the % is the PREVIOUS window")
+          "is the PREVIOUS window" in done.stdout and "67%" in done.stdout, done.stdout)
+    # The CELL carries the caveat, not a heading above a block of rows: a window whose reset has
+    # passed renders its own `... ago`, which is the whole reason the figure beside it is the
+    # previous one. Without that the row reads exactly like a current one.
+    row = [ln for ln in done.stdout.splitlines() if "67%" in ln]
     check("5 it is not presented as a current row",
-          "67.0%" in after and "67.0%" not in before, done.stdout)
+          len(row) == 1 and "ago" in row[0], str(row))
     check("6 the row carries its own cache age", "3d00h" in done.stdout, done.stdout)
 
     # 7 / 8 / 9 -- absence states, and the precedence between them.
@@ -404,10 +437,17 @@ with tempfile.TemporaryDirectory() as tmp:
     done, _, _ = run(["--claude-profile", str(shapes / ".claudeD"),
                       "--claude-profile", str(shapes / ".claudeE"),
                       "--codex-home", str(shapes / ".nope")])
-    check("10 the scoped row carries the model display name",
-          "weekly_scoped (Fable)" in done.stdout, done.stdout)
-    check("11 the flat fallback reports and says which shape it used",
-          "five_hour (flat)" in done.stdout and "seven_day (flat)" in done.stdout, done.stdout)
+    # `.claudeD` carries NOTHING BUT a scoped pool. That is not a shape the vendor produces --
+    # `session` and `weekly_all` ship beside it -- but hiding the only entry a payload has would
+    # report a perfectly well-formed profile as malformed, so the fallback shows it instead, and
+    # the model's display name has to survive into the heading unfolded and unescaped.
+    check("10 a profile with only a scoped pool still reports it, under the model's name",
+          "WEEKLY/Fable" in done.stdout, done.stdout)
+    flat = [ln for ln in done.stdout.splitlines() if ".claudeE" in ln]
+    check("11 the flat fallback says which container shape answered",
+          len(flat) == 1 and "(flat)" in flat[0], str(flat))
+    check("11 and reports both of its windows on that one row",
+          bool(flat) and "11%" in flat[0] and "22%" in flat[0], str(flat))
 
     # 12 -- container table: shapes that must gap BEFORE any record is formed.
     for label, blob in (
@@ -487,7 +527,7 @@ with tempfile.TemporaryDirectory() as tmp:
     done, _, _ = run(["--claude-profile", str(mixed / ".claudeM"),
                       "--codex-home", str(mixed_codex)], root=mixed)
     check("14 the malformed record is named", "[field-malformed]" in done.stdout, done.stdout)
-    check("14 the VALID row survives beside it", "46.0%" in done.stdout, done.stdout)
+    check("14 the VALID row survives beside it", "46%" in done.stdout, done.stdout)
     check("14 the Codex side of this run is clean, so exit 1 can only come from the mix",
           "appserver" not in done.stdout and "candidate-unreadable" not in done.stdout,
           done.stdout)
@@ -574,10 +614,29 @@ with tempfile.TemporaryDirectory() as tmp:
     home = make_codex_home(codex_root, ".codexT")
     done, record, transcript = run(["--claude-profile", str(codex_root / ".nope"),
                                     "--codex-home", str(home)], root=codex_root)
-    check("18 two limit ids with a 10080 window render distinguishably",
-          "codex/weekly" in done.stdout and "codex_bengalfox/weekly" in done.stdout, done.stdout)
-    check("18 the 300-minute window is labelled 5h",
-          "codex_bengalfox/5h" in done.stdout, done.stdout)
+    pools = {pool: line for where, pool, line in pool_rows(done.stdout) if where == ".codexT"}
+    # `rateLimitsByLimitId` enumerates pools a person at a terminal is not asking about -- a
+    # model-specific one and a reserve. Only the pool the top-level `rateLimits` names answers
+    # "how much can I still use here", and that is the one the report shows.
+    check("18 only the pool the CLI spends from is shown", set(pools) == {"codex"}, str(pools))
+    check("18 and the pools beside it are not on the page",
+          "codex_bengalfox" not in done.stdout and "codex_twin" not in done.stdout, done.stdout)
+
+    def pointed_at(limit_id):
+        result = dict(DEFAULT_RESULT,
+                      rateLimits=dict(DEFAULT_RESULT["rateLimits"], limitId=limit_id))
+        run_done, _, _ = run(["--claude-profile", str(codex_root / ".nope"),
+                              "--codex-home", str(home)], root=codex_root, stub_result=result)
+        return run_done, {pool: line for where, pool, line in pool_rows(run_done.stdout)
+                          if where == ".codexT"}
+
+    spark, pools_5h = pointed_at("codex_bengalfox")
+    header = [ln for ln in spark.stdout.splitlines() if "SOURCE" in ln][0]
+    check("18 the 300-minute window is labelled 5h", "5H" in header, repr(header))
+    check("18 and the pool's 5h figure sits under it, its weekly one after",
+          "codex_bengalfox" in pools_5h
+          and pools_5h["codex_bengalfox"].index("3%") < pools_5h["codex_bengalfox"].index("7%"),
+          str(pools_5h))
     # The UNIT, not merely the presence. Read as milliseconds, epoch(72) lands in January 1970
     # and every future window renders `stale-after-reset` -- a KNOWN_ABSENT-adjacent state that
     # exits 0 and prints no warning, so every other assertion in this file stays green.
@@ -590,9 +649,15 @@ with tempfile.TemporaryDirectory() as tmp:
     # pins the unit -- more directly than the calendar date it used to print.
     check("18 and its reset lands in the present, which is what pins the epoch unit",
           "in 2d 23h" in done.stdout or "in 3d 00h" in done.stdout, done.stdout)
+    _twin, pools_twin = pointed_at("codex_twin")
     check("18 two windows of ONE pool sharing a duration carry their slot",
-          "codex_twin/5h(primary)" in done.stdout and "codex_twin/5h(secondary)" in done.stdout,
-          done.stdout)
+          {"codex_twin(primary)", "codex_twin(secondary)"} <= set(pools_twin),
+          str(sorted(pools_twin)))
+    # Total in the other direction too: a pointer naming a pool the map does not hold keeps
+    # every pool. Showing more than was asked for is recoverable; showing none is not.
+    _all, pools_all = pointed_at("codex_absent")
+    check("18 a pointer naming no known pool keeps them all",
+          {"codex", "codex_bengalfox"} <= set(pools_all), str(sorted(pools_all)))
     # The count itself, not merely the label: "1" occurs in every percentage on the page, so
     # `"1" in stdout` would stay green for any count the script chose to print.
     coupon_rows = [row for row in voucher_band(done.stdout) if not row.startswith("credits")]
@@ -625,7 +690,7 @@ with tempfile.TemporaryDirectory() as tmp:
         check(f"19 app-server {mode} -> gap", expect in done.stdout, done.stdout)
         check(f"19 app-server {mode} -> exit 1", done.returncode == 1, f"rc={done.returncode}")
         check(f"19 app-server {mode}: the Claude side stayed clean and visible",
-              "42.0%" in done.stdout and ".claudeClean" not in done.stdout.split("warnings")[-1],
+              "42%" in done.stdout and ".claudeClean" not in done.stdout.split("warnings")[-1],
               done.stdout)
 
     for label, result in (
@@ -640,7 +705,7 @@ with tempfile.TemporaryDirectory() as tmp:
         done, _, _ = run(["--claude-profile", str(ok_claude),
                           "--codex-home", str(home)], root=codex_root, stub_result=result)
         check(f"19 codex payload {label} -> exit 1", done.returncode == 1, done.stdout)
-        check(f"19 codex payload {label}: the Claude row survives", "42.0%" in done.stdout,
+        check(f"19 codex payload {label}: the Claude row survives", "42%" in done.stdout,
               done.stdout)
 
     # N7 -- a child that streams without a newline must not be buffered without bound.
@@ -665,7 +730,7 @@ with tempfile.TemporaryDirectory() as tmp:
                        "primary": {"usedPercent": 61, "windowDurationMins": 10080,
                                    "resetsAt": epoch(50)},
                        "credits": {"hasCredits": True, "balance": "not-a-number"}}})
-    check("19 a malformed credits balance gaps only itself", "61.0%" in done.stdout, done.stdout)
+    check("19 a malformed credits balance gaps only itself", "61%" in done.stdout, done.stdout)
     check("19 and the malformed record is named", "[field-malformed]" in done.stdout, done.stdout)
     check("19 and the candidate still gaps", done.returncode == 1, f"rc={done.returncode}")
 
@@ -690,7 +755,7 @@ with tempfile.TemporaryDirectory() as tmp:
                       "--codex-home", str(live_codex)], root=live_root)
     check("21 a missing token gaps the profile",
           "[token-absent]" in done.stdout or "[keychain-denied]" in done.stdout, done.stdout)
-    check("21 it does NOT silently fall back to the cache", "88.0%" not in done.stdout, done.stdout)
+    check("21 it does NOT silently fall back to the cache", "88%" not in done.stdout, done.stdout)
     check("21 and the run gaps", done.returncode == 1, f"rc={done.returncode}")
     check("21 the gap is the Claude profile, not the Codex home",
           ".claudeL" in done.stdout.split("warnings")[-1]
@@ -723,8 +788,8 @@ with tempfile.TemporaryDirectory() as tmp:
           "limits[1]" in body and body.count("[payload-malformed]") == 1, done.stdout)
     check("26 the warning quotes the gapped row rather than inventing a token",
           "limits[1] [payload-malformed]" in done.stdout.split("warnings")[-1], done.stdout)
-    check("26 the VALID sibling before it still reports", "42.0%" in done.stdout, done.stdout)
-    check("26 the VALID sibling AFTER it still reports", "63.0%" in done.stdout, done.stdout)
+    check("26 the VALID sibling before it still reports", "42%" in done.stdout, done.stdout)
+    check("26 the VALID sibling AFTER it still reports", "63%" in done.stdout, done.stdout)
     check("26 the run gaps", done.returncode == 1, f"rc={done.returncode}")
     check("26 and it is the Claude profile the warning names",
           ".claudeM" in done.stdout.split("warnings")[-1], done.stdout)
@@ -769,7 +834,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("28 it is not a silent omission either -- the row is printed",
           len([r for r in voucher_band(done.stdout) if not r.startswith("credits")]) == 1,
           str(voucher_band(done.stdout)))
-    check("28 the usage window beside it still reports", "61.0%" in done.stdout, done.stdout)
+    check("28 the usage window beside it still reports", "61%" in done.stdout, done.stdout)
     check("28 and the run stays clean", done.returncode == 0,
           f"rc={done.returncode}\n{done.stdout}")
 
@@ -805,7 +870,7 @@ with tempfile.TemporaryDirectory() as tmp:
     surr_body = done.stdout.split("warnings")[0]
     check("29 the OTHER end of the surrogate range gaps too",
           "limits[2]" in surr_body and surr_body.count("[field-malformed]") == 2, done.stdout)
-    check("29 the valid sibling still reports", "42.0%" in done.stdout, done.stdout)
+    check("29 the valid sibling still reports", "42%" in done.stdout, done.stdout)
     check("29 no traceback escaped to stderr", "Traceback" not in done.stderr, done.stderr)
 
     # 30 -- under an ascii stdout an unencodable character raises out of print(), past every
@@ -847,7 +912,7 @@ with tempfile.TemporaryDirectory() as tmp:
         check("31 it never falls back to the keychain -- the fixture security left no marker",
               not marker.exists(),
               marker.read_text(encoding="utf-8") if marker.exists() else "")
-        check("31 the cache is not used as a fallback either", "77.0%" not in done.stdout,
+        check("31 the cache is not used as a fallback either", "77%" not in done.stdout,
               done.stdout)
         check("31 and the run gaps", done.returncode == 1, f"rc={done.returncode}")
 
@@ -876,33 +941,33 @@ with tempfile.TemporaryDirectory() as tmp:
          {"rateLimits": OK_POOL, "rateLimitResetCredits": None}, "not reported"),
         ("rateLimitsByLimitId null",
          {"rateLimits": OK_POOL, "rateLimitsByLimitId": None, "rateLimitResetCredits": COUPONS},
-         "codex/weekly"),
+         "5%"),
         ("windowDurationMins null",
          {"rateLimits": {"limitId": "codex", "primary": dict(OK_WINDOW,
                                                              windowDurationMins=None)},
-          "rateLimitResetCredits": COUPONS}, "codex/primary"),
+          "rateLimitResetCredits": COUPONS}, "PRIMARY"),
         ("windowDurationMins absent",
          {"rateLimits": {"limitId": "codex", "primary": {"usedPercent": 5,
                                                          "resetsAt": epoch(3)}},
-          "rateLimitResetCredits": COUPONS}, "codex/primary"),
+          "rateLimitResetCredits": COUPONS}, "PRIMARY"),
         ("resetsAt null",
          {"rateLimits": {"limitId": "codex", "primary": dict(OK_WINDOW, resetsAt=None)},
           "rateLimitResetCredits": COUPONS}, "not reported"),
         ("limitId null",
          {"rateLimits": {"limitId": None, "primary": OK_WINDOW},
-          "rateLimitResetCredits": COUPONS}, "codex/weekly"),
+          "rateLimitResetCredits": COUPONS}, "5%"),
         ("credits null",
          {"rateLimits": {"limitId": "codex", "credits": None, "primary": OK_WINDOW},
-          "rateLimitResetCredits": COUPONS}, "codex/weekly"),
+          "rateLimitResetCredits": COUPONS}, "5%"),
         ("secondary null",
          {"rateLimits": {"limitId": "codex", "secondary": None, "primary": OK_WINDOW},
-          "rateLimitResetCredits": COUPONS}, "codex/weekly"),
+          "rateLimitResetCredits": COUPONS}, "5%"),
         # `usedPercent` is an UNBOUNDED int32 in that schema. A pool past its limit is the moment
         # the report is most worth reading, so refusing the number would be the worst possible
         # time to gap.
         ("usedPercent past 100",
          {"rateLimits": {"limitId": "codex", "primary": dict(OK_WINDOW, usedPercent=137)},
-          "rateLimitResetCredits": COUPONS}, "137.0%"),
+          "rateLimitResetCredits": COUPONS}, "137%"),
     ):
         done, _, _ = run(["--claude-profile", str(ok_claude), "--codex-home", str(nullhome)],
                          root=nullroot, stub_result=result)
@@ -912,6 +977,16 @@ with tempfile.TemporaryDirectory() as tmp:
               "warnings" not in done.stdout, done.stdout)
         check(f"32 schema-nullable {label} still reports its row",
               expect in done.stdout, done.stdout)
+
+    # `5%` proves a figure reached the page but not WHICH allowance it belongs to, and a null
+    # limitId is exactly the case where the name is supplied by this script rather than read.
+    done, _, _ = run(["--claude-profile", str(ok_claude), "--codex-home", str(nullhome)],
+                     root=nullroot, stub_result={"rateLimits": {"limitId": None,
+                                                                "primary": OK_WINDOW},
+                                                 "rateLimitResetCredits": COUPONS})
+    named = [pool for where, pool, _line in pool_rows(done.stdout) if where == ".codexNull"]
+    check("32 a null limitId falls back to the pool name `codex`",
+          named == ["codex"], str(named))
 
     # 33 -- a valid record whose sibling raises something OTHER than Malformed. The per-record
     # handler's comment claims one bad entry cannot suppress the rest; only catching Malformed
@@ -923,8 +998,8 @@ with tempfile.TemporaryDirectory() as tmp:
                       "--codex-home", str(make_codex_home(huge, ".codexClean"))], root=huge)
     check("33 the overflowing record gaps under its own index",
           "limits[1]" in done.stdout, done.stdout)
-    check("33 the record BEFORE it still reports", "42.0%" in done.stdout, done.stdout)
-    check("33 the record AFTER it still reports too", "63.0%" in done.stdout, done.stdout)
+    check("33 the record BEFORE it still reports", "42%" in done.stdout, done.stdout)
+    check("33 the record AFTER it still reports too", "63%" in done.stdout, done.stdout)
     check("33 and the diagnostic is a member of the closed enum, not a traceback",
           "Traceback" not in done.stderr, done.stderr)
 
@@ -942,9 +1017,12 @@ with tempfile.TemporaryDirectory() as tmp:
                              "usedPercent": 10 ** 400, "windowDurationMins": 10080,
                              "resetsAt": epoch(9)}}},
                          "rateLimitResetCredits": {"availableCount": 2}})
+    gapped = [pool for _w, pool, line in pool_rows(done.stdout) if "[internal-error]" in line]
     check("33b the overflowing codex window gaps under its own pool and slot",
-          "codex_bad/primary" in done.stdout and "[internal-error]" in done.stdout, done.stdout)
-    check("33b the OTHER pool still reports", "codex/weekly" in done.stdout, done.stdout)
+          gapped == ["codex_bad"], str(gapped))
+    check("33b the OTHER pool still reports",
+          any(pool == "codex" and "5%" in line for _w, pool, line in pool_rows(done.stdout)),
+          done.stdout)
     coupon_rows_33b = [row for row in voucher_band(done.stdout)
                        if not row.startswith("credits")]
     check("33b and the voucher row beside it still reports its own count",
@@ -975,7 +1053,7 @@ with tempfile.TemporaryDirectory() as tmp:
           any(row.split()[1:2] == ["1"] for row in voucher_band(done.stdout)),
           str(voucher_band(done.stdout)))
     check("33c and the Claude side stays clean and visible",
-          "42.0%" in done.stdout and ".claudeF" not in done.stdout.split("warnings")[-1],
+          "42%" in done.stdout and ".claudeF" not in done.stdout.split("warnings")[-1],
           done.stdout)
     check("33c the run gaps", done.returncode == 1, f"rc={done.returncode}")
 
@@ -999,7 +1077,7 @@ with tempfile.TemporaryDirectory() as tmp:
         check(f"33d flat {label} gaps only its own row",
               "five_hour (flat)" in body and token in body, done.stdout)
         check(f"33d flat {label}: the seven_day sibling still reports",
-              "22.0%" in body, done.stdout)
+              "22%" in body, done.stdout)
         check(f"33d flat {label}: the run gaps rather than tracebacking",
               done.returncode == 1 and "Traceback" not in done.stderr,
               f"rc={done.returncode}\n{done.stderr}")
@@ -1041,7 +1119,7 @@ with tempfile.TemporaryDirectory() as tmp:
           not (expired_root / "security-called.txt").exists(),
           (expired_root / "security-called.txt").read_text(encoding="utf-8")
           if (expired_root / "security-called.txt").exists() else "")
-    check("21b it does NOT fall back to the cache either", "88.0%" not in done.stdout, done.stdout)
+    check("21b it does NOT fall back to the cache either", "88%" not in done.stdout, done.stdout)
     check("21b and the run gaps", done.returncode == 1, f"rc={done.returncode}")
     assert_no_secret("21b expired token", done.stdout, done.stderr)
 
@@ -1411,7 +1489,7 @@ with tempfile.TemporaryDirectory() as tmp:
           str(forged_lines))
     check("39 the name is escaped rather than dropped, so the profile is still named",
           ".claudeX" + chr(92) + "n" in done.stdout, done.stdout)
-    check("39 and its real row still reports", "12.0%" in done.stdout, done.stdout)
+    check("39 and its real row still reports", "12%" in done.stdout, done.stdout)
 
     # 39b -- the same name on a profile that GAPS. Case 39's profile is clean, so it never
     # reaches the warning line, and escaping there was unpinned: reverting it alone stayed green.
@@ -1457,8 +1535,9 @@ with tempfile.TemporaryDirectory() as tmp:
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
-    # Percentages chosen so that a wrong sort is visible: descending order is NOT the order the
-    # entries are written in, nor alphabetical by pool name.
+    # One account, three pools -- two windows of one quota plus a model-scoped one. They are one
+    # account read three ways, so they take ONE line: the duplication this table exists to remove
+    # was a row per window, each repeating the profile name and competing with its own siblings.
     ordered = make_claude(root, ".claudeOrd", cached(entries=[
         entry(kind="weekly_all", percent=12, resets=iso(40)),
         entry(kind="session", percent=91, resets=iso(2)),
@@ -1466,48 +1545,94 @@ with tempfile.TemporaryDirectory() as tmp:
               scope={"model": {"id": None, "display_name": "Fable"}, "surface": None}),
     ]))
     done, _, _ = run(["--claude-profile", str(ordered)], root=root)
-    rows = [ln for ln in done.stdout.splitlines() if "%" in ln and ".claudeOrd" in ln]
-    percents = [float(ln.split("%")[0].split()[-1]) for ln in rows]
-    check("40 the table is sorted by consumption, descending",
-          percents == sorted(percents, reverse=True), str(percents))
-    check("40 every pool still gets its own row -- nothing is collapsed",
-          len(rows) == 3, str(rows))
+    rows = [ln for ln in done.stdout.splitlines() if ".claudeOrd" in ln]
+    check("40 one account's windows share one row", len(rows) == 1, str(rows))
+    check("40 and every figure it shows is on that row",
+          bool(rows) and all(f"{p}%" in rows[0] for p in (12, 91)), str(rows))
+    header = [ln for ln in done.stdout.splitlines() if "SOURCE" in ln][0]
+    check("40 each window gets a column of its own",
+          all(label in header for label in ("5H", "WEEKLY")), repr(header))
+    check("40 in reading order, shortest window first",
+          header.index("5H") < header.index("WEEKLY"), repr(header))
+    check("40 and no percentage is padded out with a decimal it never measured",
+          ".0%" not in done.stdout, done.stdout)
+    # The model-scoped weekly pool is not shown: it read 0% on every account measured, and a
+    # column empty on every row but one costs the table more width than the pool is worth.
+    check("40 the model-scoped weekly pool is not shown",
+          "55%" not in done.stdout and "Fable" not in done.stdout, done.stdout)
 
-    # The gauge is a function of the percentage and of nothing else.
-    for percent, filled in ((0, 0), (4, 0), (5, 1), (47, 5), (99, 10), (100, 10), (137, 10)):
-        bar = R._bar(float(percent))
-        check(f"40 the gauge for {percent}% has {filled} filled cells",
-              bar.count("\u2588") == filled and len(bar) == R.BAR_CELLS, f"{percent} -> {bar!r}")
-    check("40 a pool past 100% fills the gauge AND prints its real figure",
-          R._bar(137.0).count("\u2588") == R.BAR_CELLS)
+    # The order is by candidate, alphabetically, and NOT by consumption: a rank scattered one
+    # Codex home's pools down the page and printed the same directory name in four places, and a
+    # rank over a mix of current and expired windows orders numbers that are not comparable.
+    hot = make_claude(root, ".claudeHot", cached(entries=[
+        entry(kind="session", percent=91, resets=iso(2)),
+        entry(kind="weekly_all", percent=12, resets=iso(40))]))
+    cool = make_claude(root, ".claudeCool", cached(entries=[
+        entry(kind="session", percent=12, resets=iso(2)),
+        entry(kind="weekly_all", percent=13, resets=iso(40))]))
+    done, _, _ = run(["--claude-profile", str(hot), "--claude-profile", str(cool),
+                      "--codex-home", str(make_codex_home(root, ".codexOrd"))], root=root,
+                     stub_result=dict(DEFAULT_RESULT, rateLimits=dict(
+                         DEFAULT_RESULT["rateLimits"], limitId="codex_twin")))
+    order = [where for where, _pool, _line in pool_rows(done.stdout)]
+    check("40 the table is ordered by candidate, alphabetically",
+          order == sorted(order) and order[:2] == [".claudeCool", ".claudeHot"], str(order))
+    check("40 the more consumed account does NOT jump the queue",
+          order.index(".claudeHot") > order.index(".claudeCool"), str(order))
+
+    # One candidate's rows sit together, and its name is printed once for the group.
+    grouped = [(where, line) for where, _pool, line in pool_rows(done.stdout)
+               if where == ".codexOrd"]
+    check("40 a candidate's allowances are adjacent", len(grouped) >= 2, str(grouped))
+    check("40 and its name is printed once, not once per allowance",
+          sum(1 for _w, line in grouped if ".codexOrd" in line) == 1, str(grouped))
+    check("40 the allowances inside a candidate are alphabetical too",
+          [pool for where, pool, _l in pool_rows(done.stdout) if where == ".codexOrd"]
+          == sorted(pool for where, pool, _l in pool_rows(done.stdout) if where == ".codexOrd"),
+          str(pool_rows(done.stdout)))
 
     # The sort key is TOTAL: equal percent and equal reset must still order deterministically,
     # or two runs over the same data can disagree.
     same = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5)
-    twins = [R.Row(".b", R.CLAUDE_GROUP, R.Record("pool", R.REPORTED, percent=50.0, resets=same)),
-             R.Row(".a", R.CLAUDE_GROUP, R.Record("pool", R.REPORTED, percent=50.0, resets=same))]
+
+    def one_pool(where: str, freshness: str = "cache 1h old") -> Any:
+        pool = R.Pool(where, R.CLAUDE_GROUP, "all")
+        pool.cells["weekly"] = R.Record("weekly_all", R.REPORTED, percent=50.0, resets=same,
+                                        freshness=freshness, family="all", window="weekly")
+        return pool
+
+    twins = [one_pool(".b"), one_pool(".a")]
     check("40 the ordering is total -- a tie falls back to the candidate name",
-          [row.where for row in R._sorted_rows(twins)] == [".a", ".b"],
-          str([row.where for row in R._sorted_rows(twins)]))
+          [pool.where for pool in R._sorted_pools(twins)] == [".a", ".b"],
+          str([pool.where for pool in R._sorted_pools(twins)]))
     check("40 and it is stable across the reversed input",
-          R._sorted_rows(twins) == R._sorted_rows(list(reversed(twins))))
+          [pool.where for pool in R._sorted_pools(twins)]
+          == [pool.where for pool in R._sorted_pools(list(reversed(twins)))])
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
-    # A stale row and a live row in one run: they must land in DIFFERENT sections, because a
-    # previous window's percentage is not comparable to a current one and sorting them together
-    # is what put an expired 67% above a live 46% in the first draft.
-    mixed = make_claude(root, ".claudeMix", cached(entries=[
-        entry(kind="weekly_all", percent=40, resets=iso(20)),
-        entry(kind="session", percent=95, resets=iso(-3)),
-    ]))
-    done, _, _ = run(["--claude-profile", str(mixed)], root=root)
-    before, marker, after = done.stdout.partition("stale -- the % is the PREVIOUS window")
-    check("41 the stale section exists and names itself", bool(marker), done.stdout)
-    check("41 the live row is above it", "40.0%" in before, done.stdout)
-    check("41 the stale row is below it", "95.0%" in after and "95.0%" not in before, done.stdout)
-    check("41 the stale heading still carries the diagnostic token",
+    # A stale row and a live row in one run: a previous window's percentage is not comparable to
+    # a current one, and ranking them together is what put an expired 95% above a live 40%.
+    live = make_claude(root, ".claudeLive", cached(entries=[
+        entry(kind="weekly_all", percent=40, resets=iso(20))]))
+    past = make_claude(root, ".claudePast", cached(entries=[
+        entry(kind="weekly_all", percent=95, resets=iso(-3))]), token=False)
+    done, _, _ = run(["--claude-profile", str(live), "--claude-profile", str(past),
+                      "--codex-home", str(make_codex_home(root, ".codexMix"))], root=root)
+    body = {where: line for where, _pool, line in pool_rows(done.stdout)}
+    # Position ranks nothing now, so the cell has to carry the distinction on its own: an
+    # expired window and a current one are not comparable, and a bare percentage cannot say it.
+    check("41 the stale cell says so in its own words",
+          "ago" in body.get(".claudePast", ""), str(body))
+    check("41 while the current one states the time it has left",
+          "in " in body.get(".claudeLive", "") and "ago" not in body.get(".claudeLive", ""),
+          str(body))
+    check("41 the legend carries the diagnostic token",
           "[stale-after-reset]" in done.stdout, done.stdout)
+    only_live, _, _ = run(["--claude-profile", str(live),
+                           "--codex-home", str(root / ".codexMix")], root=root)
+    check("41 and it is printed only when such a cell is on the page",
+          "[stale-after-reset]" not in only_live.stdout, only_live.stdout)
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
@@ -1528,8 +1653,8 @@ with tempfile.TemporaryDirectory() as tmp:
           "\n".join(difflib.unified_diff(plain.stdout.splitlines(),
                                           stripped.splitlines(), lineterm=""))[:1200])
     check("42 the percentage really is painted, not just the title",
-          "42.0%" in re.sub(r"\x1b\[[0-9;]*m", "", forced.stdout)
-          and any("42.0%" in seg for seg in forced.stdout.split("\x1b[")), forced.stdout[:300])
+          "42%" in re.sub(r"\x1b\[[0-9;]*m", "", forced.stdout)
+          and any("42%" in seg for seg in forced.stdout.split("\x1b[")), forced.stdout[:300])
 
     # `auto` must actually turn colour ON at a terminal -- over a pipe every branch looks alike,
     # so a renderer that only ever coloured under `--color=always` would pass everything above.
@@ -1660,7 +1785,7 @@ with tempfile.TemporaryDirectory() as tmp:
               f"rc={done.returncode}\n{done.stdout}")
         check(f"45 {label} still prints the validated count",
               len(rows) == 1 and rows[0].split()[1] == "2", str(rows))
-        check(f"45 {label} keeps the usage rows beside it", "54.0%" in done.stdout, done.stdout)
+        check(f"45 {label} keeps the usage rows beside it", "54%" in done.stdout, done.stdout)
 
 # --- 46 -- a candidate-level diagnostic must still REACH stdout ---------------------------------
 
@@ -1684,7 +1809,9 @@ with tempfile.TemporaryDirectory() as tmp:
 check("47 a CJK character counts as two columns", R._width("\u4e2d") == 2)
 check("47 an ASCII character counts as one", R._width("a") == 1)
 check("47 a combining mark adds nothing", R._width("e\u0301") == 1, str(R._width("e\u0301")))
-check("47 the gauge is one column per cell", R._width(R._bar(50.0)) == R.BAR_CELLS)
+check("47 a figure drops the zero it never measured", R._figure(42.0) == "42")
+check("47 and keeps a fraction the vendor did report", R._figure(7.5) == "7.5")
+check("47 a percentage measures the columns it prints", R._width(R._figure(100.0) + "%") == 4)
 check("47 padding fills to the column count, not the code-point count",
       R._width(R._pad("\u4e2d\u4e2d", 8)) == 8, repr(R._pad("\u4e2d\u4e2d", 8)))
 
@@ -1696,16 +1823,17 @@ with tempfile.TemporaryDirectory() as tmp:
     done, _, _ = run(["--claude-profile", str(wide),
                       "--codex-home", str(make_codex_home(root, ".codexW"))], root=root)
     check("47 a wide profile name does not gap the run", done.returncode == 0, done.stdout)
-    rows = [ln for ln in done.stdout.splitlines() if "42.0%" in ln]
+    rows = [ln for ln in done.stdout.splitlines() if "42%" in ln]
     header = [ln for ln in done.stdout.splitlines() if "SOURCE" in ln]
-    # The USED column starts where the gauge starts. Compare THAT prefix against the header's
-    # prefix before "USED": a `len()`-based renderer under-counts the wide name and the whole
-    # row slides left, which is exactly the defect this fixture exists for.
-    gauge_at = min((rows[0].find(cell) for cell in ("\u2588", "\u2591") if cell in rows[0]),
-                   default=-1)
-    check("47 and the row's USED column starts at the header's column",
-          gauge_at > 0 and R._width(rows[0][:gauge_at]) == R._width(header[0].split("USED")[0]),
-          f"{rows[0][:gauge_at]!r} vs {header[0].split('USED')[0]!r}")
+    # The SOURCE cell is the last on the line and the only one that is never padded, so it is
+    # where every earlier column's arithmetic lands. A `len()`-based renderer under-counts the
+    # wide name and the whole row slides left, which is the defect this fixture exists for.
+    source = R._source("cache 1h00m old", R.CLAUDE_GROUP)
+    check("47 and the row's SOURCE column starts at the header's column",
+          len(rows) == 1 and source in rows[0]
+          and R._width(rows[0][:rows[0].index(source)])
+          == R._width(header[0][:header[0].index("SOURCE")]),
+          f"{rows[0]!r} vs {header[0]!r}")
 
 # --- 48 -- the vendor stays readable off the row, and the tie-break is complete -----------------
 
@@ -1732,19 +1860,21 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # The tie-break must reach freshness: two rows alike in every earlier key but visibly different
 # on the page would otherwise swap places when the arguments are reversed.
-twins = [R.Row(".x", R.CLAUDE_GROUP,
-               R.Record("pool", R.REPORTED, percent=50.0, resets=same,
-                        freshness="cache 9h old")),
-         R.Row(".x", R.CLAUDE_GROUP,
-               R.Record("pool", R.REPORTED, percent=50.0, resets=same,
-                        freshness="cache 1h old"))]
+def freshness_twin(age: str) -> Any:
+    pool = R.Pool(".x", R.CLAUDE_GROUP, "all")
+    pool.cells["weekly"] = R.Record("weekly_all", R.REPORTED, percent=50.0, resets=same,
+                                    freshness=age, family="all", window="weekly")
+    return pool
+
+
+twins = [freshness_twin("cache 9h old"), freshness_twin("cache 1h old")]
 check("48 the ordering is total down to freshness",
-      [row.record.freshness for row in R._sorted_rows(twins)]
-      == [row.record.freshness for row in R._sorted_rows(list(reversed(twins)))],
-      str([row.record.freshness for row in R._sorted_rows(twins)]))
+      [pool.freshness() for pool in R._sorted_pools(twins)]
+      == [pool.freshness() for pool in R._sorted_pools(list(reversed(twins)))],
+      str([pool.freshness() for pool in R._sorted_pools(twins)]))
 check("48 and it is the earlier cache that sorts first",
-      R._sorted_rows(twins)[0].record.freshness == "cache 1h old",
-      R._sorted_rows(twins)[0].record.freshness)
+      R._sorted_pools(twins)[0].freshness() == "cache 1h old",
+      R._sorted_pools(twins)[0].freshness())
 
 # --- 49 -- what a vendor may put on the page ----------------------------------------------------
 
@@ -1849,102 +1979,329 @@ with tempfile.TemporaryDirectory() as tmp:
     check("51 and one still in date reads the time left",
           bool(band) and "in 1d" in band[0] and "expired" not in band[0], str(band))
 
-# --- 52 -- a dimmed section is dim all the way across -------------------------------------------
+# --- 52 -- the dim rides the CELL, because a figure that is not current sits beside one -------
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
+    # Both windows of ONE account, one current and one whose reset has passed. They now share a
+    # line, so the distinction can no longer be carried by a section heading above a block --
+    # only the cell itself can say that its figure is not comparable to its neighbour's.
     mixed = make_claude(root, ".claudeDim", cached(entries=[
         entry(kind="weekly_all", percent=40, resets=iso(20)),
         entry(kind="session", percent=95, resets=iso(-3)),
-    ]))
+    ]), token=False)
     done, _, _ = run(["--claude-profile", str(mixed), "--color=always"], root=root)
-    stale_rows = [ln for ln in done.stdout.splitlines() if "95.0%" in ln]
-    # Every paint() emits its own reset, so wrapping a finished line in DIM cancels the dim at
-    # the first inner reset and the row renders half dim. Each RUN of cells must carry it.
-    # Not "every painted run is dim" -- that stays true when a run is left UNPAINTED, which is
-    # the exact shape of the defect. Every visible character has to sit inside a dim run, so the
-    # row opens with one and no gap between runs carries text.
-    def undimmed(row: str) -> str:
-        visible, index = "", 0
-        dim = False
-        while index < len(row):
-            if row[index] == "\x1b":
-                close = row.index("m", index)
-                code = row[index + 2:close]
-                dim = code.startswith("2") and code != "0"
-                index = close + 1
-                continue
-            if not dim and row[index] != " ":
-                visible += row[index]
-            index += 1
-        return visible
+    rows = [ln for ln in done.stdout.splitlines() if "95%" in ln]
 
-    check("52 a stale row has no character outside a dim run",
-          len(stale_rows) == 1 and undimmed(stale_rows[0]) == "",
-          f"{undimmed(stale_rows[0])!r} in {stale_rows[0]!r}")
-    live_rows = [ln for ln in done.stdout.splitlines() if "40.0%" in ln]
-    check("52 while a current row keeps its reset at full weight",
-          len(live_rows) == 1 and "\x1b[2min 19h" not in live_rows[0], repr(live_rows))
+    def opening_code(row: str, needle: str) -> str:
+        """The escape that paints the run `needle` sits in -- what a reader actually sees."""
+        head = row[:row.index(needle)]
+        return head[head.rindex("\x1b[") + 2:head.rindex("m")] if "\x1b[" in head else ""
 
-# --- 53 -- one layout for every pool block ------------------------------------------------------
+    check("52 both figures are on one row", len(rows) == 1 and "40%" in rows[0], str(rows))
+    check("52 the stale cell recedes", bool(rows) and opening_code(rows[0], "95%").startswith("2;"),
+          repr(rows[0] if rows else ""))
+    check("52 while the current cell beside it keeps full weight",
+          bool(rows) and not opening_code(rows[0], "40%").startswith("2"),
+          repr(rows[0] if rows else ""))
+    check("52 and the hue still tracks consumption, not the dim",
+          bool(rows) and opening_code(rows[0], "95%").endswith(R.RED)
+          and opening_code(rows[0], "40%") == R.GREEN, repr(rows[0] if rows else ""))
+
+# --- 53 -- one layout for every row -------------------------------------------------------------
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
-    # Short values in one block and long ones in another. Measured per block, the header would be
-    # wider than its own columns (printing `WHEREPOOLUSED` with nothing between the labels) and
-    # each section would pick its own column starts -- a table whose columns move between
-    # sections is not a table.
-    mixed = make_claude(root, ".a", cached(entries=[
-        entry(kind="s", percent=40, resets=iso(20)),
-        entry(kind="a-considerably-longer-pool-name", percent=95, resets=iso(-3)),
-    ]))
     # BOTH candidate names are two characters, so the WHERE column's widest value is narrower
     # than the word WHERE. That is the only column a real report can drive under its own label,
-    # and without the floor the header prints `WHEREPOOL` with nothing between them.
+    # and without the floor the header prints `WHEREPOOL` with nothing between them. The Codex
+    # home supplies the long POOL values and a second, differently shaped source cell.
+    mixed = make_claude(root, ".a", cached(entries=[
+        entry(kind="session", percent=40, resets=iso(20)),
+        entry(kind="weekly_all", percent=95, resets=iso(-3)),
+    ]), token=False)
     done, _, _ = run(["--claude-profile", str(mixed),
-                      "--codex-home", str(make_codex_home(root, ".b"))], root=root)
+                      "--codex-home", str(make_codex_home(root, ".b"))], root=root,
+                     stub_result=dict(DEFAULT_RESULT, rateLimits=dict(
+                         DEFAULT_RESULT["rateLimits"], limitId="codex_twin")))
     header = [ln for ln in done.stdout.splitlines() if "SOURCE" in ln][0]
+    labels = ("WHERE", "POOL", "5H", "WEEKLY", "SOURCE")
     # Not "a space follows each label" -- that stays true when a LATER column is too narrow. Each
     # label must occupy its own column, so the header must equal the labels padded to the widths
     # the rows use, which is what the floor exists to guarantee.
-    for label in ("WHERE", "POOL", "USED", "RESET"):
+    for label in labels[:-1]:
         check(f"53 the header keeps a gap after {label}", f"{label} " in header, repr(header))
-    starts_at = [header.index(label) for label in ("WHERE", "POOL", "USED", "RESET", "SOURCE")]
+    starts_at = [header.index(label) for label in labels]
     check("53 the header's labels are in column order and never run together",
           starts_at == sorted(starts_at)
-          and all(b - a > len(label) for a, b, label in
-                  zip(starts_at, starts_at[1:], ("WHERE", "POOL", "USED", "RESET"))),
+          and all(nxt - at > len(label) for at, nxt, label in
+                  zip(starts_at, starts_at[1:], labels)),
           repr(header))
-    body = [ln for ln in done.stdout.splitlines()
-            if "40.0%" in ln or "95.0%" in ln]
-    starts = {ln.index("\u2588") if "\u2588" in ln else ln.index("\u2591") for ln in body}
-    check("53 every block starts its USED column at the same place",
-          len(body) == 2 and len(starts) == 1, f"{starts} in {body}")
+
+    # One layout for every row. SOURCE is the last cell on the line and the only one never
+    # padded, so every earlier column's arithmetic lands on where it starts; a per-row width
+    # would move it, and a table whose columns move down the page is not a table.
+    body = [line for _w, _p, line in pool_rows(done.stdout)]
+    source_at = {R._width(ln[:len(ln) - len(ln.split()[-1])]) for ln in body}
+    check("53 every row starts its SOURCE column at the same place",
+          len(body) >= 3 and len(source_at) == 1, f"{source_at} in {body}")
     check("53 and that is where the header puts it",
-          starts and starts.pop() == R._width(header.split("USED")[0]), repr(header))
+          source_at and source_at.pop() == R._width(header[:header.index("SOURCE")]),
+          repr(header))
+    check("53 no rendered line runs past 110 columns",
+          max(R._width(ln) for ln in done.stdout.splitlines()) <= 110, done.stdout)
 
     # A report whose pools are ALL stale still needs column names.
-    # No Codex home on purpose: a Codex row would be CURRENT and would put a row in the first
-    # block, which is exactly the condition that hides this defect. The run gaps on the absent
-    # Codex side, which is beside the point being made here.
+    # No Codex home on purpose: a Codex row would be CURRENT, which is the condition that hides
+    # this defect. The run gaps on the absent Codex side, which is beside the point being made.
     stale_only = make_claude(root, ".claudeAllStale", cached(entries=[
-        entry(kind="session", percent=71, resets=iso(-5))]))
+        entry(kind="session", percent=71, resets=iso(-5))]), token=False)
     done, _, _ = run(["--claude-profile", str(stale_only)], root=root)
     check("53 a report with no current rows still prints the header",
           any("WHERE" in ln and "SOURCE" in ln for ln in done.stdout.splitlines()), done.stdout)
-    check("53 above the stale block it belongs to",
-          done.stdout.index("WHERE") < done.stdout.index("stale --"), done.stdout)
-    check("53 and that report has no current rows at all",
-          "71.0%" in done.stdout
-          and done.stdout.index("stale --") < done.stdout.index("71.0%"), done.stdout)
+    check("53 above the row it belongs to",
+          done.stdout.index("WHERE") < done.stdout.index("71%"), done.stdout)
+    check("53 and that row is marked as the previous window",
+          any("71%" in ln and "ago" in ln for ln in done.stdout.splitlines()), done.stdout)
 
 # The short RESET labels stay distinguishable -- that distinction is why the cell carries the
-# note at all, and the long prose would set the column width for every block.
+# note at all, and the long prose would set the column width for every row.
 check("53 an inactive pool and an absent reset time still read differently",
-      R.RESET_LABELS["inactive, no current window"]
+      R.RESET_LABELS["inactive, no reset time reported"]
       != R.RESET_LABELS["no reset time reported by the backend"])
 check("53 an unmapped note falls through to itself, wide but correct",
       R.RESET_LABELS.get("something new", "something new") == "something new")
+check("53 and no label survives for a state the report no longer produces",
+      "inactive, no current window" not in R.RESET_LABELS, str(sorted(R.RESET_LABELS)))
+
+# --- 58 -- `is_active` marks the BINDING pool; it does not withdraw a current window ------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # MEASURED across four real accounts: exactly one pool per account carries `is_active`, and
+    # it is whichever one binds first. A five-hour window 9% used and resetting in 17 minutes
+    # carried `is_active: false` because the weekly pool was the binding one -- and was rendered
+    # as "no current window", dimmed, with its reset time greyed out along with it.
+    binding = make_claude(root, ".claudeAct", cached(entries=[
+        entry(kind="weekly_all", percent=87, resets=iso(57), active=True),
+        entry(kind="session", percent=9, resets=iso(0.3), active=False),
+    ]))
+    done, _, _ = run(["--claude-profile", str(binding), "--color=always",
+                      "--codex-home", str(make_codex_home(root, ".codexAct"))], root=root)
+    row = [ln for ln in done.stdout.splitlines() if "9%" in ln]
+    check("58 a non-binding window with a future reset states its reset time",
+          len(row) == 1 and "in 17m" in row[0], repr(row))
+
+    def opening_code(line: str, needle: str) -> str:
+        head = line[:line.index(needle)]
+        return head[head.rindex("\x1b[") + 2:head.rindex("m")] if "\x1b[" in head else ""
+
+    check("58 and is not dimmed for it",
+          bool(row) and not opening_code(row[0], "9%").startswith("2"), repr(row))
+    check("58 while the binding pool beside it reads exactly the same way",
+          bool(row) and not opening_code(row[0], "87%").startswith("2"), repr(row))
+
+    # The one thing `is_active` still decides: a pool reporting NO reset time at all. The vendor
+    # sends `resets_at: null` with `is_active: false` for a window it has nothing to say about,
+    # and an ACTIVE entry without a reset time is malformed rather than merely quiet.
+    # `resets_at` literally null -- `entry()`'s own default stands in for "unspecified", so the
+    # null has to be written onto the dict rather than passed through it.
+    quiet = make_claude(root, ".claudeQuiet", cached(entries=[
+        dict(entry(kind="weekly_all", percent=0, active=False), resets_at=None)]))
+    plain, _, _ = run(["--claude-profile", str(quiet),
+                       "--codex-home", str(root / ".codexAct")], root=root)
+    check("58 a pool with no reset time at all still reads `inactive`",
+          any("inactive" in ln for ln in plain.stdout.splitlines()), plain.stdout)
+    check("58 and does not gap the run", plain.returncode == 0, plain.stdout)
+
+# --- 54 -- the pivot: an allowance is a row, a window is a column, nothing is overwritten ------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # `codex_twin` in DEFAULT_RESULT carries TWO windows of equal duration under one limit id --
+    # a shape the vendor's schema permits. Both would key the same cell, and the second would
+    # silently overwrite the first, so the pool splits into two rows of the same column instead.
+    done, _, _ = run(["--claude-profile", str(make_claude(root, ".claudeTwin",
+                                                          cached(entries=[entry()]))),
+                      "--codex-home", str(make_codex_home(root, ".codexTwin"))], root=root,
+                     stub_result=dict(DEFAULT_RESULT, rateLimits=dict(
+                         DEFAULT_RESULT["rateLimits"], limitId="codex_twin")))
+    twins = [ln for ln in done.stdout.splitlines() if "codex_twin" in ln]
+    check("54 a pool with two same-duration windows takes two rows, not one cell",
+          len(twins) == 2, str(twins))
+    check("54 and both figures survive",
+          any("11%" in ln for ln in twins) and any("22%" in ln for ln in twins), str(twins))
+    check("54 each naming the slot it came from",
+          all(("(primary)" in ln) != ("(secondary)" in ln) for ln in twins), str(twins))
+    check("54 the run stays clean", done.returncode == 0, done.stdout)
+
+# A record built without a place keeps its own name for both, so it opens its own row and its
+# own column -- never a silent share of a cell belonging to some other pool.
+loose = R.Record("something-new", R.REPORTED, percent=5.0)
+check("54 a record with no declared place falls back to its own name",
+      (loose.family, loose.window) == ("something-new", "something-new"),
+      f"{loose.family} / {loose.window}")
+
+# --- 55 -- the DEFAULT profile keeps its config beside ~/.claude, not inside it ----------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    sandbox = root / "home"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    # The layout measured on a real machine: `~/.claude` is the data directory and carries a
+    # STALE `.claude.json` left over from an older release, while the live config -- the one the
+    # vendor's own diagnostics call `~/.claude.json` -- sits beside it. Reading the inner file
+    # reported `no-usage-cache` for an account whose weekly pool was nearly spent.
+    make_claude(sandbox, ".claude", cached(entries=[entry(kind="weekly_all", percent=41,
+                                                          resets=iso(30))]))
+    (sandbox / ".claude.json").write_text(json.dumps(cached(entries=[
+        entry(kind="weekly_all", percent=87, resets=iso(30))])), encoding="utf-8")
+    done, _, _ = run(["--codex-home", str(make_codex_home(root, ".codexHome"))], root=root)
+    check("55 the default profile is read from ~/.claude.json",
+          "87%" in done.stdout, done.stdout)
+    check("55 not from the stale copy inside the data directory",
+          "41%" not in done.stdout, done.stdout)
+    check("55 and it is not reported as having no cache",
+          "[no-usage-cache]" not in done.stdout, done.stdout)
+    check("55 the run stays clean", done.returncode == 0, done.stdout)
+
+    # A profile named explicitly by that same path is the same directory, so it resolves the
+    # same way -- an invocation form that disagreed with discovery would report two different
+    # numbers for one account depending on how it was asked for.
+    named, _, _ = run(["--claude-profile", str(sandbox / ".claude"),
+                       "--codex-home", str(root / ".codexHome")], root=root)
+    check("55 naming it explicitly resolves the same file", "87%" in named.stdout, named.stdout)
+
+    # Every OTHER profile keeps its config inside its own directory, which is what makes the
+    # default a special case rather than a rule.
+    other = make_claude(sandbox, ".claude2", cached(entries=[
+        entry(kind="weekly_all", percent=61, resets=iso(30))]))
+    done, _, _ = run(["--claude-profile", str(other),
+                      "--codex-home", str(root / ".codexHome")], root=root)
+    check("55 a named profile still reads the file inside it", "61%" in done.stdout, done.stdout)
+
+# --- 56 -- the subscription flag explains an absent cache; it never hides a present one ---------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # MEASURED on two real accounts: `hasAvailableSubscription: false` ships beside a full,
+    # freshly fetched `limits` array, one of them at 100% of its weekly pool. Read as "not
+    # subscribed", the flag suppressed exactly the account whose number mattered most -- and did
+    # it under a diagnostic that exits 0, so nothing said a pool had gone unread.
+    spent = cached(entries=[entry(kind="weekly_all", percent=100, resets=iso(17))],
+                   subscription=False)
+    profile = make_claude(root, ".claudeSpent", spent)
+    done, _, _ = run(["--claude-profile", str(profile),
+                      "--codex-home", str(make_codex_home(root, ".codexSpent"))], root=root)
+    check("56 a present cache is reported whatever the flag says", "100%" in done.stdout,
+          done.stdout)
+    check("56 and the profile is not written off as unsubscribed",
+          "[no-subscription]" not in done.stdout, done.stdout)
+    check("56 the run stays clean", done.returncode == 0, done.stdout)
+
+    # With NO cache the flag is still the better answer than "no cache": it says WHY there is
+    # none. That is the whole of what it is now allowed to decide.
+    bare = make_claude(root, ".claudeBare", {"hasAvailableSubscription": False})
+    done, _, _ = run(["--claude-profile", str(bare),
+                      "--codex-home", str(root / ".codexSpent")], root=root)
+    check("56 an absent cache under a false flag still reads no-subscription",
+          "[no-subscription]" in done.stdout and done.returncode == 0, done.stdout)
+
+# --- 57 -- the pool column carries the vendor's own name for the pool, not its internal id ------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    claude_n = make_claude(root, ".claudeN", cached(entries=[entry()]))
+    home_n = make_codex_home(root, ".codexN")
+
+    def named_run(by_id, spends_from="codex_absent"):
+        # `spends_from` defaults to a pool the map does not hold, so every pool renders and the
+        # naming rule can be read off all of them at once -- the filter has its own cases.
+        done, _, _ = run(["--claude-profile", str(claude_n), "--codex-home", str(home_n)],
+                         root=root, stub_result={
+                             "rateLimits": {"limitId": spends_from, "primary": {
+                                 "usedPercent": 4, "windowDurationMins": 10080,
+                                 "resetsAt": epoch(70)}},
+                             "rateLimitsByLimitId": by_id,
+                             "rateLimitResetCredits": {"availableCount": 0}})
+        return done, [pool for where, pool, _l in pool_rows(done.stdout) if where == ".codexN"]
+
+    WINDOW = {"usedPercent": 4, "windowDurationMins": 10080, "resetsAt": epoch(70)}
+    # `codex_bengalfox` and `base_model_inference` are internal ids; the backend names the same
+    # pools in the same object, and the id is unreadable to the person the report is for.
+    done, named = named_run({
+        "codex_bengalfox": {"limitId": "codex_bengalfox", "limitName": "GPT-5.3-Codex-Spark",
+                            "primary": WINDOW},
+        "codex": {"limitId": "codex", "limitName": None, "primary": WINDOW}})
+    check("57 a pool with a limitName is printed under it",
+          "GPT-5.3-Codex-Spark" in named, str(named))
+    check("57 and its internal id is not on the page",
+          "codex_bengalfox" not in done.stdout, done.stdout)
+    check("57 a null limitName leaves the id standing", "codex" in named, str(named))
+    check("57 the run stays clean", done.returncode == 0, done.stdout)
+
+    # Absent, not null: optional in the schema, and a .get default answers only the absent case.
+    _done, named = named_run({"codex_x": {"limitId": "codex_x", "primary": WINDOW}})
+    check("57 an absent limitName leaves the id standing", named == ["codex_x"], str(named))
+
+    # A name two pools share identifies neither -- two rows under one label are two rows the
+    # operator cannot tell apart, so both fall back to ids, which are unique by construction.
+    _done, named = named_run({
+        "codex_a": {"limitId": "codex_a", "limitName": "Shared", "primary": WINDOW},
+        "codex_b": {"limitId": "codex_b", "limitName": "Shared", "primary": WINDOW}})
+    check("57 a limitName two pools share falls back to both ids",
+          named == ["codex_a", "codex_b"], str(named))
+
+    # The same, one step less obvious: a limitName that collides with another pool's ID.
+    _done, named = named_run({
+        "codex_c": {"limitId": "codex_c", "limitName": "codex_d", "primary": WINDOW},
+        "codex_d": {"limitId": "codex_d", "limitName": None, "primary": WINDOW}})
+    check("57 a limitName colliding with another pool's id does the same",
+          named == ["codex_c", "codex_d"], str(named))
+
+    # Detail may never gap a candidate: a name this module refuses is DROPPED, and the pool's
+    # numbers still print under its id. The same rule the voucher title lives under.
+    done, named = named_run({
+        "codex_e": {"limitId": "codex_e", "limitName": "Spark" + chr(0x2028) + "warnings",
+                    "primary": WINDOW}})
+    check("57 a name that forges structure is dropped, not raised",
+          named == ["codex_e"], str(named))
+    check("57 and it does not gap the home",
+          done.returncode == 0 and "4%" in done.stdout, done.stdout)
+
+# --- 59 -- a cached window that is over is re-read live, because the file cannot answer ---------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    codex_r = make_codex_home(root, ".codexRefresh")
+    # Signing in does NOT refresh this: the CLI rewrites `.claude.json` at login and refreshes
+    # `cachedUsageUtilization` only after a request that carries usage back. So a profile can be
+    # freshly authenticated and still describe a window days gone -- with nothing on the page to
+    # suggest that signing in again was not the answer. No credential here, so the retry stops
+    # at the token and never opens a socket.
+    stale = make_claude(root, ".claudeStale", cached(entries=[
+        entry(kind="weekly_all", percent=71, resets=iso(-5))]), token=False)
+    done, _, _ = run(["--claude-profile", str(stale), "--codex-home", str(codex_r)], root=root)
+    check("59 a stale cache is retried against the API",
+          "the cache describes a window that is over" in done.stdout, done.stdout)
+    check("59 the retry names why it could not answer",
+          "token-absent" in done.stdout or "keychain-denied" in done.stdout, done.stdout)
+    # A failed retry may not COST anything. The cached figures are stale, which their own cells
+    # already say, and losing them to a failed network call would be the worse trade.
+    check("59 and the cached figures survive it",
+          any("71%" in line for _w, _p, line in pool_rows(done.stdout)), done.stdout)
+    check("59 the reason is a note, not a warning -- the default mode read what it promised to",
+          done.returncode == 0 and "warnings" not in done.stdout, done.stdout)
+
+    # The trigger is the window being OVER, not the cache being old: a current window is exactly
+    # what the file is for, and a report that phoned home on every run would be a different tool.
+    fresh = make_claude(root, ".claudeFresh", cached(entries=[
+        entry(kind="weekly_all", percent=12, resets=iso(40))]), token=False)
+    done, _, _ = run(["--claude-profile", str(fresh), "--codex-home", str(codex_r)], root=root)
+    check("59 a cache whose window is still open is not retried",
+          "the cache describes a window that is over" not in done.stdout, done.stdout)
+    check("59 and it reports from the file", "12%" in done.stdout and done.returncode == 0,
+          done.stdout)
 
 print(f"ran {checks} checks")
 if failures:

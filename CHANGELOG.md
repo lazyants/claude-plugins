@@ -2,6 +2,77 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.3.0] — 2026-08-27
+
+### Changed
+
+- **`code-limits` reports one row per ALLOWANCE, not one per window.** An account's five-hour and
+  weekly figures are two readings of one quota; printing them as two rows repeated the profile and
+  the pool on both and made an account compete with itself for the top of the page. They now sit
+  side by side under a `5H` and a `WEEKLY` column on one line. The window columns are discovered
+  from the data, so a Claude weekly pool scoped to one model joins that account's line as
+  `WEEKLY/<model>` and any other window the backend reports opens a column of its own rather than
+  being folded into somebody else's. Two windows of equal duration under one pool -- which the
+  Codex schema permits -- take two rows of the same column, because a cell holds one number and
+  dropping the second would be silent.
+- **The lifecycle sections are gone; the CELL carries its own caveat.** A window whose reset has
+  passed reads `14h ago` and is dimmed beside whatever current cells share its row, so a previous
+  window's percentage still never reads as a current one -- without a heading and a repeated
+  caveat per block. The `[stale-after-reset]` token moves to one legend line, printed only when
+  such a cell is on the page.
+- **The table is ordered by candidate, alphabetically, not by consumption.** Ranking scattered
+  one Codex home's pools down the page and printed the same directory name in four places, and a
+  rank over a mix of current and expired windows was ordering numbers that are not comparable.
+  A candidate's rows are now adjacent and its name is printed once for the group; position means
+  nothing, and consumption is read off the figure and its hue where it always was.
+- **The gauge is gone and a percentage no longer pads itself with a decimal it never measured.**
+  Three window columns of bar-plus-number wrapped the table on a terminal that would otherwise
+  hold it, and the bar never said anything the number beside it did not. `58.0%` now reads `58%`;
+  a vendor that does report a fraction still prints it.
+
+- **Only the Codex pool the CLI spends from is shown.** `rateLimitsByLimitId` enumerates pools
+  a person at a terminal is not asking about -- `codex_bengalfox` (`GPT-5.3-Codex-Spark`) and
+  `base_model_inference` (`gpt-reserve`) -- and the top-level `rateLimits` object already names
+  the one that answers "how much can I still use here". Read from that pointer rather than a
+  hardcoded id; a pointer naming a pool the map does not hold keeps every pool.
+- **A cached window that has already reset is re-read live.** The file cannot answer once its
+  window is over, and signing in does not refresh it: the CLI rewrites `.claude.json` at login
+  but refreshes `cachedUsageUtilization` only after a request that carries usage back, so a
+  freshly authenticated profile could sit at a three-day-old figure with nothing on the page to
+  suggest signing in again was not the fix. Only that profile is re-read, only when its window
+  is over; a retry that fails keeps the cached rows and states its reason as a note rather than
+  a warning. `SOURCE` reads `api` for a refreshed row and a cache age for one that was not.
+- **Claude Code's model-scoped weekly pool is no longer shown.** It read `0%` on every account
+  measured, and a `WEEKLY/<model>` column empty on every row but one cost more table width than
+  the pool was worth. A profile that carries nothing else still shows it, rather than being
+  reported as malformed over a payload that is perfectly well formed.
+- **A Codex pool is named the way the backend names it.** The payload carries a `limitName`
+  beside every pool and the report was discarding it, printing internal ids: `codex_bengalfox`
+  and `base_model_inference` are the pools the vendor itself calls `GPT-5.3-Codex-Spark` and
+  `gpt-reserve`. An unnamed pool keeps its id, and so do two pools that would end up sharing one
+  label, because two rows reading the same name cannot be told apart.
+
+### Fixed
+
+- **The default Claude Code profile is read from `~/.claude.json`, where it actually lives.** The
+  config path is `<CLAUDE_CONFIG_DIR or $HOME>/.claude.json`, and for the default profile the
+  config dir falls back to `$HOME` -- so the file sits BESIDE `~/.claude`, which is that profile's
+  data directory. Reading `~/.claude/.claude.json` found a stale copy left by an older release and
+  reported `no-usage-cache` for an account whose weekly pool was at 87%, under a diagnostic that
+  exits 0.
+- **`hasAvailableSubscription: false` no longer suppresses a profile that has usage to report.**
+  The flag is now read only as the REASON a cache is absent. Accounts ship it beside a full,
+  freshly fetched `limits` array -- one of them at 100% of its weekly pool -- so treating it as
+  "not subscribed" hid exactly the numbers worth reading, and hid them cleanly.
+- **`is_active: false` no longer withdraws a current Claude Code window.** Exactly one pool per
+  account carries that flag and it marks whichever one is currently BINDING -- a five-hour window
+  9% used and resetting in 17 minutes carried `is_active: false` because the weekly pool bound
+  first. Rendered as "no current window" it was dimmed as not comparable to the cell beside it,
+  taking its reset time with it. A reset time in the future now means the window is current, and
+  nothing else does.
+- **A window that gaps stays under the pool it was read from.** Its diagnostic used to name itself
+  as its own allowance, which opened a row of its own and lost which pool had gone unread.
+
 ## [multi-profile-plugins 1.2.0] — 2026-08-27
 
 ### Added
