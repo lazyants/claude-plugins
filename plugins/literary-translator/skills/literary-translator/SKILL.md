@@ -1962,8 +1962,8 @@ neither the dispatch nor the wait, and still gets a snapshot and its evidence.
 **#724** folded PREPARE's two commands into whichever wait turn already saw
 `--check-batch` exit 0, without moving either side of **#347**'s boundary — the
 folded turn still opens nothing either command wrote. The call-ceiling
-arithmetic that placement costs lives in `references/canon-and-glossary.md`,
-"Pre-merge citation review".
+arithmetic that placement costs lives in
+`references/pre-merge-citation-review.md`.
 `offline` is the one exception: no citation, no reviewer, no snapshot, so the
 merge consumes the attempt path there.
 
@@ -4131,6 +4131,8 @@ gate table and the stated non-goals: `references/person-registry.md`.
   assembler/NodeStream architecture
 - `references/output-target-adapters/` — `obsidian.md`, Step 0d's
   per-target rules
+- `references/pre-merge-citation-review.md` — the citation truth check,
+  read at the glossary pass when a batch is about to merge
 - `references/skeptic-pass.md` — the opt-in adversarial canon re-read,
   read only when `glossary.skeptic_pass.enabled` is true
 - `references/person-registry.md` — W9r, the opt-in person registry
