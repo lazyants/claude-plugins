@@ -34,22 +34,28 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   `base_model_inference` (`gpt-reserve`) -- and the top-level `rateLimits` object already names
   the one that answers "how much can I still use here". Read from that pointer rather than a
   hardcoded id. When the map does not hold the pool that pointer names, the top-level object IS
-  that pool and answers for it; every pool is kept only when there is no window anywhere else to
-  show.
+  that pool and answers for it; a selector that resolves to neither gaps the home rather than
+  substituting a pool nobody asked about.
 - **A cached window that has already reset is re-read live.** The file cannot answer once its
   window is over, and signing in does not refresh it: the CLI rewrites `.claude.json` at login
   but refreshes `cachedUsageUtilization` only after a request that carries usage back, so a
   freshly authenticated profile could sit at a three-day-old figure with nothing on the page to
   suggest signing in again was not the fix. Only that profile is re-read, only when its window
-  is over; a retry that fails keeps the cached rows and states its reason as a note rather than
-  a warning. `SOURCE` reads `api` for a refreshed row and a cache age for one that was not. A
-  retry that PARTLY succeeds is merged per window: a live record wins unless it gapped and the
-  cache holds that window, so one malformed entry in the response cannot throw away a window that
-  refreshed cleanly and leave the stale figure this feature exists to replace.
+  is over. A row then comes from ONE read, whole: if the live re-read produced any records those
+  are the row, gaps and exit status included, and only a retry that produced nothing keeps the
+  cached rows, stating its reason as a note rather than a warning. `SOURCE` reads `api` for a
+  refreshed row and a cache age for one that was not.
 - **Claude Code's model-scoped weekly pool is no longer shown.** It read `0%` on every account
-  measured, and a `WEEKLY/<model>` column empty on every row but one cost more table width than
-  the pool was worth. A profile that carries nothing else still shows it, rather than being
-  reported as malformed over a payload that is perfectly well formed.
+  measured, and a column empty on every row but one cost more table width than the pool was
+  worth. A profile that carries nothing else gaps instead of having it put back.
+- **One rule underneath all three of the above: semantic uncertainty is never promoted to
+  success.** Where a payload cannot be read as asked, the report gaps and says so, rather than
+  substituting another pool, putting back a record it was told to hide, or mixing two reads into
+  one row. Three review rounds each found a different instance of the same shape -- a fallback
+  that preferred showing something wrong to showing nothing, and exited 0 doing it -- so the
+  fallbacks went rather than being fixed one site at a time. A vendor kind this report does not
+  know now keeps its own name for both its row and its column instead of being placed by a guess
+  about its prefix.
 - **A Codex pool is named the way the backend names it.** The payload carries a `limitName`
   beside every pool and the report was discarding it, printing internal ids: `codex_bengalfox`
   and `base_model_inference` are the pools the vendor itself calls `GPT-5.3-Codex-Spark` and

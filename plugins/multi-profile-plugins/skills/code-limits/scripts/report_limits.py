@@ -536,25 +536,16 @@ CLAUDE_KINDS = {"session": (CLAUDE_ALL, "5h"), "weekly_all": (CLAUDE_ALL, "weekl
                 "five_hour": (CLAUDE_ALL, "5h"), "seven_day": (CLAUDE_ALL, "weekly")}
 
 
-def _claude_place(kind: str, display: str) -> tuple[str, str]:
+def _claude_place(kind: str) -> tuple[str, str]:
     """(allowance, window) for one vendor kind. Total -- an unknown kind is never folded away.
 
-    A `weekly_*` kind this table has no entry for is still a weekly window, and it names its own
-    quota through the model it is scoped to, so it joins the weekly column on a row of its own.
-    Anything else keeps its own name in both places: it then opens its own row AND its own
-    column, which is wide but honest -- being folded into another pool's cell would either
-    overwrite a real number or hide behind one.
+    A kind this table has no entry for keeps its own name in BOTH places, so it opens its own row
+    and its own column: wide, but it states what it is. Inferring a place from the kind's PREFIX
+    read like harmless tidiness and was a guess about an allowance nobody had measured -- folded
+    into another pool's row, an unrecognised window either overwrites a real number or hides
+    behind one.
     """
-    known = CLAUDE_KINDS.get(kind)
-    if known is not None:
-        return known
-    if kind.startswith("weekly"):
-        # A weekly window scoped to one model is a sub-limit of the SAME account, not a second
-        # account, so it stays on that account's line and takes a column named for its scope.
-        # Its own kind is the fallback name, because a scope that arrives without a display name
-        # still has to be told apart from the unscoped weekly column beside it.
-        return CLAUDE_ALL, f"weekly/{display or kind}"
-    return kind, kind
+    return CLAUDE_KINDS.get(kind, (kind, kind))
 
 
 def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> list[Record]:
@@ -566,12 +557,13 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
             raise Malformed("payload-malformed")
         # The model-scoped weekly pool is not shown. It read `0%` on every account measured, and
         # a column that is empty on every row but one costs the table more width than the pool
-        # is worth. FALLING BACK to the whole list when nothing else survives: an account
-        # carrying only a scoped pool is not a shape the vendor produces -- `session` and
-        # `weekly_all` ship beside it -- but if it ever did, showing the pool this report
-        # normally hides beats reporting a perfectly well-formed payload as malformed.
+        # is worth. No rescue when it is the only entry: putting back the pool this report is
+        # told to hide is a substitution like any other, and an account carrying nothing else is
+        # a shape the code says the vendor does not produce -- `session` and `weekly_all` ship
+        # beside it. Should it ever occur, the container yields no record and the profile gaps
+        # visibly, which is the answer to a payload nobody can read as asked.
         shown = [item for item in entries if not _is_scoped(item)]
-        for index, item in enumerate(shown or entries):
+        for index, item in enumerate(shown):
             # Per RECORD, not per candidate. One malformed entry must not suppress its siblings:
             # the valid pools are exactly what the operator opened the report to see, and a
             # profile that prints nothing looks identical to one that has nothing. The entry's
@@ -597,7 +589,7 @@ def _claude_flat_row(key: str, slot, freshness: str, now: datetime.datetime) -> 
     # `(flat)` rides the ALLOWANCE, which is the only cell on the row that names it now that
     # the window is a column heading. Which container shape answered is worth disclosing: the
     # flat one is a fallback, and a report that used it silently reads like the current shape.
-    family, window = _claude_place(key, "")
+    family, window = _claude_place(key)
     family = f"{family} (flat)"
     return _window_row(
         name=f"{key} (flat)",
@@ -613,19 +605,15 @@ def _claude_raw_place(item) -> dict:
     A record that GAPS has no validated kind to place it by, and the fallback names it after its
     INDEX in the payload -- so a malformed `session` opened a row AND a column both called
     `limits[0]`, while its healthy weekly sibling sat under `all`. The placement is derivable
-    without trusting the entry: read the two fields defensively, and answer nothing at all if
-    they are not the plain printable strings the vendor's schema says they are.
+    without trusting the entry: read the kind defensively, and answer nothing at all if it is not
+    the plain printable string the vendor's schema says it is.
     """
     if not isinstance(item, dict):
         return {}
     kind = item.get("kind")
     if not isinstance(kind, str) or not kind or not kind.isprintable():
         return {}
-    scope = item.get("scope")
-    model = scope.get("model") if isinstance(scope, dict) else None
-    raw = model.get("display_name") if isinstance(model, dict) else None
-    display = raw if isinstance(raw, str) and raw.isprintable() else ""
-    family, window = _claude_place(kind, display)
+    family, window = _claude_place(kind)
     return {"family": family, "window": window}
 
 
@@ -642,16 +630,17 @@ def _is_scoped(item) -> bool:
 def _claude_row(entry: dict, freshness: str, now: datetime.datetime) -> Record:
     kind = _text(entry.get("kind"), 64)
     name = kind
-    display = ""
     scope = entry.get("scope")
     if scope is not None:
         model = _obj(scope).get("model")
         if model is not None:
             raw = _obj(model).get("display_name")
             if raw is not None:
-                display = _text(raw, 64)
-                name = f"{kind} ({display})"
-    family, window = _claude_place(kind, display)
+                # Kept in the record NAME, which is what a warning prints, so a scoped pool that
+                # could not be read still identifies itself. It names no row and no column: the
+                # only kinds this report lays out are the ones CLAUDE_KINDS knows.
+                name = f"{kind} ({_text(raw, 64)})"
+    family, window = _claude_place(kind)
     active = _flag(entry.get("is_active")) if "is_active" in entry else True
     percent = _num(entry.get("percent"), 0.0, 100.0)
     if entry.get("resets_at") is None:
@@ -982,28 +971,26 @@ def _codex_spent_from(default, pools: dict[str, dict]) -> dict[str, str]:
 
     Read from the vendor's own pointer rather than from a hardcoded `"codex"`. When the map does
     not hold the pool that pointer names, the TOP-LEVEL object is that pool -- it carries the same
-    windows under the same id, which is why the no-map path already reads it. Returning the whole
-    map there dropped the only pool the operator asked about and printed the reserve instead, on a
-    run that exited 0: the exact inversion of what this filter is for.
+    windows under the same id, which is why the no-map path already reads it.
 
-    Keeping every pool stays the last resort, for a pointer this module cannot read at all or one
-    whose top-level object carries no window either. Showing more than was asked for is
-    recoverable; showing the wrong pool and calling it the answer is not.
+    A selector that resolves to NEITHER gaps the home. It has no third answer: every fallback
+    tried here substituted a different pool, and printing a reserve or a model-specific pool in
+    the place the operator reads their terminal quota is worse than saying the quota could not be
+    determined -- twice over, because it also exits 0. Semantic uncertainty is never promoted to
+    success.
     """
     if not isinstance(default, dict):
-        return pools
+        raise Malformed("payload-malformed")
     raw_id = default.get("limitId")
-    try:
-        # `limitId` is `string | null`; a .get default answers only the ABSENT case, and null is
-        # the backend using the same name the single-pool path already falls back to.
-        chosen = "codex" if raw_id is None else _text(raw_id, 64)
-    except Malformed:
-        return pools
+    # `limitId` is `string | null`; a .get default answers only the ABSENT case, and null is the
+    # backend using the same name the single-pool path already falls back to. A limitId this
+    # module refuses raises out of _text and gaps the home, which is the point.
+    chosen = "codex" if raw_id is None else _text(raw_id, 64)
     if chosen in pools:
         return {chosen: pools[chosen]}
     if any(isinstance(default.get(slot), dict) for slot in ("primary", "secondary")):
         return {chosen: default}
-    return pools
+    raise Malformed("payload-malformed")
 
 
 def _codex_labels(pools: dict[str, dict]) -> dict[str, str]:
@@ -1030,16 +1017,6 @@ def _codex_labels(pools: dict[str, dict]) -> dict[str, str]:
             labels[limit_id] = name if name.strip() else limit_id
         except Malformed:
             labels[limit_id] = limit_id
-    # A label two ids share identifies neither, and two rows reading the same name are two rows
-    # the operator cannot tell apart -- so both fall back to the ids, which are unique by
-    # construction. A `limitName` that collides with some OTHER pool's id lands here too.
-    clashes: dict[str, list[str]] = {}
-    for limit_id, label in labels.items():
-        clashes.setdefault(label, []).append(limit_id)
-    for shared in clashes.values():
-        if len(shared) > 1:
-            for limit_id in shared:
-                labels[limit_id] = limit_id
     return labels
 
 
@@ -1557,23 +1534,6 @@ def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
     print(paint("  exactly as any codex invocation does. Nothing here is ever redeemed.", DIM))
 
 
-def _merge_refresh(cached: list[Record], live: list[Record]) -> list[Record]:
-    """Cached records overlaid by a live re-read, one window at a time.
-
-    Keyed on (family, window), which is the same key the renderer lays the table out on -- so a
-    cached cell and its live replacement can never both survive into two rows for one window. A
-    live record that GAPPED loses to a cached one for that window: the cached figure is stale,
-    which its own cell says, and a stale number the operator can read beats a diagnostic token
-    where a number used to be. A gap with no cached counterpart is kept, and still gaps the run.
-    """
-    merged: dict[tuple[str, str], Record] = {(r.family, r.window): r for r in cached}
-    for record in live:
-        key = (record.family, record.window)
-        if record.state != GAP or key not in merged:
-            merged[key] = record
-    return list(merged.values())
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Report Claude Code and Codex usage limits.")
     parser.add_argument("--live", action="store_true",
@@ -1643,18 +1603,14 @@ def main(argv: list[str] | None = None) -> int:
                 # be the worse trade. Its reason is a NOTE, deliberately not a warning: the
                 # default mode promised to read a cache and it read one.
                 live_state, live_records, live_code = _examine(candidate, _claude_live)
-                if any(record.state != GAP for record in live_records):
-                    # PARTLY succeeded is not failed. A live response carrying one malformed
-                    # entry gapped the whole result, so a window that refreshed cleanly was
-                    # thrown away with it and the report showed the very stale figure this retry
-                    # exists to replace. Merge per window: a live record wins unless it gapped
-                    # and the cache has that window, in which case the stale cell -- which says
-                    # so in its own words -- is still the better of the two.
-                    records = _merge_refresh(records, live_records)
-                    state = (GAP if any(r.state == GAP for r in records)
-                             else REPORTED if any(r.state == REPORTED for r in records)
-                             else NO_CURRENT)
-                    code = ""
+                if live_records:
+                    # A row comes from ONE read, whole -- gaps included. Merging the two per
+                    # window looked strictly better and was worse: with the live gap suppressed
+                    # by a cached cell, nothing was left to gap the run, and the row rendered a
+                    # CACHED figure under the live provenance the first cell carried. A stale
+                    # number labelled `api`, no note, exit 0. Whatever the live read says is what
+                    # this row says; the cache is kept only when that read produced nothing.
+                    state, records, code = live_state, live_records, live_code
                 else:
                     detail = live_code or ", ".join(f"{r.name} [{r.diagnostic}]"
                                                     for r in live_records if r.state == GAP)

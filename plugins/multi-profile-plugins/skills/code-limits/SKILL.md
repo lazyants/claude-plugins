@@ -42,17 +42,25 @@ under one pool -- a shape the Codex schema permits -- take two rows of the same 
 cell can hold one number and dropping the second would be silent.
 
 **Claude Code's model-scoped weekly pool is the one thing deliberately not shown.** It read `0%`
-on every account measured, and a `WEEKLY/<model>` column empty on every row but one costs the
-table more width than the pool is worth. A profile carrying nothing else is the exception -- not
-a shape the vendor produces, but reporting a well-formed payload as malformed over it would be
-worse, so there the scoped pool is shown under the model's own display name.
+on every account measured, and a column empty on every row but one costs the table more width
+than the pool is worth. A profile carrying nothing else gaps rather than having it put back:
+that is not a shape the vendor produces -- `session` and `weekly_all` ship beside it -- and
+printing the pool the report was told to hide, on a run that calls itself clean, is a
+substitution like any other.
 
 On the Codex side only the pool the CLI actually spends from is shown. `rateLimitsByLimitId`
 enumerates pools a person at a terminal is not asking about -- a model-specific one and a
 reserve -- and the backend already says which one answers "how much can I still use here": the
 top-level `rateLimits` object carries its `limitId`. A pointer naming a pool that is not in the
-map keeps every pool, because showing more than was asked for is recoverable and showing none
-is not.
+map is answered by that top-level object, which carries the same pool's windows. A selector that
+resolves to neither GAPS the home: printing a reserve or a model-specific pool where the operator
+reads their terminal quota is worse than saying the quota could not be determined -- twice over,
+because the substitution also exits 0.
+
+That is the one rule the whole reader follows: **semantic uncertainty is never promoted to
+success.** Where a payload cannot be read as asked, the report gaps and says so, rather than
+substituting another pool, putting back a record it was told to hide, or mixing two reads into
+one row.
 
 So each row reads: where it lives, which allowance it is under the vendor's own NAME for it --
 Codex sends a `limitName` beside every pool, so the column reads `GPT-5.3-Codex-Spark` and
@@ -88,10 +96,13 @@ the present, and the report re-reads that one profile live rather than printing 
 about a window nobody is spending from. Signing in does not fix it on its own: the CLI rewrites
 `.claude.json` at login but refreshes `cachedUsageUtilization` only after a request that carries
 usage back, so a freshly authenticated profile can still be describing a window three days gone.
-A retry that fails keeps the cached rows exactly as they were -- they are stale, which their
-cells already say -- and states its reason as a note rather than a warning. The `SOURCE` column
-is where to read which happened: `api` for a row that was refreshed, a cache age for one that
-was not.
+A row comes from ONE read, whole. If the live re-read produced any records at all, those are the
+row -- gaps included, and its exit status with them. Only a retry that produced nothing keeps the
+cached rows, and it states its reason as a note rather than a warning: the default mode promised
+to read a cache and it read one. Merging the two per window looked strictly better and was worse
+-- a live gap suppressed by a cached cell left nothing to gap the run, and the row rendered a
+cached figure under the live provenance its first cell carried. The `SOURCE` column is where to
+read which happened: `api` for a row that was refreshed, a cache age for one that was not.
 
 The **default profile is the exception**: its config is `~/.claude.json`, beside `~/.claude`
 rather than inside it, because the path is `<CLAUDE_CONFIG_DIR or $HOME>/.claude.json` and that

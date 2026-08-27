@@ -437,12 +437,14 @@ with tempfile.TemporaryDirectory() as tmp:
     done, _, _ = run(["--claude-profile", str(shapes / ".claudeD"),
                       "--claude-profile", str(shapes / ".claudeE"),
                       "--codex-home", str(shapes / ".nope")])
-    # `.claudeD` carries NOTHING BUT a scoped pool. That is not a shape the vendor produces --
-    # `session` and `weekly_all` ship beside it -- but hiding the only entry a payload has would
-    # report a perfectly well-formed profile as malformed, so the fallback shows it instead, and
-    # the model's display name has to survive into the heading unfolded and unescaped.
-    check("10 a profile with only a scoped pool still reports it, under the model's name",
-          "WEEKLY/Fable" in done.stdout, done.stdout)
+    # `.claudeD` carries NOTHING BUT the scoped pool this report is told to hide -- not a shape
+    # the vendor produces, since `session` and `weekly_all` ship beside it. Putting it back was a
+    # substitution like any other: the report would print the pool it was told to hide and call
+    # the run clean. It gaps instead, visibly.
+    check("10 a profile whose only entry is the hidden pool gaps",
+          ".claudeD" in done.stdout and "[payload-malformed]" in done.stdout, done.stdout)
+    check("10 and the hidden pool is not put back on the page",
+          "Fable" not in done.stdout and "19%" not in done.stdout, done.stdout)
     flat = [ln for ln in done.stdout.splitlines() if ".claudeE" in ln]
     check("11 the flat fallback says which container shape answered",
           len(flat) == 1 and "(flat)" in flat[0], str(flat))
@@ -662,15 +664,21 @@ with tempfile.TemporaryDirectory() as tmp:
     check("18 and that pool carries the top-level figure, not another pool's",
           "54%" in "".join(pools_named.values()), str(pools_named))
 
-    # Keeping every pool is the LAST resort: only when the top-level object has no window either,
-    # so there is nothing better to show. Showing more than was asked for is recoverable.
+    # A selector that resolves to NEITHER a mapped pool nor a windowed top-level object gaps the
+    # home. Every substitute tried here printed a reserve or a model-specific pool in the place
+    # the operator reads their terminal quota, and exited 0 doing it.
     windowless, _, _ = run(["--claude-profile", str(codex_root / ".nope"),
                             "--codex-home", str(home)], root=codex_root,
                            stub_result=dict(DEFAULT_RESULT,
                                             rateLimits={"limitId": "codex_absent"}))
     pools_kept = {pool for where, pool, _l in pool_rows(windowless.stdout) if where == ".codexT"}
-    check("18 a pointer with no window anywhere keeps every pool",
-          {"codex", "codex_bengalfox"} <= pools_kept, str(sorted(pools_kept)))
+    check("18 a selector that resolves to nothing shows no pool at all",
+          pools_kept == set(), str(sorted(pools_kept)))
+    check("18 it gaps the home rather than substituting another pool",
+          "[payload-malformed]" in windowless.stdout and windowless.returncode == 1,
+          f"rc={windowless.returncode}\n{windowless.stdout}")
+    check("18 and names no other pool on the page",
+          "codex_bengalfox" not in windowless.stdout, windowless.stdout)
     # The count itself, not merely the label: "1" occurs in every percentage on the page, so
     # `"1" in stdout` would stay green for any count the script chose to print.
     coupon_rows = [row for row in voucher_band(done.stdout) if not row.startswith("credits")]
@@ -891,12 +899,19 @@ with tempfile.TemporaryDirectory() as tmp:
     # half that _text cannot cover: it is not a vendor field and not this script's to validate,
     # so only the stream configuration can carry it. Both halves are in this one fixture.
     narrow = root / "narrow"
-    make_claude(narrow, ".claudeW\u00e9", cached(entries=[entry(
-        kind="weekly_scoped", percent=19,
-        scope={"model": {"id": None, "display_name": "Fabl\u00e9"}, "surface": None})]))
+    make_claude(narrow, ".claudeW\u00e9", cached(entries=[entry()]))
+    # The vendor string is a Codex pool NAME, which is what the pool column prints now that the
+    # model-scoped Claude pool is not laid out at all.
     done, _, _ = run(["--claude-profile", str(narrow / ".claudeW\u00e9"),
                       "--codex-home", str(make_codex_home(narrow, ".codexClean"))],
-                     root=narrow, extra_env={"PYTHONIOENCODING": "ascii"})
+                     root=narrow, extra_env={"PYTHONIOENCODING": "ascii"},
+                     stub_result={"rateLimits": {"limitId": "codex"},
+                                  "rateLimitsByLimitId": {"codex": {
+                                      "limitId": "codex", "limitName": "Fabl\u00e9",
+                                      "primary": {"usedPercent": 19,
+                                                  "windowDurationMins": 10080,
+                                                  "resetsAt": epoch(48)}}},
+                                  "rateLimitResetCredits": {"availableCount": 0}})
     check("30 an ascii stdout does not abort the report",
           "UnicodeEncodeError" not in done.stderr and "Traceback" not in done.stderr, done.stderr)
     check("30 the vendor field is escaped rather than lost",
@@ -1022,20 +1037,20 @@ with tempfile.TemporaryDirectory() as tmp:
     done, _, _ = run(["--claude-profile", str(make_claude(ovf, ".claudeClean",
                                                           cached(entries=[entry()]))),
                       "--codex-home", str(make_codex_home(ovf, ".codexO"))], root=ovf,
-                     stub_result={"rateLimitsByLimitId": {
-                         "codex": {"limitId": "codex", "primary": {
-                             "usedPercent": 5, "windowDurationMins": 10080,
-                             "resetsAt": epoch(9)}},
+                     stub_result={"rateLimits": {"limitId": "codex_bad"},
+                                  "rateLimitsByLimitId": {
                          "codex_bad": {"limitId": "codex_bad", "primary": {
-                             "usedPercent": 10 ** 400, "windowDurationMins": 10080,
+                             "usedPercent": 10 ** 400, "windowDurationMins": 300,
+                             "resetsAt": epoch(9)},
+                             "secondary": {
+                             "usedPercent": 5, "windowDurationMins": 10080,
                              "resetsAt": epoch(9)}}},
                          "rateLimitResetCredits": {"availableCount": 2}})
     gapped = [pool for _w, pool, line in pool_rows(done.stdout) if "[internal-error]" in line]
     check("33b the overflowing codex window gaps under its own pool and slot",
           gapped == ["codex_bad"], str(gapped))
-    check("33b the OTHER pool still reports",
-          any(pool == "codex" and "5%" in line for _w, pool, line in pool_rows(done.stdout)),
-          done.stdout)
+    check("33b the VALID sibling window on that same pool still reports",
+          any("5%" in line for _w, _p, line in pool_rows(done.stdout)), done.stdout)
     coupon_rows_33b = [row for row in voucher_band(done.stdout)
                        if not row.startswith("credits")]
     check("33b and the voucher row beside it still reports its own count",
@@ -2233,10 +2248,9 @@ with tempfile.TemporaryDirectory() as tmp:
     claude_n = make_claude(root, ".claudeN", cached(entries=[entry()]))
     home_n = make_codex_home(root, ".codexN")
 
-    def named_run(by_id, spends_from="codex_absent"):
-        # The top-level object names a pool the map does not hold AND carries no window of its
-        # own, which is the one state where every pool renders -- so the naming rule can be read
-        # off all of them at once. The pool FILTER has its own cases in 18.
+    def named_run(by_id, spends_from):
+        # Exactly one pool renders -- the one the selector names -- so the naming rule is read
+        # off that pool. The FILTER itself has its own cases in 18.
         done, _, _ = run(["--claude-profile", str(claude_n), "--codex-home", str(home_n)],
                          root=root, stub_result={
                              "rateLimits": {"limitId": spends_from},
@@ -2249,39 +2263,27 @@ with tempfile.TemporaryDirectory() as tmp:
     # pools in the same object, and the id is unreadable to the person the report is for.
     done, named = named_run({
         "codex_bengalfox": {"limitId": "codex_bengalfox", "limitName": "GPT-5.3-Codex-Spark",
-                            "primary": WINDOW},
-        "codex": {"limitId": "codex", "limitName": None, "primary": WINDOW}})
+                            "primary": WINDOW}}, "codex_bengalfox")
     check("57 a pool with a limitName is printed under it",
-          "GPT-5.3-Codex-Spark" in named, str(named))
+          named == ["GPT-5.3-Codex-Spark"], str(named))
     check("57 and its internal id is not on the page",
           "codex_bengalfox" not in done.stdout, done.stdout)
-    check("57 a null limitName leaves the id standing", "codex" in named, str(named))
     check("57 the run stays clean", done.returncode == 0, done.stdout)
 
+    # Null, which the schema permits explicitly.
+    _done, named = named_run({"codex": {"limitId": "codex", "limitName": None,
+                                        "primary": WINDOW}}, "codex")
+    check("57 a null limitName leaves the id standing", named == ["codex"], str(named))
+
     # Absent, not null: optional in the schema, and a .get default answers only the absent case.
-    _done, named = named_run({"codex_x": {"limitId": "codex_x", "primary": WINDOW}})
+    _done, named = named_run({"codex_x": {"limitId": "codex_x", "primary": WINDOW}}, "codex_x")
     check("57 an absent limitName leaves the id standing", named == ["codex_x"], str(named))
-
-    # A name two pools share identifies neither -- two rows under one label are two rows the
-    # operator cannot tell apart, so both fall back to ids, which are unique by construction.
-    _done, named = named_run({
-        "codex_a": {"limitId": "codex_a", "limitName": "Shared", "primary": WINDOW},
-        "codex_b": {"limitId": "codex_b", "limitName": "Shared", "primary": WINDOW}})
-    check("57 a limitName two pools share falls back to both ids",
-          named == ["codex_a", "codex_b"], str(named))
-
-    # The same, one step less obvious: a limitName that collides with another pool's ID.
-    _done, named = named_run({
-        "codex_c": {"limitId": "codex_c", "limitName": "codex_d", "primary": WINDOW},
-        "codex_d": {"limitId": "codex_d", "limitName": None, "primary": WINDOW}})
-    check("57 a limitName colliding with another pool's id does the same",
-          named == ["codex_c", "codex_d"], str(named))
 
     # Detail may never gap a candidate: a name this module refuses is DROPPED, and the pool's
     # numbers still print under its id. The same rule the voucher title lives under.
     done, named = named_run({
         "codex_e": {"limitId": "codex_e", "limitName": "Spark" + chr(0x2028) + "warnings",
-                    "primary": WINDOW}})
+                    "primary": WINDOW}}, "codex_e")
     check("57 a name that forges structure is dropped, not raised",
           named == ["codex_e"], str(named))
     check("57 and it does not gap the home",
@@ -2396,7 +2398,7 @@ with tempfile.TemporaryDirectory() as tmp:
     home_b = make_codex_home(root, ".codexBlank")
     done, _, _ = run(["--claude-profile", str(claude_b), "--codex-home", str(home_b)],
                      root=root, stub_result={
-                         "rateLimits": {"limitId": "codex_absent"},
+                         "rateLimits": {"limitId": "codex_w"},
                          "rateLimitsByLimitId": {"codex_w": {
                              "limitId": "codex_w", "limitName": "   ",
                              "primary": {"usedPercent": 4, "windowDurationMins": 10080,
@@ -2430,40 +2432,6 @@ with tempfile.TemporaryDirectory() as tmp:
     check("61 the run gaps, because a window went unread", done.returncode == 1,
           f"rc={done.returncode}")
 
-# The refresh merge is a pure function over records, and the live path it serves cannot be
-# reached from this suite without a socket -- so the RULE is unit-tested and the WIRING is
-# asserted against main's own source, which is what a guard called from nowhere would fail.
-now_61 = datetime.datetime.now(datetime.timezone.utc)
-soon = now_61 + datetime.timedelta(hours=3)
-
-
-def rec(window, state, percent=None, diagnostic=""):
-    return R.Record(f"pool/{window}", state, percent=percent, resets=soon,
-                    diagnostic=diagnostic, family="all", window=window)
-
-
-cached_pair = [rec("5h", R.NO_CURRENT, 88.0, "stale-after-reset"), rec("weekly", R.REPORTED, 40.0)]
-merged = R._merge_refresh(cached_pair, [rec("5h", R.REPORTED, 2.0),
-                                        rec("weekly", R.GAP, diagnostic="field-malformed")])
-by_window = {r.window: r for r in merged}
-check("61 the merge keeps one record per window", len(merged) == 2, str(sorted(by_window)))
-check("61 a live record replaces the stale cell it refreshes",
-      by_window["5h"].percent == 2.0 and by_window["5h"].state == R.REPORTED,
-      str(by_window["5h"].percent))
-check("61 while a live record that GAPPED loses to the cached figure",
-      by_window["weekly"].percent == 40.0 and by_window["weekly"].state == R.REPORTED,
-      str(by_window["weekly"].state))
-only_gap = R._merge_refresh([], [rec("weekly", R.GAP, diagnostic="field-malformed")])
-check("61 but a gap with no cached counterpart is kept, so the run still gaps",
-      len(only_gap) == 1 and only_gap[0].state == R.GAP, str(only_gap))
-
-main_src = [node for node in ast.parse(SCRIPT.read_text(encoding="utf-8")).body
-            if isinstance(node, ast.FunctionDef) and node.name == "main"]
-called = {node.func.id for node in ast.walk(main_src[0])
-          if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
-check("61 and main actually calls it -- a merge wired to nothing passes every test above",
-      len(main_src) == 1 and "_merge_refresh" in called, str(sorted(called)))
-
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -2474,7 +2442,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 521
+MIN_CHECKS = 517
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
