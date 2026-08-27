@@ -333,21 +333,19 @@ this paragraph's total exclusion count):
 
 `resolve_codex_companion.py` used to be a fourth exclusion here, on the claimed
 reason that a durable copy "could not glob the plugin's own install locations to
-find the newest installed `codex-companion.mjs`". That reason was false, and the
-disproof is short: the script **reads** no `__file__` — its own location never
-enters its search — and imports nothing plugin-specific; its DEFAULT search is
-rooted at the RUNNING Claude config profile (`$CLAUDE_CONFIG_DIR`, else
-`~/.claude`) and then at `os.path.expanduser("~")` against
+find the newest installed `codex-companion.mjs`". That reason was false: the
+script **reads** no `__file__` — its own location never enters its search — and
+imports nothing plugin-specific; its DEFAULT search is rooted at the RUNNING
+Claude config profile (`$CLAUDE_CONFIG_DIR`, else `~/.claude`) and then at
+`os.path.expanduser("~")` against
 `~/.claude*/plugins/cache/openai-codex/**/codex-companion.mjs` — a different
-plugin's own install cache, found the same way regardless of where
-`resolve_codex_companion.py` itself happens to be running from. Both roots are
-ENVIRONMENT facts, so a durable copy globs the identical paths and finds the
-identical companions. It is now
-copied like every other self-anchored script; do not re-exclude it by
-re-deriving this same plausible-sounding-but-wrong argument — a literal
-occurrence count of `__file__` in the file is not this claim (the script's own
-docstring has to discuss `__file__` by NAME to explain this exact history, which
-makes a bare grep count useless as a re-check either way). Read
+plugin's own install cache. Both roots are ENVIRONMENT facts, so a durable copy
+globs the identical paths and finds the identical companions wherever it runs
+from. It is now copied like every other self-anchored script; do not re-exclude
+it by re-deriving this same plausible-sounding-but-wrong argument, and do not
+re-check it with a literal `__file__` occurrence count — the script's own
+docstring has to discuss `__file__` by NAME to explain this exact history, so a
+bare grep count is useless as a re-check either way. Read
 `tests/resolve_codex_companion.test.py::test_the_resolver_contains_no_executable_reference_to_dunder_file`'s
 verdict instead — it parses the file with `ast` and only flags a genuine
 executable reference (an `ast.Name` node), never a prose mention.
@@ -367,25 +365,22 @@ project that has scaffolded since, and on the two live books checked before
 the regular-file limb was cut (`historiettes-fr-ru/tome1`, `ssk-he-en/vol2/run`)
 it was a managed copy in both — two managed copies, zero hand adaptations.
 
-**This is an ACCEPTED TRADEOFF, stated so it is not rediscovered as a bug.**
-An adapted regular file left over from that window is overwritten here with no
-backup and no warning, and on a RESUMED project (outcome 2 above) with NO
-collision detection of any kind — collision detection exists only on outcome
-3's ambiguous-adoption path, which a resumed project's own root marker match
-bypasses entirely. The check that used to stop that was byte-identity to the
-shipped source, and it could never actually separate the two populations: it
-asked "are these bytes the current shipped bytes?", which answers "is this
-copy MANAGED?" only while the shipped bytes never move. They move on any
-release that edits the resolver, so from that release onward the byte-identity
-halt fired on every ordinary project — the majority path — while still not
-identifying a single adaptation. Separating the populations for real needs a
-prior-version digest or a per-file managed marker, permanent machinery this
-design refuses to carry for a population measured at zero; the reasoning is
-transcribed in `tests/scaffold_idempotency.test.py`'s
+**Overwriting an adapted REGULAR file at this destination is an ACCEPTED
+TRADEOFF, stated so it is not rediscovered as a bug.** A regular file adapted
+during that window is overwritten with no backup and no warning — and on a
+RESUMED project (outcome 2 above) with NO collision detection of any kind,
+since that detection exists only on outcome 3's ambiguous-adoption path, which
+outcome 2's own root marker match bypasses entirely. The retired check was
+byte-identity to the shipped source: it reads "MANAGED" only while the shipped
+bytes never move, so the first release that edits the resolver turned it into
+a halt on every ordinary project — the majority path — that still identified
+no adaptation. Separating the populations for real needs a prior-version
+digest or a per-file managed marker, permanent machinery this design refuses
+to carry for a population measured at zero; the reasoning is transcribed in
+`tests/scaffold_idempotency.test.py`'s
 `apply_resolve_codex_companion_migration` docstring. A resumed project that DID
-adapt this file must re-apply its adaptation
-after the upgrade, which the launch fix this copy delivers makes unnecessary
-in the first place.
+adapt this file must re-apply its adaptation after the upgrade, which the
+launch fix this copy delivers makes unnecessary in the first place.
 
 So THIS ONE FILE, and only this one, gets a check before its copy, never the
 blanket unconditional overwrite the rest of the bundle gets. Classify the
@@ -1269,42 +1264,36 @@ consult, so reconstruction is the only recovery. Binding on every turn:
 
 ### An empty content unit is refused at W2 (#397)
 
-`run_derivable_checks` refuses two shapes that used to pass W2 and then left
-their segment convergeable **only on an invented-text draft** — the faithful
-draft is rejected forever — surfacing only much later, after a paid translation
-job had already run:
+`run_derivable_checks` refuses two shapes that used to pass W2 and left their
+segment convergeable **only on an invented-text draft** — the faithful draft
+rejected forever, and nothing said so until a paid translation job had run:
 
 - **`no_untranslatable_empty_blocks`** — a block cited by a segment's
-  `block_ids` whose `plain_text` is empty while its `source_html` is not. A
-  purely structural node (a scene-separating `<hr>`) emitted as a content block
-  is the usual cause. `validate_draft` falls back to `source_html` when
-  `plain_text` is falsy, so it reports the (correctly) empty draft block as an
-  empty translation. The segment then converges only if the translator invents
-  text for a node that has none — which is worse than the refusal. Runs under
-  every `apparatus_policy`. A block that is the parent of exactly one
-  non-embedded verse is exempt — that block legitimately carries no text of its
-  own. *Whitespace-only* `plain_text` is NOT refused: it is truthy, so the
-  faithful empty draft already converges.
+  `block_ids` whose `plain_text` is empty while its `source_html` is not —
+  usually a purely structural node (a scene-separating `<hr>`) emitted as a
+  content block. `validate_draft` falls back to `source_html` when `plain_text`
+  is falsy, so the faithful empty draft block reads as an empty translation.
+  Runs under every `apparatus_policy`. Not refused: a block that is the parent
+  of **exactly one** non-embedded verse, legitimately carrying no text of its
+  own; and *whitespace-only* `plain_text`, truthy, so the faithful empty draft
+  already converges.
 - **`no_empty_footnote_definitions`** — a footnote whose definition block
-  carries no text (whitespace-only included). Runs only under
+  carries no text, *whitespace-only included*. Runs only under
   `footnotes.apparatus_policy: translate_all | preserve_source`, the two
-  policies where footnote text is carried into a segpack at all. A footnote's
-  `source_text` gets its TEXT from `plain_text` alone — `source_html` never
-  supplies text of its own, so a definition with no `plain_text` yields no
-  `source_text` — and a blank footnote translation is refused unconditionally.
-  Since #725, a definition whose `plain_text` is **non-empty** additionally
-  carries that block's own `<i>`/`<em>` emphasis over from `source_html`,
-  normalised to a bare `<i>`; see “Footnote emphasis” below. That never
-  reaches an empty definition, so this gate is unaffected by it.
-  This check has **no reachability filter by design**: an empty definition is
-  refused even if no segpack would have carried it. That over-catch is
-  deliberate — the remedy is the same either way, and both attempts to model
-  reachability got it wrong in a way that let the defect through.
+  policies where footnote text reaches a segpack at all. A footnote's
+  `source_text` takes its text from `plain_text` alone — `source_html` is no
+  defence — and a blank footnote translation is refused unconditionally.
+  #725's carry of the block's own `<i>`/`<em>` from `source_html`, normalised
+  to a bare `<i>` (see “Footnote emphasis” below), applies only where
+  `plain_text` is non-empty, so it never reaches this gate. **No reachability
+  filter, by design:** an empty definition is refused even where no segpack
+  would have carried it — the remedy is the same either way, and both attempts
+  to model reachability let the defect through.
 
 **What to do when one fires.** The gate names the offending block ids or
 footnote numbers. Adapt `${durable_root}/extract.py` so the node is not emitted
-as a content block (or so the empty definition is not emitted), then re-extract.
-Do NOT edit the check: the failure is real, and it is cheaper here than after a
+as a content block (or the empty definition not emitted), then re-extract. Do
+NOT edit the check: the failure is real, and cheaper here than after a
 translation round.
 
 ### Footnote emphasis reaches the translator in the source's own notation (#725)
@@ -1477,47 +1466,38 @@ region-hash pin above is format-conditional):
 ### Heading-level outline — the disclosure this gate prints (#233)
 
 The gate also prints, on stdout, one **`NOTE heading_level_outline:`**
-line whenever this book's segments cite at least one heading tier -- the
-set `U` of `manifest.blocks[*].type` values named by any segment's
-`block_ids` and also present in `heading_types ∪ {"HEAD"}` -- e.g. `NOTE
-heading_level_outline: 3 heading tier(s) cited: "HEAD"=1 (declared),
-"PEREK"=2 (default), "SIMAN"=3 (declared)`. Each cited tier is reported
-with the level `assemble.py` will actually resolve for it (its
-`heading_levels[type]` entry, or level 2 when the type is absent from
-that map) and whether that level is `declared` or fell back to the
-`default`. When two or more tiers are cited AND at least one of them is
-`default`, the gate also prints a **`WARN heading_level_outline:`** line
-on stderr and counts it in the final `(N ADVISORY)` status. Both lines
-are REPORT-ONLY, exactly like the two advisories above: they touch
-neither `derivable_ok` nor `region_ok`, so this disclosure can neither
-refuse an ingestion nor rescue a failing one.
+line whenever `U` -- the `manifest.blocks[*].type` values some segment's
+`block_ids` names AND `heading_types ∪ {"HEAD"}` contains -- is non-empty.
+Every cited tier carries the level `assemble.py` will really resolve for
+it (`heading_levels[type]`, else 2 when that entry or the whole map is
+absent), marked `declared` or `default`: `NOTE heading_level_outline: 3
+heading tier(s) cited: "HEAD"=1 (declared), "PEREK"=2 (default), "SIMAN"=3
+(declared)`. When `U` holds two or more tiers AND at least one is
+`default`, a **`WARN heading_level_outline:`** line follows on stderr and
+counts in the final `(N ADVISORY)` status. A single cited tier never
+warns, and neither does a book whose every cited tier is `declared` --
+including two tiers deliberately declared at the SAME level. The WARN
+fires ONLY on the two-or-more-tiers-with-a-`default` shape, because that
+is the one shape where a forgotten declaration and a genuinely flat
+two-level outline look identical from here. Both lines are REPORT-ONLY,
+exactly like the two advisories above: they touch neither `derivable_ok`
+nor `region_ok`, so this disclosure can neither refuse an ingestion nor
+rescue a failing one.
 
-It exists because nothing downstream re-derives a heading's level from
-anything but this same map -- `assemble.py` resolves each block's
-markdown heading level the identical way this NOTE does, so a tier this
-book cites but never declares in `heading_levels` renders at level 2
-with no further signal anywhere in the pipeline. A book citing a single
-tier never warns, and neither does a book where every cited tier is
-`declared` -- including two tiers deliberately declared at the same
-level: there is nothing ambiguous to flag in either case. The WARN fires
-only once a book cites two or more tiers and at least one is taking its
-level by default, because that is the one shape where a forgotten
-declaration and a genuinely flat two-level outline look identical from
-here.
+`assemble.py` resolves each heading from that same map the identical way
+and nothing downstream re-derives it, so a cited tier you never declare
+renders at level 2 with no further signal anywhere in the pipeline. **A
+SCREEN, not a verdict** -- adjudicate it like the advisories above: read
+the tiers the WARN names against the markdown outline you actually intend
+for this book, then either declare a level in `heading_levels` for every
+tier this book renders (a level of 2 states the default in writing) or
+leave it and carry on. Neither changes whether this gate passes.
 
-**The disclosure is a SCREEN, not a verdict.** Adjudicate it the same
-way as the advisories above: read the tiers the WARN names against the
-markdown outline you actually intend for this book, then either declare
-a level in `heading_levels` for every tier this book renders (a level of
-2 states the default in writing, rather than leaving it implicit), or
-leave it as-is and carry on -- nothing here changes whether this gate
-passes.
-
-**The residual.** A flattened or mis-nested outline still exits `0`.
-This is a disclosure, not a gate: nothing in a schema-valid manifest
-separates "the operator deliberately took the default" from "the
-operator forgot this tier", so a hard check here would refuse legal
-books. #233 stays open; this ships the disclosure only.
+**The residual.** A flattened or mis-nested outline still exits `0`,
+because nothing in a schema-valid manifest separates "the operator
+deliberately took the default" from "the operator forgot this tier" and a
+hard check here would refuse legal books. #233 stays open; this ships the
+disclosure only.
 
 Then, immediately after `validate_extraction.py` passes, run the
 **wrapper-conservation gate (#196)** — a normal bundle-copied durable-root
@@ -1993,48 +1973,43 @@ available at all: `references/canon-and-glossary.md`, "Pre-merge citation
 review".
 
 **Canon human-adjudication audit, categories 1-4 (opt-in rollout gate, with
-one always-enforced carve-out)** —
-`scripts/canon_adjudication_audit.py` enumerates every canon
-name-adjudication a human/codex must sign off (duplicate source forms,
-existing merges, all candidate missed-merge pairs, and un-drained
-`review_queue[]` items) and cross-checks them against
-`canon_adjudications.json`. **1.4.0:** the `basis:"sense_translated"` value
-(`references/canon-and-glossary.md`) gives the glossary-pass agent a
-truthful basis for a sense-translated speaking name that previously had none
-— such a candidate now resolves straight into `entries{}` instead of parking
-permanently in `review_queue[]`, so this gate's category-4
-(`review_queue_unresolved`) blocks less often in practice. **#653** drains
-the same category from the other direction: a row that `disposition:"dismiss"`
-removes is gone from `review_queue[]` (and recorded in `corrections[]`
-instead) without ever becoming an `entries{}` record, so category 4 no
-longer counts it either. `review_queue[]` now holds only genuinely
-disputed/unresolvable names still awaiting either outcome. Run before Deliver (W7/W8):
+one always-enforced carve-out)** — `scripts/canon_adjudication_audit.py`
+enumerates every canon name-adjudication a human/codex must sign off —
+duplicate source forms (1), existing merges (2), all candidate missed-merge
+pairs (3), un-drained `review_queue[]` items (4, `review_queue_unresolved`)
+— and cross-checks them against `canon_adjudications.json`. It never
+decides identity itself: every call it audits is a human reviewer's or a
+schema-validated codex workflow's. Run before Deliver (W7/W8):
 `python3 ${durable_root}/scripts/canon_adjudication_audit.py --check` —
 exit `0` = every required item has a matching `confirmed_ok` (or a valid
 risk-acceptance / the queue is drained), `1` = blocking findings, `2` =
 fatal. Add `--advisory` to report without blocking (preserves the plugin's
 WARN-first name policy). **Status: categories 2-4 — and category 1's
-identical-surface shape — remain an OPT-IN gate** a project enables for this
-Deliver-time invocation; the script defaults to hard-blocking (exit 1) so a
-project that wires it in gets the full gate.
-Category 5 (the homonym-split evidence audit) is a SEPARATE, MANDATORY
-W-step — see immediately below — never opt-in, regardless of whether a
-project enables this Deliver-time categories-1-4 gate. **A category-1
-SURFACE-VARIANT finding is likewise never opt-in (#244):** `--advisory`
-cannot mask it, so the mandatory pre-W3a invocation below halts on one even
-on a project that never enabled this gate. That is the only pipeline-reachable
-category-1 shape — `canon_validate.py` writes `entries[source_form] = entry`,
-so anything the pipeline produces has distinct raw surfaces — and the
-identical-surface shape it leaves advisory is reachable only from a
-hand-authored or legacy canon. The accuracy calls
-it audits are authored by a human
-reviewer or a schema-validated codex workflow — the script never decides
-identity itself. Enable ONLY when a per-person index, per-person bios, or
-enforced cross-document consistency is in scope; on a plain translate+gloss
-job leave it off — the lightweight `review_queue` remains the correct tool
-for genuinely disputed/unresolvable names (a speaking name with a clear
-sense-rendering resolves via `basis:"sense_translated"` instead, so the
-queue's role is narrower than it once was, not eliminated).
+identical-surface shape — remain an OPT-IN gate** a project enables for
+this Deliver-time invocation; the script defaults to hard-blocking (exit 1)
+so a project that wires it in gets the full gate. Category 5 (the
+homonym-split evidence audit) is a SEPARATE, MANDATORY W-step
+— see immediately below — never opt-in, whether or not a project enables
+this Deliver-time categories-1-4 gate. **A category-1 SURFACE-VARIANT
+finding is likewise never opt-in (#244):** `--advisory` cannot mask it, so
+the mandatory pre-W3a invocation below halts on one even on a project that
+never enabled this gate. A surface-variant finding is also the only
+category-1 shape the pipeline can write — `canon_validate.py` writes
+`entries[source_form] = entry`, so pipeline output carries distinct raw
+surfaces — and an identical-surface finding, the shape left advisory, means
+a hand-authored or legacy canon.
+Enable ONLY when a per-person index, per-person bios, or enforced
+cross-document consistency is in scope; on a plain translate+gloss job
+leave it off — the lightweight `review_queue` remains the correct tool for
+genuinely disputed/unresolvable names.
+Two routes keep category 4 clear, from opposite directions: a speaking name
+with a clear sense-rendering is accepted with `basis:"sense_translated"`
+(`references/canon-and-glossary.md`) straight into `entries{}` and never
+parks in the queue at all, while a `canon_validate.py --correct` document
+with `disposition:"dismiss"` removes an already-queued row, logging it in
+`corrections[]` without its ever becoming an `entries{}` record — category 4
+counts neither, so the queue holds only the genuinely disputed or
+unresolvable, still awaiting either outcome.
 
 **Mandatory homonym-split evidence gate (category 5, always runs)** — unlike
 the categories-1-4 gate above, this invocation of the SAME
@@ -3780,24 +3755,21 @@ python3 ${durable_root}/scripts/final_audit.py \
   --plugin-root {{PLUGIN_ROOT}}
 ```
 
-**#412 — the ENTRY POINT stays durable; only the sibling moves.** The
-command above deliberately runs `${durable_root}/scripts/final_audit.py`,
-not the plugin copy: `--plugin-root` moves only the CHECKER a script shells
-out to, and W5's own "#582 — why the ENTRY POINT stays
-`${durable_root}/scripts/`" paragraph records why relocating entry points
-was evaluated and not adopted. What the flag buys here is the
-whole-project completeness gate's sibling — that gate shells out to
-`select_segments.py`, and left to self-anchor that sibling comes out of the
-same writable `${durable_root}/scripts/` the audit is auditing.
-`final_audit.py` forwards the value verbatim, alongside a synthesized
-`--durable-root`, since the relocated `select_segments.py` no longer sits
-under the root it must classify. Unlike `canon_validate.py`, whose stamping
-modes REFUSE to run without an answer, `final_audit.py`'s `--plugin-root`
-stays OPTIONAL — and that asymmetry is a decision, not an oversight: it had
-no shipped call site at all before this command, so its caller set is
-closed by construction the moment this one exists, and a refusal would only
-break hand-run audits without closing anything a spelled-out call site
-leaves open.
+**#412 — the ENTRY POINT stays durable; only the sibling moves.** That
+command runs `${durable_root}/scripts/final_audit.py`, not the plugin copy:
+`--plugin-root` moves only the CHECKER a script shells out to, and W5's
+#582 paragraph records why relocating entry points was evaluated and not
+adopted. What the flag buys here is the completeness gate's
+`select_segments.py` sibling, which left to self-anchor comes out of the
+same writable `${durable_root}/scripts/` the audit is auditing;
+`final_audit.py` forwards the value verbatim alongside a synthesized
+`--durable-root`, since that relocated sibling no longer sits under the
+root it must classify. Unlike `canon_validate.py`'s stamping modes, which
+REFUSE without an answer, this flag stays OPTIONAL by decision, not
+oversight: `final_audit.py` had no shipped call site before this one, so
+its caller set is closed by construction, and refusing would only break
+hand-run audits without closing anything a spelled-out call site leaves
+open.
 
 - **Frontback coverage report** (advisory, informational, never
   exit-code-gating on its own): reads `manifest.json`'s `frontback[]`
@@ -3805,10 +3777,10 @@ leaves open.
   elements report their own convergence status (cross-reference to
   `segments[]`, not new logic); `regenerate`/`omit`-decision elements
   reported by decision alone. This frontback-through-segment-loop treatment
-  is new plugin hardening, generalizing an intent the real historiettes-t3
-  project's own PLAN document stated but never actually implemented — do
-  not claim this mechanism is "proven" when building or extending it; it is
-  carefully-designed but genuinely untested-at-scale.
+  is new plugin hardening, carefully-designed but genuinely
+  untested-at-scale — do not claim this mechanism is "proven" when building
+  or extending it; `references/source-format-adapters/README.md` carries
+  its provenance.
 - Reads only the canonical `draft_path(seg) = segments/{seg}.draft.json`.
 - **Excluded from every bundle hash** — not a member of `plugin_bundle_hash`
   (runs strictly after every segment is already converged, over data already
