@@ -887,7 +887,7 @@ with tempfile.TemporaryDirectory() as tmp:
           "rateLimitResetCredits": COUPONS}, "codex/primary"),
         ("resetsAt null",
          {"rateLimits": {"limitId": "codex", "primary": dict(OK_WINDOW, resetsAt=None)},
-          "rateLimitResetCredits": COUPONS}, "no reset time reported by the backend"),
+          "rateLimitResetCredits": COUPONS}, "not reported"),
         ("limitId null",
          {"rateLimits": {"limitId": None, "primary": OK_WINDOW},
           "rateLimitResetCredits": COUPONS}, "codex/weekly"),
@@ -1886,6 +1886,66 @@ with tempfile.TemporaryDirectory() as tmp:
     check("52 while a current row keeps its reset at full weight",
           len(live_rows) == 1 and "\x1b[2min 19h" not in live_rows[0], repr(live_rows))
 
+# --- 53 -- one layout for every pool block ------------------------------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # Short values in one block and long ones in another. Measured per block, the header would be
+    # wider than its own columns (printing `WHEREPOOLUSED` with nothing between the labels) and
+    # each section would pick its own column starts -- a table whose columns move between
+    # sections is not a table.
+    mixed = make_claude(root, ".a", cached(entries=[
+        entry(kind="s", percent=40, resets=iso(20)),
+        entry(kind="a-considerably-longer-pool-name", percent=95, resets=iso(-3)),
+    ]))
+    # BOTH candidate names are two characters, so the WHERE column's widest value is narrower
+    # than the word WHERE. That is the only column a real report can drive under its own label,
+    # and without the floor the header prints `WHEREPOOL` with nothing between them.
+    done, _, _ = run(["--claude-profile", str(mixed),
+                      "--codex-home", str(make_codex_home(root, ".b"))], root=root)
+    header = [ln for ln in done.stdout.splitlines() if "SOURCE" in ln][0]
+    # Not "a space follows each label" -- that stays true when a LATER column is too narrow. Each
+    # label must occupy its own column, so the header must equal the labels padded to the widths
+    # the rows use, which is what the floor exists to guarantee.
+    for label in ("WHERE", "POOL", "USED", "RESET"):
+        check(f"53 the header keeps a gap after {label}", f"{label} " in header, repr(header))
+    starts_at = [header.index(label) for label in ("WHERE", "POOL", "USED", "RESET", "SOURCE")]
+    check("53 the header's labels are in column order and never run together",
+          starts_at == sorted(starts_at)
+          and all(b - a > len(label) for a, b, label in
+                  zip(starts_at, starts_at[1:], ("WHERE", "POOL", "USED", "RESET"))),
+          repr(header))
+    body = [ln for ln in done.stdout.splitlines()
+            if "40.0%" in ln or "95.0%" in ln]
+    starts = {ln.index("\u2588") if "\u2588" in ln else ln.index("\u2591") for ln in body}
+    check("53 every block starts its USED column at the same place",
+          len(body) == 2 and len(starts) == 1, f"{starts} in {body}")
+    check("53 and that is where the header puts it",
+          starts and starts.pop() == R._width(header.split("USED")[0]), repr(header))
+
+    # A report whose pools are ALL stale still needs column names.
+    # No Codex home on purpose: a Codex row would be CURRENT and would put a row in the first
+    # block, which is exactly the condition that hides this defect. The run gaps on the absent
+    # Codex side, which is beside the point being made here.
+    stale_only = make_claude(root, ".claudeAllStale", cached(entries=[
+        entry(kind="session", percent=71, resets=iso(-5))]))
+    done, _, _ = run(["--claude-profile", str(stale_only)], root=root)
+    check("53 a report with no current rows still prints the header",
+          any("WHERE" in ln and "SOURCE" in ln for ln in done.stdout.splitlines()), done.stdout)
+    check("53 above the stale block it belongs to",
+          done.stdout.index("WHERE") < done.stdout.index("stale --"), done.stdout)
+    check("53 and that report has no current rows at all",
+          "71.0%" in done.stdout
+          and done.stdout.index("stale --") < done.stdout.index("71.0%"), done.stdout)
+
+# The short RESET labels stay distinguishable -- that distinction is why the cell carries the
+# note at all, and the long prose would set the column width for every block.
+check("53 an inactive pool and an absent reset time still read differently",
+      R.RESET_LABELS["inactive, no current window"]
+      != R.RESET_LABELS["no reset time reported by the backend"])
+check("53 an unmapped note falls through to itself, wide but correct",
+      R.RESET_LABELS.get("something new", "something new") == "something new")
+
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -1893,7 +1953,7 @@ if failures:
         print(f"  {failure}")
     sys.exit(1)
 
-MIN_CHECKS = 435
+MIN_CHECKS = 445
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

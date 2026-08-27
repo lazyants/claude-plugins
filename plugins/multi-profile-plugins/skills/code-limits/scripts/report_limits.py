@@ -1069,9 +1069,11 @@ def _pool_cells(where: str, record: Record, now: datetime.datetime) -> tuple[str
     elif record.resets is None:
         # No reset time is not one condition. A pool the vendor calls inactive and a pool whose
         # `resetsAt` the vendor simply did not send both arrive here, and an empty cell would
-        # make them the same row. The record's own note is the only thing that separates them,
-        # so it becomes the cell rather than being dropped with the rest of the prose.
-        reset = record.note
+        # make them the same row. The note is what separates them, so it becomes the cell -- in
+        # its short form, keyed on the exact strings the producers write. The full sentence would
+        # set the RESET column's width for EVERY block, since the blocks share one layout, so one
+        # inactive pool's prose would stretch the column the current rows are read in.
+        reset = RESET_LABELS.get(record.note, record.note)
     else:
         reset = _relative(record.resets, now)
     return where, _safe_name(record.name), used, reset
@@ -1139,20 +1141,40 @@ def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
     print()
 
 
-def _pool_table(rows: list[Row], now: datetime.datetime, paint: Paint, heading: str = "") -> None:
-    """One block of pool rows. A heading marks a section that is NOT current usage, and dims the
-    whole block to say so; without one this is the main table and carries the column header."""
+COLUMNS = ("WHERE", "POOL", "USED", "RESET")
+
+# Keyed on the producers' exact notes, never on a substring of them: a note that drifts falls
+# through to itself, which is wide but correct, rather than being silently mislabelled.
+RESET_LABELS = {
+    "inactive, no current window": "inactive",
+    "inactive, no reset time reported": "inactive",
+    "no reset time reported by the backend": "not reported",
+}
+
+
+def _column_widths(blocks: list[list[Row]], now: datetime.datetime) -> list[int]:
+    """One width per column, measured across EVERY pool block and floored by the header labels.
+
+    Two failures come from measuring a block on its own. Sections would each pick their own column
+    starts, so the stale block below the table would not line up with it -- a table whose columns
+    move between sections is not a table. And a run of short values (a profile named `.a`, a
+    one-character pool id) would make a column narrower than the word naming it, printing
+    `WHEREPOOLUSED` with nothing between the labels. The header labels are therefore a FLOOR, not
+    an afterthought.
+    """
+    cells = [_pool_cells(row.where, row.record, now) for block in blocks for row in block]
+    return [max([_width(cell[index]) for cell in cells] + [len(COLUMNS[index])]) + 2
+            for index in range(4)]
+
+
+def _pool_table(rows: list[Row], widths: list[int], now: datetime.datetime, paint: Paint,
+                heading: str = "") -> None:
+    """One block of pool rows, laid out on widths shared with every other block."""
     if not rows:
         return
     cells = [_pool_cells(row.where, row.record, now) for row in rows]
-    widths = [max(_width(cell[i]) for cell in cells) + 2 for i in range(4)]
     if heading:
         print(paint(f"  {heading}", DIM))
-    else:
-        head = ("  " + _pad("WHERE", widths[0]) + _pad("POOL", widths[1])
-                + _pad("USED", widths[2]) + _pad("RESET", widths[3]) + "SOURCE")
-        print(paint(head, DIM))
-        print(paint("  " + "\u2500" * (sum(widths) + 6), DIM))
     # A section's dim is applied PER CELL, not by wrapping the finished line. Every paint() emits
     # its own reset, so wrapping a line that already contains one cancels the dim for everything
     # after that cell -- the row then renders half dim and half not, which reads as an artefact
@@ -1199,11 +1221,23 @@ def _render(groups: list[tuple[str, str, list[Record]]], notes: list[str],
 
     print(f"\n{paint('code-limits', BOLD)}  {paint(_local(now), DIM)}\n")
     _voucher_band(buckets["voucher"], buckets["info"], now, paint)
-    _pool_table(_sorted_rows(buckets["current"]), now, paint)
-    _pool_table(_sorted_rows(buckets["stale"]), now, paint,
+    blocks = [_sorted_rows(buckets[name]) for name in ("current", "stale", "inactive", "gap")]
+    if any(blocks):
+        # The header goes above the FIRST non-empty block, whichever it is. Printing it only with
+        # the current block meant a report whose pools were all stale or all gapped had a table
+        # with no column names at all.
+        widths = _column_widths(blocks, now)
+        head = ("  " + _pad("WHERE", widths[0]) + _pad("POOL", widths[1])
+                + _pad("USED", widths[2]) + _pad("RESET", widths[3]) + "SOURCE")
+        print(paint(head, DIM))
+        print(paint("  " + "\u2500" * (sum(widths) + 6), DIM))
+    else:
+        widths = [0, 0, 0, 0]
+    _pool_table(blocks[0], widths, now, paint)
+    _pool_table(blocks[1], widths, now, paint,
                 "stale -- the % is the PREVIOUS window, not current  [stale-after-reset]")
-    _pool_table(_sorted_rows(buckets["inactive"]), now, paint, "inactive -- no current window")
-    _pool_table(_sorted_rows(buckets["gap"]), now, paint, "NOT CHECKED")
+    _pool_table(blocks[2], widths, now, paint, "inactive -- no current window")
+    _pool_table(blocks[3], widths, now, paint, "NOT CHECKED")
 
     for note in notes:
         print(paint(f"  {note}", DIM))
