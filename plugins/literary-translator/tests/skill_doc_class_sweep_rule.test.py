@@ -124,10 +124,12 @@ def test_w6_says_that_BUILDING_the_enumeration_is_the_fragile_step():
     returned 89 hits of which exactly one was a defect, and a source-side scan that
     stringified a whole block dict reported every figure at exactly 2x.
 
-    Each pin below is a COMPLETE sentence including its terminal period. A pin
-    that stops mid-clause stays green under the likeliest careless edit there
-    is: a qualifier appended to the end ("... never per count ONLY WHILE there
-    are fewer than ten forms"). The period is what makes that mutation red.
+    Each pin below runs through a COMPLETE sentence's terminal period; where one
+    sentence carries two separable rules it is pinned in halves, and the closing
+    half carries the period. A pin that stops mid-clause stays green under the
+    likeliest careless edit there is: a qualifier appended to the end ("... never
+    per count ONLY WHILE there are fewer than ten forms"). The period is what
+    makes that mutation red.
 
     RESIDUAL, stated because a check that oversells itself is the defect class
     this file exists to remove. Substring containment cannot see a NEGATING
@@ -196,7 +198,7 @@ def test_w6_says_that_BUILDING_the_enumeration_is_the_fragile_step():
         "#775. And must say that the widening check is itself ONE-SIDED. The "
         "sentence above prescribes widening as THE check for the direction the "
         "printed forms cannot show, and an operator reads it as closing the "
-        "'both directions' warning two sentences earlier. It does not: widening "
+        "'both directions' warning earlier in the bullet. It does not: widening "
         "an already over-broad pattern grows it further, and the larger number "
         "reads as the check confirming the miss. Without this clause the "
         "paragraph warns about both directions and prescribes a remedy for one"
