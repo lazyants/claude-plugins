@@ -1023,8 +1023,7 @@ fails validation and the write is refused. That is not a property of this mode â
 `--merge-batches` and `--restamp-derivation` refuse the identical file with the
 identical error, and the check is the gate that stops a corrupt document from
 being written at all. Several malformed rows is file corruption rather than a
-wrong adjudication: a different problem, with validate-only mode -- reached by
-omitting `--research-mode`, not by a flag of that name -- as its
+wrong adjudication: a different problem, with validate-only mode as its
 diagnostic. Measured across the four live books: 0 malformed rows in 999
 entries. Pinned as a characterization in
 `tests/canon_correct_entry.test.py::test_more_than_one_malformed_row_blocks_every_writing_mode_alike`.

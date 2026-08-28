@@ -83,8 +83,10 @@ trusting it — the pattern is the part meant to outlive any one generation.
 ## Dated snapshot (as of 2026-07 — re-verify before trusting)
 
 - **Effort ladder (Codex):** `none / minimal / low / medium / high / xhigh`.
-  Codex's own config default is not mirrored here — read it from
-  `~/.codex/config.toml` and do not rely on this document for it
+  Codex's own config default is not mirrored here — read it from the ACTIVE
+  Codex home's `config.toml` (`$CODEX_HOME/config.toml`, falling back to
+  `~/.codex/config.toml` only when `CODEX_HOME` is unset) and never from this
+  document
   silently; pin explicitly per the durable-pattern rule above. `high` is the
   cost-sane default for routine review; reserve `xhigh` for the genuinely
   hardest correctness passes and for plan review. Do **not** use Claude's
