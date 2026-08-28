@@ -200,6 +200,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -211,7 +212,7 @@ from typing import TypeGuard
 # ---- Constants (PLAN-198 §2.1 / CONTRACT.md; frozen) ------------------------
 CODEX_DEADLINE_SEC = 2700        # default codex-run poll window (45 min); overridden by --deadline-sec
 CODEX_FINALIZE_BUDGET_SEC = 150  # extra budget past the poll deadline for cancel+validate+promote+finalize
-FINALIZE_TAIL = 10               # reserved at the very end for the non-subprocess finalize (stdout/sentinel/joblog)
+FINALIZE_TAIL = 10               # reserved for finalize(): sentinel/joblog/stdout + BROKER_TEARDOWN_TIMEOUT_SEC
 PER_CALL_CAP = 90                # hard ceiling for ANY single subprocess (sized to the slowest gate call)
 CODEX_WAIT_GRACE_SEC = 600       # (Workflow-side wait grace; documented here for the shared wait-bound arithmetic)
 
@@ -315,6 +316,106 @@ def _silent_remove(path):
         os.remove(path)
     except OSError:
         pass
+
+
+# ERE metacharacters, for the one pattern this file hands to `pgrep -f`. Deliberately NOT
+# re.escape(): that also escapes `-`, `&`, `~`, `#` and the space, and a backslash before an
+# ordinary character is UNDEFINED in POSIX ERE -- so re.escape() would build a pattern whose
+# behaviour depends on which regex implementation `pgrep` was linked against. Those exact
+# characters are reachable: the sandbox path is TMPDIR-prefixed and TMPDIR is the operator's,
+# not this script's. (The segment id contributes nothing here -- validate_seg admits only
+# `(FRONTBACK:)?[A-Za-z0-9_]+`, and `:` is not a metacharacter.)
+_ERE_META = frozenset(r"\.[]{}()*+?^$|")
+
+# Bounded on its own rather than through self._run()'s budget -- see _shutdown_sandbox_broker.
+# Sized to sit inside FINALIZE_TAIL: `pgrep` is a millisecond-scale call and what follows it
+# is signals, not waits.
+BROKER_TEARDOWN_TIMEOUT_SEC = 5
+
+
+def _ere_escape(text):
+    return "".join("\\" + ch if ch in _ERE_META else ch for ch in text)
+
+
+def _shutdown_sandbox_broker(sandbox_dir):
+    """#789: SIGTERM the codex-companion app-server broker keyed to THIS invocation's
+    sandbox, called from finalize() immediately before that sandbox is rmtree'd.
+
+    codex-companion keys a PERSISTENT broker to whatever `--cwd` it is handed:
+    `lib/broker-lifecycle.mjs`'s `ensureBrokerSession(cwd)` spawns
+    `app-server-broker.mjs serve --cwd <sandbox>` with `detached: true` + `unref()`, and
+    that broker holds an open `codex app-server` (node wrapper + platform binary), which
+    in turn owns a `codex-code-mode-host`. Nothing else ever stops it: the broker has NO
+    idle timeout (it exits only on a `broker/shutdown` RPC or on SIGTERM), and the
+    companion's only teardown caller is its own `SessionEnd` hook, keyed to the CLAUDE
+    SESSION's cwd -- never to a single-use sandbox this script invented. Without this
+    call every dispatch leaves three to four processes reparented to init, running
+    against a directory that no longer exists, alive until the machine reboots (measured
+    before the fix: 274 dispatches in one profile on one day, 2794 sandbox state dirs
+    across profiles).
+
+    Matched on ARGV, not by reading the companion's own `broker.json` record. Two
+    reasons, and the second is the load-bearing one: reading that record would mean
+    duplicating the companion's private state-directory slug/hash scheme here, where a
+    silent upstream change to it would present as this cleanup simply never firing; and
+    the record is not written for every broker that exists -- `ensureBrokerSession`
+    returns null WITHOUT killing the process it just spawned when the endpoint misses its
+    2000 ms readiness window (`teardownBrokerSession` receives `killProcess: null`,
+    because `CodexAppServerClient.connect` never passes one), so an unrecorded broker is
+    reachable and an argv match is what finds it.
+
+    The match cannot hit anything else. `sandbox_dir` is a single-use `mkdtemp` path, and
+    it reaches the broker's own argv VERBATIM: this script passes it as `--cwd` to
+    `codex-companion task`, whose `resolveCommandCwd` is `path.resolve` of an
+    already-`realpath`'d absolute path (idempotent), and that value is handed down
+    unchanged through the detached task-worker to `spawnBrokerProcess`. The pattern
+    additionally requires `app-server-broker.mjs`, and anchors the path so a longer sibling
+    path cannot match.
+
+    SIGTERM, never SIGKILL: the broker's own handler runs its `shutdown()`, which closes
+    its app-server client, so the `codex app-server` and `codex-code-mode-host` go down
+    with it. SIGKILL would leave exactly those children behind -- the leak this closes.
+
+    Killing a broker whose codex turn is still streaming is INTENDED, not collateral
+    damage. By the time finalize() runs, this job has already given up on that turn and
+    is about to delete the directory it writes into (see the rmtree's own comment on
+    #409's "neutralised by the isolation itself"), so its output is discarded either way;
+    stopping it also stops paying for it.
+
+    Best-effort, never raises: cleanup on the way out must never turn a finished job into
+    a failed one. Mirrors `_attempt_cancel_orphan`'s posture in segment_dispatch_driver.py.
+
+    Deliberately NOT bounded through `self._run()`'s remaining-budget arithmetic:
+    `finalize_timeout()` is 0 exactly when the job blew its absolute deadline, which is
+    the very path most likely to have left a straggling broker -- a budget that yields
+    "skip" there would switch this cleanup off on the one run that needs it most.
+    """
+    if not sandbox_dir:
+        return
+    pattern = "app-server-broker\\.mjs .*--cwd %s( |$)" % _ere_escape(str(sandbox_dir))
+    try:
+        proc = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True,
+                              timeout=BROKER_TEARDOWN_TIMEOUT_SEC)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return
+    # pgrep: 0 = matched, 1 = nothing matched, >=2 = pgrep itself failed (a usage or
+    # platform error). Only 0 carries pids; treating >=2 as "no match" would be the same
+    # silent no-op either way, but reading stdout from a failed run is not something to
+    # start doing.
+    if proc.returncode != 0:
+        return
+    own = os.getpid()
+    for field in (proc.stdout or "").split():
+        try:
+            pid = int(field)
+        except ValueError:
+            continue
+        if pid <= 1 or pid == own:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
 
 
 def _ok(proc):
@@ -538,7 +639,8 @@ class CodexJob:
         return max(0.0, min(PER_CALL_CAP, self.poll_remaining()))
 
     def finalize_timeout(self):
-        # Reserve FINALIZE_TAIL so the non-subprocess finalize always completes.
+        # Reserve FINALIZE_TAIL so finalize()'s own work -- the sentinel/joblog/
+        # stdout writes plus the bounded broker teardown -- always completes.
         return max(0.0, min(PER_CALL_CAP, self.abs_remaining() - FINALIZE_TAIL))
 
     # ---- subprocess runner (monkeypatched in white-box tests) ---------------
@@ -696,14 +798,15 @@ class CodexJob:
 
         `remaining_fn`: a zero-arg callable returning the CALLER's own current
         remaining-seconds budget for ITS phase (self.poll_remaining for a poll-window
-        operation, self.finalize_timeout to leave FINALIZE_TAIL for the non-subprocess
-        finalize() that follows, self.abs_remaining for a caller with nothing further to
+        operation, self.finalize_timeout to leave FINALIZE_TAIL for the finalize()
+        that follows, self.abs_remaining for a caller with nothing further to
         reserve) -- never a value read once and reused, and never this method's own
         substitute for one. Sharing this job's WHOLE abs_remaining() ceiling across every
         caller regardless of phase would let a poll-window operation (adopt_pending())
         eat the 150s finalize budget while holding the lease, and let attempt validation
-        consume FINALIZE_TAIL -- reserved for the non-subprocess finalize()
-        (stdout/sentinel/joblog) -- instead of leaving it alone. `remaining_fn` is
+        consume FINALIZE_TAIL -- reserved for finalize()'s own work (the
+        sentinel/joblog/stdout writes plus the bounded broker teardown) --
+        instead of leaving it alone. `remaining_fn` is
         re-invoked fresh at EVERY check below, per-read and after EOF, because real
         wall-clock time passes between drain-loop iterations and a stale snapshot taken
         once would silently re-introduce the same overrun for a caller whose phase budget
@@ -2339,6 +2442,12 @@ class CodexJob:
         # a failed preservation is reported rather than lost.
         self._teardown_staging()
         if self.sandbox_dir:
+            # #789: stop the codex-companion broker keyed to this sandbox BEFORE the
+            # directory it runs against disappears. Ordered first for a second reason
+            # beyond bookkeeping: it narrows -- it cannot close, since SIGTERM is
+            # asynchronous and the broker is not this process's child to wait on -- the
+            # window in which a straggling turn is still writing into the rmtree below.
+            _shutdown_sandbox_broker(self.sandbox_dir)
             # Abandon the WHOLE sandbox unconditionally -- on every path (success,
             # validate-failure, timeout) we are done reading from it by this point
             # (validate_attempt/_defer_attempt already PUBLISHED whatever mattered out
