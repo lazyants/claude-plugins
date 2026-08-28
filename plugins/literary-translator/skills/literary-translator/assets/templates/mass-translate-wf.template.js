@@ -506,7 +506,7 @@ const WAIT_BOUND_SEC = CODEX_DEADLINE_SEC + CODEX_FINALIZE_BUDGET_SEC + CODEX_WA
 //
 // NOT PER_CALL_CAP. #348 suggested making the declared-but-unused
 // PER_CALL_CAP = 90 load-bearing here; deliberately declined. PER_CALL_CAP
-// mirrors codex_job.py:215's ceiling for THE DRIVER'S OWN SUBPROCESSES ("hard
+// mirrors codex_job.py:216's ceiling for THE DRIVER'S OWN SUBPROCESSES ("hard
 // ceiling for ANY single subprocess") -- a different quantity from this
 // template's per-agent-call poll bound, and conflating them would make one
 // constant answer two unrelated questions. WAIT_CHUNK_SEC is the new

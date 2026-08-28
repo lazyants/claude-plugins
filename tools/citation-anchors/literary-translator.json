@@ -250,63 +250,63 @@
    ],
    "claim": "# Set before the `import cache_key` below, which is the only point where it # still has any effect (verbatim_census.py:109 sets it for the same reason). # A plain sibling import leaves assets/scripts/__pycache__/*.pyc behind in the # PLUGIN tree this script runs from -- a real mutation of the very tree # `--verify` reports on, and one that makes \"this mode writes nothing\" false."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:1750-1784\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:1853-1887\", 0]": {
    "anchors": [
     "def hygiene(self):",
     "if ws == prior_cwd and job.get(\"status\") in _ACTIVE:"
    ],
    "claim": "\"\"\"codex round-2 item 10: best-effort orphan cancellation, called ONLY from dispatch_codex_job()'s own backstop-timeout path, right after the SIGKILL+reap. Mirrors codex_job.py's own `hygiene()` method (codex_job.py:1750-1784), including its live status check (codex round-4 MINOR correction: an earlier version of this function skipped that check and went straight from \"joblog says launched\" to cancelling -- a real, not merely cosmetic, divergence from the claim this docstring already made. The joblog's local \"launched\" status only means \"not"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2156-2160\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2259-2263\", 0]": {
    "anchors": [
     "self._write_joblog({",
     "\"jobCwd\": self.sandbox_dir,"
    ],
    "claim": "`jobId`/`jobCwd` ARE durable by the time this driver's backstop can realistically fire: codex_job.py's own `launch()` writes both, via an atomic O_EXCL+os.replace, BEFORE `poll()` (codex_job.py:2156-2160) -- `poll()` is the long phase, so the joblog this reads is already written in the overwhelming majority of cases. The one case this genuinely cannot close, stated rather than papered over: if the backstop fires MID-launch(), before that write completes, there is no"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:234\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:235\", 0]": {
    "anchors": [
     "_ACTIVE = frozenset((\"queued\", \"running\"))"
    ],
    "claim": "# Mirrors codex_job.py's own `_ACTIVE = frozenset((\"queued\", \"running\"))` # (codex_job.py:234) -- duplicated, not imported, per this project's \"no # shared lib between self-contained scripts\" convention. Used ONLY by # _attempt_cancel_orphan()'s own live status check below, never a # re-derivation of anything hygiene() itself decides differently."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2500\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2609\", 0]": {
    "anchors": [
     "if self.safe_adopt():"
    ],
    "claim": "Reachability, kept at its real width so the fix is read neither as over- nor under-motivated -- the ordinary detached-job route does NOT reach this on its own. A competing codex_job.py serializes on the per-segment `.codex_job.<seg>.lock` and then calls `safe_adopt()` BEFORE it would launch or promote anything (codex_job.py:2500); a canonical review.json that still passes `review_ready.py --expect-token` is ADOPTED, leaving the artifact byte-identical rather than replacing it. SKILL.md additionally forbids running the default Workflow and this driver against one project concurrently."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2723\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2832\", 0]": {
    "anchors": [
     "p.add_argument(\"--cwd\", required=True)"
    ],
    "claim": "\"Accepts neither flag\" is HALF right, not simply backwards: `codex_job.py` accepts `--plugin-root` but NOT `--durable-root` -- for the DATA side it takes a required `--cwd` instead (`codex_job.py:2723`), which this driver already forwards as `str(durable_root)` in every dispatch (build_codex_job_argv()'s own `--cwd` argument), matching every other v1.17.0-hardened script's self-anchored-unless-redirected shape without needing a second, redundant root flag on this particular leaf."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2723\", 1]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2832\", 1]": {
    "anchors": [
     "p.add_argument(\"--cwd\", required=True)"
    ],
    "claim": "codex_job.py \"accepts neither flag on the data side\" -- false, and HALF backwards, not simply reversed: codex_job.py DOES accept --plugin-root (codex_job.py:2757, forwarded by build_codex_job_argv() whenever plugin_root_str is set) but does NOT accept --durable-root -- for the DATA side it takes a required --cwd instead (codex_job.py:2723), which this driver already forwards separately as str(durable_root)."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2757\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2866\", 0]": {
    "anchors": [
     "p.add_argument(\"--plugin-root\", default=None, dest=\"plugin_root\")"
    ],
    "claim": "that `codex_job.py` \"accepts neither flag on the data side\". Both were false, and the first one directly contradicted `build_codex_job_argv()`'s OWN docstring in this same file, which already listed `[--plugin-root]` among the flags it splices. Verified against the shipped `codex_job.py`: it DOES accept `--plugin-root` (`codex_job.py:2757`) -- `build_codex_job_argv()` forwards it whenever `plugin_root_str` is set (below, in the argv-building section) -- and consumes it in `_trusted_scripts_dir()` (`codex_job.py:615-625`), which returns `{plugin_root}/assets/scripts/` directly when given and falls back to its own `__file__`-relative `SCRIPTS_DIR` only when it is absent."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2757\", 1]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2866\", 1]": {
    "anchors": [
     "p.add_argument(\"--plugin-root\", default=None, dest=\"plugin_root\")"
    ],
    "claim": "hand-builds its own --plugin-root handling inline rather than calling this function. codex round-3 correction: this used to also claim codex_job.py \"accepts neither flag on the data side\" -- false, and HALF backwards, not simply reversed: codex_job.py DOES accept --plugin-root (codex_job.py:2757, forwarded by build_codex_job_argv() whenever plugin_root_str is set) but does NOT accept --durable-root -- for the DATA side it takes a required --cwd instead (codex_job.py:2723), which this driver already forwards separately as str(durable_root)."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:2930\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:3039\", 0]": {
    "anchors": [
     "if not args.plugin_root.strip():"
    ],
    "claim": "# empty string, not as the flag being omitted -- and # Path(\"\").absolute() (like Path(\"\").resolve()) is CWD, silently # making wherever this process happens to be launched from the # executable authority for the template AND every sibling # script. codex_job.py:2930 already refuses this same input; # refusing it here too, before any path is built from it, keeps # both scripts consistent instead of one being the loophole."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:615-625\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"codex_job.py:717-727\", 0]": {
    "anchors": [
     "def _trusted_scripts_dir(self):",
     "return os.path.join(self.plugin_root, \"assets\", \"scripts\")"
@@ -629,7 +629,7 @@
    ],
    "claim": "`validate_draft.py` validates a draft against its canonical segpack, but the comparison is over KEY SETS plus placeholder/anchor rules (its own six checks, `validate_draft.py:30-45`). No text of any reproduced source span is compared to `plain_text`. `validate_conservation.py` is a different, opt-in gate and is word-multiset by design (`validate_conservation.py:32-36`). So a quoted Hebrew phrase inside an English draft can lose a letter and every gate stays green."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js\", \"codex_job.py:215\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/templates/mass-translate-wf.template.js\", \"codex_job.py:216\", 0]": {
    "anchors": [
     "hard ceiling for ANY single subprocess"
    ],
@@ -1047,20 +1047,20 @@
    ],
    "claim": "THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:656-662) READS ``${durable_root}/runs/.plugin_bundle_hash`` and ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before #194 SKILL.md's Step 0a only PROSE-described \"computes/writes\" them: no shipped script actually wrote either marker, so a real run failed with \"has Step 0a run for this project?\". ``scaffold_setup.py`` is the shipped"
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"codex_job.py:1750-1784\", 0]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"codex_job.py:1853-1887\", 0]": {
    "anchors": [
     "def hygiene(self):",
     "if ws == prior_cwd and job.get(\"status\") in _ACTIVE:"
    ],
    "claim": "# dispatch_codex_job()'s own backstop-timeout path. NOT a state-corruption # fix (that half of the original report was refuted by research: an orphan # that later completes writes into a leaked sandbox tempdir nothing ever # reads again) -- this closes wasted spend, mirroring codex_job.py's own # hygiene() shape (codex_job.py:1750-1784): query/cancel with the joblog's # own recorded jobCwd, never durable_root."
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"codex_job.py:1784\", 0]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"codex_job.py:1887\", 0]": {
    "anchors": [
     "if ws == prior_cwd and job.get(\"status\") in _ACTIVE:"
    ],
    "claim": "\"\"\"The other half of hygiene()'s own live check: even a job reporting an ACTIVE status must not be cancelled if the queried workspaceRoot does not match the recorded jobCwd -- the identical defense-in-depth hygiene() itself applies (codex_job.py:1784, `if ws == prior_cwd and job.get(\"status\") in _ACTIVE:`).\"\"\" root = phase2_project(tmp_path, n=1) companion = _write_fake_companion(tmp_path) _write_status_scenario(tmp_path, status=\"running\", workspace_root=\"/a-different-workspace\")"
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"codex_job.py:2930\", 0]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"codex_job.py:3039\", 0]": {
    "anchors": [
     "if not args.plugin_root.strip():"
    ],
