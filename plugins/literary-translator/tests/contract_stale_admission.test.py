@@ -905,12 +905,17 @@ def test_an_ambiguous_claim_record_refuses(tmp_path, kind):
 
 def test_ledger_json_beside_the_run_dirs_is_not_read_as_a_run_directory(tmp_path):
     """`ledger.json` and `ledger.d` both PASS claim_record.validate_run_id()
-    -- dots are legal in a run id. Without the is_dir() filter the lookup
-    lstats runs/ledger.json/.claimed.seg02, gets ENOTDIR, classifies AMBIGUOUS
-    and refuses EVERY project. runs/ledger.d/ IS descended into and is simply
-    empty of claim records; this pins that it stays harmless.
+    -- dots are legal in a run id. Without the directory filter the lookup
+    stats runs/ledger.json/.claimed.seg02, gets ENOTDIR, classifies AMBIGUOUS
+    and refuses EVERY project. That half IS pinned here.
 
-    Mutation: drop the is_dir() filter -> red."""
+    `runs/ledger.d/` is present in the fixture for realism, but note what this
+    test does NOT prove about it: descended-into-and-empty and skipped-entirely
+    produce the identical result, so nothing here distinguishes them. The
+    claim that it is descended into rests on reading the filter, not on this
+    assertion.
+
+    Mutation: drop the directory filter -> red."""
     root = one_contract_stale_book(tmp_path, admit=True)
     (root / "runs" / "ledger.d").mkdir()
     (root / "runs" / "ledger.d" / "seg02.json").write_text("{}", encoding="utf-8")
@@ -927,7 +932,13 @@ def test_a_promoted_review_without_a_convergence_write_still_refuses(tmp_path):
     token calls that spent and ships the unit; reading the ledger's cache_key
     does not, because nothing rewrote the fragment.
 
-    This is why the predicate reads the ledger and not the review."""
+    This is why the predicate reads the ledger and not the review. Be clear
+    about what that makes this test: assemble.py never opens a review document
+    at all, so the review file staged below is INERT to the code under test,
+    and mechanically this is the unspent-claim case plus a file nothing reads.
+    It is kept as a design pin against re-adopting the rejected dispatch_token
+    predicate -- under that predicate this same fixture SHIPS the unit -- not
+    as evidence that assemble.py consults the review."""
     root = one_contract_stale_book(tmp_path, admit=True)
     ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
     (root / "segments" / "seg02.review.json").write_text(
@@ -1009,6 +1020,108 @@ def test_an_undeclared_project_refuses_for_the_pre_existing_reason(tmp_path, adm
     assert result.returncode == 2, f"[{label}] stdout:\n{result.stdout}"
     error = parse_one_json_line(result)["error"]
     assert "UNSPENT claim record" not in error, f"[{label}] {error}"
+
+
+def _mode_bites(tmp_path) -> bool:
+    """True when a restrictive directory mode actually denies this process.
+
+    Decided by PROBING, never by checking for root by name: the question is
+    whether the mode bites here, and a CI container, an unusual uid, or a
+    permissive filesystem all answer it differently from `os.geteuid() == 0`.
+    """
+    probe = tmp_path / "probe"
+    (probe / "inner").mkdir(parents=True)
+    probe.chmod(0o444)
+    try:
+        return not (probe / "inner").is_dir()
+    except OSError:
+        return True
+    finally:
+        probe.chmod(0o755)
+
+
+def test_an_unlistable_runs_directory_refuses(tmp_path):
+    """`runs/` searchable but not readable: every `.claimed.<seg>` inside it
+    stays reachable BY PATH, so a live claim is fully in force and merely
+    invisible to the enumeration. Reporting that as "no claim" would be
+    fail-open on exactly the case the guard exists for.
+
+    Mutation: fold the `except OSError` arm into the FileNotFoundError arm
+    (i.e. `return None`) -> red."""
+    if not _mode_bites(tmp_path):
+        pytest.skip("directory modes do not deny this process (root, or a permissive FS)")
+    root = one_contract_stale_book(tmp_path, admit=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    publish_claim_record(
+        root, "20260101T000000Z", "seg02", ledger["segments"]["seg02"]["cache_key"]
+    )
+    (root / "runs").chmod(0o111)
+    try:
+        result = run_assemble(root)
+    finally:
+        (root / "runs").chmod(0o755)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "could not be listed" in parse_one_json_line(result)["error"], result.stdout
+
+
+def test_a_run_directory_that_cannot_be_stat_ed_refuses(tmp_path):
+    """The fail-open the closing simplifier pass caught, pinned.
+
+    A run-id-shaped SYMLINK LOOP is the nastiest shape, and the one used here:
+    `runs/` stays fully readable, so `iterdir()` SUCCEEDS and lists the entry
+    and the enumeration arm above never fires -- but `os.stat()` on it raises
+    ELOOP. `Path.is_dir()` swallows that and answers False, so the original
+    guard SKIPPED the entry, and a skip here means any claim record beneath it
+    is invisible and the unit is ADMITTED. os.stat() distinguishes "is not a
+    directory" from "could not look"; is_dir() cannot.
+
+    A mode-based fixture cannot test this: `runs/` at 0444 is unsearchable, so
+    `runs/ledger.json` stops being readable and assembly halts on `no_ledger`
+    long before the guard runs. The symlink loop leaves everything else intact.
+
+    Mutation: `if not entry.is_dir(): continue` in place of the os.stat block
+    -> red (the book assembles)."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    loop = root / "runs" / "20260101T000000Z"
+    loop.symlink_to("20260101T000000Z")  # points at itself -> ELOOP on stat
+    with pytest.raises(OSError):
+        loop.stat()
+    assert not loop.is_dir(), "is_dir() must swallow the ELOOP for this test to mean anything"
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "could not be inspected" in parse_one_json_line(result)["error"], result.stdout
+
+
+def test_a_null_baseline_is_the_documented_shape_and_admits(tmp_path):
+    """`pre_claim_cache_key: null` is LEGITIMATE -- --from-cap and
+    --from-stalled fragments carry no cache_key at all, so their records
+    record no baseline. Against a ledger record that now HAS a dict key, that
+    is evidence a convergence happened since: spent, admit.
+
+    The neighbouring cases must not swallow this one: a MISSING key refuses,
+    and a non-dict non-null value refuses, but an explicit null does not."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    publish_claim_record(root, "20260101T000000Z", "seg02", None)
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert parse_one_json_line(result)["contract_stale_admitted"] == ["seg02"], result.stdout
+
+
+@pytest.mark.parametrize("garbage", [42, "not-a-key", [], True])
+def test_a_non_dict_non_null_baseline_refuses(tmp_path, garbage):
+    """One type past the missing-key case. Coercing any non-dict to None would
+    make it compare unequal to the stored dict and CLEAR the claim, which is
+    the same fail-open the missing-key branch refuses.
+
+    Mutation: `if not isinstance(claimed, dict): claimed = None` -> red."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    publish_claim_record(root, "20260101T000000Z", "seg02", garbage)
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "neither an object nor null" in parse_one_json_line(result)["error"], result.stdout
 
 
 def test_a_root_without_claim_record_py_refuses_rather_than_admits(tmp_path):

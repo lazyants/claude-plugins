@@ -443,7 +443,7 @@ def test_red_default_source_empty_declared_heading(tmp_path):
 
 # ===========================================================================
 # RED -- default scope: draft changed after W7 review (reviewed_draft_sha1
-# rebind, mirrors assemble.py:1237-1242) -- plus its GREEN twin.
+# rebind, mirrors assemble.py:1280-1285) -- plus its GREEN twin.
 # ===========================================================================
 
 

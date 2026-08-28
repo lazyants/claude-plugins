@@ -1039,15 +1039,48 @@ def _voided_review_refusal_reason(seg: str, record: dict) -> "str | None":
         run_id = entry.name
         if cr.validate_run_id(run_id) is not None:
             continue
-        if not entry.is_dir():
-            # runs/ledger.json lives here and its NAME passes validate_run_id()
-            # (dots are legal in a run id), so without this test the lookup
-            # below would lstat runs/ledger.json/.claimed.<seg>, get ENOTDIR,
-            # classify AMBIGUOUS, and refuse EVERY project. Skipping a
-            # non-directory is not fail-open: a claim record cannot exist
-            # underneath something that is not a directory. runs/ledger.d/ IS
-            # descended into -- it is a directory whose name passes too -- and
-            # is simply empty of .claimed.<seg> entries.
+        # WHY THIS IS os.stat AND NOT Path.is_dir(). The filter is needed at all
+        # because runs/ledger.json lives here and its NAME passes
+        # validate_run_id() (dots are legal in a run id), so without it the
+        # lookup below would lstat runs/ledger.json/.claimed.<seg>, get ENOTDIR,
+        # classify AMBIGUOUS, and refuse EVERY project.
+        #
+        # But `Path.is_dir()` swallows every OSError and answers False, and in
+        # THIS guard a skip means the claim record underneath is never seen and
+        # the unit is ADMITTED -- so "could not look" would have become
+        # "nothing there", the exact fail-open the iterdir arm above refuses.
+        # Measured on this machine, Python 3.14, `runs/` at mode 0444
+        # (readable, not searchable): iterdir() SUCCEEDS and lists the run
+        # directory, is_dir() answers False, os.stat raises EACCES. A
+        # run-id-shaped ELOOP symlink behaves the same way. Both are cases where
+        # a live claim is fully in force and merely invisible.
+        # segment_dispatch_driver.py's `_stat_or_fatal()` and
+        # select_segments.py document this same trap; this is the third site.
+        #
+        # stat(), not lstat(): a symlink pointing at a real run directory is a
+        # place a claim record CAN live, so following it is the fail-closed
+        # direction here. The final component is a different question and
+        # classify_claim_record() lstats it, by its own doctrine.
+        try:
+            entry_stat = os.stat(entry)
+        except (FileNotFoundError, NotADirectoryError):
+            # Definitively nothing to descend into -- an entry that vanished
+            # between the listing and now, or a path component that is not a
+            # directory. Not the same as "could not look".
+            continue
+        except OSError as exc:
+            return (
+                f"the entry {entry} under the runs directory could not be inspected "
+                f"({exc}), so a claim record beneath it would be invisible while still "
+                f"in force -- it stays reachable BY PATH, so a failed stat is not "
+                f"evidence of absence (#773)"
+            )
+        if not stat.S_ISDIR(entry_stat.st_mode):
+            # Genuinely not a directory -- runs/ledger.json, and nothing else
+            # ships here. A claim record cannot exist underneath one, and this
+            # branch now says that only when the stat actually established it.
+            # runs/ledger.d/ IS descended into -- a directory whose name passes
+            # too -- and is simply empty of .claimed.<seg> entries.
             continue
         path = cr.claimed_path(run_id, seg, RUNS_DIR)
         state, payload, detail = cr.read_claim_record(path)
@@ -1072,12 +1105,20 @@ def _voided_review_refusal_reason(seg: str, record: dict) -> "str | None":
                 f"-- a damaged record is not a spent one (#773)"
             )
         claimed = payload["pre_claim_cache_key"]
-        if not isinstance(claimed, dict):
-            # Legitimately None for --from-cap/--from-stalled, whose fragments
-            # carry no cache_key at all. Against a stored dict that compares
-            # unequal, which is correct: a dict on the record means a
-            # convergence has happened since.
-            claimed = None
+        if claimed is not None and not isinstance(claimed, dict):
+            # `null` is the ONE documented non-dict shape: --from-cap and
+            # --from-stalled fragments carry no cache_key at all, so their
+            # records legitimately record no baseline (claim_record.py's own
+            # field commentary). Anything else -- a number, a string, a list --
+            # is a damaged record, and coercing it to None would make it
+            # compare unequal to a stored dict and CLEAR the claim. Same
+            # fail-open as the missing key above, one type further along.
+            return (
+                f"the claim record at {path} carries a 'pre_claim_cache_key' that is "
+                f"neither an object nor null ({type(claimed).__name__}), so the baseline "
+                f"that would show whether its re-review completed cannot be read -- a "
+                f"damaged record is not a spent one (#773)"
+            )
         if claimed == baseline:
             return (
                 f"segment {seg!r} has an UNSPENT claim record at {path}: publishing it "
@@ -1147,11 +1188,13 @@ def load_converged_segments(
     out-of-manifest CONVERGED entry hitting these same fatals is
     pre-existing behaviour, not something #491 is responsible for fixing.
 
-    `refusals` is {seg: reason} for every "stale" entry the carve-out itself
-    refused (never for pending/in_progress/non_converged/blocked/malformed
-    records, and never for an out-of-manifest entry the carve-out accepted
-    but this function then silently skipped -- a refusal there would name a
-    segment this book does not even contain), so main() can still name a
+    `refusals` is {seg: reason} for every "stale" entry refused on its way
+    through -- by the carve-out itself, or (#773) by the unspent-claim guard
+    on a contract-only entry the carve-out ACCEPTED and this function then
+    declined to admit. Never for pending/in_progress/non_converged/blocked/
+    malformed records, and never for an out-of-manifest entry the carve-out
+    accepted but this function then silently skipped -- a refusal there would
+    name a segment this book does not even contain. So main() can still name a
     reason for an all-refused project instead of folding it into the
     generic "nothing has converged yet" precondition (see
     assert_project_complete)."""
