@@ -987,17 +987,31 @@ def _voided_review_refusal_reason(seg: str, record: dict) -> "str | None":
     exists" cannot mean "the review is still voided": a segment claimed once
     would become permanently unassemblable, which is the exact denial of
     service claim_record.py's own cross-run ownership guard was narrowed to
-    avoid. The record has to be READ. What it preserves is
-    `pre_claim_cache_key`: the segment's ledger `cache_key` as it stood when
-    the claim voided the review, copied verbatim from the same materialized
-    runs/ledger.json this script reads. That field moves on exactly one event
-    -- ledger_update.py writes a fresh `cache_key` on the CONVERGENCE path,
-    which is reachable only through a completed review. So:
+    avoid. The record has to be READ. What it stamps is `claimed_at`, and what
+    the segment's ledger fragment stamps is the `timestamp` of its last
+    convergence write. So:
 
-        the claim is UNSPENT when the ledger record still carries exactly the
-        cache_key the claim recorded as its baseline.
+        the claim is UNSPENT when nothing has rewritten the segment's ledger
+        record since it was published -- the fragment's convergence timestamp
+        does not sit after the claim's own.
 
-    NOT the review document's own `dispatch_token`, which is the obvious
+    An ORDERING, and deliberately not a comparison of any stored VALUE. Two
+    value comparisons were tried first and both were wrong in the same way:
+    each inferred that a review had completed from an artifact that is not a
+    review identity.
+
+    NOT the stored `cache_key` against `pre_claim_cache_key`. The 15-field key
+    (cache_key.py's CACHE_KEY_FIELD_ORDER) carries no draft and no review
+    identity -- `input_sha1` is the SOURCE input -- so a hand-edited draft,
+    which is this profile's DOCUMENTED primary population, can be claimed,
+    re-reviewed and re-converged while `ledger_update.py` writes the identical
+    key back. The review plainly completed; the baseline still matched; the
+    next contract-only drift refused the unit forever. A moved key survives
+    here only as SECONDARY evidence, because it is sound in the one direction
+    it is used: `cache_key` is written only on the convergence path, so a moved
+    one proves a convergence even when the timestamps cannot be ordered.
+
+    NOT the review document's own `dispatch_token` either, which is the obvious
     candidate and is unsound: a token is `<RUN_ID>:<seg>:r<roundLabel>`, run
     ids are REUSED whenever resume_setup.py resolves a matching input.digest,
     and the driver redispatches a fresh review at the SAME round label when

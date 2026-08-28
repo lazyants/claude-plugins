@@ -94,7 +94,7 @@ but the project has not fully converged (any of `not_started`/`recoverable`/
 This closes the previous gap where a project with unconverged segments
 silently exited `0` on the default `segment_drafts_and_audit` delivery path,
 giving it no deterministic delivery-refusal gate to match the engine-loop
-HARD rule already enforced on the `assembled_book` path (`assemble.py:2900`'s
+HARD rule already enforced on the `assembled_book` path (`assemble.py:2914`'s
 `assert_project_complete`). `warnings` and the frontback coverage report
 remain purely informational.
 

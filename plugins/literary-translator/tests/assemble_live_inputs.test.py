@@ -587,8 +587,11 @@ def test_live_contract_only_drift_without_the_declaration_still_refuses(tmp_path
 
 
 def _publish_claim_record(root, run_id, seg, pre_claim_cache_key):
-    """`runs/<run_id>/.claimed.<seg>`, in select_segments.py's own shape. Only
-    `pre_claim_cache_key` is load-bearing for the #773 guard."""
+    """`runs/<run_id>/.claimed.<seg>`, in select_segments.py's own shape.
+
+    `claimed_at` and `pre_claim_cache_key` are what the #773 guard reads: it
+    orders the ledger fragment's convergence `timestamp` against the former,
+    and falls back to the latter only when that ordering is unavailable."""
     run_dir = root / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     path = run_dir / f".claimed.{seg}"
@@ -651,10 +654,14 @@ def test_the_live_admission_refuses_a_unit_whose_review_an_unspent_claim_voided(
 
 
 def test_the_live_admission_still_admits_a_spent_claim(tmp_path):
-    """The false-RED direction at the live site: the re-review completed, so
-    the ledger's cache_key moved past the baseline the claim recorded, and a
-    later contract edit re-drifted the unit. Admitted, exactly as it would be
-    with no claim record at all."""
+    """The false-RED direction at the live site: the re-review completed and
+    moved the cache_key past the baseline the claim recorded -- the guard's
+    SECONDARY proof of convergence -- and a later contract edit re-drifted the
+    unit. Admitted, exactly as it would be with no claim record at all.
+
+    The PRIMARY proof is the timestamp ordering; its own cases live in
+    contract_stale_admission.test.py, which owns the predicate's branches.
+    This suite owns the live admission SITE."""
     root, _drafts = converged_book(tmp_path, admit_contract_only_stale=True)
     ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
     older = dict(ledger["segments"]["seg01"]["cache_key"])

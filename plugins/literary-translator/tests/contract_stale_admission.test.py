@@ -746,11 +746,16 @@ def test_declaration_with_nothing_to_admit_changes_no_output(tmp_path):
 # 9a. #773 -- a claim VOIDS the stored review, and neither contract-only
 # admission may ship the unit against it.
 #
-# The predicate under test: a claim is UNSPENT when the segment's ledger
-# record still carries exactly the cache_key the claim recorded in
-# `pre_claim_cache_key`. ledger_update.py writes that field only on the
-# convergence path, so an unchanged one means the re-review the claim
-# authorized never completed.
+# The predicate under test is an ORDERING: a claim is UNSPENT when nothing
+# has rewritten the segment's ledger record since it was published -- the
+# fragment's convergence `timestamp` does not sit after the record's own
+# `claimed_at`. A moved `cache_key` is honoured only as SECONDARY evidence,
+# for the case where the timestamps cannot be ordered.
+#
+# It is NOT a comparison of the stored cache_key, and the tests below pin why:
+# that key carries no draft and no review identity, so a hand-edited draft --
+# this profile's documented primary population -- can be claimed, re-reviewed
+# and re-converged with the identical key written back.
 # ===========================================================================
 
 
@@ -760,10 +765,10 @@ def publish_claim_record(
 ):
     """Write `runs/<run_id>/.claimed.<seg>` the way select_segments.py does.
 
-    Only `pre_claim_cache_key` is load-bearing for the guard; the rest is
-    written so the fixture is a plausible record rather than the two fields
-    the assertion happens to read -- a record shaped unlike the real one
-    cannot show that the real one is handled.
+    `claimed_at` and `pre_claim_cache_key` are the two fields the guard reads;
+    the rest is written so the fixture is a plausible record rather than only
+    the fields the assertion happens to touch -- a record shaped unlike the
+    real one cannot show that the real one is handled.
     """
     run_dir = root / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -808,7 +813,8 @@ def moved_contract_key(cache_key: dict) -> dict:
 def test_unspent_claim_refuses_the_contract_only_admission(tmp_path):
     """The window #773 names: the operator claimed seg02 for re-review, which
     VOIDED its stored review, and the re-review never completed. The ledger
-    still carries the pre-claim cache_key, so the claim is unspent.
+    predates the claim and its cache_key is unchanged, so nothing has
+    rewritten the fragment since and the claim is unspent.
 
     Mutation: delete the guard call in load_converged_segments() -> seg02 is
     admitted and the book assembles, which is the shipped defect."""
@@ -831,9 +837,10 @@ def test_spent_claim_still_assembles(tmp_path):
     """The false-RED direction, and the reason the guard reads the record
     rather than merely counting it: claim records are immortal, so a project
     that ever claimed a segment must not become permanently unassemblable.
-    Here the re-review DID complete -- the ledger's cache_key moved on past the
-    baseline the claim recorded -- and a later contract edit re-staled the
-    unit.
+    Here the re-review DID complete and MOVED the cache_key past the baseline
+    the claim recorded, which is the guard's SECONDARY proof of convergence;
+    a later contract edit then re-staled the unit. (The primary proof, the
+    timestamp ordering, has its own cases further down.)
 
     Mutation: refuse on any PRESENT record regardless of the baseline -> red."""
     root = one_contract_stale_book(tmp_path, admit=True)

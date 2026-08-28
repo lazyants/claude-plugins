@@ -553,7 +553,7 @@
    ],
    "claim": "DELIBERATE ASYMMETRY -- deliberately OMITS assemble.py's own condition 4 (whether the `.ever_converged.<seg>` sentinel is present, assemble.py:715). #491 R2 (round-2 review) found the ORIGINAL version of this paragraph factually wrong: it justified the omission by claiming assemble.py always re-checks the sentinel downstream, so this gate could never ship anything assembly would refuse. That does not hold in the scope this function actually runs in -- the default"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_extraction.py\", \"assemble.py:2157-2263\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_extraction.py\", \"assemble.py:2171-2277\", 0]": {
    "anchors": [
     "legitimately unresolvable-by-design",
     "block_ids = seg_entry.get(\"block_ids\") or []",
@@ -561,13 +561,13 @@
    ],
    "claim": "# The population is the CITED tiers, not the declared vocabulary: every block # type in H (``manifest.heading_types | {\"HEAD\"}``) that some segment's # ``block_ids`` actually names, not H itself. ``assemble.py:1849-1955`` builds # an outline node only for a block a segment cites -- a type an operator lists # in ``heading_types`` but this book never actually uses would inflate the # outline with a tier that never reaches the assembled book or the published # vault."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_extraction.py\", \"assemble.py:2304\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_extraction.py\", \"assemble.py:2318\", 0]": {
    "anchors": [
     "heading_levels.get(raw_type, 2)"
    ],
    "claim": "# Heading-level outline disclosure (issue #233). ``heading_levels`` is optional # and per-tier: a book can cite three heading-shaped block types and declare a # level for none, one, or all of them, and nothing in a schema-valid manifest # distinguishes \"the operator meant level 2 for this tier\" from \"the operator # forgot to declare this tier\" -- assemble.py:1996 resolves an undeclared tier # to level 2 exactly the same way it resolves a tier the operator deliberately # pinned there. That ambiguity is why this can only ever be a disclosure, never # a HARD check: there is no way to tell the two apart from the manifest alone, # and refusing every undeclared tier would refuse legal books that use the"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_extraction.py\", \"assemble.py:2304\", 1]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_extraction.py\", \"assemble.py:2318\", 1]": {
    "anchors": [
     "heading_levels.get(raw_type, 2)"
    ],
@@ -641,7 +641,7 @@
    ],
    "claim": "the note covers (its `aliases` minus the display name), or a reader searching a variant spelling finds nothing; and emit no per-row count unless it is re-derived from the artifact itself, an index page being where a fabricated number is least likely to be checked. Step 0a copies `PLAN.template.md` once and never refreshes it (`SKILL.md:482`), so a project scaffolded before the retirement may still name `output.index.enabled` in its hand-edited `PLAN.md` intake answer; drop that phrase by hand — there is no automatic migration."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"assemble.py:2900\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"assemble.py:2914\", 0]": {
    "anchors": [
     "assert_project_complete(manifest, converged, refusals)"
    ],
@@ -936,7 +936,7 @@
    ],
    "claim": "\"\"\"(§10.2) An explicit --senses-path that does not exist is a caller error -> BLOCK (allow_absent=False), proving `senses_explicit = args.senses_path is not None` mirrors `canon_explicit` at glossary_batch_plan.py:707 exactly. A silently-empty result here would let a typo'd --senses-path bypass the exclusion entirely.\"\"\" nc, canon = write_inputs(tmp_path, [cand(\"Alice\", freq=20)]) proc = run(nc, canon, \"--senses-path\", str(tmp_path / \"nope-canon-senses.json\"))"
   },
-  "[\"plugins/literary-translator/tests/heading_level_outline.test.py\", \"assemble.py:2304\", 0]": {
+  "[\"plugins/literary-translator/tests/heading_level_outline.test.py\", \"assemble.py:2318\", 0]": {
    "anchors": [
     "heading_levels.get(raw_type, 2)"
    ],
@@ -1353,7 +1353,7 @@
    ],
    "claim": "# A Hebrew form with NO name_inventory configured: is_upper_initial() # can never see a candidate in a script with no case distinction (Lo # category), and the inventory bypass is disabled (empty inventory) -- # see caseless_offset.test.py:248-260 for the underlying matcher # invariant this test exercises through the full scan pipeline."
   },
-  "[\"plugins/literary-translator/tests/validate_assembled.test.py\", \"assemble.py:1348-1353\", 0]": {
+  "[\"plugins/literary-translator/tests/validate_assembled.test.py\", \"assemble.py:1362-1367\", 0]": {
    "anchors": [
     "if actual_sha1 != expected_sha1:",
     "draft has changed since review"
