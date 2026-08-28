@@ -94,7 +94,7 @@ but the project has not fully converged (any of `not_started`/`recoverable`/
 This closes the previous gap where a project with unconverged segments
 silently exited `0` on the default `segment_drafts_and_audit` delivery path,
 giving it no deterministic delivery-refusal gate to match the engine-loop
-HARD rule already enforced on the `assembled_book` path (`assemble.py:2592`'s
+HARD rule already enforced on the `assembled_book` path (`assemble.py:2789`'s
 `assert_project_complete`). `warnings` and the frontback coverage report
 remain purely informational.
 
@@ -231,7 +231,17 @@ in `manifest.json`.
    field machinery-only. Units admitted by (b) are listed in `assemble.py`'s
    own `contract_stale_admitted` stdout key and named on stderr — they ship
    without having been judged against the current style contract, which is a
-   decision the operator made, not one the tool inferred. The whole run is
+   decision the operator made, not one the tool inferred. Carve-out (b) has
+   one refusal of its own (#773): a unit with an UNSPENT claim record — a
+   `--from-converged` claim VOIDED its stored review and the re-review never
+   completed — is refused rather than admitted, because the
+   `reviewed_draft_sha1` it would ship against is that voided review's. The
+   same refusal guards step 2a's live check below, which admits a
+   contract-only drift independently of the merged status. Spentness is read
+   off the ledger's `cache_key`, which only a completed convergence rewrites,
+   never off the review document's `dispatch_token` — run ids are reused
+   across resumes and the driver redispatches at the same round label, so a
+   correctly re-reviewed unit can carry the identical token. The whole run is
    additionally gated on W7's `final-audit-summary.project_complete: true`
    (see Path 1 above) before assembly starts at all.
 2a. **Confirm the ledger snapshot against the LIVE inputs (#492).** Everything

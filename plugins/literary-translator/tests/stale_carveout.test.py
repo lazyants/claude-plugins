@@ -176,6 +176,12 @@ def make_durable_root(tmp_path, name="durable_root"):
     # json_stdout.py (#369): every staged script above loads it by exact
     # path from beside itself, so a root without it exits rather than runs.
     shutil.copy2(LEDGER_MERGE_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
+    # claim_record.py (#773): assemble.py imports it lazily to ask whether an
+    # UNSPENT claim voided a contract-only unit's review, and REFUSES when it
+    # cannot. A real durable root always has it -- Step 0a copies every
+    # assets/scripts/*.py bar four -- so a staged root must too, or every
+    # contract-only admission here refuses for the wrong reason.
+    shutil.copy2(LEDGER_MERGE_SRC.parent / "claim_record.py", scripts_dir / "claim_record.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     shutil.copytree(SCHEMAS_SRC_DIR, root / "schemas")

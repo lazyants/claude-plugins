@@ -937,6 +937,162 @@ def _manifest_segment_ids_or_empty(manifest: dict) -> "set[str]":
 
 
 # ---------------------------------------------------------------------------
+# #773: a claim VOIDS the stored review, and BOTH contract-only admissions
+# would otherwise ship the unit against it.
+# ---------------------------------------------------------------------------
+
+
+def _voided_review_refusal_reason(seg: str, record: dict) -> "str | None":
+    """None when no UNSPENT claim stands against `seg`, or an operator-facing
+    refusal reason when one does.
+
+    A `--from-converged` claim VOIDS the standing of the segment's stored
+    review -- claim_record.py says so in as many words, and its
+    `pre_claim_review` field exists only because "the claim's whole purpose is
+    to void it". Nothing downstream can see that, though: the claim leaves the
+    draft's CONTENT untouched (it rewrites only the draft's dispatch_token), so
+    the `reviewed_draft_sha1` comparison every admission below runs still
+    matches, and both of this script's contract-only admissions ship the unit
+    against a review the operator explicitly set aside.
+
+    WHAT "UNSPENT" IS DERIVED FROM, and why it is derived at all. Nothing
+    releases a claim -- records are immortal (#449, still open) -- so "a record
+    exists" cannot mean "the review is still voided": a segment claimed once
+    would become permanently unassemblable, which is the exact denial of
+    service claim_record.py's own cross-run ownership guard was narrowed to
+    avoid. The record has to be READ. What it preserves is
+    `pre_claim_cache_key`: the segment's ledger `cache_key` as it stood when
+    the claim voided the review, copied verbatim from the same materialized
+    runs/ledger.json this script reads. That field moves on exactly one event
+    -- ledger_update.py writes a fresh `cache_key` on the CONVERGENCE path,
+    which is reachable only through a completed review. So:
+
+        the claim is UNSPENT when the ledger record still carries exactly the
+        cache_key the claim recorded as its baseline.
+
+    NOT the review document's own `dispatch_token`, which is the obvious
+    candidate and is unsound: a token is `<RUN_ID>:<seg>:r<roundLabel>`, run
+    ids are REUSED whenever resume_setup.py resolves a matching input.digest,
+    and the driver redispatches a fresh review at the SAME round label when
+    the old review's sha1 is stale -- so a correctly re-reviewed unit can carry
+    the byte-identical token and would be refused forever. It also reads the
+    wrong artifact: a review document can be promoted and the convergence write
+    never commit (the crash boundary SKILL.md already documents), which a token
+    predicate calls "spent" and this one does not.
+
+    FAIL-CLOSED at every step, and note that the safe DIRECTION here is the
+    opposite of the one claim_record.py's dispatch guards take.
+    classify_claim_record()'s docstring requires each caller to say which way
+    it maps AMBIGUOUS: for those guards a false PRESENT would authorize a
+    re-review nobody asked for, so ambiguity means "not claimed". Here PRESENT
+    is what REFUSES, so "not claimed" is the fail-OPEN side -- an unreadable
+    record would ship the very unit it is evidence against. Ambiguity refuses.
+
+    WHAT THIS DOES NOT CLOSE, stated because the gap is real rather than
+    unnoticed: an operator who UNDOES the trigger (reverts the contract edit,
+    or restores the reviewed draft bytes) puts the record back on the plain
+    `converged` path, which no claim check guards; a second claim inside a
+    RESUMED run keeps the first claim's baseline, because write_claim_record()
+    is create-only and returns "already claimed by this run" on EEXIST without
+    updating the payload; and a hand-edited ledger fragment can paste any
+    `cache_key` it likes, exactly as it can already defeat the carve-out this
+    guard sits inside. Each needs per-claim consumption evidence written where
+    convergence is recorded -- i.e. #449's missing release primitive, in files
+    that are cache-key bundle members and would re-stale every converged
+    segment in every live book. That price is not worth paying here."""
+    try:
+        import claim_record as cr
+    except ImportError as exc:
+        # A real durable root always has it: Step 0a copies every
+        # assets/scripts/*.py bar four named exclusions, and cache_key.py
+        # hashes it as a bundle member. Imported lazily all the same, because a
+        # module-level import would abort at import time in every test root
+        # that stages a copied assemble.py without it -- and because a root
+        # that cannot supply it cannot answer this question, which is a refusal
+        # rather than a reason to stop asking.
+        return (
+            f"claim_record.py could not be imported from {SCRIPTS_DIR} ({exc}), so "
+            f"whether an operator voided segment {seg!r}'s stored review cannot be "
+            f"established -- refusing rather than admitting it unjudged (#773)"
+        )
+
+    baseline = record.get("cache_key")
+    if not isinstance(baseline, dict):
+        baseline = None
+
+    try:
+        entries = sorted(RUNS_DIR.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        # DEFINITIVELY no claim: a project that never claimed anything has no
+        # runs/ to enumerate. Distinct from the OSError below, and the two must
+        # never print the same answer.
+        return None
+    except OSError as exc:
+        return (
+            f"the runs directory {RUNS_DIR} could not be listed ({exc}), so a claim "
+            f"record voiding segment {seg!r}'s review would be invisible while still "
+            f"in force -- every .claimed.<seg> inside stays reachable BY PATH, so a "
+            f"failed enumeration is not evidence of absence (#773)"
+        )
+
+    for entry in entries:
+        run_id = entry.name
+        if cr.validate_run_id(run_id) is not None:
+            continue
+        if not entry.is_dir():
+            # runs/ledger.json lives here and its NAME passes validate_run_id()
+            # (dots are legal in a run id), so without this test the lookup
+            # below would lstat runs/ledger.json/.claimed.<seg>, get ENOTDIR,
+            # classify AMBIGUOUS, and refuse EVERY project. Skipping a
+            # non-directory is not fail-open: a claim record cannot exist
+            # underneath something that is not a directory. runs/ledger.d/ IS
+            # descended into -- it is a directory whose name passes too -- and
+            # is simply empty of .claimed.<seg> entries.
+            continue
+        path = cr.claimed_path(run_id, seg, RUNS_DIR)
+        state, payload, detail = cr.read_claim_record(path)
+        if state == cr.CLAIM_ABSENT:
+            continue
+        if state != cr.CLAIM_PRESENT:
+            return (
+                f"the claim record at {path} could not be read ({detail}), so whether "
+                f"segment {seg!r}'s stored review was voided cannot be established -- "
+                f"an unreadable record is never read as 'no claim' here, because in "
+                f"this direction that would ship the unit it is evidence against (#773)"
+            )
+        if "pre_claim_cache_key" not in payload:
+            # read_claim_record() reports PRESENT for ANY JSON object and does
+            # not validate the record's field set, so `{}` and a truncated
+            # object both arrive here. Normalising a MISSING key to None would
+            # make it compare unequal to a stored dict and clear the claim --
+            # fail-open on the one artifact this guard exists to read.
+            return (
+                f"the claim record at {path} carries no 'pre_claim_cache_key' field, so "
+                f"the baseline that would show whether its re-review completed is gone "
+                f"-- a damaged record is not a spent one (#773)"
+            )
+        claimed = payload["pre_claim_cache_key"]
+        if not isinstance(claimed, dict):
+            # Legitimately None for --from-cap/--from-stalled, whose fragments
+            # carry no cache_key at all. Against a stored dict that compares
+            # unequal, which is correct: a dict on the record means a
+            # convergence has happened since.
+            claimed = None
+        if claimed == baseline:
+            return (
+                f"segment {seg!r} has an UNSPENT claim record at {path}: publishing it "
+                f"voided the standing of the stored review, and the ledger record still "
+                f"carries the very cache_key the claim recorded as its baseline, so the "
+                f"re-review that claim authorized never completed. Shipping it now would "
+                f"assemble the unit against a review the operator set aside. Complete the "
+                f"re-review for this segment (the ordinary pipeline path -- it re-converges "
+                f"the unit and rewrites its ledger record); do not delete the claim record, "
+                f"which is the only durable account of the void (#773)"
+            )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Ledger convergence + sha1 gate.
 # ---------------------------------------------------------------------------
 
@@ -1085,6 +1241,18 @@ def load_converged_segments(
                 f"a hand-edit the reviewer never saw must not be assembled; "
                 f"re-review (or restore the reviewed draft) before assembling"
             )
+        if via_contract:
+            # #773. Placed HERE, after the reviewed_draft_sha1/draft-presence/
+            # draft-sha1 checks above rather than beside the via_contract
+            # assignment: those raise AssembleError and abort the whole run,
+            # and a soft refusal inserted ahead of them would quietly downgrade
+            # a hand-edited draft in this population from a fatal to a skip.
+            # Gated on via_contract alone -- the status=="converged" path and
+            # the #491 machinery-only carve-out are untouched.
+            voided = _voided_review_refusal_reason(seg, record)
+            if voided is not None:
+                refusals[seg] = voided
+                continue
         converged[seg] = record
         if via_contract:
             contract_admitted.append(seg)
@@ -1272,6 +1440,12 @@ def assert_live_inputs_match_ledger(
     globals_cache: dict = {}
     contract_admitted_live = []
     drifted = {}
+    # #773: kept SEPARATE from `drifted` rather than folded into it. The drift
+    # refusal below tells the operator to declare
+    # validation.admit_contract_only_stale -- advice that is actively wrong
+    # here, since reaching this branch means the declaration is already on and
+    # the obstacle is a voided review, not an undeclared contract edit.
+    voided_claims = {}
     compared_pairs = 0
 
     for seg in sorted(manifest_seg_ids):
@@ -1308,6 +1482,17 @@ def assert_live_inputs_match_ledger(
         if admit_contract_only and set(moved) == {CONTRACT_ONLY_STALE_FIELD}:
             state, _detail = classify_ever_converged_sentinel(ever_converged_path(seg))
             if state != SENTINEL_ABSENT:
+                # #773. This is assembly's SECOND contract-only admission, and
+                # it is reached by the ORDINARY sequence rather than an exotic
+                # one: edit the style contract AFTER the last ledger_merge and
+                # the snapshot still says "converged" while the live inputs
+                # have moved -- which is the whole reason #492 exists. Guarding
+                # only load_converged_segments()'s materialized-stale carve-out
+                # would leave this door open for the same voided review.
+                voided = _voided_review_refusal_reason(seg, record)
+                if voided is not None:
+                    voided_claims[seg] = voided
+                    continue
                 contract_admitted_live.append(seg)
                 continue
         drifted[seg] = moved
@@ -1328,6 +1513,18 @@ def assert_live_inputs_match_ledger(
             f"edit you accept, declare validation.admit_contract_only_stale "
             f"in profile.yml -- see R9).",
             reason="stale_live_inputs",
+        )
+    if voided_claims:
+        # Raised AFTER the drift refusal above, deliberately: a population that
+        # already refused as `stale_live_inputs` before this change must keep
+        # refusing with that same reason, so nothing that used to be reported
+        # one way starts being reported another.
+        detail = "; ".join(f"{seg} -- {reason}" for seg, reason in sorted(voided_claims.items()))
+        raise AssembleError(
+            f"refusing to assemble: {len(voided_claims)} segment(s) would be admitted "
+            f"by the live style-contract carve-out against a review an operator VOIDED "
+            f"by claiming them, and whose re-review never completed -- {detail}",
+            reason="voided_review_claim",
         )
     return sorted(contract_admitted_live), compared_pairs
 

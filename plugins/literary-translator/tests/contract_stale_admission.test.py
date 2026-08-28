@@ -275,6 +275,12 @@ def make_assemble_root(tmp_path, admit=None) -> Path:
     # json_stdout.py (#369): every staged script above loads it by exact
     # path from beside itself, so a root without it exits rather than runs.
     shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
+    # claim_record.py (#773): assemble.py imports it lazily to ask whether an
+    # UNSPENT claim voided a contract-only unit's review, and REFUSES when it
+    # cannot. A real durable root always has it -- Step 0a copies every
+    # assets/scripts/*.py bar four -- so a staged root must too, or every
+    # contract-only admission here refuses for the wrong reason.
+    shutil.copy2(src.parent / "claim_record.py", scripts_dir / "claim_record.py")
 
     profile = assemble_profile(admit)
     profile["project"]["durable_root"] = str(root)
@@ -734,6 +740,290 @@ def test_declaration_with_nothing_to_admit_changes_no_output(tmp_path):
     payload = parse_one_json_line(result)
     assert "contract_stale_admitted" not in payload, payload
     assert "CONTRACT-ONLY STALE ADMITTED" not in result.stderr, result.stderr
+
+
+# ===========================================================================
+# 9a. #773 -- a claim VOIDS the stored review, and neither contract-only
+# admission may ship the unit against it.
+#
+# The predicate under test: a claim is UNSPENT when the segment's ledger
+# record still carries exactly the cache_key the claim recorded in
+# `pre_claim_cache_key`. ledger_update.py writes that field only on the
+# convergence path, so an unchanged one means the re-review the claim
+# authorized never completed.
+# ===========================================================================
+
+
+def publish_claim_record(root, run_id, seg, pre_claim_cache_key, drop_baseline=False):
+    """Write `runs/<run_id>/.claimed.<seg>` the way select_segments.py does.
+
+    Only `pre_claim_cache_key` is load-bearing for the guard; the rest is
+    written so the fixture is a plausible record rather than the two fields
+    the assertion happens to read -- a record shaped unlike the real one
+    cannot show that the real one is handled.
+    """
+    run_dir = root / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "seg": seg,
+        "profile": "from-converged",
+        "run_id": run_id,
+        "source_run_id": "RUN-SOURCE",
+        "previous_dispatch_token": f"RUN-SOURCE:{seg}",
+        "pre_claim_content_sha1": "0" * 40,
+        "pre_claim_review": {
+            "dispatch_token": f"RUN-SOURCE:{seg}:r1",
+            "clean": True,
+            "coverage_ok": True,
+            "findings_count": 0,
+        },
+        "pre_claim_cache_key": pre_claim_cache_key,
+        "cache_key_at_claim": pre_claim_cache_key,
+        "cache_key_moved_fields": [],
+        "cache_key_movement_machinery_only": None,
+        "cache_key_note": None,
+        "operator_invocation": "select_segments.py --from-converged",
+        "claimed_at": "2026-01-02T00:00:00+00:00",
+    }
+    if drop_baseline:
+        del payload["pre_claim_cache_key"]
+    path = run_dir / f".claimed.{seg}"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def moved_contract_key(cache_key: dict) -> dict:
+    """`cache_key` as it stood one style-contract edit ago -- the baseline a
+    claim whose re-review DID complete would carry."""
+    older = dict(cache_key)
+    older[CONTRACT_FIELD] = "older" + str(older.get(CONTRACT_FIELD, ""))
+    return older
+
+
+def test_unspent_claim_refuses_the_contract_only_admission(tmp_path):
+    """The window #773 names: the operator claimed seg02 for re-review, which
+    VOIDED its stored review, and the re-review never completed. The ledger
+    still carries the pre-claim cache_key, so the claim is unspent.
+
+    Mutation: delete the guard call in load_converged_segments() -> seg02 is
+    admitted and the book assembles, which is the shipped defect."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    claim = publish_claim_record(
+        root, "20260101T000000Z", "seg02", ledger["segments"]["seg02"]["cache_key"]
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert payload.get("reason") == "project_incomplete", payload
+    assert "seg02" in payload["error"], payload
+    assert str(claim) in payload["error"], payload
+    assert "UNSPENT claim record" in payload["error"], payload
+
+
+def test_spent_claim_still_assembles(tmp_path):
+    """The false-RED direction, and the reason the guard reads the record
+    rather than merely counting it: claim records are immortal, so a project
+    that ever claimed a segment must not become permanently unassemblable.
+    Here the re-review DID complete -- the ledger's cache_key moved on past the
+    baseline the claim recorded -- and a later contract edit re-staled the
+    unit.
+
+    Mutation: refuse on any PRESENT record regardless of the baseline -> red."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    publish_claim_record(
+        root,
+        "20260101T000000Z",
+        "seg02",
+        moved_contract_key(ledger["segments"]["seg02"]["cache_key"]),
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert parse_one_json_line(result)["contract_stale_admitted"] == ["seg02"], result.stdout
+
+
+def test_a_spent_record_in_one_run_does_not_hide_an_unspent_one_in_another(tmp_path):
+    """Two runs each hold a record for the same segment: one spent, one not.
+    The spent one sorts FIRST, so a loop that returns on the first record to
+    clear never reaches the unspent one.
+
+    Mutation: `return None` on the first record that clears -> red."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    live_key = ledger["segments"]["seg02"]["cache_key"]
+    publish_claim_record(root, "20260101T000000Z", "seg02", moved_contract_key(live_key))
+    unspent = publish_claim_record(root, "20260202T000000Z", "seg02", live_key)
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert str(unspent) in parse_one_json_line(result)["error"], result.stdout
+
+
+def test_a_claim_record_missing_its_baseline_refuses_rather_than_clearing(tmp_path):
+    """read_claim_record() reports PRESENT for ANY JSON object and never
+    validates the field set, so `{}` and a truncated record both arrive at the
+    guard. Normalising a MISSING key to None would make it compare unequal to
+    the stored dict and CLEAR the claim -- fail-open on the one artifact this
+    guard exists to read.
+
+    Mutation: `payload.get("pre_claim_cache_key")` instead of the membership
+    test -> red."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    publish_claim_record(root, "20260101T000000Z", "seg02", None, drop_baseline=True)
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    error = parse_one_json_line(result)["error"]
+    assert "no 'pre_claim_cache_key'" in error, error
+    assert "damaged record is not a spent one" in error, error
+
+
+@pytest.mark.parametrize("kind", ["directory", "dangling-symlink"])
+def test_an_ambiguous_claim_record_refuses(tmp_path, kind):
+    """claim_record.py's dispatch guards map AMBIGUOUS to "not claimed"
+    because a false PRESENT would authorize a re-review nobody asked for. This
+    consumer's safe direction is the OPPOSITE: PRESENT is what refuses, so
+    "not claimed" is the fail-open side.
+
+    Mutation: treat AMBIGUOUS like ABSENT -> red."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    run_dir = root / "runs" / "20260101T000000Z"
+    run_dir.mkdir(parents=True)
+    path = run_dir / ".claimed.seg02"
+    if kind == "directory":
+        path.mkdir()
+    else:
+        path.symlink_to(run_dir / "no-such-target")
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "could not be read" in parse_one_json_line(result)["error"], result.stdout
+
+
+def test_ledger_json_beside_the_run_dirs_is_not_read_as_a_run_directory(tmp_path):
+    """`ledger.json` and `ledger.d` both PASS claim_record.validate_run_id()
+    -- dots are legal in a run id. Without the is_dir() filter the lookup
+    lstats runs/ledger.json/.claimed.seg02, gets ENOTDIR, classifies AMBIGUOUS
+    and refuses EVERY project. runs/ledger.d/ IS descended into and is simply
+    empty of claim records; this pins that it stays harmless.
+
+    Mutation: drop the is_dir() filter -> red."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    (root / "runs" / "ledger.d").mkdir()
+    (root / "runs" / "ledger.d" / "seg02.json").write_text("{}", encoding="utf-8")
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert parse_one_json_line(result)["contract_stale_admitted"] == ["seg02"], result.stdout
+
+
+def test_a_promoted_review_without_a_convergence_write_still_refuses(tmp_path):
+    """The crash boundary: the re-review's document was PROMOTED (a fresh
+    dispatch_token on segments/<seg>.review.json) but the driver died before
+    the convergence write committed. A predicate reading the review document's
+    token calls that spent and ships the unit; reading the ledger's cache_key
+    does not, because nothing rewrote the fragment.
+
+    This is why the predicate reads the ledger and not the review."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    (root / "segments" / "seg02.review.json").write_text(
+        json.dumps(
+            {
+                "clean": True,
+                "coverage_ok": True,
+                "findings": [],
+                "draft_sha1": "0" * 40,
+                # A DIFFERENT token from the one the claim record preserved.
+                "dispatch_token": "20260101T000000Z:seg02:r1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    publish_claim_record(
+        root, "20260101T000000Z", "seg02", ledger["segments"]["seg02"]["cache_key"]
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "UNSPENT claim record" in parse_one_json_line(result)["error"], result.stdout
+
+
+def test_an_unspent_claim_leaves_the_machinery_only_carveout_alone(tmp_path):
+    """SCOPE. The #491 machinery-only carve-out is a different admission on a
+    different premise -- a plugin upgrade cannot change what the prose should
+    say -- and #773 does not reach it.
+
+    Mutation: call the guard outside `if via_contract` -> red."""
+    root = one_contract_stale_book(
+        tmp_path, admit=True, mismatched=("plugin_bundle_hash",)
+    )
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    publish_claim_record(
+        root, "20260101T000000Z", "seg02", ledger["segments"]["seg02"]["cache_key"]
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "contract_stale_admitted" not in parse_one_json_line(result), result.stdout
+
+
+def test_an_unspent_claim_on_a_plain_converged_unit_still_assembles(tmp_path):
+    """SCOPE, the other half. §8 of the plan records this as a deliberate
+    non-goal: guarding the unconditional converged path would put the check on
+    the road EVERY project takes, and the two ways a claimed unit returns
+    there (reverting the contract, restoring the reviewed draft) both undo the
+    condition that motivated the void.
+
+    This test pins the accepted behaviour so a later widening is a deliberate
+    change to a recorded decision rather than an accident."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    ledger["segments"]["seg02"]["status"] = "converged"
+    del ledger["segments"]["seg02"]["stale_mismatched_fields"]
+    (root / "runs" / "ledger.json").write_text(json.dumps(ledger), encoding="utf-8")
+    publish_claim_record(
+        root, "20260101T000000Z", "seg02", ledger["segments"]["seg02"]["cache_key"]
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+
+@pytest.mark.parametrize("admit,label", [(None, "absent"), (False, "explicit-false")])
+def test_an_undeclared_project_refuses_for_the_pre_existing_reason(tmp_path, admit, label):
+    """An undeclared project never reaches the carve-out at all, so it must
+    still refuse with the contract-only reason it refused with before #773 --
+    not the new one. Guards against the guard being wired ahead of the
+    declaration check."""
+    root = one_contract_stale_book(tmp_path, admit=admit)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    publish_claim_record(
+        root, "20260101T000000Z", "seg02", ledger["segments"]["seg02"]["cache_key"]
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"[{label}] stdout:\n{result.stdout}"
+    error = parse_one_json_line(result)["error"]
+    assert "UNSPENT claim record" not in error, f"[{label}] {error}"
+
+
+def test_a_root_without_claim_record_py_refuses_rather_than_admits(tmp_path):
+    """The lazy import's direction. A root that cannot supply claim_record.py
+    cannot answer whether a claim voided the review, and admitting on an
+    ImportError would make a MISSING file read exactly like a clean project.
+
+    Mutation: `return None` in the ImportError arm -> red."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    (root / "scripts" / "claim_record.py").unlink()
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    error = parse_one_json_line(result)["error"]
+    assert "claim_record.py could not be imported" in error, error
 
 
 # ===========================================================================
