@@ -1101,8 +1101,8 @@ produce), not the word *reordering* that actually tears tokens. Adjudicate it:
    identically to an intact one. Settle it on the codepoints.
 2. **Negative** — the signature fired on something benign: record that in the
    project's notes and carry on. Nothing else to do.
-3. **Positive** — paste the clause below into the project's own
-   `style_bible.md`, under `### E-traps`. That is the one place all three turns
+3. **Positive** — paste the clause from `references/gotchas.md` §15 into the
+   project's own `style_bible.md`, under `### E-traps`. That is the one place all three turns
    read: the translator reads the style bible in full, the reviewer names it as
    style authority, and the fix turn reads it before editing.
 
@@ -1119,11 +1119,10 @@ adjudication, never an instruction to any turn. A book whose source is in
 ordinary logical order must never receive it: telling that project's reviewer to
 discount torn-token findings would suppress real defects.
 
-- last line out (1263): ```` ``` ````
-- 1264 blank, 1265 is `### An empty content unit is refused at W2 (#397)` — **leave both.**
-
-Replacement, verbatim (sits directly after the S15b-rewritten paragraph):
-
+The clause itself — a fenced `#### E-traps: visual-order source` block, ready
+to paste unaltered — is `references/gotchas.md` §15. Open that file ONLY on a
+positive adjudication: a book in ordinary logical order must never receive
+the clause, and reading it is not the same as being entitled to paste it.
 
 ### An empty content unit is refused at W2 (#397)
 
