@@ -300,14 +300,14 @@ that `codex_job.py` "accepts neither flag on the data side". Both were
 false, and the first one directly contradicted `build_codex_job_argv()`'s
 OWN docstring in this same file, which already listed `[--plugin-root]`
 among the flags it splices. Verified against the shipped `codex_job.py`:
-it DOES accept `--plugin-root` (`codex_job.py:2757`) -- `build_codex_job_argv()`
+it DOES accept `--plugin-root` (`codex_job.py:2866`) -- `build_codex_job_argv()`
 forwards it whenever `plugin_root_str` is set (below, in the argv-building
-section) -- and consumes it in `_trusted_scripts_dir()` (`codex_job.py:615-625`),
+section) -- and consumes it in `_trusted_scripts_dir()` (`codex_job.py:717-727`),
 which returns `{plugin_root}/assets/scripts/` directly when given and falls
 back to its own `__file__`-relative `SCRIPTS_DIR` only when it is absent.
 "Accepts neither flag" is HALF right, not simply backwards: `codex_job.py`
 accepts `--plugin-root` but NOT `--durable-root` -- for the DATA side it
-takes a required `--cwd` instead (`codex_job.py:2723`), which this driver
+takes a required `--cwd` instead (`codex_job.py:2832`), which this driver
 already forwards as `str(durable_root)` in every dispatch (build_codex_job_argv()'s
 own `--cwd` argument), matching every other v1.17.0-hardened script's
 self-anchored-unless-redirected shape without needing a second, redundant
@@ -748,7 +748,7 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
             # Path("").absolute() (like Path("").resolve()) is CWD, silently
             # making wherever this process happens to be launched from the
             # executable authority for the template AND every sibling
-            # script. codex_job.py:2930 already refuses this same input;
+            # script. codex_job.py:3039 already refuses this same input;
             # refusing it here too, before any path is built from it, keeps
             # both scripts consistent instead of one being the loophole.
             fatal(
@@ -806,9 +806,9 @@ def _root_forward_args(dirs: dict, durable_root_str, plugin_root_str, *, support
     this function. codex round-3 correction: this used to also claim
     codex_job.py "accepts neither flag on the data side" -- false, and
     HALF backwards, not simply reversed: codex_job.py DOES accept
-    --plugin-root (codex_job.py:2757, forwarded by build_codex_job_argv()
+    --plugin-root (codex_job.py:2866, forwarded by build_codex_job_argv()
     whenever plugin_root_str is set) but does NOT accept --durable-root --
-    for the DATA side it takes a required --cwd instead (codex_job.py:2723),
+    for the DATA side it takes a required --cwd instead (codex_job.py:2832),
     which this driver already forwards separately as str(durable_root).
     The file path Popen'd for it changes too (see resolve_dirs()), but
     that is in addition to, not instead of, the --plugin-root flag itself
@@ -2121,7 +2121,7 @@ def parse_claims_from_cap_over_sentinel(select_result: dict, claims: dict, admit
 
 
 # Mirrors codex_job.py's own `_ACTIVE = frozenset(("queued", "running"))`
-# (codex_job.py:234) -- duplicated, not imported, per this project's "no
+# (codex_job.py:235) -- duplicated, not imported, per this project's "no
 # shared lib between self-contained scripts" convention. Used ONLY by
 # _attempt_cancel_orphan()'s own live status check below, never a
 # re-derivation of anything hygiene() itself decides differently.
@@ -2132,7 +2132,7 @@ def _attempt_cancel_orphan(*, durable_root: Path, seg: str, disp: str, companion
     """codex round-2 item 10: best-effort orphan cancellation, called ONLY
     from dispatch_codex_job()'s own backstop-timeout path, right after the
     SIGKILL+reap. Mirrors codex_job.py's own `hygiene()` method
-    (codex_job.py:1750-1784), including its live status check (codex round-4
+    (codex_job.py:1853-1887), including its live status check (codex round-4
     MINOR correction: an earlier version of this function skipped that
     check and went straight from "joblog says launched" to cancelling --
     a real, not merely cosmetic, divergence from the claim this docstring
@@ -2161,7 +2161,7 @@ def _attempt_cancel_orphan(*, durable_root: Path, seg: str, disp: str, companion
 
     `jobId`/`jobCwd` ARE durable by the time this driver's backstop can
     realistically fire: codex_job.py's own `launch()` writes both, via an
-    atomic O_EXCL+os.replace, BEFORE `poll()` (codex_job.py:2156-2160) --
+    atomic O_EXCL+os.replace, BEFORE `poll()` (codex_job.py:2259-2263) --
     `poll()` is the long phase, so the joblog this reads is already
     written in the overwhelming majority of cases. The one case this
     genuinely cannot close, stated rather than papered over: if the
@@ -5965,7 +5965,7 @@ def _terminal_write_still_binds_what_was_reviewed(
     over- nor under-motivated -- the ordinary detached-job route does NOT
     reach this on its own. A competing codex_job.py serializes on the
     per-segment `.codex_job.<seg>.lock` and then calls `safe_adopt()`
-    BEFORE it would launch or promote anything (codex_job.py:2500); a
+    BEFORE it would launch or promote anything (codex_job.py:2609); a
     canonical review.json that still passes `review_ready.py
     --expect-token` is ADOPTED, leaving the artifact byte-identical rather
     than replacing it. SKILL.md additionally forbids running the default

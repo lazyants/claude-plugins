@@ -7106,7 +7106,7 @@ def test_template_harness_source_refuses_a_missing_truncation_marker():
 # fix (that half of the original report was refuted by research: an orphan
 # that later completes writes into a leaked sandbox tempdir nothing ever
 # reads again) -- this closes wasted spend, mirroring codex_job.py's own
-# hygiene() shape (codex_job.py:1750-1784): query/cancel with the joblog's
+# hygiene() shape (codex_job.py:1853-1887): query/cancel with the joblog's
 # own recorded jobCwd, never durable_root.
 # ===========================================================================
 
@@ -7253,7 +7253,7 @@ def test_attempt_cancel_orphan_does_not_cancel_on_a_workspace_root_mismatch(tmp_
     """The other half of hygiene()'s own live check: even a job reporting
     an ACTIVE status must not be cancelled if the queried workspaceRoot
     does not match the recorded jobCwd -- the identical defense-in-depth
-    hygiene() itself applies (codex_job.py:1784, `if ws == prior_cwd and
+    hygiene() itself applies (codex_job.py:1887, `if ws == prior_cwd and
     job.get("status") in _ACTIVE:`)."""
     root = phase2_project(tmp_path, n=1)
     companion = _write_fake_companion(tmp_path)
@@ -9071,7 +9071,7 @@ def test_empty_or_whitespace_only_plugin_root_is_refused_never_becomes_cwd(tmp_p
     string, never as the flag being omitted) would silently make wherever
     this process happens to be launched from the executable authority for
     the template AND every sibling script, with no error at all.
-    `codex_job.py:2930` already refuses exactly this input; refusing it
+    `codex_job.py:3039` already refuses exactly this input; refusing it
     here too, before any path is built from it, keeps both scripts
     consistent instead of one being the loophole the other closed."""
     for bad_value in ("", "   ", "\t\n", "  \t "):
