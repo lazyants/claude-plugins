@@ -280,7 +280,7 @@ LEDGER_STATUS_ENUM = frozenset(
 #
 # Restated here, not imported -- house convention for this plugin's
 # self-contained scripts (see e.g. ledger_merge.py's own CACHE_KEY_FIELDS,
-# assemble.py:426-427's own comment). The existing three-way census
+# assemble.py:428-429's own comment). The existing three-way census
 # (tests/stale_carveout.test.py's own
 # test_three_copy_drift_guard_for_machinery_only_fields) lives in a file a
 # concurrent #491 change owns, so this copy is pinned by a SEPARATE
@@ -877,7 +877,7 @@ def _stale_qualifies_for_carveout(
 
     DELIBERATE ASYMMETRY -- deliberately OMITS assemble.py's own condition
     4 (whether the `.ever_converged.<seg>` sentinel is present,
-    assemble.py:715). #491 R2 (round-2 review) found the ORIGINAL
+    assemble.py:716). #491 R2 (round-2 review) found the ORIGINAL
     version of this paragraph factually wrong: it justified the omission by
     claiming assemble.py always re-checks the sentinel downstream, so this
     gate could never ship anything assembly would refuse. That does not

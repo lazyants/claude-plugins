@@ -219,6 +219,12 @@ def make_root(tmp_path: Path, admit_contract_only_stale=None) -> Path:
     # json_stdout.py (#369): every staged script above loads it by exact
     # path from beside itself, so a root without it exits rather than runs.
     shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
+    # claim_record.py (#773): assemble.py imports it lazily to ask whether an
+    # UNSPENT claim voided a contract-only unit's review, and REFUSES when it
+    # cannot. A real durable root always has it -- Step 0a copies every
+    # assets/scripts/*.py bar four -- so a staged root must too, or every
+    # contract-only admission here refuses for the wrong reason.
+    shutil.copy2(src.parent / "claim_record.py", scripts_dir / "claim_record.py")
 
     profile = default_profile(admit_contract_only_stale)
     profile["project"]["durable_root"] = str(root)
@@ -578,6 +584,112 @@ def test_live_contract_only_drift_without_the_declaration_still_refuses(tmp_path
     result = run_assemble(root)
     assert result.returncode != 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert parse_one_json_line(result).get("reason") == "stale_live_inputs"
+
+
+def _publish_claim_record(root, run_id, seg, pre_claim_cache_key):
+    """`runs/<run_id>/.claimed.<seg>`, in select_segments.py's own shape.
+
+    `claimed_at` and `pre_claim_cache_key` are what the #773 guard reads: it
+    orders the ledger fragment's convergence `timestamp` against the former,
+    and falls back to the latter only when that ordering is unavailable."""
+    run_dir = root / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / f".claimed.{seg}"
+    path.write_text(
+        json.dumps(
+            {
+                "seg": seg,
+                "profile": "from-converged",
+                "run_id": run_id,
+                "source_run_id": "RUN-SOURCE",
+                "previous_dispatch_token": f"RUN-SOURCE:{seg}",
+                "pre_claim_content_sha1": "0" * 40,
+                "pre_claim_review": {
+                    "dispatch_token": f"RUN-SOURCE:{seg}:r1",
+                    "clean": True,
+                    "coverage_ok": True,
+                    "findings_count": 0,
+                },
+                "pre_claim_cache_key": pre_claim_cache_key,
+                "cache_key_at_claim": pre_claim_cache_key,
+                "cache_key_moved_fields": [],
+                "cache_key_movement_machinery_only": None,
+                "cache_key_note": None,
+                "operator_invocation": "select_segments.py --from-converged",
+                "claimed_at": "2026-01-02T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_the_live_admission_refuses_a_unit_whose_review_an_unspent_claim_voided(tmp_path):
+    """#773 at assembly's SECOND contract-only admission -- this one.
+
+    It matters because this path is reached by the ORDINARY sequence and not
+    an exotic one: edit the style contract AFTER the last ledger_merge run and
+    the snapshot still says `converged` while the live inputs have moved,
+    which is exactly the lag #492 exists to catch. So a guard placed only on
+    load_converged_segments()'s materialized-`stale` carve-out leaves this door
+    open for the same voided review, and the record here never becomes `stale`
+    at all.
+
+    Mutation: drop the guard call in assert_live_inputs_match_ledger() -> the
+    unit is admitted live and the book assembles."""
+    root, _drafts = converged_book(tmp_path, admit_contract_only_stale=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    assert ledger["segments"]["seg01"]["status"] == "converged", ledger
+    claim = _publish_claim_record(
+        root, "20260101T000000Z", "seg01", ledger["segments"]["seg01"]["cache_key"]
+    )
+    write_style_bible(root, b"Formal register, Oxford comma. PLUS a new rule.\n")
+
+    result = run_assemble(root)
+    assert result.returncode != 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert payload.get("reason") == "voided_review_claim", payload
+    assert str(claim) in payload["error"], payload
+    assert "UNSPENT claim record" in payload["error"], payload
+
+
+def test_the_live_admission_still_admits_a_spent_claim(tmp_path):
+    """The false-RED direction at the live site: the re-review completed and
+    moved the cache_key past the baseline the claim recorded -- the guard's
+    SECONDARY proof of convergence -- and a later contract edit re-drifted the
+    unit. Admitted, exactly as it would be with no claim record at all.
+
+    The PRIMARY proof is the timestamp ordering; its own cases live in
+    contract_stale_admission.test.py, which owns the predicate's branches.
+    This suite owns the live admission SITE."""
+    root, _drafts = converged_book(tmp_path, admit_contract_only_stale=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    older = dict(ledger["segments"]["seg01"]["cache_key"])
+    older["style_contract_hash"] = "older" + str(older.get("style_contract_hash", ""))
+    _publish_claim_record(root, "20260101T000000Z", "seg01", older)
+    write_style_bible(root, b"Formal register, Oxford comma. PLUS a new rule.\n")
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert parse_one_json_line(result)["contract_stale_admitted"] == ["seg01"], result.stdout
+
+
+def test_a_pre_existing_drift_refusal_keeps_its_own_reason(tmp_path):
+    """Ordering. A population that refused as `stale_live_inputs` before #773
+    must keep refusing with that reason even when a voided claim is also
+    present, so nothing that used to be reported one way starts being reported
+    another."""
+    root, _drafts = converged_book(tmp_path, admit_contract_only_stale=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    _publish_claim_record(
+        root, "20260101T000000Z", "seg01", ledger["segments"]["seg01"]["cache_key"]
+    )
+    write_style_bible(root, b"Formal register, Oxford comma. PLUS a new rule.\n")
+    (root / "translate_TASK.md").write_bytes(b"TRANSLATE TASK PROMPT v2\n")
+
+    result = run_assemble(root)
+    assert result.returncode != 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert parse_one_json_line(result).get("reason") == "stale_live_inputs", result.stdout
 
 
 def test_the_declaration_does_not_admit_a_second_moved_field(tmp_path):

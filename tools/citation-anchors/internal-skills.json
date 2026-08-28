@@ -230,7 +230,7 @@
    ],
    "claim": "`_read_fragments()` (`ledger_merge.py:368-422`) returns `{}` when `runs/ledger.d/` is missing, and otherwise keys each fragment by its filename stem (one file per segment, `runs/ledger.d/{seg}.json`); `classify_segment()` (`select_segments.py:1520-1525`) returns `{\"category\": \"not_started\"}` whenever a segment has NO record in the merged ledger at all. Deleting a blocked segment's `runs/ledger.d/{seg}.json` fragment therefore ALSO clears `blocked_needs_regeneration` — not via any restamp, but by discarding that segment's entire convergence record, forcing a full FRESH re-translation (heavier than the `stale` outcome `--restamp-derivation` produces: a `not_started` segment carries no"
   },
-  "[\".claude/skills/literary-translator-ops/references/plugin-facts.md\", \"assemble.py:2298\", 0]": {
+  "[\".claude/skills/literary-translator-ops/references/plugin-facts.md\", \"assemble.py:2620\", 0]": {
    "anchors": [
     "mentions_cfg.get(\"enabled\") is not False"
    ],

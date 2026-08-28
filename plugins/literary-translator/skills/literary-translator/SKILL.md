@@ -1668,7 +1668,21 @@ carves out like a present one), whose draft still matches its
 `reviewed_draft_sha1`, and whose only non-machinery moved field is that one:
 it is admitted and NAMED, its ledger record untouched. The declaration is the
 wrong answer after a rule REVERSAL, and no hash can detect that for you
-(`#533`).
+(`#533`). One thing it does NOT admit: a unit carrying an UNSPENT claim
+record — one you published under `--from-converged`, which VOIDED that stored
+review, whose re-review then never completed. W9 refuses it at both
+contract-only admissions (the merged-`stale` carve-out and the live
+cache-key check), because the `reviewed_draft_sha1` it would ship against
+belongs to the review you set aside. "Unspent" is read off the ledger, not
+the review file, and it is an ORDERING: the claim record stamps `claimed_at`,
+the ledger fragment stamps the `timestamp` of its last convergence write, and
+a re-review that completed leaves the second later than the first. NOT a
+comparison of the stored `cache_key` — that key carries no draft and no
+review identity, so a hand-edited draft (this profile's commonest population)
+that you re-review and re-converge writes the identical key back, and
+comparing it would refuse a unit you did re-review. Finish the re-review;
+never delete the claim record, which is the sole durable account of the void
+(`#773`).
 
 **The pre-merge citation review** gates whether a batch counts as ready at
 all. Under `research_mode: live`, every `basis:"established"` item's `source`
