@@ -3150,13 +3150,27 @@ Two traps attend that work:
   exactly like a clean run, and the direction this warns about is the one the
   remedy above cannot see. The check for that direction is a different one:
   widen the pattern deliberately, dropping its most restrictive element, and
-  see whether the set of distinct forms grows. Measured on one round of a
+  see whether the set of distinct forms grows. That check is one-directional in
+  its turn — an already over-broad pattern only grows further under it, which
+  reads as confirmation — so pair it with the opposite move: tighten by one
+  defensible distinction and see whether the count collapses, and treat a count
+  that moves by an order of magnitude under a small, defensible change of
+  pattern as the signal to stop and read rather than to sweep. A script that
+  writes its vowels as separate combining codepoints — Hebrew and Yiddish among
+  the sources this plugin targets — makes that change one codepoint wide and
+  puts a shorter word inside a longer one, where the word boundary works against
+  you — the mark following the shorter word is not a word character, so `\b`
+  MATCHES inside the longer one instead of refusing it — and the printed forms
+  show no difference: measured on a Hebrew source, one honorific class swept
+  two defensible ways minutes apart returned 688 source sites and 0, the two
+  patterns differing by a single negative lookahead for the longer honorific
+  whose points the naive pattern had swallowed. Measured on one round of a
   French-to-Russian book, a stem scan for a spelling class returned 89 hits
-  across three stems and exactly one of them was a defect — `идет` 66 and none,
-  `черт` 12 and none, `произведен` 11 and one — because in an inflected
+  across three stems and exactly one of them was a defect — `идет` 66 and
+  none, `черт` 12 and none, `произведен` 11 and one — because in an inflected
   language a stem matches forms where the property under test is legitimately
-  absent, and in the total those hits are indistinguishable from real ones. The
-  same day a source-side scan stringified a whole block dict, counted
+  absent, and in the total those hits are indistinguishable from real ones.
+  The same day a source-side scan stringified a whole block dict, counted
   `source_html` and `plain_text` both, and reported every figure at exactly
   twice its true value.
 - **A class claim and the sites it names are two claims.** Under the rule above,
@@ -3204,7 +3218,9 @@ the 12 unnamed sat in units that had already CONVERGED and would have shipped �
 draft-side pattern cannot find those, because nothing draws attention to a
 converged unit. Where the enumeration cannot be complete, say the floor out loud
 (a run the alignment cannot locate is invisible to it) and report the residue as a
-named number rather than implying zero.
+named number rather than implying zero. Anchoring on the source fixes the
+DENOMINATOR, not the pattern: the source-side pattern is one you wrote too, and
+the trap above applies to it unchanged.
 
 **Gate a sweep on the invariant its own transform can break — a structural gate by
 construction never reads what changed.** Measured on a live book: a parcel

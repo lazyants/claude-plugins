@@ -124,10 +124,12 @@ def test_w6_says_that_BUILDING_the_enumeration_is_the_fragile_step():
     returned 89 hits of which exactly one was a defect, and a source-side scan that
     stringified a whole block dict reported every figure at exactly 2x.
 
-    Each pin below is a COMPLETE sentence including its terminal period. A pin
-    that stops mid-clause stays green under the likeliest careless edit there
-    is: a qualifier appended to the end ("... never per count ONLY WHILE there
-    are fewer than ten forms"). The period is what makes that mutation red.
+    Each pin below runs through a COMPLETE sentence's terminal period; where one
+    sentence carries two separable rules it is pinned in halves, and the closing
+    half carries the period. A pin that stops mid-clause stays green under the
+    likeliest careless edit there is: a qualifier appended to the end ("... never
+    per count ONLY WHILE there are fewer than ten forms"). The period is what
+    makes that mutation red.
 
     RESIDUAL, stated because a check that oversells itself is the defect class
     this file exists to remove. Substring containment cannot see a NEGATING
@@ -188,6 +190,79 @@ def test_w6_says_that_BUILDING_the_enumeration_is_the_fragile_step():
         "including 'widen ... dropping its most restrictive element': an "
         "instruction to 'check for misses' without naming the action is "
         "satisfied by looking harder at the same list, which is the failure"
+    )
+    assert (
+        "That check is one-directional in its turn — an already over-broad "
+        "pattern only grows further under it, which reads as confirmation" in w6
+    ), (
+        "#775. And must say that the widening check is itself ONE-SIDED. The "
+        "sentence above prescribes widening as THE check for the direction the "
+        "printed forms cannot show, and an operator reads it as closing the "
+        "'both directions' warning earlier in the bullet. It does not: widening "
+        "an already over-broad pattern grows it further, and the larger number "
+        "reads as the check confirming the miss. Without this clause the "
+        "paragraph warns about both directions and prescribes a remedy for one"
+    )
+    assert (
+        "tighten by one defensible distinction and see whether the count "
+        "collapses, and treat a count that moves by an order of magnitude under "
+        "a small, defensible change of pattern as the signal to stop and read "
+        "rather than to sweep." in w6
+    ), (
+        "#775. And must give the other direction as an ACTION with its decision "
+        "rule attached, for the same reason the widening pin above is a whole "
+        "sentence: 'check both directions' without naming the move is satisfied "
+        "by re-reading the same output. The decision rule is the half that does "
+        "the work and is pinned with it -- the operator is told what a moving "
+        "count MEANS (stop and read), because tightening does not prove the "
+        "broad pattern over-matched, only that two defensible predicates "
+        "disagree materially. A pin ending at 'collapses' would survive a "
+        "rewrite that keeps the action and drops the verdict, which is how a "
+        "measurement becomes sweep authority again"
+    )
+
+
+def test_w6_says_source_anchoring_does_not_fix_the_pattern():
+    """#775, second half. 1.72.0 (#760) added the paragraph telling the operator
+    to enumerate the population from the SOURCE rather than from a draft-side
+    matcher, and that rule is correct: a draft-side pattern defines its own
+    residue. But it fixes WHICH POPULATION is counted, not whether the pattern
+    counting it is right, and a reader who has just been given a rule that
+    solves one enumeration failure reads it as solving enumeration.
+
+    The measurement behind this is a source-side sweep -- run exactly as that
+    paragraph prescribes -- where two defensible patterns for one class returned
+    688 sites and 0 minutes apart. Anchoring the denominator on the source did
+    nothing about it, because the source-side pattern is also one the operator
+    wrote.
+
+    Pinned separately from the trap bullet, and not merged into it, because the
+    two live in different paragraphs and the loss modes differ: the bullet can
+    lose the two-directional check while this paragraph keeps its rule intact,
+    and this paragraph can be read as sufficient while the bullet is word-perfect.
+
+    Deliberately NOT pinned: the 688/0 digits. This file's module docstring puts
+    field measurements in CHANGELOG.md, since nothing here can check that two
+    hand-copied sets of digits agree.
+    """
+    w6 = _w6_section()
+    assert "Enumerate the population from the SOURCE, not from your own matcher." in w6, (
+        "the source-anchoring rule this qualification attaches to must still be "
+        "here -- if 1.72.0's paragraph is ever cut, the qualification below is "
+        "left pointing at nothing and should be cut with it, not silently kept"
+    )
+    assert (
+        "Anchoring on the source fixes the DENOMINATOR, not the pattern: the "
+        "source-side pattern is one you wrote too, and the trap above applies "
+        "to it unchanged." in w6
+    ), (
+        "and W6 must say that source-anchoring is BETTER than a draft-side "
+        "sweep, not SUFFICIENT. Pinned as the complete sentence including its "
+        "terminal period: a pin stopping at 'not the pattern' survives a "
+        "qualifier appended to the end, and the second half is the half that "
+        "does the work -- it points the reader back at the pattern trap rather "
+        "than restating it, which is what keeps this from being a fifth copy "
+        "of the no-sweep rule"
     )
 
 
