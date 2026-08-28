@@ -42,18 +42,16 @@
 
 # Style bible -- [PROJECT TITLE / AUTHOR / PERIOD -- fill in]
 
-> Editing `style_contract` (sections A-F) invalidates every already-converged segment BY ITSELF: those
-> bytes are hashed into `style_contract_hash`, which is a cache-key field, so no version bump is needed
-> and none is available -- this document carries no version field of its own that any script reads.
-> `project.pipeline_version` in `profile.yml` is the operator's lever for the other case: an invalidation
-> the hashed span cannot express, where the contract text is unchanged but what the pipeline does with it
-> is not.
 > Living document, read in full by every translator (codex) and reviewer (codex) call, every segment.
 > Two parts with different invalidation scope: `style_contract` (A-F, global, changes rarely and on
-> purpose) and `glossary` (G, per-term, backed by `canon.json`, grows continuously via the
-> codex-glossary-pass). Roles: Claude/the human maintain this document's FORM; every accuracy decision
-> (canon name basis, established vs. transliterated, an address-register pair) is made by codex, never
-> Claude.
+> purpose -- its bytes are hashed into the `style_contract_hash` cache-key field, so editing it
+> invalidates every already-converged segment by itself, with no version bump needed or available: this
+> document carries no version field of its own that any script reads) and `glossary` (G, per-term, backed
+> by `canon.json`, grows continuously via the codex-glossary-pass).
+> `project.pipeline_version` in `profile.yml` is the operator's lever for the other case: an invalidation
+> the hashed span cannot express, where the contract text is unchanged but what the pipeline does with it
+> is not. Roles: Claude/the human maintain this document's FORM; every accuracy decision (canon name
+> basis, established vs. transliterated, an address-register pair) is made by codex, never Claude.
 
 ---
 
@@ -246,10 +244,9 @@ homonym has no single frozen target form) into every segment.
 
 Three of this section's sub-sections -- `G-cast`, `G-voices` and `G-motifs` -- are optional and ship
 empty; an empty one is a legitimate final state for a book that doesn't need it. Like the rest of section
-G they sit OUTSIDE the style_contract markers, so filling one in mid-run moves no cache-key field and
-re-stales nothing -- so the edit alone never re-dispatches a segment that already converged: they bind
-the segments still to come. (Any later dispatch of such a segment, for whatever other reason, reads this
-file in full and does see the addition.)
+G they sit outside the style_contract markers, so filling one in mid-run moves no cache-key field and
+binds the segments still to come without re-dispatching one that already converged (any later dispatch of
+such a segment, for whatever other reason, reads this file in full and does see the addition).
 
 | source form | canonical target form | basis |
 |----|--------------|-------|

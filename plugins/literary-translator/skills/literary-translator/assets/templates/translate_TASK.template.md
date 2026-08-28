@@ -70,16 +70,13 @@ match the source block.
 - **Word-sense and realia fidelity** -- check what a notable word or
   reference actually meant in the source's own era and context, not its
   first present-day sense.
-  <!-- ERA/DOMAIN TRAP EXAMPLE -- `scripts/scaffold_validate.py`'s W1 gate
-       FATALs if this exact shipped example survives an unedited
-       copy-paste into a real project; replace it with a real trap
-       specific to THIS project's own source material before your first
-       segment: guéridon=refrain-song -- in general modern French,
-       "guéridon" is a small round pedestal table, but in this shipped
-       example's own 17th-century French-memoir source domain the word
-       was period slang for a type of song refrain; a translator relying
-       on the modern sense alone would silently mistranslate every
-       occurrence. -->
+  <!-- ERA/DOMAIN TRAP EXAMPLE -- replace with a trap from THIS project's
+       own source material before your first segment; `scaffold_validate.py`'s
+       W1 gate FATALs while this shipped one survives unedited. Example:
+       guéridon=refrain-song -- modern French reads "guéridon" as a small
+       pedestal table, but in this example's 17th-century French-memoir
+       domain it was a song refrain, so a translator on the modern sense
+       alone silently mistranslates every occurrence. -->
 - **Embedded third-language text** (e.g. Latin, an older stage of the
   source language, or a similar aside) -- ALWAYS gloss it in-text: keep
   the original AND give the target-language translation immediately
@@ -146,9 +143,7 @@ other block value; carry the placeholder sentinels through exactly as
 delivered (see above).
 
 Self-check before returning (direct/fallback use only -- under the W5 driver
-the generated dispatch prompt supersedes this step, because the driver's own
-validate-before-promote plus the Workflow's on-disk gate are the acceptance
-authority there): run
+the generated dispatch prompt supersedes this step): run
 `python3 ${durable_root}/scripts/validate_draft.py {SEG}` and confirm it
 prints `OK`. If it prints `FAIL`, fix the draft, rewrite the file, and
 repeat until it prints `OK`.

@@ -286,10 +286,10 @@ def test_plugin_root_412_redirect_substitution_present():
     #   "payload, as a new top-level `plugin_root` field (deliberately NOT inside"
     #   "substitution is not a neutral default: it leaves the pre-#412"
     text = _skill_text()
-    # The mechanical-distinction note: unlike this skill's OTHER
-    # {{PLUGIN_ROOT}} occurrences (plain prose the reader substitutes when
-    # typing an example command), THIS one is a literal Workflow-template
-    # token that must be written into the instantiated .js file itself.
+    # The mechanical-distinction note: unlike this skill's PROSE
+    # {{PLUGIN_ROOT}} occurrences (which a reader substitutes when typing an
+    # example command), THIS one is a literal Workflow-template token that
+    # must be written into the instantiated .js file itself.
     assert "THIS one is a literal Workflow-template token" in text
     # resume_setup.py's payload carries plugin_root as a top-level field,
     # deliberately excluded from `subst` (and therefore never hashed).
@@ -877,13 +877,11 @@ R10_NEVER_COPIED_TAIL_EXPECTED = (
     "comes only from the user's answers to the questionnaire that same Step 0 "
     "run prints. (Its other fields — `source.path`, `durable_root`, the "
     "source-format and adapter knobs — are read off this book's own material, "
-    "and always were; they are not decisions anyone is asked to make.) Writing "
-    "the file by hand, or answering a fresh copy's sentinels from its own "
-    "inline comments, produces a complete profile carrying real values instead "
-    "of `CHOOSE_` sentinels, so the placeholder scan has nothing left to ask, "
-    "Step 0 prints `OK`, and every intake decision the user was supposed to "
-    "make is taken instead by whoever typed the file — silently, and printing "
-    "exactly what a run that answered all of them prints."
+    "and always were; they are not decisions anyone is asked to make.) "
+    "Writing the file by hand, or answering a fresh copy's sentinels from "
+    "its own inline comments, takes every INTAKE DECISION silently and "
+    "prints exactly what a run that answered all of them prints; Step 0's "
+    "item 1 states that failure in full."
 )
 
 # Deliberately narrower than the whole R10 index entry: pinning all 983

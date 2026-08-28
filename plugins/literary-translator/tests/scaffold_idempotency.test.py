@@ -489,7 +489,7 @@ def test_repeatable_overwrite_helper_actually_overwrites(tmp_path):
 
 
 def apply_resolve_codex_companion_migration(shipped_source: Path, dest_path: Path) -> str:
-    """Literal transcription of SKILL.md's Step 0a migration note for
+    """Literal transcription of SKILL.md's Step 0a copy-pass check for
     resolve_codex_companion.py: absent -> copy; ANY genuine regular file ->
     copy (the ordinary managed overwrite every other bundle member gets);
     anything NON-REGULAR -> HALT, never a silent overwrite and never an
@@ -501,7 +501,8 @@ def apply_resolve_codex_companion_migration(shipped_source: Path, dest_path: Pat
     "is this copy managed?", which held only while the shipped bytes were
     frozen, so afterwards every ordinary project's own MANAGED copy reads as
     divergent and halts on the majority path. Measured on both live books at
-    the time: two managed copies, zero hand adaptations.
+    the time (`historiettes-fr-ru/tome1`, `ssk-he-en/vol2/run`): two managed
+    copies, zero hand adaptations.
 
     "Anything non-regular" is still deliberately broad: a symlink (regardless
     of what it points at -- its target content is never even read), a
@@ -522,7 +523,7 @@ def apply_resolve_codex_companion_migration(shipped_source: Path, dest_path: Pat
     Returns one of "copied-fresh" (was absent), "copied-over" (was
     already a genuine regular file, whatever its bytes -- so the copy may
     replace DIFFERENT bytes; it is deliberately not called a no-op), "halt" (anything
-    non-regular) -- the three outcomes SKILL.md's own migration note names, so a
+    non-regular) -- the three outcomes SKILL.md's own copy-pass check names, so a
     test can assert on which one fired rather than only on the end
     state."""
     try:
@@ -712,7 +713,7 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
     # Checking for "HALT" and
     # for the three entry-kind labels INDEPENDENTLY cannot distinguish an
     # instruction from its own negation, because presence is invariant
-    # under "do not" -- a migration note rewritten to say "do not HALT
+    # under "do not" -- a copy-pass check rewritten to say "do not HALT
     # before copying anything" keeps every token asserted below present
     # and still passes. Bind the verb to its OWN trigger clause instead of
     # scattering the check across the whole section: the note's
@@ -741,13 +742,13 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
         "distinguishes the instruction from its own negation"
     )
     assert "HALT" in instruction_section, (
-        "the migration note's ACTUAL INSTRUCTION must say HALT on a non-"
+        "the copy-pass check's ACTUAL INSTRUCTION must say HALT on a non-"
         "absent, NON-REGULAR destination -- this is the operative safety "
         "property, and its absence here means the documented contract "
         "reverted to something else"
     )
     assert "pre-upgrade-backup" not in instruction_section, (
-        "the migration note's ACTUAL INSTRUCTION must NOT describe the "
+        "the copy-pass check's ACTUAL INSTRUCTION must NOT describe the "
         "superseded backup-and-copy shape (rename to a .pre-upgrade-backup "
         "sibling) -- that design was replaced because it cannot be made "
         "symlink-safe or concurrency-safe from orchestrating-session prose "

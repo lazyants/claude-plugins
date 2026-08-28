@@ -30,16 +30,13 @@ written and refuse to record a stale convergence.
 - **Word-sense and realia fidelity** -- check what a notable word or
   reference actually meant in the source's own era and context, not its
   first present-day sense.
-  <!-- ERA/DOMAIN TRAP EXAMPLE -- `scripts/scaffold_validate.py`'s W1 gate
-       FATALs if this exact shipped example survives an unedited
-       copy-paste into a real project; replace it with a real trap
-       specific to THIS project's own source material before your first
-       review: guéridon=refrain-song -- in general modern French,
-       "guéridon" is a small round pedestal table, but in this shipped
-       example's own 17th-century French-memoir source domain the word
-       was period slang for a type of song refrain; a reviewer relying on
-       the modern sense alone would silently wave through a
-       mistranslation. -->
+  <!-- ERA/DOMAIN TRAP EXAMPLE -- replace with a trap from THIS project's
+       own source material before your first review; `scaffold_validate.py`'s
+       W1 gate FATALs while this shipped one survives unedited. Example:
+       guéridon=refrain-song -- modern French reads "guéridon" as a small
+       pedestal table, but in this example's 17th-century French-memoir
+       domain it was a song refrain, so a reviewer on the modern sense
+       alone silently waves the mistranslation through. -->
 - Names/dates/titles: each `canon_names` name renders its `canon_map`
   target form's stem/spelling, correctly declined/inflected as the target
   grammar requires -- a correctly inflected form of the canonical stem is
@@ -132,13 +129,10 @@ example baked into this file):
 
 ## Output -- write the file, then print one sentinel line
 
-This is a detached-driver dispatch (the `codex_job.py` driver launches you and
-never reads your turn's return): nothing reads your own turn's return value as
-the verdict. Your job is to WRITE the file correctly, not to return a
-structured result -- a separate, later call reads
-`${durable_root}/segments/{SEG}.review.json` back off disk (see
-`references/workflow-schema-validation.md`'s DISPATCH -> WAIT -> CONSUME
-pattern).
+Nothing reads your own turn's return value as the verdict: WRITE the file
+correctly rather than returning a structured result. A separate, later call
+reads `${durable_root}/segments/{SEG}.review.json` back off disk (see
+`references/workflow-schema-validation.md`'s DISPATCH -> WAIT -> CONSUME pattern).
 
 Write EXACTLY this JSON object (no markdown fencing) to the write target the
 dispatch prompt gives you. Under W5 mass-translate, `reviewDispatchPrompt()`

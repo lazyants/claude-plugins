@@ -9760,10 +9760,10 @@ def test_no_verse_policy_instruction_text_carries_the_authority_rule():
 
 def test_review_task_template_bullet_states_the_names_negative():
     """#529. The narrative template says it too, IN the names/dates/titles
-    bullet. Bounded to that bullet on purpose: this file opens with a ~40-line
-    HTML comment, and a whole-file substring check would pass on the rule
-    written into that comment while the operative sentence still read as
-    authority. A boundary slice rather than a Markdown parse -- a hand-rolled
+    bullet. Bounded to that bullet on purpose: a whole-file substring check
+    would pass on any restatement of the rule elsewhere in the template -- an
+    example, a heading, a comment -- while the operative sentence still read
+    as authority. A boundary slice rather than a Markdown parse -- a hand-rolled
     parser fails OPEN, silently matching nothing when the shape changes.
 
     The other half -- that the SUPERSEDED sentence is gone -- is a row in
@@ -9986,12 +9986,12 @@ def test_fix_prompt_still_owns_the_apply_side_book_scoped_branch(tmp_path):
 
 def test_review_task_template_block_states_the_book_scope_rule():
     """#526. The narrative template says it too, in its own block. Bounded to
-    that block for the reason the #529 slice test states: this file opens with a
-    ~40-line HTML comment, and a whole-file substring check would pass on the
-    rule written into that comment while the operative check list still read as
-    an unqualified obligation. A boundary slice rather than a Markdown parse --
-    a hand-rolled parser fails OPEN, silently matching nothing when the shape
-    changes.
+    that block for the reason the #529 slice test states: a whole-file substring
+    check would pass on any restatement of the rule elsewhere in the template --
+    an example, a heading, a comment -- while the operative check list still
+    read as an unqualified obligation. A boundary slice rather than a Markdown
+    parse -- a hand-rolled parser fails OPEN, silently matching nothing when the
+    shape changes.
 
     The fragments are restated here rather than referencing the prompt-output
     constants above: these are two independently editable artifacts, so sharing a
