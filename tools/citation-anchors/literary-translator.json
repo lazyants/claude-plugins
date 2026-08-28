@@ -985,12 +985,6 @@
    ],
    "claim": "(\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"), (\"schema_literal_drift.test.py:31-32\", SCHEMA_LITERAL_DRIFT_TEST, \"never gated against\"), (\"select_segments.py:12\", SELECT_SEGMENTS_SCRIPT, \"purely diagnostic/orchestration\"), ]"
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"references/ledger-and-resumability.md:166\", 0]": {
-   "anchors": [
-    "diagnostic-only, never part of any segment's cache key"
-   ],
-   "claim": "def test_ledger_already_accurate_ledger_merge_aside_not_flagged(): \"\"\"references/ledger-and-resumability.md:166's `ledger_merge.py` aside (\"diagnostic-only, never part of any segment's cache key\") is already accurate -- qualified in the very next sentence by the resume-integrity digest note -- and must survive untouched. None of the STALE_PHRASES keys above match this exact clause, so a correct fix never trips it.\"\"\""
-  },
   "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"resume_setup.py:307-309\", 0]": {
    "anchors": [
     "this script's own logic directly determines whether a run",
@@ -1428,6 +1422,12 @@
     "never flips a cache key or the resume-integrity digest via either bundle"
    ],
    "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"references/ledger-and-resumability.md:168\", 0]": {
+   "anchors": [
+    "diagnostic-only, never part of any segment's cache key"
+   ],
+   "claim": "def test_ledger_already_accurate_ledger_merge_aside_not_flagged(): \"\"\"references/ledger-and-resumability.md:166's `ledger_merge.py` aside (\"diagnostic-only, never part of any segment's cache key\") is already accurate -- qualified in the very next sentence by the resume-integrity digest note -- and must survive untouched. None of the STALE_PHRASES keys above match this exact clause, so a correct fix never trips it.\"\"\""
   }
  },
  "exemptions": {

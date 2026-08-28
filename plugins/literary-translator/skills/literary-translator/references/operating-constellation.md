@@ -83,12 +83,15 @@ trusting it — the pattern is the part meant to outlive any one generation.
 ## Dated snapshot (as of 2026-07 — re-verify before trusting)
 
 - **Effort ladder (Codex):** `none / minimal / low / medium / high / xhigh`.
-  Codex's own config default has drifted to `xhigh` — do not rely on it
+  Codex's own config default is not mirrored here — read it from the ACTIVE
+  Codex home's `config.toml` (`$CODEX_HOME/config.toml`, falling back to
+  `~/.codex/config.toml` only when `CODEX_HOME` is unset) and never from this
+  document
   silently; pin explicitly per the durable-pattern rule above. `high` is the
   cost-sane default for routine review; reserve `xhigh` for the genuinely
   hardest correctness passes and for plan review. Do **not** use Claude's
   `max` effort tier for this work — it is overkill.
-- **Model tier by role:** strongest = **Opus 4.8** (hardest
+- **Model tier by role:** strongest = **the newest Opus** (hardest
   adversarial-correctness review, planning); cheaper-but-strong = **Sonnet
   5** (several times cheaper, good enough for most checks, but *not*
   identical to Opus on subtle or correctness-critical ones) — use a split,

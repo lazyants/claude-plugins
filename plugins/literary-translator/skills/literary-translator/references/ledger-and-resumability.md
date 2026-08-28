@@ -45,7 +45,9 @@ hardcodes a different path is a bug, not a faithful port.
   `translate_TASK.template.md`, `mass-translate-wf.template.js`,
   `validate_assembled.py` (1.6.0 — its default scope reads converged drafts
   for the union structural-completeness gate, see below) — must use
-  this exact path (**13** draft-path sites as of 1.6.0).
+  this exact path. The site count is not restated here -- it has gone stale once
+already; `tests/draft_path_convention.test.py` enumerates them and is the only
+place the number should be read from.
   `tests/draft_path_convention.test.py` instantiates every one of these
   against a fixture and asserts the exact path, failing loudly and naming
   the offender if any one disagrees. **1.2.0:** the written file also
@@ -70,8 +72,8 @@ hardcodes a different path is a bug, not a faithful port.
   `reviewed_draft_sha1`/`dispatch_token` binding check at convergence), and
   `codex_job.py` (`--kind review` — derives the same canonical `review.json`
   for its validate-before-promote). `tests/draft_path_convention.test.py` is
-  extended (not duplicated) to cover all these call sites — recomputed to
-  **10** review-path sites for 1.4.7.
+  extended (not duplicated) to cover all these call sites; the site count
+  is not restated here either — read it from that test.
   **1.2.0:** the written file also carries `dispatch_token =
   <RUN_ID>:<seg>:r<roundLabel>` (`roundLabel` = the round number or
   `final`) — see below.

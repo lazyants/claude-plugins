@@ -12,12 +12,12 @@ clause below is the text that lived there, so a project that turns the pass on l
 **Skeptic pass (RFC #215 Phase 2, opt-in + advisory)** — if
 `glossary.enabled` is not false AND `glossary.skeptic_pass.enabled` is true
 in `profile.yml`, run the structural-risk triage + adverse-only skeptic
-pass immediately after the mandatory homonym-split gate above and before
+pass immediately after the mandatory homonym-split gate (`SKILL.md`, W3) and before
 W3a. The parent switch is not a formality: Step 0 fatally refuses the
 contradictory combination — `glossary.enabled: false` with
 `glossary.skeptic_pass.enabled: true` — outright, naming both fields, so
 this pass never reaches a project that declared it wants no glossary at
-all (see the `glossary.enabled: false` branch above). Every enabled pass
+all (see the `glossary.enabled: false` branch in `SKILL.md`'s W3). Every enabled pass
 re-derives its own worklist fresh (never trusts a stale one):
 `suspicion_scan.py --canon ${durable_root}/canon.json --manifest
 ${durable_root}/manifest.json --particle-config <literal value>

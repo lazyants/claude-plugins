@@ -129,8 +129,8 @@ READS the on-disk `findings[]`, see §5), plus `review_artifact_check.py`,
 `review_ready.py`, `ledger_merge.py`, and `ledger_update.py` (the last for the
 `reviewed_draft_sha1`/`dispatch_token` binding check) READ it.
 
-`tests/draft_path_convention.test.py` instantiates every one of the **thirteen**
-draft-path call sites and the **ten** review-path call sites against a fixture
+`tests/draft_path_convention.test.py` instantiates every one of the
+draft-path call sites and every review-path call site against a fixture
 and asserts the exact path, failing loudly and naming the offender if any one
 of them drifts. (The regression-lock test counts writer+reader SITES, so its
 review-path site count is larger than the conceptual "readers" list above — that
@@ -224,9 +224,12 @@ review log is noise to every actual user.
 
 If an exact field name, enum value, or hash definition is unclear, the
 relevant reference file in `references/` (cross-referenced throughout this
-plugin's docs) is authoritative. If genuinely ambiguous even there, the
-original `PLAN_literary_translator_plugin.md` is the ultimate fallback —
-not training-data guessing, not "it seemed reasonable."
+plugin's docs) is authoritative. If genuinely ambiguous even there, ASK the
+operator — there is no further authority to fall back on. Earlier revisions of
+this paragraph named a `PLAN_literary_translator_plugin.md`; no such file has
+ever existed in this repository (`git rev-list --all --objects` finds zero
+objects for it), so an agent sent there finds nothing and guesses. Not
+training-data guessing, not "it seemed reasonable."
 
 ## 8. The three ledger schema files — a real JSON Schema composition gotcha
 
