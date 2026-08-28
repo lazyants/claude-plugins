@@ -1452,11 +1452,18 @@ def _paint_cell(text: str, record, paint: Paint) -> str:
     Dim is the whole of what used to be a separate section with a heading. A stale or inactive
     figure is a real measurement and is printed at full precision, but it is not comparable to
     the live cell beside it and must not read as though it were.
+
+    The GAP test comes FIRST, and the order is the whole of it: every record `_row_or_gap`
+    builds carries `percent is None`, so a missing-value test placed above this one answered for
+    every gap on the page and dimmed the diagnostic that says a window went unread -- the one
+    cell that must not recede.
     """
-    if record is None or record.percent is None:
-        return paint(text, DIM) if text else text
+    if record is None:
+        return text
     if record.state == GAP:
         return paint(text, RED)
+    if record.percent is None:
+        return paint(text, DIM) if text else text
     hue = _hue(record.percent)
     return paint(text, hue if record.kind() == "current" else DIM + ";" + hue)
 

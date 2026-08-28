@@ -2538,6 +2538,35 @@ with tempfile.TemporaryDirectory() as tmp:
           len(kept) == 1 and kept[0].split()[1] == "3", str(kept))
     check("63 and the Claude side is untouched by it", "42%" in done.stdout, done.stdout)
 
+# --- 64 -- a gap is the one cell that may not recede -------------------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # Every record `_row_or_gap` builds carries `percent is None`, so a missing-value test above
+    # the GAP test answered for every gap on the page: the diagnostic saying a window went unread
+    # rendered in the same dim as an inactive pool's `-`.
+    broken = make_claude(root, ".claudeRed", cached(entries=[
+        entry(kind="session", percent="not-a-number", resets=iso(3)),
+        entry(kind="weekly_all", percent=44, resets=iso(50)),
+    ]), token=False)
+    done, _, _ = run(["--claude-profile", str(broken), "--color=always",
+                      "--codex-home", str(make_codex_home(root, ".codexRed"))], root=root)
+    # The warnings block prints the same token; only the TABLE cell is under test here.
+    row = [ln for ln in done.stdout.split("warnings")[0].splitlines()
+           if "[field-malformed]" in ln]
+
+    def opens_with(line: str, needle: str) -> str:
+        head = line[:line.index(needle)]
+        return head[head.rindex("\x1b[") + 2:head.rindex("m")] if "\x1b[" in head else ""
+
+    check("64 a gap cell is painted red", len(row) == 1
+          and opens_with(row[0], "[field-malformed]") == R.RED,
+          repr(opens_with(row[0], "[field-malformed]") if row else row))
+    check("64 and not dimmed like an ordinary missing value",
+          bool(row) and not opens_with(row[0], "[field-malformed]").startswith("2"), repr(row))
+    check("64 while the healthy figure beside it keeps its own hue",
+          bool(row) and opens_with(row[0], "44%") == R.GREEN, repr(row))
+
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -2548,7 +2577,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 534
+MIN_CHECKS = 537
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
