@@ -146,6 +146,7 @@ import stat
 import sys
 import tempfile
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -942,6 +943,32 @@ def _manifest_segment_ids_or_empty(manifest: dict) -> "set[str]":
 # ---------------------------------------------------------------------------
 
 
+def _parse_claim_iso8601(value):
+    """An AWARE datetime for `value`, or None when it is absent or unreadable.
+
+    Both timestamps this guard orders are written as
+    `datetime.now(timezone.utc).isoformat(timespec="seconds")` with the trailing
+    "+00:00" rewritten to "Z" (select_segments.py's `_claim_now_iso8601()`,
+    ledger_update.py's `now_iso8601()`). `datetime.fromisoformat` accepts that
+    Z form on the Python this ships against, but the replacement is done here
+    anyway so the parse does not depend on that acceptance.
+
+    A NAIVE result is rejected rather than assumed UTC: comparing an aware and
+    a naive datetime raises TypeError, and silently stamping a timezone onto a
+    value that did not carry one would invent an ordering. None is the "cannot
+    order this" answer, and every caller maps that to its own safe direction.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        return None
+    return parsed
+
+
 def _voided_review_refusal_reason(seg: str, record: dict) -> "str | None":
     """None when no UNSPENT claim stands against `seg`, or an operator-facing
     refusal reason when one does.
@@ -1119,17 +1146,58 @@ def _voided_review_refusal_reason(seg: str, record: dict) -> "str | None":
                 f"that would show whether its re-review completed cannot be read -- a "
                 f"damaged record is not a spent one (#773)"
             )
-        if claimed == baseline:
+        # PRIMARY spent test: was the ledger fragment REWRITTEN after the claim?
+        #
+        # This asks the question directly, and an earlier revision of this guard
+        # got it wrong by asking a proxy instead -- whether the stored cache_key
+        # had MOVED. That proxy has a false-RED on --from-converged's DOCUMENTED
+        # primary population: the 15-field cache key carries no draft and no
+        # review identity (`input_sha1` is the SOURCE input), so a hand-edited
+        # draft that is then claimed, re-reviewed and re-converged writes back
+        # the byte-identical key. The re-review plainly completed, yet the
+        # baseline still matched, and a later contract-only drift refused the
+        # unit forever. Found by the MR reviewer with an end-to-end probe.
+        #
+        # `claimed_at` and the fragment's `timestamp` are produced by the same
+        # idiom in the two writers that own them -- select_segments.py's
+        # `_claim_now_iso8601()` and ledger_update.py's `now_iso8601()`, both
+        # `datetime.now(timezone.utc).isoformat(timespec="seconds")` with
+        # "+00:00" rewritten to "Z" -- so they are the same format, from the same
+        # clock, on the same machine. Parsed rather than compared as strings, so
+        # a hand-written variant spelling is caught instead of mis-ordered.
+        claimed_at = payload.get("claimed_at")
+        claim_time = _parse_claim_iso8601(claimed_at)
+        if claim_time is None:
             return (
-                f"segment {seg!r} has an UNSPENT claim record at {path}: publishing it "
-                f"voided the standing of the stored review, and the ledger record still "
-                f"carries the very cache_key the claim recorded as its baseline, so the "
-                f"re-review that claim authorized never completed. Shipping it now would "
-                f"assemble the unit against a review the operator set aside. Complete the "
-                f"re-review for this segment (the ordinary pipeline path -- it re-converges "
-                f"the unit and rewrites its ledger record); do not delete the claim record, "
-                f"which is the only durable account of the void (#773)"
+                f"the claim record at {path} carries no readable 'claimed_at' "
+                f"({claimed_at!r}), so whether the re-review it authorized has since "
+                f"completed cannot be ordered against it -- a damaged record is not a "
+                f"spent one (#773)"
             )
+        converged_at = _parse_claim_iso8601(record.get("timestamp"))
+        if converged_at is not None and converged_at > claim_time:
+            # The fragment was rewritten after the claim. On this segment's
+            # ledger record only a convergence write can produce a status this
+            # guard is even reached for, so the re-review completed. Spent.
+            continue
+        # SECONDARY, and only ever ADMITS more: a moved cache_key proves a
+        # convergence happened even when the timestamps cannot be ordered (an
+        # absent or hand-mangled fragment `timestamp`). Kept because it is
+        # sound on its own -- ledger_update.py writes `cache_key` only on the
+        # convergence path -- and because it costs one comparison.
+        if claimed != baseline:
+            continue
+        return (
+            f"segment {seg!r} has an UNSPENT claim record at {path}: publishing it "
+            f"voided the standing of the stored review, and nothing has rewritten the "
+            f"segment's ledger record since (its timestamp still predates the claim, and "
+            f"its cache_key is still the one the claim recorded), so the re-review that "
+            f"claim authorized never completed. Shipping it now would assemble the unit "
+            f"against a review the operator set aside. Complete the re-review for this "
+            f"segment (the ordinary pipeline path -- it re-converges the unit and "
+            f"rewrites its ledger record); do not delete the claim record, which is the "
+            f"only durable account of the void (#773)"
+        )
     return None
 
 

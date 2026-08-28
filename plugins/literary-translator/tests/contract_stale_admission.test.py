@@ -754,7 +754,10 @@ def test_declaration_with_nothing_to_admit_changes_no_output(tmp_path):
 # ===========================================================================
 
 
-def publish_claim_record(root, run_id, seg, pre_claim_cache_key, drop_baseline=False):
+def publish_claim_record(
+    root, run_id, seg, pre_claim_cache_key, drop_baseline=False,
+    claimed_at="2026-01-02T00:00:00+00:00", drop_claimed_at=False,
+):
     """Write `runs/<run_id>/.claimed.<seg>` the way select_segments.py does.
 
     Only `pre_claim_cache_key` is load-bearing for the guard; the rest is
@@ -783,10 +786,12 @@ def publish_claim_record(root, run_id, seg, pre_claim_cache_key, drop_baseline=F
         "cache_key_movement_machinery_only": None,
         "cache_key_note": None,
         "operator_invocation": "select_segments.py --from-converged",
-        "claimed_at": "2026-01-02T00:00:00+00:00",
+        "claimed_at": claimed_at,
     }
     if drop_baseline:
         del payload["pre_claim_cache_key"]
+    if drop_claimed_at:
+        del payload["claimed_at"]
     path = run_dir / f".claimed.{seg}"
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return path
@@ -1122,6 +1127,130 @@ def test_a_non_dict_non_null_baseline_refuses(tmp_path, garbage):
     result = run_assemble(root)
     assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "neither an object nor null" in parse_one_json_line(result)["error"], result.stdout
+
+
+def test_a_completed_re_review_that_moved_no_cache_key_field_still_admits(tmp_path):
+    """The MR reviewer's finding, and the reason the predicate is an ORDERING
+    and not a cache-key comparison.
+
+    `--from-converged`'s DOCUMENTED primary population is a HAND-EDITED draft.
+    The 15-field cache key carries no draft and no review identity --
+    `input_sha1` is the SOURCE input -- so when that unit is claimed,
+    re-reviewed and re-converged, convergence writes back the byte-identical
+    key. The re-review plainly completed; a cache-key comparison calls the
+    claim unspent anyway, and every later contract-only drift refuses the unit
+    forever.
+
+    Here the ledger record's `timestamp` is AFTER `claimed_at` (the
+    convergence write) while its `cache_key` is unchanged -- exactly that
+    shape.
+
+    Mutation: drop the timestamp ordering and keep only the `claimed !=
+    baseline` test -> red."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    ledger["segments"]["seg02"]["timestamp"] = "2026-03-01T00:00:00+00:00"
+    (root / "runs" / "ledger.json").write_text(json.dumps(ledger), encoding="utf-8")
+    publish_claim_record(
+        root,
+        "20260101T000000Z",
+        "seg02",
+        ledger["segments"]["seg02"]["cache_key"],
+        claimed_at="2026-02-01T00:00:00+00:00",
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert parse_one_json_line(result)["contract_stale_admitted"] == ["seg02"], result.stdout
+
+
+def test_a_convergence_predating_the_claim_does_not_count_as_spending_it(tmp_path):
+    """The other side of the ordering: the fragment's timestamp is OLDER than
+    the claim, so the convergence it records happened BEFORE the review was
+    voided and cannot be the re-review the claim authorized.
+
+    Mutation: compare with `!=` instead of `>` -> red."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    ledger["segments"]["seg02"]["timestamp"] = "2026-01-01T00:00:00+00:00"
+    (root / "runs" / "ledger.json").write_text(json.dumps(ledger), encoding="utf-8")
+    publish_claim_record(
+        root,
+        "20260101T000000Z",
+        "seg02",
+        ledger["segments"]["seg02"]["cache_key"],
+        claimed_at="2026-02-01T00:00:00+00:00",
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "UNSPENT claim record" in parse_one_json_line(result)["error"], result.stdout
+
+
+@pytest.mark.parametrize(
+    "claimed_at,label",
+    [
+        ("2026-01-02T00:00:00", "naive-no-offset"),
+        ("not-a-timestamp", "unparseable"),
+        ("", "empty"),
+    ],
+)
+def test_a_claim_record_without_a_readable_claimed_at_refuses(tmp_path, claimed_at, label):
+    """The ordering needs both endpoints. A naive value is refused rather than
+    assumed UTC -- stamping a timezone onto a value that did not carry one
+    would invent the ordering this guard exists to read.
+
+    Mutation: treat an unparseable `claimed_at` as "not spent yet" and fall
+    through to the key test -> still red here, because the key ALSO matches;
+    so the assertion checks the REASON, not just the refusal."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    publish_claim_record(
+        root, "20260101T000000Z", "seg02", ledger["segments"]["seg02"]["cache_key"],
+        claimed_at=claimed_at,
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"[{label}] stdout:\n{result.stdout}"
+    error = parse_one_json_line(result)["error"]
+    assert "no readable 'claimed_at'" in error, f"[{label}] {error}"
+
+
+def test_a_claim_record_missing_claimed_at_entirely_refuses(tmp_path):
+    """`{}`-shaped damage one field along from the baseline case."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    publish_claim_record(
+        root, "20260101T000000Z", "seg02", ledger["segments"]["seg02"]["cache_key"],
+        drop_claimed_at=True,
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "no readable 'claimed_at'" in parse_one_json_line(result)["error"], result.stdout
+
+
+def test_an_unreadable_fragment_timestamp_falls_back_to_the_cache_key(tmp_path):
+    """When the fragment's own `timestamp` cannot be ordered, a MOVED cache_key
+    still proves a convergence happened -- ledger_update.py writes that field
+    only on the convergence path. The secondary test exists for exactly this
+    and only ever ADMITS more.
+
+    Mutation: delete the `claimed != baseline` fallback -> red."""
+    root = one_contract_stale_book(tmp_path, admit=True)
+    ledger = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    ledger["segments"]["seg02"]["timestamp"] = "whenever"
+    (root / "runs" / "ledger.json").write_text(json.dumps(ledger), encoding="utf-8")
+    publish_claim_record(
+        root,
+        "20260101T000000Z",
+        "seg02",
+        moved_contract_key(ledger["segments"]["seg02"]["cache_key"]),
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert parse_one_json_line(result)["contract_stale_admitted"] == ["seg02"], result.stdout
 
 
 def test_a_root_without_claim_record_py_refuses_rather_than_admits(tmp_path):
