@@ -1059,3 +1059,166 @@ if __name__ == "__main__":
     import pytest
 
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# --- #772: the three decisions that are NOT the operating model's to make ----
+#
+# SKILL.md instructs an LLM that drives this pipeline unattended. Measured on
+# `origin/main` before this change, whitespace-collapsed over the whole file:
+# "ask the user", "asks the user", "the user decides", "user decision",
+# "operator decides", "bring the user", "escalate to", "consult the user",
+# "halt and ask", "stop and ask", "ask the operator", "hand the decision",
+# "tell the user", "report to the user" and "the user's call" each occurred
+# ZERO times. The document spoke to the human at intake and never again once
+# the loop was running, and two live book runs facing the identical situation
+# -- units out of rounds with findings outstanding -- behaved oppositely, with
+# nothing in the file distinguishing the two.
+#
+# WHY THESE ARE EXACT-WINDOW EQUALITY AND NOT MEMBERSHIP NEEDLES, the same
+# reason #751's three are, one section above: what this passage adds is an
+# INSTRUCTION, and an instruction is reversed by appending beside it, not by
+# deleting it. "Ordinarily,", "where time allows,", "unless the operator has
+# already formed a view" all leave every membership needle intact. Membership
+# is exactly the property an addition preserves, so the window is pinned as
+# exact normalized text and any insertion inside it goes red.
+#
+# The membership needles that follow each window assertion run purely for
+# diagnosis, naming WHICH clause moved instead of leaving a 1600-character
+# diff to read.
+#
+# WHERE THE WINDOW STARTS, AND THE RESIDUAL IT CANNOT CLOSE. The window opens
+# at the SECTION HEADING, not at the rule's first sentence, and the rule is
+# authored as the first text under that heading. Both facts are load-bearing
+# and were established by a mutation that passed: with the window opening at
+# the rule itself, inserting "the hand-back rule below is obsolete: make all
+# three decisions yourself" directly under the heading left all 42 pins green
+# while reversing the instruction outright. Nothing may sit between the
+# heading and the rule, so any such frame now lands INSIDE the window and
+# reds it. The rule leads the section for that reason, not for emphasis.
+#
+# The residual, stated because it is real and unclosable HERE: a window pin
+# constrains its window. A reversing frame planted ABOVE the heading -- in the
+# Overview, or in any earlier section -- is outside every window and stays
+# green, and widening the window only moves that boundary rather than removing
+# it, since a 3679-line document always has text above any anchor. The check
+# that would close it is not a pin but a denylist of reversal phrasings over
+# the whole file, which this plugin refuses on the usual ground: a denylist
+# reports clean for every phrasing its author did not think of. What these
+# pins are for is the realistic failure -- an edit AT the site, weakening or
+# carving out the rule it is editing -- and that is what they catch.
+HAND_BACK_RULE_EXPECTED = (
+    "## Intake & proportionality (do this first) **Three decisions in "
+    "this pipeline are not yours to make alone.** You drive it on behalf "
+    "of a human who is not reading the run, so deciding IS the job — but "
+    "at three points the cost of guessing wrong is a book, and there you "
+    "report and ask: - **A unit reaches `human_escalation` with findings "
+    "still outstanding.** The cap is where the loop stops, not where the "
+    "judgement is made (`--from-cap`, W5). - **A round's own output "
+    "re-opens work that had already converged.** W6's class sweep is the "
+    "standing case, and the loop it opens has no terminating condition "
+    "inside this pipeline (end of W6). - **A choice between re-reviewing "
+    "and re-translating already-converged work.** `--from-converged` "
+    "authorizes a re-review and never re-translates, while "
+    "`--allow-retranslate-converged` authorizes what `select_segments.py` "
+    "calls, in its own words, \"the path that actually destroys converged "
+    "work\". A hand-back carries three things and then stops: the state as "
+    "measured, each route with its real price, and your recommendation. "
+    "The human answers; you execute it. **This is not licence to stop at "
+    "every fork** — a model that stops at every fork is worse than one "
+    "that decides. Nor does it narrow the instructions elsewhere in this "
+    "document that already require a human on their own terms: "
+    "`ambiguous_sentinels`, where each path needs a human to look at it "
+    "and a non-empty bucket fails the run, and the two attestation "
+    "scripts, `reject_review.py` and `refuse_finding.py` — copying each "
+    "`--expect-*` value back verbatim IS the attestation that a human "
+    "read that exact verdict or finding, so neither is ever yours to "
+    "self-attest. Outside these three and those, decide, and record the "
+    "decision."
+)
+
+FROM_CAP_HAND_BACK_EXPECTED = (
+    "Reaching the cap is a state to REPORT, not a residue to adjudicate "
+    "on your own. Show the human what is still outstanding on each capped "
+    "unit and which of those two routes applies to it, and let them "
+    "choose. The question is not \"another round?\" — a rejection at "
+    "`final` over an unmoved draft converges the unit with no further "
+    "review at all, and a finding that stands has no accept-it-anyway "
+    "route."
+)
+
+def _hand_back_rule_window() -> str:
+    """Intake's hand-back rule: everything between the intake paragraph that
+    already speaks to the user and intake's numbered item 1."""
+    return _window(
+        _normalized(SKILL_MD),
+        "## Intake & proportionality (do this first)",
+        "Before Step 0, before scaffolding a single file:",
+    )
+
+
+_FROM_CAP_WINDOW_START = "flag plus `--only-segs` when the finding was right."
+
+
+def _from_cap_hand_back_window() -> str:
+    """The tail of the `--from-cap` bullet, after the two routes back are
+    named and before the next bullet begins. The opening marker is sliced
+    off here rather than at the call site, so the literal exists once."""
+    return _window(
+        _normalized(SKILL_MD),
+        _FROM_CAP_WINDOW_START,
+        "- **`--from-stalled SEG1[,SEG2,...]`**",
+    )[len(_FROM_CAP_WINDOW_START):].strip()
+
+
+def test_intake_names_the_three_decisions_that_are_not_the_models_to_make():
+    tail = _hand_back_rule_window().strip()
+    # Diagnosis needles first: when the window assertion below fails, these say
+    # which clause moved.
+    assert "**Three decisions in this pipeline are not yours to make alone.**" in tail, (
+        "intake must state the rule as a bounded COUNT of decisions -- an "
+        "unbounded 'ask when unsure' is the instruction that produced the two "
+        "opposite behaviours this pins against"
+    )
+    assert "the state as measured, each route with its real price, and your recommendation" in tail, (
+        "a hand-back that reports state without pricing the routes puts the "
+        "choice to a human who cannot make it"
+    )
+    assert "**This is not licence to stop at every fork**" in tail, (
+        "the anti-rule is load-bearing: a model that stops at every fork is "
+        "worse than one that decides"
+    )
+    assert "so neither is ever yours to self-attest" in tail, (
+        "the anti-rule must NOT read as exclusive. BOTH attestation scripts -- "
+        "reject_review.py and refuse_finding.py -- require a human on their own "
+        "terms OUTSIDE these three triggers, and a bare 'outside these three, "
+        "decide' would license the model to self-attest a terminal final-round "
+        "rejection or a finding refusal the next fix turn then reads as "
+        "considered rather than overlooked"
+    )
+    assert "`reject_review.py` and `refuse_finding.py`" in tail, (
+        "and must name BOTH of them: naming only one is what made this "
+        "carve-out incomplete on its first draft"
+    )
+    assert tail == HAND_BACK_RULE_EXPECTED, (
+        "intake's hand-back rule must match its pinned text EXACTLY. A clause "
+        "deleted, reworded, weakened, or a carve-out appended beside it all "
+        "move this window and all belong in the same edit as a re-pin"
+    )
+
+
+def test_from_cap_tells_the_operator_to_report_the_cap_rather_than_adjudicate_it():
+    tail = _from_cap_hand_back_window()
+    assert "a state to REPORT, not a residue to adjudicate on your own" in tail, (
+        "reaching the cap is where the loop stops, not where the judgement is "
+        "made -- the whole of #772's instance 1"
+    )
+    assert 'The question is not "another round?"' in tail, (
+        "and the question put to the human must be the RIGHT one: a rejection "
+        "at `final` over an unmoved draft converges the unit with no further "
+        "review, while a finding that stands has no accept-it-anyway route, so "
+        "'spend another round?' describes neither branch"
+    )
+    assert tail == FROM_CAP_HAND_BACK_EXPECTED, (
+        "the --from-cap hand-back must match its pinned text EXACTLY, for the "
+        "reason stated above this block"
+    )

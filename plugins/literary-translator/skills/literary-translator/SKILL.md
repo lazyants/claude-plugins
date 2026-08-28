@@ -43,6 +43,36 @@ Three scope statements, read BEFORE any setup work:
 
 ## Intake & proportionality (do this first)
 
+**Three decisions in this pipeline are not yours to make alone.** You drive
+it on behalf of a human who is not reading the run, so deciding IS the job —
+but at three points the cost of guessing wrong is a book, and there you
+report and ask:
+
+- **A unit reaches `human_escalation` with findings still outstanding.** The
+  cap is where the loop stops, not where the judgement is made
+  (`--from-cap`, W5).
+- **A round's own output re-opens work that had already converged.** W6's
+  class sweep is the standing case, and the loop it opens has no terminating
+  condition inside this pipeline (end of W6).
+- **A choice between re-reviewing and re-translating already-converged
+  work.** `--from-converged` authorizes a re-review and never re-translates,
+  while `--allow-retranslate-converged` authorizes what `select_segments.py`
+  calls, in its own words, "the path that actually destroys converged work".
+
+A hand-back carries three things and then stops: the state as measured, each
+route with its real price, and your recommendation. The human answers; you
+execute it.
+
+**This is not licence to stop at every fork** — a model that stops at every
+fork is worse than one that decides. Nor does it narrow the instructions
+elsewhere in this document that already require a human on their own terms:
+`ambiguous_sentinels`, where each path needs a human to look at it and a
+non-empty bucket fails the run, and the two attestation scripts,
+`reject_review.py` and `refuse_finding.py` — copying each `--expect-*` value
+back verbatim IS the attestation that a human read that exact verdict or
+finding, so neither is ever yours to self-attest. Outside these three and
+those, decide, and record the decision.
+
 Before Step 0, before scaffolding a single file: size the job and agree its
 output shape with the user out loud. Skipping this is how a plain
 translate+gloss job ends up quietly provisioning apparatus it will never use.
@@ -2905,6 +2935,13 @@ reclassified into another one:
   verdict reported `coverage_ok`, that CONVERGES the unit — #527; otherwise
   one fresh review at `final`), or a hand-edit of the draft followed by this
   flag plus `--only-segs` when the finding was right.
+
+  Reaching the cap is a state to REPORT, not a residue to adjudicate on your
+  own. Show the human what is still outstanding on each capped unit and
+  which of those two routes applies to it, and let them choose. The question
+  is not "another round?" — a rejection at `final` over an unmoved draft
+  converges the unit with no further review at all, and a finding that
+  stands has no accept-it-anyway route.
 - **`--from-stalled SEG1[,SEG2,...]`** — for a segment stalled with
   genuinely incomplete bookkeeping: previously converged, then left
   `in_progress` with no `reviewed_draft_sha1` and a review that no longer
@@ -3354,6 +3391,30 @@ compares translated prose across segments at all: each reviewer call sees
 one segment in isolation, and `final_audit.py`'s whole-book checks are
 lexical and WARN-only. Read for narrative voice, for how each recurring
 character is rendered, and for recurring motifs and epithets.
+
+**Ending this sweep is a decision, and it is the human's.** Sweeping a class
+edits sites inside units that have already converged; their drafts drift off
+the hash their review was taken against, they land in `stale`, and
+re-reviewing them yields fresh class findings whose sweep drifts the next
+set. That loop has no terminating condition in this pipeline — no gate
+reports it and no status names it — so where to stop is not a state you can
+wait for. Report the population the last round re-opened, what each route
+costs, and a recommendation, and let the human say whether another sweep
+round opens.
+
+What they decide is the sweep BOUNDARY, not the fate of a draft. Every unit
+already touched still takes one of the two routes above — `--from-converged`
+for a confirming re-review, or a restore — because nothing here delivers a
+draft the reviewer never saw: `assemble.py` refuses one outright ("a
+hand-edit the reviewer never saw must not be assembled") and W7's hard check
+2 reports the same mismatch independently. Record why the sweep stopped in
+`consistency_issues.md`, where a record that authorizes nothing belongs;
+never as a key on a ledger fragment or record, which `ledger_update.py` will
+not write, which both schemas refuse, and which the next ordinary write
+erases anyway. One completed book ended this loop by hand-writing ledger
+records the supported writer cannot produce — that is what happened on it,
+not a route to copy. Note what was decided there: every finding was applied,
+and only the bookkeeping was accepted.
 
 **W7 Final audit** — `scripts/final_audit.py`, generalized directly from the
 proven `final_audit.py` in the in-house historiettes-t3 provenance project
