@@ -29,22 +29,59 @@ that reported a count of zero reads `0` -- the integer it measured, never a word
 it -- while one whose backend sent no voucher data at all reads `not reported`. Those are two
 different facts and the report keeps them apart. The credit balance follows in the same band, labelled with the home it belongs to.
 
-Then one **flat table of pools**, most consumed first. Profile is a column rather than a heading,
-so the row that needs attention is the top row rather than something to hunt for under a group.
-Each row is one pool: where it lives, which pool it is under the vendor's own identifier, a gauge
-and the percentage used, how long until the window resets, and where the number came from.
+Then one **table of allowances**, ordered by candidate and then by allowance, alphabetically.
+Every profile and home on this machine is on it, its rows adjacent, in the same order on every
+run -- and its name printed once for the group rather than once per row.
 
-Rows that are not current usage do not compete with rows that are, because their percentages are
-not comparable. They sit below in their own sections, each headed by the reason: **stale** (an
-expired window, whose percentage describes the PREVIOUS one), **inactive -- no current window**,
-and **NOT CHECKED** for anything that gapped. Candidate-level outcomes -- a profile with no cache,
-one with no subscription, an unreadable directory -- become one footnote line each, with their
-diagnostic token intact.
+**A row is an allowance, not a window.** An account's five-hour and weekly figures are two
+readings of one quota, so they sit side by side on one line under a `5H` and a `WEEKLY` column
+rather than on two rows that repeat the profile and compete with each other for the top of the
+page. The columns are discovered from the data, so any other window the backend reports opens a
+column of its own rather than being folded into somebody else's. Two windows of equal duration
+under one pool -- a shape the Codex schema permits -- take two rows of the same column, because a
+cell can hold one number and dropping the second would be silent.
 
-Ordering inside the table is by consumption, descending, with ties broken by the sooner reset and
-then by name, so two runs over the same data agree. It is deliberately NOT a projected-exhaustion
-score: that needs a burn rate nothing here measures, and an invented number in the column read
-first is worse than an honest one.
+**Claude Code's model-scoped weekly pool is the one thing deliberately not shown.** It read `0%`
+on every account measured, and a column empty on every row but one costs the table more width
+than the pool is worth. A profile carrying nothing else gaps rather than having it put back:
+that is not a shape the vendor produces -- `session` and `weekly_all` ship beside it -- and
+printing the pool the report was told to hide, on a run that calls itself clean, is a
+substitution like any other.
+
+On the Codex side only the pool the CLI actually spends from is shown. `rateLimitsByLimitId`
+enumerates pools a person at a terminal is not asking about -- a model-specific one and a
+reserve -- and the backend already says which one answers "how much can I still use here": the
+top-level `rateLimits` object carries its `limitId`. A pointer naming a pool that is not in the
+map is answered by that top-level object, which carries the same pool's windows. A selector that
+resolves to neither GAPS the home: printing a reserve or a model-specific pool where the operator
+reads their terminal quota is worse than saying the quota could not be determined -- twice over,
+because the substitution also exits 0.
+
+That is the one rule the whole reader follows: **semantic uncertainty is never promoted to
+success.** Where a payload cannot be read as asked, the report gaps and says so, rather than
+substituting another pool, putting back a record it was told to hide, or mixing two reads into
+one row.
+
+So each row reads: where it lives, which allowance it is under the vendor's own NAME for it --
+Codex sends a `limitName` beside every pool, so the column reads `GPT-5.3-Codex-Spark` and
+`gpt-reserve` rather than the internal `codex_bengalfox` and `base_model_inference`; a pool the
+backend leaves unnamed keeps its id, and so does one whose name another pool already uses -- then
+one cell per window carrying the percentage used and how long until that window resets, and
+finally where the numbers came from. A cell whose window is not current says so in its own words
+and is dimmed: an expired one reads `14h ago` -- the percentage beside it describes the PREVIOUS
+window -- and one the backend sends no reset time at all for reads `inactive` or `not reported`.
+Claude Code's `is_active` is deliberately not part of that: it marks whichever pool is currently
+BINDING, and exactly one pool per account carries it, so treating it as "no current window" grey
+out five-hour figures that were entirely current -- along with the reset time beside them. A cell that gapped carries its diagnostic token in place of a figure.
+Candidate-level outcomes -- a profile with no cache, one with no subscription, an unreadable
+directory -- become one footnote line each, with their diagnostic token intact.
+
+**Position means nothing, deliberately.** Ranking by consumption scattered one Codex home's
+pools down the page and printed the same directory name in four places, and a rank over a mix of
+current and expired windows orders numbers that are not comparable to begin with. Consumption is
+read off the figure and its hue; whether a window is current is read off the cell's own words. A
+stable alphabetical order also means two runs over the same data agree, and that a row does not
+move because some other account's window rolled over.
 
 ## Two sources, different in kind
 
@@ -52,8 +89,31 @@ The Claude Code side and the Codex side are read differently, and every row says
 last column: `live` for Codex, and the cache's age for Claude Code.
 
 **Claude Code is a cache on disk.** `<profile>/.claude.json` carries `cachedUsageUtilization`, a
-snapshot taken at some past `fetchedAtMs`. Reading it costs nothing and needs no credential, but
-the snapshot goes stale the moment its window rolls over. The default mode reads only this file.
+snapshot taken at some past `fetchedAtMs`. Reading it costs nothing and needs no credential.
+
+**Except when that snapshot's window is already over** -- then the file has nothing to say about
+the present, and the report re-reads that one profile live rather than printing a percentage
+about a window nobody is spending from. Signing in does not fix it on its own: the CLI rewrites
+`.claude.json` at login but refreshes `cachedUsageUtilization` only after a request that carries
+usage back, so a freshly authenticated profile can still be describing a window three days gone.
+A row comes from ONE read, whole. If the live re-read produced any records at all, those are the
+row -- gaps included, and its exit status with them. Only a retry that produced nothing keeps the
+cached rows, and it states its reason as a note rather than a warning: the default mode promised
+to read a cache and it read one. Merging the two per window looked strictly better and was worse
+-- a live gap suppressed by a cached cell left nothing to gap the run, and the row rendered a
+cached figure under the live provenance its first cell carried. The `SOURCE` column is where to
+read which happened: `api` for a row that was refreshed, a cache age for one that was not.
+
+The **default profile is the exception**: its config is `~/.claude.json`, beside `~/.claude`
+rather than inside it, because the path is `<CLAUDE_CONFIG_DIR or $HOME>/.claude.json` and that
+profile is the one where the config dir falls back to `$HOME`. `~/.claude` is its data directory,
+and a `~/.claude/.claude.json` left there by an older release is not the live config -- reading
+it reports `no-usage-cache` for an account whose pools are perfectly readable one level up.
+
+`hasAvailableSubscription: false` is read only as the REASON a cache is absent, never as a reason
+to skip one that is present. Accounts ship that flag beside a full, freshly fetched `limits`
+array -- including at 100% of a weekly pool -- so treating it as "not subscribed" suppressed
+exactly the numbers worth reading, under a diagnostic that exits 0.
 
 **Codex is a live, read-only RPC.** `codex app-server` speaks JSON-RPC 2.0 over stdio; the report
 sends it the handshake needed to call `account/rateLimits/read` and reads the reply. There is no
@@ -62,10 +122,11 @@ cache to fall back to on the Codex side -- the number is current at the moment i
 ## stale-after-reset
 
 A window whose `resets_at` (or `resetsAt`) has already passed describes the PREVIOUS window --
-neither current usage nor zero. The report never presents an expired window as current: a row in
-this state renders as `stale-after-reset`, shows the previous window's percentage labelled as
-such together with that window's own reset time, and says the current window is unknown without
-`--live`.
+neither current usage nor zero. The report never presents an expired window as current: the cell
+reads how long ago that window reset (`14h ago`) and is dimmed beside whatever current cells
+share its row. One legend line under the
+table carries the `[stale-after-reset]` token and says the current figure needs `--live`; it is
+printed only when such a cell is actually on the page.
 
 ## `--live`, Claude Code side
 
@@ -163,8 +224,11 @@ terminal and `NO_COLOR` is unset, so piping the report -- into a file, a pager, 
 own test suite -- yields plain text. Colour is applied to finished cells after the column widths
 are computed from the plain strings, so it changes how the table looks and nothing else: strip the
 escapes from an `--color=always` run and you get the `--color=never` run back, byte for byte.
-The gauge is red at 80% and above, yellow from 50, green below; sections that are not current
-usage are dimmed; a voucher count is bold, and green when there is one to spend.
+A figure is red at 80% and above, yellow from 50, green below; a cell whose window is not the
+current one keeps that hue but is dimmed, because it sits beside a cell that IS current and must
+not read as comparable to it; a voucher count is bold, and green when there is one to spend.
+There is no gauge: three window columns of bar plus number wrapped the table, and the bar never
+said anything the number beside it did not.
 
 ## `code-limit`, the installed command
 
