@@ -443,8 +443,10 @@ and unattached front/back matter, including the ~18 800-character Project
 Gutenberg licence block present in every Gutenberg book. A repeated block id
 inside `block_ids` is counted once: nothing in the schema forbids a repeat and
 no derivable check rejects one -- measured, by feeding a manifest whose
-`block_ids` repeats an id through `run_derivable_checks()` and watching all
-fourteen pass -- so counting occurrences would move both the population and the
+`block_ids` repeats an id through `run_derivable_checks()` and watching every
+check it emits pass. The count is deliberately not restated here: it is the
+`chk()` call sites in `validate_extraction.py`, and it has grown since this
+note was written. So counting occurrences would move both the population and the
 reference with no block behind the difference.
 
 ## See also

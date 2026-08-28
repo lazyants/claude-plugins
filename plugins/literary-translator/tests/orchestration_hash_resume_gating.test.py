@@ -367,7 +367,7 @@ def test_reworded_site_mentions_resume(label, path):
 
 
 def test_ledger_already_accurate_ledger_merge_aside_not_flagged():
-    """references/ledger-and-resumability.md:166's `ledger_merge.py` aside
+    """references/ledger-and-resumability.md:168's `ledger_merge.py` aside
     ("diagnostic-only, never part of any segment's cache key") is already
     accurate -- qualified in the very next sentence by the resume-integrity
     digest note -- and must survive untouched. None of the STALE_PHRASES
