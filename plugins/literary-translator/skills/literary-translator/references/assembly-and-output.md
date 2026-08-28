@@ -149,6 +149,56 @@ needs the co-design conversation to start immediately, not be discovered
 after every segment has already converged. See `SKILL.md`'s Step 0d for the
 exact HALT/FATAL conditions and `references/output-target-adapters/README.md`
 for the adapter contract Step 0d resolves into.
+Runs only when `output.v1_scope: assembled_book`. Under the default
+`output.v1_scope: segment_drafts_and_audit`, Step 0d is a deliberate no-op —
+zero resolution work, zero HALT risk — matching the proportionality
+guardrail that a plain translate+gloss job never pays for assembly
+machinery it will never read (`references/assembly-and-output.md`).
+
+When `assembled_book` is selected, resolve the already-schema-validated
+`output.target` (`obsidian` | `epub` | `custom`) via `output_resolve.py`'s
+resolution logic, plus read `output.name_display` and the one
+`output.adapter_config.<target>` sub-block matching the resolved
+target — the others sit inert. This step depends ONLY on the
+already-validated `profile.output` block (no manifest, no ledger, no draft
+required yet) — the same "resolve early, from validated shape alone"
+posture Step 0b/0c already apply to `verse_policy.mode`/`source.format`, so
+a blocking co-design need surfaces at setup time, never mid-project.
+
+- `target: obsidian` resolves to the built-in `render_obsidian` adapter
+  (shipped this increment). `target: epub` maps to the built-in name
+  `render_epub`, a later-phase adapter **not yet written** — so it does not
+  resolve: `output_resolve.py` HALTS, naming the missing `render_epub.py` and
+  the three ways out (stay on `v1_scope: segment_drafts_and_audit` and build
+  the EPUB with a project-local script; `target: custom` with a co-designed
+  renderer; or `target: obsidian`). The enum-to-name mapping is exhaustive
+  over the enum; it was never a claim that every module it names exists, and
+  until this check that gap only surfaced at W9, with the whole book already
+  translated and converged (#726).
+- `target: custom` specifically: the schema validates shape only — the
+  `adapter_config.custom.renderer_path` key is required whenever
+  `target: custom`, value must be `string | null`. Step 0d owns the two
+  procedural checks a schema can't express, the same split Step 0c already
+  applies to `source.adapter_config.custom.extractor_path`:
+  - `null` — valid, the expected starting state — HALT and co-design a
+    hand-crafted Python renderer with the user (informed by
+    `render_obsidian.py` as a starting pattern), against the fixed
+    `render(nodestream, canon, profile, out_dir) -> dict` entry-point every
+    built-in adapter implements
+    (`references/output-target-adapters/README.md`).
+  - Non-null — FATAL rejection (before any existence check) of any value
+    containing `..`, starting with `/`, or not matching the schema's
+    `^[A-Za-z0-9._/-]+$` pattern. Resolution is against a fixed subtree,
+    `${durable_root}/scripts/custom_renderers/<value>`, never an arbitrary
+    filesystem location. Only then does Step 0d check the resolved path
+    actually exists — FATAL, naming the unresolvable path, if not.
+
+Unlike a Step-0c custom-source HALT, which blocks the whole project before
+extraction can even begin, a Step-0d custom-target HALT blocks only
+assembly (W9) — a project can still scaffold, translate, and converge every
+segment with the co-design conversation still outstanding, and only hits
+this HALT once `output.v1_scope: assembled_book` is actually chosen.
+
 
 #### W9 Assemble — the reconstruction algorithm
 
@@ -441,6 +491,133 @@ gates the HARD exit code — the declared set is the sole non-heuristic
 source of truth. Exit `0` clean / `1` HARD defect / `2` env-usage; one JSON
 line `{"defects":[...], "warnings":[...]}` to stdout. See `SKILL.md` W7/W8/W9
 for the exact invocation points.
+
+#### Output-coverage — the OPT-IN ratio-outlier lane and the blind spot
+
+  - **New in 1.12.0 — a within-cohort output-coverage ratio-outlier
+    surfacer, `Refs #202` (this does NOT close #202 — see the limitation
+    below).** OPT-IN: config `validation.conservation_ratio_band`
+    (`min_source_words_band`/`min_cohort`/`k`/`abs_guard`); absent or
+    `null` means this lane does not run at all and `output-coverage`
+    behaves exactly as it did in 1.11.0. Per cohort
+    (blocks sharing a manifest `type`), it flags `low_coverage_outlier`
+    when a block's output/source word ratio falls below a robust
+    median-and-MAD fence computed from its OWN cohort, AND is well below
+    that cohort's own typical ratio (a second, independent `abs_guard`
+    condition that defends against a degenerate near-zero-MAD cohort).
+    `zero_output_block` and `insufficient_sample` (naming a `reason`)
+    cover the edge cases; a `coverage_distribution` entry
+    (`median_ratio`/`mad`/`fence_ratio` per cohort, `null` when nothing
+    was eligible to compute them from) rides alongside the warnings on the
+    same stdout JSON line.
+  - **Stated limitation — this lane structurally cannot close #202.** It
+    is a within-cohort comparison, never an absolute truthfulness check:
+    if every block in a cohort is truncated by roughly the same
+    proportion, that cohort's own median absorbs the truncation and
+    nothing reads as an outlier — detecting uniform collapse would need a
+    reference outside the audited population, and none exists here. It is
+    also NOT language-pair-agnostic: `normalize_words()` is NFC +
+    whitespace splitting only, no morphological/markup/sentinel
+    normalization, so agglutinative/compounding target languages and
+    markup-heavy blocks produce ratios that are not linguistically
+    comparable across language pairs. What it DOES catch: a few collapsed
+    blocks amid an otherwise healthy cohort — proportional truncation
+    across a range of block sizes, which the absolute floor above cannot
+    see at any single fixed `(min_source_words, max_output_words)` pair.
+
+#### W9 Assemble — the run order, gate by gate
+
+**W9 Assemble** (only when `output.v1_scope: assembled_book`) — assembly
+runs as a plain DETERMINISTIC script step (`assemble.py` then
+`diff_rendered_output.py`), never an agent workflow: it has no
+agent-workflow template of its own, and none is planned. Assembly has no
+review/fix loop and no ledger prompts to schema-validate, so it does not
+mirror `mass-translate-wf.template.js`'s agent machinery. Gated on W7's
+`final-audit-summary.project_complete: true` — the whole-project
+completeness gate, not merely "this batch converged" — assembling a book
+from a project that is not yet fully converged is refused, never silently
+attempted over a partial set. Because that ONE verdict gates the whole step,
+both gates must agree about every unit: `assemble.py` re-derives the same two
+carve-outs (the #491 machinery-only one and, when
+`validation.admit_contract_only_stale` is declared, #533's contract-only one)
+from the same merged ledger rather than trusting the summary. When either
+admits a unit, both name it — `stale_contract_admitted` in W7's summary,
+`contract_stale_admitted` in `assemble.py`'s, and a stderr block in each.
+One asymmetry since #492, and it is deliberate: W9 ALSO admits a contract-only
+drift it detects itself, by comparing the live inputs against each shipped
+record (same declaration, same sentinel condition). Such a unit is still
+`converged` in the merged ledger, so W7's summary — which reads that snapshot —
+has nothing to name yet. W9's list is therefore the authority on what THIS run
+shipped unjudged against the current contract, and may legitimately exceed
+W7's; re-running W7 after the merge brings the two back into step. The same
+holds for `validate_assembled.py` and `validate_conservation.py`, which derive
+their own lists from that snapshot too.
+Keep the declaration stable across the whole W7→W9 chain; toggling it between
+steps is the only way a normal run can make the two gates disagree about the
+same book. (They read the moved-field list from different authorities -- W7
+from `select_segments.py`'s recomputation against the CURRENT cache key, W9
+from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887`
+drops any inherited value and re-derives that list from the same diff, so the
+two agree by construction on anything a run produces. Hand-editing the
+materialized `ledger.json` between the two steps can split them; so can
+editing one segment's `status` to `converged`, which skips both carve-outs
+entirely.)
+
+Run `scripts/assemble.py`, which reconstructs the whole-book reading order
+from `manifest.json` + every converged segment's draft + `ledger.json`'s
+convergence gate into the shared NodeStream artifact, then invokes the
+Step-0d-resolved output-target adapter (`render_obsidian` in this
+increment) to render the book under `${durable_root}/out/` (see
+`references/assembly-and-output.md` for the reconstruction algorithm and
+the NodeStream/anchor-map artifacts).
+
+Then run `scripts/validate_assembled.py` — AFTER `assemble.py` writes
+`out/.assembled/nodestream.json`, BEFORE `scripts/diff_rendered_output.py` —
+the same #202 structural-completeness gate, this time checking that every
+declared heading source marker surfaced as a non-empty `kind:"heading"` node
+in the assembled NodeStream. Exit `1` HARD on a dropped/misclassified
+heading; exit `0` with non-gating WARN entries otherwise.
+
+Then run `scripts/validate_conservation.py output-coverage` — the same
+WARN-only #202 floor + within-cohort ratio-outlier lane as W7 (see above),
+this time reading `out/.assembled/nodestream.json`
+(`output.v1_scope: assembled_book`) instead of converged drafts. Never
+gates; exit `0` always barring an env/usage precondition.
+
+Then run `scripts/diff_rendered_output.py` as the acceptance gate: it
+reduces the ALREADY-rendered output (it renders nothing itself) and diffs it
+against the last accepted baseline — exit `0` on an exact match, `1`
+on a mismatch or guard refusal, `2` when no baseline exists yet
+(`--accept-baseline` freezes the current render as the new baseline). For
+rendered-content equality, the render+diff comparison IS the acceptance
+gate — there is no separate item-count check alongside it (structural
+completeness is `validate_assembled.py`'s distinct concern above, checked
+before this step ever runs). To compare two ALREADY-rendered trees instead —
+the check a project that post-processes the vault needs, and the only one the
+frozen baseline cannot express — pass `--baseline-dir A --candidate-dir B`:
+read-only, no baseline involved, `"mode": "two_tree"` on the verdict.
+
+Then — for `output.target: obsidian`, ON BY DEFAULT unless explicitly
+disabled (`output.adapter_config.obsidian.mentions_section.enabled: false`) —
+run `scripts/validate_backlinks.py` as an **advisory** appendix-integrity gate,
+AFTER `diff_rendered_output.py`. It re-derives the source-anchored occurrence
+universe and checks that every index-eligible entity's `## Mentions` section
+covers its occurrences (metric 1, the sole warning source), plus a
+native-inline-backlink diagnostic and collision/unresolved-homonym reports
+(metric 2, exit-neutral). Unlike the hard gates above, its **exit `1` is
+ADVISORY — log the warnings and CONTINUE W9** (it never blocks assembly);
+only exit `2` (unreadable/malformed input, e.g. a missing
+`out/.assembled/nodestream.json`) halts. When the target is not obsidian, or
+the flag is explicitly disabled, it short-circuits to
+`mentions_coverage.status: disabled`, exit `0`. Against a vault whose entity
+notes a post-processing layer renamed or merged, pass `--entity-note-map FILE`
+(a JSON `{source_form: vault-relative *.md path}`) — without it the gate
+re-derives every note path from the renderer's own rule and reports the whole
+vault missing. The `## Mentions` section is
+a source-anchored occurrence index (mirroring the SSK `build_index.py`
+model) that supersedes the older "native backlinks are the occurrence index"
+stance for `output.target: obsidian` projects; see
+`references/output-target-adapters/obsidian.md`.
 
 ## Why `build_epub.py` hasn't been generalized (why `epub` isn't shipped yet)
 

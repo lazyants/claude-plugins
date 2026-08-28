@@ -501,6 +501,156 @@ operates only on whole `seg` items; a segment whose `word_count` exceeds
 `max_segment_words` is caught at W2 extraction, never here (see `SKILL.md`
 W4).
 
+### The fix turn's write scope (#582/#607)
+
+**#582 — why the ENTRY POINT stays `${durable_root}/scripts/`, and what
+`--plugin-root` does and does not buy.** The W5-and-later commands below run
+their scripts from the durable copy, which the same passes can write to (the
+Step 0 / W2 / W3 commands already run from `{{PLUGIN_ROOT}}`). That asymmetry
+is deliberate and this paragraph is the reason, recorded so it is not
+re-raised per review: **`--plugin-root` moves only the CHECKER a script shells
+out to; nothing here moves the ENTRY POINT.** Relocating individual entry
+points to `{{PLUGIN_ROOT}}` is real defence in depth — it prevents direct
+execution of a tampered durable copy of that one command — but it was
+evaluated and not adopted as the answer here, because it does not close the
+class. The class survives it for two measured reasons:
+
+1. **The fix turn is a write-capable deputy.** On a non-clean, non-final
+   review inside the fix-round budget, `runRound()` calls `callFix()`, which
+   dispatches a PLAIN Claude agent (`agent()` with no `agentType` — not
+   `codex_job.py`, so not sandboxed) and hands it a review whose
+   `issue`/`suggest` text codex itself authored. Since #532 that turn applies an
+   entry only where it can substantiate the claim against the source and refuses
+   the rest, so it is a reader of that free text rather than an executor of it —
+   but it is still a write-capable agent taking untrusted prose as input.
+   `REVIEW_SCHEMA` constrains a finding's SHAPE (`loc`/`severity`/`issue`/
+   `suggest`, strings, no extra keys); beyond that the only content check is
+   that `loc` contains a colon (`AUTHENTIC_LOC_RE`) — `issue` and `suggest`
+   are unconstrained prose. That turn is told to rewrite the draft, but it is
+   neither forbidden nor technically prevented from writing elsewhere. So the
+   surface that decides where a fix lands is an untrusted party's free text
+   reaching a write-capable agent — a surface that sandboxing codex does not
+   reach and that relocating an entry point does not narrow.
+2. **A per-command rewrite does not converge.** The invocations are not a
+   closed set: they live in this file, in `references/`, in the three
+   per-pass TASK prompt templates and in the three workflow templates' own
+   command builders, and a new one is added by any future dispatch. Trust
+   that depends on every call site being spelled correctly is trust that
+   silently lapses the first time one is not.
+
+Note what `--plugin-root` actually does, since it is easy to overstate: it
+BYPASSES a possibly-tampered durable sibling by executing the trusted plugin
+copy instead. It does not detect, report, or repair the tampering — a poisoned
+durable checker simply sits there unexecuted. `plugin_bundle_hash` does not
+detect one either (`cache_key.py` reads the Step-0a marker; it never re-hashes
+the copies).
+
+The durable root holding one project's data, and a human reading the
+deliverable, limit the expected blast radius of the DELIVERABLE — they do not
+bound the fix turn's filesystem write reach.
+
+**What 1.68.0 (#607) did about it, and what it deliberately did not.** Two
+halves shipped. `fixPrompt` now tells that turn it has exactly ONE write
+target, `segments/<seg>.draft.json`, and that a finding whose remedy would
+require editing any other file is refused on that ground alone — a gate
+script edited so that it accepts a draft is never a fix. And after every
+dispatched fix call, before its reply is even inspected, W5 runs
+`fix_scope_audit.py` from `{{PLUGIN_ROOT}}`: a **copy-fidelity check** that
+every file Step 0a copied into this durable root (`scripts/`, `schemas/`,
+`languages/`, the three workflow templates) still equals the plugin bytes it
+came from, plus the two `runs/` bundle markers, whose expected values are
+derivable from the same plugin tree. That closes the specific sentence two
+paragraphs above — `plugin_bundle_hash` never re-hashed the copies; this
+does.
+
+It is a copy-fidelity check and NOT a write audit, and the difference is the
+whole residual:
+
+- Files with **no plugin twin** are not covered — `canon.json`,
+  `canon_senses.json`, `manifest.json`, the segpacks, the ledger, and the
+  one-time template seeds an operator then hand-edits (`style_bible.md`,
+  `extract.py`, the `*_TASK.md` files). Most of those are translation
+  CONTENT. One that is not is `runs/<id>/.resume_gate_ack`, a per-run
+  authorization with no derivable authority: it is gate state, it is
+  uncovered, and it is named here rather than left implicit.
+- It is a **point-in-time** comparison. A write that lands after the audit
+  call returns — a detached child the fix turn spawned — is not in it, and is
+  reproducible. The next audit on that root still finds the divergence, since
+  the check has no baseline and re-reads the plugin bytes every time; the
+  uncovered case is the LAST fix round of a segment that then converges, where
+  no next audit runs.
+- It cannot **confine** the turn. That turn is a plain Claude agent holding
+  the operator's own permissions, and the Workflow `agent()` API offers no
+  filesystem confinement. A party able to alter the PLUGIN tree — including
+  the auditor itself — can make the check report clean while durable
+  divergence remains; a later plugin refresh repairs the auditor but does not
+  retroactively reveal that divergence. What the check changes is that a
+  tamper must now cover a second tree.
+- A **driver-mediated** fix turn is not audited at all.
+  `segment_dispatch_driver.py` returns the rendered fix prompt as `needs_fix`
+  for an external Claude turn and truncates this template before every
+  top-level preflight, so no audit call site fires on that route. Bracketing
+  it needs a digest handed out at `needs_fix` and required back on the next
+  invocation; that is tracked separately and is not in 1.68.0.
+
+**Halt contract.** A mismatch ends the segment with reason
+`fix-scope-violation`; two consecutive failures of the audit relay end it as
+`fix-scope-unverified`. Both attempt a terminal `blocked` fragment and both
+classify `human_escalation`. Neither is recoverable on its own,
+deliberately: leaving the segment `in_progress` would let the next batch run
+over exactly the state the gate could not verify.
+
+That durable fragment, though, is written by `ledger_update.py` FROM the tree
+the audit has just reported as diverging, so the write can fail for the very
+reason the halt fired — and the `in_progress` fragment already on disk
+classifies `recoverable`. So the halt is ALSO recorded where the audited tree
+cannot reach it: a `FIX-SCOPE HALT` log line, and a batch result carrying
+`batchComplete: false` and one `fixScopeHalts` entry per halted segment, each
+with a `ledgerRecorded` flag. The `fixScopeHalts` array is the invariant, not
+the `reason` string: `reason` reads `"fix-scope-halt"` on the ordinary path,
+but a batch whose FINAL ledger merge also failed returns
+`"ledger-merge-failed"` — still `batchComplete: false`, still carrying the
+halts. **Read `fixScopeHalts` before dispatching another batch** — that
+array, not the ledger and not the reason, is what survives a failed write. It does not make the durable record bulletproof; it
+makes a batch that halted unable to end looking clean.
+
+**A clean verdict is honoured only if it counted something.** The script
+reports both `n_checked` and the `n_expected` it derives from the same walk;
+W5 honours `ok: true` only when they are equal and non-zero, and otherwise
+takes the `fix-scope-unverified` path. `ok` alone was a false GREEN — a walk
+that runs zero times prints exactly like one that covered everything.
+
+**What the counts prove is self-consistency, not coverage**, and the check
+does not pretend otherwise: both sides come from the same walk over the
+PLUGIN tree, so a plugin tree that has lost members shrinks them together and
+they still agree. Two verdicts read the population from the DURABLE root
+instead, which the plugin tree cannot shrink — `orphaned`, a
+`${durable_root}/schemas/*.json` with no plugin twin (that directory has no
+sanctioned addition, and a file dropped there is loaded into
+`canon_validate.py`'s registry and hashed into the run identity), and
+`degenerate`, a plugin-side class that yields nothing while the durable root
+still holds files of it.
+
+**`languages/` is the one class where that leaves a hole, and it is a real
+one.** An orphan sweep cannot run there — the documented `fr.local.json`
+override would read as an orphan and cost a segment a re-translation — so
+`languages/` is covered by `degenerate` alone, which fires only on WHOLESALE
+loss. If a plugin tree loses ONE preset (`assets/languages/fr.json`) while
+the others remain, the durable `fr.json` drops out of `compared_pairs()`,
+both counts shrink together, `degenerate` skips the class because plugin
+languages still exist, and a widened edit to that durable file audits CLEAN.
+That is not the disclosed "someone rewrote the auditor" case; an incomplete
+refresh reaches it. The durable language file carries the pair's particle
+configuration, so the consequence is real. It is left open rather than
+patched: every closure needs either a stored baseline (the design this
+release rejected three times) or a naming rule for legitimate overrides that
+SKILL.md does not fix. `tests/fix_scope_audit.test.py` pins the clean result
+so the limitation cannot be lost.
+
+The relay residual is stated rather than closed: the audit reaches W5 through
+a model relay, and a relay that fabricates its reply can fabricate BOTH
+numbers. Nothing here prevents that.
+
 ## Prompt functions — generated from the profile at instantiation time
 
 `mass-translate-wf.template.js` defines sixteen prompt functions:
@@ -569,6 +719,20 @@ particular is read fresh from the CURRENT `profile.yml` every time a run is
 scaffolded — never spliced into `translate_TASK.md`/`review_TASK.md`
 directly — which is what keeps it staleness-immune when `verse_policy.mode`
 changes between runs (see `references/verse-policy.md`).
+
+**`{{MAX_CODEX_JOBS_PER_BATCH}}` (#409) is a BARE INTEGER, not JSON** — substitute
+the resolved value directly. `profile.schema.json`'s `default` applies only when
+the key is absent from `profile.yml`; a present-but-null value is a schema error,
+not a fallback.
+
+**`resolve_codex_companion.py` runs from the plugin's own install path, never from
+the durable-root copy.** The durable copy exists so a run stays reproducible after
+the plugin moves; resolving the companion through it would bind the run to whatever
+that copy was when it was made, which is the opposite of what the token is for.
+
+**`{{CITATION_CONTENT_TYPES}}` fails loud rather than defaulting**, on the same
+reasoning as every token above: a silently-empty content-type list would let a
+citation pass a check that never ran.
 
 Because substitution happens once at instantiation time and never again at
 runtime, a leftover `{{...}}` token in the generated script is a hard bug,

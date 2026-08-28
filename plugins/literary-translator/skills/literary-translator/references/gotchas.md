@@ -568,6 +568,36 @@ error:"x"}` as a success just as readily as a genuine one.
 every remaining `schema:` const, top-level `object`, no top-level
 combinator.
 
+## 15. Visual-order source — the E-traps clause to paste
+
+```markdown
+#### E-traps: visual-order source
+
+The extracted source text of THIS book is in VISUAL order, not logical order: a
+PDF-to-EPUB converter emitted runs whose words appear in display sequence, and
+extraction preserved those bytes faithfully. The segpack, `manifest.json` and
+the source EPUB all carry the SAME mangled bytes — there is no unmangled copy to
+consult, so reconstruction is the only recovery. Binding on every turn:
+
+1. **The token order you read is not the author's word order.** Where a span is
+   visually ordered, reconstruct the logical clause before you translate, judge
+   or edit it. Reconstruction is bounded: reverse the order of WORDS, never the
+   characters inside a word (words are themselves stored logically); reverse
+   only a span you have established is WHOLLY reordered, never a partly-affected
+   line; and PRESERVE the internal order of any embedded left-to-right run — a
+   Latin name, a citation sigil, a digit sequence. Treat the result as a
+   hypothesis: keep it only if it yields a grammatical clause consistent with
+   the surrounding context. Where the span is ambiguous or mixed-direction,
+   reconstruct from context and say so — never apply reversal mechanically.
+2. **A short token stranded at a span boundary is usually half of a torn word,
+   not a word.** Do not file a word-order or torn-token finding, and do not act
+   on one, until you have reconstructed the span. Then report only what SURVIVES
+   reconstruction — this is not an instruction to suppress findings.
+3. **Never judge an RTL token by how it looks.** A bidi terminal renders a
+   corrupted token identically to an intact one. Settle any such question on the
+   codepoints.
+```
+
 ## See also
 
 - [`ledger-and-resumability.md`](./ledger-and-resumability.md) — full spec

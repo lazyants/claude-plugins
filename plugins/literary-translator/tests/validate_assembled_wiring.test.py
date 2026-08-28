@@ -38,8 +38,18 @@ SKILL_PATH = PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md"
 
 assert SKILL_PATH.is_file(), f"SKILL.md not found at {SKILL_PATH}"
 
+# The assembled-scope half of this contract moved with the W9 run order into its
+# own reference. The default-scope half (W7/W8) stayed in SKILL.md, so this file
+# reads two documents rather than one.
+ASSEMBLY_PATH = (
+    PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "assembly-and-output.md"
+)
+assert ASSEMBLY_PATH.is_file(), f"assembly-and-output.md not found at {ASSEMBLY_PATH}"
+
 W7_HEADING = "**W7 Final audit**"
 W8_HEADING = "**W8 Deliver**"
+ASSEMBLY_W9_HEADING = "#### W9 Assemble — the run order, gate by gate"
+ASSEMBLY_W9_END = "## Why `build_epub.py`"
 W9_HEADING = "**W9 Assemble**"
 REFERENCE_DOCS_HEADING = "## Reference docs"
 
@@ -70,13 +80,17 @@ def _default_scope_window(text: str) -> str:
     return text[w7:w8]
 
 
+def _assembly_text() -> str:
+    return ASSEMBLY_PATH.read_text(encoding="utf-8")
+
+
 def _assembled_scope_window(text: str) -> str:
-    w9 = text.find(W9_HEADING)
-    ref = text.find(REFERENCE_DOCS_HEADING)
-    assert w9 != -1, "SKILL.md no longer has a W9 Assemble heading"
-    assert ref != -1, "SKILL.md no longer has a Reference docs heading"
-    assert w9 < ref, "W9 Assemble must come before the Reference docs section"
-    return text[w9:ref]
+    w9 = text.find(ASSEMBLY_W9_HEADING)
+    end = text.find(ASSEMBLY_W9_END)
+    assert w9 != -1, "assembly-and-output.md no longer has the W9 run-order heading"
+    assert end != -1, "assembly-and-output.md no longer has the build_epub section"
+    assert w9 < end, "the W9 run order must precede the build_epub section"
+    return text[w9:end]
 
 
 # ===========================================================================
@@ -126,7 +140,7 @@ def test_default_scope_gate_marker_does_not_leak_outside_its_window():
 
 
 def test_assembled_scope_gate_wired_between_assemble_and_diff():
-    window = _assembled_scope_window(_skill_text())
+    window = _assembled_scope_window(_assembly_text())
     assemble_offset = window.find(ASSEMBLE_INVOKE_MARKER)
     diff_offset = window.find(DIFF_RENDERED_MARKER)
     assert assemble_offset != -1, (
@@ -163,7 +177,7 @@ def test_assembled_scope_gate_wired_between_assemble_and_diff():
 
 
 def test_assembled_scope_gate_not_mentioned_before_assemble_invocation():
-    window = _assembled_scope_window(_skill_text())
+    window = _assembled_scope_window(_assembly_text())
     assemble_offset = window.find(ASSEMBLE_INVOKE_MARKER)
     assert assemble_offset != -1
     assert VALIDATE_ASSEMBLED_MARKER not in window[:assemble_offset], (
@@ -219,14 +233,14 @@ def test_assembled_scope_matcher_rejects_a_decoy_placed_before_assemble():
     rejected: the assembled_book-scope gate cannot run before the artifact
     it reads (nodestream.json) exists."""
     decoy = (
-        f"{W9_HEADING} filler.\n\n"
+        f"{ASSEMBLY_W9_HEADING}\n\nfiller.\n\n"
         f"Run `scripts/validate_assembled.py` checking "
         f"{ASSEMBLED_SCOPE_NODESTREAM_MARKER} and every "
         f"{ASSEMBLED_SCOPE_HEADING_KIND_MARKER} node -- misplaced, BEFORE "
         f"assemble.py itself runs.\n\n"
         f"{ASSEMBLE_INVOKE_MARKER} filler filler.\n\n"
         f"Then run `{DIFF_RENDERED_MARKER} filler.\n\n"
-        f"{REFERENCE_DOCS_HEADING}\n"
+        f"{ASSEMBLY_W9_END}\n"
     )
     window = _assembled_scope_window(decoy)
     assemble_offset = window.find(ASSEMBLE_INVOKE_MARKER)
@@ -235,14 +249,14 @@ def test_assembled_scope_matcher_rejects_a_decoy_placed_before_assemble():
 
 def test_assembled_scope_matcher_accepts_a_genuine_fragment():
     good = (
-        f"{W9_HEADING} filler.\n\n"
+        f"{ASSEMBLY_W9_HEADING}\n\nfiller.\n\n"
         f"{ASSEMBLE_INVOKE_MARKER} filler filler.\n\n"
         f"Then run `scripts/validate_assembled.py` -- AFTER assemble.py "
         f"writes `{ASSEMBLED_SCOPE_NODESTREAM_MARKER}`, checking every "
         f"{ASSEMBLED_SCOPE_HEADING_KIND_MARKER} node -- BEFORE the next "
         f"step.\n\n"
         f"Then run `{DIFF_RENDERED_MARKER} filler.\n\n"
-        f"{REFERENCE_DOCS_HEADING}\n"
+        f"{ASSEMBLY_W9_END}\n"
     )
     window = _assembled_scope_window(good)
     assemble_offset = window.find(ASSEMBLE_INVOKE_MARKER)
