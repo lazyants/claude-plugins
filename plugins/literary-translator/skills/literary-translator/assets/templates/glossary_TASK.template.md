@@ -9,17 +9,16 @@ per call. Style authority: `style_bible.md` -- section C for the
 naming/title-mapping rule, section C-translit for this project's own
 fixed practical-transcription rule.
 
-## Why this exists (read once)
+## Scope (read once)
 
-A name, title, or realia term must translate identically everywhere it
-appears in the book, independent of which segment happens to be in
-context at the moment a translator drafts it. `canon.json` exists so that
-decision is made once, here, validated, and frozen -- never re-decided
-inside a segment's own translation pass, and never re-litigated by a
-later batch. **Never re-decide or override any `source_form` already
-present in `canon.json`'s own `entries{}`** -- this batch resolves only
-the new candidates you are handed below, which were already filtered
-against the current `canon.json` before you were dispatched.
+A name, title, or realia term must translate identically everywhere in the
+book, whichever segment happens to be in context when a translator drafts
+it, so `canon.json` freezes each decision once -- never re-decided inside a
+segment's own translation pass, never re-litigated by a later batch.
+**Never re-decide or override any `source_form` already present in
+`canon.json`'s own `entries{}`** -- this batch resolves only the new
+candidates you are handed below, which were already filtered against the
+current `canon.json` before you were dispatched.
 
 ## Input
 
@@ -65,14 +64,10 @@ canon-batch item:
   marker described under `source_form` always gets
   `disposition: "review_queue"`, never `"accepted"` -- whatever you can
   make of the part you can see, and even when the visible part looks like
-  a perfectly resolvable name. Say in the `note` that the candidate's
-  name was machine-truncated, so a human can go and look at the real run
-  in the source. An over-long run is normally not a name at all (an
-  all-caps licence block, a running header, a dedication page, or OCR
-  damage that welded a paragraph into one token), and accepting one
-  freezes a spelling into `canon.json` that no occurrence of it can ever
-  match: the entry would sit there looking resolved while contributing
-  nothing to the book.
+  a perfectly resolvable name. Say in the `note` that the name was
+  machine-truncated, so a human can look up the real run in the source: an
+  over-long run is usually not a name at all, and a truncated spelling
+  frozen into `canon.json` matches no occurrence in the book.
 - **`basis`** (accepted items only) -- exactly one of:
   - **`established`** -- a real, already-current target-language form
     exists for this name. Confirm it through an actual reference source

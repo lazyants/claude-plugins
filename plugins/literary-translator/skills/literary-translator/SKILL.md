@@ -350,25 +350,11 @@ bare grep count is useless as a re-check either way. Read
 verdict instead — it parses the file with `ast` and only flags a genuine
 executable reference (an `ast.Name` node), never a prose mention.
 
-**Migration note, mandatory before `resolve_codex_companion.py` is copied on
-any project scaffolded before this correction:** its destination,
-`${durable_root}/scripts/resolve_codex_companion.py`, was explicitly EXCLUDED
-from this copy pass until now, and the "unconditional overwrite, safe since
-these files are never hand-edited" premise the rest of this copy pass rests on
-was NEVER true for this one path — a project that hit the exit-2 default-
-launch defect this correction fixes could have reasonably worked around it by
-placing its own adapted copy exactly there, on the explicit strength of that
-destination being documented as untouched. That window is CLOSED and its
-population was MEASURED at zero: Step 0a has been writing this exact path
-since the correction, so what sits there now is a managed copy on every
-project that has scaffolded since, and on the two live books checked before
-the regular-file limb was cut (`historiettes-fr-ru/tome1`, `ssk-he-en/vol2/run`)
-it was a managed copy in both — two managed copies, zero hand adaptations.
-
 **Overwriting an adapted REGULAR file at this destination is an ACCEPTED
-TRADEOFF, stated so it is not rediscovered as a bug.** A regular file adapted
-during that window is overwritten with no backup and no warning — and on a
-RESUMED project (outcome 2 above) with NO collision detection of any kind,
+TRADEOFF, stated so it is not rediscovered as a bug.** A regular file adapted at
+`${durable_root}/scripts/resolve_codex_companion.py` while that destination was
+documented as never copied is overwritten with no backup and no warning — and on
+a RESUMED project (outcome 2 above) with NO collision detection of any kind,
 since that detection exists only on outcome 3's ambiguous-adoption path, which
 outcome 2's own root marker match bypasses entirely. The retired check was
 byte-identity to the shipped source: it reads "MANAGED" only while the shipped
@@ -403,10 +389,10 @@ place while reporting success:
   - **Anything else** — a symlink (identical-looking target or not — lstat
     does not resolve it, so its target content is never compared), a
     directory, or any other non-absent, non-regular entry `os.lstat()`
-    reports — → HALT before copying anything. This limb is NOT part of the
-    expired migration and does not expire with it: it exists because a copy
-    over a symlink writes THROUGH it, so the shipped file never lands at
-    the destination at all while the copy reports success.
+    reports — → HALT before copying anything. This limb is NOT migration
+    leftover and never expires: it exists because a copy over a symlink writes
+    THROUGH it, so the shipped file never lands at the destination at all
+    while the copy reports success.
     Name the exact path and state plainly that a pre-existing,
     non-managed entry sits there and this copy pass will not touch it
     silently. Instruct the operator PER ENTRY KIND, never one generic
@@ -980,13 +966,10 @@ here, follow the linked doc:
   from the user's answers to the questionnaire that same Step 0 run prints.
   (Its other fields — `source.path`, `durable_root`, the source-format and
   adapter knobs — are read off this book's own material, and always were;
-  they are not decisions anyone is asked to make.) Writing the file
-  by hand, or answering a fresh copy's sentinels from its own inline comments,
-  produces a complete profile carrying real values instead of `CHOOSE_`
-  sentinels, so the placeholder scan has nothing left to ask, Step 0 prints
-  `OK`, and every intake decision the user was supposed to make is taken
-  instead by whoever typed the file — silently, and printing exactly what a
-  run that answered all of them prints.
+  they are not decisions anyone is asked to make.) Writing the file by hand,
+  or answering a fresh copy's sentinels from its own inline comments, takes
+  every INTAKE DECISION silently and prints exactly what a run that answered
+  all of them prints; Step 0's item 1 states that failure in full.
   **The check, because a rule nobody can verify is a wish:** after Step 0a and
   before the first dispatch, `select_segments.py --classify-only` must report
   every unit `not_started`. Anything else means state arrived from somewhere.
@@ -2142,14 +2125,12 @@ what `resume_setup.py`'s `subst` payload must carry. The DEFAULT path
 (`segment_dispatch_driver.py`, below) instantiates no template at all.
 
 **#412:** that same instantiation ALSO substitutes `{{PLUGIN_ROOT}}` — this
-skill's own directory, the SAME value this skill's own
-`{{PLUGIN_ROOT}}` placeholder already resolves to throughout this document
-(Step 0: `${CLAUDE_PLUGIN_ROOT}/skills/literary-translator`), reused here,
-never redefined — NOT `${CLAUDE_PLUGIN_ROOT}` itself, which makes
-`codex_job.py` exit 2 with "does not resolve to a directory containing
-assets/scripts/". Unlike
-this skill's OTHER `{{PLUGIN_ROOT}}` occurrences — plain prose the reader
-substitutes on the fly when typing an example command (Step 0, W2, W3) —
+skill's own directory, the SAME value Step 0 already defines
+(`${CLAUDE_PLUGIN_ROOT}/skills/literary-translator`), reused here, never
+redefined — and NOT `${CLAUDE_PLUGIN_ROOT}` itself, which makes `codex_job.py`
+exit 2 with "does not resolve to a directory containing assets/scripts/".
+Unlike this skill's PROSE occurrences of `{{PLUGIN_ROOT}}`, which a reader
+substitutes on the fly when typing an example command,
 THIS one is a literal Workflow-template token: it must be written into the
 instantiated `mass-translate-wf.template.js` file itself, exactly like
 `{{RUN_ID}}`/`{{EFFORT}}`/`{{MODEL}}`/`{{CODEX_COMPANION_PATH_JSON}}`
@@ -3084,11 +3065,8 @@ lost-token path, this run — never merely because the review happens to be
 current.
 
 **When a unit fails one of the conditions above, the hand-driven procedure
-below is the FALLBACK — no longer the only route.** The currently known
-instances (`seg21`, `FRONTBACK:errata_02`) are both admissible under
-`--from-stalled` on their real on-disk state as of this writing; drive them
-through it rather than by hand. For a unit that genuinely fails the
-profile, the same procedure that used to be the only option remains
+below is the FALLBACK — no longer the only route.** For a unit that genuinely
+fails the profile, the same procedure that used to be the only option remains
 available, entirely OUTSIDE any plugin script, in this exact order:
 
 1. **A fresh review of the current bytes, at the NEXT round label** (e.g.

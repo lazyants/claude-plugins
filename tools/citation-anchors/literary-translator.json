@@ -635,7 +635,7 @@
    ],
    "claim": "// NOT PER_CALL_CAP. #348 suggested making the declared-but-unused // PER_CALL_CAP = 90 load-bearing here; deliberately declined. PER_CALL_CAP // mirrors codex_job.py:215's ceiling for THE DRIVER'S OWN SUBPROCESSES (\"hard // ceiling for ANY single subprocess\") -- a different quantity from this // template's per-agent-call poll bound, and conflating them would make one // constant answer two unrelated questions. WAIT_CHUNK_SEC is the new // load-bearing chunk bound; do not \"restore\" the conflation."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"SKILL.md:443\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"SKILL.md:429\", 0]": {
    "anchors": [
     "never re-copied, never regenerated"
    ],
@@ -949,13 +949,13 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:473\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:459\", 0]": {
    "anchors": [
     "ORCHESTRATION_BUNDLE_MEMBERS` — non-gating for convergence, never part of the"
    ],
    "claim": "STALE_PHRASES = [ (\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"),"
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:475\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:461\", 0]": {
    "anchors": [
     "digest, and also surfaced in W8's reporting"
    ],
@@ -1414,7 +1414,7 @@
    ],
    "claim": "Keep the declaration stable across the whole W7→W9 chain; toggling it between steps is the only way a normal run can make the two gates disagree about the same book. (They read the moved-field list from different authorities -- W7 from `select_segments.py`'s recomputation against the CURRENT cache key, W9 from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887` drops any inherited value and re-derives that list from the same diff, so the two agree by construction on anything a run produces. Hand-editing the materialized `ledger.json` between the two steps can split them; so can editing one segment's `status` to `converged`, which skips both carve-outs"
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3453-3459\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3431-3437\", 0]": {
    "anchors": [
     "Excluded from every bundle hash",
     "nor of `orchestration_bundle_hash`",

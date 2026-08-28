@@ -694,7 +694,7 @@ non-shipped historiettes-t3 provenance project referenced above.
   searching a variant spelling finds nothing; and emit no per-row count
   unless it is re-derived from the artifact itself, an index page being where
   a fabricated number is least likely to be checked. Step 0a copies
-  `PLAN.template.md` once and never refreshes it (`SKILL.md:443`), so a
+  `PLAN.template.md` once and never refreshes it (`SKILL.md:429`), so a
   project scaffolded before the retirement may still name
   `output.index.enabled` in its hand-edited `PLAN.md` intake answer; drop
   that phrase by hand — there is no automatic migration.
