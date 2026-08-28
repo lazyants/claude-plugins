@@ -72,8 +72,8 @@ place the number should be read from.
   `reviewed_draft_sha1`/`dispatch_token` binding check at convergence), and
   `codex_job.py` (`--kind review` — derives the same canonical `review.json`
   for its validate-before-promote). `tests/draft_path_convention.test.py` is
-  extended (not duplicated) to cover all these call sites — recomputed to
-  **10** review-path sites for 1.4.7.
+  extended (not duplicated) to cover all these call sites; the site count
+  is not restated here either — read it from that test.
   **1.2.0:** the written file also carries `dispatch_token =
   <RUN_ID>:<seg>:r<roundLabel>` (`roundLabel` = the round number or
   `final`) — see below.

@@ -129,8 +129,8 @@ READS the on-disk `findings[]`, see §5), plus `review_artifact_check.py`,
 `review_ready.py`, `ledger_merge.py`, and `ledger_update.py` (the last for the
 `reviewed_draft_sha1`/`dispatch_token` binding check) READ it.
 
-`tests/draft_path_convention.test.py` instantiates every one of the **thirteen**
-draft-path call sites and the **ten** review-path call sites against a fixture
+`tests/draft_path_convention.test.py` instantiates every one of the
+draft-path call sites and every review-path call site against a fixture
 and asserts the exact path, failing loudly and naming the offender if any one
 of them drifts. (The regression-lock test counts writer+reader SITES, so its
 review-path site count is larger than the conceptual "readers" list above — that
