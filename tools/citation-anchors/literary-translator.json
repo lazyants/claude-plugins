@@ -1,13 +1,5 @@
 {
  "declarations": {
-  "[\"plugins/literary-translator/skills/literary-translator/SKILL.md\", \"ledger_merge.py:873-887\", 0]": {
-   "anchors": [
-    "entry.pop(\"stale_mismatched_fields\", None)",
-    "fields = stale_mismatched_fields.get(seg)",
-    "entry[\"stale_mismatched_fields\"] = fields"
-   ],
-   "claim": "Keep the declaration stable across the whole W7→W9 chain; toggling it between steps is the only way a normal run can make the two gates disagree about the same book. (They read the moved-field list from different authorities -- W7 from `select_segments.py`'s recomputation against the CURRENT cache key, W9 from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887` drops any inherited value and re-derives that list from the same diff, so the two agree by construction on anything a run produces. Hand-editing the materialized `ledger.json` between the two steps can split them; so can editing one segment's `status` to `converged`, which skips both carve-outs"
-  },
   "[\"plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json\", \"cache_key.py:532\", 0]": {
    "anchors": [
     "compute_profile_semantics_hash"
@@ -156,14 +148,6 @@
     "against a plugin that no longer behaves"
    ],
    "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
-  },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/fix_scope_audit.py\", \"SKILL.md:4069-4071\", 0]": {
-   "anchors": [
-    "registry schemas ship under",
-    "never copied into a durable root"
-   ],
-   "claim": "* `assets/schemas/*.json` -> `${durable_root}/schemas/`. FLAT only: `assets/schemas/registry/` is deliberately plugin-only (SKILL.md:4327-4330) and is never copied, so it is never compared.",
-   "target": "plugins/literary-translator/skills/literary-translator/SKILL.md"
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/glossary_preflight.py\", \"canon_senses.py:25-35\", 0]": {
    "anchors": [
@@ -965,15 +949,6 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3785-3791\", 0]": {
-   "anchors": [
-    "Excluded from every bundle hash",
-    "nor of `orchestration_bundle_hash`",
-    "final_audit.py` is not one of",
-    "never flips a cache key or the resume-integrity digest via either bundle"
-   ],
-   "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
-  },
   "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:473\", 0]": {
    "anchors": [
     "ORCHESTRATION_BUNDLE_MEMBERS` — non-gating for convergence, never part of the"
@@ -1428,6 +1403,31 @@
     "if parent not in seg_block_ids and parent not in footnote_def_block_ids:"
    ],
    "claim": "\"\"\"The verse lives inside the footnote's own DEFINITION text (FN:1), which is never a member of this segpack's own blocks[] -- yet the verse is still included in verses[] because its parent is one of this segpack's footnote_def_block_ids (segpack.py:673's ``parent not in seg_block_ids and parent not in footnote_def_block_ids`` guard).\"\"\" pack = _pack_for(\"c\", extract_mod, tmp_path) _assert_valid_and_hashes(pack)"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/fix_scope_audit.py\", \"references/person-registry.md:28-30\", 0]": {
+   "anchors": [
+    "`assets/schemas/registry/` — Step 0a's copy pass globs",
+    "NON-recursively, so a schema in that subdirectory is neither copied nor hashed"
+   ],
+   "claim": "* `assets/schemas/*.json` -> `${durable_root}/schemas/`. FLAT only: `assets/schemas/registry/` is deliberately plugin-only (references/person-registry.md:28-30) and is never copied, so it is never compared.",
+   "target": "plugins/literary-translator/skills/literary-translator/references/person-registry.md"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"ledger_merge.py:873-887\", 0]": {
+   "anchors": [
+    "entry.pop(\"stale_mismatched_fields\", None)",
+    "fields = stale_mismatched_fields.get(seg)",
+    "entry[\"stale_mismatched_fields\"] = fields"
+   ],
+   "claim": "Keep the declaration stable across the whole W7→W9 chain; toggling it between steps is the only way a normal run can make the two gates disagree about the same book. (They read the moved-field list from different authorities -- W7 from `select_segments.py`'s recomputation against the CURRENT cache key, W9 from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887` drops any inherited value and re-derives that list from the same diff, so the two agree by construction on anything a run produces. Hand-editing the materialized `ledger.json` between the two steps can split them; so can editing one segment's `status` to `converged`, which skips both carve-outs"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3453-3459\", 0]": {
+   "anchors": [
+    "Excluded from every bundle hash",
+    "nor of `orchestration_bundle_hash`",
+    "final_audit.py` is not one of",
+    "never flips a cache key or the resume-integrity digest via either bundle"
+   ],
+   "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
   }
  },
  "exemptions": {

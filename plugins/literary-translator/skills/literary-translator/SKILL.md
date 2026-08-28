@@ -587,66 +587,20 @@ census established nothing read as a healthy project:
   in dry runs too, because a dry run's `missing_sentinels` is what this note
   tells you to act on.
 
-  **Known limitation, narrower than it was but not closed. Read this before
-  trusting a clean report on a live or networked project.** Every sentinel
-  lookup now goes through the directory descriptor the run holds — the census
-  and the writer's `EEXIST` re-read alike — so no read can land in a
-  different directory than the one the run opened. **That settles WHICH
-  DIRECTORY and nothing about the entries inside it**, and two mechanisms
-  reach a wrong answer without ever touching the pathname:
-
-  - a sync client or restore tool rewriting sentinel entries **in place**,
-    which leaves the directory inode unchanged, so the identity check sees
-    nothing wrong;
-  - a sentinel simply deleted after the census classified it PRESENT.
-
-  A third is only partly closed: network-filesystem failover, remount or
-  snapshot switching now surfaces as AMBIGUOUS and fails the run **if it
-  invalidates the descriptor**, but a silent switch that keeps it valid does
-  not.
-
-  **What the dispatch gate now does about it, and what it still cannot do
-  (#442).** The consequence used to be silent retranslation outright:
-  `select_segments.py` gated only the segments it found PRESENT, so a marker
-  that had since gone absent left that segment eligible and the refusal that
-  would have protected converged work never fired. It now fires for the case
-  the marker's own writer makes impossible: `ledger_update.py` cannot publish
-  a `converged` ledger record without first writing the marker, so a selected
-  segment whose materialized record says converged/stale while its marker
-  reads ABSENT is refused, reported as `lost_sentinels`, and pointed at
-  `backfill_ever_converged.py --apply` as the non-destructive remedy. The
-  ledger status is a second witness in a different directory, written by a
-  different writer, and one deleted marker no longer removes both.
-
-  **The residual, stated as a state rather than a promise.** That second
-  witness is mutable. A unit whose status has ALSO moved off converged/stale
-  has neither witness left, classifies as `recoverable`, and is still
-  dispatched silently. Two routes reach that state, and one of them needs no
-  earlier re-dispatch at all: convergence raises the marker *before* it
-  commits the ledger fragment, so a run killed between those two steps leaves
-  a finished, reviewed unit at `in_progress` with its marker up — delete the
-  marker after that and nothing remembers. (The other route is an
-  authorized re-dispatch interrupted after the driver's own `in_progress`
-  write.) **#443 shipped a content-bearing marker and did NOT close this** —
-  provenance describes a marker that exists, and a deleted one has nothing
-  left to describe. Closing it needs a second durable witness this gate can
-  read when the marker is gone: the convergence record committed together
-  with the marker rather than in two directories with two durability
-  stories, or an append-only convergence journal. That remains open on #442
-  itself, with the dispatch-time race tracked separately as #621.
-  Until then: treat a clean run as evidence about the moment it ran, and
-  re-run it immediately before dispatching rather than relying on an earlier
-  result.
-
-  **Two earlier drafts of this note were wrong in opposite directions, which
-  is why it is worth reading rather than skimming.** The first said the
-  failure needs something renaming `segments/` — an understatement, since a
-  rename is one mechanism and not a precondition. The second said closing it
-  "needs a locking protocol honoured by everything that can touch
-  `segments/`" — an overstatement that survived several review rounds because
-  a limitation that sounds cautious never gets attacked. The descriptor was
-  already open; the census simply was not using it, and PR review reproduced
-  a clean report about a directory the project was not using.
+  **Known limitation, narrower than it was but not closed.** The directory
+  descriptor settles WHICH DIRECTORY every sentinel lookup read, and nothing
+  about the entries inside it: a sentinel rewritten in place by a sync client
+  or a restore tool, or simply deleted after the census called it PRESENT,
+  reaches a wrong answer without ever touching the pathname. Before trusting a
+  clean report on a live, synced or networked project — or when a dispatch
+  refuses a segment as `lost_sentinels`, whose non-destructive remedy is
+  `backfill_ever_converged.py --apply` — read
+  `references/sentinel-backfill.md`, "The known limitation (#442/#443/#621)".
+  It states which of the three mechanisms (the two above, plus a
+  network-filesystem failover, remount or snapshot switch) the dispatch
+  gate's `lost_sentinels` refusal now covers, which residual #443's
+  content-bearing marker did NOT close, and why a clean run is evidence about
+  the moment it ran and must be re-run immediately before dispatching.
 - **`ambiguous_sentinels`** — a path whose protection status could not be
   established. That covers both a path that is demonstrably not a regular
   file (a directory, a symlink, a dangling symlink) and one whose state
@@ -673,25 +627,16 @@ census established nothing read as a healthy project:
   must be inventoried by hand — the script makes no claim about them, and
   `success: true` does not cover them.
 
-**`sentinel_attribution` is not on that list, and deliberately so.** The
-report also names, for every marker it found ALREADY present, which writer
-the marker SAYS published it — `ledger_update` (earned at a real convergence,
-carrying that convergence's reviewed draft sha1, plus its run token, and the
-round label when the recording call supplied a run token and a non-empty label
-could be read off the review artifact — evidence is all-or-nothing, so a
-marker whose evidence would not fit records the identity fields alone), `backfill_ever_converged`
-(retrofitted from a ledger row by a run of this script), `unattributed`, or
-`unreadable`. It is a DIAGNOSTIC: it moves no bucket, no count and not
-`success`, and no gate anywhere reads a marker's body. It is also
-**self-reported, not authenticated** — nothing signs the marker, so the value
-is that the plugin's own writers now record their evidence for you to check,
-not that a claim of authorship proves anything on its own. **`unattributed` does not mean unprotected.** Every marker written
-before this field existed is unattributed and protects exactly as it always
-did — that is what makes the change safe to adopt on a project mid-flight,
-and reading it as a defect would invert it. What the field is FOR is the
-question that previously had no answer on disk at all: when a segment's
-ledger row and its marker disagree, whether anything ever observed that
-convergence, or whether the marker was merely asserted.
+**`sentinel_attribution` is not on the six-item list above, and deliberately
+so.** The report also names, for every marker it found ALREADY present, which
+writer the marker SAYS published it. It is a DIAGNOSTIC: it moves no bucket,
+no count and not `success`, no gate anywhere reads a marker's body, and it is
+self-reported rather than authenticated. **`unattributed` does not mean
+unprotected** — every marker written before the field existed is unattributed
+and protects exactly as it always did, which is what makes the change safe to
+adopt mid-flight. Read `references/sentinel-backfill.md`,
+"`sentinel_attribution`", when a segment's ledger row and its marker disagree
+and you need to know whether anything ever observed that convergence.
 
 See `backfill_ever_converged.py`'s own module docstring for the full
 mechanism and CLI contract.
@@ -718,37 +663,12 @@ plugin install path (same exception class as `profile_validate.py` — no
 durable-root copy needed). Filename resolution: lowercase, underscore→hyphen,
 `.md` suffix; halt naming available files if missing.
 
-For `custom` specifically: the schema (`profile.schema.json`) validates
-shape only — the `extractor_path` key is required whenever `format: custom`,
-value must be `string | null`. Step 0c owns the two procedural checks a
-schema can't express:
-
-- If `null`: valid, expected starting state — halt and co-design a
-  hand-crafted Python extractor with the user (informed by
-  `gutenberg-epub.md` as a starting pattern — the one working adapter;
-  `plain-text.md` documents the same target shape as a forward spec for #62,
-  not yet implemented), but its output contract is fixed — must produce a
-  `manifest.json` matching the exact same shape `gutenberg_epub`'s adapter
-  produces (block-ID types, `order_index`,
-  `spine`/`segments`/`footnotes`/`verse.store`, `source_inputs[]`, and final
-  `generation_hashes.source_extraction_hash`/`.source_input_hash` via the same
-  two-phase write), and pass the same round-trip self-check suite plus
-  `manifest.schema.json` validation that `extract.py.template` runs (or a
-  documented equivalent). Once written, the project sets `extractor_path` to
-  point at it.
-- If non-null: FATAL rejection (before existence check) of any value
-  containing `..` or starting with `/` — resolution is against a fixed
-  subtree, `${durable_root}/scripts/custom_extractors/<value>`, never
-  arbitrary. Then check it resolves to an existing file — FATAL, naming the
-  unresolvable path, if not.
-
-Honesty note for W2's managed gate (see below): for `custom`, that gate runs
-schema validation + independent manifest-derivable re-derivation against the
-custom-produced `manifest.json`, but SKIPS the region-hash pin entirely —
-`extract.py` on disk (Step 0a's unconditional template copy) is never the
-real custom extractor, so pinning it would certify nothing. See
-`references/source-format-adapters/custom.md` /
-`references/false-green-gate.md`.
+For `custom`, read `references/source-format-adapters/custom.md` now —
+Step 0c's two procedural checks (the `extractor_path: null` co-design halt;
+the FATAL `..`/leading-`/` rejection before the existence check under
+`${durable_root}/scripts/custom_extractors/`), the fixed output contract a
+co-designed extractor must meet, and why W2's managed gate SKIPS the
+region-hash pin for `custom`, are all there and are not restated here.
 
 ## Step 0d — Resolve output-target adapter
 
@@ -756,51 +676,16 @@ Runs only when `output.v1_scope: assembled_book`. Under the default
 `output.v1_scope: segment_drafts_and_audit`, Step 0d is a deliberate no-op —
 zero resolution work, zero HALT risk — matching the proportionality
 guardrail that a plain translate+gloss job never pays for assembly
-machinery it will never read (`references/assembly-and-output.md`).
-
-When `assembled_book` is selected, resolve the already-schema-validated
-`output.target` (`obsidian` | `epub` | `custom`) via `output_resolve.py`'s
-resolution logic, plus read `output.name_display` and the one
-`output.adapter_config.<target>` sub-block matching the resolved
-target — the others sit inert. This step depends ONLY on the
-already-validated `profile.output` block (no manifest, no ledger, no draft
-required yet) — the same "resolve early, from validated shape alone"
-posture Step 0b/0c already apply to `verse_policy.mode`/`source.format`, so
-a blocking co-design need surfaces at setup time, never mid-project.
-
-- `target: obsidian` resolves to the built-in `render_obsidian` adapter
-  (shipped this increment). `target: epub` maps to the built-in name
-  `render_epub`, a later-phase adapter **not yet written** — so it does not
-  resolve: `output_resolve.py` HALTS, naming the missing `render_epub.py` and
-  the three ways out (stay on `v1_scope: segment_drafts_and_audit` and build
-  the EPUB with a project-local script; `target: custom` with a co-designed
-  renderer; or `target: obsidian`). The enum-to-name mapping is exhaustive
-  over the enum; it was never a claim that every module it names exists, and
-  until this check that gap only surfaced at W9, with the whole book already
-  translated and converged (#726).
-- `target: custom` specifically: the schema validates shape only — the
-  `adapter_config.custom.renderer_path` key is required whenever
-  `target: custom`, value must be `string | null`. Step 0d owns the two
-  procedural checks a schema can't express, the same split Step 0c already
-  applies to `source.adapter_config.custom.extractor_path`:
-  - `null` — valid, the expected starting state — HALT and co-design a
-    hand-crafted Python renderer with the user (informed by
-    `render_obsidian.py` as a starting pattern), against the fixed
-    `render(nodestream, canon, profile, out_dir) -> dict` entry-point every
-    built-in adapter implements
-    (`references/output-target-adapters/README.md`).
-  - Non-null — FATAL rejection (before any existence check) of any value
-    containing `..`, starting with `/`, or not matching the schema's
-    `^[A-Za-z0-9._/-]+$` pattern. Resolution is against a fixed subtree,
-    `${durable_root}/scripts/custom_renderers/<value>`, never an arbitrary
-    filesystem location. Only then does Step 0d check the resolved path
-    actually exists — FATAL, naming the unresolvable path, if not.
-
-Unlike a Step-0c custom-source HALT, which blocks the whole project before
-extraction can even begin, a Step-0d custom-target HALT blocks only
-assembly (W9) — a project can still scaffold, translate, and converge every
-segment with the co-design conversation still outstanding, and only hits
-this HALT once `output.v1_scope: assembled_book` is actually chosen.
+machinery it will never read. When `assembled_book` IS selected, read
+`references/assembly-and-output.md`, "Step 0d — resolving the target,
+early", BEFORE resolving anything: it carries `output_resolve.py`'s
+enum-to-adapter mapping, the `render_epub` HALT and its three ways out, and
+the two procedural checks a schema cannot express for `target: custom` (the
+`renderer_path: null` co-design HALT, and the `..`/leading-`/`/pattern FATAL
+against the fixed `${durable_root}/scripts/custom_renderers/` subtree). A
+Step-0d custom-target HALT blocks only assembly (W9): a project can still
+scaffold, translate and converge every segment with the co-design
+conversation still outstanding.
 
 ## Pre-read mandate
 
@@ -1216,8 +1101,8 @@ produce), not the word *reordering* that actually tears tokens. Adjudicate it:
    identically to an intact one. Settle it on the codepoints.
 2. **Negative** — the signature fired on something benign: record that in the
    project's notes and carry on. Nothing else to do.
-3. **Positive** — paste the clause below into the project's own
-   `style_bible.md`, under `### E-traps`. That is the one place all three turns
+3. **Positive** — paste the clause from `references/gotchas.md` §15 into the
+   project's own `style_bible.md`, under `### E-traps`. That is the one place all three turns
    read: the translator reads the style bible in full, the reviewer names it as
    style authority, and the fix turn reads it before editing.
 
@@ -1234,33 +1119,10 @@ adjudication, never an instruction to any turn. A book whose source is in
 ordinary logical order must never receive it: telling that project's reviewer to
 discount torn-token findings would suppress real defects.
 
-```markdown
-#### E-traps: visual-order source
-
-The extracted source text of THIS book is in VISUAL order, not logical order: a
-PDF-to-EPUB converter emitted runs whose words appear in display sequence, and
-extraction preserved those bytes faithfully. The segpack, `manifest.json` and
-the source EPUB all carry the SAME mangled bytes — there is no unmangled copy to
-consult, so reconstruction is the only recovery. Binding on every turn:
-
-1. **The token order you read is not the author's word order.** Where a span is
-   visually ordered, reconstruct the logical clause before you translate, judge
-   or edit it. Reconstruction is bounded: reverse the order of WORDS, never the
-   characters inside a word (words are themselves stored logically); reverse
-   only a span you have established is WHOLLY reordered, never a partly-affected
-   line; and PRESERVE the internal order of any embedded left-to-right run — a
-   Latin name, a citation sigil, a digit sequence. Treat the result as a
-   hypothesis: keep it only if it yields a grammatical clause consistent with
-   the surrounding context. Where the span is ambiguous or mixed-direction,
-   reconstruct from context and say so — never apply reversal mechanically.
-2. **A short token stranded at a span boundary is usually half of a torn word,
-   not a word.** Do not file a word-order or torn-token finding, and do not act
-   on one, until you have reconstructed the span. Then report only what SURVIVES
-   reconstruction — this is not an instruction to suppress findings.
-3. **Never judge an RTL token by how it looks.** A bidi terminal renders a
-   corrupted token identically to an intact one. Settle any such question on the
-   codepoints.
-```
+The clause itself — a fenced `#### E-traps: visual-order source` block, ready
+to paste unaltered — is `references/gotchas.md` §15. Open that file ONLY on a
+positive adjudication: a book in ordinary logical order must never receive
+the clause, and reading it is not the same as being entitled to paste it.
 
 ### An empty content unit is refused at W2 (#397)
 
@@ -1314,52 +1176,23 @@ leaves it roman".
 Two consequences worth knowing:
 
 - **`source_text` is an UNDECIDABLE UNION of two encodings — do not try to
-  fold it back.** A definition whose emphasis was carried is an HTML fragment:
-  its entities stay escaped, exactly as `source_html` spells them, so a literal
-  `<i>` *inside a carried definition* stays `&lt;i&gt;` and is never confused
-  with a real tag. A definition with no emphasis, or one that could not be
-  carried, is `plain_text` **verbatim** — and a `plain_text` may itself contain
-  a literal `<i>` or a bare `&`. Nothing in the string says which of the two you
-  are holding, so a consumer that strips `</?i>` and unescapes gets the carried
-  case right and **corrupts the fallback case**, inventing text that was never
-  there. Both such folds were written for this change and both were reverted
-  for exactly that reason.
-  **A consumer that needs the definition's exact, unambiguous text reads
-  `manifest.json`'s own `blocks{}` `plain_text`**, and one deciding whether the
-  source marks emphasis reads that block's `source_html` — authoritative, one
-  encoding each, and where the fix turn is already directed.
-  Two report-only checks accept a small, recorded loss rather than fold:
-  `final_audit.py`'s term-consistency check (WARN 6) counts no source occurrence of a
-  pinned term the source italicises across its own middle
-  (`Le pr<i>ésident</i>`), and `verbatim_census.py` splits a source-script run
-  at an intra-word span, so it can queue a correct translation for reading.
-  Both are pinned as characterizations in
-  `tests/segpack_footnote_emphasis.test.py`.
+  fold it back.** A definition whose emphasis was carried is an HTML fragment
+  with its entities still escaped; one with no emphasis, or one that could not
+  be carried, is `plain_text` verbatim and may itself contain a literal `<i>`
+  or a bare `&`. Nothing in the string says which you are holding, so a
+  consumer that strips `</?i>` and unescapes corrupts the fallback case,
+  inventing text that was never there. **A consumer that needs the
+  definition's exact, unambiguous text reads `manifest.json`'s own `blocks{}`
+  `plain_text`**, and one deciding whether the source marks emphasis reads
+  that block's `source_html`.
 - **It never mangles the text, and never invents emphasis.** Three checks
-  decide, and any failure returns `plain_text` unchanged: removing the emphasis
-  tags and unescaping must reproduce `plain_text` exactly; every opener must be
-  closed by a tag of its **own name** (a numerically balanced
-  `<i>a</em>b<em>c</i>` is not balanced at all, and collapsing the names would
-  leave `b` roman); and if no `<i>` survives, the definition is returned
-  verbatim rather than re-encoded — which is what stops a footnote the source
-  never italicised from changing its bytes, and its `note_map_hash`, merely
-  because some other tag was dropped out of it. Tag names are matched with
-  HTML's own syntax rules, never Python's character rules — never `\s` or `\b`
-  for the terminator (`-` and `:` are non-word characters and U+00A0 is `\s`,
-  so `<i-foo>` and `<i` + NBSP + `>` would both read as italic), and never a
-  bare `re.IGNORECASE` for the name (Python folds `i` with U+0130 and U+0131,
-  so `<İ>` and `<ı>` would too — HTML case-folds element names per ASCII, so
-  the classifiers carry `re.ASCII`). So emphasis can be *lost* (markup the
-  two regexes do not model, a definition whose text spans several block tags, a
-  hand-written extractor emitting unbalanced HTML) but never invented or
-  reordered.
+  decide and any failure returns `plain_text` unchanged, so emphasis can be
+  LOST but never invented or reordered.
 
-Markdown `*...*` was the first design and it is **not** what shipped: a
-delimiter has flanking rules a tag does not. `<i>a</i><em>b</em>` conserves
-every character and still emits `*a**b*`; a source backslash before a span
-escapes the delimiter; and CommonMark's punctuation-aware flanking makes
-`<i>mot,</i>x` → `*mot,*x` render as literal asterisks, as it does for the
-equivalent CJK and Hebrew shapes.
+Read `references/w2-gate-disclosures.md`, "Footnote emphasis (#725)", before
+writing any consumer of `footnotes[].source_text`, before proposing markdown
+`*...*` for this again (it records the three ways that design failed), and
+before touching `segpack.py`'s tag classifiers.
 
 **Name candidates are unaffected.** The candidate scan still reads the
 definition's `plain_text`, never the emphasis-carrying `source_text` — `>` is
@@ -1507,24 +1340,16 @@ script (unlike `validate_extraction.py` above), so run the durable copy:
 python3 ${durable_root}/scripts/validate_conservation.py wrapper-conservation
 ```
 
-This is **opt-in**: it is a no-op (prints a NOTE, exits `0`) unless
-`profile.yml` declares `source.conservation` (`baseline_path` +
-`provenance_path`, optionally `allowed_omissions_path`) — only relevant when
-this project's source was hand-wrapped into its current format from some
-other pre-wrap form (e.g. hand-split `pdftotext -layout` output turned into
-an EPUB) and the exact pre-wrap text was preserved as an immutable baseline.
-When declared, it is HARD: it compares the preserved baseline against
-`manifest.json` via the wrap-time provenance map, at word-multiset
-granularity (never byte-exact — legitimate reflow, e.g. the same
-layout-whitespace collapse `source_html` → `plain_text` already performs,
-must never false-RED), catching a hand-wrap that silently dropped baseline
-content (#196), a block that reached the wrap but was truncated/hollowed
-when written (the #202 case `validate_assembled.py` declines at assembly
-time), and a block that was physically shuffled relative to its neighbors
-even though its own content survived intact (`reading_order_reversal`,
-checked against manifest `order_index`). Exit `1` HARD on any defect — the pipeline
-advances to W3 ONLY on exit `0`. See `validate_conservation.py`'s own module
-docstring for the full check spec and the three-artifact contract.
+This is **opt-in**: a no-op (prints a NOTE, exits `0`) unless `profile.yml`
+declares `source.conservation` — only a source hand-wrapped into this project's
+format from some other pre-wrap form, with the exact pre-wrap text preserved as
+an immutable baseline, has one. When it IS declared the gate is HARD: exit `1`
+on any defect, and the pipeline advances to W3 ONLY on exit `0`. What it
+compares, at what granularity, and the three defect classes it catches (dropped
+baseline content, a truncated/hollowed block, `reading_order_reversal`) are in
+`references/w2-gate-disclosures.md`, "Wrapper conservation (#196)", and in
+`validate_conservation.py`'s own module docstring. Read either only when
+`source.conservation` is declared.
 
 **W3 Bootstrap style bible + language smoke test.** After W2 produces
 `manifest.json`, W3's own procedural code (never `profile.schema.json`)
@@ -2306,49 +2131,15 @@ migration tool for no reason.
 
 Only then — on the FALLBACK path — is `mass-translate-wf.template.js`
 instantiated (fresh from the plugin's current copy every run — never reuse a
-stale generated copy), substituting the resolved `{{RUN_ID}}` alongside
-every other token, and `pipeline()` launched. **#197:** the same
-instantiation substitutes
-`{{EFFORT}}` (`engine.effort`) and `{{MODEL}}` (`engine.model`, or an
-empty string when unset) too; the `resume_setup.py` payload's `subst`
-object must carry the resolved `effort` value as well (see the W3
-glossary-pass note above — `compute_input_digest` fails loudly if it's
-missing). **#409:** that instantiation also substitutes `{{MAX_CODEX_JOBS_PER_BATCH}}`,
-a DERIVED token called out here rather than left to the generic "every other
-token" rule above, because it cannot be read straight out of `profile.yml`. It
-is a BARE integer: `engine.max_codex_jobs_per_batch` when the profile sets it,
-otherwise `profile.schema.json`'s own documented `default` for that field. The
-profile key is deliberately OPTIONAL (making it `required` would reject every
-profile written before it existed) but the token is NOT, and JSON Schema
-`default` is an annotation no validator injects, so the orchestrator must apply
-the fallback itself. It joins `SUBST_FIELDS`, so the `subst` object must carry
-the resolved `max_codex_jobs_per_batch` exactly as it carries `batch_agent_cap`.
-The refusal message deliberately does NOT report whether the limit was
-configured or defaulted, and no token carries that provenance: the template
-holds no such information, so the message cannot misstate it. That is a
-correctness property, not an omission — do not "improve" it by threading a
-provenance flag through. Leaving the token unsubstituted is a hard JavaScript
-syntax error at instantiation (verified: `node --check` exits 1 on an
-unsubstituted bare token), not a silent fallback — the same fail-loud property
-`{{CITATION_CONTENT_TYPES}}` relies on. **1.4.7:** as part of that same instantiation the
-orchestrator first runs `resolve_codex_companion.py --durable-root
-${durable_root}` from the plugin's own install path — the orchestrating
-session already has `{{PLUGIN_ROOT}}` in hand at this step, so there is no
-reason to prefer the durable copy Step 0a now also places at
-`${durable_root}/scripts/resolve_codex_companion.py` for the fully
-self-anchored, no-orchestrating-session case (`segment_dispatch_driver.py`'s
-own dispatch path uses that copy instead; see Step 0a's copy-pass section for
-why this script needs no plugin-path-specific behavior either way) — ABORTS
-W5 on any non-zero exit (codex is the required engine per R1 — fail-fast, not
-today's silent no-draft hang), reads
-the raw `companion_path` it prints, `json.dumps`-encodes that string ONCE, and
-substitutes it as the `{{CODEX_COMPANION_PATH_JSON}}` token alongside every
-other. Each per-segment translate/review dispatch then launches codex through
-the detached `codex_job.py` driver (R1/R7), not a `codex:codex-rescue`
-`agent()` call. See `references/orchestration-and-batching.md` for
-the full `{{RUN_ID}}` derivation contract and digest definition, and
-`references/ledger-and-resumability.md` for the `dispatch_token`
-commit-gate chain this sets up for translate/review to enforce per segment.
+stale generated copy) and `pipeline()` launched. That instantiation
+substitutes `{{RUN_ID}}`, `{{EFFORT}}`, `{{MODEL}}`,
+`{{MAX_CODEX_JOBS_PER_BATCH}}` and `{{CODEX_COMPANION_PATH_JSON}}` — the
+last resolved by running `resolve_codex_companion.py` from the plugin's own
+install path, which ABORTS W5 on any non-zero exit — alongside every other
+token. Read `references/orchestration-and-batching.md`'s W5 and "Prompt
+functions" sections BEFORE instantiating, for each token's derivation and
+what `resume_setup.py`'s `subst` payload must carry. The DEFAULT path
+(`segment_dispatch_driver.py`, below) instantiates no template at all.
 
 **#412:** that same instantiation ALSO substitutes `{{PLUGIN_ROOT}}` — this
 skill's own directory, the SAME value this skill's own
@@ -2378,153 +2169,30 @@ vulnerability open** — a codex-tampered copy of any of those three gate
 scripts sitting in `${durable_root}/scripts/` would validate its own bad
 output, and nothing downstream would catch it. Always substitute it.
 
-**#582 — why the ENTRY POINT stays `${durable_root}/scripts/`, and what
-`--plugin-root` does and does not buy.** The W5-and-later commands below run
-their scripts from the durable copy, which the same passes can write to (the
-Step 0 / W2 / W3 commands already run from `{{PLUGIN_ROOT}}`). That asymmetry
-is deliberate and this paragraph is the reason, recorded so it is not
-re-raised per review: **`--plugin-root` moves only the CHECKER a script shells
-out to; nothing here moves the ENTRY POINT.** Relocating individual entry
-points to `{{PLUGIN_ROOT}}` is real defence in depth — it prevents direct
-execution of a tampered durable copy of that one command — but it was
-evaluated and not adopted as the answer here, because it does not close the
-class. The class survives it for two measured reasons:
+**#582/#607 — what bounds the fix turn's writes, and where that is recorded.**
+`--plugin-root` moves only the CHECKER a script shells out to; nothing here
+moves the ENTRY POINT, and that asymmetry is deliberate rather than an
+oversight. On the FALLBACK path only, W5 runs `fix_scope_audit.py` from
+`{{PLUGIN_ROOT}}` after every dispatched fix call — a copy-fidelity check, not
+a write audit — and a mismatch ends the segment (`fix-scope-violation`, or
+`fix-scope-unverified` after two failed relays); both classify
+`human_escalation`, and neither is recoverable on its own. **Read
+`fixScopeHalts` in the batch result before dispatching another batch**: that
+array, not the ledger and not the `reason` string, is what survives a failed
+durable write. The relay residual is stated rather than closed — the audit
+reaches W5 through a model relay, and a relay that fabricates its reply can
+fabricate BOTH numbers; nothing here prevents that.
 
-1. **The fix turn is a write-capable deputy.** On a non-clean, non-final
-   review inside the fix-round budget, `runRound()` calls `callFix()`, which
-   dispatches a PLAIN Claude agent (`agent()` with no `agentType` — not
-   `codex_job.py`, so not sandboxed) and hands it a review whose
-   `issue`/`suggest` text codex itself authored. Since #532 that turn applies an
-   entry only where it can substantiate the claim against the source and refuses
-   the rest, so it is a reader of that free text rather than an executor of it —
-   but it is still a write-capable agent taking untrusted prose as input.
-   `REVIEW_SCHEMA` constrains a finding's SHAPE (`loc`/`severity`/`issue`/
-   `suggest`, strings, no extra keys); beyond that the only content check is
-   that `loc` contains a colon (`AUTHENTIC_LOC_RE`) — `issue` and `suggest`
-   are unconstrained prose. That turn is told to rewrite the draft, but it is
-   neither forbidden nor technically prevented from writing elsewhere. So the
-   surface that decides where a fix lands is an untrusted party's free text
-   reaching a write-capable agent — a surface that sandboxing codex does not
-   reach and that relocating an entry point does not narrow.
-2. **A per-command rewrite does not converge.** The invocations are not a
-   closed set: they live in this file, in `references/`, in the three
-   per-pass TASK prompt templates and in the three workflow templates' own
-   command builders, and a new one is added by any future dispatch. Trust
-   that depends on every call site being spelled correctly is trust that
-   silently lapses the first time one is not.
-
-Note what `--plugin-root` actually does, since it is easy to overstate: it
-BYPASSES a possibly-tampered durable sibling by executing the trusted plugin
-copy instead. It does not detect, report, or repair the tampering — a poisoned
-durable checker simply sits there unexecuted. `plugin_bundle_hash` does not
-detect one either (`cache_key.py` reads the Step-0a marker; it never re-hashes
-the copies).
-
-The durable root holding one project's data, and a human reading the
-deliverable, limit the expected blast radius of the DELIVERABLE — they do not
-bound the fix turn's filesystem write reach.
-
-**What 1.68.0 (#607) did about it, and what it deliberately did not.** Two
-halves shipped. `fixPrompt` now tells that turn it has exactly ONE write
-target, `segments/<seg>.draft.json`, and that a finding whose remedy would
-require editing any other file is refused on that ground alone — a gate
-script edited so that it accepts a draft is never a fix. And after every
-dispatched fix call, before its reply is even inspected, W5 runs
-`fix_scope_audit.py` from `{{PLUGIN_ROOT}}`: a **copy-fidelity check** that
-every file Step 0a copied into this durable root (`scripts/`, `schemas/`,
-`languages/`, the three workflow templates) still equals the plugin bytes it
-came from, plus the two `runs/` bundle markers, whose expected values are
-derivable from the same plugin tree. That closes the specific sentence two
-paragraphs above — `plugin_bundle_hash` never re-hashed the copies; this
-does.
-
-It is a copy-fidelity check and NOT a write audit, and the difference is the
-whole residual:
-
-- Files with **no plugin twin** are not covered — `canon.json`,
-  `canon_senses.json`, `manifest.json`, the segpacks, the ledger, and the
-  one-time template seeds an operator then hand-edits (`style_bible.md`,
-  `extract.py`, the `*_TASK.md` files). Most of those are translation
-  CONTENT. One that is not is `runs/<id>/.resume_gate_ack`, a per-run
-  authorization with no derivable authority: it is gate state, it is
-  uncovered, and it is named here rather than left implicit.
-- It is a **point-in-time** comparison. A write that lands after the audit
-  call returns — a detached child the fix turn spawned — is not in it, and is
-  reproducible. The next audit on that root still finds the divergence, since
-  the check has no baseline and re-reads the plugin bytes every time; the
-  uncovered case is the LAST fix round of a segment that then converges, where
-  no next audit runs.
-- It cannot **confine** the turn. That turn is a plain Claude agent holding
-  the operator's own permissions, and the Workflow `agent()` API offers no
-  filesystem confinement. A party able to alter the PLUGIN tree — including
-  the auditor itself — can make the check report clean while durable
-  divergence remains; a later plugin refresh repairs the auditor but does not
-  retroactively reveal that divergence. What the check changes is that a
-  tamper must now cover a second tree.
-- A **driver-mediated** fix turn is not audited at all.
-  `segment_dispatch_driver.py` returns the rendered fix prompt as `needs_fix`
-  for an external Claude turn and truncates this template before every
-  top-level preflight, so no audit call site fires on that route. Bracketing
-  it needs a digest handed out at `needs_fix` and required back on the next
-  invocation; that is tracked separately and is not in 1.68.0.
-
-**Halt contract.** A mismatch ends the segment with reason
-`fix-scope-violation`; two consecutive failures of the audit relay end it as
-`fix-scope-unverified`. Both attempt a terminal `blocked` fragment and both
-classify `human_escalation`. Neither is recoverable on its own,
-deliberately: leaving the segment `in_progress` would let the next batch run
-over exactly the state the gate could not verify.
-
-That durable fragment, though, is written by `ledger_update.py` FROM the tree
-the audit has just reported as diverging, so the write can fail for the very
-reason the halt fired — and the `in_progress` fragment already on disk
-classifies `recoverable`. So the halt is ALSO recorded where the audited tree
-cannot reach it: a `FIX-SCOPE HALT` log line, and a batch result carrying
-`batchComplete: false` and one `fixScopeHalts` entry per halted segment, each
-with a `ledgerRecorded` flag. The `fixScopeHalts` array is the invariant, not
-the `reason` string: `reason` reads `"fix-scope-halt"` on the ordinary path,
-but a batch whose FINAL ledger merge also failed returns
-`"ledger-merge-failed"` — still `batchComplete: false`, still carrying the
-halts. **Read `fixScopeHalts` before dispatching another batch** — that
-array, not the ledger and not the reason, is what survives a failed write. It does not make the durable record bulletproof; it
-makes a batch that halted unable to end looking clean.
-
-**A clean verdict is honoured only if it counted something.** The script
-reports both `n_checked` and the `n_expected` it derives from the same walk;
-W5 honours `ok: true` only when they are equal and non-zero, and otherwise
-takes the `fix-scope-unverified` path. `ok` alone was a false GREEN — a walk
-that runs zero times prints exactly like one that covered everything.
-
-**What the counts prove is self-consistency, not coverage**, and the check
-does not pretend otherwise: both sides come from the same walk over the
-PLUGIN tree, so a plugin tree that has lost members shrinks them together and
-they still agree. Two verdicts read the population from the DURABLE root
-instead, which the plugin tree cannot shrink — `orphaned`, a
-`${durable_root}/schemas/*.json` with no plugin twin (that directory has no
-sanctioned addition, and a file dropped there is loaded into
-`canon_validate.py`'s registry and hashed into the run identity), and
-`degenerate`, a plugin-side class that yields nothing while the durable root
-still holds files of it.
-
-**`languages/` is the one class where that leaves a hole, and it is a real
-one.** An orphan sweep cannot run there — the documented `fr.local.json`
-override would read as an orphan and cost a segment a re-translation — so
-`languages/` is covered by `degenerate` alone, which fires only on WHOLESALE
-loss. If a plugin tree loses ONE preset (`assets/languages/fr.json`) while
-the others remain, the durable `fr.json` drops out of `compared_pairs()`,
-both counts shrink together, `degenerate` skips the class because plugin
-languages still exist, and a widened edit to that durable file audits CLEAN.
-That is not the disclosed "someone rewrote the auditor" case; an incomplete
-refresh reaches it. The durable language file carries the pair's particle
-configuration, so the consequence is real. It is left open rather than
-patched: every closure needs either a stored baseline (the design this
-release rejected three times) or a naming rule for legitimate overrides that
-SKILL.md does not fix. `tests/fix_scope_audit.test.py` pins the clean result
-so the limitation cannot be lost.
-
-The relay residual is stated rather than closed: the audit reaches W5 through
-a model relay, and a relay that fabricates its reply can fabricate BOTH
-numbers. Nothing here prevents that.
+The full record — why relocating entry points was evaluated and not adopted
+(recorded so it is not re-raised per review), what `--plugin-root` does and
+does not buy, the four classes the copy-fidelity check does not cover, the
+`n_checked`/`n_expected` rule that makes `ok: true` honourable, and the
+`languages/` hole `tests/fix_scope_audit.test.py` pins — is in
+`references/orchestration-and-batching.md`, "The fix turn's write scope
+(#582/#607)". Read it when you are on the fallback path, when a fix-scope halt
+fires, or before proposing a per-command entry-point rewrite. On the DEFAULT
+driver path this whole paragraph is inert: `fix_scope_audit.py` does not fire
+there at all — see "What the default path does NOT carry", item (1), below.
 
 Clearing a halt costs that segment a re-translation — name it under
 `--only-segs`, and for a previously converged segment add
@@ -3829,36 +3497,16 @@ open.
     its current converged-draft text is empty/near-empty (an absolute
     word-count floor, not a length band — see that script's own module
     docstring for why a band is deliberately not built here).
-  - **New in 1.12.0 — a within-cohort output-coverage ratio-outlier
-    surfacer, `Refs #202` (this does NOT close #202 — see the limitation
-    below).** OPT-IN: config `validation.conservation_ratio_band`
-    (`min_source_words_band`/`min_cohort`/`k`/`abs_guard`); absent or
-    `null` means this lane does not run at all and `output-coverage`
-    behaves exactly as it did in 1.11.0. Per cohort
-    (blocks sharing a manifest `type`), it flags `low_coverage_outlier`
-    when a block's output/source word ratio falls below a robust
-    median-and-MAD fence computed from its OWN cohort, AND is well below
-    that cohort's own typical ratio (a second, independent `abs_guard`
-    condition that defends against a degenerate near-zero-MAD cohort).
-    `zero_output_block` and `insufficient_sample` (naming a `reason`)
-    cover the edge cases; a `coverage_distribution` entry
-    (`median_ratio`/`mad`/`fence_ratio` per cohort, `null` when nothing
-    was eligible to compute them from) rides alongside the warnings on the
-    same stdout JSON line.
-  - **Stated limitation — this lane structurally cannot close #202.** It
-    is a within-cohort comparison, never an absolute truthfulness check:
-    if every block in a cohort is truncated by roughly the same
-    proportion, that cohort's own median absorbs the truncation and
-    nothing reads as an outlier — detecting uniform collapse would need a
-    reference outside the audited population, and none exists here. It is
-    also NOT language-pair-agnostic: `normalize_words()` is NFC +
-    whitespace splitting only, no morphological/markup/sentinel
-    normalization, so agglutinative/compounding target languages and
-    markup-heavy blocks produce ratios that are not linguistically
-    comparable across language pairs. What it DOES catch: a few collapsed
-    blocks amid an otherwise healthy cohort — proportional truncation
-    across a range of block sizes, which the absolute floor above cannot
-    see at any single fixed `(min_source_words, max_output_words)` pair.
+  - **New in 1.12.0 — the OPT-IN within-cohort output-coverage ratio-outlier
+    surfacer, `Refs #202`**, which runs only when
+    `validation.conservation_ratio_band` is declared and which
+    structurally cannot close #202 — a within-cohort comparison reads a
+    uniformly truncated cohort as clean. Its config keys, its warning codes
+    (`low_coverage_outlier`, `zero_output_block`, `insufficient_sample`), the
+    `coverage_distribution` payload and the full stated limitation are in
+    `references/assembly-and-output.md`, "Output-coverage — the two lanes and
+    the blind spot". Read that section before declaring the band, and before
+    acting on any warning this lane prints.
   Read the WARN list; it is diagnostic input for W8's report, not a stop
   condition.
 
@@ -3880,96 +3528,18 @@ silent substitute for the segment-drafts handoff (see
 `references/assembly-and-output.md`).
 
 **W9 Assemble** (only when `output.v1_scope: assembled_book`) — assembly
-runs as a plain DETERMINISTIC script step (`assemble.py` then
-`diff_rendered_output.py`), never an agent workflow: it has no
-agent-workflow template of its own, and none is planned. Assembly has no
-review/fix loop and no ledger prompts to schema-validate, so it does not
-mirror `mass-translate-wf.template.js`'s agent machinery. Gated on W7's
+runs as a plain DETERMINISTIC script step, never an agent workflow: it has
+no agent-workflow template of its own, and none is planned. Gated on W7's
 `final-audit-summary.project_complete: true` — the whole-project
-completeness gate, not merely "this batch converged" — assembling a book
-from a project that is not yet fully converged is refused, never silently
-attempted over a partial set. Because that ONE verdict gates the whole step,
-both gates must agree about every unit: `assemble.py` re-derives the same two
-carve-outs (the #491 machinery-only one and, when
-`validation.admit_contract_only_stale` is declared, #533's contract-only one)
-from the same merged ledger rather than trusting the summary. When either
-admits a unit, both name it — `stale_contract_admitted` in W7's summary,
-`contract_stale_admitted` in `assemble.py`'s, and a stderr block in each.
-One asymmetry since #492, and it is deliberate: W9 ALSO admits a contract-only
-drift it detects itself, by comparing the live inputs against each shipped
-record (same declaration, same sentinel condition). Such a unit is still
-`converged` in the merged ledger, so W7's summary — which reads that snapshot —
-has nothing to name yet. W9's list is therefore the authority on what THIS run
-shipped unjudged against the current contract, and may legitimately exceed
-W7's; re-running W7 after the merge brings the two back into step. The same
-holds for `validate_assembled.py` and `validate_conservation.py`, which derive
-their own lists from that snapshot too.
-Keep the declaration stable across the whole W7→W9 chain; toggling it between
-steps is the only way a normal run can make the two gates disagree about the
-same book. (They read the moved-field list from different authorities -- W7
-from `select_segments.py`'s recomputation against the CURRENT cache key, W9
-from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887`
-drops any inherited value and re-derives that list from the same diff, so the
-two agree by construction on anything a run produces. Hand-editing the
-materialized `ledger.json` between the two steps can split them; so can
-editing one segment's `status` to `converged`, which skips both carve-outs
-entirely.)
-
-Run `scripts/assemble.py`, which reconstructs the whole-book reading order
-from `manifest.json` + every converged segment's draft + `ledger.json`'s
-convergence gate into the shared NodeStream artifact, then invokes the
-Step-0d-resolved output-target adapter (`render_obsidian` in this
-increment) to render the book under `${durable_root}/out/` (see
-`references/assembly-and-output.md` for the reconstruction algorithm and
-the NodeStream/anchor-map artifacts).
-
-Then run `scripts/validate_assembled.py` — AFTER `assemble.py` writes
-`out/.assembled/nodestream.json`, BEFORE `scripts/diff_rendered_output.py` —
-the same #202 structural-completeness gate, this time checking that every
-declared heading source marker surfaced as a non-empty `kind:"heading"` node
-in the assembled NodeStream. Exit `1` HARD on a dropped/misclassified
-heading; exit `0` with non-gating WARN entries otherwise.
-
-Then run `scripts/validate_conservation.py output-coverage` — the same
-WARN-only #202 floor + within-cohort ratio-outlier lane as W7 (see above),
-this time reading `out/.assembled/nodestream.json`
-(`output.v1_scope: assembled_book`) instead of converged drafts. Never
-gates; exit `0` always barring an env/usage precondition.
-
-Then run `scripts/diff_rendered_output.py` as the acceptance gate: it
-reduces the ALREADY-rendered output (it renders nothing itself) and diffs it
-against the last accepted baseline — exit `0` on an exact match, `1`
-on a mismatch or guard refusal, `2` when no baseline exists yet
-(`--accept-baseline` freezes the current render as the new baseline). For
-rendered-content equality, the render+diff comparison IS the acceptance
-gate — there is no separate item-count check alongside it (structural
-completeness is `validate_assembled.py`'s distinct concern above, checked
-before this step ever runs). To compare two ALREADY-rendered trees instead —
-the check a project that post-processes the vault needs, and the only one the
-frozen baseline cannot express — pass `--baseline-dir A --candidate-dir B`:
-read-only, no baseline involved, `"mode": "two_tree"` on the verdict.
-
-Then — for `output.target: obsidian`, ON BY DEFAULT unless explicitly
-disabled (`output.adapter_config.obsidian.mentions_section.enabled: false`) —
-run `scripts/validate_backlinks.py` as an **advisory** appendix-integrity gate,
-AFTER `diff_rendered_output.py`. It re-derives the source-anchored occurrence
-universe and checks that every index-eligible entity's `## Mentions` section
-covers its occurrences (metric 1, the sole warning source), plus a
-native-inline-backlink diagnostic and collision/unresolved-homonym reports
-(metric 2, exit-neutral). Unlike the hard gates above, its **exit `1` is
-ADVISORY — log the warnings and CONTINUE W9** (it never blocks assembly);
-only exit `2` (unreadable/malformed input, e.g. a missing
-`out/.assembled/nodestream.json`) halts. When the target is not obsidian, or
-the flag is explicitly disabled, it short-circuits to
-`mentions_coverage.status: disabled`, exit `0`. Against a vault whose entity
-notes a post-processing layer renamed or merged, pass `--entity-note-map FILE`
-(a JSON `{source_form: vault-relative *.md path}`) — without it the gate
-re-derives every note path from the renderer's own rule and reports the whole
-vault missing. The `## Mentions` section is
-a source-anchored occurrence index (mirroring the SSK `build_index.py`
-model) that supersedes the older "native backlinks are the occurrence index"
-stance for `output.target: obsidian` projects; see
-`references/output-target-adapters/obsidian.md`.
+completeness gate, not merely "this batch converged". Before running it,
+read `references/assembly-and-output.md`, "W9 Assemble — the run order, gate
+by gate": the five scripts in their required order (`assemble.py`,
+`validate_assembled.py`, `validate_conservation.py output-coverage`,
+`diff_rendered_output.py`, `validate_backlinks.py`), which exits are HARD
+and which are advisory, and the carve-out agreement that keeps W7's summary
+and `assemble.py`'s own re-derivation naming the same admitted units. Run
+the chain from there, in that order; the two paragraphs below describe what
+that run reports and assume it has happened.
 
 **What collision de-linking cost this book (1.32.0, #588).** On every
 `output.target: obsidian` render — appendix on or off — a
@@ -4021,72 +3591,15 @@ NodeStream into `registry_input.json`'s digest).
 **W9r Person registry — OPT-IN, and opt-in means the operator runs it**
 (1.34.0, #550). For a book translated *for genealogy* rather than for the
 translation, `scripts/person_registry.py` consolidates what the pipeline
-already produced into a person-keyed registry: one record per human being,
-every source form and alias, the target renderings **as actually printed** with
-counts taken from the assembled text, typed kinship each carrying the sentence
-it was derived from, places and dates where stated, mention locations, and an
-identity-contested flag kept separate from the mention count. It writes NEW
-artifacts under `${durable_root}/registry/` only — it reads `canon.json` and
-never writes it, it is in **none** of the three bundle tuples, and it changes
-no cache key. **There is deliberately no `profile.yml` knob**: a project that
-wants a registry runs this step, one that does not never invokes it, and a
-profile key would have moved `${durable_root}/schemas/`'s hash — hence
-`input_digest` — for every project on earth to gate a step nothing auto-runs.
-
-Run it **immediately after the W9 chain above, in the same session** — its
-`--prep` gate detects a partial assembly, a scope change and a post-assembly
-draft edit, but cannot detect a segment re-converged after W9 ran, which the
-emitted artifact states as `assembly_currency: "not_bound"`.
-
-The chain is bound to both inputs it reads: `--prep` hashes `manifest.json`
-and the assembled NodeStream into its own body, and `--claims`/`--build`
-refuse (`manifest_changed` / `nodestream_changed`) when either moved
-underneath. The remedy is always to re-run `--prep`, Pass A, `--claims` and
-Pass B against the current text — never to re-run only the step that failed,
-whose inputs are the stale ones.
-
-Copy `assets/templates/registry_TASK.template.md` → `${durable_root}/
-registry_TASK.md` (a W9r-time copy, NOT a Step-0a one) and fill its bracketed
-placeholders. Then three script calls with two model calls between them:
-
-```
-LT=<the literary-translator skill directory>   # holds assets/schemas/registry/
-python3 scripts/person_registry.py --prep   --plugin-root "$LT"
-#             ->  registry/registry_input.json
-#   Pass A -- ONE call over the whole cast, per registry_TASK.md's Pass A
-#             section  ->  registry/registry_verdicts.json
-python3 scripts/person_registry.py --claims --plugin-root "$LT"
-#             ->  registry/registry_claims.json
-#   Pass B -- a FRESH dispatch whose only semantic inputs are registry_TASK.md's
-#             Pass B section and registry_claims.json; it must NOT inherit Pass
-#             A's conversation and must not read registry_verdicts.json
-#             ->  registry/registry_adjudications.json
-python3 scripts/person_registry.py --build  --plugin-root "$LT"
-#             ->  registry/person_registry.json + registry/PEOPLE.md
-```
-
-`--plugin-root` is not optional from `${durable_root}/scripts/`: the three
-registry schemas ship under `assets/schemas/registry/` and are deliberately
-never copied into a durable root (Step 0a's copy glob and `resume_setup.py`'s
-schema hash are both non-recursive, which is exactly why they live there), so
-`--claims` and `--build` exit `2` with `schema_not_found` without it. Exit `0`
-/ `1` (a rejected verdict) / `2` (a usage or precondition failure), one JSON
-line on stdout.
-
-**Why two model calls and not one.** Deciding that two name forms denote the
-same person is interpretation, so it is a model's judgement — but a
-verbatim-quote check proves only that a sentence EXISTS, never that it says
-what the claim says. A model can cite a real sentence and attach an unrelated
-kinship claim to it, and every structural gate passes. Pass B is the only thing
-in the design that can catch that, and a merge that is plausible and wrong; its
-independence is load-bearing, which is why it is a fresh dispatch. An
-unaffirmed person claim REFUSES (every unit to `refusals[]`, no record emitted)
-rather than splitting into single-unit survivors nobody adjudicated. Both
-passes read the DELIVERED text, not only the source: every context pairs its
-source occurrence with what the book prints in that same container, and a
-printed-surface claim carries the passages where that exact string
-occurs in the assembled corpus, with the true total and a truncation flag. Full contract, the prep universe's three populations, the
-gate table and the stated non-goals: `references/person-registry.md`.
+already produced into a person-keyed registry under
+`${durable_root}/registry/`. It is in none of the three bundle tuples and
+moves no cache key, and there is deliberately no `profile.yml` knob. Run it
+**immediately after the W9 chain (`references/assembly-and-output.md`, "W9
+Assemble — the run order, gate by gate"), in the same session**. The three
+script calls, the two model passes between them, why `--plugin-root` is
+mandatory and what the pass does NOT do are in
+`references/person-registry.md` — read it in full before the first call, and
+do not reconstruct the chain from this paragraph.
 
 ## Reference docs
 

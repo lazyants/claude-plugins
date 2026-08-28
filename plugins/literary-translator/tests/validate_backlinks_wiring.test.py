@@ -30,12 +30,16 @@ from pathlib import Path
 import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-SKILL_PATH = PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md"
+# The W9 run order moved out of SKILL.md into its own reference; the gate this
+# test guards travelled with it, so the window is located there now.
+SKILL_PATH = (
+    PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "assembly-and-output.md"
+)
 
-assert SKILL_PATH.is_file(), f"SKILL.md not found at {SKILL_PATH}"
+assert SKILL_PATH.is_file(), f"assembly-and-output.md not found at {SKILL_PATH}"
 
-W9_HEADING = "**W9 Assemble**"
-REFERENCE_DOCS_HEADING = "## Reference docs"
+W9_HEADING = "#### W9 Assemble — the run order, gate by gate"
+REFERENCE_DOCS_HEADING = "## Why `build_epub.py`"
 
 # The existing diff acceptance-gate invocation (from the shipped W9 prose) --
 # our gate must be wired strictly AFTER it.

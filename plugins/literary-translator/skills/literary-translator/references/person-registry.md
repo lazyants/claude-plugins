@@ -79,6 +79,16 @@ python3 scripts/person_registry.py --build  --plugin-root "$LT"
 `--plugin-root` is not optional here — `--claims` and `--build` exit `2` with
 `schema_not_found` without it, for the reason above.
 
+The chain is bound to both inputs it reads: `--prep` hashes `manifest.json`
+and the assembled NodeStream into its own body, and `--claims`/`--build`
+refuse (`manifest_changed` / `nodestream_changed`) when either moved
+underneath. The remedy is always to re-run `--prep`, Pass A, `--claims` and
+Pass B against the current text — never to re-run only the step that failed,
+whose inputs are the stale ones.
+
+Exit `0` / `1` (a rejected verdict) / `2` (a usage or precondition failure),
+one JSON line on stdout.
+
 Copy `assets/templates/registry_TASK.template.md` to
 `${durable_root}/registry_TASK.md` and fill its bracketed placeholders before
 Pass A. Everything lands under `${durable_root}/registry/` — deliberately not
