@@ -3408,7 +3408,10 @@ already touched still needs an outcome of its own, and there are three:
 re-translates; `--allow-retranslate-converged` authorizes the re-translation,
 which may discard the sweep edit and whose fresh draft is then reviewed like
 any other; and restoring the draft to the bytes its review was taken against
-returns the unit to `reusable` with nothing left to authorize. Which one is
+clears the draft mismatch alone — it returns the unit to `reusable` only when
+no cache-key field moved with it, and when one did (an independently hashed
+input, or an A–F edit moving `style_contract_hash` across every converged
+unit) the unit stays `stale` and still needs one of the first two. Which one is
 the same re-review-versus-re-translate choice intake names as the human's —
 price it per unit rather than settling it for them. What no outcome does is
 deliver a draft the reviewer never saw: `assemble.py` refuses one outright
