@@ -3402,21 +3402,24 @@ wait for. Report the population the last round re-opened, what each route
 costs, and a recommendation, and let the human say whether another sweep
 round opens.
 
-What they decide is the sweep BOUNDARY, not the fate of a draft. Every unit
-already touched still needs an outcome of its own, and there are three:
-`--from-converged` carries the edit into a confirming re-review and never
-re-translates; `--allow-retranslate-converged` authorizes the re-translation,
-which may discard the sweep edit and whose fresh draft is then reviewed like
-any other; and restoring the draft to the bytes its review was taken against
-clears the draft mismatch alone — it returns the unit to `reusable` only when
-no cache-key field moved with it, and when one did (an independently hashed
-input, or an A–F edit moving `style_contract_hash` across every converged
-unit) the unit stays `stale` and still needs one of the first two. Which one is
-the same re-review-versus-re-translate choice intake names as the human's —
-price it per unit rather than settling it for them. What no outcome does is
-deliver a draft the reviewer never saw: `assemble.py` refuses one outright
-("a hand-edit the reviewer never saw must not be assembled") and W7's hard
-check 2 reports the same mismatch independently. Record why the sweep stopped in
+What they decide is the sweep BOUNDARY, not the fate of any one draft. Each
+touched unit still needs its own outcome, and the choice between carrying the
+edit into a confirming re-review (`--from-converged`) and authorizing the
+re-translation that may discard it (`--allow-retranslate-converged`) is the
+same re-review-versus-re-translate choice intake names as the human's — price
+it per unit rather than settling it for them. Restoring a draft to the bytes
+its review was taken against is the third move, and it authorizes nothing by
+itself. **Do not price any of them from this paragraph. Re-run
+`select_segments.py` and read the category it gives each unit**: a restore
+clears the draft mismatch alone, and what a unit needs next follows from its
+classification rather than from what you did to its draft — including a
+`blocked_needs_regeneration` that no override reaches until W2/W3 have rerun.
+Those categories are defined with the selector above, which owns them; this
+section does not restate them, because a second copy of that table is one that
+goes wrong silently. What no outcome does is deliver a draft the reviewer
+never saw: `assemble.py` refuses one outright ("a hand-edit the reviewer never
+saw must not be assembled") and W7's hard check 2 reports the same mismatch
+independently. Record why the sweep stopped in
 `consistency_issues.md`, where a record that authorizes nothing belongs;
 never as a key on a ledger fragment or record, which `ledger_update.py` will
 not write, which both schemas refuse, and which the next ordinary write
