@@ -14,7 +14,8 @@ one entity note per frozen `canon.json` entry, cross-linked by wikilinks —
 and, when the project declares `output.entity_markup` with
 `index_from: markup`, one further note per entity its translator marked
 inline (see "Markup-driven entity notes" below; absent that declaration
-nothing on this page changes). Its own knobs live under
+nothing on this page changes except the two unconditional items named under
+"Editorial brackets"). Its own knobs live under
 `output.adapter_config.obsidian` — currently just `folders` (the
 category→folder catalog, see below); `assets/profile.example.yml` ships the
 shape. `output.entity_markup` is NOT one of them: it is read by
@@ -559,18 +560,22 @@ no link syntax and no escape residue reaches a filename. That flattening runs
 only in `index` mode, so a literal `[[…]]` an operator wrote into a source
 heading on any other project still reaches `title:` exactly as it does today.
 
-One thing there is NOT mode-gated, and it is the single behaviour a project
-declaring nothing can still notice: `_heading_plain_text` scrubs the
-`⟦ENT_n⟧`/`⟦/ENT_n⟧` token pair unconditionally, keeping the payload —
+One thing there is NOT mode-gated, and it is one of the two behaviours a
+project declaring nothing can still notice: `_heading_plain_text` scrubs
+`⟦ENT_n⟧`/`⟦/ENT_n⟧` unconditionally, keeping what sits between a pair —
 exactly the posture the `⟦FNREF_N⟧` anchor scrub beside it already has, and
-for the same reason (a fixed machine shape, never prose). It cannot be
+for the same reason (a fixed machine shape, never prose). Every matching
+token individually, not only a well-formed pair: a lone opener or closer
+ships to a reader just as visibly as a whole one. It cannot be
 gated: `validate_backlinks.py` rebuilds each segment note's filename from the
 PERSISTED nodestream — written by `assemble.py` before this adapter resolved
 anything — and it is handed no mode to gate on, so without the scrub it would
 derive a filename with raw sentinels in it for a segment written without
 them, and report every Mentions link into that segment missing. The cost is
 that a heading carrying that literal machine shape loses it from `title:` and
-from the slug on any project.
+from the slug on any project — and, because such a heading no longer takes
+the byte-identical fast path, has its internal whitespace collapsed there
+too.
 
 **What the coverage guarantee is, and is not.** The adapter refuses
 (`entity_markup_coverage_mismatch`) unless every recorded span resolved
@@ -582,15 +587,20 @@ a plausible operator error — a span in a dedicated verse node's ignored
 `text` — is refused at assemble time instead.
 
 **The vault is checked before it is destroyed.** `_clean_vault_content`
-removes the managed vault before the first note is written, so the whole
-NodeStream value is walked for unresolvable `⟦ENT_n⟧` / `⟦/ENT_n⟧` tokens
-BEFORE that point (`entity_markup_unresolvable`), leaving the existing vault
-untouched on a refusal. A per-note residual check before each write stands
-behind that; with the preflight in place it can only fire on a resolver bug,
-and it is the last thing between a machine token and a reader.
+removes the managed vault before the first note is written, so BOTH inputs a
+note's text is built from are walked for `⟦ENT_n⟧` / `⟦/ENT_n⟧` tokens BEFORE
+that point (`entity_markup_unresolvable`), leaving the existing vault
+untouched on a refusal: the whole NodeStream value, where every token must
+sit in a slot the pre-pass rewrites and pair up one-to-one with a recorded
+span; and the whole of `canon.json`, where any such token is refused
+outright, because an entity note's frontmatter and heading come straight from
+the entry and never pass through the pre-pass. A per-note residual check
+before each write stands behind that; with the preflight covering both inputs
+it can only fire on a resolver bug, and it is the last thing between a
+machine token and a reader.
 
-**Two accepted imprecisions, both about `parenthetical_originals:
-first_occurrence` and neither about a link target.** The pre-pass consults and
+**Three accepted imprecisions, all about `parenthetical_originals:
+first_occurrence` and none about a link target.** The pre-pass consults and
 updates the same book-global set the canon linker uses, so the original-script
 gloss still appears exactly once. But an UNMARKED occurrence earlier in the
 book than the first marked one loses the gloss to the marked one (closing that
@@ -598,15 +608,24 @@ would mean running the canon scan first, which is the two-competing-scans
 design this whole section avoids); and within a single node an inline embedded
 verse is spliced at its placeholder position at render time while the pre-pass
 visits a node's text and its verse content as separate strings, so the gloss
-can land on the later of two marked occurrences inside one node.
+can land on the later of two marked occurrences inside one node; and the
+pre-pass visits every node before any footnote definition while rendering
+delivers segment 1's footnotes before segment 2's prose, so the gloss can
+land in a footnote that the reader meets after an unglossed occurrence in
+later prose. All three are the price of resolving spans in ONE whole-
+NodeStream pass instead of at each rendering site, which is what makes the
+coverage identity checkable at all.
 
 **Editorial brackets.** A bracket the translator places around a name used to
 collide with the wikilink put inside it: `[[[People/Reb Noson|Reb Noson]]]`
 makes Obsidian read the target as `[People/Reb Noson` and leave a stray `]`.
 The outer pair is now escaped at both emission sites, which preserves what the
 reader sees and lets the link parse. This applies to canon links too, so it is
-the one behaviour here that can change rendered output for a project that
-declares no markup at all.
+one of the two behaviours here that can change rendered output for a project
+that declares no markup at all — the unconditional heading scrub above is the
+other. A bracket is treated as escaped on the PARITY of the backslash run
+before it, so `\\[Name]` (an escaped backslash, then a literal bracket) is
+still repaired.
 
 ## Category→folder catalog — presets are EXAMPLES, not an enum
 

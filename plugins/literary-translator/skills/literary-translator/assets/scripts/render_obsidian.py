@@ -43,8 +43,13 @@ real output.
   (`output.adapter_config.obsidian.folders`; absent/unsafe -> `other`).
 - One **markup note** per declared-entity identity `canon.json` has no
   entry for, but ONLY when `output.entity_markup.index_from: markup` is in
-  effect (#795 -- absent that knob nothing below it runs and this adapter's
-  output is byte-identical to 1.72.0). See the "Declared entity markup"
+  effect (#795). Absent that knob nothing below it runs, and this adapter's
+  output matches 1.72.0 except in two deliberate places, both documented
+  under obsidian.md's "Editorial brackets": the outer editorial `[`/`]` around
+  ANY emitted wikilink (canon links included) is now escaped, and a heading
+  whose source text literally contains an `⟦ENT_n⟧`-shaped token has those
+  tokens removed and its internal whitespace collapsed. See the
+  "Declared entity markup"
   section further down for the whole feature: assemble.py records what the
   translator marked, and one pre-pass here turns every recorded span into a
   wikilink to either the canon note or a minted markup note.
@@ -1329,13 +1334,13 @@ def _walk_json_strings(value):
             yield from _walk_json_strings(item)
 
 
-def _entity_markup_preflight(nodestream, spans):
+def _entity_markup_preflight(nodestream, spans, canon):
     """#795 §6.4. Called BEFORE `out_dir.mkdir`/`_clean_vault_content`, for
     the same reason `_validate_link_groups` is: the clean empties the
     existing vault, so a failure discovered while WRITING would leave the
     operator with neither the old vault nor a complete new one.
 
-    Three conditions, all of them fail-closed:
+    Five conditions, all of them fail-closed:
       1. every `⟦ENT_n⟧`/`⟦/ENT_n⟧` token in the whole NodeStream sits in a
          slot the pre-pass actually rewrites (counted, not located -- a
          count over `_walk_json_strings` compared against the same count over
@@ -1343,9 +1348,19 @@ def _entity_markup_preflight(nodestream, spans):
       2. within those slots every token belongs to a well-formed
          `⟦ENT_n⟧…⟦/ENT_n⟧` pair;
       3. every such pair's id has a span record;
-      4. and the INVERSE of 3 -- every span record is used by exactly one
-         pair.
+      4. the INVERSE of 3 -- every span record is used by exactly one
+         pair;
+      5. and no reserved token sits anywhere in `canon.json`, the OTHER
+         source of text this render writes to disk.
     Anything else raises `RenderError("entity_markup_unresolvable")`.
+
+    Condition 5 is condition 4's sibling, closed in the same place for the
+    same reason. An entity note's frontmatter and heading are built straight
+    from the canon entry and never pass through the pre-pass, so a reserved
+    token sitting there is caught only by `_reject_residual_entity_tokens`
+    at WRITE time -- after the clean. Checking canon HERE is what keeps that
+    post-condition a pure resolver assertion rather than a second, later,
+    vault-destroying input gate.
 
     Condition 4 is not symmetry for its own sake: render()'s coverage
     identity (`replaced == links == len(spans)`, §6.5) is checked AFTER
@@ -1404,6 +1419,28 @@ def _entity_markup_preflight(nodestream, spans):
             f"rewrites (first: {unused[:5]}) -- the recorded index would claim "
             "coverage this render cannot deliver. Re-run assemble.py rather "
             "than hand-editing nodestream.json.",
+        )
+
+    # Condition 5 -- see this function's own docstring. `canon` is walked
+    # whole rather than field by field: every string in it is a candidate
+    # for an entity note's aliases, name, category or ref.
+    canon_stray = next(
+        (
+            match.group(0)
+            for text in _walk_json_strings(canon)
+            for match in [_ENT_TOKEN_RE.search(text)]
+            if match
+        ),
+        None,
+    )
+    if canon_stray is not None:
+        raise RenderError(
+            "entity_markup_unresolvable",
+            f"canon.json contains the reserved entity-markup sentinel "
+            f"{canon_stray!r}. Entity notes are built straight from canon "
+            "and never pass through this adapter's resolution pre-pass, so "
+            "that token would ship verbatim to a reader. Remove it from "
+            "canon.json.",
         )
     repeated = sorted((k for k, n in pair_uses.items() if n > 1), key=lambda k: (len(k), k))
     if repeated:
@@ -1520,10 +1557,21 @@ def _wrapped_by_unescaped_brackets(text, start, end):
     operator's own escape (or a previous run's), and re-escaping it would
     show the reader a backslash. The closing side needs no such test -- an
     escaped closer is `\\]`, whose `]` sits one character further right than
-    `text[end]`, so it simply does not match here."""
+    `text[end]`, so it simply does not match here.
+
+    Escape status is the PARITY of the backslash run immediately before the
+    `[`, not the presence of one backslash: in `\\\\[Name]` the two
+    backslashes are themselves an escaped backslash, so the `[` is a LITERAL
+    editorial bracket and does collide. Counting the run costs one loop and
+    removes a whole family of even-length false negatives."""
     if start < 1 or text[start - 1] != "[":
         return False
-    if start >= 2 and text[start - 2] == "\\":
+    run = 0
+    i = start - 2
+    while i >= 0 and text[i] == "\\":
+        run += 1
+        i -= 1
+    if run % 2:
         return False
     return end < len(text) and text[end] == "]"
 
@@ -1645,10 +1693,16 @@ def _reject_residual_entity_tokens(rel_path, note_text):
     sentinel and a reader, checked on each note's final text immediately
     before `_write_note`.
 
-    With the §6.4 preflight in place this can only fire on a resolver bug --
-    which is the point: the preflight proves the INPUT was resolvable, this
-    proves the OUTPUT was actually resolved. Both token forms, because a lone
-    closer ships just as visibly as a lone opener."""
+    With the §6.4 preflight in place this can only fire on a resolver bug:
+    the preflight covers BOTH inputs a note's text is built from -- the
+    NodeStream and canon.json -- so anything reaching here was resolvable
+    and was not resolved. That is the division of labour: the preflight
+    proves the INPUT was resolvable and refuses BEFORE the vault is cleaned,
+    this proves the OUTPUT was actually resolved. Both token forms, because
+    a lone closer ships just as visibly as a lone opener.
+
+    Gated on markup being active at all three call sites, so an undeclared
+    project never runs it."""
     match = _ENT_TOKEN_RE.search(note_text)
     if match:
         raise RenderError(
@@ -1962,10 +2016,18 @@ def _heading_plain_text(node, flatten_wikilinks=False):
         # value, blank it so a raw ⟦…⟧ can never reach the title (#171 invariant).
         text = combined_re.sub("", text)
     text = _TITLE_FNREF_ANCHOR_RE.sub("", text)   # scrub stray anchors not in this node's fnrefs
-    # #795: strip the entity-markup sentinel PAIR, keeping the payload
-    # between them -- the same defense-in-depth the FNREF scrub above is
-    # (⟦ENT_n⟧ is a fixed machine shape, never prose), and load-bearing for
-    # ONE caller in particular. `validate_backlinks.py:780` reconstructs each
+    # #795: strip entity-markup sentinels, keeping the payload between them
+    # -- the same defense-in-depth the FNREF scrub above is (⟦ENT_n⟧ is a
+    # fixed machine shape, never prose), and load-bearing for ONE caller in
+    # particular. UNCONDITIONAL, and every matching token individually: a
+    # LONE opener or closer is removed too, because a half-pair ships to a
+    # reader just as visibly as a whole one. That is also the one way this
+    # function's output can change for a project declaring no markup -- a
+    # heading whose SOURCE text literally contains an ⟦ENT_n⟧-shaped token
+    # now leaves the byte-identical fast path (whose guard tests for it),
+    # so it loses those tokens AND has its internal whitespace collapsed.
+    # Prose says so at `references/output-target-adapters/obsidian.md`
+    # "Editorial brackets". `validate_backlinks.py:780` reconstructs each
     # segment note's filename by calling `_segment_title` against the
     # PERSISTED nodestream.json -- which assemble.py wrote BEFORE render()'s
     # resolution pre-pass ran, so its heading text still carries raw
@@ -2717,7 +2779,7 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # vault nor a complete new one. This walks the WHOLE NodeStream value,
     # not just the strings the pre-pass rewrites.
     if entity_markup_active:
-        _entity_markup_preflight(nodestream, entity_spans)
+        _entity_markup_preflight(nodestream, entity_spans, canon)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     _clean_vault_content(out_dir)  # marker-gated; raises RenderError if unmanaged -- review round 1+2

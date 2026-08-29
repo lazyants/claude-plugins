@@ -35,7 +35,9 @@ eleven local scripts.
   links **every** marked occurrence. A span whose label is already a linkable canon target takes
   the canon note instead of minting a second one, so the two indexes compose rather than compete.
   The tag is part of the identity, not just the folder: `<person>Jordan</person>` and
-  `<place>Jordan</place>` stay two notes rather than being silently merged.
+  `<place>Jordan</place>` stay two notes rather than being silently merged. Composition onto
+  a canon note is conditional on the same identity: it happens only when the canon entry's
+  `category` equals the marked tag, or when that entry carries no `category` at all.
 - **Five assemble-time refusals, all fail-closed, all named.** Markup this pipeline cannot
   render correctly is refused rather than half-processed: a malformed or unpaired element
   (including a malformed use of a *declared* tag name, which would otherwise ship verbatim);
@@ -43,7 +45,9 @@ eleven local scripts.
   carrying a bracket, a pipe or a line break, none of which survive interpolation into a
   wikilink alias or a note name; a span in the ignored `text` of a dedicated verse node, which
   would be counted and never delivered; and `index_from: markup` under any target but
-  `obsidian`, since no other adapter consumes the spans. The block's own shape is re-validated
+  `obsidian`, since no other adapter consumes the spans. The middle three are checked in
+  `index` mode only — they defend the renderer's emission grammar, and `strip` emits no
+  wikilink, note name or heading to defend. The block's own shape is re-validated
   at runtime too — `assemble.py` does not run jsonschema, so a profile hand-edited after Step 0
   is checked where it is used, not only where it was written.
 - **The vault is checked before it is destroyed.** `render_obsidian.py` deletes the managed
@@ -52,8 +56,9 @@ eleven local scripts.
   identity and a per-note residual check stand behind it.
 - **An editorial bracket around a name no longer breaks its link.** `[[[Note|Name]]]` made
   Obsidian read the target as `[Note` and leave a stray `]`; the outer pair is now escaped, which
-  preserves what the reader sees and lets the link parse. This is the one change that can alter
-  rendered output for a project that declares nothing.
+  preserves what the reader sees and lets the link parse. This is one of the two changes that
+  can alter rendered output for a project that declares nothing — the heading-title scrub
+  above is the other.
 
 **Migration.** No cache-key field moves, so **nothing re-translates** and nothing is blocked
 needing regeneration. Two real costs: the `profile.schema.json` edit is part of both the resume
@@ -62,7 +67,8 @@ starts fresh rather than resuming — converged segments are untouched either wa
 `render_obsidian.py` edit moves `render_version`: where the rendered content is unchanged the
 render/diff gate still exits 0 with a `stale_baseline` warning, so a baseline re-accept
 (`--accept-baseline --force-accept-baseline`) is needed only where content actually changed —
-a project that declares `output.entity_markup`, or one whose text hits the bracket case above.
+a project that declares `output.entity_markup`, one whose text hits the bracket case above, or
+one whose source heading text literally carries an `⟦ENT_n⟧`-shaped token.
 
 ## 1.72.0 — 2026-08-25
 

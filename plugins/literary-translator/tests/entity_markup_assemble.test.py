@@ -128,7 +128,7 @@ def _write_cache_key_inputs(root: Path, scripts_dir: Path) -> None:
     )
 
 
-def default_profile(output_target="obsidian", entity_markup=None):
+def default_profile(output_target="obsidian", entity_markup=None, custom_renderer_path=None):
     """`entity_markup`: the literal value to write at `output.entity_markup`,
     or the module-level `_OMIT` sentinel to leave the key out entirely. Absence
     and a present-but-malformed block are DIFFERENT states (`off` vs a runtime
@@ -141,7 +141,7 @@ def default_profile(output_target="obsidian", entity_markup=None):
         "adapter_config": {
             "obsidian": {"folders": {}, "mentions_section": {"enabled": False}},
             "epub": None,
-            "custom": None,
+            "custom": {"renderer_path": custom_renderer_path} if custom_renderer_path else None,
         },
     }
     if entity_markup is not _OMIT:
@@ -198,7 +198,8 @@ class _Omit:
 _OMIT = _Omit()
 
 
-def make_root(tmp_path, output_target="obsidian", entity_markup=_OMIT) -> Path:
+def make_root(tmp_path, output_target="obsidian", entity_markup=_OMIT,
+              custom_renderer_path=None) -> Path:
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
@@ -208,7 +209,10 @@ def make_root(tmp_path, output_target="obsidian", entity_markup=_OMIT) -> Path:
     ):
         shutil.copy2(src, scripts_dir / src.name)
 
-    profile = default_profile(output_target=output_target, entity_markup=entity_markup)
+    profile = default_profile(
+        output_target=output_target, entity_markup=entity_markup,
+        custom_renderer_path=custom_renderer_path,
+    )
     profile["project"]["durable_root"] = str(root)
     profile["output"]["destination"] = str(root / "out")
     (root / "profile.yml").write_text(_yaml_dump(profile), encoding="utf-8")
@@ -938,18 +942,74 @@ def test_index_from_markup_under_a_non_obsidian_target_is_fatal(tmp_path):
 def test_strip_mode_is_allowed_under_a_non_obsidian_target(tmp_path):
     """Removing the elements is target-neutral -- only the INDEX needs an
     adapter that consumes it -- so the refusal above must not spread to strip.
-    `custom` would need a co-designed renderer to finish the run, so this
-    asserts the markup pass itself let the run past it: the failure that
-    remains is output_resolve's own, not entity_markup's."""
+
+    Asserting only "the run did not fail for an entity_markup reason" would be
+    vacuous: a run that never scanned anything passes that too. So this ships
+    a real no-op custom renderer, requires the run to SUCCEED, and reads the
+    persisted NodeStream: the element is gone, the payload is in the prose,
+    and there is no `entity_markup` key -- exactly strip mode's contract, now
+    proved under a target that is not obsidian."""
     root = make_root(
-        tmp_path, output_target="custom", entity_markup=PERSON_PLACE
+        tmp_path, output_target="custom", entity_markup=PERSON_PLACE,
+        custom_renderer_path="noop_renderer.py",
+    )
+    custom_dir = root / "scripts" / "custom_renderers"
+    custom_dir.mkdir(parents=True)
+    (custom_dir / "noop_renderer.py").write_text(
+        "def render(nodestream, canon, profile, out_dir):\n"
+        "    out_dir.mkdir(parents=True, exist_ok=True)\n"
+        "    (out_dir / 'book.txt').write_text('ok', encoding='utf-8')\n"
+        "    return {'written': ['book.txt'], 'kind': 'file'}\n",
+        encoding="utf-8",
     )
     build_book(root, p1_text=f"Prose <person>Jean</person> {FN_PH_1} done.")
 
     proc = run_assemble(root)
-    payload = parse_one_json_line(proc)
-    assert payload.get("reason") != "entity_markup_index_unsupported_target", payload
-    assert "entity_markup" not in (payload.get("error") or ""), payload
+    payload = assert_ok(proc)
+    assert payload["entity_markup"]["mode"] == "strip", payload
+    assert payload["entity_markup"]["spans"] == 1, payload
+
+    nodestream = read_nodestream(root)
+    assert "entity_markup" not in nodestream, sorted(nodestream)
+    assert node_by_id(nodestream, "p1")["text"] == f"Prose Jean {FN_PH_1} done."
+
+
+def test_strip_mode_accepts_a_payload_and_ref_index_mode_would_refuse(tmp_path):
+    """The three renderer-facing refusals are index-gated ON PURPOSE, and that
+    relaxation needs its own pin or it silently becomes a refusal again.
+
+    Strip mode deletes the element and puts the payload back byte for byte --
+    it emits no wikilink alias, no note name and no `# H1` -- so a bracket, a
+    pipe and a footnote sentinel inside a marked run are ordinary text here.
+    All three sit in the payload and are asserted to survive INTO the prose
+    rather than merely to avoid a refusal; the `ref` carries a bracket and a
+    pipe of its own, which index mode also refuses. The ref cannot carry the
+    footnote sentinel as well -- this book anchors ⟦FNREF_1⟧ exactly once, and
+    a second use is `duplicate_footnote_ref` long before this pass runs."""
+    root = make_root(tmp_path, entity_markup=PERSON_PLACE)
+    payload_text = f"Jean [le sage] | {FN_PH_1}"
+    build_book(
+        root,
+        p1_text=f'Prose <person ref="a|b [x]">{payload_text}</person> done.',
+    )
+
+    proc = run_assemble(root)
+    result = assert_ok(proc)
+    assert result["entity_markup"]["mode"] == "strip", result
+
+    nodestream = read_nodestream(root)
+    assert "entity_markup" not in nodestream, sorted(nodestream)
+    assert node_by_id(nodestream, "p1")["text"] == f"Prose {payload_text} done."
+
+
+def test_index_mode_still_refuses_the_text_strip_mode_accepts(tmp_path):
+    """The other half of the pin above -- without it, "strip accepts X" would
+    pass just as well if index accepted X too, and the gating would be
+    untested in the direction that matters."""
+    root = make_root(tmp_path, entity_markup=PERSON_PLACE_INDEX)
+    build_book(root, p1_text=f"Prose <person>Jean [le sage]</person> {FN_PH_1} done.")
+
+    assert_refused(run_assemble(root), "entity_markup_span_unsafe_text")
 
 
 # ===========================================================================
@@ -1060,10 +1120,85 @@ def test_each_mode_predicate_docstring_names_the_other_copy_and_the_divergence(p
         f"{path.name}'s `_entity_markup_mode` docstring no longer names its "
         f"counterpart in {other}"
     )
-    assert "index_unsupported_target" in doc, (
-        f"{path.name}'s `_entity_markup_mode` docstring no longer names the one "
-        f"divergence between the two copies (this file raises where the other "
-        f"reports a value, or vice versa)"
+    for marker in ("index_unsupported_target", "entity_markup_config_invalid"):
+        assert marker in doc, (
+            f"{path.name}'s `_entity_markup_mode` docstring no longer names the "
+            f"{marker!r} divergence between the two copies (one raises where "
+            f"the other reports a value)"
+        )
+
+
+# The docstring pins above are prose about behaviour. This is the behaviour:
+# both copies resolved against the SAME profiles, in one subprocess, so a
+# maintainer who edits one and not the other gets a RED here and not only a
+# docstring complaint. `sys.path` is the shipped scripts directory, exactly
+# how assemble.py reaches its own siblings at runtime.
+_MODE_AGREEMENT_MATRIX = [
+    # (profile, expected assemble answer, expected render answer)
+    # `assemble` answers are either a mode string or "raise:<reason>".
+    ({"output": {"target": "obsidian"}}, "off", "off"),
+    ({"output": {"target": "obsidian",
+                 "entity_markup": {"tags": ["person"]}}}, "strip", "strip"),
+    ({"output": {"target": "obsidian",
+                 "entity_markup": {"tags": ["person"], "index_from": "canon"}}},
+     "strip", "strip"),
+    ({"output": {"target": "obsidian",
+                 "entity_markup": {"tags": ["person"], "index_from": "markup"}}},
+     "index", "index"),
+    # Divergence 1 -- unsupported target: assemble refuses, the renderer stays inert.
+    ({"output": {"target": "custom",
+                 "entity_markup": {"tags": ["person"], "index_from": "markup"}}},
+     "raise:entity_markup_index_unsupported_target", "index_unsupported_target"),
+    # Divergence 2 -- a present-but-non-mapping block: assemble refuses, the
+    # renderer resolves it to "off" (assemble.py has already refused on every
+    # real path, so the renderer's answer is reached only standalone).
+    ({"output": {"target": "obsidian", "entity_markup": "person"}},
+     "raise:entity_markup_config_invalid", "off"),
+]
+
+_MODE_AGREEMENT_PROBE = r"""
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import assemble, render_obsidian
+
+out = []
+for profile in json.loads(sys.argv[2]):
+    try:
+        a = assemble._entity_markup_mode(profile)
+    except assemble.AssembleError as exc:
+        a = "raise:" + (getattr(exc, "reason", None) or "?")
+    out.append([a, render_obsidian._entity_markup_mode(profile)])
+print(json.dumps(out))
+"""
+
+
+def test_the_two_mode_predicates_resolve_every_profile_the_same_way(tmp_path):
+    """The behavioural half of the two-copy contract. Docstring markers rot
+    loudly; a predicate that silently starts answering `strip` where its twin
+    answers `index` does not, and it would ship an index the operator asked
+    for and did not get -- or spans nothing consumes. Every row of the mode
+    table gets asserted here, INCLUDING both deliberate divergences, so
+    "divergent" stays a short closed list rather than whatever the two files
+    happen to do."""
+    probe = tmp_path / "probe.py"
+    probe.write_text(_MODE_AGREEMENT_PROBE, encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(probe), str(SCRIPTS_SRC_DIR),
+         json.dumps([row[0] for row in _MODE_AGREEMENT_MATRIX])],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    got = json.loads(proc.stdout)
+    expected = [[row[1], row[2]] for row in _MODE_AGREEMENT_MATRIX]
+    assert got == expected, (
+        "the two `_entity_markup_mode` copies no longer agree row for row.\n"
+        + "\n".join(
+            f"  {json.dumps(row[0], sort_keys=True)}\n"
+            f"    expected assemble={row[1]!r} render={row[2]!r}\n"
+            f"    got      assemble={g[0]!r} render={g[1]!r}"
+            for row, g in zip(_MODE_AGREEMENT_MATRIX, got)
+            if [row[1], row[2]] != g
+        )
     )
 
 

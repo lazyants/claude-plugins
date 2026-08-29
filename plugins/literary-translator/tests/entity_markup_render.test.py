@@ -923,7 +923,7 @@ def test_already_escaped_brackets_are_left_alone(tmp_path):
 
 
 # ===========================================================================
-# 17. validate_backlinks.py against a vault that contains markup notes.
+# 17b. validate_backlinks.py against a vault that contains markup notes.
 # ===========================================================================
 
 _STUB_OCCURRENCE_TARGETS_SRC = '''\
@@ -1397,6 +1397,172 @@ def test_the_ent_heading_scrub_is_unconditional_even_with_no_declared_markup(tmp
         "only the title and slug are scrubbed -- the rendered heading body "
         "keeps the literal, exactly as the ⟦FNREF_N⟧ anchor scrub beside it does"
     )
+
+
+# ===========================================================================
+# 18. The three things review round 2 found untested, each pinned where it
+#     actually decides something.
+# ===========================================================================
+
+def test_an_even_backslash_run_is_a_literal_bracket_and_is_still_repaired(tmp_path):
+    """Escape status is the PARITY of the backslash run before the `[`, not
+    the presence of one backslash. In `\\[Name]` the two backslashes are an
+    escaped backslash, so the `[` is a LITERAL editorial bracket and does
+    collide with the wikilink put inside it -- the exact case the fix exists
+    for. Treating any preceding backslash as proof of escaping shipped
+    `\\[[[People/…|…]]]` to the reader, which is the original bug with one
+    more backslash in front of it."""
+    nodes = [make_node("p1", "seg01", f"And \\\\[{ent(1, 'Reb Noson')}] spoke.")]
+    out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans={"1": span("person", "Reb Noson")}),
+        make_canon({}), make_profile(),
+    )
+    body = segment_note_texts(out_dir)[0]
+    assert "And \\\\\\[[[People/Reb Noson|Reb Noson]]\\] spoke." in body, f"got:\n{body}"
+    assert manifest["entity_markup"]["brackets_escaped"] == 1
+
+
+def test_canon_carrying_the_reserved_token_is_refused_before_the_vault_is_cleaned(tmp_path):
+    """An entity note's frontmatter and heading are built STRAIGHT from the
+    canon entry and never pass through the resolution pre-pass, so a reserved
+    token sitting in canon.json reaches `_reject_residual_entity_tokens` only
+    at WRITE time -- after `_clean_vault_content` has emptied the operator's
+    vault. Same class as the two span-record conditions beside it, and closed
+    in the same place: the preflight walks canon too."""
+    out_dir = make_managed_vault(tmp_path)
+    canon = make_canon({"Иван": canon_entry("Иван", f"Ivan {ent(1, 'x')}")})
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Ivan')} arrived.")]
+
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(
+            tmp_path, make_nodestream(nodes, spans={"1": span("person", "Ivan")}),
+            canon, make_profile(), out_dir=out_dir,
+        )
+    assert excinfo.value.reason == "entity_markup_unresolvable", excinfo.value.reason
+    assert "canon.json" in str(excinfo.value)
+    assert (out_dir / "SURVIVOR.md").is_file(), (
+        "the refusal must fire BEFORE _clean_vault_content -- the operator "
+        "keeps the vault they already had"
+    )
+
+
+def test_the_footnote_ordering_imprecision_is_what_the_docs_say_it_is(tmp_path):
+    """An ACCEPTED imprecision, pinned so it stays accepted rather than
+    drifting silently. The pre-pass visits every NODE before any footnote
+    definition, while rendering delivers segment 1's footnotes before segment
+    2's prose. So with the only two occurrences in seg01's FOOTNOTE and in
+    seg02's prose, `parenthetical_originals: first_occurrence` puts the gloss
+    on the seg02 prose -- and the reader meets the unglossed footnote
+    occurrence a page earlier.
+
+    What IS guaranteed, and is asserted here beside the ordering, is that the
+    gloss appears exactly once book-wide. Closing the ordering gap would mean
+    running the pre-pass in render order, i.e. resolving spans at each
+    rendering site instead of in one whole-NodeStream pass -- the design this
+    feature deliberately does not have, because it is what makes the coverage
+    identity checkable at all."""
+    nodes = [
+        make_node("p1", "seg01", "A quiet opening.", fnrefs=[1]),
+        make_node("p2", "seg02", f"Later {ent(2, 'Ivan')} left.", order_index=1),
+    ]
+    footnotes = [{"n": 1, "text": f"See {ent(1, 'Ivan')} here.", "seg": "seg01"}]
+    canon = make_canon({"Иван": canon_entry("Иван", "Ivan")})
+    out_dir, _manifest = render_into(
+        tmp_path,
+        make_nodestream(nodes, footnotes=footnotes,
+                        spans={"1": span("person", "Ivan"),
+                               "2": span("person", "Ivan")}),
+        canon, make_profile(parenthetical_originals="first_occurrence"),
+    )
+    first, second = segment_note_texts(out_dir)
+    assert "[[People/Иван|Ivan]] here." in first and "(Иван)" not in first, (
+        f"expected the EARLIER page's footnote occurrence to be unglossed:\n{first}"
+    )
+    assert "[[People/Иван|Ivan]] (Иван) left." in second, (
+        f"expected the gloss on the LATER page's prose occurrence:\n{second}"
+    )
+    assert (first + second).count("(Иван)") == 1, (
+        "exactly-once book-wide is the guarantee, and it still holds"
+    )
+
+
+# ===========================================================================
+# 19. Composition identity is NFC-normalized and tolerant of a canon
+#     `category` that is not a string at all.
+# ===========================================================================
+
+def test_composition_matches_across_unicode_normalization_forms(tmp_path):
+    """`_entity_markup_identity` NFC-normalizes the label and the canon index
+    is built the same way, so a payload spelled in DECOMPOSED form still
+    composes with a canon entry stored precomposed. Without that, one
+    invisible difference in spelling mints a duplicate note beside the canon
+    one and the operator sees two entries for one person."""
+    precomposed = "Jos\u00e9"                    # e-acute as one code point
+    decomposed = "Jose\u0301"                    # e + combining acute
+    assert precomposed != decomposed
+    canon = make_canon({"Хосе": canon_entry("Хосе", precomposed)})
+    nodes = [make_node("p1", "seg01", f"{ent(1, decomposed)} arrived.")]
+    _out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans={"1": span("person", decomposed)}),
+        canon, make_profile(),
+    )
+    assert entity_note_relpaths(manifest) == ["People/Хосе.md"], (
+        "a decomposed payload must compose with the precomposed canon entry, "
+        "not mint a second note for the same person"
+    )
+    assert manifest["entity_markup"]["notes"] == 0
+
+
+@pytest.mark.parametrize("category", [5, ["place"], {"name": "place"}, True])
+def test_a_canon_category_that_is_not_a_string_composes_like_an_absent_one(
+    tmp_path, category
+):
+    """`_canon_composition` tests `isinstance(category, str)` deliberately: a
+    non-string `category` is not a CONTRADICTION, it is an unreadable field,
+    and the no-category rule already says canon speaks only where it has
+    actually spoken. Pinned because the alternative -- comparing whatever the
+    field holds against the tag -- would refuse composition on every such
+    entry and mint the duplicate note the whole feature exists to avoid."""
+    entry = canon_entry("Ярдэн", "Jordan", category="place")
+    entry["category"] = category
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Jordan')} arrived.")]
+    _out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans={"1": span("person", "Jordan")}),
+        make_canon({"Ярдэн": entry}), make_profile(),
+    )
+    assert entity_note_relpaths(manifest) == ["other/Ярдэн.md"]
+    assert manifest["entity_markup"]["notes"] == 0
+
+
+# ===========================================================================
+# 20. The heading scrub takes EVERY matching token, not only a well-formed
+#     pair -- and a heading it touches loses the byte-identical fast path.
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "heading_text, expected_title",
+    [
+        pytest.param("Chapter ⟦ENT_1⟧One", "Chapter One", id="lone-opener"),
+        pytest.param("Chapter ⟦/ENT_1⟧One", "Chapter One", id="lone-closer"),
+        pytest.param("Chapter  ⟦ENT_1⟧ One ", "Chapter One", id="whitespace-collapse"),
+    ],
+)
+def test_a_lone_heading_token_is_scrubbed_and_the_title_whitespace_collapses(
+    tmp_path, heading_text, expected_title
+):
+    """A half-pair ships to a reader just as visibly as a whole one, so the
+    scrub is per TOKEN. The collapse is the documented cost: a heading the
+    scrub touches no longer takes `_heading_plain_text`'s byte-identical fast
+    path, so its internal whitespace is normalized. Both are asserted here
+    because both are behaviour an undeclared project can notice."""
+    heading = make_node("h1", "seg01", heading_text, kind="heading", raw_type="H2")
+    out_dir, manifest = render_into(
+        tmp_path, make_nodestream([heading], spans=None), make_canon({}),
+        make_profile(entity_markup=False),
+    )
+    written_slugs = [rel for rel in manifest["written"] if "/" not in rel]
+    assert written_slugs == [f"001 {expected_title}.md"], written_slugs
+    assert parse_frontmatter(read(out_dir, written_slugs[0]))["title"] == expected_title
 
 
 if __name__ == "__main__":

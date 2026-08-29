@@ -94,7 +94,7 @@ but the project has not fully converged (any of `not_started`/`recoverable`/
 This closes the previous gap where a project with unconverged segments
 silently exited `0` on the default `segment_drafts_and_audit` delivery path,
 giving it no deterministic delivery-refusal gate to match the engine-loop
-HARD rule already enforced on the `assembled_book` path (`assemble.py:3468`'s
+HARD rule already enforced on the `assembled_book` path (`assemble.py:3473`'s
 `assert_project_complete`). `warnings` and the frontback coverage report
 remain purely informational.
 
@@ -430,7 +430,7 @@ is how a project declares the convention:
 
 ```yaml
 output:
-  entity_markup:                 # ABSENT -> 1.72.0 behaviour, byte-identical
+  entity_markup:                 # ABSENT -> no scan, no key (see the mode table)
     tags: [person, place, work]  # required; the element names the translator may emit
     ref_attribute: ref           # optional, default "ref"
     index_from: markup           # optional, canon | markup; default canon
@@ -442,7 +442,7 @@ predicates are the precedent for that discipline):
 
 | profile | mode | behaviour |
 | --- | --- | --- |
-| block absent | `off` | no scan, no `entity_markup` key, byte-identical output |
+| block absent | `off` | no scan, no `entity_markup` key; assembled output byte-identical (the renderer has two unconditional changes of its own — obsidian.md, "Editorial brackets") |
 | present, `index_from` absent or `canon` | `strip` | the declared elements are removed and their payload kept; no sentinels, no new notes |
 | present, `index_from: markup`, `output.target: obsidian` | `index` | elements become `⟦ENT_n⟧payload⟦/ENT_n⟧` and the spans are recorded; the adapter mints and links notes |
 | present, `index_from: markup`, any other target | FATAL | `entity_markup_index_unsupported_target` — no other shipped adapter consumes the spans, and degrading to `strip` would hand the operator an index they asked for and did not get |
@@ -455,7 +455,13 @@ project itself declared: every position where a declared tag name follows
 `<person ref=x>` and a bare unterminated `<person` are refused rather than
 delivered. `assemble.py` scans block text, verse `rendered` and
 `literal_gloss`, and footnote definitions, and refuses (exit 1, one JSON
-line, `reason` named) on:
+line, `reason` named) on the following. The first two are about the MARKUP
+and fire in both modes; the last three defend the RENDERER's emission
+grammar and are checked in `index` mode only — `strip` puts the payload back
+into the prose byte for byte and emits no wikilink, no note name and no
+heading, so a bracket, a pipe, a line break or a sentinel inside a marked run
+is ordinary text there and refusing it would be a false RED on input that
+mode handles correctly.
 
 - `entity_markup_config_invalid` — the block's own shape. Re-checked HERE
   because `assemble.py` loads the profile through `validate_draft.py`'s
@@ -466,8 +472,8 @@ line, `reason` named) on:
   reports success.
 - `entity_markup_malformed` — unpaired, nested, mismatched, or a malformed
   declared-tag token as above.
-- `entity_markup_span_contains_sentinel` — a machine sentinel or a verse
-  placeholder inside the payload or inside the `ref`. `<person>X⟦FNREF_1⟧</person>`
+- `entity_markup_span_contains_sentinel` (index mode) — a machine sentinel
+  or a verse placeholder inside the payload or inside the `ref`. `<person>X⟦FNREF_1⟧</person>`
   would render as `[[People/X|X[^1]]]`, whose footnote closer collides with
   the wikilink closer; a sentinel inside a `ref` passes the sentinel
   validator when it names a real footnote and would then be lifted out of the
@@ -475,12 +481,12 @@ line, `reason` named) on:
   verse text only — footnote-definition sentinels are already stripped in
   Phase 0/1, before this pass runs, so nothing leaks there and the guard
   simply has nothing to say.
-- `entity_markup_span_unsafe_text` — `[`, `]`, `|`, CR or LF in the payload
-  or the `ref`. Each of those breaks the wikilink alias or the note name the
+- `entity_markup_span_unsafe_text` (index mode) — `[`, `]`, `|`, CR or LF in
+  the payload or the `ref`. Each of those breaks the wikilink alias or the note name the
   renderer interpolates them into, and none of them requires a hostile
   author.
-- `entity_markup_span_unrendered` — a span in the `text` of a `kind: "verse"`
-  node. The renderer builds such a node from `verses[]` alone and ignores its
+- `entity_markup_span_unrendered` (index mode) — a span in the `text` of a
+  `kind: "verse"` node. The renderer builds such a node from `verses[]` alone and ignores its
   `text`, so the span would be recorded, counted and never delivered.
 
 The summary JSON reports `entity_markup: {mode, strings_scanned, spans,

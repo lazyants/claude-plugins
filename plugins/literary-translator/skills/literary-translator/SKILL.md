@@ -713,8 +713,10 @@ goes; that is what `output.entity_markup` declares (`tags`, the optional
 `references/output-target-adapters/obsidian.md`). Ask it HERE, not later:
 the answer is what this project's `style_contract` then has to tell the
 translator to mark, and a convention invented mid-book reaches the reader as
-raw markup. An absent block is 1.72.0 behaviour exactly, so a project that
-wants no marked index answers by saying nothing.
+raw markup. An absent block runs none of it, so a project that
+wants no marked index answers by saying nothing (the release's two
+unconditional renderer changes are named in the CHANGELOG; neither is
+reached by a book that carries no such markup).
 
 This question is deliberately NOT one of the `CHOOSE_` sentinels Step 0's
 questionnaire prints. Those are asked of every project; this one is only

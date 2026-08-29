@@ -2768,8 +2768,8 @@ def _entity_markup_mode(profile: dict) -> str:
     agree on the answer while differing in signature and in how each spells the
     target check.
 
-    THE ONE DIVERGENCE, and it is a divergence in FAILURE VOCABULARY, never in
-    which mode a profile resolves to: this copy RAISES
+    TWO DIVERGENCES, both in FAILURE VOCABULARY, never in which mode a VALID
+    profile resolves to. First: this copy RAISES
     `AssembleError(reason="entity_markup_index_unsupported_target")` on the
     unsupported-target row, and a renderer has no such vocabulary, so
     render_obsidian.py's copy reports that same row as a fourth VALUE
@@ -2779,7 +2779,12 @@ def _entity_markup_mode(profile: dict) -> str:
     runs FIRST on every real path -- `dispatch_adapter()` is the only way the
     built-in renderer is reached from a pipeline run -- so by the time the
     adapter resolves the mode itself, this function has already refused. The
-    renderer's own resolution is reached only when it is invoked STANDALONE."""
+    renderer's own resolution is reached only when it is invoked STANDALONE.
+
+    Second, and for the same reason: a present-but-non-mapping
+    `entity_markup` is a hard `entity_markup_config_invalid` here and
+    resolves to `"off"` there. Both divergences are recorded in the
+    renderer's own copy too; change one docstring and change the other."""
     cfg = _entity_markup_config(profile)
     if cfg is None:
         return "off"
