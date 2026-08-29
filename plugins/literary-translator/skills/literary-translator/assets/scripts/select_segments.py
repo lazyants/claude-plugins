@@ -2393,18 +2393,15 @@ def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict):
     otherwise be a complete authorization. The record must therefore AGREE
     with the path it was found at (its own `seg` and `run_id`), name one of
     this project's own claim profiles, and carry EVERY field
-    `build_claim_record()` writes.
-    The full-shape check is not ceremony: the fourteen fields are what makes a
-    record something only this project's own claim path produces, and a
-    partial object is exactly what a forgery or a half-finished write looks
-    like. It is still not proof of authenticity -- nothing in a plain file can
+    `build_claim_record()` writes. The full-shape check is not ceremony: the
+    fourteen fields are what makes a record something only this project's own
+    claim path produces, and a partial object is exactly what a forgery or a
+    half-finished write looks like. It is still not proof of authenticity -- nothing in a plain file can
     be, and an attacker with durable-root write access can overwrite the draft
     directly -- but it removes the case where three hand-typed keys are a
     complete authorization.
 
-    #796: the record must have been granted under ONE OF THIS PROJECT'S OWN
-    claim profiles, and no longer under the specific profile the caller is
-    admitting for. #460 hard-coded CLAIM_PROFILE_FROM_CONVERGED here and #455
+    #796: #460 hard-coded CLAIM_PROFILE_FROM_CONVERGED here and #455
     generalized it to a required keyword-only `expected_profile`, both on the
     premise that a loop opened under one profile is not a loop opened under
     another. That premise ignores MIGRATION: a unit changes profile population
@@ -2418,12 +2415,11 @@ def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict):
     unit blocked a whole title.
 
     Nothing is relaxed by widening it. The fact this probe establishes is
-    about the DRAFT -- the record is looked up under the draft's OWN owner run
-    (see the ordering note above), it must sit at that path, agree with its own
-    seg/run_id, and carry every CLAIM_RECORD_FIELDS entry. The profile LABEL
-    adds nothing to that, and each caller's own population gates (status,
-    sentinel, drift baseline, S1-S5, D6) are untouched and still decide who may
-    ask. The MUTATION that must turn a test red: narrow the membership test
+    about the DRAFT -- the record is still looked up under the draft's OWN
+    owner run (see the ordering note above), and every other clause above
+    holds unchanged. The profile LABEL adds nothing to that, and each caller's
+    own population gates (status, sentinel, drift baseline, S1-S5, D6) are
+    untouched and still decide who may ask. The MUTATION that must turn a test red: narrow the membership test
     back to a single profile and the cross-profile continuation tests must
     fail -- if they still pass, they are not exercising this at all.
 
@@ -2511,9 +2507,8 @@ def evaluate_open_review_loop_with_recovery(
         # condition is what keeps it there. That path reaches here with
         # `source_run_id` recovered from THIS run's own claim record -- it
         # names the run the draft originally came FROM, which never held a
-        # claim of its own and never should, so asking only
-        # about it would strand exactly the recovery this branch exists to
-        # enable.
+        # claim of its own and never should, so asking only about it would
+        # strand exactly the recovery this branch exists to enable.
         #
         # Gating on the RECOVERY, not merely on "the ids differ", because
         # this run's record proves only that this run once opened a loop on

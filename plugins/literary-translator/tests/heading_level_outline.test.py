@@ -46,7 +46,7 @@ wiring) cannot leave this file green: the firing tests would go red first.
 Interpretation note (see the #233 CONTRACT's own "Exact output" section): the
 contract's illustrative NOTE line shows ``"PEREK"=3 (default)``, but its
 Definitions section is explicit that a defaulted tier is ALWAYS level 2
-(mirroring ``assemble.py:2321``'s ``heading_levels.get(raw_type, 2)``). That
+(mirroring ``assemble.py:2322``'s ``heading_levels.get(raw_type, 2)``). That
 example line is read here as illustrative of the FORMAT only; the fixtures
 below use levels for which "declared" and the ever-present default (2) do
 not collide, and expected strings are derived from that fixed default, never

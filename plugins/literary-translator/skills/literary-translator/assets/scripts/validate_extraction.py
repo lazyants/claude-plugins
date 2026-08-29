@@ -1288,7 +1288,7 @@ def _escape_block_id(block_id: str) -> str:
 # and per-tier: a book can cite three heading-shaped block types and declare a
 # level for none, one, or all of them, and nothing in a schema-valid manifest
 # distinguishes "the operator meant level 2 for this tier" from "the operator
-# forgot to declare this tier" -- assemble.py:2321 resolves an undeclared tier
+# forgot to declare this tier" -- assemble.py:2322 resolves an undeclared tier
 # to level 2 exactly the same way it resolves a tier the operator deliberately
 # pinned there. That ambiguity is why this can only ever be a disclosure, never
 # a HARD check: there is no way to tell the two apart from the manifest alone,
@@ -1341,7 +1341,7 @@ def _cited_heading_tiers(manifest: dict):
 
 def _resolved_heading_level(block_type: str, heading_levels: dict):
     """``(level, is_declared)`` for one tier, mirroring
-    ``assemble.py:2321``'s ``heading_levels.get(raw_type, 2)`` exactly.
+    ``assemble.py:2322``'s ``heading_levels.get(raw_type, 2)`` exactly.
 
     Precondition: the manifest is schema-valid (``main()`` exits 1 on schema
     errors before any advisory runs), so a present value is an ``int`` 1..6.

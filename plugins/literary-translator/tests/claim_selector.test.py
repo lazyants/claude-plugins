@@ -3479,45 +3479,25 @@ def test_evaluate_open_review_loop_refuses_a_none_or_empty_owner_run_id(tmp_path
         assert "no owner whose claim could be read" in reason, reason
 
 
-def test_evaluate_open_review_loop_admits_a_from_stalled_owner_claim_continuing_a_from_converged_loop(tmp_path):
-    """#455 hard-coded a required keyword-only `expected_profile` here, and
-    this test proved it was genuinely READ -- not merely present in the
-    signature -- by asserting a --from-stalled record REFUSED a
-    --from-converged continuation probe, the mismatch itself being the
-    proof. #796 removed that parameter for exactly the reason the from-cap
-    admission test above states: a --from-stalled loop whose driver dies
-    before the convergence write leaves an in_progress unit whose live
-    record still says from-stalled, and the continuation is then asked for
-    under whichever profile now owns the unit. Exact-match refused that
-    migration precisely as it refused the from-cap sibling, and since
-    assemble.py refuses a whole book while any unit is not converged, one
-    such unit blocked a whole title. This test now proves the opposite of
-    what it proved before it was rewritten: a --from-stalled record
-    CONTINUES a --from-converged admission, same as the from-cap record
-    does -- there is no longer a caller-supplied profile for the record to
-    mismatch against, so the old assertion on the mismatch has nothing left
-    to pin."""
-    root = make_durable_root(tmp_path)
-    seg = "seg22"
-    write_owner_claim_record(root, seg, profile="from-stalled")
-
-    mod = _load_select_segments_module(root)
-    dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
-    assert ok is True
-    assert reason == ""
-
-
 def test_evaluate_open_review_loop_permits_a_valid_owner_claim_under_from_stalled(tmp_path):
     """The mirror of the happy-path test above (profile="from-converged"),
-    with a --from-stalled record instead: since #796 removed the
-    keyword-only `expected_profile` parameter, evaluate_open_review_loop()
-    no longer takes a caller-side expectation to compare against at all --
-    it only checks the record's own `profile` field against CLAIM_PROFILES.
-    This pins that from-stalled is genuinely a member of that check, not
-    merely from-converged with the other two profiles left untested; every
-    other test in this section plants from-converged, which would leave a
-    membership check narrowed back to one literal value undetected."""
+    with a --from-stalled record instead. #455 hard-coded a required
+    keyword-only `expected_profile` here, and a SECOND test proved the
+    parameter was genuinely READ -- not merely present in the signature --
+    by asserting that a --from-stalled record REFUSED a --from-converged
+    probe, the mismatch itself being the proof. #796 removed the parameter,
+    so that test's body became character-for-character this one's and its
+    name asserted a distinction the function can no longer draw; it was
+    deleted rather than left as a second copy, and its reason is recorded
+    here instead.
+
+    What is left to pin is MEMBERSHIP: evaluate_open_review_loop() now
+    checks the record's own `profile` field against CLAIM_PROFILES and takes
+    no caller-side expectation at all, so from-stalled must genuinely be a
+    member of that check rather than from-converged with the other two
+    profiles left untested. Every other admitting test in this section
+    plants from-converged, which would leave a membership check narrowed
+    back to one literal value undetected."""
     root = make_durable_root(tmp_path)
     seg = "seg22"
     write_owner_claim_record(root, seg, profile="from-stalled")

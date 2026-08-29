@@ -1394,4 +1394,4 @@ after.** After any driver death, classify first and then read the ledger record 
 every `recoverable`/`in_progress` id — the category label alone reports none of
 the facts that decide which route the unit needs: status and sentinel presence
 pick the profile, and `reviewed_draft_sha1`'s presence no longer excludes
-`--from-stalled` and settles nothing about the route on its own (#796).
+`--from-stalled`, so it settles nothing about the route on its own (#796).
