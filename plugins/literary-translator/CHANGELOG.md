@@ -4,7 +4,7 @@
 
 The fifth batch fold: every merge that landed on `main` after the 1.72.0 cut (`cd5a907`) without a
 version of its own — sixteen commits. Most of them are one campaign, a bloat pass over the
-always-loaded docs, and the rest are four behaviour changes and two gate repairs.
+always-loaded docs, and the rest are four behaviour changes and four gate repairs.
 
 ### What this release costs, measured across the whole range
 
@@ -12,12 +12,13 @@ Measured by materializing both revisions' plugin trees and running `scaffold_set
 `compute_bundle_hash` over each revision's own member tuples — never a re-implementation of the
 scheme:
 
-- **`plugin_bundle_hash` moves** — `c862fcd1…` → `577b9a9d…`. Membership grows 19 → 20:
-  `refuse_finding.py` is new (#764). Five existing members carry byte diffs — `cache_key.py`,
+- **`plugin_bundle_hash` moves** — `c862fcd1…` → `577b9a9d…`. `refuse_finding.py` is new (#764), so `PLUGIN_BUNDLE_MEMBERS`
+  now holds 20 members, up from 19. Five existing members carry byte diffs — `cache_key.py`,
   `codex_job.py`, `ledger_update.py`, `segment_dispatch_driver.py` and
   `mass-translate-wf.template.js`.
 - **`derivation_bundle_hash` and `orchestration_bundle_hash` do NOT move** — `8bc88ab9…` and
-  `d35b28da…` at both revisions, membership unchanged at 2 and 6. So no segpack regeneration and
+  `d35b28da…` at both revisions: `DERIVATION_BUNDLE_MEMBERS` still holds 2 members, and
+  `ORCHESTRATION_BUNDLE_MEMBERS` still holds 6. So no segpack regeneration and
   no `blocked_needs_regeneration` from this release.
 - **`prompt_hash` and `style_contract_hash` do not move either, and that is the load-bearing
   one.** `translate_TASK.template.md`, `review_TASK.template.md` and `style_bible.template.md` all
@@ -39,7 +40,7 @@ dispatch by name rather than being retranslated over.
 ### The always-loaded docs got smaller — SKILL.md 4457 → 3705 lines
 
 Six merges, one campaign. `SKILL.md` is read in full on every run of every project, and a rule
-that binds on a rare path was costing every run that never takes it. Reference files grew 18 → 22
+that binds on a rare path was costing every run that never takes it. The reference set now holds 22 files, up from 18,
 as the destination for what moved.
 
 - **The skeptic pass is documented where it is read** (#779) and **the citation truth check at the
