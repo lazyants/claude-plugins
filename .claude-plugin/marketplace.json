@@ -98,7 +98,7 @@
       "name": "cc-usage-coach",
       "source": "./plugins/cc-usage-coach",
       "description": "Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer \u2014 computed entirely from your local session logs. Python measures; Claude concludes.",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": {
         "name": "Lazy Ants"
       },

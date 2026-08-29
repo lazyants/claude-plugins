@@ -1,5 +1,47 @@
 # Changelog
 
+## [cc-usage-coach 1.0.1] — 2026-08-29
+
+Five commits landed the day after 1.0.0 was published and none carried a version. Merging is
+publishing in this repo — `claude plugin install` resolves straight from the manifests on `main` —
+so those bytes have been shipping under the **1.0.0 label** ever since, and an already-installed
+1.0.0 could not pick them up at all. That is what this number exists to fix; nothing here is new
+work.
+
+Four of the five are privacy fixes from the `lazy-ants-reviewer` review of PR #1, and the fifth is
+a pre-merge audit finding against the plugin's own marketing claim.
+
+- **The shareable `signal_pack.json` is project-name-free.** Project directory names reached it via
+  `pareto.top_projects[].p` and `candidate_sessions.items[].p`; every label is now an opaque
+  `proj_<sha1[:10]>` id, with the id→name map written only to the new LOCAL-ONLY
+  `project_index.json`. A real-data smoke then found a second vector the neutral fixtures could not
+  show: re-read FILENAMES in `read_evidence.repeat_reads` can carry a project or client name even
+  after the directory is stripped, so each is now an opaque `file_<hash>` token with the repeat
+  count preserved.
+- **Local-user identity no longer reaches the shareable pack.** The path-shape home-root test
+  ("parent leaf is `Users`/`home`") cannot see a relocated home under a non-standard parent
+  (`/Volumes/Data/<user>`, `D:\Profiles\<user>`), so the username leaked through `_safe_leaf` /
+  `proj_of`. The tool only ever reads the local user's own logs, so a `_SELF` backstop (home-dir
+  basename, `$USER`, `$LOGNAME`) now drops any path leaf equal to it. A project directory *under*
+  such a home keeps its label.
+- **All four local-only dataset files are `0600` from creation.** Only `sessions.jsonl` was
+  chmodded, and post-hoc — a umask window — while `turns.jsonl`, `tools.json` and `meta.json`
+  stayed world-readable. A new `lib_sessions.open_local_write`
+  (`O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW`, mode `0600` + `fchmod`) routes all four: no umask race,
+  and it refuses a pre-planted symlink at the path.
+- **`arc.py`'s digest is documented as local-only rather than "PATH-FREE".** `redact_paths` is
+  best-effort and misses the same relocated-home shapes; the digest contains the user's prompt
+  text, so the honest scope is local-only, not path-free.
+- **The privacy claim is corrected, and this is the one that changes what a user should expect.**
+  Both READMEs said "no network calls / nothing leaves your machine". The SCRIPTS make no network
+  calls — that part is true and is now scoped to the scripts explicitly. But the report itself is
+  written by the Claude Code model, which on Max/Pro is a cloud model, so feeding `signal_pack.json`
+  plus `arc.py`'s raw prompt excerpts into the model context transmits them to Anthropic's API like
+  any other Claude Code prompt. An interim wording that said the excerpts go to "your own Claude
+  runtime" and "stay on your machine" was itself misleading for a privacy-marketed plugin and is
+  gone. The excerpts are still never written to the shareable pack, and the scripts still add no
+  upload of their own.
+
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
 ## [multi-profile-plugins 1.3.0] — 2026-08-27
