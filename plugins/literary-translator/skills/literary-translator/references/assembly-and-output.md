@@ -94,7 +94,7 @@ but the project has not fully converged (any of `not_started`/`recoverable`/
 This closes the previous gap where a project with unconverged segments
 silently exited `0` on the default `segment_drafts_and_audit` delivery path,
 giving it no deterministic delivery-refusal gate to match the engine-loop
-HARD rule already enforced on the `assembled_book` path (`assemble.py:2918`'s
+HARD rule already enforced on the `assembled_book` path (`assemble.py:3485`'s
 `assert_project_complete`). `warnings` and the frontback coverage report
 remain purely informational.
 
@@ -377,7 +377,14 @@ NodeStream = {
   "book":      { "seg_order": [str,...], "title": str|null },
   "nodes":     [ BlockNode, ... ],                    # whole-book reading order
   "footnotes": [ { "n": int, "text": str }, ... ],    # book-wide, unique n, ASCENDING
-  "meta":      { "target": str, "verse_mode": str, "apparatus_policy": str }
+  "meta":      { "target": str, "verse_mode": str, "apparatus_policy": str },
+
+  # OPTIONAL, present ONLY under output.entity_markup with index_from: markup
+  # (see "Inline entity markup" below). Absent otherwise -- an absent key is
+  # not the same as an empty one, and the renderer ignores this key entirely
+  # unless its own mode predicate says index.
+  "entity_markup": { "spans": { "<n>": {"tag": str, "payload": str,
+                                        "ref": str} } }
 }
 BlockNode = {
   "id": str, "seg": str,
@@ -412,6 +419,80 @@ node order for structural resync:
 used by `diff_rendered_output.py` for structural-completeness checking and
 keyed resync, so one inserted node doesn't cascade a mismatch across the
 whole diff.
+
+#### Inline entity markup — `output.entity_markup` (1.74.0, #795)
+
+A book whose names are not knowable before translation cannot seed a name
+list, so its translator marks entities inline as it goes. Before 1.74.0
+nothing here recognised such markup, so it reached the reader verbatim and
+the index covered only what canon happened to carry. `output.entity_markup`
+is how a project declares the convention:
+
+```yaml
+output:
+  entity_markup:                 # ABSENT -> no scan, no key (see the mode table)
+    tags: [person, place, work]  # required; the element names the translator may emit
+    ref_attribute: ref           # optional, default "ref"
+    index_from: markup           # optional, canon | markup; default canon
+```
+
+Three effective modes, resolved independently in `assemble.py` and
+`render_obsidian.py` from the same profile fields (the `mentions_section`
+predicates are the precedent for that discipline):
+
+| profile | mode | behaviour |
+| --- | --- | --- |
+| block absent | `off` | no scan, no `entity_markup` key; assembled output byte-identical (the renderer has two unconditional changes of its own — obsidian.md, "Editorial brackets") |
+| present, `index_from` absent or `canon` | `strip` | the declared elements are removed and their payload kept; no sentinels, no new notes |
+| present, `index_from: markup`, `output.target: obsidian` | `index` | elements become `⟦ENT_n⟧payload⟦/ENT_n⟧` and the spans are recorded; the adapter mints and links notes |
+| present, `index_from: markup`, any other target | FATAL | `entity_markup_index_unsupported_target` — no other shipped adapter consumes the spans, and degrading to `strip` would hand the operator an index they asked for and did not get |
+
+The grammar is deliberately narrow — `<TAG>` / `<TAG REF="…">` … `</TAG>`,
+non-nested — so an unknown angle-bracket run in the prose is source text and
+survives untouched. What it will NOT do is pass a malformed use of a name the
+project itself declared: every position where a declared tag name follows
+`<` or `</` must begin a token the grammar matches in full, so `<person/>`,
+`<person ref=x>` and a bare unterminated `<person` are refused rather than
+delivered. `assemble.py` scans block text, verse `rendered` and
+`literal_gloss`, and footnote definitions, and refuses (exit 1, one JSON
+line, `reason` named) on the following. The first two are about the MARKUP
+and fire in both modes; the last three defend the RENDERER's emission
+grammar and are checked in `index` mode only — `strip` puts the payload back
+into the prose byte for byte and emits no wikilink, no note name and no
+heading, so a bracket, a pipe, a line break or a sentinel inside a marked run
+is ordinary text there and refusing it would be a false RED on input that
+mode handles correctly.
+
+- `entity_markup_config_invalid` — the block's own shape. Re-checked HERE
+  because `assemble.py` loads the profile through `validate_draft.py`'s
+  loader, which does not run jsonschema; `profile_validate.py`'s Step-0 gate
+  is not on this path, and a profile can be hand-edited after Step 0. A bare
+  string `tags: person` is the case that makes this load-bearing: it is
+  iterable, so an unvalidated reader builds a per-CHARACTER alternation and
+  reports success.
+- `entity_markup_malformed` — unpaired, nested, mismatched, or a malformed
+  declared-tag token as above.
+- `entity_markup_span_contains_sentinel` (index mode) — a machine sentinel
+  or a verse placeholder inside the payload or inside the `ref`. `<person>X⟦FNREF_1⟧</person>`
+  would render as `[[People/X|X[^1]]]`, whose footnote closer collides with
+  the wikilink closer; a sentinel inside a `ref` passes the sentinel
+  validator when it names a real footnote and would then be lifted out of the
+  narrative and written into a note's own heading. The guard reaches node and
+  verse text only — footnote-definition sentinels are already stripped in
+  Phase 0/1, before this pass runs, so nothing leaks there and the guard
+  simply has nothing to say.
+- `entity_markup_span_unsafe_text` (index mode) — `[`, `]`, `|`, CR or LF in
+  the payload or the `ref`. Each of those breaks the wikilink alias or the note name the
+  renderer interpolates them into, and none of them requires a hostile
+  author.
+- `entity_markup_span_unrendered` (index mode) — a span in the `text` of a
+  `kind: "verse"` node. The renderer builds such a node from `verses[]` alone and ignores its
+  `text`, so the span would be recorded, counted and never delivered.
+
+The summary JSON reports `entity_markup: {mode, strings_scanned, spans,
+tags}` whenever the block is declared. A book may genuinely carry no markup,
+so a zero is not a refusal — but it is VISIBLE, rather than
+indistinguishable from a scan that never ran.
 
 #### The adapter entry point
 

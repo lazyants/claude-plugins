@@ -741,6 +741,36 @@
             }
           }
         },
+        "entity_markup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tags"],
+          "description": "OPTIONAL. Declares that this project's translator marks entities INLINE as it goes, using elements the project itself names -- e.g. <person ref=\"reb-noson\">Reb Noson</person>. ABSENT (the only shape that existed before 1.74.0) means assembly does not scan for markup at all and the assembled book is byte-identical to 1.73.0. PRESENT means assemble.py removes every declared element from the assembled text before any adapter sees it (they must never reach a reader) and, when index_from is 'markup', records what was marked so the obsidian adapter can mint and link an entity note per marked identity instead of deriving the index from canon.json alone. This block is NOT a detector: it fires only on the element names declared in `tags`, so an unrelated angle-bracket run in the prose survives untouched -- and a MALFORMED use of a declared name (<person/>, <person class=\"x\">, an unterminated <person) is a hard refusal, never a passthrough. See references/assembly-and-output.md for the grammar and the refusal list, and references/output-target-adapters/obsidian.md for how a markup note is named and composed with canon.",
+          "properties": {
+            "tags": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+              },
+              "description": "REQUIRED, non-empty, unique. The element names this project's translator is told to mark with (the same vocabulary belongs in the project's style_contract, so the translator knows what to mark). The tag is part of the entity IDENTITY, not merely a folder hint: <person>Jordan</person> and <place>Jordan</place> stay two separate notes. Re-validated at RUNTIME by assemble.py's own _entity_markup_config() -- assemble.py loads profile.yml through validate_draft.load_profile(), which never runs jsonschema, and is directly invocable on a resumed project whose profile may have been hand-edited since Step 0. A bare string (tags: person) is the load-bearing case that validation catches: a string is iterable, so an unvalidated reader would build a per-CHARACTER tag alternation and report success."
+            },
+            "ref_attribute": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+              "default": "ref",
+              "description": "OPTIONAL attribute name carrying a stable identity for the marked entity (<person ref=\"reb-noson\">Reb Noson</person>), used as the note's identity when present so two spellings of one person converge on one note. This 'default' annotation is DOCUMENTATION ONLY -- nothing in this plugin materializes JSON-Schema defaults, and an absent key is resolved to \"ref\" explicitly in code, by assemble.py's _entity_markup_config(). Nothing in render_obsidian.py reads this field at all: assembly has already resolved it by the time the adapter runs, and what the adapter reads is each recorded span's own 'ref' key. Declaring a different name makes ref=\"...\" ordinary text: a <person ref=\"x\"> under ref_attribute: who is then a malformed use of a declared tag and is refused, not silently accepted."
+            },
+            "index_from": {
+              "type": "string",
+              "enum": ["canon", "markup"],
+              "default": "canon",
+              "description": "OPTIONAL. 'canon' (the resolved default) is STRIP mode: the declared elements are removed and their payload text kept, nothing is recorded, and the entity index stays derived from canon.json exactly as before. 'markup' is INDEX mode: each element is replaced by a paired machine sentinel, the span is recorded on the NodeStream, and the obsidian adapter mints a note per marked identity and links every marked occurrence. This 'default' annotation is DOCUMENTATION ONLY, resolved in code by assemble.py's _entity_markup_config() and, independently, by render_obsidian.py's own _entity_markup_mode() -- index_from is the one field of this block BOTH scripts read. INDEX mode requires output.target == 'obsidian': no other shipped adapter consumes the recorded spans, so assemble.py refuses (reason entity_markup_index_unsupported_target) rather than degrading to strip and handing the operator an index they asked for and did not get."
+            }
+          }
+        },
         "adapter_config": {
           "type": "object",
           "additionalProperties": false,

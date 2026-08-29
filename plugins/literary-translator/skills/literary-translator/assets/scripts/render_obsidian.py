@@ -41,6 +41,18 @@ real output.
 - One **entity note** per `canon.json` `entries{}` entry (keyed by
   `source_form`), routed into `<folder>/` per the category->folder catalog
   (`output.adapter_config.obsidian.folders`; absent/unsafe -> `other`).
+- One **markup note** per declared-entity identity `canon.json` has no
+  entry for, but ONLY when `output.entity_markup.index_from: markup` is in
+  effect (#795). Absent that knob nothing below it runs, and this adapter's
+  output matches 1.73.0 except in two deliberate places, both documented
+  under obsidian.md's "Editorial brackets": the outer editorial `[`/`]` around
+  ANY emitted wikilink (canon links included) is now escaped, and a heading
+  whose source text literally contains an `⟦ENT_n⟧`-shaped token has those
+  tokens removed and its internal whitespace collapsed. See the
+  "Declared entity markup"
+  section further down for the whole feature: assemble.py records what the
+  translator marked, and one pre-pass here turns every recorded span into a
+  wikilink to either the canon note or a minted markup note.
 
 Canon terms occurring in rendered text (narrative prose/headings, verse
 content, and footnote definitions alike) are wikilinked -- see
@@ -59,6 +71,7 @@ sufficient for either.
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -900,6 +913,14 @@ class _Linker:
         self.delinked_targets = frozenset(delinked_targets or ())
         self.delinked_counts = Counter()
         self.links_emitted = 0
+        # #795 §7: how many emitted wikilinks had an editorial bracket pair
+        # escaped around them. Counted on this object rather than returned,
+        # because #795's OTHER emission site (the entity-markup pre-pass,
+        # `_apply_entity_markup`) folds its own escapes into the same counter
+        # -- the manifest reports one number for both sites, which is what
+        # makes it a count of what the render actually did rather than of one
+        # code path. Purely observational: nothing reads it back.
+        self.brackets_escaped = 0
 
     def link(self, text, seen_in_block=None, extra_protected=None):
         # `extra_protected` (optional): a list of (start, end) char-offset spans
@@ -1100,15 +1121,27 @@ class _Linker:
             if target in seen_in_block:
                 continue
             seen_in_block.add(target)
-            out.append(text[last:m.start()])
             note_identity, source_form = self.target_to_entity[target]
             piece = f"[[{note_identity}|{target}]]"
             if self.parenthetical_mode == "first_occurrence" and target not in self.global_seen:
                 piece += f" ({source_form})"
             self.global_seen.add(target)
-            out.append(piece)
+            # #795 §7, emission site 1 of 2 (the other is
+            # `_apply_entity_markup`). An editorial bracket the translator
+            # put around the name collides with the wikilink placed inside
+            # it: "[" + "[[People/Reb Noson|Reb Noson]]" + "]" reads to
+            # Obsidian as the target "[People/Reb Noson" plus a stray "]".
+            # Escaping the OUTER pair keeps what the reader sees ("[…]")
+            # and gives the parser an unambiguous link. The parenthetical
+            # gloss is inside the escaped pair on purpose -- the outer "]"
+            # sits after it in the source text, so the pair being escaped is
+            # the one that actually encloses the whole emitted piece.
+            chunks, last, escaped = _editorial_bracket_emit(
+                text, last, m.start(), m.end(), piece
+            )
+            out.extend(chunks)
+            self.brackets_escaped += escaped
             self.links_emitted += 1  # #588: counted where the link is actually inserted
-            last = m.end()
         out.append(text[last:])
         if self.pattern is None:
             # Nothing was linkable this render, so nothing was rewritten --
@@ -1118,6 +1151,713 @@ class _Linker:
             # `original_text`).
             return original_text
         return "".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Declared entity markup (#795) -- the `output.entity_markup` knob's RENDER
+# half. `assemble.py` owns the SCAN half: in `index` mode it has already
+# replaced each declared element in every text-bearing string with the
+# three-part sequence `⟦ENT_{n}⟧{payload}⟦/ENT_{n}⟧` and recorded
+# `nodestream["entity_markup"] = {"spans": {"<n>": {"tag","payload","ref"}}}`.
+# Nothing below re-parses the operator's `<person …>` grammar -- that grammar
+# lives in assemble.py alone, and this file consumes only the sentinel form.
+# Spec: references/assembly-and-output.md (the NodeStream contract) and
+# references/output-target-adapters/obsidian.md (how a markup note is named,
+# foldered and composed with canon).
+# ---------------------------------------------------------------------------
+
+# The sentinel pair, and the token form on its own. `⟦[^⟧]+⟧` already makes
+# both a `_PROTECTED_SPAN_RE` span for free, which is why a sentinel (rather
+# than a character offset) is what assemble.py records: `_render_block`
+# splices verse/fnref substitutions into the text before linking and
+# `_heading_plain_text` rebuilds title text from scratch -- an offset survives
+# neither. DOTALL because a payload may not contain CR/LF (assemble.py refuses
+# those) but the surrounding text between two different spans may.
+_ENT_SPAN_RE = re.compile(r"⟦ENT_(\d+)⟧(.*?)⟦/ENT_\1⟧", re.DOTALL)
+# BOTH forms. A lone closer reaches a reader exactly as much as a lone opener,
+# so every residual check below looks for either.
+_ENT_TOKEN_RE = re.compile(r"⟦/?ENT_\d+⟧")
+
+# The two shapes `_heading_plain_text(flatten_wikilinks=True)` reduces, plus
+# the escaped-bracket pair §7 may have wrapped one in.
+_WIKILINK_ALIASED_RE = re.compile(r"\[\[([^\[\]|]*)\|([^\[\]]*)\]\]")
+_WIKILINK_BARE_RE = re.compile(r"\[\[([^\[\]|]*)\]\]")
+# Cheap "is there anything here to flatten at all" probe, so the plain-heading
+# fast path in `_heading_plain_text` still returns byte-identical text for
+# every heading that carries neither a wikilink nor an escaped bracket.
+_HEADING_FLATTEN_PROBE_RE = re.compile(r"\[\[|\\[\[\]]")
+
+
+def _entity_markup_mode(profile):
+    """`"off"` / `"strip"` / `"index"` / `"index_unsupported_target"` for
+    this profile's `output.entity_markup` block (#795 §4).
+
+    INDEPENDENT RECOMPUTATION of `assemble.py`'s function of the same name,
+    from the SAME two profile fields, never imported from it -- the same
+    discipline the three `mentions_section` predicates already follow.
+    Change one and change the other.
+
+    The two do NOT have identical text, and cannot: assemble.py's copy
+    delegates to its own `_entity_markup_config` runtime validator and
+    RAISES `AssembleError` on the unsupported-target row, and this file has
+    no such failure vocabulary (a renderer must stay inert there, not
+    fatal). So that row is a fourth RETURN VALUE here. It also inlines the
+    `output.target == "obsidian"` test rather than calling
+    `_is_obsidian_target`, which exists only in this file.
+
+    A SECOND, OPEN-ENDED divergence, deliberate and confined to profiles
+    assemble.py has already refused: this copy does NOT validate the block. It
+    reads exactly two fields and never looks at `tags`, so anything
+    `_entity_markup_config` rejects is a hard `entity_markup_config_invalid`
+    there while resolving here to whatever those two reads produce -- `"off"`
+    for a non-mapping block, and for a structurally-bad-but-mapping one (an
+    empty `tags`, a bare string `tags`, an unknown key) whatever `index_from`
+    and `output.target` say, `"index"` included. Do not read the pair as
+    "two named exceptions": the rule is that assemble.py REFUSES wherever
+    this copy resolves, and the set of such profiles is whatever its validator
+    rejects.
+
+    `assemble.py` runs first on every real path -- it is what writes the
+    spans this adapter reads -- so this function's own answer is only ever
+    reached standalone, and staying inert on a block it cannot parse is the
+    same fail-quiet posture as the `"off"` branch itself. The fail-CLOSED
+    half lives downstream, in the preflight that proves the span table and
+    the text agree, and are well-typed, before the vault is cleaned.
+
+    `index_unsupported_target` is `index_from: markup` asked for on a target
+    that consumes no spans. `assemble.py` REFUSES there
+    (`entity_markup_index_unsupported_target`), because silently degrading to
+    `strip` would hand an operator an index they asked for and did not get;
+    this adapter treats it as not-index and stays inert, which is the same
+    posture D1/D3/D4 take on the standalone CLI's dormant
+    `obsidian`-under-`target: "custom"` path."""
+    output_cfg = (profile or {}).get("output") or {}
+    cfg = output_cfg.get("entity_markup")
+    if not isinstance(cfg, dict):
+        return "off"
+    if cfg.get("index_from") != "markup":
+        return "strip"
+    if output_cfg.get("target") != "obsidian":
+        return "index_unsupported_target"
+    return "index"
+
+
+def _entity_markup_spans(nodestream):
+    """The RAW `{"<n>": {"tag","payload","ref"}}` table off the NodeStream,
+    or `{}` when the book carries none.
+
+    Deliberately UNFILTERED. An earlier version dropped every non-mapping
+    record here and claimed that turned a malformed record into a named
+    refusal downstream -- true only for a record some `⟦ENT_n⟧` pair actually
+    cites, because the preflight's inverse check (condition 4) can only see
+    what this function returned. An UNUSED garbage record was therefore
+    dropped in silence. Everything malformed now reaches
+    `_entity_markup_preflight`'s condition 0, which is the one place that
+    decides what a valid record is.
+
+    Only non-string KEYS are dropped, and they cannot be reached anyway: JSON
+    object keys are strings by construction, and the pair regex captures
+    digits."""
+    block = nodestream.get("entity_markup")
+    if not isinstance(block, dict):
+        return {}
+    spans = block.get("spans")
+    if not isinstance(spans, dict):
+        return {}
+    return {key: span for key, span in spans.items() if isinstance(key, str)}
+
+
+def _entity_markup_identity(span):
+    """`(tag, label)` -- #795 §6.2's ONE identity rule.
+
+    `label = NFC(ref or payload)`; the NFC normalization is what makes a
+    label match `build_entity_index`'s own NFC-normalized target keys, and
+    what keeps two spellings of one decomposed name from minting two notes.
+
+    The TAG is part of the identity, not merely the folder: `<person>Jordan`
+    and `<place>Jordan` stay two notes. Collapsing them would be the
+    entity-merge judgement #795's non-goals exclude, and one note cannot
+    truthfully carry two categories anyway."""
+    tag = span.get("tag") or ""
+    ref = span.get("ref")
+    label = ref if isinstance(ref, str) and ref else (span.get("payload") or "")
+    return tag, unicodedata.normalize("NFC", label)
+
+
+def _entity_markup_string_slots(nodestream):
+    """Yields `(container, key)` for EVERY string the resolution pre-pass
+    rewrites -- node `text`, each verse `content.rendered`/`literal_gloss`,
+    each footnote `text`.
+
+    ONE enumeration, used by both the preflight (§6.4) and the rewrite
+    (§6.3), so the two can never disagree about which strings are rewritable.
+    That agreement is the whole basis of the preflight's completeness claim:
+    it refuses a token found ANYWHERE in the NodeStream that is not in one of
+    these slots, which is only sound while "these slots" means the same thing
+    to both.
+
+    Walk order is the RENDERER's own reconstructed reading order -- group by
+    `seg`, follow `book.seg_order` with unlisted segs appended sorted, sort
+    each segment's nodes by `order_index`, footnotes last by `n` -- NOT the
+    raw `nodes` list order. `parenthetical_originals: first_occurrence`
+    appends its gloss to the FIRST span the pre-pass resolves, so a
+    hand-authored or post-processed NodeStream must order the same way the
+    vault does."""
+    nodes_by_seg = {}
+    for node in nodestream.get("nodes") or []:
+        if isinstance(node, dict):
+            nodes_by_seg.setdefault(node["seg"], []).append(node)
+    seg_order = (nodestream.get("book") or {}).get("seg_order") or []
+    full_order = list(seg_order) + sorted(set(nodes_by_seg) - set(seg_order))
+    for seg in full_order:
+        for node in sorted(nodes_by_seg.get(seg, []), key=lambda n: n["order_index"]):
+            if isinstance(node.get("text"), str):
+                yield node, "text"
+            for verse in node.get("verses") or []:
+                content = verse.get("content") if isinstance(verse, dict) else None
+                if not isinstance(content, dict):
+                    continue
+                for field in ("rendered", "literal_gloss"):
+                    if isinstance(content.get(field), str):
+                        yield content, field
+    footnotes = [fn for fn in (nodestream.get("footnotes") or []) if isinstance(fn, dict)]
+    for fn in sorted(footnotes, key=lambda f: f.get("n") or 0):
+        if isinstance(fn.get("text"), str):
+            yield fn, "text"
+
+
+def _walk_json_strings(value):
+    """Every string anywhere in a parsed-JSON value, dict KEYS included.
+    The preflight's totality rests on this being the WHOLE value: a token
+    hiding in a field the pre-pass does not rewrite (a node's `raw_type`, a
+    verse `placeholder`) is exactly the case a scan of the rewritten strings
+    alone would miss, and it would ship that sentinel to a reader."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str):
+                yield key
+            yield from _walk_json_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_json_strings(item)
+
+
+# The characters a span record's `tag`/`payload`/`ref` may never contain.
+# BYTE-FOR-BYTE the set `assemble.py`'s `_ENTITY_UNSAFE_CHARS` refuses at
+# recording time, plus the sentinel delimiters: `⟦…⟧` is a fixed machine
+# shape, and one inside a payload (`⟦FNREF_1⟧`, a verse placeholder) would be
+# lifted into a note heading or collide with the wikilink closer. Duplicated
+# per this repo's no-shared-util convention; change both copies together.
+_ENTITY_UNSAFE_IN_RECORD = ("[", "]", "|", "\r", "\n", "⟦", "⟧")
+
+
+def _entity_markup_preflight(nodestream, spans, canon):
+    """#795 §6.4. Called BEFORE `out_dir.mkdir`/`_clean_vault_content`, for
+    the same reason `_validate_link_groups` is: the clean empties the
+    existing vault, so a failure discovered while WRITING would leave the
+    operator with neither the old vault nor a complete new one.
+
+    SIX conditions, all of them fail-closed. Their shape is deliberate: the
+    span table and the text that cites it must be proved MUTUALLY CONSISTENT
+    AND WELL-TYPED here, because every consumer downstream of the clean --
+    `_entity_markup_identity`, `_canon_composition`, `_markup_note_records`,
+    the rewriter -- reads those fields without re-checking them, and the
+    clean is irreversible. Three separate review rounds each found one more
+    malformed shape that reached `_clean_vault_content`; conditions 0 and 3b
+    are the answer to that class rather than to the last instance of it.
+
+      0. every span record this render will USE is well-typed: `tag` and
+         `payload` non-empty strings, `ref` a non-empty string when present.
+         Nothing downstream re-checks, and a non-string payload reaches
+         `unicodedata.normalize` as a TypeError -- after the clean;
+      1. every `⟦ENT_n⟧`/`⟦/ENT_n⟧` token in the whole NodeStream sits in a
+         slot the pre-pass actually rewrites (counted, not located -- a
+         count over `_walk_json_strings` compared against the same count over
+         `_entity_markup_string_slots`, which is total by construction);
+      2. within those slots every token belongs to a well-formed
+         `⟦ENT_n⟧…⟦/ENT_n⟧` pair;
+      3. every such pair's id has a span record (3a) AND the text between the
+         tokens equals that record's own `payload` (3b). Assembly emits the
+         two from one string, so disagreement means the table and the text
+         come from different runs -- and the rewriter takes the DISPLAYED
+         alias from the text while taking the NOTE from the record, so a
+         stale table writes `[[People/Pyotr|Ivan]]`: a name linked to
+         somebody else, exit 0, counts balanced;
+      4. the INVERSE of 3a -- every span record is used by exactly one
+         pair;
+      5. and no reserved token sits anywhere in `canon.json`, the OTHER
+         source of text this render writes to disk.
+    Anything else raises `RenderError("entity_markup_unresolvable")`.
+
+    Condition 5 is condition 4's sibling, closed in the same place for the
+    same reason. An entity note's frontmatter and heading are built straight
+    from the canon entry and never pass through the pre-pass, so a reserved
+    token sitting there is caught only by `_reject_residual_entity_tokens`
+    at WRITE time -- after the clean. Checking canon HERE is what keeps that
+    post-condition a pure resolver assertion rather than a second, later,
+    vault-destroying input gate.
+
+    Condition 4 is not symmetry for its own sake: render()'s coverage
+    identity (`replaced == links == len(spans)`, §6.5) is checked AFTER
+    `_clean_vault_content` has already emptied the managed vault, so a
+    NodeStream carrying records 1 and 2 but only pair 1 -- or pair 1 twice --
+    used to pass this preflight, lose the operator their existing vault, and
+    only then fail. Checking it HERE is what makes the CHANGELOG's "a failure
+    leaves the existing vault untouched" true; the post-render comparison
+    stays as a cheap postcondition on the resolver itself."""
+    # Condition 0 -- see this function's own docstring. Checked over the RAW
+    # table (`_entity_markup_spans` filters nothing) and over the WHOLE of it
+    # rather than only the ids the text cites: condition 4 already requires
+    # every record to be used, so an UNUSED garbage record must be refused
+    # here or it is refused nowhere.
+    for key in sorted(spans, key=lambda k: (len(k), k)):
+        record = spans[key]
+        if not isinstance(record, dict):
+            raise RenderError(
+                "entity_markup_unresolvable",
+                f"nodestream.entity_markup.spans[{key!r}] is {record!r}, not "
+                "a mapping of tag/payload/ref. Re-run assemble.py rather than "
+                "hand-editing nodestream.json.",
+            )
+        for field, required in (("tag", True), ("payload", True), ("ref", False)):
+            if not required and field not in record:
+                continue
+            value = record.get(field)
+            if not isinstance(value, str) or not value:
+                raise RenderError(
+                    "entity_markup_unresolvable",
+                    f"nodestream.entity_markup.spans[{key!r}].{field} is "
+                    f"{value!r}, not a non-empty string. Every field of a span "
+                    "record is interpolated into a note name, a wikilink or a "
+                    "heading without being re-checked. Re-run assemble.py "
+                    "rather than hand-editing nodestream.json.",
+                )
+            # The producer's OWN constraint, re-applied to the persisted
+            # artifact. `assemble.py` refuses these characters at the moment
+            # the span is recorded (`_entity_markup_check_span_text`) precisely
+            # because this adapter interpolates the value into a wikilink alias
+            # and a note name; a hand-edited `Iv|an` renders as the malformed
+            # `[[People/Iv_an|Iv|an]]`. Duplicated rather than imported: this
+            # repo keeps cross-cutting helpers duplicated per script, and the
+            # two copies must be changed together.
+            bad = next((c for c in _ENTITY_UNSAFE_IN_RECORD if c in value), None)
+            if bad is not None:
+                raise RenderError(
+                    "entity_markup_unresolvable",
+                    f"nodestream.entity_markup.spans[{key!r}].{field} contains "
+                    f"{bad!r}, which cannot survive interpolation into a "
+                    "wikilink alias or a note name. assemble.py refuses it when "
+                    "the span is recorded; this NodeStream was hand-edited or "
+                    "written by a different version. Re-run assemble.py.",
+                )
+
+    slots = list(_entity_markup_string_slots(nodestream))
+    slot_tokens = sum(len(_ENT_TOKEN_RE.findall(container[key])) for container, key in slots)
+    all_tokens = sum(len(_ENT_TOKEN_RE.findall(s)) for s in _walk_json_strings(nodestream))
+    if all_tokens != slot_tokens:
+        raise RenderError(
+            "entity_markup_unresolvable",
+            f"the NodeStream carries {all_tokens} entity-markup sentinel "
+            f"token(s) but only {slot_tokens} of them sit in a field this "
+            "adapter rewrites (node text, verse rendered/literal_gloss, "
+            "footnote text) -- the rest would be delivered verbatim to a "
+            "reader. Re-run assemble.py rather than hand-editing "
+            "nodestream.json.",
+        )
+    pair_uses = Counter()
+    for container, key in slots:
+        text = container[key]
+        if "ENT_" not in text:
+            continue
+        for match in _ENT_SPAN_RE.finditer(text):
+            pair_uses[match.group(1)] += 1
+            if match.group(1) not in spans:
+                raise RenderError(
+                    "entity_markup_unresolvable",
+                    f"entity-markup sentinel {match.group(0)!r} has no record "
+                    f"in nodestream.entity_markup.spans -- this adapter cannot "
+                    f"resolve it to a note, and it would ship verbatim. "
+                    f"Offending text: {text[:200]!r}",
+                )
+            # Condition 3b -- see this function's own docstring.
+            recorded = spans[match.group(1)]["payload"]
+            if match.group(2) != recorded:
+                raise RenderError(
+                    "entity_markup_unresolvable",
+                    f"entity-markup span {match.group(1)!r} reads "
+                    f"{match.group(2)!r} in the text but "
+                    f"nodestream.entity_markup.spans records {recorded!r}. "
+                    "Assembly writes both from one string, so this NodeStream's "
+                    "text and span table are from different runs -- the printed "
+                    "name would be linked to whichever entity the stale record "
+                    "names. Re-run assemble.py rather than hand-editing "
+                    "nodestream.json.",
+                )
+        residue = _ENT_SPAN_RE.sub("", text)
+        stray = _ENT_TOKEN_RE.search(residue)
+        if stray:
+            raise RenderError(
+                "entity_markup_unresolvable",
+                f"unpaired entity-markup sentinel {stray.group(0)!r} -- every "
+                "token must be part of a well-formed ⟦ENT_n⟧…⟦/ENT_n⟧ pair. "
+                f"Offending text: {text[:200]!r}",
+            )
+
+    # Condition 4 -- the inverse of 3, checked here rather than after the
+    # vault has already been cleaned (see this function's own docstring).
+    unused = sorted(set(spans) - set(pair_uses), key=lambda k: (len(k), k))
+    if unused:
+        raise RenderError(
+            "entity_markup_unresolvable",
+            f"nodestream.entity_markup.spans records {len(spans)} span(s) but "
+            f"{len(unused)} of them appear nowhere in the text this adapter "
+            f"rewrites (first: {unused[:5]}) -- the recorded index would claim "
+            "coverage this render cannot deliver. Re-run assemble.py rather "
+            "than hand-editing nodestream.json.",
+        )
+
+    # Condition 5 -- see this function's own docstring. `canon` is walked
+    # whole rather than field by field: every string in it is a candidate
+    # for an entity note's aliases, name, category or ref.
+    canon_stray = next(
+        (
+            match.group(0)
+            for text in _walk_json_strings(canon)
+            for match in [_ENT_TOKEN_RE.search(text)]
+            if match
+        ),
+        None,
+    )
+    if canon_stray is not None:
+        raise RenderError(
+            "entity_markup_unresolvable",
+            f"canon.json contains the reserved entity-markup sentinel "
+            f"{canon_stray!r}. Entity notes are built straight from canon "
+            "and never pass through this adapter's resolution pre-pass, so "
+            "that token would ship verbatim to a reader. Remove it from "
+            "canon.json.",
+        )
+    repeated = sorted((k for k, n in pair_uses.items() if n > 1), key=lambda k: (len(k), k))
+    if repeated:
+        raise RenderError(
+            "entity_markup_unresolvable",
+            f"entity-markup span id(s) {repeated[:5]} appear in more than one "
+            "⟦ENT_n⟧…⟦/ENT_n⟧ pair -- each id names ONE marked run, so a reused "
+            "id means the NodeStream no longer describes the book assemble.py "
+            "built. Re-run assemble.py rather than hand-editing nodestream.json.",
+        )
+
+
+def _canon_composition(spans, target_to_entity, entries):
+    """`{(tag, label): (note_identity, source_form)}` for every span identity
+    that COMPOSES with canon -- links canon's own note and mints nothing --
+    computed ONCE so `_markup_note_records` and `_apply_entity_markup` can
+    never disagree about which identities canon owns.
+
+    An identity composes when its label is a linkable canon target AND that
+    canon entry does not CONTRADICT the declared tag. The category test is
+    the whole point: composing on the label alone made `<person>Jordan</person>`
+    link a canon note for a PLACE named Jordan -- one canon entry silently
+    absorbing a second, differently-categorized entity the operator had
+    explicitly marked, which is both the entity-merge judgement this plugin
+    never makes and a silent index shortfall (no person note, coverage counts
+    still balanced, exit 0).
+
+    A canon entry with NO category composes with any tag, and that is
+    deliberate rather than lax: the shipped glossary pass never asks for
+    `category`, so on a typical project the field is empty everywhere, and
+    requiring a positive match would stop composition entirely -- every marked
+    name would mint a duplicate beside its own canon note, which is exactly
+    the "two indexes competing" this feature exists to avoid. Canon speaks
+    only where it has actually spoken."""
+    composed = {}
+    for span in spans.values():
+        tag, label = _entity_markup_identity(span)
+        if (tag, label) in composed:
+            continue
+        resolved = target_to_entity.get(label)
+        if resolved is None:
+            continue
+        category = (entries.get(resolved[1]) or {}).get("category")
+        if isinstance(category, str) and category.strip() and category.strip() != tag:
+            continue
+        composed[(tag, label)] = resolved
+    return composed
+
+
+def _markup_note_records(spans, canon_composition):
+    """`{(tag, label): {"aliases": [...], "ref": label or None}}` for every
+    span identity that needs a note of its OWN -- i.e. every one absent from
+    `_canon_composition` (those link the canon note and mint nothing, so canon
+    stays the authority wherever it has actually spoken).
+
+    `aliases` is every DISTINCT PRINTED payload seen for this identity,
+    sorted and deduped: two spans `<person ref="B">Reb Noson</person>` and
+    `<person ref="B">R. Noson</person>` are one man with two printed forms.
+    `ref` is present only when the label came from a `ref` attribute -- in
+    which case it IS the label, since the identity is NFC-keyed and the raw
+    pre-normalization spelling is not what any consumer resolves against.
+    Nothing else goes in the frontmatter: `basis`, `confidence` and `source`
+    are canon fields, and inventing them here would be a fabrication."""
+    records = {}
+    for span in spans.values():
+        tag, label = _entity_markup_identity(span)
+        if (tag, label) in canon_composition:
+            continue
+        record = records.setdefault((tag, label), {"aliases": set(), "ref": None})
+        record["aliases"].add(span.get("payload") or "")
+        ref = span.get("ref")
+        if isinstance(ref, str) and ref:
+            record["ref"] = label
+    return {
+        identity: {"aliases": sorted(record["aliases"]), "ref": record["ref"]}
+        for identity, record in records.items()
+    }
+
+
+def _resolve_markup_notes(identities, folders_map, used_paths):
+    """`{(tag, label): relpath}`, resolved through the SAME `used_paths` set
+    the canon notes were already resolved through (#795 §6.1).
+
+    Canon resolves FIRST and this runs second, on purpose: every canon
+    relpath then stays byte-identical to what it was before this feature
+    existed, so `validate_backlinks.py`'s own INDEPENDENT re-derivation
+    (`_resolve_entity_notes(entries, folders_map)`, two arguments, its own
+    fresh set) still matches the vault. A markup note can therefore never
+    take or overwrite a canon note's path -- only ever get deduped away from
+    one.
+
+    The fallback stem is prefixed `markup-` rather than `entity-` so a
+    sanitized-to-nothing markup label and a sanitized-to-nothing canon
+    `source_form` do not silently resolve to the same name; `_dedupe_path`
+    would separate them anyway, but the reader can see which is which."""
+    relpath_by_identity = {}
+    for identity in sorted(identities):
+        tag, label = identity
+        folder = _resolve_folder(tag, folders_map)
+        stem = sanitize_filename_component(
+            label, _stable_fallback_name(f"{tag}/{label}", "markup")
+        )
+        relpath_by_identity[identity] = _dedupe_path(f"{folder}/{stem}.md", used_paths)
+    return relpath_by_identity
+
+
+def _backslash_run_is_even(text, index):
+    """Is the backslash run ending immediately before `text[index]` of EVEN
+    length -- i.e. is `text[index]` a LITERAL character rather than an
+    escaped one?
+
+    Parity, never presence: in `\\\\[` the two backslashes are themselves an
+    escaped backslash, so the `[` after them is literal and does collide with
+    a wikilink put inside it. Testing only `text[index - 1] == "\\\\"` reports
+    every even run as escaped, which is the original bug with one more
+    backslash in front of it."""
+    run = 0
+    i = index - 1
+    while i >= 0 and text[i] == "\\":
+        run += 1
+        i -= 1
+    return run % 2 == 0
+
+
+def _editorial_bracket_sides(text, start, end):
+    """#795 §7: `(escape_open, escape_close)` for an emitted link that
+    replaces `text[start:end]`. An editorial bracket the translator put
+    around a name collides with the wikilink emitted inside it --
+    `[[[People/X|X]]` reads to Obsidian as the target `[People/X` plus a
+    stray `]`.
+
+    The PAIR is what makes it an editorial bracket, so both sides must be
+    present -- either literal or already escaped -- or nothing is touched and
+    an unmatched bracket stays the literal source text the renderer's
+    unresolved-bracket contract promises. But the two sides are decided
+    SEPARATELY, because they can disagree: in `[Name\\]` the operator escaped
+    only the closer, and requiring both to be literal left the opener bare and
+    the link target broken. Escaping only what is literal also means an
+    operator's own escape is never doubled -- a reader must never be shown a
+    backslash.
+
+    PARITY ON BOTH SIDES, and the third return value is what makes the
+    closing side possible. The opening side's backslash run sits BEFORE its
+    `[`, so it stays in the prefix untouched and the caller consumes one
+    character. The closing side's run sits BETWEEN the span and its `]`, so
+    the caller has to consume the run TOO and re-emit it -- `\\\\]` is an
+    escaped backslash followed by a LITERAL `]`, which must become
+    `\\\\` + `\\]`, not be mistaken for an escaped closer and skipped.
+    Returns `(escape_open, escape_close, close_run_len)`."""
+    if start < 1 or text[start - 1] != "[":
+        return False, False, 0
+    # `\[` needs no branch of its own: the run before the `[` is odd there,
+    # so parity already reports it escaped.
+    open_literal = _backslash_run_is_even(text, start - 1)
+    run = 0
+    while end + run < len(text) and text[end + run] == "\\":
+        run += 1
+    if end + run >= len(text) or text[end + run] != "]":
+        return False, False, 0
+    return open_literal, run % 2 == 0, run
+
+
+def _editorial_bracket_emit(text, last, start, end, piece):
+    """The SPLICE half of §7, shared by both emission sites: `(chunks,
+    new_last, escaped)` for replacing `text[start:end]` with `piece` while
+    honouring an editorial bracket pair around it.
+
+    `chunks` is appended to the caller's output list and `escaped` (0 or 1)
+    folded into the caller's own `brackets_escaped` counter -- the two sites
+    differ only in how they FIND the span and which counter they own, and
+    `_editorial_bracket_sides` alone left the consume-and-re-emit arithmetic
+    written twice, where a fix applied to one copy stays invisible until a
+    book hits that site's own mixed case."""
+    open_lit, close_lit, close_run = _editorial_bracket_sides(text, start, end)
+    if not (open_lit or close_lit):
+        return [text[last:start], piece], end, 0
+    # Consume the LITERAL bracket on each side and re-emit it escaped; an
+    # already-escaped one is left exactly as the operator wrote it (see
+    # `_editorial_bracket_sides`). On the closing side the backslash run
+    # between the span and its `]` is consumed with it and re-emitted verbatim.
+    chunks = [
+        text[last:start - (1 if open_lit else 0)],
+        f"\\[{piece}" if open_lit else piece,
+    ]
+    if close_lit:
+        chunks.append(text[end:end + close_run] + "\\]")
+    return chunks, end + (close_run + 1 if close_lit else 0), 1
+
+
+def _apply_entity_markup(nodestream, spans, canon_composition, markup_note_identity, linker):
+    """#795 §6.3 -- THE single resolution site. Rewrites every string
+    `_entity_markup_string_slots` names, in place, replacing each
+    `⟦ENT_n⟧payload⟦/ENT_n⟧` with a wikilink. Returns
+    `{"replaced": int, "links": int}` for render()'s coverage check.
+
+    ONE pre-pass rather than a resolution point inside each renderer:
+    `_render_block`, `_render_verse_block`, `_render_verse_inline`,
+    `_render_segment_note` and `_heading_plain_text` are all untouched by
+    resolution, so there is no site to forget. `_render_verse_inline` in
+    particular splices its output into the composed block AFTER any
+    per-function resolution point would have run, which is exactly how a
+    per-site design leaks.
+
+    EVERY span emits a wikilink -- every occurrence, every node kind,
+    headings included. No marked span is ever left as bare text, and that is
+    the single property the whole design rests on: an emitted `[[…]]` is a
+    `_PROTECTED_SPAN_RE` span, so the canon scan cannot see inside it and the
+    two mechanisms share no state at all. Leaving even one class of marked
+    span bare would silently re-open three separate defects, because the
+    canon scan matches over the RECOMPOSED text rather than entity
+    boundaries: longest-first matching (`_longest_first_pattern`) would link
+    a marked `John` into a wikilink for a canon `John Smith`; `seen_in_block`
+    would swallow the second and later marked occurrences in a block; and
+    `_boundary_ok` would refuse `<person>Ann</person>ette` outright. Each
+    produces a rendered index covering less than what was marked, or covering
+    it wrongly, while the run exits 0.
+
+    `parenthetical_originals: first_occurrence` is HONOURED here, not
+    bypassed: this consults and updates the same `linker.global_seen` set the
+    canon linker uses (the linker is constructed before this runs -- "before
+    the scan" is not "before construction"), so the gloss appears exactly
+    once book-wide. `linker.links_emitted` is likewise incremented here, so
+    `delink_cost.inline_links_emitted` keeps meaning every inline link this
+    render inserted rather than quietly narrowing to the canon ones."""
+    counts = {"replaced": 0, "links": 0}
+
+    def _rewrite(text):
+        if "ENT_" not in text:
+            return text
+        out = []
+        last = 0
+        for match in _ENT_SPAN_RE.finditer(text):
+            payload = match.group(2)
+            span = spans[match.group(1)]  # preflight already proved the record exists
+            tag, label = _entity_markup_identity(span)
+            if (tag, label) in canon_composition:
+                note_identity, source_form = canon_composition[(tag, label)]
+                piece = f"[[{note_identity}|{payload}]]"
+                if (linker.parenthetical_mode == "first_occurrence"
+                        and label not in linker.global_seen):
+                    piece += f" ({source_form})"
+                linker.global_seen.add(label)
+            else:
+                note_identity = markup_note_identity[(tag, label)]
+                piece = f"[[{note_identity}|{payload}]]"
+            counts["replaced"] += 1
+            counts["links"] += 1
+            linker.links_emitted += 1
+            # §7, emission site 2 of 2 (the other is `_Linker.link`).
+            chunks, last, escaped = _editorial_bracket_emit(
+                text, last, match.start(), match.end(), piece
+            )
+            out.extend(chunks)
+            linker.brackets_escaped += escaped
+        out.append(text[last:])
+        return "".join(out)
+
+    for container, key in _entity_markup_string_slots(nodestream):
+        container[key] = _rewrite(container[key])
+    return counts
+
+
+def _flatten_wikilinks(text):
+    """`[[target|display]]` -> `display`, `[[target]]` -> `target`, and
+    `\\[`/`\\]` -> `[`/`]` (#795 §6.3).
+
+    Used ONLY for a heading's frontmatter `title:` and filename slug, and
+    only in `index` mode. A heading's marked spans link like every other
+    span -- resolving them to bare payload instead is what would reopen the
+    wrong-note problem inside a heading -- but a wikilink must not survive
+    into a YAML title or a filename. The unescape is not incidental: §7 turns
+    an editorial-bracketed marked name in a heading into `\\[[[…]]\\]`, and
+    flattening only the inner wikilink would leave `title: \\[John\\]` and
+    the backslashes in the slug."""
+    text = _WIKILINK_ALIASED_RE.sub(lambda m: m.group(2), text)
+    text = _WIKILINK_BARE_RE.sub(lambda m: m.group(1), text)
+    return text.replace("\\[", "[").replace("\\]", "]")
+
+
+def _render_markup_note(tag, label, aliases, ref, is_rtl):
+    """#795 §6.6. Frontmatter carries only what is TRUE of a marked entity:
+    the printed forms seen, the label, the tag as `category`, the `ref` when
+    the label came from one, and `direction`. No `basis`/`confidence`/
+    `source` -- those are canon's, and a markup note has no canon entry
+    behind it by construction.
+
+    No `## Mentions` section either: that index is source-anchored and
+    canon-keyed, and `validate_backlinks.py` derives the notes it parses from
+    canon alone -- markup notes are invisible to it, which is why that gate
+    needs no change."""
+    frontmatter = {"aliases": aliases, "name": label, "category": tag}
+    if ref is not None:
+        frontmatter["ref"] = ref
+    frontmatter["direction"] = "rtl" if is_rtl else "ltr"
+    return "\n".join([_yaml_frontmatter(frontmatter), "", f"# {label}"]) + "\n"
+
+
+def _reject_residual_entity_tokens(rel_path, note_text):
+    """#795 §6.5, post-condition 2: the LAST thing between a machine
+    sentinel and a reader, checked on each note's final text immediately
+    before `_write_note`.
+
+    With the §6.4 preflight in place this can only fire on a resolver bug:
+    the preflight covers BOTH inputs a note's text is built from -- the
+    NodeStream and canon.json -- so anything reaching here was resolvable
+    and was not resolved. That is the division of labour: the preflight
+    proves the INPUT was resolvable and refuses BEFORE the vault is cleaned,
+    this proves the OUTPUT was actually resolved. Both token forms, because
+    a lone closer ships just as visibly as a lone opener.
+
+    Gated on markup being active at all three call sites, so an undeclared
+    project never runs it."""
+    match = _ENT_TOKEN_RE.search(note_text)
+    if match:
+        raise RenderError(
+            "entity_markup_residual_sentinel",
+            f"refusing to write {rel_path!r}: it still contains the "
+            f"entity-markup sentinel {match.group(0)!r} after resolution -- "
+            "a machine token must never reach a reader.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1368,7 +2108,7 @@ def _render_block(node, linker):
     return text
 
 
-def _heading_plain_text(node):
+def _heading_plain_text(node, flatten_wikilinks=False):
     """Resolve a heading node's KNOWN sentinels to PLAIN title text for the
     frontmatter `title` and filename slug: declared verse placeholders -> their
     flattened rendered verse text (footnote refs [^N] stripped -- a footnote
@@ -1385,7 +2125,16 @@ def _heading_plain_text(node):
     the raw sentinel through unstripped. When there is nothing to resolve, the
     ORIGINAL text is returned with only .strip() -- byte-identical to the prior
     _segment_title, so plain-heading titles/slugs never change (no internal
-    whitespace collapse)."""
+    whitespace collapse).
+
+    `flatten_wikilinks` (#795 §6.3, passed True ONLY in `index` mode) also
+    reduces `[[target|display]]`/`[[target]]` and unescapes `\\[`/`\\]` --
+    see `_flatten_wikilinks`. It is mode-confined on purpose: that keeps a
+    literal `[[…]]` an operator wrote into a source heading behaving exactly
+    as it does today on every other project. The fast path above has to know
+    about it too, or a heading carrying a wikilink but NO verse placeholder
+    and NO footnote anchor would take that path and ship the raw `[[…]]`
+    into `title:` and the filename slug."""
     original = node.get("text") or ""
     substitutions = {}
     for v in node.get("verses") or []:
@@ -1399,7 +2148,9 @@ def _heading_plain_text(node):
     # Plain heading (no known sentinel to resolve): preserve prior behavior EXACTLY
     # -- .strip() only, no whitespace collapse. A literal ⟦variant⟧ that is neither
     # a declared placeholder nor a footnote anchor stays verbatim here.
-    if not substitutions and not _TITLE_FNREF_ANCHOR_RE.search(original):
+    needs_flatten = bool(flatten_wikilinks and _HEADING_FLATTEN_PROBE_RE.search(original))
+    if (not substitutions and not _TITLE_FNREF_ANCHOR_RE.search(original)
+            and not _ENT_TOKEN_RE.search(original) and not needs_flatten):
         return original.strip()
     text = original
     if substitutions:
@@ -1412,20 +2163,53 @@ def _heading_plain_text(node):
         # value, blank it so a raw ⟦…⟧ can never reach the title (#171 invariant).
         text = combined_re.sub("", text)
     text = _TITLE_FNREF_ANCHOR_RE.sub("", text)   # scrub stray anchors not in this node's fnrefs
+    # #795: strip entity-markup sentinels, keeping the payload between them
+    # -- the same defense-in-depth the FNREF scrub above is (⟦ENT_n⟧ is a
+    # fixed machine shape, never prose), and load-bearing for ONE caller in
+    # particular. UNCONDITIONAL, and every matching token individually: a
+    # LONE opener or closer is removed too, because a half-pair ships to a
+    # reader just as visibly as a whole one. That is also the one way this
+    # function's output can change for a project declaring no markup -- a
+    # heading whose SOURCE text literally contains an ⟦ENT_n⟧-shaped token
+    # now leaves the byte-identical fast path (whose guard tests for it),
+    # so it loses those tokens AND has its internal whitespace collapsed.
+    # Prose says so at `references/output-target-adapters/obsidian.md`
+    # "Editorial brackets". `validate_backlinks.py:780` reconstructs each
+    # segment note's filename by calling `_segment_title` against the
+    # PERSISTED nodestream.json -- which assemble.py wrote BEFORE render()'s
+    # resolution pre-pass ran, so its heading text still carries raw
+    # sentinels. Without this scrub that gate would derive
+    # "001 _ENT_1_John_ENT_1_" for a segment render() actually wrote as
+    # "001 John", and every Mentions link into that segment would be reported
+    # missing. Scrubbing the tokens yields exactly render()'s own answer,
+    # because a resolved span's wikilink DISPLAY text is the payload and
+    # `_flatten_wikilinks` reduces it back to that same payload.
+    text = _ENT_TOKEN_RE.sub("", text)
+    if flatten_wikilinks:
+        # LAST, after every sentinel resolution: a declared verse placeholder
+        # resolves to verse text that the #795 pre-pass may itself have
+        # wikilinked, so flattening earlier would miss it.
+        text = _flatten_wikilinks(text)
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _segment_title(seg_nodes, seg):
+def _segment_title(seg_nodes, seg, flatten_wikilinks=False):
+    """`flatten_wikilinks` is threaded straight through to
+    `_heading_plain_text` (#795 §6.3). OPTIONAL and defaulting to today's
+    behaviour: `validate_backlinks.py` calls this with two arguments while
+    re-deriving each segment note's own expected filename, and that call must
+    keep resolving to the byte-identical slug this adapter wrote."""
     for node in seg_nodes:
         if node.get("kind") == "heading":
-            text = _heading_plain_text(node)
+            text = _heading_plain_text(node, flatten_wikilinks=flatten_wikilinks)
             if text:
                 return text
     return seg
 
 
-def _render_segment_note(seg, seg_nodes, footnote_text_by_n, linker, is_rtl):
-    title = _segment_title(seg_nodes, seg)
+def _render_segment_note(seg, seg_nodes, footnote_text_by_n, linker, is_rtl,
+                         flatten_wikilinks=False):
+    title = _segment_title(seg_nodes, seg, flatten_wikilinks=flatten_wikilinks)
     frontmatter = {
         "seg": seg,
         "title": title,
@@ -1643,7 +2427,7 @@ def _entity_note_relpath(source_form, entry, folders_map, used_paths):
     return _dedupe_path(f"{folder}/{stem}.md", used_paths)
 
 
-def _resolve_entity_notes(entries, folders_map):
+def _resolve_entity_notes(entries, folders_map, used_paths=None):
     """Resolves every entry's note relpath (folder/stem.md) UP FRONT, in
     the same `sorted(entries)` order the entity-note-writing loop uses --
     so the wikilink identity used while rendering narrative pages (via
@@ -1652,8 +2436,18 @@ def _resolve_entity_notes(entries, folders_map):
     (review round 1: the link target and the emitted filename must be the
     same string, or the link never resolves to the note). Returns
     {source_form: relpath}; the writing loop reuses this same mapping
-    rather than re-resolving (and re-deduping) a second time."""
-    used_paths = set()
+    rather than re-resolving (and re-deduping) a second time.
+
+    `used_paths` (#795 §6.1) is an OPTIONAL, caller-owned collision set, so
+    `render()` can resolve the entity-markup notes afterwards through the
+    SAME set and a markup note can never take or overwrite a canon note's
+    path. Absent -- which is how `validate_backlinks.py:860` calls this, with
+    two arguments, immediately `.items()`-ing the dict it returns -- a fresh
+    set is used and every canon relpath is byte-identical to what it was
+    before #795 existed. Canon MUST be resolved first for that to hold; see
+    `_resolve_markup_notes`."""
+    if used_paths is None:
+        used_paths = set()
     relpath_by_source_form = {}
     for source_form in sorted(entries):
         entry = entries[source_form]
@@ -2027,7 +2821,11 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
 
     Raises `RenderError` (carrying `.reason`) for a fail-closed out_dir
     precondition -- see `_clean_vault_content` (`out_dir_not_managed`) and
-    the symlink guard immediately below (`out_dir_is_symlink`)."""
+    the symlink guard immediately below (`out_dir_is_symlink`) -- and for
+    #795's three entity-markup failures: `entity_markup_unresolvable` (§6.4,
+    raised BEFORE the existing vault is touched),
+    `entity_markup_coverage_mismatch` (§6.5) and
+    `entity_markup_residual_sentinel` (§6.5)."""
     out_dir = Path(out_dir)
     if out_dir.is_symlink():
         # Checked BEFORE mkdir(exist_ok=True) -- that call would otherwise
@@ -2042,6 +2840,57 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
             "TARGET's own contents rather than a vault this adapter owns; "
             "point output.destination at a real directory instead",
         )
+    # #795: the ONE place this render decides whether declared entity markup
+    # is in effect. In every other mode -- `off`, `strip`, and the
+    # `index_unsupported_target` state assemble.py itself refuses -- every
+    # path below is inert, exactly the discipline `nodestream["mentions"]`
+    # already gets under a non-effective-enabled profile. The deepcopy is
+    # taken only here, because the resolution pre-pass rewrites
+    # node/verse/footnote text in place and assemble.py's own nodestream
+    # object (already persisted to nodestream.json) must not change under it.
+    entity_markup_active = _entity_markup_mode(profile) == "index"
+    if not entity_markup_active:
+        # ...with ONE exception, and it is the whole point of the feature.
+        # Being inert about the KEY is right; being inert about a book whose
+        # TEXT carries `⟦ENT_n⟧` is how machine markup reaches a reader, which
+        # is the failure #795 exists to close. Only an `index`-mode assemble
+        # writes those tokens -- `strip` and `off` write none, and
+        # `index_from: markup` under another target is refused there -- so
+        # finding one here means the NodeStream and the profile are from
+        # different runs: someone removed `index_from: markup` (or the whole
+        # block) and re-rendered without re-assembling. Nothing in this mode
+        # can resolve them, so it refuses rather than delivering them.
+        #
+        # The test is over the TEXT, never over the span table. The table is
+        # only a PROXY for sentinel-bearing text, and a broken one in both
+        # directions: a hand-edited or truncated NodeStream can carry the
+        # tokens with an empty, absent or malformed table, and that shape --
+        # empty table, off mode -- cleaned the managed vault and wrote raw
+        # tokens into a segment note. Same walk the `index`-mode preflight
+        # uses, so no reserved token escapes either path.
+        stale = next(
+            (
+                match.group(0)
+                for text in _walk_json_strings(nodestream)
+                for match in [_ENT_TOKEN_RE.search(text)]
+                if match
+            ),
+            None,
+        )
+        if stale is not None:
+            raise RenderError(
+                "entity_markup_stale_nodestream",
+                f"this NodeStream's text carries the entity-markup sentinel "
+                f"{stale!r}, so it was assembled under "
+                "`output.entity_markup.index_from: markup`, but this profile "
+                "no longer resolves to that mode. Nothing here can resolve "
+                "those tokens, so they would ship verbatim to a reader. Re-run "
+                "assemble.py against the current profile.",
+            )
+    entity_spans = _entity_markup_spans(nodestream) if entity_markup_active else {}
+    if entity_markup_active:
+        nodestream = copy.deepcopy(nodestream)
+
     meta = nodestream.get("meta") or {}
     is_rtl = _is_rtl_language(meta.get("target"))
 
@@ -2071,7 +2920,14 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # entity-note-writing loop later emits as a filename -- never the raw
     # source_form (review round 1: a raw source_form target doesn't
     # resolve to the emitted note, and could itself be path-like).
-    relpath_by_source_form = _resolve_entity_notes(entries, folders_map)
+    # #795 §6.1: canon resolves FIRST, through a set this function now owns,
+    # so `_resolve_markup_notes` can dedupe against it afterwards. Passing an
+    # empty set in is behaviourally identical to the fresh one the helper
+    # used to make for itself -- every canon relpath stays byte-identical to
+    # a pre-#795 render, which is what keeps `validate_backlinks.py`'s own
+    # independent re-derivation correct.
+    used_note_paths = set()
+    relpath_by_source_form = _resolve_entity_notes(entries, folders_map, used_note_paths)
     # The wikilink identity is the FOLDER-QUALIFIED relpath (minus ".md"),
     # e.g. "People/Ivan" -- NOT the bare stem (review round 2, [important]).
     # `_dedupe_path`'s `used_paths` set is shared across ALL entities for
@@ -2100,6 +2956,14 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
         nodestream.get("link_groups") if collision_delink else None,
         note_identity_by_source_form,
     )
+
+    # #795 §6.4, and here for the same reason `_validate_link_groups` is: the
+    # clean below empties the existing vault, so an unresolvable sentinel
+    # discovered while WRITING would leave the operator with neither the old
+    # vault nor a complete new one. This walks the WHOLE NodeStream value,
+    # not just the strings the pre-pass rewrites.
+    if entity_markup_active:
+        _entity_markup_preflight(nodestream, entity_spans, canon)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     _clean_vault_content(out_dir)  # marker-gated; raises RenderError if unmanaged -- review round 1+2
@@ -2151,6 +3015,53 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
         delinked_targets=set(delinked_owners),
     )
 
+    # #795 §6.2/§6.3: resolve every recorded span to a wikilink, in ONE
+    # pre-pass, BEFORE any renderer helper reads the text. Ordered here and
+    # not earlier because it needs two things that only exist by now:
+    # `target_to_entity` (which `_canon_composition` reduces to the identities
+    # canon actually owns -- those link the canon note and mint nothing) and
+    # `linker` (whose `global_seen` the
+    # pre-pass shares, so `parenthetical_originals: first_occurrence` shows
+    # its gloss once book-wide across BOTH mechanisms, and whose
+    # `links_emitted` keeps counting every inline link this render inserted).
+    markup_records = {}
+    markup_note_relpath = {}
+    entity_markup_report = None
+    if entity_markup_active:
+        canon_composition = _canon_composition(entity_spans, target_to_entity, entries)
+        markup_records = _markup_note_records(entity_spans, canon_composition)
+        markup_note_relpath = _resolve_markup_notes(
+            markup_records, folders_map, used_note_paths
+        )
+        markup_note_identity = {
+            identity: relpath[: -len(".md")] if relpath.endswith(".md") else relpath
+            for identity, relpath in markup_note_relpath.items()
+        }
+        markup_counts = _apply_entity_markup(
+            nodestream, entity_spans, canon_composition, markup_note_identity, linker
+        )
+        # §6.5, post-condition 1. With no bare-text branch the identity is
+        # exact -- spans resolved == wikilinks emitted == len(spans) -- so it
+        # is ONE comparison rather than an argument. A resolver that quietly
+        # drops spans is otherwise indistinguishable from one that resolves
+        # them all: the counts look plausible and every spot-check passes.
+        # It is deliberately a claim about RESOLUTION, not about delivery --
+        # §9's vault assertions are what prove a link reached a reader.
+        if (markup_counts["replaced"] != len(entity_spans)
+                or markup_counts["links"] != len(entity_spans)):
+            raise RenderError(
+                "entity_markup_coverage_mismatch",
+                f"entity-markup resolution covered {markup_counts['replaced']} "
+                f"span(s) and emitted {markup_counts['links']} wikilink(s), but "
+                f"nodestream.entity_markup.spans records {len(entity_spans)} -- "
+                "every recorded span must resolve to exactly one wikilink.",
+            )
+        entity_markup_report = {
+            "spans": len(entity_spans),
+            "notes": len(markup_note_relpath),
+            "links": markup_counts["links"],
+        }
+
     footnote_text_by_n = {fn["n"]: fn.get("text", "") for fn in (nodestream.get("footnotes") or [])}
 
     nodes_by_seg = {}
@@ -2180,11 +3091,21 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     segment_note_by_seg = {}
     for idx, seg in enumerate(full_order, start=1):
         seg_nodes = sorted(nodes_by_seg.get(seg, []), key=lambda n: n["order_index"])
-        title = _segment_title(seg_nodes, seg)
+        # #795 §6.3: a heading's marked spans are wikilinks like any other by
+        # now, and a wikilink must not survive into the frontmatter `title:`
+        # or the filename slug -- but resolving heading spans to bare payload
+        # instead is exactly what would reopen the wrong-note problem inside
+        # a heading. Flatten instead, and only in `index` mode.
+        title = _segment_title(seg_nodes, seg, flatten_wikilinks=entity_markup_active)
         slug = sanitize_filename_component(title, _stable_fallback_name(seg or str(idx), "segment"))
         rel_path = f"{idx:03d} {slug}.md"
         segment_note_by_seg[seg] = rel_path
-        note_text = _render_segment_note(seg, seg_nodes, footnote_text_by_n, linker, is_rtl)
+        note_text = _render_segment_note(
+            seg, seg_nodes, footnote_text_by_n, linker, is_rtl,
+            flatten_wikilinks=entity_markup_active,
+        )
+        if entity_markup_active:
+            _reject_residual_entity_tokens(rel_path, note_text)  # §6.5 post-condition 2
         _write_note(out_dir, rel_path, note_text)
         written.append(rel_path)
 
@@ -2205,6 +3126,21 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
             if note_identities:
                 mentions_section = _render_mentions_section(note_identities)
         note_text = _render_entity_note(source_form, entry, is_rtl, mentions_section=mentions_section)
+        if entity_markup_active:
+            _reject_residual_entity_tokens(rel_path, note_text)  # §6.5 post-condition 2
+        _write_note(out_dir, rel_path, note_text)
+        written.append(rel_path)
+
+    # #795 §6.6: one note per markup identity that canon has no entry for.
+    # Written LAST, after the canon notes, mirroring the resolution order
+    # that gave them their paths -- canon first, markup deduped against it.
+    for identity, rel_path in markup_note_relpath.items():
+        tag, label = identity
+        record = markup_records[identity]
+        note_text = _render_markup_note(
+            tag, label, record["aliases"], record["ref"], is_rtl
+        )
+        _reject_residual_entity_tokens(rel_path, note_text)  # §6.5 post-condition 2
         _write_note(out_dir, rel_path, note_text)
         written.append(rel_path)
 
@@ -2221,7 +3157,15 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # to a COMPLETE vault -- see the unmeasured stamp right after the clean.
     _stamp_vault_marker(out_dir, delink_cost=delink_cost)
 
-    return {"written": sorted(written), "kind": "vault", "delink_cost": delink_cost}
+    manifest = {"written": sorted(written), "kind": "vault", "delink_cost": delink_cost}
+    if entity_markup_report is not None:
+        # #795 §6.7. An extra manifest key is already accepted by
+        # diff_rendered_output.py -- `delink_cost` set that precedent.
+        # `brackets_escaped` is read off the linker because BOTH §7 emission
+        # sites fold into that one counter.
+        entity_markup_report["brackets_escaped"] = linker.brackets_escaped
+        manifest["entity_markup"] = entity_markup_report
+    return manifest
 
 
 # ---------------------------------------------------------------------------

@@ -703,6 +703,28 @@ Step-0d custom-target HALT blocks only assembly (W9): a project can still
 scaffold, translate and converge every segment with the co-design
 conversation still outstanding.
 
+**When the target resolves to `obsidian`, ask one further question before
+translation starts: do you want an index, and of what?** The default answer
+is canon — one note per `canon.json` entry, which is what a book whose names
+can be seeded from a list wants. A book whose names are NOT knowable in
+advance cannot seed that list, and its translator has to mark entities as it
+goes; that is what `output.entity_markup` declares (`tags`, the optional
+`ref_attribute`, and `index_from: canon | markup` — full semantics in
+`references/output-target-adapters/obsidian.md`). Ask it HERE, not later:
+the answer is what this project's `style_contract` then has to tell the
+translator to mark, and a convention invented mid-book reaches the reader as
+raw markup. An absent block runs none of it, so a project that
+wants no marked index answers by saying nothing (the release's two
+unconditional renderer changes are named in the CHANGELOG; neither is
+reached by a book that carries no such markup).
+
+This question is deliberately NOT one of the `CHOOSE_` sentinels Step 0's
+questionnaire prints. Those are asked of every project; this one is only
+meaningful under `output.v1_scope: assembled_book` with an `obsidian`
+target, and a plain translate+gloss job must not be made to answer an
+assembly question it will never read — the same proportionality rule that
+makes the whole of Step 0d a no-op under the default scope.
+
 ## Pre-read mandate
 
 Before any extraction, prompting, or reviewing work, read (once per

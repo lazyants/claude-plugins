@@ -367,71 +367,27 @@ def _local_dict_len(filename, funcname, varname):
 # would make this file the third copy of one number, which is the shape #580 was
 # filed about.
 FIGURES = [
-    # ROTATED TO 1.73.0. The 1.72.0 rotation this replaces was empty because
-    # that entry was documentation-only and claimed no tuple size; 1.73.0 moves
-    # `PLUGIN_BUNDLE_MEMBERS` and states all three sizes, so the rows the
-    # 1.71.0 entry retired come back -- against this release's own values.
-    Figure(
-        phrase="now holds 20 members",
-        value=20,
-        derive=lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
-    ),
-    Figure(
-        phrase="still holds 2 members",
-        value=2,
-        derive=lambda: _tuple_len("cache_key.py", "DERIVATION_BUNDLE_MEMBERS"),
-    ),
-    Figure(
-        phrase="still holds 6.",
-        value=6,
-        derive=lambda: _tuple_len(
-            "scaffold_setup.py", "ORCHESTRATION_BUNDLE_MEMBERS"
-        ),
-    ),
-    Figure(
-        phrase="3727 lines",
-        value=3727,
-        derive=lambda: len(
-            (PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md")
-            .read_text(encoding="utf-8")
-            .splitlines()
-        ),
-    ),
-    Figure(
-        phrase="now holds 22 files",
-        value=22,
-        derive=lambda: len(
-            list(
-                (PLUGIN_ROOT / "skills" / "literary-translator" / "references")
-                .rglob("*.md")
-            )
-        ),
-    ),
-    # The account of every numeral in the entry this list does NOT declare, so
-    # the list stays exhaustive over what is re-derivable rather than merely
-    # non-empty:
+    # ROTATED TO 1.74.0, and DELIBERATELY EMPTY -- the same shape the 1.72.0
+    # rotation had, and for the same reason. The #795 entry states five
+    # numbers (5265 inline tags, 763 distinct entities, 97 of them in canon,
+    # 3300 lines, eleven scripts) and not one of them is re-derivable from
+    # this tree: they are field measurements taken on a private Hebrew→English
+    # corpus that this repository does not and will not contain. A row
+    # hardcoding one would compare a literal against itself and prove nothing,
+    # which is the shape #580 was filed about.
     #
-    # HISTORICAL, re-derivable only at the OTHER revision, never from this
-    # tree: 19 (the pre-release `PLUGIN_BUNDLE_MEMBERS` size), 4457 (SKILL.md's
-    # line count at 1.72.0) and 18 (the reference count there). A row for any
-    # of them would have to hardcode its answer -- the `lambda: 17` failure the
-    # docstring refuses -- because the tree this file reads is the one AFTER
-    # the change. The paired current values are declared above, which is the
-    # half a guard can actually hold.
-    #
-    # RANGE MEASUREMENTS, taken by materializing both revisions and running
-    # `scaffold_setup.py`'s own `compute_bundle_hash`: the four bundle-hash
-    # prefixes (`c862fcd1`, `577b9a9d`, `8bc88ab9`, `d35b28da`) and the counts
-    # in the prose around them (16 commits, five changed members, four
-    # behaviour changes, four gate repairs). These are statements about a
-    # commit RANGE, not about the tree, and `_tuple_len`'s sibling helpers read
-    # a tree; re-deriving them here would mean shelling out to git and
-    # re-running the measurement, which is the release procedure rather than a
-    # figure guard. They are recorded in the commit message that made them.
-    #
-    # IDENTIFIERS, never measurements: the version numbers (1.73.0, 1.72.0,
-    # 1.71.0), the release date, `cd5a907`, and every issue number.
+    # The 1.73.0 rows this replaces (PLUGIN_BUNDLE_MEMBERS and friends) are
+    # not lost coverage: the gate reads the NEWEST entry only, by design, so a
+    # released entry's figures are frozen by the release rather than re-checked
+    # forever. Restore rows here the moment an entry claims a number the tree
+    # can answer.
 ]
+
+# The version FIGURES was last rotated to. An empty FIGURES makes the loop in
+# the second test iterate zero times, which prints exactly what a passing one
+# prints -- so the rotation itself is what gets asserted, and a release that
+# forgets to rotate goes RED instead of silently checking nothing.
+FIGURES_VERSION = "1.74.0"
 
 
 def _newest_entry():
@@ -444,6 +400,25 @@ def _newest_entry():
     first = heads[0]
     end = heads[1].start() if len(heads) > 1 else len(text)
     return first.group(1), text[first.start() : end]
+
+
+def test_the_figure_rows_were_rotated_to_the_newest_entry():
+    """FIGURES is written against ONE entry -- the release being edited. When
+    a new entry lands and the rows are not rotated, every row's phrase stops
+    occurring and the check below goes red loudly. But rotating to an EMPTY
+    list is legitimate (an entry claiming no re-derivable number), and then
+    nothing below iterates, so a stale empty list would sail through every
+    later release unnoticed. This is the pin that makes the rotation itself
+    the thing under test."""
+    version, _entry = _newest_entry()
+    assert version == FIGURES_VERSION, (
+        f"CHANGELOG's newest entry is {version} but FIGURES was rotated to "
+        f"{FIGURES_VERSION}. Rewrite FIGURES against the {version} entry -- "
+        f"one row per number in it the tree can re-derive -- and update "
+        f"FIGURES_VERSION. An empty list is a valid answer when the entry "
+        f"claims no such number; say so in a comment, as the 1.72.0 and "
+        f"1.74.0 rotations do."
+    )
 
 
 def test_every_declared_figure_is_still_what_the_tree_says():

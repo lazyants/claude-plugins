@@ -248,7 +248,7 @@ def _parse_style_bible_g_summary():
 
 
 def _parse_obsidian_frontmatter_enum():
-    """obsidian.md:53 -- the entity-note frontmatter's `basis:` pipe-enum
+    """obsidian.md:59 -- the entity-note frontmatter's `basis:` pipe-enum
     line inside the fenced YAML example block."""
     text = OBSIDIAN_SPEC.read_text(encoding="utf-8")
     m = re.search(r"^basis:\s*([a-z_ |]+)$", text, re.MULTILINE)

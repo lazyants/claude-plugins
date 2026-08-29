@@ -8,7 +8,7 @@ appendix-backlink-integrity, 1.8.0).
 The shipped `## Mentions` design (`references/output-target-adapters/
 obsidian.md`) has historically treated the inline linker's own scan of
 *translated* prose (`build_entity_index`/`_Linker`, `render_obsidian.py:
-706-1132`) AS the occurrence index. That model silently drops any occurrence
+719-1167`) AS the occurrence index. That model silently drops any occurrence
 whose translated surface differs from the one `canonical_target_form` the
 linker matches (#206), and collapses two distinct `source_form`s that
 happen to share a target string (#207-a). This module fixes both by

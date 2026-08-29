@@ -2578,6 +2578,573 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# #795: `output.entity_markup` -- the translator's own INLINE entity elements.
+#
+# A project whose translator marks entities as it goes (`<person ref="reb-
+# noson">Reb Noson</person>`) declares that vocabulary in profile.yml. Assembly
+# then REMOVES every declared element from the assembled text -- on the live
+# corpus that motivated this, all 5265 inline tags shipped verbatim into the
+# vault, the auto-linker inserted wikilinks INSIDE `ref` attribute values, and
+# heading slugs / frontmatter `title:` inherited the markup because `<`/`>` are
+# sanitized to `_` rather than the elements being removed -- and, in `index`
+# mode, RECORDS what was marked so the obsidian adapter can build the entity
+# index from what the translator actually marked rather than from canon.json
+# alone (on that corpus 58 of 64 distinct `ref` values named a person canon had
+# no entry for, so 666 marked entities could not become notes).
+#
+# Deliberately NOT a generic tag stripper and NOT a detector of UNDECLARED
+# markup: every regex below is built from the operator's own declared names, so
+# an unrelated angle-bracket run in the prose survives byte-for-byte.
+# ---------------------------------------------------------------------------
+
+# The identifier shape profile.schema.json's `tags`/`ref_attribute` patterns
+# declare, restated here because this script never runs jsonschema -- see
+# _entity_markup_config()'s docstring for why the whole block is re-validated.
+_ENTITY_TAG_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+# Characters a marked payload or `ref` may not carry. The obsidian adapter
+# interpolates the payload as a wikilink ALIAS and the identity as a note name
+# and an `# H1`: `[[Places/X|a|b]]` re-splits at the pipe and `[[...|a]]b]]`
+# closes early, so a grammar that admits these and an emission grammar that
+# cannot escape them are simply incompatible. CR and LF are refused for the
+# same reason -- a wikilink alias and a note name are single-line. None of this
+# needs a hostile author: a printed form carrying a pipe or a bracket is
+# ordinary.
+_ENTITY_UNSAFE_CHARS = ("[", "]", "|", "\r", "\n")
+
+
+def _entity_excerpt(text: str, pos: int, width: int = 60) -> str:
+    """A BOUNDED excerpt of `text` from `pos`, for an operator-facing refusal.
+    Bounded because the carrier is a whole block of translated prose and a
+    refusal that pastes the entire block back is unreadable."""
+    snippet = text[pos:pos + width]
+    return repr(snippet + ("..." if len(text) - pos > width else ""))
+
+
+def _entity_markup_config(profile: dict) -> "dict | None":
+    """The RESOLVED `output.entity_markup` block -- `{"tags", "ref_attribute",
+    "index_from"}` with every absent optional filled in HERE -- or None when
+    the block is absent entirely (mode `off`).
+
+    RE-VALIDATES the block at runtime; it deliberately does not lean on
+    profile.schema.json. assemble.py loads profile.yml through
+    `validate_draft.load_profile()`, which parses YAML and returns a mapping
+    WITHOUT running jsonschema (`validate_draft.py:317`); `profile_validate.py`
+    is a Step-0 gate on a path this script does not go through, and assemble.py
+    is directly invocable and re-run on a resumed project whose profile may
+    have been hand-edited since. So every constraint the schema states is
+    checked again here, and every absent optional is resolved explicitly --
+    the schema's `default:` annotations are documentation only, nothing in this
+    plugin materializes them (the same discipline `skeptic_constants.py` and
+    `_effective_mentions_enabled` already follow).
+
+    The single load-bearing check is `tags` being a LIST: a bare `tags: person`
+    is a perfectly good YAML string and a string is ITERABLE, so an unvalidated
+    reader would build a per-CHARACTER tag alternation (`p|e|r|s|o|n`) and
+    report a successful run. `index_from` is checked against the exact enum for
+    the mirror-image reason: a typo like `markkup` would otherwise resolve
+    silently to `strip` and hand the operator a run with no index and no
+    error."""
+    output_cfg = (profile or {}).get("output")
+    if not isinstance(output_cfg, dict) or "entity_markup" not in output_cfg:
+        return None
+
+    block = output_cfg["entity_markup"]
+    if not isinstance(block, dict):
+        raise AssembleError(
+            f"output.entity_markup must be a mapping with a 'tags' list, got "
+            f"{type(block).__name__} ({block!r})",
+            reason="entity_markup_config_invalid",
+        )
+
+    known = ("tags", "ref_attribute", "index_from")
+    unknown = sorted(k for k in block if k not in known)
+    if unknown:
+        raise AssembleError(
+            f"output.entity_markup has unknown key(s) {unknown} -- only "
+            f"{list(known)} are declared; a typo'd key would otherwise be "
+            f"read as an intentional omission of the setting it misspells",
+            reason="entity_markup_config_invalid",
+        )
+
+    if "tags" not in block:
+        raise AssembleError(
+            "output.entity_markup.tags is required -- the block declares WHICH "
+            "element names this project's translator marks with, and there is "
+            "no defensible default vocabulary to fall back on",
+            reason="entity_markup_config_invalid",
+        )
+    tags = block["tags"]
+    if not isinstance(tags, list):
+        raise AssembleError(
+            f"output.entity_markup.tags must be a list of element names, got "
+            f"{type(tags).__name__} ({tags!r}) -- a bare string is ITERABLE, so "
+            f"accepting one would build a per-CHARACTER tag alternation and "
+            f"report a successful run",
+            reason="entity_markup_config_invalid",
+        )
+    if not tags:
+        raise AssembleError(
+            "output.entity_markup.tags is empty -- declaring the block with no "
+            "element names would scan for nothing while claiming the project "
+            "marks entities inline",
+            reason="entity_markup_config_invalid",
+        )
+    non_str = [t for t in tags if not isinstance(t, str)]
+    if non_str:
+        raise AssembleError(
+            f"output.entity_markup.tags has non-string member(s) {non_str!r} -- "
+            f"every element name must be a string",
+            reason="entity_markup_config_invalid",
+        )
+    duplicates = sorted({t for t in tags if tags.count(t) > 1})
+    if duplicates:
+        raise AssembleError(
+            f"output.entity_markup.tags repeats {duplicates!r} -- element names "
+            f"must be unique",
+            reason="entity_markup_config_invalid",
+        )
+    malformed_tags = [t for t in tags if not _ENTITY_TAG_RE.match(t)]
+    if malformed_tags:
+        raise AssembleError(
+            f"output.entity_markup.tags has member(s) {malformed_tags!r} that do "
+            f"not match {_ENTITY_TAG_RE.pattern} -- an element name must be a "
+            f"lowercase identifier, so the compiled grammar stays a literal "
+            f"alternation rather than whatever regex metacharacters a free-form "
+            f"name would smuggle in",
+            reason="entity_markup_config_invalid",
+        )
+
+    # `in`, never `.get(key, default)`: an explicit `ref_attribute: null` is a
+    # malformed declaration, not a request for the documented default.
+    ref_attribute = "ref"
+    if "ref_attribute" in block:
+        ref_attribute = block["ref_attribute"]
+        if not isinstance(ref_attribute, str):
+            raise AssembleError(
+                f"output.entity_markup.ref_attribute must be a string, got "
+                f"{type(ref_attribute).__name__} ({ref_attribute!r})",
+                reason="entity_markup_config_invalid",
+            )
+        if not _ENTITY_TAG_RE.match(ref_attribute):
+            raise AssembleError(
+                f"output.entity_markup.ref_attribute {ref_attribute!r} does not "
+                f"match {_ENTITY_TAG_RE.pattern} -- an attribute name must be a "
+                f"lowercase identifier, for the same reason a tag name must",
+                reason="entity_markup_config_invalid",
+            )
+
+    index_from = "canon"
+    if "index_from" in block:
+        index_from = block["index_from"]
+        if index_from not in ("canon", "markup"):
+            raise AssembleError(
+                f"output.entity_markup.index_from must be 'canon' or 'markup', "
+                f"got {index_from!r} -- a typo here would otherwise resolve "
+                f"silently to strip mode and hand the operator a run with no "
+                f"index and no error",
+                reason="entity_markup_config_invalid",
+            )
+
+    return {"tags": list(tags), "ref_attribute": ref_attribute, "index_from": index_from}
+
+
+def _entity_markup_mode(profile: dict) -> str:
+    """The effective mode: `off` | `strip` | `index`.
+
+      - block absent                              -> `off`: no scan, no key on
+        the nodestream, assembled output byte-identical to 1.73.0.
+      - block present, index_from absent/`canon`  -> `strip`: elements removed,
+        payload kept, nothing recorded.
+      - block present, index_from `markup`,
+        output.target == "obsidian"               -> `index`: elements replaced
+        by paired sentinels and the spans recorded for the adapter.
+
+    `index_from: markup` under any OTHER target RAISES here -- rather than a
+    silent degrade to `strip` -- because no other shipped adapter consumes the
+    recorded spans, and degrading would give an operator an index they asked
+    for and did not get.
+
+    THE SHARED PREDICATE, written twice: render_obsidian.py carries its own
+    `_entity_markup_mode`, computed INDEPENDENTLY from the same profile fields
+    and never imported from here (nor this one from there). That is the house
+    precedent the `mentions_section` trio already sets -- three copies that
+    agree on the answer while differing in signature and in how each spells the
+    target check.
+
+    EVERY DIVERGENCE HAS ONE SHAPE, and it is never about which mode a VALID
+    profile resolves to: this copy REFUSES where the renderer resolves to some
+    inert answer, because only this copy validates the block (it delegates to
+    `_entity_markup_config`) and a renderer has no failure vocabulary to
+    refuse with. Two categories, and the second is open-ended by
+    construction. First: this copy RAISES
+    `AssembleError(reason="entity_markup_index_unsupported_target")` on the
+    unsupported-target row, and a renderer has no such vocabulary, so
+    render_obsidian.py's copy reports that same row as a fourth VALUE
+    (`"index_unsupported_target"`) and stays inert on it. Byte-identical text is
+    therefore not achievable, and neither copy should claim it is. That the
+    adapter can stay inert there is safe for exactly one reason: assemble.py
+    runs FIRST on every real path -- `dispatch_adapter()` is the only way the
+    built-in renderer is reached from a pipeline run -- so by the time the
+    adapter resolves the mode itself, this function has already refused. The
+    renderer's own resolution is reached only when it is invoked STANDALONE.
+
+    Second, and for the same reason: ANY block `_entity_markup_config`
+    rejects is a hard `entity_markup_config_invalid` here while the renderer
+    resolves it to whatever its two unvalidated field reads produce -- `"off"`
+    for a non-mapping block, and for a structurally-bad-but-mapping one (an
+    empty `tags`, a bare string `tags`, an unknown key) whatever `index_from`
+    and `output.target` say, up to and including `"index"`. That is safe for
+    exactly the reason above and no other. Recorded in the renderer's own copy
+    too; change one docstring and change the other."""
+    cfg = _entity_markup_config(profile)
+    if cfg is None:
+        return "off"
+    if cfg["index_from"] != "markup":
+        return "strip"
+    target = ((profile or {}).get("output") or {}).get("target")
+    if target != "obsidian":
+        raise AssembleError(
+            f"output.entity_markup.index_from is 'markup' but output.target is "
+            f"{target!r} -- only the obsidian adapter consumes the recorded "
+            f"spans, so an index cannot be built for this target; either set "
+            f"output.target: obsidian or use index_from: canon (strip only)",
+            reason="entity_markup_index_unsupported_target",
+        )
+    return "index"
+
+
+def _compile_entity_markup(cfg: dict) -> tuple:
+    """`(open_re, close_re, any_re)` for the resolved config.
+
+    Regex, not an HTML parser -- the shape the live workaround this feature
+    replaces already proved, and deliberately narrow so an unknown angle-bracket
+    run in the prose is untouched.
+
+    `any_re` is the LEXICAL GUARD: every position in every scanned string where
+    a DECLARED tag name follows `<` or `</` must be the start of a token
+    `open_re`/`close_re` match IN FULL. `<person/>`, `<person ref=x>` (unquoted),
+    a bare unterminated `<person` and `<person class="x">` all hit it. Without
+    it a MALFORMED use of a name the project itself declared would ship
+    verbatim, which is the exact failure this feature exists to close. It is
+    not undeclared-markup detection: it fires only on the operator's own names.
+
+    The guard's terminator is an explicit negative lookahead over the tag
+    alphabet, NEVER `\\b`: the identifier pattern admits a tag ending in `-` or
+    `_`, and Python places no word boundary between a trailing `-` and the `>`,
+    `/` or space that follows it -- `\\b` would silently fail to guard exactly
+    the tags whose last character is not alphanumeric. The lookahead is also
+    what makes the alternation order irrelevant (`person` cannot win over
+    `person-x` at `<person-x>`, because the lookahead then sees `-`); it is
+    sorted anyway, so the compiled pattern is deterministic."""
+    alternation = "|".join(re.escape(t) for t in sorted(cfg["tags"]))
+    ref_attr = re.escape(cfg["ref_attribute"])
+    open_re = re.compile(
+        rf'<({alternation})(?:\s+{ref_attr}="([^"<>]*)")?\s*>'
+    )
+    close_re = re.compile(rf"</({alternation})\s*>")
+    any_re = re.compile(rf"</?\s*(?:{alternation})(?![a-z0-9_-])")
+    return open_re, close_re, any_re
+
+
+def _entity_markup_scan(text, open_re, close_re, any_re, where: str) -> list:
+    """Every well-formed element in `text`, as `(start, end, tag, ref, payload)`
+    in source order -- `ref` is None when the attribute was absent, and
+    `payload` is the text between the tags VERBATIM.
+
+    Raises `entity_markup_malformed` for: an `any_re` hit that is not the start
+    of a full token (see `_compile_entity_markup`), an open with no matching
+    close, a close with no open, a NESTED open before its close, and a close
+    whose tag differs from its open's. Fail-closed on all five: half-parsed
+    markup is exactly the state that ships to a reader."""
+    tokens = [
+        (m.start(), m.end(), "open", m.group(1), m.group(2))
+        for m in open_re.finditer(text)
+    ]
+    tokens.extend(
+        (m.start(), m.end(), "close", m.group(1), None)
+        for m in close_re.finditer(text)
+    )
+    tokens.sort(key=lambda t: t[0])
+
+    token_starts = {t[0] for t in tokens}
+    for m in any_re.finditer(text):
+        if m.start() not in token_starts:
+            raise AssembleError(
+                f"{where}: {_entity_excerpt(text, m.start())} uses a declared "
+                f"entity_markup tag name but is not a well-formed element -- "
+                f"the grammar is exactly <tag>, <tag attr=\"value\"> and "
+                f"</tag>, matching {open_re.pattern} / {close_re.pattern}; "
+                f"refusing rather than shipping a malformed use of the "
+                f"project's own declared element verbatim",
+                reason="entity_markup_malformed",
+            )
+
+    spans = []
+    open_token = None
+    for start, end, kind, tag, ref in tokens:
+        if kind == "open":
+            if open_token is not None:
+                raise AssembleError(
+                    f"{where}: {_entity_excerpt(text, start)} opens <{tag}> "
+                    f"while <{open_token[3]}> (at offset {open_token[0]}) is "
+                    f"still open -- nested entity markup has no single payload "
+                    f"and is refused",
+                    reason="entity_markup_malformed",
+                )
+            open_token = (start, end, kind, tag, ref)
+            continue
+        if open_token is None:
+            raise AssembleError(
+                f"{where}: {_entity_excerpt(text, start)} closes <{tag}> that "
+                f"was never opened",
+                reason="entity_markup_malformed",
+            )
+        if tag != open_token[3]:
+            raise AssembleError(
+                f"{where}: {_entity_excerpt(text, start)} closes <{tag}> but "
+                f"the open element (at offset {open_token[0]}) is "
+                f"<{open_token[3]}>",
+                reason="entity_markup_malformed",
+            )
+        spans.append(
+            (open_token[0], end, tag, open_token[4], text[open_token[1]:start])
+        )
+        open_token = None
+
+    if open_token is not None:
+        raise AssembleError(
+            f"{where}: {_entity_excerpt(text, open_token[0])} opens "
+            f"<{open_token[3]}> and is never closed",
+            reason="entity_markup_malformed",
+        )
+    return spans
+
+
+def _entity_markup_check_span_text(value: str, label: str, where: str, placeholders) -> None:
+    """Refuses a marked payload / `ref` value that carries a machine sentinel or
+    a character the obsidian emission grammar cannot escape.
+
+    THE SENTINEL REFUSAL IS LOAD-BEARING ON BOTH CARRIERS, not tidiness. In the
+    payload: `<person>John⟦FNREF_1⟧</person>` would render as
+    `[[People/John|John[^1]]]`, where the footnote closer collides with the
+    wikilink closer and the markdown breaks -- refusing tells the operator to
+    write `<person>John</person>⟦FNREF_1⟧`, which is what they meant. In the
+    `ref`: a value like `ref="⟦FNREF_1⟧"` passes `_scan_and_validate_sentinels`
+    unremarked when it names a real footnote at that site, and would then be
+    lifted out of the narrative into the span record and written verbatim into
+    a markup note's `name`, `ref` and `# heading` -- a machine sentinel
+    delivered to a reader through a path neither renderer residual check looks
+    at, because both look only for `ENT` tokens.
+
+    `placeholders` is the carrier NODE's own verse placeholder strings.
+    `ANY_SENTINEL_RE` already covers every `⟦...⟧` token, but
+    segpack.schema.json's `placeholder` field is free-form and is not
+    guaranteed to follow that bracket convention, so the node's own strings are
+    checked by value too.
+
+    SCOPE, stated honestly: this can only fire on node text and verse content.
+    `build_nodestream` strips every sentinel out of footnote-DEFINITION text
+    before this pass ever sees it (Phase 0 policy -- "a footnote definition's
+    own nested sentinels are stripped, not recursively expanded"), so a
+    sentinel inside a marked footnote payload is gone by then. Nothing leaks;
+    the guard simply has nothing to say there."""
+    hit = ANY_SENTINEL_RE.search(value)
+    if hit:
+        raise AssembleError(
+            f"{where}: the marked element's {label} carries the machine "
+            f"sentinel {hit.group(0)!r} ({value!r}) -- move the sentinel "
+            f"OUTSIDE the marked element; a sentinel lifted into an entity "
+            f"identity reaches the reader through a path no residual check "
+            f"looks at",
+            reason="entity_markup_span_contains_sentinel",
+        )
+    for placeholder in sorted(placeholders):
+        if placeholder in value:
+            raise AssembleError(
+                f"{where}: the marked element's {label} carries this node's "
+                f"own verse placeholder {placeholder!r} ({value!r}) -- move it "
+                f"OUTSIDE the marked element",
+                reason="entity_markup_span_contains_sentinel",
+            )
+    for char in _ENTITY_UNSAFE_CHARS:
+        if char in value:
+            raise AssembleError(
+                f"{where}: the marked element's {label} contains {char!r} "
+                f"({value!r}) -- the obsidian adapter interpolates it as a "
+                f"wikilink alias and a note name, which can escape none of "
+                f"{list(_ENTITY_UNSAFE_CHARS)} and are single-line",
+                reason="entity_markup_span_unsafe_text",
+            )
+
+
+def _apply_entity_markup(nodestream: dict, profile: dict) -> "dict | None":
+    """Processes every text-bearing string on `nodestream` IN PLACE per
+    `_entity_markup_mode(profile)`, and returns the counts for main()'s summary
+    JSON -- or None in `off` mode, where nothing is scanned and nothing is
+    added.
+
+    THE FROZEN NODESTREAM CONTRACT this produces, which
+    `render_obsidian.py` consumes verbatim:
+
+      - In INDEX mode each declared element becomes the three-part sequence:
+        the literal opening token U+27E6 ENT_ <n> U+27E7, then the payload text
+        verbatim, then the literal closing token U+27E6 /ENT_ <n> U+27E7. `n`
+        is a book-global monotonic integer starting at 1.
+      - nodestream gains exactly one new key: `entity_markup`, whose value is
+        an object with exactly one key `spans`, whose value is an object
+        mapping the DECIMAL STRING form of `n` to an object with keys `tag`
+        (string, the declared element name), `payload` (string, verbatim), and
+        `ref` (string, present ONLY when the ref attribute was present on that
+        element).
+      - In STRIP mode and OFF mode the nodestream gains NO `entity_markup` key
+        at all.
+
+    Sentinels rather than character offsets because `_render_block` splices
+    verse/fnref substitutions into the text before linking and
+    `_heading_plain_text` rebuilds title text from scratch -- an offset survives
+    neither. `⟦FNREF_N⟧` is this plugin's own established idiom for exactly
+    this ("assemble records, the adapter renders"), and the adapter's
+    `_PROTECTED_SPAN_RE` already protects such tokens from the linker for free.
+    The payload stays INLINE rather than living only in the span table because
+    `nodestream.json` is a durable, operator-inspected artifact and the
+    documented adapter contract's `text` field: on a book with thousands of
+    marked names, replacing the prose with opaque ids would make it unreadable.
+    The pairing that costs collapses to one regex with a backreference, because
+    a payload containing a machine sentinel is refused above.
+
+    STRINGS SCANNED -- every text-bearing string the renderer can emit:
+    `node["text"]`, each `node["verses"][i]["content"]["rendered"]` and
+    `["literal_gloss"]`, and each `nodestream["footnotes"][i]["text"]`.
+
+    THREE OF THE REFUSALS FIRE IN INDEX MODE ONLY, because all three defend the
+    obsidian adapter's emission grammar rather than the markup itself:
+    `entity_markup_span_unrendered` (a span in the `text` of a `kind: "verse"`
+    node, which `_render_block` renders from `node["verses"]` alone and never
+    emits, so the span would be recorded, counted, resolved -- and still never
+    reach the vault, a silent shortfall in exactly the coverage this feature
+    promises), and the payload/`ref` sentinel and unsafe-character checks. Strip
+    mode records nothing and emits no wikilink: it deletes the element and puts
+    the payload back byte-for-byte, so none of those three has anything to
+    protect there and refusing would be a false RED on input strip mode handles
+    correctly. Config validation, the pairing rules and the declared-tag-token
+    guard are NOT mode-gated -- those are about the markup itself.
+
+    Called from main() immediately after `build_nodestream()` and BEFORE
+    `_attach_link_groups` / `_attach_mentions`, so the occurrence index and the
+    persisted `nodestream.json` both see processed text. It runs AFTER
+    `_scan_and_validate_sentinels` has walked the draft text, so the `ENT_`
+    tokens it introduces can never collide with that gate."""
+    mode = _entity_markup_mode(profile)
+    if mode == "off":
+        return None
+
+    cfg = _entity_markup_config(profile)
+    open_re, close_re, any_re = _compile_entity_markup(cfg)
+    spans_recorded = {}
+    tag_counts = {tag: 0 for tag in cfg["tags"]}
+    state = {"n": 0, "scanned": 0}
+
+    def process(text: str, where: str, placeholders, rendered: bool = True) -> str:
+        state["scanned"] += 1
+        found = _entity_markup_scan(text, open_re, close_re, any_re, where)
+        if not found:
+            return text
+        if not rendered and mode == "index":
+            raise AssembleError(
+                f"{where}: {len(found)} entity element(s) are marked in a "
+                f"kind=\"verse\" node's own text, which the obsidian adapter "
+                f"renders from node[\"verses\"] alone and never emits -- they "
+                f"would be recorded and counted and would still never reach a "
+                f"reader; mark them in the verse's own rendered/literal_gloss "
+                f"instead",
+                reason="entity_markup_span_unrendered",
+            )
+        pieces = []
+        cursor = 0
+        for start, end, tag, ref, payload in found:
+            if mode == "index":
+                # INDEX MODE ONLY, and deliberately so. Both of these checks
+                # defend the RENDERER's emission grammar: the payload becomes a
+                # wikilink ALIAS and the label becomes a note name and an `# H1`.
+                # Strip mode emits neither -- it deletes the element and puts the
+                # payload back into the prose byte-for-byte -- so a bracket, a
+                # pipe, a line break or an ⟦FNREF_n⟧ inside a marked run is
+                # ordinary text there, and refusing it would be a false RED on
+                # input this mode handles correctly. The pairing and
+                # declared-tag-token rules in `_entity_markup_scan` are NOT
+                # mode-gated: those are about the markup itself, in both modes.
+                _entity_markup_check_span_text(payload, "payload", where, placeholders)
+                if ref is not None:
+                    _entity_markup_check_span_text(
+                        ref, f"{cfg['ref_attribute']} attribute value", where, placeholders
+                    )
+            state["n"] += 1
+            tag_counts[tag] += 1
+            pieces.append(text[cursor:start])
+            if mode == "index":
+                record = {"tag": tag, "payload": payload}
+                if ref is not None:
+                    record["ref"] = ref
+                spans_recorded[str(state["n"])] = record
+                pieces.append(f"⟦ENT_{state['n']}⟧{payload}⟦/ENT_{state['n']}⟧")
+            else:
+                pieces.append(payload)
+            cursor = end
+        pieces.append(text[cursor:])
+        return "".join(pieces)
+
+    for node in nodestream.get("nodes") or []:
+        placeholders = {
+            v.get("placeholder")
+            for v in (node.get("verses") or [])
+            if isinstance(v.get("placeholder"), str) and v.get("placeholder")
+        }
+        where = f"node {node.get('id')!r} (segment {node.get('seg')!r})"
+        text = node.get("text")
+        if isinstance(text, str):
+            node["text"] = process(
+                text, f"{where} text", placeholders,
+                rendered=node.get("kind") != "verse",
+            )
+        for verse in node.get("verses") or []:
+            content = verse.get("content")
+            if not isinstance(content, dict):
+                continue
+            for field in ("rendered", "literal_gloss"):
+                value = content.get(field)
+                if isinstance(value, str):
+                    content[field] = process(
+                        value,
+                        f"{where} verse {verse.get('vid')!r} {field}",
+                        placeholders,
+                    )
+
+    # Footnote definitions carry no node, so no per-node verse placeholders to
+    # check by value -- ANY_SENTINEL_RE is the whole guard there, and per
+    # _entity_markup_check_span_text's own scope note it has nothing to say
+    # anyway: build_nodestream already stripped every sentinel out of this text.
+    for footnote in nodestream.get("footnotes") or []:
+        value = footnote.get("text")
+        if isinstance(value, str):
+            footnote["text"] = process(
+                value, f"footnote n={footnote.get('n')!r} definition text", set()
+            )
+
+    if mode == "index":
+        nodestream["entity_markup"] = {"spans": spans_recorded}
+    # Reported even when it is all zeros -- a book may genuinely carry no
+    # markup, and that is not a refusal; but a zero must be VISIBLE rather than
+    # indistinguishable from a scan that never ran.
+    return {
+        "mode": mode,
+        "strings_scanned": state["scanned"],
+        "spans": state["n"],
+        "tags": tag_counts,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Adapter dispatch (contract section 10).
 # ---------------------------------------------------------------------------
 
@@ -2970,6 +3537,16 @@ def main() -> int:
 
         nodestream, anchor_map = build_nodestream(profile, manifest, converged)
 
+        # #795: strip (and, in `index` mode, record) the translator's own
+        # inline entity elements HERE -- immediately after the nodestream is
+        # built and BEFORE anything else reads it, so the occurrence index
+        # _attach_mentions derives and the persisted nodestream.json both see
+        # processed text rather than raw `<person>...</person>` markup. Returns
+        # None under an absent `output.entity_markup` block, in which case
+        # nothing was scanned, nothing was attached, and this run is
+        # byte-identical to one before the knob existed.
+        entity_markup_counts = _apply_entity_markup(nodestream, profile)
+
         # #588: link groups gate on the TARGET alone, not on the Mentions
         # flag -- collision de-linking, which is what a group modifies, is
         # itself decoupled from that flag (#206/#207). Attached here, next
@@ -3070,6 +3647,13 @@ def main() -> int:
         # consumer cannot read an empty list as "we checked and there were
         # none" on a run where nothing was ever checked.
         result["contract_stale_admitted"] = contract_admitted
+    if entity_markup_counts is not None:
+        # #795. Present in strip/index mode ONLY -- an undeclared project's
+        # stdout keys are unchanged. Unlike the block above it IS emitted when
+        # the counts are all zero: a book may genuinely carry no markup, and
+        # that zero has to be visible rather than indistinguishable from a scan
+        # that never ran.
+        result["entity_markup"] = entity_markup_counts
     print(dumps_line(result))
     return 0
 

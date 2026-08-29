@@ -1,5 +1,88 @@
 # Changelog
 
+## 1.74.0 — 2026-08-29
+
+**A project can declare WHAT it wants indexed (#795).** Until now `output.target: obsidian`
+built its entity index from exactly one place — one note per `canon.json` entry, keyed by the
+original-script `source_form`, with body text auto-linked by string-matching each entry's
+`canonical_target_form`. A book whose names are not knowable before translation cannot seed that
+list, so its translator marks entities inline as it goes; nothing in `assemble.py` or
+`render_obsidian.py` recognised such markup, and the result was two silent failures on a live
+Hebrew→English volume: all 5265 inline tags shipped verbatim into the delivered vault (with
+wikilinks inserted INSIDE `ref` attribute values, and chapter filenames and frontmatter `title:`
+inheriting the markup, because `<`/`>` are sanitized to `_` rather than the elements being
+removed), and of the 763 distinct entities marked, only the 97 in canon could become notes. That
+volume shipped through a hand-written render wrapper; a sibling volume needed 3300 lines across
+eleven local scripts.
+
+- **`output.entity_markup` — one new profile block, absent by default.** `tags` declares the
+  element names the translator may emit, `ref_attribute` (default `ref`) the optional
+  disambiguator, and `index_from` (`canon` | `markup`, default `canon`) whether the index is
+  built from the markup. **An absent block means no scan, no new nodestream key, and no
+  behaviour change** — with two named exceptions, both deliberate and both below: the
+  editorial-bracket fix, and the heading-title scrub of the `⟦ENT_n⟧` machine shape, which is
+  unconditional exactly like the `⟦FNREF_N⟧` anchor scrub beside it (a heading carrying that
+  literal loses it from `title:` and from the filename slug in every mode — every matching
+  token individually, a lone opener or closer included, and such a heading also loses the
+  byte-identical fast path, so its title has its internal whitespace collapsed). The scrub cannot
+  be mode-gated: `validate_backlinks.py` rebuilds each segment note's filename from the
+  PERSISTED nodestream, which assemble.py wrote before the renderer resolved anything, and it
+  is handed no mode to gate on.
+- **Assembly strips the declared elements, so the reader never sees them.** With the block
+  present and `index_from: canon`, `assemble.py` removes each element and keeps its payload —
+  that alone closes the first failure. Every text-bearing string the renderer can emit is
+  covered: block text, verse `rendered` and `literal_gloss`, and footnote definitions.
+- **`index_from: markup` builds the index from what was marked.** Assembly records each span's
+  tag, payload and `ref`; the Obsidian adapter mints one note per `(tag, ref-or-payload)` and
+  links **every** marked occurrence. A span whose label is already a linkable canon target takes
+  the canon note instead of minting a second one, so the two indexes compose rather than compete.
+  The tag is part of the identity, not just the folder: `<person>Jordan</person>` and
+  `<place>Jordan</place>` stay two notes rather than being silently merged. Composition onto
+  a canon note is conditional on the same identity: it happens only when the canon entry's
+  `category` equals the marked tag, or when that entry carries no `category` at all.
+- **Five assemble-time refusals, all fail-closed, all named.** Markup this pipeline cannot
+  render correctly is refused rather than half-processed: a malformed or unpaired element
+  (including a malformed use of a *declared* tag name, which would otherwise ship verbatim);
+  a payload or `ref` carrying a machine sentinel or a verse placeholder; a payload or `ref`
+  carrying a bracket, a pipe or a line break, none of which survive interpolation into a
+  wikilink alias or a note name; a span in the ignored `text` of a dedicated verse node, which
+  would be counted and never delivered; and `index_from: markup` under any target but
+  `obsidian`, since no other adapter consumes the spans. The middle three are checked in
+  `index` mode only — they defend the renderer's emission grammar, and `strip` emits no
+  wikilink, note name or heading to defend. The block's own shape is re-validated
+  at runtime too — `assemble.py` does not run jsonschema, so a profile hand-edited after Step 0
+  is checked where it is used, not only where it was written.
+- **A stale NodeStream is refused, not delivered.** A book assembled under
+  `index_from: markup` and then re-rendered against a profile that no longer resolves to that
+  mode still carries `⟦ENT_n⟧` in its text, and no other mode can resolve it. That is now
+  `entity_markup_stale_nodestream` rather than sentinels shipped verbatim — the original
+  failure with one more step in front of it. The check reads the TEXT, never the span table:
+  the table is only a proxy for sentinel-bearing text, and a hand-edited or truncated
+  NodeStream carries the tokens with an empty, absent or malformed one. A book with no such
+  token renders exactly as before.
+- **The vault is checked before it is destroyed.** `render_obsidian.py` deletes the managed
+  vault before writing the first note, so the whole nodestream is walked for unresolvable span
+  tokens *before* that point; a failure leaves the existing vault untouched. A resolution-count
+  identity and a per-note residual check stand behind it.
+- **An editorial bracket around a name no longer breaks its link.** `[[[Note|Name]]]` made
+  Obsidian read the target as `[Note` and leave a stray `]`; the outer pair is now escaped, which
+  preserves what the reader sees and lets the link parse. It applies at BOTH emission sites,
+  the canon linker's included, so it is one of the two changes that can alter rendered output
+  for a project that declares nothing — the heading-title scrub above is the other. The two
+  sides of the pair are decided separately: `[Name\]`, where the operator escaped only the
+  closer, escapes the opener alone rather than being left bare, and an escape the operator
+  already wrote is never doubled.
+
+**Migration.** No cache-key field moves, so **nothing re-translates** and nothing is blocked
+needing regeneration. Two real costs: the `profile.schema.json` edit is part of both the resume
+digest and the skeptic-run digest, so an INTERRUPTED run (and an interrupted opt-in skeptic pass)
+starts fresh rather than resuming — converged segments are untouched either way. And the
+`render_obsidian.py` edit moves `render_version`: where the rendered content is unchanged the
+render/diff gate still exits 0 with a `stale_baseline` warning, so a baseline re-accept
+(`--accept-baseline --force-accept-baseline`) is needed only where content actually changed —
+a project that declares `output.entity_markup`, one whose text hits the bracket case above, or
+one whose source heading text literally carries an `⟦ENT_n⟧`-shaped token.
+
 ## 1.73.0 — 2026-08-29
 
 The fifth batch fold: every merge that landed on `main` after the 1.72.0 cut (`cd5a907`) without a
