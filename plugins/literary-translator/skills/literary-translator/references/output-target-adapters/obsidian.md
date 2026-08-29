@@ -599,6 +599,23 @@ before each write stands behind that; with the preflight covering both inputs
 it can only fire on a resolver bug, and it is the last thing between a
 machine token and a reader.
 
+The span table is checked there too, and not only for tokens. `nodestream.json`
+is a SEPARATE input from the run that produced it — it can be hand-edited, or
+left over from a different version — so the preflight re-applies the
+producer's own constraints to every record in the RAW table, used or not:
+`tag` and `payload` non-empty strings, `ref` a non-empty string when the key
+is present at all, none of them carrying a bracket, a pipe, a line break or a
+`⟦…⟧` sentinel, and each pair's inline text equal to its record's `payload`.
+Nothing downstream re-checks any of it — the values go straight into a
+wikilink alias, a note name and an `# H1` — and the check has to happen here
+because everything downstream runs after the vault is gone.
+
+Two gaps are known and accepted, both needing a hand-edited NodeStream and
+neither destroying anything: a span in the ignored `text` of a dedicated verse
+node is counted but never delivered (assembly refuses it, this preflight does
+not re-derive deliverability), and a string carrying a lone UTF-16 surrogate
+fails at write time like any other unencodable text in the book.
+
 **Three accepted imprecisions, all about `parenthetical_originals:
 first_occurrence` and none about a link target.** The pre-pass consults and
 updates the same book-global set the canon linker uses, so the original-script
@@ -627,13 +644,21 @@ other.
 
 The PAIR is what makes a bracket editorial, so both sides must be present or
 nothing is touched — an unmatched `[` stays the literal source text the
-unresolved-bracket contract promises. The two sides are then decided
-SEPARATELY, on the PARITY of the backslash run before each: `\\[Name]` (an
-escaped backslash, then a literal bracket) is repaired on both sides, and
-`[Name\]` — where the operator escaped only the closer — has its opener
-escaped alone rather than left bare, which is the case that still broke the
-link target. An escape the operator already wrote is never doubled: a reader
-must never be shown a backslash.
+unresolved-bracket contract promises. **That is an accepted residual:** a bare
+literal `[` immediately before an emitted link still corrupts the target, and
+escaping it would preserve what the reader sees, but a lone bracket is not an
+editorial pair and widening the rule to reach it is a product decision this
+release does not take.
+
+The two sides are then decided SEPARATELY, each on the PARITY of its own
+backslash run. On the opening side that run sits BEFORE the `[` and stays in
+the prefix untouched; on the closing side it sits BETWEEN the link and the
+`]`, so it is kept verbatim and the `]` is escaped behind it. Worked cases:
+`\\[Name]` is an escaped backslash then a literal bracket, repaired on both
+sides; `[Name\]`, where the operator escaped only the closer, has its opener
+escaped alone rather than left bare; `[Name\\]` is an escaped backslash then a
+literal `]`, so both sides are escaped. An escape the operator already wrote
+is never doubled: a reader must never be shown a backslash.
 
 ## Category→folder catalog — presets are EXAMPLES, not an enum
 

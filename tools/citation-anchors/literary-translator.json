@@ -230,7 +230,7 @@
    ],
    "claim": "(`backfill_ever_converged.py:640-660`, test `tests/backfill_ever_converged.test.py:2106-2172`).\"\"\" path = ever_converged_path(seg, segments_dir)"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/occurrence_targets.py\", \"render_obsidian.py:719-1162\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/occurrence_targets.py\", \"render_obsidian.py:719-1167\", 0]": {
    "anchors": [
     "def build_entity_index",
     "class _Linker",

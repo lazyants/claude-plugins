@@ -1626,6 +1626,17 @@ def test_a_span_record_whose_payload_disagrees_with_the_text_is_refused(tmp_path
         pytest.param("\\[{link}]", "\\[{piece}\\]", 1, id="opener-already-escaped"),
         pytest.param("\\[{link}\\]", "\\[{piece}\\]", 0, id="both-already-escaped"),
         pytest.param("\\\\[{link}]", "\\\\\\[{piece}\\]", 1, id="even-run-is-literal"),
+        # Closing-side parity, the mirror of the opening side. A run of FOUR
+        # backslashes before the `]` is two escaped backslashes, so the `]`
+        # after them is LITERAL and must be escaped -- with the run kept
+        # verbatim in front of it. A run of THREE is an escaped backslash plus
+        # an escaped `]`: nothing to do on that side. Both were classified as
+        # "no closing bracket at all" while the prose already claimed parity
+        # on both sides, so the literal opener shipped bare.
+        pytest.param("[{link}" + "\\" * 4 + "]", "\\[{piece}" + "\\" * 5 + "]", 1,
+                     id="closing-even-run-is-literal"),
+        pytest.param("[{link}" + "\\" * 3 + "]", "\\[{piece}" + "\\" * 3 + "]", 1,
+                     id="closing-odd-run-is-escaped"),
         pytest.param("{link}", "{piece}", 0, id="no-brackets"),
         pytest.param("[{link}", "[{piece}", 0, id="unmatched-opener-untouched"),
         pytest.param("{link}]", "{piece}]", 0, id="unmatched-closer-untouched"),
@@ -1664,6 +1675,100 @@ def test_the_canon_linker_decides_bracket_sides_the_same_way(tmp_path):
     )
     body = segment_note_texts(out_dir)[0]
     assert "And \\[[[People/Иван|Ivan]]\\] spoke." in body, f"got:\n{body}"
+
+
+# ===========================================================================
+# 23. Condition 0 reads the RAW span table and re-applies the PRODUCER's own
+#     constraints. An unused garbage record used to be filtered away before
+#     the preflight could see it, and a hand-edited payload carrying a pipe
+#     or a sentinel rendered a malformed wikilink.
+# ===========================================================================
+
+def test_an_unused_garbage_record_is_refused_not_silently_dropped(tmp_path):
+    """`_entity_markup_spans` used to drop every non-mapping record and claim
+    the preflight would catch it. It could not: the inverse check only ever
+    saw what that filter returned, so a record no pair cites was dropped in
+    silence and the render carried on -- reporting a span count that did not
+    match the table the operator was looking at."""
+    out_dir = make_managed_vault(tmp_path)
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Ivan')} arrived.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(
+            tmp_path,
+            make_nodestream(nodes, spans={"1": span("person", "Ivan"), "2": 5}),
+            make_canon({}), make_profile(), out_dir=out_dir,
+        )
+    assert excinfo.value.reason == "entity_markup_unresolvable", excinfo.value.reason
+    assert "'2'" in str(excinfo.value), str(excinfo.value)
+    assert (out_dir / "SURVIVOR.md").is_file()
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        pytest.param("payload", "Iv|an", id="payload-pipe"),
+        pytest.param("payload", "Iv[an", id="payload-open-bracket"),
+        pytest.param("payload", "Iv]an", id="payload-close-bracket"),
+        pytest.param("payload", "Iv\nan", id="payload-newline"),
+        pytest.param("payload", "Ivan\u27e6FNREF_1\u27e7", id="payload-footnote-sentinel"),
+        pytest.param("ref", "iv|an", id="ref-pipe"),
+        pytest.param("ref", "iv\u27e6VERSE_v1_abc\u27e7", id="ref-verse-placeholder"),
+        pytest.param("tag", "per|son", id="tag-pipe"),
+    ],
+)
+def test_a_record_carrying_a_producer_forbidden_character_is_refused(
+    tmp_path, field, value
+):
+    """assemble.py refuses these the moment the span is recorded, precisely
+    because this adapter interpolates the value into a wikilink alias and a
+    note name. The persisted artifact is a SEPARATE input -- hand-edited, or
+    written by a different version -- so re-applying the constraint here is
+    what makes "nothing downstream re-checks these fields" a safe statement
+    rather than a hopeful one. A pipe rendered `[[People/Iv_an|Iv|an]]`."""
+    out_dir = make_managed_vault(tmp_path)
+    record = {"tag": "person", "payload": "Ivan"}
+    record[field] = value
+    nodes = [make_node("p1", "seg01", f"{ent(1, record['payload'])} arrived.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(
+            tmp_path, make_nodestream(nodes, spans={"1": record}),
+            make_canon({}), make_profile(), out_dir=out_dir,
+        )
+    assert excinfo.value.reason == "entity_markup_unresolvable", excinfo.value.reason
+    assert field in str(excinfo.value), str(excinfo.value)
+    assert (out_dir / "SURVIVOR.md").is_file()
+
+
+def test_a_present_null_ref_is_refused_rather_than_read_as_absent(tmp_path):
+    """Assembly OMITS `ref` when the attribute was absent; it never writes
+    null. A present null is therefore a shape nothing in this pipeline
+    produces, and reading it as "absent" would accept a record whose meaning
+    is guessed rather than known."""
+    out_dir = make_managed_vault(tmp_path)
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Ivan')} arrived.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(
+            tmp_path,
+            make_nodestream(
+                nodes, spans={"1": {"tag": "person", "payload": "Ivan", "ref": None}}
+            ),
+            make_canon({}), make_profile(), out_dir=out_dir,
+        )
+    assert excinfo.value.reason == "entity_markup_unresolvable", excinfo.value.reason
+    assert (out_dir / "SURVIVOR.md").is_file()
+
+
+def test_an_absent_ref_key_is_still_fine(tmp_path):
+    """The other half of the pin above -- without it, "a null ref refuses"
+    would pass just as well if EVERY ref-less record refused, which is the
+    common case."""
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Ivan')} arrived.")]
+    _out_dir, manifest = render_into(
+        tmp_path,
+        make_nodestream(nodes, spans={"1": {"tag": "person", "payload": "Ivan"}}),
+        make_canon({}), make_profile(),
+    )
+    assert entity_note_relpaths(manifest) == ["People/Ivan.md"]
 
 
 if __name__ == "__main__":
