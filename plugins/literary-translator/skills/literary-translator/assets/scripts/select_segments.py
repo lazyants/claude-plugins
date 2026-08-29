@@ -2989,7 +2989,10 @@ def evaluate_claim_admission(
             # The continuation is AUTHENTICATED rather than assumed, the same
             # shape #460 gave --from-converged's dirty-review branch: a
             # current review continues only when the DRAFT'S OWN OWNER holds a
-            # COMPLETE claim record for this segment under THIS profile.
+            # COMPLETE claim record for this segment, granted under one of
+            # this project's claim profiles -- since #796 not necessarily
+            # under THIS one, because a unit migrates between profile
+            # populations as its ledger status moves.
             # "The review is current" is just as true of a segment nobody ever
             # claimed, so it authorizes nothing by itself.
             # A MISMATCH is the entry condition itself and needs no branch:
@@ -3010,7 +3013,7 @@ def evaluate_claim_admission(
                         f"'draft_sha1' still matches the current draft ({current_draft_sha1!r}) "
                         f"-- the stored verdict describes the draft that is there NOW, so this "
                         f"is not the stalled population. A CURRENT review is admitted only as "
-                        f"the continuation of a re-review loop this profile already opened, "
+                        f"the continuation of a re-review loop this project already opened, "
                         f"and that could not be established here: {why_not}. "
                         f"{FROM_STALLED_DISCLOSURE}"
                     )

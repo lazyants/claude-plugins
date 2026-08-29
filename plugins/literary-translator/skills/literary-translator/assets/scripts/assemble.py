@@ -1147,10 +1147,13 @@ def _voided_review_refusal_reason(seg: str, record: dict) -> "str | None":
             )
         claimed = payload["pre_claim_cache_key"]
         if claimed is not None and not isinstance(claimed, dict):
-            # `null` is the ONE documented non-dict shape: --from-cap and
-            # --from-stalled fragments carry no cache_key at all, so their
-            # records legitimately record no baseline (claim_record.py's own
-            # field commentary). Anything else -- a number, a string, a list --
+            # `null` is the ONE documented non-dict shape: the --from-cap and
+            # --from-stalled fragments this plugin's own writers produce carry
+            # no cache_key at all, so their records legitimately record no
+            # baseline (claim_record.py's own field commentary, which since
+            # #796 also notes that an out-of-band fragment admitted under
+            # --from-stalled may carry one -- the record then stores the dict
+            # it read, which is still a documented shape here). Anything else -- a number, a string, a list --
             # is a damaged record, and coercing it to None would make it
             # compare unequal to a stored dict and CLEAR the claim. Same
             # fail-open as the missing key above, one type further along.

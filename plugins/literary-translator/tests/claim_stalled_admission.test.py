@@ -1352,7 +1352,7 @@ def test_a_review_that_is_current_against_the_draft_is_refused_without_an_open_l
     assert "still matches the current draft" in reasons, (
         f"the refusal must name the entry condition: {reasons!r}"
     )
-    assert "the continuation of a re-review loop this profile already opened" in reasons, (
+    assert "the continuation of a re-review loop this project already opened" in reasons, (
         f"and must name the ONE way a current review is admitted, or the operator "
         f"reads a dead end where there is a door: {reasons!r}"
     )
@@ -2726,7 +2726,7 @@ def test_the_disclosure_says_what_is_asserted_rather_than_proved(tmp_path):
 # `human_escalation` and therefore requires --only-segs naming the same ids.
 # It is not, and it does not. `status: in_progress` classifies as `recoverable`
 # (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES
-# (:1559), and D3 (:5029) enforces only the ONE direction
+# (:1559), and D3 (:5032) enforces only the ONE direction
 # `claim_requests ⊆ segs`. For --from-cap the subset direction forces
 # --only-segs as a side effect of its population being human_escalation;
 # --from-stalled's population is default-eligible, so nothing forces it.

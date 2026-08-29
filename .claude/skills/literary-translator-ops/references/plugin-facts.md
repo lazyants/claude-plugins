@@ -199,7 +199,7 @@ Modeled on `final_audit.py` / `canon_validate.py` / `review_artifact_check.py` /
   annotation is documentation only, see the three runtime predicates in
   render_obsidian.py/assemble.py/validate_backlinks.py for the actual mechanism"). The REAL
   enable-predicate is `mentions_cfg.get("enabled") is not False`, hand-duplicated byte-for-byte across
-  **three** call sites: `validate_backlinks.py:521` (`_effective_enabled`), `assemble.py:2620`
+  **three** call sites: `validate_backlinks.py:521` (`_effective_enabled`), `assemble.py:2623`
   (`_effective_mentions_enabled`), `render_obsidian.py:247` (`_effective_mentions_enabled`) — each
   docstring explicitly cross-references the other two copies. **Flipping only some of the duplicated
   sites silently yields a false-green disabled-report on an advisory gate** — e.g. patching

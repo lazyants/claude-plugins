@@ -2928,8 +2928,9 @@ def test_fresh_claim_by_a_new_run_succeeds_even_though_the_named_run_still_holds
 # ---------------------------------------------------------------------------
 # 19. #460 -- evaluate_open_review_loop(): a DIRTY --from-converged review is
 # admitted only when the draft's OWNER run (named by its own dispatch_token)
-# holds a live, self-consistent, from-converged claim record for this exact
-# segment. `clean: true` was the ENTRY condition into the previously-converged
+# holds a live, self-consistent claim record for this exact segment, granted
+# under one of this project's claim profiles -- since #796 not necessarily
+# from-converged itself. `clean: true` was the ENTRY condition into the previously-converged
 # population, not a standing one -- round 1 of a re-review overwrites the
 # stored review with a DIRTY one, and before this fix that closed the door
 # behind the operator: the driver's own prescribed fix turn could run, and
