@@ -324,7 +324,7 @@ def test_resume_setup_minted_run_id_is_accepted_by_select_segments_own_validator
     from a real subprocess run, never a hand-typed guess at the format) must
     be accepted by select_segments.py's OWN `validate_run_id()` -- the exact
     function D1a's `select_segments.py --run-id` flag consults
-    (select_segments.py:5000, `run_id_problem = validate_run_id(run_id)`).
+    (select_segments.py:5020, `run_id_problem = validate_run_id(run_id)`).
 
     This is deliberately narrower than a full claim dispatch: it proves the
     single interface point the ordering claim actually depends on (does a

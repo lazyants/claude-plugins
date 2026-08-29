@@ -2944,10 +2944,11 @@ reclassified into another one:
   stands has no accept-it-anyway route.
 - **`--from-stalled SEG1[,SEG2,...]`** — for a segment stalled with
   genuinely incomplete bookkeeping: previously converged, then left
-  `in_progress` with no `reviewed_draft_sha1` and a review that no longer
-  describes the current draft. Full condition list, what the profile
-  proves versus what it asks the operator to assert, and the hand-driven
-  fallback for a unit that fails it: see **P3**, below.
+  `in_progress` with a review that no longer describes the current draft.
+  `reviewed_draft_sha1` is unconstrained either way (#796) — see **P3**
+  for why. Full condition list, what the profile proves versus what it
+  asks the operator to assert, and the hand-driven fallback for a unit
+  that fails it: see **P3**, below.
 
 **A dirty review is admitted under `--from-converged` only as the
 CONTINUATION of a re-review loop this project already opened — never
@@ -2964,10 +2965,19 @@ different facts — and, ONLY on D9's lost-token recovery path (the draft
 carries no token at all, and this run's own prior claim record is what
 re-establishes one), this run itself. Every condition is checked against
 the record's CONTENTS, never merely its presence: it must agree with the
-path it was found at (its own `seg` and `run_id`), carry the
-`from-converged` profile, and carry every field `build_claim_record()`
+path it was found at (its own `seg` and `run_id`), carry one of this
+project's own claim profiles (#796 — not necessarily `from-converged`
+itself: a unit migrates between profile populations as its ledger status
+moves, so the profile that opened the loop can no longer be required to
+be the one now admitting it), and carry every field `build_claim_record()`
 writes — a partial object is what a forgery or a half-finished write looks
-like, and it is refused exactly like an absent record. On the lost-token
+like, and it is refused exactly like an absent record. **This widening is
+about continuation, not about D9's own lost-token recovery** — that
+recovery is a separate, narrower check (`evaluate_lost_token_recovery()`)
+and #796 leaves its profile test alone: it still requires this run's own
+record to name the EXACT profile now being requested, because its
+sanctioned instruction is literally "re-claim under the SAME profile,"
+never a different one. On the lost-token
 path specifically, admission is ALSO refused if any OTHER run has taken
 the segment over since this run's own claim — records are never released,
 so two claim records for one segment is not an anomaly, it is what a
@@ -3004,21 +3014,23 @@ one wasted dispatch per claimed id, never the draft.
 **P3 — a stalled, previously-converged, incompletely-bookkept unit.**
 `--from-stalled SEG1[,SEG2,...]` (1.24.0, #455) admits a segment stuck with
 genuinely incomplete bookkeeping — materialized ledger `status:
-in_progress`, a `.ever_converged.<seg>` sentinel PRESENT, no
-`reviewed_draft_sha1`, a draft on disk, and a stored review that is stale
-against that draft — rather than cleanly converged-and-edited
+in_progress`, a `.ever_converged.<seg>` sentinel PRESENT, a draft on disk,
+and a stored review that is stale against that draft, whether or not a
+`reviewed_draft_sha1` from an earlier convergence is still on record
+(#796 — see below) — rather than cleanly converged-and-edited
 (`--from-converged`) or capped-and-edited (`--from-cap`). Neither of those
 two profiles reaches it: `--from-cap` refuses because the materialized
 status is `in_progress`, not `non_converged`/`reason: "cap"` (since 1.27.0
 it is the STATUS that refuses here, never the sentinel — a present sentinel
 is admissible under `--from-cap`, see #537); `--from-converged` refuses
-because there is no `reviewed_draft_sha1`, the drift baseline that profile
-requires.
+because the status is `in_progress`, not one of the converged/stale
+statuses that profile requires — `reviewed_draft_sha1` decides nothing
+there, since that gate never gets past the status check.
 
 Requires, beyond the shared safety gates above: materialized status
-`in_progress`; the `.ever_converged.<seg>` sentinel present; no
-`reviewed_draft_sha1`; a review artifact on disk; that review stale against
-the CURRENT draft, checked **only on entry** (below); no competing driver
+`in_progress`; the `.ever_converged.<seg>` sentinel present; a review
+artifact on disk; that review stale against the CURRENT draft, checked
+**only on entry** (below); no competing driver
 holding `runs/.driver.lock`; no codex job holding this segment's own
 `segments/.codex_job.<seg>.lock`; and (D3b) `--only-segs` naming exactly the
 claimed id(s). **`--only-segs` IS required here, but not for the reason it is
@@ -3039,13 +3051,18 @@ requested, every emitted seg must ALSO be a subset of the claimed ids**
 `--only-segs` does not merely dispatch un-scoped work; it trips D3b's fatal
 outright, because `select_default()`'s sweep is exactly what makes `segs` a
 strict superset of the claim. Review
-`clean` is **not** constrained — a stalled
-unit's stale review may be `clean: true` or `clean: false` and both are
-admitted; unlike `--from-cap`'s `clean: false`-with-findings requirement,
-the field describes a verdict over a draft that no longer exists, so it
-says nothing about the CURRENT draft in either direction. A unit whose
-review is current and clean but never converged is deliberately excluded —
-its remedy is a convergence write, not a re-review.
+`clean` is **not** constrained — a stalled unit's stale review may be
+`clean: true` or `clean: false` and both are admitted; unlike
+`--from-cap`'s `clean: false`-with-findings requirement, the field
+describes a verdict over a draft that no longer exists, so it says nothing
+about the CURRENT draft in either direction. A unit whose review is
+current and clean but never converged is deliberately excluded — its
+remedy is a convergence write, not a re-review. `reviewed_draft_sha1` is
+unconstrained the same way (#796): the field records what an EARLIER
+convergence saw, and this profile's population is defined by the stored
+review no longer describing the CURRENT draft, which that field says
+nothing about either way — present and absent are both admitted, at the
+same width `clean` is.
 
 **What this profile proves, and what it asks the operator to assert
 instead of proving.** Two liveness facts are provable from this durable
@@ -3107,13 +3124,18 @@ the convergence write, or the fresh verdict is rejected via
 `reject_review.py` without touching the draft and the driver sends it back
 for one more review rather than converging it (#527: at `final` a rejection
 over an unmoved, `coverage_ok` verdict converges instead), the unit returns
-to `in_progress` + sentinel + no `reviewed_draft_sha1` with a now-current
-review — and a standing staleness gate would wrongly refuse re-entry into
-the loop this profile just opened. Continuation is authenticated the same
-way `--from-converged`'s dirty-review continuation is, above: against a
-COMPLETE claim record held by the draft's current owner, or, on the
-lost-token path, this run — never merely because the review happens to be
-current.
+to `in_progress` + sentinel + no `reviewed_draft_sha1` (still this loop's
+ordinary shape, since it never had a baseline to begin with — but no
+longer the profile's defining one, since #796 also admits it PRESENT; see
+P3 above) with a now-current review — and a standing staleness gate would
+wrongly refuse re-entry into the loop this profile just opened.
+Continuation is authenticated the same way `--from-converged`'s
+dirty-review continuation is, above: against a COMPLETE claim record held
+by the draft's current owner, or, on the lost-token path, this run — and,
+since #796, that record no longer has to name `--from-stalled` itself,
+only one of this project's own claim profiles, because a unit can migrate
+between profile populations between the original claim and this
+continuation — never merely because the review happens to be current.
 
 **When a unit fails one of the conditions above, the hand-driven procedure
 below is the FALLBACK — no longer the only route.** For a unit that genuinely

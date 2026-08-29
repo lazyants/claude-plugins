@@ -127,7 +127,7 @@
    "claim": "#488 added `canon_senses.senses_for`, which computes exactly this, and this function was DELIBERATELY not re-pointed at it. The lookup here is normalized through THIS module's own `normalize_form` binding, and `tests/canon_validate_recollapse.test.py:289-301` pins the indexed fast path by monkeypatching that binding and asserting exactly one call; delegating would move the call inside canon_senses, silently reduce that count to zero, and force a passing performance test to be rewritten for a refactor #488 does not need. The shared comparator is",
    "target": "plugins/literary-translator/tests/canon_validate_recollapse.test.py"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5000\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5020\", 0]": {
    "anchors": [
     "run_id_problem = validate_run_id(run_id)"
    ],
@@ -148,6 +148,14 @@
     "against a plugin that no longer behaves"
    ],
    "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/fix_scope_audit.py\", \"references/person-registry.md:28-30\", 0]": {
+   "anchors": [
+    "`assets/schemas/registry/` — Step 0a's copy pass globs",
+    "NON-recursively, so a schema in that subdirectory is neither copied nor hashed"
+   ],
+   "claim": "* `assets/schemas/*.json` -> `${durable_root}/schemas/`. FLAT only: `assets/schemas/registry/` is deliberately plugin-only (references/person-registry.md:28-30) and is never copied, so it is never compared.",
+   "target": "plugins/literary-translator/skills/literary-translator/references/person-registry.md"
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/glossary_preflight.py\", \"canon_senses.py:25-35\", 0]": {
    "anchors": [
@@ -201,14 +209,14 @@
    ],
    "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_update.py\", \"claim_record.py:565-577\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_update.py\", \"claim_record.py:572-584\", 0]": {
    "anchors": [
     "A FAILURE IS A FAILURE",
     "of the defect rather than its fix."
    ],
    "claim": "sentinel FILE, then fsync that directory, so the entry that makes the file findable survives a crash too: fsync on a file commits its contents, not its link. Same two-halves reasoning claim_record.py's fsync_directory() docstring states for the claim record (claim_record.py:565-577)."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_update.py\", \"claim_record.py:565-577\", 1]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_update.py\", \"claim_record.py:572-584\", 1]": {
    "anchors": [
     "A FAILURE IS A FAILURE",
     "of the defect rather than its fix."
@@ -513,7 +521,7 @@
    ],
    "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"claim_record.py:438-439\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"claim_record.py:444-445\", 0]": {
    "anchors": [
     "cache_key_at_claim` is the key freshly computed"
    ],
@@ -647,6 +655,14 @@
    ],
    "claim": "This closes the previous gap where a project with unconverged segments silently exited `0` on the default `segment_drafts_and_audit` delivery path, giving it no deterministic delivery-refusal gate to match the engine-loop HARD rule already enforced on the `assembled_book` path (`assemble.py:2592`'s `assert_project_complete`). `warnings` and the frontback coverage report remain purely informational."
   },
+  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"ledger_merge.py:873-887\", 0]": {
+   "anchors": [
+    "entry.pop(\"stale_mismatched_fields\", None)",
+    "fields = stale_mismatched_fields.get(seg)",
+    "entry[\"stale_mismatched_fields\"] = fields"
+   ],
+   "claim": "Keep the declaration stable across the whole W7→W9 chain; toggling it between steps is the only way a normal run can make the two gates disagree about the same book. (They read the moved-field list from different authorities -- W7 from `select_segments.py`'s recomputation against the CURRENT cache key, W9 from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887` drops any inherited value and re-derives that list from the same diff, so the two agree by construction on anything a run produces. Hand-editing the materialized `ledger.json` between the two steps can split them; so can editing one segment's `status` to `converged`, which skips both carve-outs"
+  },
   "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"person_registry.py:1994-2004\", 0]": {
    "anchors": [
     "for row in verdicts.get(\"refusals\") or []:",
@@ -706,7 +722,7 @@
    ],
    "claim": "FileExistsError on a retry, classifies the entry SENTINEL_PRESENT, and the already-present branch must NOT return True having synced nothing -- that would record convergence over a sentinel whose directory entry was never made durable, laundering the first call's failed sync into a green result. Exactly the shape backfill_ever_converged.py:971-1000 already documents and tests at :1644-1709 for its own retry path."
   },
-  "[\"plugins/literary-translator/tests/backfill_ever_converged.test.py\", \"claim_record.py:565-577\", 0]": {
+  "[\"plugins/literary-translator/tests/backfill_ever_converged.test.py\", \"claim_record.py:572-584\", 0]": {
    "anchors": [
     "A FAILURE IS A FAILURE",
     "token-without-record"
@@ -796,13 +812,13 @@
    ],
    "claim": "--from-stalled additionally drives run()'s own runs/.driver.lock acquisition and its --driver-lease-held forwarding to the child selector (segment_dispatch_driver.py:1741-1778) -- both real here, not stubbed, since this test calls run() directly rather than through a subprocess and nothing about that machinery is mocked.\"\"\" seg = \"seg21\" root = wiring_make_driver_root_from_stalled(tmp_path, seg)"
   },
-  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7545\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7546\", 0]": {
    "anchors": [
     "session_id=session_id, claims=claims"
    ],
    "claim": "# =========================================================================== # C -- the WIRING itself: does segment_dispatch_driver.py's own run() # (segment_dispatch_driver.py:7517's `claims=claims`) actually carry a REAL # select_segments.py admission into ctx.claims, or does # claim_capability_refusal_for_translate() only ever get exercised against a # context THIS SUITE injected `claims=` into by hand? Every test in Sections # A/B builds DispatchContext directly and passes `claims=` itself -- deleting"
   },
-  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7545\", 1]": {
+  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7546\", 1]": {
    "anchors": [
     "session_id=session_id, claims=claims"
    ],
@@ -826,7 +842,7 @@
    ],
    "claim": "\"in_progress\"})` (mass-translate-wf.template.js:2413) completes BEFORE `agent(translateDrivePrompt(seg))` (:2416) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of"
   },
-  "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5000\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5020\", 0]": {
    "anchors": [
     "run_id_problem = validate_run_id(run_id)"
    ],
@@ -844,7 +860,7 @@
    ],
    "claim": "# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1559), and D3 (:5009) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces"
   },
-  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5009\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5029\", 0, \"continuation\"]": {
    "anchors": [
     "D3: the authorization must be a SUBSET"
    ],
@@ -949,6 +965,15 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3556-3562\", 0]": {
+   "anchors": [
+    "Excluded from every bundle hash",
+    "nor of `orchestration_bundle_hash`",
+    "final_audit.py` is not one of",
+    "never flips a cache key or the resume-integrity digest via either bundle"
+   ],
+   "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
+  },
   "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:489\", 0]": {
    "anchors": [
     "ORCHESTRATION_BUNDLE_MEMBERS` — non-gating for convergence, never part of the"
@@ -984,6 +1009,12 @@
     "orchestration_bundle_hash` is non-gating for convergence — never part of"
    ],
    "claim": "(\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"), (\"schema_literal_drift.test.py:31-32\", SCHEMA_LITERAL_DRIFT_TEST, \"never gated against\"), (\"select_segments.py:12\", SELECT_SEGMENTS_SCRIPT, \"purely diagnostic/orchestration\"), ]"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"references/ledger-and-resumability.md:168\", 0]": {
+   "anchors": [
+    "diagnostic-only, never part of any segment's cache key"
+   ],
+   "claim": "def test_ledger_already_accurate_ledger_merge_aside_not_flagged(): \"\"\"references/ledger-and-resumability.md:166's `ledger_merge.py` aside (\"diagnostic-only, never part of any segment's cache key\") is already accurate -- qualified in the very next sentence by the resume-integrity digest note -- and must survive untouched. None of the STALE_PHRASES keys above match this exact clause, so a correct fix never trips it.\"\"\""
   },
   "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"resume_setup.py:307-309\", 0]": {
    "anchors": [
@@ -1397,37 +1428,6 @@
     "if parent not in seg_block_ids and parent not in footnote_def_block_ids:"
    ],
    "claim": "\"\"\"The verse lives inside the footnote's own DEFINITION text (FN:1), which is never a member of this segpack's own blocks[] -- yet the verse is still included in verses[] because its parent is one of this segpack's footnote_def_block_ids (segpack.py:673's ``parent not in seg_block_ids and parent not in footnote_def_block_ids`` guard).\"\"\" pack = _pack_for(\"c\", extract_mod, tmp_path) _assert_valid_and_hashes(pack)"
-  },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/fix_scope_audit.py\", \"references/person-registry.md:28-30\", 0]": {
-   "anchors": [
-    "`assets/schemas/registry/` — Step 0a's copy pass globs",
-    "NON-recursively, so a schema in that subdirectory is neither copied nor hashed"
-   ],
-   "claim": "* `assets/schemas/*.json` -> `${durable_root}/schemas/`. FLAT only: `assets/schemas/registry/` is deliberately plugin-only (references/person-registry.md:28-30) and is never copied, so it is never compared.",
-   "target": "plugins/literary-translator/skills/literary-translator/references/person-registry.md"
-  },
-  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"ledger_merge.py:873-887\", 0]": {
-   "anchors": [
-    "entry.pop(\"stale_mismatched_fields\", None)",
-    "fields = stale_mismatched_fields.get(seg)",
-    "entry[\"stale_mismatched_fields\"] = fields"
-   ],
-   "claim": "Keep the declaration stable across the whole W7→W9 chain; toggling it between steps is the only way a normal run can make the two gates disagree about the same book. (They read the moved-field list from different authorities -- W7 from `select_segments.py`'s recomputation against the CURRENT cache key, W9 from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887` drops any inherited value and re-derives that list from the same diff, so the two agree by construction on anything a run produces. Hand-editing the materialized `ledger.json` between the two steps can split them; so can editing one segment's `status` to `converged`, which skips both carve-outs"
-  },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3534-3540\", 0]": {
-   "anchors": [
-    "Excluded from every bundle hash",
-    "nor of `orchestration_bundle_hash`",
-    "final_audit.py` is not one of",
-    "never flips a cache key or the resume-integrity digest via either bundle"
-   ],
-   "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
-  },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"references/ledger-and-resumability.md:168\", 0]": {
-   "anchors": [
-    "diagnostic-only, never part of any segment's cache key"
-   ],
-   "claim": "def test_ledger_already_accurate_ledger_merge_aside_not_flagged(): \"\"\"references/ledger-and-resumability.md:166's `ledger_merge.py` aside (\"diagnostic-only, never part of any segment's cache key\") is already accurate -- qualified in the very next sentence by the resume-integrity digest note -- and must survive untouched. None of the STALE_PHRASES keys above match this exact clause, so a correct fix never trips it.\"\"\""
   }
  },
  "exemptions": {
