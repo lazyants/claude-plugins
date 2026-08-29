@@ -152,23 +152,28 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # EMPTY ON PURPOSE, and rotated rather than inherited: the 1.72.0 entry --
-    # documentation only, promoting operating lessons into the skill -- cites no
-    # `file.ext:NNN` anchor at all. It names files and fields
-    # (`references/engine-loop.md`, `segments/<seg>.review.json`,
-    # `dispatch_token`, `notes[]`, `--from-stalled`) and never a line number,
-    # deliberately: this release ADDS prose to `SKILL.md` and to three reference
-    # files, so any line it pinned would have renumbered inside the very range it
-    # describes -- the same reason 1.71.0's rotation gave, and the reason the
-    # repo-wide anchor map needed two of its own literary-translator ranges
-    # re-derived in this cut.
+    # EMPTY ON PURPOSE, and rotated rather than inherited: the 1.73.0 entry --
+    # the fifth batch fold -- cites no `file.ext:NNN` anchor at all. It names
+    # files, fields, bundle hashes and issue numbers (`refuse_finding.py`,
+    # `driver_status.py`, `SAFE_STALE_CARVEOUT_FIELDS`, `plugin_bundle_hash`,
+    # `c862fcd1` -> `577b9a9d`) and never a line number, deliberately: half of
+    # what this entry describes IS a 752-line reorganization of `SKILL.md` plus
+    # four new reference files, so any line it pinned would have renumbered
+    # inside the very range it describes -- and two of the citations it would
+    # have had to spell are ones this release itself renumbered.
     #
-    # The rotation this replaces is 1.71.0's, which retired 1.69.0's. Its record,
-    # so it is not lost with the comment: 1.71.0 was a batch fold citing no
-    # anchor either, and the dict sat empty and UNROTATED across all of 1.70.0,
-    # so nothing attests 1.70.0's entry was ever examined. The
-    # undeclared-anchor half of this file still runs over the entry, so a line
-    # citation added here later goes RED until it is declared.
+    # Verified at this cut, not assumed: appending a bogus line citation to
+    # the entry turned this file's own undeclared-anchor half RED, so the check
+    # is reading THIS entry rather than an older one, and a line citation added
+    # here later goes red until it is declared. The bogus citation is NOT
+    # spelled here -- a `name.ext:NNN` in this comment is one the repo-wide
+    # citation gate would then demand a declaration for.
+    #
+    # The rotation this replaces is 1.72.0's, which retired 1.71.0's. Their
+    # record, so it is not lost with the comment: 1.72.0 was documentation-only
+    # and added prose to SKILL.md and three reference files; 1.71.0 was a batch
+    # fold citing no anchor either, and the dict sat empty and UNROTATED across
+    # all of 1.70.0, so nothing attests 1.70.0's entry was ever examined.
 }
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an

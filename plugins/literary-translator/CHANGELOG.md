@@ -1,5 +1,93 @@
 # Changelog
 
+## 1.73.0 — 2026-08-29
+
+The fifth batch fold: every merge that landed on `main` after the 1.72.0 cut (`cd5a907`) without a
+version of its own — sixteen commits. Most of them are one campaign, a bloat pass over the
+always-loaded docs, and the rest are four behaviour changes and four gate repairs.
+
+### What this release costs, measured across the whole range
+
+Measured by materializing both revisions' plugin trees and running `scaffold_setup.py`'s own
+`compute_bundle_hash` over each revision's own member tuples — never a re-implementation of the
+scheme:
+
+- **`plugin_bundle_hash` moves** — `c862fcd1…` → `577b9a9d…`. `refuse_finding.py` is new (#764), so `PLUGIN_BUNDLE_MEMBERS`
+  now holds 20 members, up from 19. Five existing members carry byte diffs — `cache_key.py`,
+  `codex_job.py`, `ledger_update.py`, `segment_dispatch_driver.py` and
+  `mass-translate-wf.template.js`.
+- **`derivation_bundle_hash` and `orchestration_bundle_hash` do NOT move** — `8bc88ab9…` and
+  `d35b28da…` at both revisions: `DERIVATION_BUNDLE_MEMBERS` still holds 2 members, and
+  `ORCHESTRATION_BUNDLE_MEMBERS` still holds 6. So no segpack regeneration and
+  no `blocked_needs_regeneration` from this release.
+- **`prompt_hash` and `style_contract_hash` do not move either, and that is the load-bearing
+  one.** `translate_TASK.template.md`, `review_TASK.template.md` and `style_bible.template.md` all
+  changed in this range, but Step 0a gives those templates ONE-TIME-SEED treatment — only the three
+  `*-wf.template.js` files are re-instantiated on a refresh. An existing `durable_root` keeps the
+  `translate_TASK.md`, `review_TASK.md` and `style_bible.md` it was seeded with, so neither hash
+  reads a changed byte. A NEW project started after this release gets the trimmed templates.
+- **`schema_hash` does not move.** `schemas/profile.schema.json` changed, but `schema_hash` reads
+  `draft.schema.json`, `review.schema.json` and `segpack.schema.json` only.
+
+**So: every converged segment goes `stale` exactly once, at the next Step 0a refresh, and
+`plugin_bundle_hash` is the only moved field.** That field is in `final_audit.py`'s
+`SAFE_STALE_CARVEOUT_FIELDS`, so W7 and W9 still ship those units — under #491's own conditions
+(the ever-converged sentinel present, and the draft still matching its `reviewed_draft_sha1`).
+**This release does not cost a re-translation.** The refreshed root does mint a fresh `RUN_ID`,
+which meets 1.71.0's orphaned-draft refusal: a draft left in flight across the upgrade halts the
+dispatch by name rather than being retranslated over.
+
+### The always-loaded docs got smaller — SKILL.md 4457 → 3705 lines
+
+Six merges, one campaign. `SKILL.md` is read in full on every run of every project, and a rule
+that binds on a rare path was costing every run that never takes it. The reference set now holds 22 files, up from 18,
+as the destination for what moved.
+
+- **The skeptic pass is documented where it is read** (#779) and **the citation truth check at the
+  merge, not on every run** (#781) — each moved into a reference file of its own.
+- **The always-loaded docs were trimmed and everything pointing into them repointed** (#780), and
+  **twelve rare-path sections moved out of the always-loaded set** (#784) into
+  `assembly-and-output.md`, `orchestration-and-batching.md`, `gotchas.md`, `person-registry.md`
+  and two new files, `sentinel-backfill.md` and `w2-gate-disclosures.md`. Five units were
+  deliberately NOT moved; #784's own commit records why for each.
+- **Six units were compressed and seven left alone** (#782) — the seven would each have lost a
+  rule. **Three further cuts the bloat review had dropped** landed after it (#786).
+- **The maintainer header is not what a worker needs to read** (#778).
+- **Six stale or dangling statements in the always-loaded docs** were corrected (#785).
+
+### Behaviour
+
+- **A refused finding gets a durable record the next fix turn reads** (#764) — new
+  `refuse_finding.py`. A fix turn may legitimately refuse the finding it was handed; previously
+  that refusal lived only in one turn's reply, so the next turn met the same finding with no way
+  to tell a considered refusal from an overlooked one. Its `--expect-*` values are a human
+  attestation and are never the model's to self-attest.
+- **A read-only progress surface for a running batch** (#765) — new `driver_status.py`. There was
+  no supported way to ask *is this still working, how far along is it, or did it stop*, and two
+  books independently grew hand-rolled answers.
+- **SKILL.md tells the operating model when to hand a decision back** (#772). The file instructed
+  an LLM that drives this pipeline unattended and spoke to the human at intake and never again
+  once the loop was running; two live runs met the identical situation and behaved oppositely.
+  Three points now hand back: a unit at `human_escalation` with findings outstanding, a round
+  whose own output re-opens converged work, and the re-review-versus-re-translate choice. W6 also
+  states, for the first time, that the class sweep's own edits re-open converged units and that
+  the resulting loop has no terminating condition in this pipeline — ending it is the human's
+  call. No gate, flag, artifact or knob changed.
+- **A claim voids the stored review, so the contract-only carve-out refuses the unit** (#773).
+
+### Gates
+
+- **W6's enumeration check now covers the direction it warns about** (#788) — the pattern-widening
+  check could only ever show an over-count, so the omission direction it warns about was the one
+  it could not see.
+- **Zero body files is a refusal, not an `ALL PASS`** (#762) — a loop that iterates zero times
+  printed exactly what a passing one printed.
+- **The citation truth gate enumerates, attributes and gates a bare `:NNN` continuation** (#754,
+  repo-wide; the literary-translator half renumbered `ledger_update.py`'s docstring pointer onto
+  the file that actually holds the sibling writer's laundering test).
+- **The codex-companion broker keyed to a sandbox is stopped before that sandbox is deleted**
+  (#791).
+
 ## 1.72.0 — 2026-08-25
 
 **Operating lessons from two live books, promoted into the skill.** Documentation only —

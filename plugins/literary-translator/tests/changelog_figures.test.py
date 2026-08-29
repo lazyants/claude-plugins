@@ -367,29 +367,70 @@ def _local_dict_len(filename, funcname, varname):
 # would make this file the third copy of one number, which is the shape #580 was
 # filed about.
 FIGURES = [
-    # EMPTY, rotated to 1.72.0. All three of 1.71.0's rows were RETIRED with the
-    # entry they described (the `PLUGIN_BUNDLE_MEMBERS`,
-    # `DERIVATION_BUNDLE_MEMBERS` and `ORCHESTRATION_BUNDLE_MEMBERS` sizes): the
-    # 1.72.0 entry is documentation-only, moves no bundle membership, and makes
-    # no claim about any of the three, so carrying a row over would declare a
-    # figure its entry does not state.
+    # ROTATED TO 1.73.0. The 1.72.0 rotation this replaces was empty because
+    # that entry was documentation-only and claimed no tuple size; 1.73.0 moves
+    # `PLUGIN_BUNDLE_MEMBERS` and states all three sizes, so the rows the
+    # 1.71.0 entry retired come back -- against this release's own values.
+    Figure(
+        phrase="now holds 20 members",
+        value=20,
+        derive=lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
+    ),
+    Figure(
+        phrase="still holds 2 members",
+        value=2,
+        derive=lambda: _tuple_len("cache_key.py", "DERIVATION_BUNDLE_MEMBERS"),
+    ),
+    Figure(
+        phrase="still holds 6.",
+        value=6,
+        derive=lambda: _tuple_len(
+            "scaffold_setup.py", "ORCHESTRATION_BUNDLE_MEMBERS"
+        ),
+    ),
+    Figure(
+        phrase="3705 lines",
+        value=3705,
+        derive=lambda: len(
+            (PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ),
+    ),
+    Figure(
+        phrase="now holds 22 files",
+        value=22,
+        derive=lambda: len(
+            list(
+                (PLUGIN_ROOT / "skills" / "literary-translator" / "references")
+                .rglob("*.md")
+            )
+        ),
+    ),
+    # The account of every numeral in the entry this list does NOT declare, so
+    # the list stays exhaustive over what is re-derivable rather than merely
+    # non-empty:
     #
-    # Nothing replaces them, and the list is meant to be EXHAUSTIVE over what the
-    # entry contains, so here is the account of every numeral in it. The entry
-    # promotes operating lessons measured while running this plugin on live
-    # books, and every measurement it quotes was taken against an
-    # operator-owned durable root or a round of review that exists in NO tree:
-    # the 19-of-20 dispatch count and its round-2 token, the ~35-70k per-agent
-    # bootstrap band and the 69,844-token poll subagent, the 638 agents / ~25M
-    # tokens / ~700k per segment / 3-5 codex calls / ~90-95% orchestration
-    # arithmetic, the ~92 KB and ~100k tokens of one 807-candidate glossary
-    # launch, the 32/3/15 closures of one quotation class, the 1057 enumerated
-    # and 230 reproduced source runs, the 20/8/12 defect split, and the 11 words
-    # across 8 segments. None is re-derivable here however it were phrased, and
-    # declaring one would hardcode its answer -- the `lambda: 17` failure the
-    # docstring refuses. The remaining numerals are identifiers, never
-    # measurements: the version numbers (1.72.0, 1.37.0), the release date, and
-    # the issue numbers (#461, #527, #532).
+    # HISTORICAL, re-derivable only at the OTHER revision, never from this
+    # tree: 19 (the pre-release `PLUGIN_BUNDLE_MEMBERS` size), 4457 (SKILL.md's
+    # line count at 1.72.0) and 18 (the reference count there). A row for any
+    # of them would have to hardcode its answer -- the `lambda: 17` failure the
+    # docstring refuses -- because the tree this file reads is the one AFTER
+    # the change. The paired current values are declared above, which is the
+    # half a guard can actually hold.
+    #
+    # RANGE MEASUREMENTS, taken by materializing both revisions and running
+    # `scaffold_setup.py`'s own `compute_bundle_hash`: the four bundle-hash
+    # prefixes (`c862fcd1`, `577b9a9d`, `8bc88ab9`, `d35b28da`) and the counts
+    # in the prose around them (16 commits, five changed members, four
+    # behaviour changes, four gate repairs). These are statements about a
+    # commit RANGE, not about the tree, and `_tuple_len`'s sibling helpers read
+    # a tree; re-deriving them here would mean shelling out to git and
+    # re-running the measurement, which is the release procedure rather than a
+    # figure guard. They are recorded in the commit message that made them.
+    #
+    # IDENTIFIERS, never measurements: the version numbers (1.73.0, 1.72.0,
+    # 1.71.0), the release date, `cd5a907`, and every issue number.
 ]
 
 
