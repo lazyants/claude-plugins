@@ -24,6 +24,18 @@ Deliberately substring pins over exact-paragraph pins: the prose may be
 rewritten, and only these properties may not silently vanish. Whitespace is
 normalised before matching, because this document hard-wraps and a pin that
 breaks when a sentence rewraps is a pin nobody keeps.
+
+ONE EXCEPTION, and it is the #772 block at the end of this section. That block
+is an INSTRUCTION, and an instruction is reversed by appending a negating frame
+beside it rather than by deleting it, so a substring pin would stay green
+through its own reversal. It is therefore pinned WHOLE, with `endswith` over
+the normalised section, which is also why it is authored last: there is no room
+after it for a frame. The mirror residual is not closed and is not closeable by
+this shape -- a negating frame planted HIGHER inside W6 leaves the `endswith`
+green, exactly as one planted above the heading does for the intake pin in
+skill_prose_present.test.py. Pinning all of W6 exactly is not worth its cost;
+the check that would close the class is a whole-file denylist of reversal
+phrasings, which reports clean for every phrasing its author did not think of.
 """
 import re
 from pathlib import Path
@@ -314,3 +326,107 @@ if __name__ == "__main__":
     import pytest
 
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# --- #772: ending the class sweep is the HUMAN's decision --------------------
+#
+# W6 already told the operator that a converged unit goes stale the moment it is
+# touched and that acting is a deliberate call. What it never said is that the
+# call RECURS: the sweep's own edits re-open converged units, whose re-review
+# yields fresh class findings, whose sweep re-opens the next set. That loop has
+# no terminating condition anywhere in this pipeline -- no gate reports it and no
+# status names it -- so an operator waiting for a signal waits for one that never
+# arrives. Measured before this change, whitespace-collapsed over the whole of
+# SKILL.md: "no terminating condition" and "does not terminate" each occurred
+# ZERO times, as did every one of fifteen ask-the-user phrasings.
+#
+# WHY THIS PIN IS AN `endswith` AND NOT A MEMBERSHIP ASSERTION. Every needle
+# above asserts containment, which is the right shape for a FACT. This passage
+# is an INSTRUCTION, and an instruction survives its own needle: leave every
+# pinned character in place, append "That was the old policy; the orchestrator
+# now closes the loop itself", and containment stays green while the meaning
+# inverts. `endswith` over the normalized section is a bounded window with no
+# room after it, so anything appended inside W6 below this block -- a negating
+# frame included -- moves the tail and goes red. That is also why the block is
+# authored at the END of the section rather than beside the sentence it extends.
+W6_SWEEP_HAND_BACK_EXPECTED = (
+    "**Ending this sweep is a decision, and it is the human's.** "
+    "Sweeping a class edits sites inside units that have already "
+    "converged; their drafts drift off the hash their review was "
+    "taken against, they land in `stale`, and re-reviewing them "
+    "yields fresh class findings whose sweep drifts the next set. "
+    "That loop has no terminating condition in this pipeline — no "
+    "gate reports it and no status names it — so where to stop is "
+    "not a state you can wait for. Report the population the last "
+    "round re-opened, what each route costs, and a recommendation, "
+    "and let the human say whether another sweep round opens. What "
+    "they decide is the sweep BOUNDARY, not the fate of any one "
+    "draft. Each touched unit still needs its own outcome, and the "
+    "choice between carrying the edit into a confirming re-review "
+    "(`--from-converged`) and authorizing the re-translation that "
+    "may discard it (`--allow-retranslate-converged`) is the same "
+    "re-review-versus-re-translate choice intake names as the "
+    "human's — price it per unit rather than settling it for them. "
+    "Restoring a draft to the bytes its review was taken against is "
+    "the third move, and it authorizes nothing by itself. **Do not "
+    "price any of them from this paragraph. Re-run "
+    "`select_segments.py` and read the category it gives each "
+    "unit**: a restore clears the draft mismatch alone, and what a "
+    "unit needs next follows from its classification rather than "
+    "from what you did to its draft — including a "
+    "`blocked_needs_regeneration` that no override reaches until "
+    "W2/W3 have rerun. Those categories are defined with the "
+    "selector above, which owns them; this section does not restate "
+    "them, because a second copy of that table is one that goes "
+    "wrong silently. What no outcome does is deliver a draft the "
+    "reviewer never saw: `assemble.py` refuses one outright (\"a "
+    "hand-edit the reviewer never saw must not be assembled\") and "
+    "W7's hard check 2 reports the same mismatch independently. "
+    "Record why the sweep stopped in `consistency_issues.md`, where "
+    "a record that authorizes nothing belongs; never as a key on a "
+    "ledger fragment or record, which `ledger_update.py` will not "
+    "write, which both schemas refuse, and which the next ordinary "
+    "write erases anyway. One completed book ended this loop by "
+    "hand-writing ledger records the supported writer cannot "
+    "produce — that is what happened on it, not a route to copy. "
+    "Note what was decided there: every finding was applied, and "
+    "only the bookkeeping was accepted."
+)
+
+def test_w6_says_the_sweep_loop_has_no_terminating_condition_and_the_human_ends_it():
+    w6 = _w6_section().rstrip()
+    # Diagnosis needles first -- they name WHICH clause moved, instead of
+    # leaving a 1500-character diff to read.
+    assert "That loop has no terminating condition in this pipeline" in w6, (
+        "W6 must state the non-termination as a property of the PIPELINE, not "
+        "as a hazard the operator might happen to notice: no gate reports it "
+        "and no status names it, so it is not a state anyone can wait for"
+    )
+    assert "the sweep BOUNDARY, not the fate of any one draft" in w6, (
+        "and must scope the human's decision correctly. No supported route "
+        "delivers a draft the reviewer never saw -- assemble.py refuses one "
+        "outright and W7's hard check 2 reports the same mismatch -- so an "
+        "instruction to 'accept the delta' would leave the operator holding a "
+        "record and an undeliverable book"
+    )
+    assert "Re-run `select_segments.py` and read the category it gives each unit" in w6, (
+        "and must send the operator to the SELECTOR for each unit's next step "
+        "rather than restating the classification table here. Three review "
+        "rounds each found another category this paragraph had mispriced "
+        "(reusable's two conditions, then blocked_needs_regeneration's "
+        "precedence) -- a second copy of that table goes wrong silently, so "
+        "the paragraph delegates instead of enumerating"
+    )
+    assert "never as a key on a ledger fragment or record" in w6, (
+        "and must forbid the ledger destination explicitly. ledger_update.py's "
+        "payload schema rejects a seventh key, the fragment and the "
+        "materialized record both close with unevaluatedProperties:false so an "
+        "ordinary merge refuses, and a supported write rebuilds the fragment "
+        "fresh -- three independent reasons a stamp there is silently lost"
+    )
+    assert w6.endswith(W6_SWEEP_HAND_BACK_EXPECTED), (
+        "the sweep hand-back must be the LAST thing in W6 and must match its "
+        "pinned text exactly. A membership assertion here would stay green "
+        "under a negating frame appended beside it; the whole point of this "
+        "shape is that there is no room after the block for one"
+    )
