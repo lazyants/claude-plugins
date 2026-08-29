@@ -94,7 +94,7 @@ but the project has not fully converged (any of `not_started`/`recoverable`/
 This closes the previous gap where a project with unconverged segments
 silently exited `0` on the default `segment_drafts_and_audit` delivery path,
 giving it no deterministic delivery-refusal gate to match the engine-loop
-HARD rule already enforced on the `assembled_book` path (`assemble.py:3481`'s
+HARD rule already enforced on the `assembled_book` path (`assemble.py:3485`'s
 `assert_project_complete`). `warnings` and the frontback coverage report
 remain purely informational.
 
@@ -420,10 +420,10 @@ used by `diff_rendered_output.py` for structural-completeness checking and
 keyed resync, so one inserted node doesn't cascade a mismatch across the
 whole diff.
 
-#### Inline entity markup — `output.entity_markup` (1.73.0, #795)
+#### Inline entity markup — `output.entity_markup` (1.74.0, #795)
 
 A book whose names are not knowable before translation cannot seed a name
-list, so its translator marks entities inline as it goes. Before 1.73.0
+list, so its translator marks entities inline as it goes. Before 1.74.0
 nothing here recognised such markup, so it reached the reader verbatim and
 the index covered only what canon happened to carry. `output.entity_markup`
 is how a project declares the convention:

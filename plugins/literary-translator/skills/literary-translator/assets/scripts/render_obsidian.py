@@ -44,7 +44,7 @@ real output.
 - One **markup note** per declared-entity identity `canon.json` has no
   entry for, but ONLY when `output.entity_markup.index_from: markup` is in
   effect (#795). Absent that knob nothing below it runs, and this adapter's
-  output matches 1.72.0 except in two deliberate places, both documented
+  output matches 1.73.0 except in two deliberate places, both documented
   under obsidian.md's "Editorial brackets": the outer editorial `[`/`]` around
   ANY emitted wikilink (canon links included) is now escaped, and a heading
   whose source text literally contains an `⟦ENT_n⟧`-shaped token has those

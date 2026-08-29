@@ -2376,9 +2376,10 @@ def evaluate_lost_token_recovery(seg: str, profile: str, run_id, durable_root: P
     return payload, None
 
 
-def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict, *, expected_profile: str):
+def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict):
     """(True, "") when `seg`'s draft belongs to a re-review loop this project
-    already opened UNDER `expected_profile`, else (False, reason). #460, #455.
+    already opened under ANY of its claim profiles, else (False, reason).
+    #460, #455, #796.
 
     The evidence is a claim record held by `owner_run_id` -- WHICH RUN TO ASK
     ABOUT IS THE CALLER'S DECISION, and it passes the DRAFT's own owner first.
@@ -2390,32 +2391,37 @@ def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict, *, expected_pr
     presence: `read_claim_record()` establishes "a regular file holding a JSON
     object" and nothing more, so a three-key file at the right path would
     otherwise be a complete authorization. The record must therefore AGREE
-    with the path it was found at (its own `seg` and `run_id`), carry
-    `expected_profile` -- the same scoping D5.2 applies to the in-invocation
-    clearing, since a --from-cap claim authorizes a different population for
-    different reasons -- and carry EVERY field `build_claim_record()` writes.
-    The full-shape check is not ceremony: the fourteen fields are what makes a
-    record something only this project's own claim path produces, and a
-    partial object is exactly what a forgery or a half-finished write looks
-    like. It is still not proof of authenticity -- nothing in a plain file can
+    with the path it was found at (its own `seg` and `run_id`), name one of
+    this project's own claim profiles, and carry EVERY field
+    `build_claim_record()` writes. The full-shape check is not ceremony: the
+    fourteen fields are what makes a record something only this project's own
+    claim path produces, and a partial object is exactly what a forgery or a
+    half-finished write looks like. It is still not proof of authenticity -- nothing in a plain file can
     be, and an attacker with durable-root write access can overwrite the draft
     directly -- but it removes the case where three hand-typed keys are a
     complete authorization.
 
-    #455: `expected_profile` is KEYWORD-ONLY AND HAS NO DEFAULT, on purpose.
-    #460 hard-coded CLAIM_PROFILE_FROM_CONVERGED here, and --from-stalled
-    needs the identical predicate over its OWN profile (see its continuation
-    branch in evaluate_claim_admission()); a default would let a fourth
-    profile's call site inherit the from-converged condition list SILENTLY --
-    and silently is the operative word, because the wrong profile makes this
-    function refuse rather than crash, so the defect would surface only as a
-    continuation that mysteriously never continues. Required-and-explicit
-    turns that into a TypeError at the call site, the same reason
-    build_claim_record() is keyword-only with no defaults. The MUTATION that
-    must turn a test red: hard-code CLAIM_PROFILE_FROM_CONVERGED in the check
-    below again and the --from-stalled continuation tests must fail, naming
-    the profile mismatch -- if they still pass, they are not exercising this
-    parameter at all.
+    #796: #460 hard-coded CLAIM_PROFILE_FROM_CONVERGED here and #455
+    generalized it to a required keyword-only `expected_profile`, both on the
+    premise that a loop opened under one profile is not a loop opened under
+    another. That premise ignores MIGRATION: a unit changes profile population
+    as its own ledger status moves, and the profile that opened the loop can
+    then no longer accept it. A --from-cap loop that converges leaves a
+    `converged` unit --from-cap refuses on the status; a --from-stalled loop
+    whose driver dies before the convergence write leaves an `in_progress`
+    unit whose live claim says from-stalled but whose continuation is asked
+    for under whichever profile now owns it. Exact-match refused BOTH, and
+    since assemble.py refuses a book while any unit is not converged, one such
+    unit blocked a whole title.
+
+    Nothing is relaxed by widening it. The fact this probe establishes is
+    about the DRAFT -- the record is still looked up under the draft's OWN
+    owner run (see the ordering note above), and every other clause above
+    holds unchanged. The profile LABEL adds nothing to that, and each caller's
+    own population gates (status, sentinel, drift baseline, S1-S5, D6) are
+    untouched and still decide who may ask. The MUTATION that must turn a test red: narrow the membership test
+    back to a single profile and the cross-profile continuation tests must
+    fail -- if they still pass, they are not exercising this at all.
 
     Every failure to establish a fact returns False. The cost is asymmetric:
     refusing wrongly costs a fresh claim, admitting wrongly puts a
@@ -2441,10 +2447,12 @@ def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict, *, expected_pr
             f"the claim record at {record_path} disagrees with its own location "
             f"(records seg={payload.get('seg')!r} run_id={payload.get('run_id')!r})"
         )
-    if payload.get("profile") != expected_profile:
+    if payload.get("profile") not in CLAIM_PROFILES:
         return False, (
             f"the claim record at {record_path} was granted under profile "
-            f"{payload.get('profile')!r}, not {expected_profile!r}"
+            f"{payload.get('profile')!r}, which is not one of this project's claim "
+            f"profiles ({', '.join(CLAIM_PROFILES)}) -- a record naming a profile no "
+            f"claim path grants is not something select_segments.py wrote"
         )
     missing = [field for field in claim_record.CLAIM_RECORD_FIELDS if field not in payload]
     if missing:
@@ -2464,20 +2472,19 @@ def evaluate_open_review_loop_with_recovery(
     *,
     source_run_id,
     lost_token_recovery: bool,
-    expected_profile: str,
 ) -> "tuple[bool, str]":
     """evaluate_open_review_loop() plus D9's lost-token second probe --
     `(True, "")` when `seg`'s draft belongs to a re-review loop this project
-    already opened under `expected_profile`, else `(False, why_not)`.
+    already opened, else `(False, why_not)`.
 
     ONE construction, used by BOTH profiles that admit on a continuation:
     --from-converged's dirty-review branch (#460) and --from-stalled's
     current-review branch (#455). They were written twice, identically, and
     the second copy's own comment said to read the first one's -- which is
-    the drift this function exists to close. The only things that legitimately
-    vary are `expected_profile` and the refusal sentence, and the refusal
-    sentence stays at the CALL SITE: what a failed continuation means is a
-    property of the profile, not of this probe.
+    the drift this function exists to close. Since #796 nothing about the
+    probe varies by profile at all; the only thing that does is the refusal
+    sentence, and it stays at the CALL SITE: what a failed continuation means
+    is a property of the profile, not of this probe.
 
     The FIRST probe asks about `source_run_id` -- the DRAFT'S OWN OWNER --
     and NEVER about args.run_id. They coincide whenever the same run re-enters
@@ -2490,22 +2497,18 @@ def evaluate_open_review_loop_with_recovery(
     fixture whose draft owner differs from the invoking run must then admit
     where it should refuse.
 
-    All parameters after `args` are keyword-only and have no defaults, for
-    the reason evaluate_open_review_loop()'s own `expected_profile` does: a
-    wrong value here makes this function REFUSE rather than crash, so the
-    defect surfaces only as a continuation that mysteriously never continues.
+    All parameters after `args` are keyword-only and have no defaults: a wrong
+    value here makes this function REFUSE rather than crash, so the defect
+    surfaces only as a continuation that mysteriously never continues.
     """
-    open_loop, why_not = evaluate_open_review_loop(
-        seg, source_run_id, dirs, expected_profile=expected_profile
-    )
+    open_loop, why_not = evaluate_open_review_loop(seg, source_run_id, dirs)
     if not open_loop and lost_token_recovery and args.run_id and args.run_id != source_run_id:
         # ONLY on D9's lost-token path, and the `lost_token_recovery`
         # condition is what keeps it there. That path reaches here with
         # `source_run_id` recovered from THIS run's own claim record -- it
         # names the run the draft originally came FROM, which never held a
-        # claim under `expected_profile` and never should, so asking only
-        # about it would strand exactly the recovery this branch exists to
-        # enable.
+        # claim of its own and never should, so asking only about it would
+        # strand exactly the recovery this branch exists to enable.
         #
         # Gating on the RECOVERY, not merely on "the ids differ", because
         # this run's record proves only that this run once opened a loop on
@@ -2530,9 +2533,7 @@ def evaluate_open_review_loop_with_recovery(
         #
         # The draft's own token still decides who is asked first whenever
         # there IS one; this branch is reachable only when there is not.
-        open_loop, why_not_self = evaluate_open_review_loop(
-            seg, args.run_id, dirs, expected_profile=expected_profile
-        )
+        open_loop, why_not_self = evaluate_open_review_loop(seg, args.run_id, dirs)
         if not open_loop:
             # BOTH probes are reported, each labelled with the run it asked
             # about. A single merged sentence would make the refusal
@@ -2732,7 +2733,6 @@ def evaluate_claim_admission(
                     args,
                     source_run_id=source_run_id,
                     lost_token_recovery=lost_token_recovery,
-                    expected_profile=CLAIM_PROFILE_FROM_CONVERGED,
                 )
                 if not open_loop:
                     reasons.append(
@@ -2854,16 +2854,17 @@ def evaluate_claim_admission(
             draft_unchanged_since_convergence = True
     elif profile == CLAIM_PROFILE_FROM_STALLED:
         # #455. The THIRD state, and the whole reason this profile exists:
-        # materialized status in_progress, sentinel PRESENT, no
-        # reviewed_draft_sha1, a draft on disk, and a stored review that
-        # describes a draft that no longer exists. --from-cap refuses it on
-        # the STATUS alone -- in_progress is not non_converged/reason=cap --
-        # and since #537 that is the only thing refusing it there, the
-        # sentinel no longer being disqualifying under that profile; and
-        # --from-converged
-        # refuses it (the status is wrong and there is no drift baseline), so
+        # materialized status in_progress, sentinel PRESENT, a draft on disk,
+        # and a stored review that describes a draft that no longer exists.
+        # --from-cap refuses it on the STATUS alone -- in_progress is not
+        # non_converged/reason=cap -- and since #537 that is the only thing
+        # refusing it there, the sentinel no longer being disqualifying under
+        # that profile; and --from-converged refuses it on the status too, so
         # before this profile the only route was a hand-driven
-        # ledger_update.py convergence write.
+        # ledger_update.py convergence write. #796: `reviewed_draft_sha1`
+        # dropped out of that description -- absent is the ordinary shape,
+        # since the in_progress write that leaves a unit here drops the field,
+        # but present is admitted as well (see its own comment below).
         #
         # EVERY condition below is reported INDEPENDENTLY -- no short-circuit,
         # no elif chain across different facts -- because this function's
@@ -2894,20 +2895,35 @@ def evaluate_claim_admission(
                 f"converged at least once; an in_progress unit with no sentinel is ordinary "
                 f"first-pass work, and re-reviewing it is not what this profile authorizes"
             )
-        # The EXACT field whose absence makes --from-converged refuse
-        # ("the drift baseline this profile requires", in the branch above).
-        # Its absence is not an incidental property here, it is the defining
-        # one: a unit that HAS it has a baseline, so its remedy is
-        # --from-converged's drift comparison rather than this profile.
-        reviewed_draft_sha1 = ledger_record.get("reviewed_draft_sha1")
-        if isinstance(reviewed_draft_sha1, str) and reviewed_draft_sha1:
-            reasons.append(
-                f"{seg!r} requested under --from-stalled, but its ledger record already "
-                f"carries 'reviewed_draft_sha1' ({reviewed_draft_sha1!r}) -- --from-stalled "
-                f"is for a unit whose convergence write never landed, so the drift baseline "
-                f"is exactly what it does NOT have. A unit that has one is --from-converged's "
-                f"population, which compares against it"
-            )
+        # #796: `reviewed_draft_sha1` IS NOT CONSTRAINED HERE, and this
+        # profile used to refuse when it was PRESENT. The reason given was
+        # that a unit with a drift baseline belongs to --from-converged's
+        # comparison rather than to this profile -- and that remedy does not
+        # exist for anything this branch can reach: --from-converged also
+        # requires a materialized status in WAS_CONVERGED_STATUSES, and the
+        # status condition above has already required `in_progress`. So the
+        # old refusal could only ever fire on a unit NO profile admitted,
+        # which, since assemble.py refuses a book while any unit is not
+        # converged, blocked the whole title. The absence was a proxy for
+        # "belongs to --from-converged", and the proxy is false for every
+        # in_progress unit.
+        #
+        # The intersection it now admits is `in_progress` + sentinel +
+        # baseline PRESENT, at the full width of this profile: `clean` is
+        # unconstrained (see the paragraph below), so a stale CLEAN review
+        # over such a record is admitted too, and so is the continuation
+        # exception for a CURRENT one. That width is correct rather than
+        # incidental -- the field says what some earlier convergence write
+        # recorded, and this profile's population is defined by the stored
+        # REVIEW no longer describing the draft in front of it, which the
+        # baseline says nothing about either way.
+        #
+        # No shipped writer produces that record: ledger_update.py builds
+        # every fragment fresh and derives the baseline only for
+        # status == converged, so every in_progress write drops it. It takes
+        # an out-of-band fragment edit -- which is exactly the state an
+        # operator performing the fix turn this driver deliberately does not
+        # implement can leave behind, and the state #796 was filed from.
         # `clean` IS DELIBERATELY NOT CONSTRAINED HERE, and this is the one
         # place --from-stalled is WIDER than --from-cap (which requires
         # clean: false WITH findings) and than --from-converged's entry
@@ -2968,7 +2984,10 @@ def evaluate_claim_admission(
             # The continuation is AUTHENTICATED rather than assumed, the same
             # shape #460 gave --from-converged's dirty-review branch: a
             # current review continues only when the DRAFT'S OWN OWNER holds a
-            # COMPLETE claim record for this segment under THIS profile.
+            # COMPLETE claim record for this segment, granted under one of
+            # this project's claim profiles -- since #796 not necessarily
+            # under THIS one, because a unit migrates between profile
+            # populations as its ledger status moves.
             # "The review is current" is just as true of a segment nobody ever
             # claimed, so it authorizes nothing by itself.
             # A MISMATCH is the entry condition itself and needs no branch:
@@ -2982,7 +3001,6 @@ def evaluate_claim_admission(
                     args,
                     source_run_id=source_run_id,
                     lost_token_recovery=lost_token_recovery,
-                    expected_profile=CLAIM_PROFILE_FROM_STALLED,
                 )
                 if not open_loop:
                     reasons.append(
@@ -2990,7 +3008,7 @@ def evaluate_claim_admission(
                         f"'draft_sha1' still matches the current draft ({current_draft_sha1!r}) "
                         f"-- the stored verdict describes the draft that is there NOW, so this "
                         f"is not the stalled population. A CURRENT review is admitted only as "
-                        f"the continuation of a re-review loop this profile already opened, "
+                        f"the continuation of a re-review loop this project already opened, "
                         f"and that could not be established here: {why_not}. "
                         f"{FROM_STALLED_DISCLOSURE}"
                     )
@@ -3034,7 +3052,7 @@ def evaluate_claim_admission(
         # `current_cache_key`, computed once directly above: a second
         # cache_key.py subprocess call here would be exactly the kind of
         # second, later-timestamped invocation D4's own "the key as of
-        # publication" contract must not tolerate (claim_record.py:438-439).
+        # publication" contract must not tolerate (claim_record.py:444-445).
         stored_cache_key_for_drift = ledger_record.get("cache_key")
         if not isinstance(stored_cache_key_for_drift, dict):
             reasons.append(
@@ -5891,9 +5909,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "#455: claim these ids for RE-REVIEW under the --from-stalled profile -- a "
             "previously-converged segment left with incomplete bookkeeping: materialized "
-            "status in_progress, the .ever_converged sentinel PRESENT, no "
-            "reviewed_draft_sha1, and a stored review that is STALE against the current "
-            "draft. Never re-translates. Requires --run-id, and --only-segs naming every "
+            "status in_progress, the .ever_converged sentinel PRESENT, and a stored review "
+            "that is STALE against the current draft. Ordinarily no reviewed_draft_sha1 "
+            "either, because the in_progress write that leaves a unit here drops it -- but "
+            "since #796 a record that carries one is admitted too, rather than refused "
+            "toward a --from-converged route its own in_progress status forbids. "
+            "Never re-translates. Requires --run-id, and --only-segs naming every "
             "claimed id -- enforced by D3b, this profile's OWN check, for a different "
             "reason than --from-cap's. A capped id is human_escalation and so never "
             "reaches the dispatch set unless --only-segs names it; a stalled id is "

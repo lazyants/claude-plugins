@@ -497,7 +497,7 @@ in either case, is `--accept-baseline --force-accept-baseline` —
 `--accept-baseline` alone refuses to overwrite a baseline that already
 exists.
 
-## Markup-driven entity notes — `index_from: markup` (1.73.0, #795)
+## Markup-driven entity notes — `index_from: markup` (1.74.0, #795)
 
 Everything above describes the canon-driven index, which is still the
 default and is unchanged. A project whose names cannot be seeded from a list

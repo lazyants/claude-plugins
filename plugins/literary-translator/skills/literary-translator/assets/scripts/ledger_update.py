@@ -564,7 +564,7 @@ def _sync_published_sentinel(path, *, dir_fd: int) -> "str | None":
     file findable survives a crash too: fsync on a file commits its
     contents, not its link. Same two-halves reasoning claim_record.py's
     fsync_directory() docstring states for the claim record
-    (claim_record.py:565-577).
+    (claim_record.py:572-584).
 
     Returns None on success, or a short error string naming which half
     failed. Deliberately does NOT import claim_record.fsync_directory():
@@ -767,7 +767,7 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR, provenance=None):
     sync failure on EITHER path returns False through the same
     _report_sentinel_failure() contract as every other failure here,
     fail-closed rather than best-effort (see that helper's own docstring for
-    why, citing claim_record.py:565-577). Covering the already-present path
+    why, citing claim_record.py:572-584). Covering the already-present path
     too, not only fresh-create, is load-bearing: without it, a retry after a
     failed sync would hit FileExistsError, classify SENTINEL_PRESENT, and
     return True having synced nothing -- laundering the earlier failure into

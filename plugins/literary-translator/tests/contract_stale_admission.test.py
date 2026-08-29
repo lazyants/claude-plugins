@@ -1106,9 +1106,11 @@ def test_a_run_directory_that_cannot_be_stat_ed_refuses(tmp_path):
 
 
 def test_a_null_baseline_is_the_documented_shape_and_admits(tmp_path):
-    """`pre_claim_cache_key: null` is LEGITIMATE -- --from-cap and
-    --from-stalled fragments carry no cache_key at all, so their records
-    record no baseline. Against a ledger record that now HAS a dict key, that
+    """`pre_claim_cache_key: null` is LEGITIMATE -- the --from-cap and
+    --from-stalled fragments this plugin's own writers produce carry no
+    cache_key at all, so their records record no baseline (an out-of-band
+    fragment admitted under --from-stalled since #796 may carry one; this
+    test is about the null shape either way). Against a ledger record that now HAS a dict key, that
     is evidence a convergence happened since: spent, admit.
 
     The neighbouring cases must not swallow this one: a MISSING key refuses,

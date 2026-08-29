@@ -1172,7 +1172,7 @@ def test_a_directory_fsync_failure_makes_mark_ever_converged_return_false(tmp_pa
     write_fragment_atomically()'s best-effort directory sync (`except
     OSError: pass`), a segments/ directory-fsync failure here must refuse
     convergence rather than report success over a directory entry that was
-    never made durable -- claim_record.py:565-577 argues the split
+    never made durable -- claim_record.py:572-584 argues the split
     explicitly, for exactly this asymmetry (a crash can lose the entry
     while the fragment it backs survives).
 

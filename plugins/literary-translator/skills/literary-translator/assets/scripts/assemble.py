@@ -1147,11 +1147,15 @@ def _voided_review_refusal_reason(seg: str, record: dict) -> "str | None":
             )
         claimed = payload["pre_claim_cache_key"]
         if claimed is not None and not isinstance(claimed, dict):
-            # `null` is the ONE documented non-dict shape: --from-cap and
-            # --from-stalled fragments carry no cache_key at all, so their
-            # records legitimately record no baseline (claim_record.py's own
-            # field commentary). Anything else -- a number, a string, a list --
-            # is a damaged record, and coercing it to None would make it
+            # `null` is the ONE documented non-dict shape: the --from-cap and
+            # --from-stalled fragments this plugin's own writers produce carry
+            # no cache_key at all, so their records legitimately record no
+            # baseline (claim_record.py's own field commentary, which since
+            # #796 also notes that an out-of-band fragment admitted under
+            # --from-stalled may carry one -- the record then stores the dict
+            # it read, which is still a documented shape here). Anything
+            # else -- a number, a string, a list -- is a damaged record, and
+            # coercing it to None would make it
             # compare unequal to a stored dict and CLEAR the claim. Same
             # fail-open as the missing key above, one type further along.
             return (
@@ -2749,7 +2753,7 @@ def _entity_markup_mode(profile: dict) -> str:
     """The effective mode: `off` | `strip` | `index`.
 
       - block absent                              -> `off`: no scan, no key on
-        the nodestream, assembled output byte-identical to 1.72.0.
+        the nodestream, assembled output byte-identical to 1.73.0.
       - block present, index_from absent/`canon`  -> `strip`: elements removed,
         payload kept, nothing recorded.
       - block present, index_from `markup`,
