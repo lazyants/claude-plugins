@@ -222,7 +222,7 @@ def validate_run_id(run_id):
 
     WHY THIS MODULE NEEDS ITS OWN COPY AT ALL: the asymmetry that made
     claimed_path() a path-traversal hole. The WRITER validated its run id
-    before minting a claim (select_segments.py:5000, called from its claim
+    before minting a claim (select_segments.py:5018, called from its claim
     block) and every READER built the same path from an unvalidated one.
     A run id can reach a reader from an untrusted place -- draft_ready.py's
     `_claim_run_id()` derives it from a draft's own `dispatch_token`, a
@@ -434,7 +434,13 @@ def read_claim_record(path: Path):
 #       history. That history is what the `.ever_converged` sentinel records;
 #       it is not carried onto the fragment's own `cache_key` field, so a
 #       stalled fragment is a full replacement with no baseline exactly like a
-#       capped one, for a different underlying reason.
+#       capped one, for a different underlying reason. "Always" there is a
+#       statement about this plugin's own WRITERS, not a guarantee about the
+#       field: since #796 --from-stalled also admits a fragment that carries
+#       convergence-derived fields it could only have got out of band, and such
+#       a fragment can carry a `cache_key` too. The record then stores what was
+#       read, as it always does -- nothing here derives a value from the
+#       profile.
 #       `cache_key_at_claim` is the key freshly computed by this invocation --
 #       what it IS now.
 #

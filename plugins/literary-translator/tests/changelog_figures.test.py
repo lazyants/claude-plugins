@@ -389,8 +389,8 @@ FIGURES = [
         ),
     ),
     Figure(
-        phrase="3705 lines",
-        value=3705,
+        phrase="3727 lines",
+        value=3727,
         derive=lambda: len(
             (PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md")
             .read_text(encoding="utf-8")

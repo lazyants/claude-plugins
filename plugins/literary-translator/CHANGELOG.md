@@ -37,7 +37,7 @@ scheme:
 which meets 1.71.0's orphaned-draft refusal: a draft left in flight across the upgrade halts the
 dispatch by name rather than being retranslated over.
 
-### The always-loaded docs got smaller — SKILL.md 4457 → 3705 lines
+### The always-loaded docs got smaller — SKILL.md 4457 → 3727 lines
 
 Six merges, one campaign. `SKILL.md` is read in full on every run of every project, and a rule
 that binds on a rare path was costing every run that never takes it. The reference set now holds 22 files, up from 18,

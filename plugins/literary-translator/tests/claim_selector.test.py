@@ -2928,8 +2928,9 @@ def test_fresh_claim_by_a_new_run_succeeds_even_though_the_named_run_still_holds
 # ---------------------------------------------------------------------------
 # 19. #460 -- evaluate_open_review_loop(): a DIRTY --from-converged review is
 # admitted only when the draft's OWNER run (named by its own dispatch_token)
-# holds a live, self-consistent, from-converged claim record for this exact
-# segment. `clean: true` was the ENTRY condition into the previously-converged
+# holds a live, self-consistent claim record for this exact segment, granted
+# under one of this project's claim profiles -- since #796 not necessarily
+# from-converged itself. `clean: true` was the ENTRY condition into the previously-converged
 # population, not a standing one -- round 1 of a re-review overwrites the
 # stored review with a DIRTY one, and before this fix that closed the door
 # behind the operator: the driver's own prescribed fix turn could run, and
@@ -3042,12 +3043,19 @@ def test_dirty_review_refused_when_owner_holds_no_claim_record(tmp_path):
     )
 
 
-def test_dirty_review_refused_when_owners_claim_was_granted_under_from_cap(tmp_path):
-    """REFUSE. The owner's record exists and is perfectly readable, but it
-    authorizes a DIFFERENT population for a different reason (D5.2) --
-    --from-cap's own re-review loop is not --from-converged's. Must refuse
-    on the PROFILE clause specifically, not be swallowed by the "no record"
-    reason the previous test exercises."""
+def test_dirty_review_admitted_when_owners_claim_was_granted_under_from_cap(tmp_path):
+    """ADMIT -- #796's end-to-end migration case, and the shape issue #796
+    itself named: a --from-cap loop converges, the unit re-diverges and is
+    hand-fixed, and the owner's live claim record still says from-cap while
+    the ledger's materialized status has since moved to converged. Before
+    #796 this REFUSED -- --from-cap's own population gate refuses on the now
+    -converged status while --from-converged's exact-match refused on the
+    profile label -- and since assemble.py refuses a whole book while any
+    unit is not converged, the empty intersection of those two refusals
+    stranded a title. Nothing about the OTHER clauses relaxes: the record
+    still has to sit at the draft owner's own path, agree with its own
+    seg/run_id, and carry every CLAIM_RECORD_FIELDS entry -- only the
+    profile label stopped being exact-match against --from-converged."""
     root = make_durable_root(tmp_path)
     seg = "seg22"
     fixture_keys = {}
@@ -3055,6 +3063,37 @@ def test_dirty_review_refused_when_owners_claim_was_granted_under_from_cap(tmp_p
     write_manifest(root, [seg])
     write_fixture_cache_keys(root, fixture_keys)
     write_owner_claim_record(root, seg, profile="from-cap")
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert seg in out["segs"]
+    assert seg not in out["previously_converged"], (
+        "an admitted --from-converged claim must clear the gate for itself, same as the "
+        "clean-review happy path"
+    )
+    assert seg in out["claims"]
+    claim = out["claims"][seg]
+    assert claim["run_id"] == RUN_ID, "the fresh claim is granted to THIS run, not the owner"
+    assert claim["source_run_id"] == SOURCE_RUN_ID
+
+
+def test_dirty_review_refused_when_owners_claim_was_granted_under_an_unknown_profile(tmp_path):
+    """REFUSE -- the end-to-end mirror of the unit-level membership-floor
+    test in the evaluate_open_review_loop() section below. #796 widened the
+    profile clause from exact-match against ONE literal to membership in
+    CLAIM_PROFILES, and a record naming a profile string this project's
+    claim path never grants at all must still refuse: the widening only
+    admits the two OTHER real profiles, never an arbitrary string. Must
+    refuse on the PROFILE clause specifically, not be swallowed by the "no
+    record" reason the earlier test in this section exercises."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys, review_overrides={"clean": False})
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+    write_owner_claim_record(root, seg, profile="from-nowhere")
 
     proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
     assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
@@ -3065,7 +3104,8 @@ def test_dirty_review_refused_when_owners_claim_was_granted_under_from_cap(tmp_p
     # Asserting over the whole string would pass on the second probe's "no
     # record" reason, which is exactly the swallowing this test exists to stop.
     owner_clause = out["error"].split("; for this run")[0]
-    assert "was granted under profile 'from-cap'" in owner_clause, out["error"]
+    assert "was granted under profile 'from-nowhere'" in owner_clause, out["error"]
+    assert "not one of this project's claim profiles" in owner_clause, out["error"]
     assert "holds no readable claim record" not in owner_clause, (
         "must refuse on the PROFILE clause, not the presence clause the no-record test covers"
     )
@@ -3305,9 +3345,7 @@ def test_evaluate_open_review_loop_permits_a_valid_owner_claim(tmp_path):
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(
-        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
-    )
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
     assert ok is True
     assert reason == ""
 
@@ -3319,26 +3357,62 @@ def test_evaluate_open_review_loop_refuses_when_owner_holds_no_claim_record(tmp_
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(
-        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
-    )
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
     assert ok is False
     assert "holds no readable claim record" in reason, reason
     assert "state=absent" in reason, reason
 
 
-def test_evaluate_open_review_loop_refuses_a_from_cap_owner_claim(tmp_path):
+def test_evaluate_open_review_loop_admits_a_from_cap_owner_claim(tmp_path):
+    """#796's unit-level migration proof: a claim record granted under
+    --from-cap continues an open loop just as a --from-converged record
+    would, because the two profile constants name overlapping evidence for
+    the SAME loop, not two different loops. #455 hard-coded a required
+    `expected_profile` here on the premise that a record's profile label
+    fixes which loop it can continue; that premise ignores a unit MIGRATING
+    between profile populations (a from-cap unit that converges, or a
+    from-stalled unit whose continuation is asked for under whichever
+    profile now owns it). This test used to assert the opposite -- that a
+    from-cap record refuses a from-converged probe -- and that refusal is
+    exactly the #796 shape that stranded a title when the from-cap and
+    from-converged refusals intersected to nothing. Every other clause the
+    record has to satisfy (self-agreement, the full field set) is untouched;
+    only the profile label stopped being exact-match."""
     root = make_durable_root(tmp_path)
     seg = "seg22"
     write_owner_claim_record(root, seg, profile="from-cap")
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(
-        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
-    )
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    assert ok is True
+    assert reason == ""
+
+
+def test_evaluate_open_review_loop_refuses_a_claim_granted_under_an_unknown_profile(tmp_path):
+    """The membership check has a floor: #796 widened the profile clause from
+    exact-match against ONE constant to membership in CLAIM_PROFILES, and a
+    record naming a profile string outside that tuple entirely must still
+    refuse, exactly like the from-cap and from-stalled records used to
+    before the widening. Without this case the widening is unverified from
+    the other direction -- every remaining test in this section plants one
+    of the three real profiles, so a version of evaluate_open_review_loop()
+    that dropped the profile check altogether (accepting ANY string, or even
+    a missing key) would pass all of them and only this one would catch it.
+    build_claim_record() does not validate its `profile` argument, so
+    write_owner_claim_record() -- the same helper the ADMIT tests above use
+    -- can plant this shape through the real writer; the refusal is reachable
+    from a genuinely produced record, not only from a hand-typed file."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    write_owner_claim_record(root, seg, profile="from-nowhere")
+
+    mod = _load_select_segments_module(root)
+    dirs = mod.resolve_dirs(str(root))
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
     assert ok is False
-    assert "was granted under profile 'from-cap'" in reason, reason
+    assert "was granted under profile 'from-nowhere'" in reason, reason
+    assert "not one of this project's claim profiles" in reason, reason
     assert "holds no readable claim record" not in reason, (
         f"must refuse on the PROFILE clause, not the presence clause. Got: {reason!r}"
     )
@@ -3351,9 +3425,7 @@ def test_evaluate_open_review_loop_refuses_a_seg_mismatched_record(tmp_path):
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(
-        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
-    )
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
     assert ok is False
     assert "disagrees with its own location" in reason, reason
     assert "seg='some_other_seg'" in reason, reason
@@ -3366,9 +3438,7 @@ def test_evaluate_open_review_loop_refuses_a_run_id_mismatched_record(tmp_path):
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(
-        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
-    )
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
     assert ok is False
     assert "disagrees with its own location" in reason, reason
     assert f"run_id={OTHER_RUN_ID!r}" in reason, reason
@@ -3387,9 +3457,7 @@ def test_evaluate_open_review_loop_refuses_a_torn_owner_record(tmp_path):
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(
-        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
-    )
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
     assert ok is False
     assert "holds no readable claim record" in reason, reason
     assert "state=ambiguous" in reason, reason
@@ -3406,54 +3474,37 @@ def test_evaluate_open_review_loop_refuses_a_none_or_empty_owner_run_id(tmp_path
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
     for bad_owner in (None, ""):
-        ok, reason = mod.evaluate_open_review_loop(
-            seg, bad_owner, dirs, expected_profile="from-converged"
-        )
+        ok, reason = mod.evaluate_open_review_loop(seg, bad_owner, dirs)
         assert ok is False
         assert "no owner whose claim could be read" in reason, reason
 
 
-def test_evaluate_open_review_loop_refuses_a_from_stalled_owner_claim_when_expecting_converged(tmp_path):
-    """The #455 half of the generalization: a valid, complete, self-agreeing
-    claim record is not enough on its own -- it must have been granted under
-    THE CALLER'S OWN profile. A record granted under --from-stalled must not
-    let --from-converged's own continuation predicate treat it as its own
-    re-review loop, even though every other field agrees. Mutation this test
-    exists to catch: hard-coding CLAIM_PROFILE_FROM_CONVERGED back into
-    evaluate_open_review_loop() would make this pass for the wrong reason
-    only by coincidence -- it would actually make the from-cap sibling above
-    (also refused) indistinguishable in cause from this one; the assertion
-    on the mismatched profile value is what pins the parameter is genuinely
-    read, not merely present in the signature."""
-    root = make_durable_root(tmp_path)
-    seg = "seg22"
-    write_owner_claim_record(root, seg, profile="from-stalled")
-
-    mod = _load_select_segments_module(root)
-    dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(
-        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
-    )
-    assert ok is False
-    assert "was granted under profile 'from-stalled'" in reason, reason
-    assert "not 'from-converged'" in reason, reason
-
-
 def test_evaluate_open_review_loop_permits_a_valid_owner_claim_under_from_stalled(tmp_path):
-    """The mirror of the happy-path test above, with expected_profile
-    generalized to --from-stalled's own value -- pins that the predicate is
-    genuinely parameterized rather than only ever exercised with
-    'from-converged' (every other test in this section passes that one
-    value, which would leave a hard-coded default undetected)."""
+    """The mirror of the happy-path test above (profile="from-converged"),
+    with a --from-stalled record instead. #455 hard-coded a required
+    keyword-only `expected_profile` here, and a SECOND test proved the
+    parameter was genuinely READ -- not merely present in the signature --
+    by asserting that a --from-stalled record REFUSED a --from-converged
+    probe, the mismatch itself being the proof. #796 removed the parameter,
+    so that test's body became character-for-character this one's and its
+    name asserted a distinction the function can no longer draw; it was
+    deleted rather than left as a second copy, and its reason is recorded
+    here instead.
+
+    What is left to pin is MEMBERSHIP: evaluate_open_review_loop() now
+    checks the record's own `profile` field against CLAIM_PROFILES and takes
+    no caller-side expectation at all, so from-stalled must genuinely be a
+    member of that check rather than from-converged with the other two
+    profiles left untested. Every other admitting test in this section
+    plants from-converged, which would leave a membership check narrowed
+    back to one literal value undetected."""
     root = make_durable_root(tmp_path)
     seg = "seg22"
     write_owner_claim_record(root, seg, profile="from-stalled")
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(
-        seg, SOURCE_RUN_ID, dirs, expected_profile="from-stalled"
-    )
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
     assert ok is True
     assert reason == ""
 

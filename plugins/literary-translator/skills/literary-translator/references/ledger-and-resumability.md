@@ -1324,13 +1324,20 @@ IDs beside actually-emitted IDs.
   override, logged as such, regardless of its `human_escalation`
   classification.
 
-## A never-converged unit stranded by a killed driver fits no claim profile
+## A unit stranded outside every claim profile
 
-A driver killed mid-flight never writes the terminal record for the segments it
-was holding, so they stay `in_progress` — dispatch-eligible by default, which is
-the part that hides them. For a unit that HAS converged before, that is P3's
-population and `--from-stalled` is its route. For a unit that never converged, all
-three profiles refuse it, each on a different fact: `--from-cap` and
+A driver kill or a hand-fix mid-flight can each leave a unit that all three claim
+profiles refuse, each on its own fact, with no route through any of them alone.
+#796 closed two such intersections by widening what two of the profiles already
+check, without adding a fourth profile or relaxing any profile's own population
+gates. This section keeps the case that predates that fix, since a killed driver
+is still the ordinary way to land in this state, and adds the two #796 closed.
+
+**Never converged.** A driver killed mid-flight never writes the terminal record
+for the segments it was holding, so they stay `in_progress` — dispatch-eligible by
+default, which is the part that hides them. For a unit that HAS converged before,
+that is P3's population and `--from-stalled` is its route. For a unit that never
+converged, all three profiles refuse it, each on a different fact: `--from-cap` and
 `--from-converged` on the materialized status, and `--from-stalled` on the
 `.ever_converged.<seg>` sentinel it requires and this unit has never had.
 
@@ -1341,7 +1348,42 @@ That works precisely because it never converged — luck, not design — and it 
 worth knowing before an operator reaches for `--allow-retranslate-converged`,
 which authorizes a re-translation this unit does not need.
 
-**The dangerous part is the round it blocks on the way there.** D3b requires that
+**Previously converged, `in_progress`, sentinel present, a drift baseline already
+on record (#796).** An out-of-band ledger-fragment edit — the state a hand fix
+that this project's driver deliberately does not implement can leave behind — can
+carry a `reviewed_draft_sha1` forward into an `in_progress` row; no shipped writer
+produces that combination on its own, since `ledger_update.py` builds every
+fragment fresh and derives the baseline only for `status: converged`. Before
+#796, this fell through all three: `--from-stalled` refused it on the field's own
+PRESENCE, on the premise that a unit carrying a baseline belonged to
+`--from-converged`'s comparison instead; `--from-converged` refused it on the
+STATUS (`in_progress` is not one of `WAS_CONVERGED_STATUSES`, so that remedy never
+existed for anything `--from-stalled` could reach); and `--from-cap` refused it on
+the same status test (`in_progress`, not `non_converged`/`reason: "cap"`).
+`--from-stalled` now owns this population outright: the field is no longer
+constrained on entry, so a unit carrying it is admitted alongside the ordinary
+absent case, and the other two profiles' gates did not move — only
+`--from-stalled`'s did (see P3 in SKILL.md).
+
+**A claim record naming a profile the unit has since outgrown (#796).** A claim
+record names the profile that opened its loop, permanently — records are never
+released — but the unit's own ledger status keeps moving underneath it. A
+`--from-cap` loop that converges and is later hand-fixed back to a dirty draft
+needs `--from-converged`'s dirty-review continuation to finish, but the only claim
+record on file for it still names `from-cap`; continuation used to require an
+EXACT match, so `--from-converged` refused it on the profile mismatch. `--from-cap`
+cannot pick it up either, on the other side of the same fact: its own status gate
+requires `non_converged`/`reason: "cap"`, and convergence already moved the status
+to `converged`. The exact-match check was refusing a record for having opened the
+loop under the wrong profile, when no profile's own population gates ever asked it
+to reopen under a different one — continuation now asks only that the record name
+one of this project's own profiles, so `--from-converged` admits it and the
+migration is no longer a dead end. (D9's own lost-token recovery keeps its
+narrower, unchanged same-profile equality check regardless of this widening — see
+SKILL.md's `--from-converged` continuation paragraph.)
+
+**The dangerous part, for any of these three, is the round a stranded id
+blocks on the way to its route.** D3b requires that
 every emitted seg be a subset of the claimed ids on a `--from-stalled`
 invocation, so one stranded, unclaimable id refuses the whole round until it is
 claimed or excluded. Exclusion is the obvious move, and it is where the unit
@@ -1350,5 +1392,6 @@ dispatched — the excluded unit appears nowhere, so the summary reads as comple
 **Write the exclusion into an open-items record BEFORE the summary exists, not
 after.** After any driver death, classify first and then read the ledger record of
 every `recoverable`/`in_progress` id — the category label alone reports none of
-the three independent facts (status, sentinel, `reviewed_draft_sha1`) that decide
-which route the unit needs.
+the facts that decide which route the unit needs: status and sentinel presence
+pick the profile, and `reviewed_draft_sha1`'s presence no longer excludes
+`--from-stalled`, so it settles nothing about the route on its own (#796).

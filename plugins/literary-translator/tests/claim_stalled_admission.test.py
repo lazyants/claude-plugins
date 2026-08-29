@@ -3,9 +3,13 @@ claim admission profile in select_segments.py.
 
 THE POPULATION. A unit that converged once and whose convergence bookkeeping
 never landed: materialized ledger `status: in_progress`, the
-`.ever_converged.<seg>` sentinel PRESENT, NO `reviewed_draft_sha1`, a draft on
-disk, and a stored review whose `draft_sha1` describes a draft that no longer
-exists. `--from-cap` refuses it (wrong status -- `in_progress`, not
+`.ever_converged.<seg>` sentinel PRESENT, a draft on disk, and a stored review
+whose `draft_sha1` describes a draft that no longer exists. `reviewed_draft_sha1`
+is ABSENT in the ordinary case -- the `in_progress` write that leaves a unit
+here drops the field -- but its presence is admitted too (#796): see
+`test_a_ledger_record_that_already_carries_reviewed_draft_sha1_is_admitted_too`
+and `test_issue_796_shape_1_a_dirty_stale_review_over_a_baselined_in_progress_unit_admits`
+below. `--from-cap` refuses it (wrong status -- `in_progress`, not
 non_converged/reason=cap; since 1.27.0/#537 the sentinel alone no longer
 refuses under that profile) and
 `--from-converged` refuses it (wrong status, and there is no drift baseline), so
@@ -163,7 +167,10 @@ OTHER_RUN_ID = "20260811T000000Z"
 # stored review's draft_sha1 disagreeing with the current draft -- differing
 # from each other ONLY in `clean`. That disagreement is the measured reason the
 # profile must not constrain that field, so both are carried here rather than
-# one standing in for the other.
+# one standing in for the other. `reviewed_draft_sha1` absent is what was
+# MEASURED on these two units, not a condition the profile requires -- #796
+# admits it present too, and this file's own dedicated tests cover that shape
+# separately rather than by editing either live fixture.
 LIVE_CLEAN_SEG = "seg21"
 LIVE_DIRTY_SEG = "FRONTBACK:errata_02"
 
@@ -336,11 +343,13 @@ def make_run_dir(root, run_id):
 
 def in_progress_fragment(rounds=1, **overrides):
     """The stalled unit's materialized ledger shape, measured: status
-    in_progress, no `reason`, and -- the defining absence -- no
-    `reviewed_draft_sha1` at all. `cache_key` is absent too: a fragment written
-    for an in_progress unit carries none, which is why claim_record.py's own
-    note about a missing historical cache key had to stop saying 'expected for
-    --from-cap' alone.
+    in_progress, no `reason`, and -- the ORDINARY absence, not a condition the
+    profile requires -- no `reviewed_draft_sha1` by default (the in_progress
+    write that leaves a unit here drops the field; #796 admits its presence
+    too, via the `reviewed_draft_sha1=` override this function already takes).
+    `cache_key` is absent too: a fragment written for an in_progress unit
+    carries none, which is why claim_record.py's own note about a missing
+    historical cache key had to stop saying 'expected for --from-cap' alone.
 
     `reason` is OMITTED rather than written as null. The live units read as
     `reason: None` through `record.get("reason")`, which is what an ABSENT key
@@ -379,10 +388,13 @@ def build_from_stalled_segment(
 
     Defaults reproduce the measured live shape: in_progress / reason None /
     sentinel present / no reviewed_draft_sha1 / draft and review on disk /
-    review.draft_sha1 disagreeing with the current draft's content sha1.
-    `clean_review` selects between the two real units -- seg21's clean stale
-    verdict and errata_02's dirty one -- and NEITHER is the "correct" one: the
-    profile does not constrain that field.
+    review.draft_sha1 disagreeing with the current draft's content sha1. The
+    absent `reviewed_draft_sha1` is what was measured on the two live units,
+    not a condition this profile requires -- #796 admits it present too (write
+    it onto the materialized fragment afterwards, as this file's own
+    dedicated tests for that shape do). `clean_review` selects between the two
+    real units -- seg21's clean stale verdict and errata_02's dirty one -- and
+    NEITHER is the "correct" one: the profile does not constrain that field.
 
     Returns the facts a caller needs to build a CURRENT review or an authentic
     continuation claim without recomputing them."""
@@ -1091,15 +1103,21 @@ def test_an_absent_ever_converged_sentinel_is_refused_by_name(tmp_path):
     assert not claim_marker(root, seg).exists()
 
 
-def test_a_ledger_record_that_already_carries_reviewed_draft_sha1_is_refused_by_name(tmp_path):
-    """Condition 3 -- the EXACT field whose absence makes `--from-converged`
-    refuse ("the drift baseline this profile requires"). Its absence is the
-    defining property here, not an incidental one: a unit that HAS a baseline
-    has a drift comparison available, so its remedy is `--from-converged`.
+def test_a_ledger_record_that_already_carries_reviewed_draft_sha1_is_admitted_too(tmp_path):
+    """#796: `reviewed_draft_sha1` PRESENT used to be its own refusal here
+    ("the drift baseline this profile requires -- --from-converged's own
+    comparison"), on the premise that a unit with a baseline belongs to
+    --from-converged instead. That remedy does not exist for anything this
+    branch can reach: --from-converged also requires a materialized status in
+    WAS_CONVERGED_STATUSES, and the status condition just above already
+    requires `in_progress` -- so the old refusal could only ever fire on a
+    unit NO profile admitted, and since assemble.py refuses a whole book while
+    any unit is not converged, that stranded unit blocked the entire title.
 
-    The value planted is a REAL sha1 of a REAL prior state of this draft, not a
-    placeholder constant: a well-formed value is what makes the refusal
-    attributable to the field being PRESENT rather than to it being malformed."""
+    The value planted is a REAL sha1 of a REAL prior state of this draft, not
+    a placeholder constant: a well-formed baseline is what makes the
+    admission attributable to the field's PRESENCE being tolerated, not to a
+    malformed value being overlooked by accident."""
     root = make_durable_root(tmp_path)
     fixture_keys: dict = {}
     seg = LIVE_CLEAN_SEG
@@ -1111,20 +1129,84 @@ def test_a_ledger_record_that_already_carries_reviewed_draft_sha1_is_refused_by_
     write_fixture_cache_keys(root, fixture_keys)
     assert len(facts["reviewed_sha1"]) == 40, (
         "the planted baseline must be a well-formed sha1, or a FORMAT problem could "
-        "be what refuses instead of the field's presence"
+        "be what admits instead of the field's presence"
     )
 
     proc = claim_stalled(root, seg)
-    assert_refused(proc, "its ledger record already carries 'reviewed_draft_sha1'")
-    reasons = joined_reasons(proc, seg)
-    assert "its ledger record already carries 'reviewed_draft_sha1'" in reasons, (
-        f"the refusal must name the field that must be absent: {reasons!r}"
+    assert proc.returncode == 0, (
+        f"a ledger record that already carries 'reviewed_draft_sha1' must be admitted -- "
+        f"the old refusal's stated remedy requires a status this profile already refuses\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
     )
-    assert facts["reviewed_sha1"] in reasons, (
-        f"and must show the value it found, so an operator can tell whose baseline "
-        f"it is: {reasons!r}"
+    out = parse_stdout(proc)
+    assert seg in out["claims"], f"{seg!r} must be reported as claimed: {out['claims']!r}"
+    assert out["claims"][seg]["profile"] == "from-stalled"
+    marker = claim_marker(root, seg)
+    assert marker.is_file(), "the durable claim record must actually be on disk"
+    assert json.loads(marker.read_text(encoding="utf-8")) == out["claims"][seg], (
+        "the reported authorization and the durable one must be the SAME object"
     )
-    assert not claim_marker(root, seg).exists()
+    assert "claim_failures" not in out or seg not in out.get("claim_failures", {}), (
+        f"no reason naming 'reviewed_draft_sha1' may survive: {out.get('claim_failures')!r}"
+    )
+
+
+def test_issue_796_shape_1_a_dirty_stale_review_over_a_baselined_in_progress_unit_admits(tmp_path):
+    """END TO END, over the EXACT shape #796 was filed from -- not one axis
+    flipped away from a control, like the closed-condition-list tests above,
+    but every one of the population's defining facts held at once: status
+    `in_progress`, the `.ever_converged` sentinel PRESENT, `reviewed_draft_sha1`
+    PRESENT in the materialized ledger fragment, and a stored review that is
+    STALE against the CURRENT draft with `clean: false`.
+
+    `clean: false` is deliberate here rather than reused from the field's-own
+    test above: this profile does not constrain `clean` at all (the measured
+    reason is that the two live units this profile was built for disagree on
+    it), so an admission fixture that only ever used `clean: true` would leave
+    that half of the width untested for the one condition #796 actually
+    changed -- the field's own dedicated test above already covers `clean:
+    true`, so this one deliberately covers the other real unit's shape
+    instead. Built from the SAME two helpers every other fixture in this file
+    uses, never a hand-rolled ledger fragment or review document, so this
+    stays wired to whatever those helpers' shipped-shape guarantees are."""
+    root = make_durable_root(tmp_path)
+    fixture_keys: dict = {}
+    seg = LIVE_DIRTY_SEG
+    facts = build_from_stalled_segment(
+        root, seg, fixture_keys,
+        clean_review=False,
+        sentinel_present=True,
+        ledger_status="in_progress",
+        review_stale=True,
+    )
+    write_fragment(root, seg, in_progress_fragment(
+        reviewed_draft_sha1=facts["reviewed_sha1"],
+    ))
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+    assert facts["review"]["clean"] is False, (
+        "the fixture must genuinely be the DIRTY shape, or this is the clean "
+        "case the field's own test already covers"
+    )
+    assert facts["reviewed_sha1"] != facts["current_sha1"], (
+        "the stored review must genuinely be STALE against the current draft, or "
+        "this is the continuation shape rather than the ordinary entry one"
+    )
+
+    proc = claim_stalled(root, seg)
+    assert proc.returncode == 0, (
+        f"#796's shape 1 must be admitted under --from-stalled: in_progress + "
+        f"sentinel + reviewed_draft_sha1 present + a stale dirty review\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    out = parse_stdout(proc)
+    assert seg in out["claims"], f"{seg!r} must be reported as claimed: {out['claims']!r}"
+    assert out["claims"][seg]["profile"] == "from-stalled"
+    marker = claim_marker(root, seg)
+    assert marker.is_file(), "the durable claim record must actually be on disk"
+    assert json.loads(marker.read_text(encoding="utf-8")) == out["claims"][seg], (
+        "the reported authorization and the durable one must be the SAME object"
+    )
 
 
 def test_a_unit_with_no_usable_stored_review_is_refused_by_the_profiles_own_condition(tmp_path):
@@ -1270,7 +1352,7 @@ def test_a_review_that_is_current_against_the_draft_is_refused_without_an_open_l
     assert "still matches the current draft" in reasons, (
         f"the refusal must name the entry condition: {reasons!r}"
     )
-    assert "the continuation of a re-review loop this profile already opened" in reasons, (
+    assert "the continuation of a re-review loop this project already opened" in reasons, (
         f"and must name the ONE way a current review is admitted, or the operator "
         f"reads a dead end where there is a door: {reasons!r}"
     )
@@ -1308,7 +1390,6 @@ def test_every_population_condition_has_its_own_refusal_test(tmp_path):
     owned = {
         "not 'in_progress'": "test_a_status_other_than_in_progress_is_refused_by_name",
         "carries no .ever_converged sentinel": "test_an_absent_ever_converged_sentinel_is_refused_by_name",
-        "already carries 'reviewed_draft_sha1'": "test_a_ledger_record_that_already_carries_reviewed_draft_sha1_is_refused_by_name",
         "no usable stored review was read": "test_a_unit_with_no_usable_stored_review_is_refused_by_the_profiles_own_condition",
         "content sha1 could not be computed": "test_a_draft_whose_content_sha1_cannot_be_computed_is_refused_rather_than_read_as_stale",
         "still matches the current draft": "test_a_review_that_is_current_against_the_draft_is_refused_without_an_open_loop",
@@ -1322,14 +1403,16 @@ def test_every_population_condition_has_its_own_refusal_test(tmp_path):
         )
         assert f"def {owner}(" in this_file, f"{owner} is missing from this file"
         checked += 1
-    assert checked == 6, f"expected 6 mapped conditions, checked {checked}"
+    assert checked == 5, f"expected 5 mapped conditions, checked {checked}"
 
     # And the block holds no refusal this map does not know about. Counted from
-    # the `reasons.append(` sites, which is what a new condition adds.
+    # the `reasons.append(` sites, which is what a new condition adds. #796
+    # deleted the `reviewed_draft_sha1`-present refusal outright rather than
+    # replacing it, so this dropped from 6 to 5 with no new condition to map.
     appended = block.count("reasons.append(")
-    assert appended == 6, (
+    assert appended == 5, (
         f"the --from-stalled block appends {appended} refusal(s) but this file maps "
-        f"6 -- a condition shipped without a red-before-green test of its own"
+        f"5 -- a condition shipped without a red-before-green test of its own"
     )
 
 
@@ -2189,7 +2272,71 @@ def test_a_current_dirty_review_rejected_via_reject_review_still_continues(tmp_p
     assert rejection_path.is_file(), "and the claim must not disturb the rejection record"
 
 
-def test_a_partial_or_wrong_profile_claim_record_does_not_continue_the_loop(tmp_path):
+def test_a_claim_granted_under_a_different_own_profile_still_continues_the_loop(tmp_path):
+    """#796: MIGRATION. #460 hard-coded CLAIM_PROFILE_FROM_CONVERGED into
+    evaluate_open_review_loop() and #455 generalized it to a required
+    keyword-only `expected_profile`, both on the premise that a loop opened
+    under one profile is not a loop opened under another. That premise
+    ignores that a unit MIGRATES between profile populations as its ledger
+    status moves: a --from-cap loop that converges leaves a `converged` unit
+    --from-cap refuses on status; a --from-stalled loop whose driver dies
+    before the convergence write leaves an `in_progress` unit whose live claim
+    still says from-stalled but whose continuation may be asked for under
+    whichever profile now owns it. Exact-match refused BOTH, and since
+    assemble.py refuses a whole book while any unit is not converged, one such
+    unit blocked an entire title.
+
+    So the record here is genuine in every field -- seg, run_id, and all
+    fourteen CLAIM_RECORD_FIELDS -- and only the profile differs from the one
+    now being asked. It must continue the loop: the fact this probe
+    establishes is about the DRAFT (this claim record sits at the draft's own
+    owner's path and agrees with its own seg/run_id), not about which profile
+    label happened to grant it. The MUTATION that must turn this red: narrow
+    the membership test back to a single profile, and this must fail -- if it
+    still passes, it is not exercising this at all."""
+    root, facts = stalled_project(tmp_path)
+    seg = LIVE_CLEAN_SEG
+    genuine = open_a_from_stalled_loop(root, seg, facts[seg]["current_sha1"], clean=True)
+    marker = claim_marker(root, seg)
+
+    # CONTROL: untouched, it continues.
+    control = reclaim(root, seg)
+    assert control.returncode == 0, (
+        f"the genuine record must authorize, or the edit below proves nothing\n"
+        f"stdout={control.stdout}\nstderr={control.stderr}"
+    )
+
+    # A record granted under ANOTHER of this project's OWN claim profiles.
+    # Its seg, its run_id and all fourteen fields are right; only the profile
+    # differs.
+    marker.write_text(
+        json.dumps({**genuine, "profile": "from-converged"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    migrated = reclaim(root, seg)
+    assert migrated.returncode == 0, (
+        f"a claim granted under --from-converged must still continue a "
+        f"--from-stalled loop -- the profile label is not what this probe is "
+        f"about\nstdout={migrated.stdout}\nstderr={migrated.stderr}"
+    )
+    out = parse_stdout(migrated)
+    assert seg in out["claims"], f"{seg!r} must be reported as claimed: {out['claims']!r}"
+    # A CONTINUATION reports the record it found rather than writing a fresh
+    # one -- the same shape the untouched CONTROL above exercises -- so what is
+    # returned here is the planted 'from-converged' label verbatim. That is
+    # the correct behaviour, not an oversight: the marker on disk is what
+    # authorizes the draft's owner, and this probe's whole point is that its
+    # profile label is not what decides admission.
+    assert out["claims"][seg]["profile"] == "from-converged", (
+        f"the continuation must report the record actually on disk: {out['claims'][seg]!r}"
+    )
+    assert seg not in out["previously_converged"]
+    assert json.loads(marker.read_text(encoding="utf-8"))["profile"] == "from-converged", (
+        "the durable marker itself must be untouched by a mere continuation"
+    )
+
+
+def test_a_partial_or_out_of_band_profile_claim_record_does_not_continue_the_loop(tmp_path):
     """The record is judged by its CONTENTS, never by its presence at the right
     path.
 
@@ -2198,14 +2345,7 @@ def test_a_partial_or_wrong_profile_claim_record_does_not_continue_the_loop(tmp_
     complete authorization to re-review a draft nobody re-read. Each case below
     starts from the record THE SHIPPED CODE WROTE and changes exactly one thing,
     with the untouched record asserted to authorize first -- so a refusal is
-    attributable to that one change.
-
-    THE PROFILE CASE is the one #455 added and the one a default parameter would
-    have hidden: evaluate_open_review_loop() takes `expected_profile`
-    keyword-only with NO default, because a from-cap claim authorizes a
-    different population for different reasons, and a call site that inherited
-    'from-converged' silently would make this function REFUSE rather than crash
-    -- surfacing only as a continuation that mysteriously never continues."""
+    attributable to that one change."""
     root, facts = stalled_project(tmp_path)
     seg = LIVE_CLEAN_SEG
     genuine = open_a_from_stalled_loop(root, seg, facts[seg]["current_sha1"], clean=True)
@@ -2222,17 +2362,25 @@ def test_a_partial_or_wrong_profile_claim_record_does_not_continue_the_loop(tmp_
         marker.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
         return reclaim(root, seg)
 
-    # A record granted under ANOTHER profile. Its seg, its run_id and all
-    # fourteen fields are right; only the profile differs.
-    wrong_profile = _place({**genuine, "profile": "from-converged"})
-    assert wrong_profile.returncode != 0, (
-        f"a claim granted under --from-converged must not continue a --from-stalled "
-        f"loop\nstdout={wrong_profile.stdout}"
+    # A record naming a profile string that is NOT one of this project's own
+    # claim profiles at all. build_claim_record() itself never writes this --
+    # the real writer only ever names CLAIM_PROFILES -- but build_claim_record()
+    # the TEST HELPER does not validate the field, which is exactly the gap a
+    # planted or corrupted record can occupy. Without this case, the "one of
+    # this project's OWN profiles" membership check is exercised by nothing:
+    # every other fixture here already names a real profile.
+    out_of_band = _place({**genuine, "profile": "from-nowhere"})
+    assert out_of_band.returncode != 0, (
+        f"a record naming a profile no claim path grants must not continue the "
+        f"loop\nstdout={out_of_band.stdout}"
     )
-    reasons = joined_reasons(wrong_profile, seg)
-    assert "was granted under profile 'from-converged', not 'from-stalled'" in reasons, (
-        f"the refusal must name BOTH profiles -- which one is wrong decides the "
-        f"operator's next move: {reasons!r}"
+    out_of_band_reasons = joined_reasons(out_of_band, seg)
+    assert (
+        "was granted under profile 'from-nowhere', which is not one of this "
+        "project's claim profiles"
+    ) in out_of_band_reasons, (
+        f"the refusal must name the planted profile and say it is not one of "
+        f"this project's own: {out_of_band_reasons!r}"
     )
 
     # A PARTIAL record. A half-finished write and a hand-made file look exactly
@@ -2578,7 +2726,7 @@ def test_the_disclosure_says_what_is_asserted_rather_than_proved(tmp_path):
 # `human_escalation` and therefore requires --only-segs naming the same ids.
 # It is not, and it does not. `status: in_progress` classifies as `recoverable`
 # (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES
-# (:1559), and D3 (:5009) enforces only the ONE direction
+# (:1559), and D3 (:5027) enforces only the ONE direction
 # `claim_requests ⊆ segs`. For --from-cap the subset direction forces
 # --only-segs as a side effect of its population being human_escalation;
 # --from-stalled's population is default-eligible, so nothing forces it.
