@@ -1136,11 +1136,16 @@ class _Linker:
             # gloss is inside the escaped pair on purpose -- the outer "]"
             # sits after it in the source text, so the pair being escaped is
             # the one that actually encloses the whole emitted piece.
-            if _wrapped_by_unescaped_brackets(text, m.start(), m.end()):
-                out.append(text[last:m.start() - 1])
-                out.append(f"\\[{piece}\\]")
+            open_lit, close_lit = _editorial_bracket_sides(text, m.start(), m.end())
+            if open_lit or close_lit:
+                # Consume the LITERAL bracket on each side and re-emit it
+                # escaped; an already-escaped one is left exactly as the
+                # operator wrote it (see `_editorial_bracket_sides`).
+                out.append(text[last:m.start() - (1 if open_lit else 0)])
+                out.append(f"\\[{piece}" if open_lit else piece)
+                out.append("\\]" if close_lit else "")
                 self.brackets_escaped += 1
-                last = m.end() + 1
+                last = m.end() + (1 if close_lit else 0)
             else:
                 out.append(text[last:m.start()])
                 out.append(piece)
@@ -1209,15 +1214,24 @@ def _entity_markup_mode(profile):
     `output.target == "obsidian"` test rather than calling
     `_is_obsidian_target`, which exists only in this file.
 
-    ONE further divergence, deliberate and confined to a profile assemble.py
-    has already refused: a present-but-non-mapping `entity_markup` resolves
-    to `"off"` here and is a hard `entity_markup_config_invalid` there.
+    A SECOND, OPEN-ENDED divergence, deliberate and confined to profiles
+    assemble.py has already refused: this copy does NOT validate the block. It
+    reads exactly two fields and never looks at `tags`, so anything
+    `_entity_markup_config` rejects is a hard `entity_markup_config_invalid`
+    there while resolving here to whatever those two reads produce -- `"off"`
+    for a non-mapping block, and for a structurally-bad-but-mapping one (an
+    empty `tags`, a bare string `tags`, an unknown key) whatever `index_from`
+    and `output.target` say, `"index"` included. Do not read the pair as
+    "two named exceptions": the rule is that assemble.py REFUSES wherever
+    this copy resolves, and the set of such profiles is whatever its validator
+    rejects.
+
     `assemble.py` runs first on every real path -- it is what writes the
     spans this adapter reads -- so this function's own answer is only ever
     reached standalone, and staying inert on a block it cannot parse is the
     same fail-quiet posture as the `"off"` branch itself. The fail-CLOSED
-    half lives downstream, in the preflight that refuses an unresolvable
-    `ENT` token before the vault is cleaned.
+    half lives downstream, in the preflight that proves the span table and
+    the text agree, and are well-typed, before the vault is cleaned.
 
     `index_unsupported_target` is `index_from: markup` asked for on a target
     that consumes no spans. `assemble.py` REFUSES there
@@ -1340,15 +1354,33 @@ def _entity_markup_preflight(nodestream, spans, canon):
     existing vault, so a failure discovered while WRITING would leave the
     operator with neither the old vault nor a complete new one.
 
-    Five conditions, all of them fail-closed:
+    SIX conditions, all of them fail-closed. Their shape is deliberate: the
+    span table and the text that cites it must be proved MUTUALLY CONSISTENT
+    AND WELL-TYPED here, because every consumer downstream of the clean --
+    `_entity_markup_identity`, `_canon_composition`, `_markup_note_records`,
+    the rewriter -- reads those fields without re-checking them, and the
+    clean is irreversible. Three separate review rounds each found one more
+    malformed shape that reached `_clean_vault_content`; conditions 0 and 3b
+    are the answer to that class rather than to the last instance of it.
+
+      0. every span record this render will USE is well-typed: `tag` and
+         `payload` non-empty strings, `ref` a non-empty string when present.
+         Nothing downstream re-checks, and a non-string payload reaches
+         `unicodedata.normalize` as a TypeError -- after the clean;
       1. every `⟦ENT_n⟧`/`⟦/ENT_n⟧` token in the whole NodeStream sits in a
          slot the pre-pass actually rewrites (counted, not located -- a
          count over `_walk_json_strings` compared against the same count over
          `_entity_markup_string_slots`, which is total by construction);
       2. within those slots every token belongs to a well-formed
          `⟦ENT_n⟧…⟦/ENT_n⟧` pair;
-      3. every such pair's id has a span record;
-      4. the INVERSE of 3 -- every span record is used by exactly one
+      3. every such pair's id has a span record (3a) AND the text between the
+         tokens equals that record's own `payload` (3b). Assembly emits the
+         two from one string, so disagreement means the table and the text
+         come from different runs -- and the rewriter takes the DISPLAYED
+         alias from the text while taking the NOTE from the record, so a
+         stale table writes `[[People/Pyotr|Ivan]]`: a name linked to
+         somebody else, exit 0, counts balanced;
+      4. the INVERSE of 3a -- every span record is used by exactly one
          pair;
       5. and no reserved token sits anywhere in `canon.json`, the OTHER
          source of text this render writes to disk.
@@ -1370,6 +1402,27 @@ def _entity_markup_preflight(nodestream, spans, canon):
     only then fail. Checking it HERE is what makes the CHANGELOG's "a failure
     leaves the existing vault untouched" true; the post-render comparison
     stays as a cheap postcondition on the resolver itself."""
+    # Condition 0 -- see this function's own docstring. Checked over the
+    # WHOLE table rather than only the ids the text cites: condition 4 already
+    # requires every record to be used, so "used" and "present" are the same
+    # set by the time this function returns, and validating first gives the
+    # operator the type error rather than the cardinality one.
+    for key in sorted(spans, key=lambda k: (len(k), k)):
+        record = spans[key]
+        for field, required in (("tag", True), ("payload", True), ("ref", False)):
+            value = record.get(field)
+            if value is None and not required:
+                continue
+            if not isinstance(value, str) or not value:
+                raise RenderError(
+                    "entity_markup_unresolvable",
+                    f"nodestream.entity_markup.spans[{key!r}].{field} is "
+                    f"{value!r}, not a non-empty string. Every field of a span "
+                    "record is interpolated into a note name, a wikilink or a "
+                    "heading without being re-checked. Re-run assemble.py "
+                    "rather than hand-editing nodestream.json.",
+                )
+
     slots = list(_entity_markup_string_slots(nodestream))
     slot_tokens = sum(len(_ENT_TOKEN_RE.findall(container[key])) for container, key in slots)
     all_tokens = sum(len(_ENT_TOKEN_RE.findall(s)) for s in _walk_json_strings(nodestream))
@@ -1397,6 +1450,20 @@ def _entity_markup_preflight(nodestream, spans, canon):
                     f"in nodestream.entity_markup.spans -- this adapter cannot "
                     f"resolve it to a note, and it would ship verbatim. "
                     f"Offending text: {text[:200]!r}",
+                )
+            # Condition 3b -- see this function's own docstring.
+            recorded = spans[match.group(1)]["payload"]
+            if match.group(2) != recorded:
+                raise RenderError(
+                    "entity_markup_unresolvable",
+                    f"entity-markup span {match.group(1)!r} reads "
+                    f"{match.group(2)!r} in the text but "
+                    f"nodestream.entity_markup.spans records {recorded!r}. "
+                    "Assembly writes both from one string, so this NodeStream's "
+                    "text and span table are from different runs -- the printed "
+                    "name would be linked to whichever entity the stale record "
+                    "names. Re-run assemble.py rather than hand-editing "
+                    "nodestream.json.",
                 )
         residue = _ENT_SPAN_RE.sub("", text)
         stray = _ENT_TOKEN_RE.search(residue)
@@ -1547,33 +1614,58 @@ def _resolve_markup_notes(identities, folders_map, used_paths):
     return relpath_by_identity
 
 
-def _wrapped_by_unescaped_brackets(text, start, end):
-    """#795 §7: is `text[start:end]` immediately wrapped by an UNESCAPED
-    `[`…`]` pair? An editorial bracket the translator put around a name
-    collides with the wikilink emitted inside it -- `[[[People/X|X]]` reads
-    to Obsidian as the target `[People/X` plus a stray `]`.
+def _backslash_run_is_even(text, index):
+    """Is the backslash run ending immediately before `text[index]` of EVEN
+    length -- i.e. is `text[index]` a LITERAL character rather than an
+    escaped one?
 
-    Already-escaped brackets are left alone: a preceding `\\[` is the
-    operator's own escape (or a previous run's), and re-escaping it would
-    show the reader a backslash. The closing side needs no such test -- an
-    escaped closer is `\\]`, whose `]` sits one character further right than
-    `text[end]`, so it simply does not match here.
-
-    Escape status is the PARITY of the backslash run immediately before the
-    `[`, not the presence of one backslash: in `\\\\[Name]` the two
-    backslashes are themselves an escaped backslash, so the `[` is a LITERAL
-    editorial bracket and does collide. Counting the run costs one loop and
-    removes a whole family of even-length false negatives."""
-    if start < 1 or text[start - 1] != "[":
-        return False
+    Parity, never presence: in `\\\\[` the two backslashes are themselves an
+    escaped backslash, so the `[` after them is literal and does collide with
+    a wikilink put inside it. Testing only `text[index - 1] == "\\\\"` reports
+    every even run as escaped, which is the original bug with one more
+    backslash in front of it."""
     run = 0
-    i = start - 2
+    i = index - 1
     while i >= 0 and text[i] == "\\":
         run += 1
         i -= 1
-    if run % 2:
-        return False
-    return end < len(text) and text[end] == "]"
+    return run % 2 == 0
+
+
+def _editorial_bracket_sides(text, start, end):
+    """#795 §7: `(escape_open, escape_close)` for an emitted link that
+    replaces `text[start:end]`. An editorial bracket the translator put
+    around a name collides with the wikilink emitted inside it --
+    `[[[People/X|X]]` reads to Obsidian as the target `[People/X` plus a
+    stray `]`.
+
+    The PAIR is what makes it an editorial bracket, so both sides must be
+    present -- either literal or already escaped -- or nothing is touched and
+    an unmatched bracket stays the literal source text the renderer's
+    unresolved-bracket contract promises. But the two sides are decided
+    SEPARATELY, because they can disagree: in `[Name\\]` the operator escaped
+    only the closer, and requiring both to be literal left the opener bare and
+    the link target broken. Escaping only what is literal also means an
+    operator's own escape is never doubled -- a reader must never be shown a
+    backslash.
+
+    An escaped closer is `\\]`, whose `]` sits one character right of
+    `text[end]`; a literal one is at `text[end]` itself."""
+    if start >= 1 and text[start - 1] == "[":
+        open_literal = _backslash_run_is_even(text, start - 1)
+    elif start >= 2 and text[start - 2] == "[" and text[start - 1] == "\\":
+        # `\[` -- present, already escaped. Cannot itself be an escaped
+        # backslash: that would put a `\` at start-2, not a `[`.
+        open_literal = False
+    else:
+        return False, False
+    if end < len(text) and text[end] == "]":
+        close_literal = True
+    elif end + 1 < len(text) and text[end] == "\\" and text[end + 1] == "]":
+        close_literal = False
+    else:
+        return False, False
+    return open_literal, close_literal
 
 
 def _apply_entity_markup(nodestream, spans, canon_composition, markup_note_identity, linker):
@@ -1636,11 +1728,15 @@ def _apply_entity_markup(nodestream, spans, canon_composition, markup_note_ident
             counts["links"] += 1
             linker.links_emitted += 1
             # §7, emission site 2 of 2 (the other is `_Linker.link`).
-            if _wrapped_by_unescaped_brackets(text, match.start(), match.end()):
-                out.append(text[last:match.start() - 1])
-                out.append(f"\\[{piece}\\]")
+            open_lit, close_lit = _editorial_bracket_sides(
+                text, match.start(), match.end()
+            )
+            if open_lit or close_lit:
+                out.append(text[last:match.start() - (1 if open_lit else 0)])
+                out.append(f"\\[{piece}" if open_lit else piece)
+                out.append("\\]" if close_lit else "")
                 linker.brackets_escaped += 1
-                last = match.end() + 1
+                last = match.end() + (1 if close_lit else 0)
             else:
                 out.append(text[last:match.start()])
                 out.append(piece)

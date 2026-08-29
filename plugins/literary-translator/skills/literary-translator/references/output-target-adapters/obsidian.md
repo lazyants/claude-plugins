@@ -623,9 +623,17 @@ The outer pair is now escaped at both emission sites, which preserves what the
 reader sees and lets the link parse. This applies to canon links too, so it is
 one of the two behaviours here that can change rendered output for a project
 that declares no markup at all — the unconditional heading scrub above is the
-other. A bracket is treated as escaped on the PARITY of the backslash run
-before it, so `\\[Name]` (an escaped backslash, then a literal bracket) is
-still repaired.
+other.
+
+The PAIR is what makes a bracket editorial, so both sides must be present or
+nothing is touched — an unmatched `[` stays the literal source text the
+unresolved-bracket contract promises. The two sides are then decided
+SEPARATELY, on the PARITY of the backslash run before each: `\\[Name]` (an
+escaped backslash, then a literal bracket) is repaired on both sides, and
+`[Name\]` — where the operator escaped only the closer — has its opener
+escaped alone rather than left bare, which is the case that still broke the
+link target. An escape the operator already wrote is never doubled: a reader
+must never be shown a backslash.
 
 ## Category→folder catalog — presets are EXAMPLES, not an enum
 

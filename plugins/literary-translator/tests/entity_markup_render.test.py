@@ -1404,24 +1404,6 @@ def test_the_ent_heading_scrub_is_unconditional_even_with_no_declared_markup(tmp
 #     actually decides something.
 # ===========================================================================
 
-def test_an_even_backslash_run_is_a_literal_bracket_and_is_still_repaired(tmp_path):
-    """Escape status is the PARITY of the backslash run before the `[`, not
-    the presence of one backslash. In `\\[Name]` the two backslashes are an
-    escaped backslash, so the `[` is a LITERAL editorial bracket and does
-    collide with the wikilink put inside it -- the exact case the fix exists
-    for. Treating any preceding backslash as proof of escaping shipped
-    `\\[[[People/…|…]]]` to the reader, which is the original bug with one
-    more backslash in front of it."""
-    nodes = [make_node("p1", "seg01", f"And \\\\[{ent(1, 'Reb Noson')}] spoke.")]
-    out_dir, manifest = render_into(
-        tmp_path, make_nodestream(nodes, spans={"1": span("person", "Reb Noson")}),
-        make_canon({}), make_profile(),
-    )
-    body = segment_note_texts(out_dir)[0]
-    assert "And \\\\\\[[[People/Reb Noson|Reb Noson]]\\] spoke." in body, f"got:\n{body}"
-    assert manifest["entity_markup"]["brackets_escaped"] == 1
-
-
 def test_canon_carrying_the_reserved_token_is_refused_before_the_vault_is_cleaned(tmp_path):
     """An entity note's frontmatter and heading are built STRAIGHT from the
     canon entry and never pass through the resolution pre-pass, so a reserved
@@ -1563,6 +1545,125 @@ def test_a_lone_heading_token_is_scrubbed_and_the_title_whitespace_collapses(
     written_slugs = [rel for rel in manifest["written"] if "/" not in rel]
     assert written_slugs == [f"001 {expected_title}.md"], written_slugs
     assert parse_frontmatter(read(out_dir, written_slugs[0]))["title"] == expected_title
+
+
+# ===========================================================================
+# 21. The preflight owns the span table's SHAPE and its AGREEMENT with the
+#     text, not only its cardinality. Three review rounds each found one more
+#     malformed shape reaching `_clean_vault_content`; these two conditions
+#     are the answer to the class. Every case below asserts the SURVIVOR file
+#     is still there -- a refusal that fires after the clean has already cost
+#     the operator the vault they had.
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "record, field",
+    [
+        pytest.param({"tag": "person", "payload": 5}, "payload", id="payload-int"),
+        pytest.param({"tag": "person", "payload": None}, "payload", id="payload-null"),
+        pytest.param({"tag": "person", "payload": ""}, "payload", id="payload-empty"),
+        pytest.param({"tag": "person"}, "payload", id="payload-missing"),
+        pytest.param({"tag": 7, "payload": "Ivan"}, "tag", id="tag-int"),
+        pytest.param({"tag": "", "payload": "Ivan"}, "tag", id="tag-empty"),
+        pytest.param({"payload": "Ivan"}, "tag", id="tag-missing"),
+        pytest.param({"tag": "person", "payload": "Ivan", "ref": 3}, "ref", id="ref-int"),
+        pytest.param({"tag": "person", "payload": "Ivan", "ref": []}, "ref", id="ref-list"),
+    ],
+)
+def test_a_malformed_span_record_field_refuses_with_the_vault_intact(
+    tmp_path, record, field
+):
+    """A non-string `payload` used to reach `unicodedata.normalize` as a
+    TypeError -- AFTER `_clean_vault_content`, so the operator lost the vault
+    they had and got a traceback instead of a named refusal. Nothing
+    downstream re-checks these fields: they are interpolated into a note
+    name, a wikilink alias and an `# H1`."""
+    out_dir = make_managed_vault(tmp_path)
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Ivan')} arrived.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(
+            tmp_path, make_nodestream(nodes, spans={"1": record}),
+            make_canon({}), make_profile(), out_dir=out_dir,
+        )
+    assert excinfo.value.reason == "entity_markup_unresolvable", excinfo.value.reason
+    assert field in str(excinfo.value), str(excinfo.value)
+    assert (out_dir / "SURVIVOR.md").is_file(), (
+        "the refusal must fire BEFORE _clean_vault_content"
+    )
+
+
+def test_a_span_record_whose_payload_disagrees_with_the_text_is_refused(tmp_path):
+    """The rewriter takes the DISPLAYED alias from the text between the
+    tokens and the NOTE from the record. A table from a different run than
+    the text therefore writes `[[People/Pyotr|Ivan]]` -- one person's printed
+    name linked to another person's note -- and every count still balances,
+    so the render exits 0 and nothing ever says so. Only comparing the two
+    catches it, and it has to happen before the clean."""
+    out_dir = make_managed_vault(tmp_path)
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Ivan')} arrived.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(
+            tmp_path,
+            make_nodestream(nodes, spans={"1": span("person", "Pyotr")}),
+            make_canon({}), make_profile(), out_dir=out_dir,
+        )
+    assert excinfo.value.reason == "entity_markup_unresolvable", excinfo.value.reason
+    assert "'Ivan'" in str(excinfo.value) and "'Pyotr'" in str(excinfo.value)
+    assert (out_dir / "SURVIVOR.md").is_file()
+
+
+# ===========================================================================
+# 22. The editorial-bracket pair is decided SIDE BY SIDE. Requiring both to
+#     be literal left `[Name\]` -- an operator who escaped only the closer --
+#     with a bare opener and a broken link target.
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "source, expected, escaped",
+    [
+        pytest.param("[{link}]", "\\[{piece}\\]", 1, id="both-literal"),
+        pytest.param("[{link}\\]", "\\[{piece}\\]", 1, id="closer-already-escaped"),
+        pytest.param("\\[{link}]", "\\[{piece}\\]", 1, id="opener-already-escaped"),
+        pytest.param("\\[{link}\\]", "\\[{piece}\\]", 0, id="both-already-escaped"),
+        pytest.param("\\\\[{link}]", "\\\\\\[{piece}\\]", 1, id="even-run-is-literal"),
+        pytest.param("{link}", "{piece}", 0, id="no-brackets"),
+        pytest.param("[{link}", "[{piece}", 0, id="unmatched-opener-untouched"),
+        pytest.param("{link}]", "{piece}]", 0, id="unmatched-closer-untouched"),
+    ],
+)
+def test_each_bracket_side_is_escaped_only_when_it_is_literal(
+    tmp_path, source, expected, escaped
+):
+    """Whatever the reader was shown before must still be what they see --
+    `[Reb Noson]` either way -- while the emitted wikilink always parses. An
+    escape the operator already wrote is never doubled, and an UNMATCHED
+    bracket is left alone: without a pair it is not an editorial bracket, it
+    is the literal source text the unresolved-bracket contract promises."""
+    piece = "[[People/Reb Noson|Reb Noson]]"
+    nodes = [make_node("p1", "seg01",
+                       "And " + source.format(link=ent(1, "Reb Noson")) + " spoke.")]
+    out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans={"1": span("person", "Reb Noson")}),
+        make_canon({}), make_profile(),
+    )
+    body = segment_note_texts(out_dir)[0]
+    want = "And " + expected.format(piece=piece) + " spoke."
+    assert want in body, f"want:\n{want}\ngot:\n{body}"
+    assert manifest["entity_markup"]["brackets_escaped"] == escaped, body
+
+
+def test_the_canon_linker_decides_bracket_sides_the_same_way(tmp_path):
+    """The other emission site, and the one an UNDECLARED project reaches.
+    Both call `_editorial_bracket_sides`; a fix applied to one only would be
+    invisible until a canon-only book hit the mixed case."""
+    canon = make_canon({"Иван": canon_entry("Иван", "Ivan")})
+    nodes = [make_node("p1", "seg01", "And [Ivan\\] spoke.")]
+    out_dir, _manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans=None), canon,
+        make_profile(entity_markup=False),
+    )
+    body = segment_note_texts(out_dir)[0]
+    assert "And \\[[[People/Иван|Ivan]]\\] spoke." in body, f"got:\n{body}"
 
 
 if __name__ == "__main__":

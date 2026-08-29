@@ -222,7 +222,7 @@
    ],
    "claim": "(`backfill_ever_converged.py:640-660`, test `tests/backfill_ever_converged.test.py:2106-2172`).\"\"\" path = ever_converged_path(seg, segments_dir)"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/occurrence_targets.py\", \"render_obsidian.py:719-1157\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/occurrence_targets.py\", \"render_obsidian.py:719-1162\", 0]": {
    "anchors": [
     "def build_entity_index",
     "class _Linker",
@@ -641,7 +641,7 @@
    ],
    "claim": "the note covers (its `aliases` minus the display name), or a reader searching a variant spelling finds nothing; and emit no per-row count unless it is re-derived from the artifact itself, an index page being where a fabricated number is least likely to be checked. Step 0a copies `PLAN.template.md` once and never refreshes it (`SKILL.md:482`), so a project scaffolded before the retirement may still name `output.index.enabled` in its hand-edited `PLAN.md` intake answer; drop that phrase by hand — there is no automatic migration."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"assemble.py:3473\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"assemble.py:3481\", 0]": {
    "anchors": [
     "assert_project_complete(manifest, converged, refusals)"
    ],

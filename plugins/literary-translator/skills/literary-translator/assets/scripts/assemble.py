@@ -2768,8 +2768,12 @@ def _entity_markup_mode(profile: dict) -> str:
     agree on the answer while differing in signature and in how each spells the
     target check.
 
-    TWO DIVERGENCES, both in FAILURE VOCABULARY, never in which mode a VALID
-    profile resolves to. First: this copy RAISES
+    EVERY DIVERGENCE HAS ONE SHAPE, and it is never about which mode a VALID
+    profile resolves to: this copy REFUSES where the renderer resolves to some
+    inert answer, because only this copy validates the block (it delegates to
+    `_entity_markup_config`) and a renderer has no failure vocabulary to
+    refuse with. Two categories, and the second is open-ended by
+    construction. First: this copy RAISES
     `AssembleError(reason="entity_markup_index_unsupported_target")` on the
     unsupported-target row, and a renderer has no such vocabulary, so
     render_obsidian.py's copy reports that same row as a fourth VALUE
@@ -2781,10 +2785,14 @@ def _entity_markup_mode(profile: dict) -> str:
     adapter resolves the mode itself, this function has already refused. The
     renderer's own resolution is reached only when it is invoked STANDALONE.
 
-    Second, and for the same reason: a present-but-non-mapping
-    `entity_markup` is a hard `entity_markup_config_invalid` here and
-    resolves to `"off"` there. Both divergences are recorded in the
-    renderer's own copy too; change one docstring and change the other."""
+    Second, and for the same reason: ANY block `_entity_markup_config`
+    rejects is a hard `entity_markup_config_invalid` here while the renderer
+    resolves it to whatever its two unvalidated field reads produce -- `"off"`
+    for a non-mapping block, and for a structurally-bad-but-mapping one (an
+    empty `tags`, a bare string `tags`, an unknown key) whatever `index_from`
+    and `output.target` say, up to and including `"index"`. That is safe for
+    exactly the reason above and no other. Recorded in the renderer's own copy
+    too; change one docstring and change the other."""
     cfg = _entity_markup_config(profile)
     if cfg is None:
         return "off"

@@ -1149,11 +1149,21 @@ _MODE_AGREEMENT_MATRIX = [
     ({"output": {"target": "custom",
                  "entity_markup": {"tags": ["person"], "index_from": "markup"}}},
      "raise:entity_markup_index_unsupported_target", "index_unsupported_target"),
-    # Divergence 2 -- a present-but-non-mapping block: assemble refuses, the
-    # renderer resolves it to "off" (assemble.py has already refused on every
-    # real path, so the renderer's answer is reached only standalone).
+    # Divergence category 2 -- ANY block assemble's validator rejects. The
+    # renderer does not validate: it reads two fields and never looks at
+    # `tags`, so its answer is whatever those two reads produce. Both ends of
+    # that range are pinned, because "off" alone would read like a rule.
     ({"output": {"target": "obsidian", "entity_markup": "person"}},
      "raise:entity_markup_config_invalid", "off"),
+    ({"output": {"target": "obsidian",
+                 "entity_markup": {"tags": [], "index_from": "markup"}}},
+     "raise:entity_markup_config_invalid", "index"),
+    ({"output": {"target": "obsidian",
+                 "entity_markup": {"tags": "person", "index_from": "markup"}}},
+     "raise:entity_markup_config_invalid", "index"),
+    ({"output": {"target": "obsidian",
+                 "entity_markup": {"tags": ["person"], "nope": 1}}},
+     "raise:entity_markup_config_invalid", "strip"),
 ]
 
 _MODE_AGREEMENT_PROBE = r"""
@@ -1177,9 +1187,18 @@ def test_the_two_mode_predicates_resolve_every_profile_the_same_way(tmp_path):
     loudly; a predicate that silently starts answering `strip` where its twin
     answers `index` does not, and it would ship an index the operator asked
     for and did not get -- or spans nothing consumes. Every row of the mode
-    table gets asserted here, INCLUDING both deliberate divergences, so
-    "divergent" stays a short closed list rather than whatever the two files
-    happen to do."""
+    table gets asserted here, and so does the RULE every divergence obeys:
+    assemble REFUSES wherever the renderer resolves, never the reverse, and
+    never a disagreement about which mode a VALID profile gets. The second
+    divergence category is open-ended -- the renderer validates nothing, so
+    an invalid block can resolve there to `off`, `strip` or `index` -- and
+    all three of those are pinned, because pinning only `off` would read
+    like a rule the code does not have.
+
+    What is NOT asserted here is that this list is every profile the two
+    could ever disagree on: it cannot be, since one side's answer is defined
+    by a validator with its own open vocabulary. What IS asserted is the
+    direction, which is the property the safety argument rests on."""
     probe = tmp_path / "probe.py"
     probe.write_text(_MODE_AGREEMENT_PROBE, encoding="utf-8")
     proc = subprocess.run(
@@ -1190,6 +1209,14 @@ def test_the_two_mode_predicates_resolve_every_profile_the_same_way(tmp_path):
     assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     got = json.loads(proc.stdout)
     expected = [[row[1], row[2]] for row in _MODE_AGREEMENT_MATRIX]
+    for (profile, a, _r), (got_a, got_r) in zip(_MODE_AGREEMENT_MATRIX, got):
+        if got_a == got_r:
+            continue
+        assert got_a.startswith("raise:"), (
+            f"the two copies disagree WITHOUT assemble refusing, which is the "
+            f"one shape the divergence rule excludes: {json.dumps(profile)} -> "
+            f"assemble={got_a!r} render={got_r!r}"
+        )
     assert got == expected, (
         "the two `_entity_markup_mode` copies no longer agree row for row.\n"
         + "\n".join(

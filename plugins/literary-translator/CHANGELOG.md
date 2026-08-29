@@ -22,7 +22,9 @@ eleven local scripts.
   behaviour change** — with two named exceptions, both deliberate and both below: the
   editorial-bracket fix, and the heading-title scrub of the `⟦ENT_n⟧` machine shape, which is
   unconditional exactly like the `⟦FNREF_N⟧` anchor scrub beside it (a heading carrying that
-  literal loses it from `title:` and from the filename slug in every mode). The scrub cannot
+  literal loses it from `title:` and from the filename slug in every mode — every matching
+  token individually, a lone opener or closer included, and such a heading also loses the
+  byte-identical fast path, so its title has its internal whitespace collapsed). The scrub cannot
   be mode-gated: `validate_backlinks.py` rebuilds each segment note's filename from the
   PERSISTED nodestream, which assemble.py wrote before the renderer resolved anything, and it
   is handed no mode to gate on.
@@ -56,9 +58,12 @@ eleven local scripts.
   identity and a per-note residual check stand behind it.
 - **An editorial bracket around a name no longer breaks its link.** `[[[Note|Name]]]` made
   Obsidian read the target as `[Note` and leave a stray `]`; the outer pair is now escaped, which
-  preserves what the reader sees and lets the link parse. This is one of the two changes that
-  can alter rendered output for a project that declares nothing — the heading-title scrub
-  above is the other.
+  preserves what the reader sees and lets the link parse. It applies at BOTH emission sites,
+  the canon linker's included, so it is one of the two changes that can alter rendered output
+  for a project that declares nothing — the heading-title scrub above is the other. The two
+  sides of the pair are decided separately: `[Name\]`, where the operator escaped only the
+  closer, escapes the opener alone rather than being left bare, and an escape the operator
+  already wrote is never doubled.
 
 **Migration.** No cache-key field moves, so **nothing re-translates** and nothing is blocked
 needing regeneration. Two real costs: the `profile.schema.json` edit is part of both the resume

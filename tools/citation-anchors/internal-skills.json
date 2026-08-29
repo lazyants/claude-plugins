@@ -230,7 +230,7 @@
    ],
    "claim": "`_read_fragments()` (`ledger_merge.py:368-422`) returns `{}` when `runs/ledger.d/` is missing, and otherwise keys each fragment by its filename stem (one file per segment, `runs/ledger.d/{seg}.json`); `classify_segment()` (`select_segments.py:1520-1525`) returns `{\"category\": \"not_started\"}` whenever a segment has NO record in the merged ledger at all. Deleting a blocked segment's `runs/ledger.d/{seg}.json` fragment therefore ALSO clears `blocked_needs_regeneration` — not via any restamp, but by discarding that segment's entire convergence record, forcing a full FRESH re-translation (heavier than the `stale` outcome `--restamp-derivation` produces: a `not_started` segment carries no"
   },
-  "[\".claude/skills/literary-translator-ops/references/plugin-facts.md\", \"assemble.py:3179\", 0]": {
+  "[\".claude/skills/literary-translator-ops/references/plugin-facts.md\", \"assemble.py:3187\", 0]": {
    "anchors": [
     "mentions_cfg.get(\"enabled\") is not False"
    ],
@@ -276,14 +276,14 @@
    ],
    "claim": "Consequence: you CANNOT translate a `.txt`/OCR/scraped source through the shipped code. Fastest workaround = wrap the text as a **minimal EPUB** and run the proven `gutenberg_epub` adapter. The extractor's self-check region (`extract.py.template:1110–1279`) is genuinely GENERIC (grep confirms zero project literals), so a 0-footnote / 0-verse / 0-frontmatter Hebrew EPUB passes it. That region is hash-pinned by `validate_extraction.py`, so only the four `# ADAPT-POINT:` regions are editable."
   },
-  "[\".claude/skills/schema-gate-hardening/references/gate-review-lenses.md\", \"render_obsidian.py:1964-1973\", 0]": {
+  "[\".claude/skills/schema-gate-hardening/references/gate-review-lenses.md\", \"render_obsidian.py:2060-2069\", 0]": {
    "anchors": [
     "def _heading_plain_text(",
     "defense-in-depth. The \"plain heading\" fast path"
    ],
    "claim": "2. **Source-marker extraction too strict for a garbled OCR/text-layer.** A completeness gate (`∪ source markers ⊆ ∪ rendered headings`) is only as good as its extractor: an anchored strict regex silently MISSED split/nikud-carrying markers, and **a marker it can't extract can't be reported as dropped ⇒ false-GREEN.** Fix: whitespace-tolerant extraction + canonical reconstruction, and deliberately **OVER-extract** — over-capture only ever yields a loud false-RED (safe, you investigate); under-capture yields a silent false-GREEN. 3. **\"Did the VALUE change?\" is the wrong signal for \"did we ACT?\" — gate on \"was there anything to RESOLVE\".** A resolve-then-report function that decides it transformed nothing by comparing `text == original` false-negatives every **no-op substitution**: a known token that legitimately maps to itself (X→X) leaves the string byte-identical, so the function reports \"no transform\" and skips the follow-up it owed. Gate instead on whether a known token MATCHED — the question actually being asked. Found by code review on literary-translator 1.4.2, in the renderer's **#171** heading-sentinel invariant (`render_obsidian.py:1910-1921`, `:1412`) — NOT #173, which is the separate exact-map placeholder-fidelity fix in the same release. 4. **Per-unit review is structurally blind to cross-unit drift.** N independently-generated units each pass their own per-unit review \"clean\" yet drift in cross-unit PRESENTATION (one segment prefixes source lines with a `[Yiddish]` label; the other 39 use a bare `>`). The per-unit review CAN'T catch this — it never sees the others. Only a corpus-wide normalization gate over the assembled whole does."
   },
-  "[\".claude/skills/schema-gate-hardening/references/gate-review-lenses.md\", \"render_obsidian.py:2016\", 0, \"continuation\"]": {
+  "[\".claude/skills/schema-gate-hardening/references/gate-review-lenses.md\", \"render_obsidian.py:2112\", 0, \"continuation\"]": {
    "anchors": [
     "can never reach the title (#171 invariant)"
    ],
