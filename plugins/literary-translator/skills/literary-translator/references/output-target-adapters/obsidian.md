@@ -610,6 +610,16 @@ Nothing downstream re-checks any of it — the values go straight into a
 wikilink alias, a note name and an `# H1` — and the check has to happen here
 because everything downstream runs after the vault is gone.
 
+A NodeStream carrying spans while the profile no longer resolves to `index`
+is refused outright (`entity_markup_stale_nodestream`), in every other mode.
+A non-empty span table can only come from an `index`-mode assembly, so the
+pairing means the two inputs are from different runs — someone removed
+`index_from: markup` and re-rendered without re-assembling — and the text
+still carries sentinels no other mode can resolve. Being inert about the KEY
+is right; being inert about a book whose TEXT carries `⟦ENT_n⟧` is how machine
+markup reaches a reader. An EMPTY span table stays ignored: it means a
+declared book that marked nothing, and there is nothing to resolve.
+
 Two gaps are known and accepted, both needing a hand-edited NodeStream and
 neither destroying anything: a span in the ignored `text` of a dedicated verse
 node is counted but never delivered (assembly refuses it, this preflight does

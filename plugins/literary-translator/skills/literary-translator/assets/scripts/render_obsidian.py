@@ -1136,25 +1136,11 @@ class _Linker:
             # gloss is inside the escaped pair on purpose -- the outer "]"
             # sits after it in the source text, so the pair being escaped is
             # the one that actually encloses the whole emitted piece.
-            open_lit, close_lit, close_run = _editorial_bracket_sides(
-                text, m.start(), m.end()
+            chunks, last, escaped = _editorial_bracket_emit(
+                text, last, m.start(), m.end(), piece
             )
-            if open_lit or close_lit:
-                # Consume the LITERAL bracket on each side and re-emit it
-                # escaped; an already-escaped one is left exactly as the
-                # operator wrote it (see `_editorial_bracket_sides`). On the
-                # closing side the backslash run between the span and its `]`
-                # is consumed with it and re-emitted verbatim.
-                out.append(text[last:m.start() - (1 if open_lit else 0)])
-                out.append(f"\\[{piece}" if open_lit else piece)
-                if close_lit:
-                    out.append(text[m.end():m.end() + close_run] + "\\]")
-                self.brackets_escaped += 1
-                last = m.end() + (close_run + 1 if close_lit else 0)
-            else:
-                out.append(text[last:m.start()])
-                out.append(piece)
-                last = m.end()
+            out.extend(chunks)
+            self.brackets_escaped += escaped
             self.links_emitted += 1  # #588: counted where the link is actually inserted
         out.append(text[last:])
         if self.pattern is None:
@@ -1714,6 +1700,33 @@ def _editorial_bracket_sides(text, start, end):
     return open_literal, run % 2 == 0, run
 
 
+def _editorial_bracket_emit(text, last, start, end, piece):
+    """The SPLICE half of §7, shared by both emission sites: `(chunks,
+    new_last, escaped)` for replacing `text[start:end]` with `piece` while
+    honouring an editorial bracket pair around it.
+
+    `chunks` is appended to the caller's output list and `escaped` (0 or 1)
+    folded into the caller's own `brackets_escaped` counter -- the two sites
+    differ only in how they FIND the span and which counter they own, and
+    `_editorial_bracket_sides` alone left the consume-and-re-emit arithmetic
+    written twice, where a fix applied to one copy stays invisible until a
+    book hits that site's own mixed case."""
+    open_lit, close_lit, close_run = _editorial_bracket_sides(text, start, end)
+    if not (open_lit or close_lit):
+        return [text[last:start], piece], end, 0
+    # Consume the LITERAL bracket on each side and re-emit it escaped; an
+    # already-escaped one is left exactly as the operator wrote it (see
+    # `_editorial_bracket_sides`). On the closing side the backslash run
+    # between the span and its `]` is consumed with it and re-emitted verbatim.
+    chunks = [
+        text[last:start - (1 if open_lit else 0)],
+        f"\\[{piece}" if open_lit else piece,
+    ]
+    if close_lit:
+        chunks.append(text[end:end + close_run] + "\\]")
+    return chunks, end + (close_run + 1 if close_lit else 0), 1
+
+
 def _apply_entity_markup(nodestream, spans, canon_composition, markup_note_identity, linker):
     """#795 §6.3 -- THE single resolution site. Rewrites every string
     `_entity_markup_string_slots` names, in place, replacing each
@@ -1774,20 +1787,11 @@ def _apply_entity_markup(nodestream, spans, canon_composition, markup_note_ident
             counts["links"] += 1
             linker.links_emitted += 1
             # §7, emission site 2 of 2 (the other is `_Linker.link`).
-            open_lit, close_lit, close_run = _editorial_bracket_sides(
-                text, match.start(), match.end()
+            chunks, last, escaped = _editorial_bracket_emit(
+                text, last, match.start(), match.end(), piece
             )
-            if open_lit or close_lit:
-                out.append(text[last:match.start() - (1 if open_lit else 0)])
-                out.append(f"\\[{piece}" if open_lit else piece)
-                if close_lit:
-                    out.append(text[match.end():match.end() + close_run] + "\\]")
-                linker.brackets_escaped += 1
-                last = match.end() + (close_run + 1 if close_lit else 0)
-            else:
-                out.append(text[last:match.start()])
-                out.append(piece)
-                last = match.end()
+            out.extend(chunks)
+            linker.brackets_escaped += escaped
         out.append(text[last:])
         return "".join(out)
 
@@ -2838,14 +2842,36 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
         )
     # #795: the ONE place this render decides whether declared entity markup
     # is in effect. In every other mode -- `off`, `strip`, and the
-    # `index_unsupported_target` state assemble.py itself refuses --
-    # `nodestream["entity_markup"]` is IGNORED ENTIRELY and every path below
-    # is inert, exactly the discipline `nodestream["mentions"]` already gets
-    # under a non-effective-enabled profile. The deepcopy is taken only here,
-    # because the resolution pre-pass rewrites node/verse/footnote text in
-    # place and assemble.py's own nodestream object (already persisted to
-    # nodestream.json) must not change under it.
+    # `index_unsupported_target` state assemble.py itself refuses -- every
+    # path below is inert, exactly the discipline `nodestream["mentions"]`
+    # already gets under a non-effective-enabled profile. The deepcopy is
+    # taken only here, because the resolution pre-pass rewrites
+    # node/verse/footnote text in place and assemble.py's own nodestream
+    # object (already persisted to nodestream.json) must not change under it.
     entity_markup_active = _entity_markup_mode(profile) == "index"
+    if not entity_markup_active:
+        # ...with ONE exception, and it is the whole point of the feature.
+        # Being inert about the KEY is right; being inert about a book whose
+        # TEXT carries `⟦ENT_n⟧` is how machine markup reaches a reader, which
+        # is the failure #795 exists to close. A non-empty span table can only
+        # come from an `index`-mode assemble -- `strip` and `off` write no key,
+        # and `index_from: markup` under another target is refused there -- so
+        # this pairing means the NodeStream and the profile are from different
+        # runs: someone removed `index_from: markup` (or the whole block) and
+        # re-rendered without re-assembling. There is no legitimate path to it
+        # and no resolution this mode can perform, so it refuses instead of
+        # delivering the sentinels verbatim.
+        stale = _entity_markup_spans(nodestream)
+        if stale:
+            raise RenderError(
+                "entity_markup_stale_nodestream",
+                f"this NodeStream records {len(stale)} entity-markup span(s), "
+                "so it was assembled under `output.entity_markup.index_from: "
+                "markup`, but this profile no longer resolves to that mode -- "
+                "its text still carries ⟦ENT_n⟧ sentinels and nothing here can "
+                "resolve them, so they would ship verbatim to a reader. Re-run "
+                "assemble.py against the current profile.",
+            )
     entity_spans = _entity_markup_spans(nodestream) if entity_markup_active else {}
     if entity_markup_active:
         nodestream = copy.deepcopy(nodestream)

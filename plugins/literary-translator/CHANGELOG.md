@@ -52,6 +52,12 @@ eleven local scripts.
   wikilink, note name or heading to defend. The block's own shape is re-validated
   at runtime too — `assemble.py` does not run jsonschema, so a profile hand-edited after Step 0
   is checked where it is used, not only where it was written.
+- **A stale NodeStream is refused, not delivered.** A book assembled under
+  `index_from: markup` and then re-rendered against a profile that no longer resolves to that
+  mode still carries `⟦ENT_n⟧` in its text, and no other mode can resolve it. That pairing is
+  now `entity_markup_stale_nodestream` rather than sentinels shipped verbatim — which is the
+  original failure with one more step in front of it. An EMPTY span table is still ignored: it
+  means a declared book that marked nothing.
 - **The vault is checked before it is destroyed.** `render_obsidian.py` deletes the managed
   vault before writing the first note, so the whole nodestream is walked for unresolvable span
   tokens *before* that point; a failure leaves the existing vault untouched. A resolution-count

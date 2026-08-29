@@ -26,7 +26,7 @@ Two styles on purpose, and the split is load-bearing.
      with a hand-authored NodeStream, exactly as `tests/render_obsidian.test.py`
      does -- the adapter's contract is independently testable from a NodeStream
      literal, which is the point of the IR boundary.
-  2. **One integration case** (section 13) builds a real `durable_root`, runs
+  2. **One integration case** (section 18) builds a real `durable_root`, runs
      the ACTUAL `assemble.py` as a subprocess, and feeds the
      `nodestream.json` it wrote into `render()`. A hand-authored fixture on
      BOTH sides of a wire contract is exactly how a broken contract passes two
@@ -34,7 +34,7 @@ Two styles on purpose, and the split is load-bearing.
 
 ## Delivery is asserted against the WRITTEN FILES
 
-Section 9 reads the emitted `.md` files off disk rather than trusting
+Section 11 reads the emitted `.md` files off disk rather than trusting
 `render()`'s returned manifest. A manifest count proves the pre-pass replaced
 something; it does not prove anything reached a reader. `_render_block`
 discards a `kind: "verse"` node's own `text` entirely, so
@@ -447,7 +447,7 @@ def test_first_occurrence_gloss_appears_exactly_once_book_wide(tmp_path):
 
 # ===========================================================================
 # 6. Markdown-active characters in a payload are unreachable BY CONSTRUCTION
-#    (assemble.py refuses them -- pinned across the seam in section 13), and
+#    (assemble.py refuses them -- pinned across the seam in section 18), and
 #    the characters that ARE legal render a well-formed wikilink.
 # ===========================================================================
 
@@ -850,23 +850,61 @@ def test_a_resolver_bug_that_leaves_a_sentinel_is_caught_before_the_note_is_writ
     {"entity_markup": False},
     {"index_from": "markup", "target": "custom"},
 ])
-def test_a_non_index_profile_ignores_a_planted_entity_markup_key(tmp_path, profile_kwargs):
+def test_a_non_index_profile_refuses_a_stale_index_mode_nodestream(tmp_path, profile_kwargs):
+    """Being inert about the KEY is right; being inert about a book whose
+    TEXT carries `⟦ENT_n⟧` is how machine markup reaches a reader -- the
+    failure #795 exists to close.
+
+    A NON-EMPTY span table can only come from an `index`-mode assemble
+    (`strip` and `off` write no key, and `index_from: markup` under another
+    target is refused there), so this pairing means the NodeStream and the
+    profile are from different runs: someone dropped `index_from: markup` and
+    re-rendered without re-assembling. Nothing in these modes can resolve the
+    sentinels, so the render refuses rather than delivering them verbatim.
+    Every non-index mode is covered, including the `target: custom` row where
+    the renderer stays inert on the MODE."""
+    out_dir = make_managed_vault(tmp_path)
     nodes = [make_node("p1", "seg01", f"{ent(1, 'John')} spoke.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(
+            tmp_path, make_nodestream(nodes, spans={"1": span("person", "John")}),
+            make_canon({}), make_profile(**profile_kwargs), out_dir=out_dir,
+        )
+    assert excinfo.value.reason == "entity_markup_stale_nodestream", excinfo.value.reason
+    assert (out_dir / "SURVIVOR.md").is_file(), (
+        "the refusal must fire BEFORE _clean_vault_content"
+    )
+
+
+@pytest.mark.parametrize("profile_kwargs", [
+    {"index_from": "canon"},
+    {"index_from": None},
+    {"entity_markup": False},
+    {"index_from": "markup", "target": "custom"},
+])
+def test_a_non_index_profile_still_ignores_an_EMPTY_planted_key(tmp_path, profile_kwargs):
+    """The other half, and the reason the refusal keys on the span table
+    rather than on the key's presence: a book that declared the knob, carried
+    no marked entity, and then had the knob removed leaves an
+    `entity_markup: {"spans": {}}` behind. There are no sentinels in its text,
+    so there is nothing to refuse -- the key is ignored exactly as
+    `nodestream["mentions"]` is under a non-effective-enabled profile."""
+    nodes = [make_node("p1", "seg01", "John spoke.")]
     out_dir, manifest = render_into(
-        tmp_path, make_nodestream(nodes, spans={"1": span("person", "John")}),
+        tmp_path, make_nodestream(nodes, spans={}),
         make_canon({}), make_profile(**profile_kwargs),
     )
     assert "entity_markup" not in manifest
     assert entity_note_relpaths(manifest) == [], "no markup note may be minted"
-    body = segment_note_texts(out_dir)[0]
-    assert ent(1, "John") in body, (
-        "the key is ignored ENTIRELY -- the renderer neither resolves nor "
-        f"refuses it. Got:\n{body}"
-    )
+    assert "John spoke." in segment_note_texts(out_dir)[0]
 
 
 # ===========================================================================
-# 16. The editorial-bracket collision (§7), at BOTH emission sites.
+# 16. The editorial-bracket collision (§7), at BOTH emission sites. The
+#     side-by-side parity table -- every literal/escaped combination on each
+#     side, at the marked site, with the `brackets_escaped` count -- is
+#     section 26; what lives here is the canon site and the heading, whose
+#     unescaping in the title that table does not reach.
 # ===========================================================================
 
 def test_bracketed_canon_name_escapes_the_outer_pair(tmp_path):
@@ -880,18 +918,6 @@ def test_bracketed_canon_name_escapes_the_outer_pair(tmp_path):
     )
     body = segment_note_texts(out_dir)[0]
     assert "And \\[[[People/Reb Noson|Reb Noson]]\\] spoke." in body, f"got:\n{body}"
-
-
-def test_bracketed_marked_name_escapes_the_outer_pair(tmp_path):
-    """The new pre-pass insertion point, same rule."""
-    nodes = [make_node("p1", "seg01", f"And [{ent(1, 'Reb Noson')}] spoke.")]
-    out_dir, manifest = render_into(
-        tmp_path, make_nodestream(nodes, spans={"1": span("person", "Reb Noson")}),
-        make_canon({}), make_profile(),
-    )
-    body = segment_note_texts(out_dir)[0]
-    assert "And \\[[[People/Reb Noson|Reb Noson]]\\] spoke." in body, f"got:\n{body}"
-    assert manifest["entity_markup"]["brackets_escaped"] == 1
 
 
 def test_bracketed_marked_name_in_a_heading_escapes_the_body_and_leaves_the_title_plain(tmp_path):
@@ -908,18 +934,6 @@ def test_bracketed_marked_name_in_a_heading_escapes_the_body_and_leaves_the_titl
     title = parse_frontmatter(body)["title"]
     assert title == "[John]", f"got title {title!r}"
     assert "\\" not in title and "[[" not in title
-
-
-def test_already_escaped_brackets_are_left_alone(tmp_path):
-    nodes = [make_node("p1", "seg01", f"And \\[{ent(1, 'Reb Noson')}\\] spoke.")]
-    out_dir, manifest = render_into(
-        tmp_path, make_nodestream(nodes, spans={"1": span("person", "Reb Noson")}),
-        make_canon({}), make_profile(),
-    )
-    body = segment_note_texts(out_dir)[0]
-    assert "And \\[[[People/Reb Noson|Reb Noson]]\\] spoke." in body, f"got:\n{body}"
-    assert "\\\\[" not in body, "an operator's own escape must not be re-escaped"
-    assert manifest["entity_markup"]["brackets_escaped"] == 0
 
 
 # ===========================================================================
@@ -1292,7 +1306,7 @@ def test_strip_mode_leaves_no_entity_markup_key_for_the_renderer_to_find(tmp_pat
 
 
 # ===========================================================================
-# 15. Canon composition must not absorb a differently-CATEGORIZED entity.
+# 19. Canon composition must not absorb a differently-CATEGORIZED entity.
 #     Composing on the label alone made `<person>Jordan</person>` link a canon
 #     note for a PLACE named Jordan: the entity-merge judgement this plugin
 #     never makes, and a silent shortfall -- no person note, coverage counts
@@ -1352,7 +1366,7 @@ def test_a_canon_entry_with_no_category_composes_with_any_tag(tmp_path, category
 
 
 # ===========================================================================
-# 16. The preflight owns BOTH directions. A record with no pair, or one id
+# 20. The preflight owns BOTH directions. A record with no pair, or one id
 #     used twice, used to pass it and be caught only by the post-render count
 #     comparison -- which runs after _clean_vault_content has already emptied
 #     the operator's vault.
@@ -1375,7 +1389,7 @@ def test_preflight_refuses_one_span_id_used_by_two_pairs(tmp_path):
 
 
 # ===========================================================================
-# 17. The ⟦ENT_n⟧ heading scrub is UNCONDITIONAL, and that is the one thing a
+# 21. The ⟦ENT_n⟧ heading scrub is UNCONDITIONAL, and that is the one thing a
 #     project declaring nothing can notice. Pinned deliberately rather than
 #     left to be discovered: it cannot be mode-gated, because
 #     validate_backlinks.py rebuilds a segment filename off the PERSISTED
@@ -1400,7 +1414,7 @@ def test_the_ent_heading_scrub_is_unconditional_even_with_no_declared_markup(tmp
 
 
 # ===========================================================================
-# 18. The three things review round 2 found untested, each pinned where it
+# 22. The three things review round 2 found untested, each pinned where it
 #     actually decides something.
 # ===========================================================================
 
@@ -1469,7 +1483,7 @@ def test_the_footnote_ordering_imprecision_is_what_the_docs_say_it_is(tmp_path):
 
 
 # ===========================================================================
-# 19. Composition identity is NFC-normalized and tolerant of a canon
+# 23. Composition identity is NFC-normalized and tolerant of a canon
 #     `category` that is not a string at all.
 # ===========================================================================
 
@@ -1517,7 +1531,7 @@ def test_a_canon_category_that_is_not_a_string_composes_like_an_absent_one(
 
 
 # ===========================================================================
-# 20. The heading scrub takes EVERY matching token, not only a well-formed
+# 24. The heading scrub takes EVERY matching token, not only a well-formed
 #     pair -- and a heading it touches loses the byte-identical fast path.
 # ===========================================================================
 
@@ -1548,7 +1562,7 @@ def test_a_lone_heading_token_is_scrubbed_and_the_title_whitespace_collapses(
 
 
 # ===========================================================================
-# 21. The preflight owns the span table's SHAPE and its AGREEMENT with the
+# 25. The preflight owns the span table's SHAPE and its AGREEMENT with the
 #     text, not only its cardinality. Three review rounds each found one more
 #     malformed shape reaching `_clean_vault_content`; these two conditions
 #     are the answer to the class. Every case below asserts the SURVIVOR file
@@ -1613,7 +1627,7 @@ def test_a_span_record_whose_payload_disagrees_with_the_text_is_refused(tmp_path
 
 
 # ===========================================================================
-# 22. The editorial-bracket pair is decided SIDE BY SIDE. Requiring both to
+# 26. The editorial-bracket pair is decided SIDE BY SIDE. Requiring both to
 #     be literal left `[Name\]` -- an operator who escaped only the closer --
 #     with a bare opener and a broken link target.
 # ===========================================================================
@@ -1665,7 +1679,7 @@ def test_each_bracket_side_is_escaped_only_when_it_is_literal(
 
 def test_the_canon_linker_decides_bracket_sides_the_same_way(tmp_path):
     """The other emission site, and the one an UNDECLARED project reaches.
-    Both call `_editorial_bracket_sides`; a fix applied to one only would be
+    Both call `_editorial_bracket_emit`; a fix applied to one only would be
     invisible until a canon-only book hit the mixed case."""
     canon = make_canon({"Иван": canon_entry("Иван", "Ivan")})
     nodes = [make_node("p1", "seg01", "And [Ivan\\] spoke.")]
@@ -1678,7 +1692,7 @@ def test_the_canon_linker_decides_bracket_sides_the_same_way(tmp_path):
 
 
 # ===========================================================================
-# 23. Condition 0 reads the RAW span table and re-applies the PRODUCER's own
+# 27. Condition 0 reads the RAW span table and re-applies the PRODUCER's own
 #     constraints. An unused garbage record used to be filtered away before
 #     the preflight could see it, and a hand-edited payload carrying a pipe
 #     or a sentinel rendered a malformed wikilink.
