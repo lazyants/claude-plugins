@@ -222,7 +222,7 @@
    ],
    "claim": "(`backfill_ever_converged.py:640-660`, test `tests/backfill_ever_converged.test.py:2106-2172`).\"\"\" path = ever_converged_path(seg, segments_dir)"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/occurrence_targets.py\", \"render_obsidian.py:706-1132\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/occurrence_targets.py\", \"render_obsidian.py:706-1152\", 0]": {
    "anchors": [
     "def build_entity_index",
     "class _Linker",
@@ -641,7 +641,7 @@
    ],
    "claim": "the note covers (its `aliases` minus the display name), or a reader searching a variant spelling finds nothing; and emit no per-row count unless it is re-derived from the artifact itself, an index page being where a fabricated number is least likely to be checked. Step 0a copies `PLAN.template.md` once and never refreshes it (`SKILL.md:482`), so a project scaffolded before the retirement may still name `output.index.enabled` in its hand-edited `PLAN.md` intake answer; drop that phrase by hand — there is no automatic migration."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"assemble.py:2914\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"assemble.py:3451\", 0]": {
    "anchors": [
     "assert_project_complete(manifest, converged, refusals)"
    ],
@@ -753,11 +753,11 @@
    ],
    "claim": "\"\"\"`_merge_batch` appends whenever the whole object differs, so one form queued by two batches for two different reasons is TWO rows, not one -- ordinary, not a hand-edit artifact (person_registry.py:899-910 documents and coalesces exactly this). Matching on the whole value means dismissing one reason must not silently dismiss the other; two decisions take two documents.\"\"\" root = make_project(tmp_path)"
   },
-  "[\"plugins/literary-translator/tests/canon_enum_drift.test.py\", \"obsidian.md:53\", 0]": {
+  "[\"plugins/literary-translator/tests/canon_enum_drift.test.py\", \"obsidian.md:58\", 0]": {
    "anchors": [
     "basis: established | transliterated"
    ],
-   "claim": "def _parse_obsidian_frontmatter_enum(): \"\"\"obsidian.md:53 -- the entity-note frontmatter's `basis:` pipe-enum line inside the fenced YAML example block.\"\"\" text = OBSIDIAN_SPEC.read_text(encoding=\"utf-8\") m = re.search(r\"^basis:\\s*([a-z_ |]+)$\", text, re.MULTILINE) assert m, \"no 'basis: a | b | c' frontmatter line found in obsidian.md\""
+   "claim": "def _parse_obsidian_frontmatter_enum(): \"\"\"obsidian.md:58 -- the entity-note frontmatter's `basis:` pipe-enum line inside the fenced YAML example block.\"\"\" text = OBSIDIAN_SPEC.read_text(encoding=\"utf-8\") m = re.search(r\"^basis:\\s*([a-z_ |]+)$\", text, re.MULTILINE) assert m, \"no 'basis: a | b | c' frontmatter line found in obsidian.md\""
   },
   "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:3970-4017\", 0]": {
    "anchors": [
@@ -1414,7 +1414,7 @@
    ],
    "claim": "Keep the declaration stable across the whole W7→W9 chain; toggling it between steps is the only way a normal run can make the two gates disagree about the same book. (They read the moved-field list from different authorities -- W7 from `select_segments.py`'s recomputation against the CURRENT cache key, W9 from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887` drops any inherited value and re-derives that list from the same diff, so the two agree by construction on anything a run produces. Hand-editing the materialized `ledger.json` between the two steps can split them; so can editing one segment's `status` to `converged`, which skips both carve-outs"
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3534-3540\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3554-3560\", 0]": {
    "anchors": [
     "Excluded from every bundle hash",
     "nor of `orchestration_bundle_hash`",
@@ -1428,6 +1428,24 @@
     "diagnostic-only, never part of any segment's cache key"
    ],
    "claim": "def test_ledger_already_accurate_ledger_merge_aside_not_flagged(): \"\"\"references/ledger-and-resumability.md:166's `ledger_merge.py` aside (\"diagnostic-only, never part of any segment's cache key\") is already accurate -- qualified in the very next sentence by the resume-integrity digest note -- and must survive untouched. None of the STALE_PHRASES keys above match this exact clause, so a correct fix never trips it.\"\"\""
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"validate_draft.py:317\", 0]": {
+   "anchors": [
+    "def load_profile("
+   ],
+   "claim": "assemble.py loads profile.yml through `validate_draft.load_profile()`, which parses YAML and returns a mapping WITHOUT running jsonschema (`validate_draft.py:317`)"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/render_obsidian.py\", \"validate_backlinks.py:780\", 0]": {
+   "anchors": [
+    "render_obsidian._segment_title(seg_nodes, seg)"
+   ],
+   "claim": "`validate_backlinks.py:780` reconstructs each segment note's filename by calling `_segment_title` against the PERSISTED nodestream.json"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/render_obsidian.py\", \"validate_backlinks.py:860\", 0]": {
+   "anchors": [
+    "render_obsidian._resolve_entity_notes(entries, folders_map)"
+   ],
+   "claim": "Absent -- which is how `validate_backlinks.py:860` calls this, with two arguments, immediately `.items()`-ing the dict it returns -- a fresh set is used"
   }
  },
  "exemptions": {

@@ -10,10 +10,15 @@ Selected via `output.target: obsidian` in `profile.yml`, only ever consulted
 when `output.v1_scope: assembled_book` (`SKILL.md`'s Step 0d). Renders the
 assembled NodeStream (`references/assembly-and-output.md`) into an Obsidian
 vault: one set of narrative pages carrying the translated book itself, plus
-one entity note per frozen `canon.json` entry, cross-linked by wikilinks.
-Its own knobs live under `output.adapter_config.obsidian` — currently just
-`folders` (the category→folder catalog, see below); `assets/profile.example.yml`
-ships the shape.
+one entity note per frozen `canon.json` entry, cross-linked by wikilinks —
+and, when the project declares `output.entity_markup` with
+`index_from: markup`, one further note per entity its translator marked
+inline (see "Markup-driven entity notes" below; absent that declaration
+nothing on this page changes). Its own knobs live under
+`output.adapter_config.obsidian` — currently just `folders` (the
+category→folder catalog, see below); `assets/profile.example.yml` ships the
+shape. `output.entity_markup` is NOT one of them: it is read by
+`assemble.py` as well, so it sits directly under `output`.
 
 ## Vault layout
 
@@ -490,6 +495,97 @@ MISMATCHES (exit `1`) and a deliberate re-accept is required. Any re-accept,
 in either case, is `--accept-baseline --force-accept-baseline` —
 `--accept-baseline` alone refuses to overwrite a baseline that already
 exists.
+
+## Markup-driven entity notes — `index_from: markup` (1.73.0, #795)
+
+Everything above describes the canon-driven index, which is still the
+default and is unchanged. A project whose names cannot be seeded from a list
+in advance declares `output.entity_markup` instead (grammar, modes and the
+five assemble-time refusals: `references/assembly-and-output.md`, "Inline
+entity markup"). Under `index_from: markup`, `assemble.py` hands this adapter
+`nodestream["entity_markup"].spans` and the adapter builds notes from them.
+Under any other mode — including an absent block — this adapter ignores that
+key entirely, exactly as it ignores `nodestream["mentions"]` when the
+Mentions appendix is not effective-enabled.
+
+**Identity is the PAIR `(tag, ref or payload)`.** The tag is not merely the
+folder: `<person>Jordan</person>` and `<place>Jordan</place>` are two notes,
+`People/Jordan.md` and `Places/Jordan.md`. Collapsing them would be an entity
+merge — a judgement this plugin does not make anywhere, and one the issue
+that added this feature explicitly excluded.
+
+**Composition with canon, not competition.** When the label (`ref` if
+present, else the payload) is a linkable canon `canonical_target_form`, the
+span links THAT canon note and mints nothing. Otherwise a markup note is
+minted. Canon notes are resolved first and their relpaths are byte-identical
+to a render with no markup at all, so `validate_backlinks.py`'s independent
+re-derivation still matches; markup notes are deduped against the same
+`used_paths` set afterwards and can never take or overwrite a canon note's
+path.
+
+**Every marked span becomes a wikilink — every occurrence, every node kind,
+headings included.** This is not a stylistic choice, it is what keeps the two
+indexes from interfering. An emitted `[[…]]` is a protected span, so the
+canon scan cannot see inside it and the two mechanisms share no state.
+Leaving even one class of marked span as bare text would expose it to a scan
+that is longest-first (so `<person>John</person> Smith` links the wrong man
+when canon holds both `John` and `John Smith`), that suppresses repeats
+within a block (so two marked spans yield one link), and that refuses a match
+adjacent to an alphanumeric (so `<person>Ann</person>ette` yields none) —
+three ways to deliver less, or worse, than what was marked, all of them
+silent.
+
+**A markup note carries only what is true**: `aliases` (every distinct
+printed payload seen for that identity, sorted), `name`, `category` (the
+tag), `ref` when the label came from one, and `direction`. It carries no
+`basis`, `confidence` or `source` — those are canon's, and inventing them
+here would be fabrication. It carries no `## Mentions` section either: that
+appendix is source-anchored and canon-keyed, and `validate_backlinks.py`
+derives the notes it parses from canon alone, so markup notes are invisible
+to it and it needs no change.
+
+**Headings.** A heading's spans link like any other, and the frontmatter
+`title:` and the filename slug are derived from the FLATTENED text — the
+wikilink reduced to its display form and `\[`/`\]` unescaped — so no markup,
+no link syntax and no escape residue reaches a filename. That flattening runs
+only in `index` mode, so a literal `[[…]]` an operator wrote into a source
+heading on any other project still reaches `title:` exactly as it does today.
+
+**What the coverage guarantee is, and is not.** The adapter refuses
+(`entity_markup_coverage_mismatch`) unless every recorded span resolved
+exactly once. That is a claim about RESOLUTION. It is not a claim that every
+link reaches a written note: a segment note carries only the footnote
+definitions its own nodes reference, so a span inside an UNREFERENCED
+footnote definition resolves and is never delivered. The one such gap that is
+a plausible operator error — a span in a dedicated verse node's ignored
+`text` — is refused at assemble time instead.
+
+**The vault is checked before it is destroyed.** `_clean_vault_content`
+removes the managed vault before the first note is written, so the whole
+NodeStream value is walked for unresolvable `⟦ENT_n⟧` / `⟦/ENT_n⟧` tokens
+BEFORE that point (`entity_markup_unresolvable`), leaving the existing vault
+untouched on a refusal. A per-note residual check before each write stands
+behind that; with the preflight in place it can only fire on a resolver bug,
+and it is the last thing between a machine token and a reader.
+
+**Two accepted imprecisions, both about `parenthetical_originals:
+first_occurrence` and neither about a link target.** The pre-pass consults and
+updates the same book-global set the canon linker uses, so the original-script
+gloss still appears exactly once. But an UNMARKED occurrence earlier in the
+book than the first marked one loses the gloss to the marked one (closing that
+would mean running the canon scan first, which is the two-competing-scans
+design this whole section avoids); and within a single node an inline embedded
+verse is spliced at its placeholder position at render time while the pre-pass
+visits a node's text and its verse content as separate strings, so the gloss
+can land on the later of two marked occurrences inside one node.
+
+**Editorial brackets.** A bracket the translator places around a name used to
+collide with the wikilink put inside it: `[[[People/Reb Noson|Reb Noson]]]`
+makes Obsidian read the target as `[People/Reb Noson` and leave a stray `]`.
+The outer pair is now escaped at both emission sites, which preserves what the
+reader sees and lets the link parse. This applies to canon links too, so it is
+the one behaviour here that can change rendered output for a project that
+declares no markup at all.
 
 ## Category→folder catalog — presets are EXAMPLES, not an enum
 

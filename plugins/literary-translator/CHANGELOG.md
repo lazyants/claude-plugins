@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.73.0 — 2026-08-29
+
+**A project can declare WHAT it wants indexed (#795).** Until now `output.target: obsidian`
+built its entity index from exactly one place — one note per `canon.json` entry, keyed by the
+original-script `source_form`, with body text auto-linked by string-matching each entry's
+`canonical_target_form`. A book whose names are not knowable before translation cannot seed that
+list, so its translator marks entities inline as it goes; nothing in `assemble.py` or
+`render_obsidian.py` recognised such markup, and the result was two silent failures on a live
+Hebrew→English volume: all 5265 inline tags shipped verbatim into the delivered vault (with
+wikilinks inserted INSIDE `ref` attribute values, and chapter filenames and frontmatter `title:`
+inheriting the markup, because `<`/`>` are sanitized to `_` rather than the elements being
+removed), and of the 763 distinct entities marked, only the 97 in canon could become notes. That
+volume shipped through a hand-written render wrapper; a sibling volume needed 3300 lines across
+eleven local scripts.
+
+- **`output.entity_markup` — one new profile block, absent by default.** `tags` declares the
+  element names the translator may emit, `ref_attribute` (default `ref`) the optional
+  disambiguator, and `index_from` (`canon` | `markup`, default `canon`) whether the index is
+  built from the markup. **An absent block is byte-identical to 1.72.0** — no scan, no new
+  nodestream key, no behaviour change of any kind.
+- **Assembly strips the declared elements, so the reader never sees them.** With the block
+  present and `index_from: canon`, `assemble.py` removes each element and keeps its payload —
+  that alone closes the first failure. Every text-bearing string the renderer can emit is
+  covered: block text, verse `rendered` and `literal_gloss`, and footnote definitions.
+- **`index_from: markup` builds the index from what was marked.** Assembly records each span's
+  tag, payload and `ref`; the Obsidian adapter mints one note per `(tag, ref-or-payload)` and
+  links **every** marked occurrence. A span whose label is already a linkable canon target takes
+  the canon note instead of minting a second one, so the two indexes compose rather than compete.
+  The tag is part of the identity, not just the folder: `<person>Jordan</person>` and
+  `<place>Jordan</place>` stay two notes rather than being silently merged.
+- **Five assemble-time refusals, all fail-closed, all named.** Markup this pipeline cannot
+  render correctly is refused rather than half-processed: a malformed or unpaired element
+  (including a malformed use of a *declared* tag name, which would otherwise ship verbatim);
+  a payload or `ref` carrying a machine sentinel or a verse placeholder; a payload or `ref`
+  carrying a bracket, a pipe or a line break, none of which survive interpolation into a
+  wikilink alias or a note name; a span in the ignored `text` of a dedicated verse node, which
+  would be counted and never delivered; and `index_from: markup` under any target but
+  `obsidian`, since no other adapter consumes the spans. The block's own shape is re-validated
+  at runtime too — `assemble.py` does not run jsonschema, so a profile hand-edited after Step 0
+  is checked where it is used, not only where it was written.
+- **The vault is checked before it is destroyed.** `render_obsidian.py` deletes the managed
+  vault before writing the first note, so the whole nodestream is walked for unresolvable span
+  tokens *before* that point; a failure leaves the existing vault untouched. A resolution-count
+  identity and a per-note residual check stand behind it.
+- **An editorial bracket around a name no longer breaks its link.** `[[[Note|Name]]]` made
+  Obsidian read the target as `[Note` and leave a stray `]`; the outer pair is now escaped, which
+  preserves what the reader sees and lets the link parse. This is the one change that can alter
+  rendered output for a project that declares nothing.
+
+**Migration.** No cache-key field moves, so **nothing re-translates** and nothing is blocked
+needing regeneration. Two real costs: the `profile.schema.json` edit is part of both the resume
+digest and the skeptic-run digest, so an INTERRUPTED run (and an interrupted opt-in skeptic pass)
+starts fresh rather than resuming — converged segments are untouched either way. And the
+`render_obsidian.py` edit moves `render_version`: where the rendered content is unchanged the
+render/diff gate still exits 0 with a `stale_baseline` warning, so a baseline re-accept
+(`--accept-baseline --force-accept-baseline`) is needed only where content actually changed —
+a project that declares `output.entity_markup`, or one whose text hits the bracket case above.
+
 ## 1.72.0 — 2026-08-25
 
 **Operating lessons from two live books, promoted into the skill.** Documentation only —
