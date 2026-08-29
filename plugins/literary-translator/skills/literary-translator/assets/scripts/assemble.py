@@ -3000,12 +3000,18 @@ def _apply_entity_markup(nodestream: dict, profile: dict) -> "dict | None":
     `node["text"]`, each `node["verses"][i]["content"]["rendered"]` and
     `["literal_gloss"]`, and each `nodestream["footnotes"][i]["text"]`.
 
-    A span in the `text` of a `kind: "verse"` node is REFUSED
-    (`entity_markup_span_unrendered`): `_render_block` renders such a node from
-    `node["verses"]` alone and IGNORES that node's own `text`, so a span marked
-    there would be recorded, counted and resolved and would still never reach
-    the vault -- a silent shortfall in exactly the coverage this feature
-    promises. Refusing names the operator's mistake instead.
+    THREE OF THE REFUSALS FIRE IN INDEX MODE ONLY, because all three defend the
+    obsidian adapter's emission grammar rather than the markup itself:
+    `entity_markup_span_unrendered` (a span in the `text` of a `kind: "verse"`
+    node, which `_render_block` renders from `node["verses"]` alone and never
+    emits, so the span would be recorded, counted, resolved -- and still never
+    reach the vault, a silent shortfall in exactly the coverage this feature
+    promises), and the payload/`ref` sentinel and unsafe-character checks. Strip
+    mode records nothing and emits no wikilink: it deletes the element and puts
+    the payload back byte-for-byte, so none of those three has anything to
+    protect there and refusing would be a false RED on input strip mode handles
+    correctly. Config validation, the pairing rules and the declared-tag-token
+    guard are NOT mode-gated -- those are about the markup itself.
 
     Called from main() immediately after `build_nodestream()` and BEFORE
     `_attach_link_groups` / `_attach_mentions`, so the occurrence index and the
@@ -3027,7 +3033,7 @@ def _apply_entity_markup(nodestream: dict, profile: dict) -> "dict | None":
         found = _entity_markup_scan(text, open_re, close_re, any_re, where)
         if not found:
             return text
-        if not rendered:
+        if not rendered and mode == "index":
             raise AssembleError(
                 f"{where}: {len(found)} entity element(s) are marked in a "
                 f"kind=\"verse\" node's own text, which the obsidian adapter "
@@ -3040,11 +3046,22 @@ def _apply_entity_markup(nodestream: dict, profile: dict) -> "dict | None":
         pieces = []
         cursor = 0
         for start, end, tag, ref, payload in found:
-            _entity_markup_check_span_text(payload, "payload", where, placeholders)
-            if ref is not None:
-                _entity_markup_check_span_text(
-                    ref, f"{cfg['ref_attribute']} attribute value", where, placeholders
-                )
+            if mode == "index":
+                # INDEX MODE ONLY, and deliberately so. Both of these checks
+                # defend the RENDERER's emission grammar: the payload becomes a
+                # wikilink ALIAS and the label becomes a note name and an `# H1`.
+                # Strip mode emits neither -- it deletes the element and puts the
+                # payload back into the prose byte-for-byte -- so a bracket, a
+                # pipe, a line break or an ⟦FNREF_n⟧ inside a marked run is
+                # ordinary text there, and refusing it would be a false RED on
+                # input this mode handles correctly. The pairing and
+                # declared-tag-token rules in `_entity_markup_scan` are NOT
+                # mode-gated: those are about the markup itself, in both modes.
+                _entity_markup_check_span_text(payload, "payload", where, placeholders)
+                if ref is not None:
+                    _entity_markup_check_span_text(
+                        ref, f"{cfg['ref_attribute']} attribute value", where, placeholders
+                    )
             state["n"] += 1
             tag_counts[tag] += 1
             pieces.append(text[cursor:start])

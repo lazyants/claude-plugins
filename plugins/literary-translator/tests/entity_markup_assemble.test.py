@@ -1067,5 +1067,66 @@ def test_each_mode_predicate_docstring_names_the_other_copy_and_the_divergence(p
     )
 
 
+# ===========================================================================
+# 15. The three renderer-facing refusals are INDEX-MODE ONLY. Strip mode
+#     deletes the element and puts the payload back byte-for-byte -- it emits
+#     no wikilink alias and no note name, records nothing, and promises no
+#     coverage -- so a bracket, a pipe, a line break, a machine sentinel or a
+#     verse-node span is ordinary input there. Refusing it would be a false
+#     RED on text this mode handles correctly.
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param("Jean [le Bon]", id="payload-brackets"),
+        pytest.param("Jean|Anne", id="payload-pipe"),
+        pytest.param("Jean\nAnne", id="payload-bare-LF"),
+        pytest.param("Jean\rAnne", id="payload-bare-CR"),
+    ],
+)
+def test_strip_mode_accepts_a_payload_the_emission_grammar_could_not_carry(tmp_path, payload):
+    root = make_root(tmp_path, entity_markup=PERSON_PLACE)
+    build_book(root, p1_text=f"Prose <person>{payload}</person> {FN_PH_1} done.")
+
+    assert_ok(run_assemble(root))
+    ns = read_nodestream(root)
+    assert node_by_id(ns, "p1")["text"] == f"Prose {payload} {FN_PH_1} done."
+    assert "entity_markup" not in ns, sorted(ns)
+
+
+def test_strip_mode_accepts_a_machine_sentinel_inside_a_marked_payload(tmp_path):
+    """The index-mode refusal exists because `<person>X⟦FNREF_1⟧</person>`
+    would render as `[[People/X|X[^1]]]`, whose footnote closer collides with
+    the wikilink closer. Strip mode emits no wikilink at all, so the same
+    input is simply a name with a footnote anchor after it."""
+    root = make_root(tmp_path, entity_markup=PERSON_PLACE)
+    build_book(root, p1_text=f"Prose <person>Jean{FN_PH_1}</person> done.")
+
+    assert_ok(run_assemble(root))
+    assert node_by_id(read_nodestream(root), "p1")["text"] == f"Prose Jean{FN_PH_1} done."
+
+
+def test_strip_mode_accepts_a_span_in_a_verse_nodes_own_text(tmp_path):
+    """Nothing is recorded in strip mode, so there is no coverage claim for an
+    unrendered span to falsify -- the node's `text` is dropped by the renderer
+    either way, exactly as it is on a project that declares no markup."""
+    root = make_root(tmp_path, entity_markup=PERSON_PLACE)
+    build_book(root, vblock_text=f"<person>Jean</person> {V_PH_A}")
+
+    assert_ok(run_assemble(root))
+    assert node_by_id(read_nodestream(root), "vblockA")["text"] == f"Jean {V_PH_A}"
+
+
+def test_strip_mode_still_refuses_malformed_markup(tmp_path):
+    """The mode gate is narrow: pairing and the declared-tag-token guard are
+    about the MARKUP itself and fire in both modes."""
+    root = make_root(tmp_path, entity_markup=PERSON_PLACE)
+    build_book(root, p1_text=f"Prose <person>Jean {FN_PH_1} done.")
+
+    assert_refused(run_assemble(root), "entity_markup_malformed")
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

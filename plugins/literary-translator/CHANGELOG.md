@@ -18,8 +18,14 @@ eleven local scripts.
 - **`output.entity_markup` — one new profile block, absent by default.** `tags` declares the
   element names the translator may emit, `ref_attribute` (default `ref`) the optional
   disambiguator, and `index_from` (`canon` | `markup`, default `canon`) whether the index is
-  built from the markup. **An absent block is byte-identical to 1.72.0** — no scan, no new
-  nodestream key, no behaviour change of any kind.
+  built from the markup. **An absent block means no scan, no new nodestream key, and no
+  behaviour change** — with two named exceptions, both deliberate and both below: the
+  editorial-bracket fix, and the heading-title scrub of the `⟦ENT_n⟧` machine shape, which is
+  unconditional exactly like the `⟦FNREF_N⟧` anchor scrub beside it (a heading carrying that
+  literal loses it from `title:` and from the filename slug in every mode). The scrub cannot
+  be mode-gated: `validate_backlinks.py` rebuilds each segment note's filename from the
+  PERSISTED nodestream, which assemble.py wrote before the renderer resolved anything, and it
+  is handed no mode to gate on.
 - **Assembly strips the declared elements, so the reader never sees them.** With the block
   present and `index_from: canon`, `assemble.py` removes each element and keeps its payload —
   that alone closes the first failure. Every text-bearing string the renderer can emit is

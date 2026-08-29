@@ -1342,8 +1342,19 @@ def _entity_markup_preflight(nodestream, spans):
          `_entity_markup_string_slots`, which is total by construction);
       2. within those slots every token belongs to a well-formed
          `⟦ENT_n⟧…⟦/ENT_n⟧` pair;
-      3. every such pair's id has a span record.
-    Anything else raises `RenderError("entity_markup_unresolvable")`."""
+      3. every such pair's id has a span record;
+      4. and the INVERSE of 3 -- every span record is used by exactly one
+         pair.
+    Anything else raises `RenderError("entity_markup_unresolvable")`.
+
+    Condition 4 is not symmetry for its own sake: render()'s coverage
+    identity (`replaced == links == len(spans)`, §6.5) is checked AFTER
+    `_clean_vault_content` has already emptied the managed vault, so a
+    NodeStream carrying records 1 and 2 but only pair 1 -- or pair 1 twice --
+    used to pass this preflight, lose the operator their existing vault, and
+    only then fail. Checking it HERE is what makes the CHANGELOG's "a failure
+    leaves the existing vault untouched" true; the post-render comparison
+    stays as a cheap postcondition on the resolver itself."""
     slots = list(_entity_markup_string_slots(nodestream))
     slot_tokens = sum(len(_ENT_TOKEN_RE.findall(container[key])) for container, key in slots)
     all_tokens = sum(len(_ENT_TOKEN_RE.findall(s)) for s in _walk_json_strings(nodestream))
@@ -1357,11 +1368,13 @@ def _entity_markup_preflight(nodestream, spans):
             "reader. Re-run assemble.py rather than hand-editing "
             "nodestream.json.",
         )
+    pair_uses = Counter()
     for container, key in slots:
         text = container[key]
         if "ENT_" not in text:
             continue
         for match in _ENT_SPAN_RE.finditer(text):
+            pair_uses[match.group(1)] += 1
             if match.group(1) not in spans:
                 raise RenderError(
                     "entity_markup_unresolvable",
@@ -1380,12 +1393,71 @@ def _entity_markup_preflight(nodestream, spans):
                 f"Offending text: {text[:200]!r}",
             )
 
+    # Condition 4 -- the inverse of 3, checked here rather than after the
+    # vault has already been cleaned (see this function's own docstring).
+    unused = sorted(set(spans) - set(pair_uses), key=lambda k: (len(k), k))
+    if unused:
+        raise RenderError(
+            "entity_markup_unresolvable",
+            f"nodestream.entity_markup.spans records {len(spans)} span(s) but "
+            f"{len(unused)} of them appear nowhere in the text this adapter "
+            f"rewrites (first: {unused[:5]}) -- the recorded index would claim "
+            "coverage this render cannot deliver. Re-run assemble.py rather "
+            "than hand-editing nodestream.json.",
+        )
+    repeated = sorted((k for k, n in pair_uses.items() if n > 1), key=lambda k: (len(k), k))
+    if repeated:
+        raise RenderError(
+            "entity_markup_unresolvable",
+            f"entity-markup span id(s) {repeated[:5]} appear in more than one "
+            "⟦ENT_n⟧…⟦/ENT_n⟧ pair -- each id names ONE marked run, so a reused "
+            "id means the NodeStream no longer describes the book assemble.py "
+            "built. Re-run assemble.py rather than hand-editing nodestream.json.",
+        )
 
-def _markup_note_records(spans, target_to_entity):
+
+def _canon_composition(spans, target_to_entity, entries):
+    """`{(tag, label): (note_identity, source_form)}` for every span identity
+    that COMPOSES with canon -- links canon's own note and mints nothing --
+    computed ONCE so `_markup_note_records` and `_apply_entity_markup` can
+    never disagree about which identities canon owns.
+
+    An identity composes when its label is a linkable canon target AND that
+    canon entry does not CONTRADICT the declared tag. The category test is
+    the whole point: composing on the label alone made `<person>Jordan</person>`
+    link a canon note for a PLACE named Jordan -- one canon entry silently
+    absorbing a second, differently-categorized entity the operator had
+    explicitly marked, which is both the entity-merge judgement this plugin
+    never makes and a silent index shortfall (no person note, coverage counts
+    still balanced, exit 0).
+
+    A canon entry with NO category composes with any tag, and that is
+    deliberate rather than lax: the shipped glossary pass never asks for
+    `category`, so on a typical project the field is empty everywhere, and
+    requiring a positive match would stop composition entirely -- every marked
+    name would mint a duplicate beside its own canon note, which is exactly
+    the "two indexes competing" this feature exists to avoid. Canon speaks
+    only where it has actually spoken."""
+    composed = {}
+    for span in spans.values():
+        tag, label = _entity_markup_identity(span)
+        if (tag, label) in composed:
+            continue
+        resolved = target_to_entity.get(label)
+        if resolved is None:
+            continue
+        category = (entries.get(resolved[1]) or {}).get("category")
+        if isinstance(category, str) and category.strip() and category.strip() != tag:
+            continue
+        composed[(tag, label)] = resolved
+    return composed
+
+
+def _markup_note_records(spans, canon_composition):
     """`{(tag, label): {"aliases": [...], "ref": label or None}}` for every
-    span identity that needs a note of its OWN -- i.e. every one whose label
-    is NOT already a linkable canon target (those link the canon note and
-    mint nothing, so canon stays the authority wherever it has an entry).
+    span identity that needs a note of its OWN -- i.e. every one absent from
+    `_canon_composition` (those link the canon note and mint nothing, so canon
+    stays the authority wherever it has actually spoken).
 
     `aliases` is every DISTINCT PRINTED payload seen for this identity,
     sorted and deduped: two spans `<person ref="B">Reb Noson</person>` and
@@ -1398,7 +1470,7 @@ def _markup_note_records(spans, target_to_entity):
     records = {}
     for span in spans.values():
         tag, label = _entity_markup_identity(span)
-        if label in target_to_entity:
+        if (tag, label) in canon_composition:
             continue
         record = records.setdefault((tag, label), {"aliases": set(), "ref": None})
         record["aliases"].add(span.get("payload") or "")
@@ -1456,7 +1528,7 @@ def _wrapped_by_unescaped_brackets(text, start, end):
     return end < len(text) and text[end] == "]"
 
 
-def _apply_entity_markup(nodestream, spans, target_to_entity, markup_note_identity, linker):
+def _apply_entity_markup(nodestream, spans, canon_composition, markup_note_identity, linker):
     """#795 §6.3 -- THE single resolution site. Rewrites every string
     `_entity_markup_string_slots` names, in place, replacing each
     `⟦ENT_n⟧payload⟦/ENT_n⟧` with a wikilink. Returns
@@ -1502,8 +1574,8 @@ def _apply_entity_markup(nodestream, spans, target_to_entity, markup_note_identi
             payload = match.group(2)
             span = spans[match.group(1)]  # preflight already proved the record exists
             tag, label = _entity_markup_identity(span)
-            if label in target_to_entity:
-                note_identity, source_form = target_to_entity[label]
+            if (tag, label) in canon_composition:
+                note_identity, source_form = canon_composition[(tag, label)]
                 piece = f"[[{note_identity}|{payload}]]"
                 if (linker.parenthetical_mode == "first_occurrence"
                         and label not in linker.global_seen):
@@ -2700,8 +2772,9 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # #795 §6.2/§6.3: resolve every recorded span to a wikilink, in ONE
     # pre-pass, BEFORE any renderer helper reads the text. Ordered here and
     # not earlier because it needs two things that only exist by now:
-    # `target_to_entity` (a span whose label IS a linkable canon target links
-    # the canon note and mints nothing) and `linker` (whose `global_seen` the
+    # `target_to_entity` (which `_canon_composition` reduces to the identities
+    # canon actually owns -- those link the canon note and mint nothing) and
+    # `linker` (whose `global_seen` the
     # pre-pass shares, so `parenthetical_originals: first_occurrence` shows
     # its gloss once book-wide across BOTH mechanisms, and whose
     # `links_emitted` keeps counting every inline link this render inserted).
@@ -2709,7 +2782,8 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     markup_note_relpath = {}
     entity_markup_report = None
     if entity_markup_active:
-        markup_records = _markup_note_records(entity_spans, target_to_entity)
+        canon_composition = _canon_composition(entity_spans, target_to_entity, entries)
+        markup_records = _markup_note_records(entity_spans, canon_composition)
         markup_note_relpath = _resolve_markup_notes(
             markup_records, folders_map, used_note_paths
         )
@@ -2718,7 +2792,7 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
             for identity, relpath in markup_note_relpath.items()
         }
         markup_counts = _apply_entity_markup(
-            nodestream, entity_spans, target_to_entity, markup_note_identity, linker
+            nodestream, entity_spans, canon_composition, markup_note_identity, linker
         )
         # §6.5, post-condition 1. With no bare-text branch the identity is
         # exact -- spans resolved == wikilinks emitted == len(spans) -- so it

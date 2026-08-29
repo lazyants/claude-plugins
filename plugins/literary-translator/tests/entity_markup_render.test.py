@@ -1291,5 +1291,113 @@ def test_strip_mode_leaves_no_entity_markup_key_for_the_renderer_to_find(tmp_pat
     assert nodestream["nodes"][0]["text"] == "Then Reb Noson spoke."
 
 
+# ===========================================================================
+# 15. Canon composition must not absorb a differently-CATEGORIZED entity.
+#     Composing on the label alone made `<person>Jordan</person>` link a canon
+#     note for a PLACE named Jordan: the entity-merge judgement this plugin
+#     never makes, and a silent shortfall -- no person note, coverage counts
+#     still balanced, exit 0.
+# ===========================================================================
+
+def test_a_contradicting_canon_category_refuses_composition_and_mints_its_own_note(tmp_path):
+    canon = make_canon({"Ярдэн": canon_entry("Ярдэн", "Jordan", category="place")})
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Jordan')} and {ent(2, 'Jordan')}.")]
+    spans = {"1": span("place", "Jordan"), "2": span("person", "Jordan")}
+    out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans=spans), canon, make_profile(),
+    )
+
+    assert entity_note_relpaths(manifest) == ["People/Jordan.md", "Places/Ярдэн.md"], (
+        "the place span composes with canon; the PERSON span must mint its own "
+        "note rather than be absorbed into a canon entry for a place"
+    )
+    assert manifest["entity_markup"]["notes"] == 1
+    body = segment_note_texts(out_dir)[0]
+    assert "[[Places/Ярдэн|Jordan]] and [[People/Jordan|Jordan]]." in body, body
+
+
+def test_a_matching_canon_category_still_composes(tmp_path):
+    canon = make_canon({"Ярдэн": canon_entry("Ярдэн", "Jordan", category="place")})
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Jordan')} lies east.")]
+    out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans={"1": span("place", "Jordan")}),
+        canon, make_profile(),
+    )
+    assert entity_note_relpaths(manifest) == ["Places/Ярдэн.md"]
+    assert manifest["entity_markup"]["notes"] == 0
+
+
+@pytest.mark.parametrize("category", ["", "   ", None])
+def test_a_canon_entry_with_no_category_composes_with_any_tag(tmp_path, category):
+    """Deliberate, not lax: the shipped glossary pass never asks for
+    `category`, so on a typical project the field is empty everywhere.
+    Demanding a positive match would stop composition entirely and mint a
+    duplicate beside every canon note -- the two-competing-indexes outcome
+    this feature exists to avoid."""
+    entry = canon_entry("Ярдэн", "Jordan", category="place")
+    if category is None:
+        del entry["category"]
+    else:
+        entry["category"] = category
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Jordan')} arrived.")]
+    _out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans={"1": span("person", "Jordan")}),
+        make_canon({"Ярдэн": entry}), make_profile(),
+    )
+    # `other/` because a categoryless canon entry routes to DEFAULT_FOLDER --
+    # unchanged behaviour, and exactly why demanding a positive category match
+    # would strand every such entry with a duplicate markup note beside it.
+    assert entity_note_relpaths(manifest) == ["other/Ярдэн.md"]
+    assert manifest["entity_markup"]["notes"] == 0
+
+
+# ===========================================================================
+# 16. The preflight owns BOTH directions. A record with no pair, or one id
+#     used twice, used to pass it and be caught only by the post-render count
+#     comparison -- which runs after _clean_vault_content has already emptied
+#     the operator's vault.
+# ===========================================================================
+
+def test_preflight_refuses_a_span_record_that_no_pair_uses(tmp_path):
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Ivan')} arrived.")]
+    _assert_preflight_refuses(
+        tmp_path,
+        make_nodestream(nodes, spans={"1": span("person", "Ivan"),
+                                      "2": span("person", "Pyotr")}),
+    )
+
+
+def test_preflight_refuses_one_span_id_used_by_two_pairs(tmp_path):
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Ivan')} met {ent(1, 'Ivan')}.")]
+    _assert_preflight_refuses(
+        tmp_path, make_nodestream(nodes, spans={"1": span("person", "Ivan")}),
+    )
+
+
+# ===========================================================================
+# 17. The ⟦ENT_n⟧ heading scrub is UNCONDITIONAL, and that is the one thing a
+#     project declaring nothing can notice. Pinned deliberately rather than
+#     left to be discovered: it cannot be mode-gated, because
+#     validate_backlinks.py rebuilds a segment filename off the PERSISTED
+#     nodestream and is handed no mode to gate on.
+# ===========================================================================
+
+def test_the_ent_heading_scrub_is_unconditional_even_with_no_declared_markup(tmp_path):
+    heading = make_node("h1", "seg01", f"Chapter {ent(1, 'One')}",
+                        kind="heading", raw_type="H2")
+    out_dir, manifest = render_into(
+        tmp_path, make_nodestream([heading], spans=None), make_canon({}),
+        make_profile(entity_markup=False),
+    )
+    written_slugs = [rel for rel in manifest["written"] if "/" not in rel]
+    assert written_slugs == ["001 Chapter One.md"], written_slugs
+    body = read(out_dir, written_slugs[0])
+    assert parse_frontmatter(body)["title"] == "Chapter One"
+    assert f"## Chapter {ent(1, 'One')}" in body, (
+        "only the title and slug are scrubbed -- the rendered heading body "
+        "keeps the literal, exactly as the ⟦FNREF_N⟧ anchor scrub beside it does"
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

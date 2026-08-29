@@ -517,7 +517,15 @@ that added this feature explicitly excluded.
 **Composition with canon, not competition.** When the label (`ref` if
 present, else the payload) is a linkable canon `canonical_target_form`, the
 span links THAT canon note and mints nothing. Otherwise a markup note is
-minted. Canon notes are resolved first and their relpaths are byte-identical
+minted. Composition is refused when the canon entry's own `category`
+CONTRADICTS the declared tag — otherwise `<person>Jordan</person>` would link
+a canon note for a place named Jordan, which is both the entity-merge
+judgement this plugin never makes and a silent shortfall (no person note, the
+coverage counts still balanced, exit 0). A canon entry with no `category`
+composes with any tag, deliberately: the shipped glossary pass never asks for
+that field, so on a typical project it is empty everywhere, and demanding a
+positive match would stop composition entirely and mint a duplicate beside
+every canon note. Canon notes are resolved first and their relpaths are byte-identical
 to a render with no markup at all, so `validate_backlinks.py`'s independent
 re-derivation still matches; markup notes are deduped against the same
 `used_paths` set afterwards and can never take or overwrite a canon note's
@@ -550,6 +558,19 @@ wikilink reduced to its display form and `\[`/`\]` unescaped — so no markup,
 no link syntax and no escape residue reaches a filename. That flattening runs
 only in `index` mode, so a literal `[[…]]` an operator wrote into a source
 heading on any other project still reaches `title:` exactly as it does today.
+
+One thing there is NOT mode-gated, and it is the single behaviour a project
+declaring nothing can still notice: `_heading_plain_text` scrubs the
+`⟦ENT_n⟧`/`⟦/ENT_n⟧` token pair unconditionally, keeping the payload —
+exactly the posture the `⟦FNREF_N⟧` anchor scrub beside it already has, and
+for the same reason (a fixed machine shape, never prose). It cannot be
+gated: `validate_backlinks.py` rebuilds each segment note's filename from the
+PERSISTED nodestream — written by `assemble.py` before this adapter resolved
+anything — and it is handed no mode to gate on, so without the scrub it would
+derive a filename with raw sentinels in it for a segment written without
+them, and report every Mentions link into that segment missing. The cost is
+that a heading carrying that literal machine shape loses it from `title:` and
+from the slug on any project.
 
 **What the coverage guarantee is, and is not.** The adapter refuses
 (`entity_markup_coverage_mismatch`) unless every recorded span resolved

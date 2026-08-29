@@ -641,7 +641,7 @@
    ],
    "claim": "the note covers (its `aliases` minus the display name), or a reader searching a variant spelling finds nothing; and emit no per-row count unless it is re-derived from the artifact itself, an index page being where a fabricated number is least likely to be checked. Step 0a copies `PLAN.template.md` once and never refreshes it (`SKILL.md:482`), so a project scaffolded before the retirement may still name `output.index.enabled` in its hand-edited `PLAN.md` intake answer; drop that phrase by hand — there is no automatic migration."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"assemble.py:3451\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"assemble.py:3468\", 0]": {
    "anchors": [
     "assert_project_complete(manifest, converged, refusals)"
    ],
@@ -1446,6 +1446,18 @@
     "render_obsidian._resolve_entity_notes(entries, folders_map)"
    ],
    "claim": "Absent -- which is how `validate_backlinks.py:860` calls this, with two arguments, immediately `.items()`-ing the dict it returns -- a fresh set is used"
+  },
+  "[\"plugins/literary-translator/tests/entity_markup_render.test.py\", \"validate_backlinks.py:860\", 0]": {
+   "anchors": [
+    "render_obsidian._resolve_entity_notes(entries, folders_map)"
+   ],
+   "claim": "the two-argument `_resolve_entity_notes(entries, folders_map)` call `validate_backlinks.py:860` makes must keep returning a dict"
+  },
+  "[\"plugins/literary-translator/tests/entity_markup_render.test.py\", \"validate_backlinks.py:780\", 0]": {
+   "anchors": [
+    "render_obsidian._segment_title(seg_nodes, seg)"
+   ],
+   "claim": "`validate_backlinks.py:780` reconstructs each segment note's filename by calling `_segment_title(seg_nodes, seg)` against the PERSISTED nodestream.json"
   }
  },
  "exemptions": {
