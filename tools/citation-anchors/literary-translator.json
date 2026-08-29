@@ -1489,6 +1489,12 @@
     "render_obsidian._segment_title(seg_nodes, seg)"
    ],
    "claim": "`validate_backlinks.py:780` reconstructs each segment note's filename by calling `_segment_title(seg_nodes, seg)` against the PERSISTED nodestream.json"
+  },
+  "[\"plugins/literary-translator/tests/entity_markup_render.test.py\", \"validate_backlinks.py:780\", 1]": {
+   "anchors": [
+    "render_obsidian._segment_title(seg_nodes, seg)"
+   ],
+   "claim": "`validate_backlinks.py:780` reconstructs each segment note's filename by calling `_segment_title(seg_nodes, seg)` against the PERSISTED nodestream.json"
   }
  },
  "exemptions": {

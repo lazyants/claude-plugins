@@ -54,10 +54,12 @@ eleven local scripts.
   is checked where it is used, not only where it was written.
 - **A stale NodeStream is refused, not delivered.** A book assembled under
   `index_from: markup` and then re-rendered against a profile that no longer resolves to that
-  mode still carries `⟦ENT_n⟧` in its text, and no other mode can resolve it. That pairing is
-  now `entity_markup_stale_nodestream` rather than sentinels shipped verbatim — which is the
-  original failure with one more step in front of it. An EMPTY span table is still ignored: it
-  means a declared book that marked nothing.
+  mode still carries `⟦ENT_n⟧` in its text, and no other mode can resolve it. That is now
+  `entity_markup_stale_nodestream` rather than sentinels shipped verbatim — the original
+  failure with one more step in front of it. The check reads the TEXT, never the span table:
+  the table is only a proxy for sentinel-bearing text, and a hand-edited or truncated
+  NodeStream carries the tokens with an empty, absent or malformed one. A book with no such
+  token renders exactly as before.
 - **The vault is checked before it is destroyed.** `render_obsidian.py` deletes the managed
   vault before writing the first note, so the whole nodestream is walked for unresolvable span
   tokens *before* that point; a failure leaves the existing vault untouched. A resolution-count

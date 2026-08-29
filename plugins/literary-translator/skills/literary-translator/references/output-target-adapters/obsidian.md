@@ -610,15 +610,22 @@ Nothing downstream re-checks any of it — the values go straight into a
 wikilink alias, a note name and an `# H1` — and the check has to happen here
 because everything downstream runs after the vault is gone.
 
-A NodeStream carrying spans while the profile no longer resolves to `index`
-is refused outright (`entity_markup_stale_nodestream`), in every other mode.
-A non-empty span table can only come from an `index`-mode assembly, so the
-pairing means the two inputs are from different runs — someone removed
-`index_from: markup` and re-rendered without re-assembling — and the text
-still carries sentinels no other mode can resolve. Being inert about the KEY
-is right; being inert about a book whose TEXT carries `⟦ENT_n⟧` is how machine
-markup reaches a reader. An EMPTY span table stays ignored: it means a
-declared book that marked nothing, and there is nothing to resolve.
+A NodeStream whose TEXT carries `⟦ENT_n⟧` while the profile no longer
+resolves to `index` is refused outright (`entity_markup_stale_nodestream`), in
+every other mode. Only an `index`-mode assembly writes those tokens, so
+finding one means the two inputs are from different runs — someone removed
+`index_from: markup` and re-rendered without re-assembling — and nothing in
+this mode can resolve them. Being inert about the KEY is right; being inert
+about a book whose TEXT carries the tokens is how machine markup reaches a
+reader.
+
+The test is over the text and never over the span table. The table is only a
+proxy for sentinel-bearing text, and a broken one: a hand-edited or truncated
+NodeStream carries the tokens with an empty, absent or malformed table, and
+that shape cleaned the vault and wrote raw tokens into a segment note. It is
+the same walk the `index`-mode preflight uses, so no reserved token escapes
+either path — and a book with no such token in its text renders exactly as
+before, whatever its `entity_markup` key says.
 
 Two gaps are known and accepted, both needing a hand-edited NodeStream and
 neither destroying anything: a span in the ignored `text` of a dedicated verse

@@ -2853,23 +2853,38 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
         # ...with ONE exception, and it is the whole point of the feature.
         # Being inert about the KEY is right; being inert about a book whose
         # TEXT carries `⟦ENT_n⟧` is how machine markup reaches a reader, which
-        # is the failure #795 exists to close. A non-empty span table can only
-        # come from an `index`-mode assemble -- `strip` and `off` write no key,
-        # and `index_from: markup` under another target is refused there -- so
-        # this pairing means the NodeStream and the profile are from different
-        # runs: someone removed `index_from: markup` (or the whole block) and
-        # re-rendered without re-assembling. There is no legitimate path to it
-        # and no resolution this mode can perform, so it refuses instead of
-        # delivering the sentinels verbatim.
-        stale = _entity_markup_spans(nodestream)
-        if stale:
+        # is the failure #795 exists to close. Only an `index`-mode assemble
+        # writes those tokens -- `strip` and `off` write none, and
+        # `index_from: markup` under another target is refused there -- so
+        # finding one here means the NodeStream and the profile are from
+        # different runs: someone removed `index_from: markup` (or the whole
+        # block) and re-rendered without re-assembling. Nothing in this mode
+        # can resolve them, so it refuses rather than delivering them.
+        #
+        # The test is over the TEXT, never over the span table. The table is
+        # only a PROXY for sentinel-bearing text, and a broken one in both
+        # directions: a hand-edited or truncated NodeStream can carry the
+        # tokens with an empty, absent or malformed table, and that shape --
+        # empty table, off mode -- cleaned the managed vault and wrote raw
+        # tokens into a segment note. Same walk the `index`-mode preflight
+        # uses, so no reserved token escapes either path.
+        stale = next(
+            (
+                match.group(0)
+                for text in _walk_json_strings(nodestream)
+                for match in [_ENT_TOKEN_RE.search(text)]
+                if match
+            ),
+            None,
+        )
+        if stale is not None:
             raise RenderError(
                 "entity_markup_stale_nodestream",
-                f"this NodeStream records {len(stale)} entity-markup span(s), "
-                "so it was assembled under `output.entity_markup.index_from: "
-                "markup`, but this profile no longer resolves to that mode -- "
-                "its text still carries ⟦ENT_n⟧ sentinels and nothing here can "
-                "resolve them, so they would ship verbatim to a reader. Re-run "
+                f"this NodeStream's text carries the entity-markup sentinel "
+                f"{stale!r}, so it was assembled under "
+                "`output.entity_markup.index_from: markup`, but this profile "
+                "no longer resolves to that mode. Nothing here can resolve "
+                "those tokens, so they would ship verbatim to a reader. Re-run "
                 "assemble.py against the current profile.",
             )
     entity_spans = _entity_markup_spans(nodestream) if entity_markup_active else {}

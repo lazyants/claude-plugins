@@ -541,8 +541,12 @@ def test_markup_note_colliding_with_a_canon_note_is_deduped_and_canon_keeps_its_
     assert "[[People/John-2|John]] arrived." in segment_note_texts(out_dir)[0]
 
     # ...and the same canon rendered with the knob absent resolves identically.
+    # PLAIN text on this half, not the marked-up nodes: a non-index render now
+    # REFUSES sentinel-bearing text rather than delivering it, so reusing them
+    # would exercise that refusal instead of the canon relpath this asserts.
+    plain_nodes = [make_node("p1", "seg01", "John arrived.")]
     plain_dir, plain_manifest = render_into(
-        tmp_path, make_nodestream(nodes, spans=None), canon,
+        tmp_path, make_nodestream(plain_nodes, spans=None), canon,
         make_profile(entity_markup=False), out_dir=tmp_path / "plain",
     )
     assert entity_note_relpaths(plain_manifest) == ["People/John.md"]
@@ -874,6 +878,56 @@ def test_a_non_index_profile_refuses_a_stale_index_mode_nodestream(tmp_path, pro
     assert (out_dir / "SURVIVOR.md").is_file(), (
         "the refusal must fire BEFORE _clean_vault_content"
     )
+
+
+@pytest.mark.parametrize(
+    "spans",
+    [
+        pytest.param({}, id="empty-table"),
+        pytest.param(None, id="key-absent"),
+        pytest.param({"1": 5}, id="malformed-record"),
+        pytest.param({"9": span("person", "Elsewhere")}, id="wrong-id"),
+    ],
+)
+def test_sentinel_bearing_text_is_refused_whatever_the_span_table_says(tmp_path, spans):
+    """The span table is only a PROXY for sentinel-bearing text, and a broken
+    one: a hand-edited or truncated NodeStream carries the tokens with an
+    empty, absent or malformed table. Keying the refusal on the TABLE let
+    exactly that shape -- empty table, `off` mode -- clean the managed vault
+    and write raw `⟦ENT_1⟧` tokens into a segment note, which is the original
+    #795 failure with one more step in front of it. The refusal reads the
+    TEXT."""
+    out_dir = make_managed_vault(tmp_path)
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'John')} spoke.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(
+            tmp_path, make_nodestream(nodes, spans=spans), make_canon({}),
+            make_profile(entity_markup=False), out_dir=out_dir,
+        )
+    assert excinfo.value.reason == "entity_markup_stale_nodestream", excinfo.value.reason
+    assert (out_dir / "SURVIVOR.md").is_file(), (
+        "the refusal must fire BEFORE _clean_vault_content"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("A lone ⟦ENT_1⟧ opener.", id="lone-opener"),
+        pytest.param("A lone ⟦/ENT_1⟧ closer.", id="lone-closer"),
+    ],
+)
+def test_a_lone_sentinel_token_is_refused_in_a_non_index_mode(tmp_path, text):
+    """A half-pair ships to a reader just as visibly as a whole one, so the
+    scan is per TOKEN -- the same shape the heading scrub takes."""
+    out_dir = make_managed_vault(tmp_path)
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(
+            tmp_path, make_nodestream([make_node("p1", "seg01", text)], spans=None),
+            make_canon({}), make_profile(entity_markup=False), out_dir=out_dir,
+        )
+    assert excinfo.value.reason == "entity_markup_stale_nodestream", excinfo.value.reason
+    assert (out_dir / "SURVIVOR.md").is_file()
 
 
 @pytest.mark.parametrize("profile_kwargs", [
@@ -1396,21 +1450,25 @@ def test_preflight_refuses_one_span_id_used_by_two_pairs(tmp_path):
 #     nodestream and is handed no mode to gate on.
 # ===========================================================================
 
-def test_the_ent_heading_scrub_is_unconditional_even_with_no_declared_markup(tmp_path):
+def test_the_ent_heading_scrub_is_unconditional_at_the_caller_that_needs_it():
+    """The scrub runs in EVERY mode, and the caller that makes that
+    load-bearing is not `render()` -- it is `validate_backlinks.py:780`, which
+    rebuilds each segment note's filename by calling `_segment_title` against
+    the PERSISTED nodestream.json. assemble.py wrote that file BEFORE the
+    resolution pre-pass ran, so its heading text still carries raw sentinels,
+    and it is handed no mode to gate on. Without the scrub that gate derives
+    `001 _ENT_1_John_ENT_1_` for a segment render() wrote as `001 John`, and
+    reports every Mentions link into it missing.
+
+    Asserted at that TWO-ARGUMENT call rather than through a whole render of
+    an undeclared project: such a render now refuses sentinel-bearing text
+    outright (`entity_markup_stale_nodestream`), which is the right answer for
+    a delivered book and the wrong vehicle for this scrub."""
     heading = make_node("h1", "seg01", f"Chapter {ent(1, 'One')}",
                         kind="heading", raw_type="H2")
-    out_dir, manifest = render_into(
-        tmp_path, make_nodestream([heading], spans=None), make_canon({}),
-        make_profile(entity_markup=False),
-    )
-    written_slugs = [rel for rel in manifest["written"] if "/" not in rel]
-    assert written_slugs == ["001 Chapter One.md"], written_slugs
-    body = read(out_dir, written_slugs[0])
-    assert parse_frontmatter(body)["title"] == "Chapter One"
-    assert f"## Chapter {ent(1, 'One')}" in body, (
-        "only the title and slug are scrubbed -- the rendered heading body "
-        "keeps the literal, exactly as the ⟦FNREF_N⟧ anchor scrub beside it does"
-    )
+    assert render_obsidian._segment_title(
+        [heading], {"seg": "seg01", "kind": "body"}
+    ) == "Chapter One"
 
 
 # ===========================================================================
@@ -1544,21 +1602,19 @@ def test_a_canon_category_that_is_not_a_string_composes_like_an_absent_one(
     ],
 )
 def test_a_lone_heading_token_is_scrubbed_and_the_title_whitespace_collapses(
-    tmp_path, heading_text, expected_title
+    heading_text, expected_title
 ):
     """A half-pair ships to a reader just as visibly as a whole one, so the
-    scrub is per TOKEN. The collapse is the documented cost: a heading the
+    scrub is per TOKEN. The collapse is its documented cost: a heading the
     scrub touches no longer takes `_heading_plain_text`'s byte-identical fast
-    path, so its internal whitespace is normalized. Both are asserted here
-    because both are behaviour an undeclared project can notice."""
+    path, so its internal whitespace is normalized. Both matter to the
+    filename `validate_backlinks.py` re-derives, which is the call asserted
+    here -- see the test above for why not through a render."""
     heading = make_node("h1", "seg01", heading_text, kind="heading", raw_type="H2")
-    out_dir, manifest = render_into(
-        tmp_path, make_nodestream([heading], spans=None), make_canon({}),
-        make_profile(entity_markup=False),
-    )
-    written_slugs = [rel for rel in manifest["written"] if "/" not in rel]
-    assert written_slugs == [f"001 {expected_title}.md"], written_slugs
-    assert parse_frontmatter(read(out_dir, written_slugs[0]))["title"] == expected_title
+    assert render_obsidian._heading_plain_text(heading) == expected_title
+    assert render_obsidian._segment_title(
+        [heading], {"seg": "seg01", "kind": "body"}
+    ) == expected_title
 
 
 # ===========================================================================
