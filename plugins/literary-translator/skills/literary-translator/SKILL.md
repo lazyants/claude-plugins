@@ -3403,11 +3403,17 @@ costs, and a recommendation, and let the human say whether another sweep
 round opens.
 
 What they decide is the sweep BOUNDARY, not the fate of a draft. Every unit
-already touched still takes one of the two routes above — `--from-converged`
-for a confirming re-review, or a restore — because nothing here delivers a
-draft the reviewer never saw: `assemble.py` refuses one outright ("a
-hand-edit the reviewer never saw must not be assembled") and W7's hard check
-2 reports the same mismatch independently. Record why the sweep stopped in
+already touched still needs an outcome of its own, and there are three:
+`--from-converged` carries the edit into a confirming re-review and never
+re-translates; `--allow-retranslate-converged` authorizes the re-translation,
+which may discard the sweep edit and whose fresh draft is then reviewed like
+any other; and restoring the draft to the bytes its review was taken against
+returns the unit to `reusable` with nothing left to authorize. Which one is
+the same re-review-versus-re-translate choice intake names as the human's —
+price it per unit rather than settling it for them. What no outcome does is
+deliver a draft the reviewer never saw: `assemble.py` refuses one outright
+("a hand-edit the reviewer never saw must not be assembled") and W7's hard
+check 2 reports the same mismatch independently. Record why the sweep stopped in
 `consistency_issues.md`, where a record that authorizes nothing belongs;
 never as a key on a ledger fragment or record, which `ledger_update.py` will
 not write, which both schemas refuse, and which the next ordinary write
