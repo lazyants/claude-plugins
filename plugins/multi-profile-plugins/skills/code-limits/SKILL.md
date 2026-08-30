@@ -70,8 +70,10 @@ one cell per window carrying the percentage used and how long until that window 
 finally where the numbers came from. A cell whose window is not current says so in its own words
 and is dimmed: an expired one reads `14h ago` -- the percentage beside it describes the PREVIOUS
 window -- and one the backend sends no reset time at all for reads `inactive`, `unopened` or
-`not reported`. `unopened` is a pool at 0% that the backend calls active: the window has never
-been used, so there is nothing to reset, and that is a state to report rather than to gap.
+`not reported`. `unopened` is a pool at 0% with no reset time that the backend has not marked
+inactive -- either it says active, or, in the flat container, it carries no such flag at all: the
+window has never been used, so there is nothing to reset, and that is a state to report rather
+than to gap. Above 0% the same pair still gaps, because consumption means a window opened.
 Claude Code's `is_active` is deliberately not part of that: it marks whichever pool is currently
 BINDING, and exactly one pool per account carries it, so treating it as "no current window" grey
 out five-hour figures that were entirely current -- along with the reset time beside them. A cell that gapped carries its diagnostic token in place of a figure.
