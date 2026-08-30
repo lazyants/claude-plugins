@@ -2567,6 +2567,92 @@ with tempfile.TemporaryDirectory() as tmp:
     check("64 while the healthy figure beside it keeps its own hue",
           bool(row) and opens_with(row[0], "44%") == R.GREEN, repr(row))
 
+# --- 65 -- an ACTIVE pool at 0% with no reset time is an unopened window, not a malformed one ---
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # MEASURED on a real profile that has consumed nothing: the vendor ships
+    # `{"kind": "session", "percent": 0, "resets_at": null, "is_active": true}` -- the binding
+    # pool of an account whose five-hour window has never OPENED. Read as drift, that gapped the
+    # whole 5H cell of a profile whose only fault was going unused, and printed a warning about a
+    # payload that was exactly what the vendor sends. `entry()`'s default stands in for
+    # "unspecified", so the null is written onto the dict rather than passed through it.
+    unused = make_claude(root, ".claudeUnused", cached(entries=[
+        dict(entry(kind="session", percent=0, active=True), resets_at=None),
+        dict(entry(kind="weekly_all", percent=0, active=False), resets_at=None),
+    ]))
+    done, _, _ = run(["--claude-profile", str(unused),
+                      "--codex-home", str(make_codex_home(root, ".codexUnused"))], root=root)
+    body = done.stdout.split("warnings")[0]
+    rows = [line for _w, pool, line in pool_rows(body) if pool == "all"]
+    check("65 an unused account does not gap", "[field-malformed]" not in done.stdout, done.stdout)
+    check("65 and the run stays clean", done.returncode == 0, f"rc={done.returncode}\n{done.stdout}")
+    check("65 its unopened window states that in its own cell",
+          len(rows) == 1 and "unopened" in rows[0], str(rows))
+    check("65 while the inactive sibling beside it still reads `inactive`",
+          bool(rows) and "inactive" in rows[0], str(rows))
+    check("65 and both figures are still printed",
+          bool(rows) and rows[0].count("0%") == 2, str(rows))
+
+    # The other half of the rule, which is what keeps the relaxation from being a hole: an active
+    # pool ABOVE zero has a window open by definition, so no reset time for it is still drift.
+    used = make_claude(root, ".claudeUsedNoReset", cached(entries=[
+        dict(entry(kind="session", percent=37, active=True), resets_at=None),
+        entry(kind="weekly_all", percent=44, resets=iso(50)),
+    ]), token=False)
+    done, _, _ = run(["--claude-profile", str(used),
+                      "--codex-home", str(make_codex_home(root, ".codexUsed"))], root=root)
+    gapped = [line for _w, _p, line in pool_rows(done.stdout.split("warnings")[0])
+              if "[field-malformed]" in line]
+    check("65 an active pool with usage and no reset time still gaps",
+          len(gapped) == 1 and "37%" not in gapped[0], str(gapped))
+    check("65 and its healthy sibling still reports",
+          bool(gapped) and "44%" in gapped[0], str(gapped))
+
+    # An INACTIVE pool carrying usage is untouched by the rule -- its window may simply have
+    # closed, which no measurement here calls malformed. Pinned so the relaxation cannot be
+    # "tidied" into a symmetric test that gaps a state the report used to accept.
+    closed = make_claude(root, ".claudeClosed", cached(entries=[
+        dict(entry(kind="session", percent=31, active=False), resets_at=None),
+        entry(kind="weekly_all", percent=44, resets=iso(50)),
+    ]))
+    done, _, _ = run(["--claude-profile", str(closed),
+                      "--codex-home", str(make_codex_home(root, ".codexClosed"))], root=root)
+    closed_rows = [line for _w, _p, line in pool_rows(done.stdout.split("warnings")[0])
+                   if "31%" in line]
+    check("65 an inactive pool with usage and no reset time still reads `inactive`",
+          len(closed_rows) == 1 and "inactive" in closed_rows[0], str(closed_rows))
+    check("65 and does not gap the run", done.returncode == 0, done.stdout)
+
+    # The flat container has no `is_active` to consult, and the same profile carries the same
+    # unopened window there: `{"utilization": 0, "resets_at": null}` under `five_hour`.
+    for label, five_hour, expect in (
+        ("an unopened window", {"utilization": 0, "resets_at": None}, "unopened"),
+        ("usage with no reset time", {"utilization": 55, "resets_at": None}, "[field-malformed]"),
+    ):
+        flat_root = root / f"flat-{expect.strip('[]')}"
+        make_claude(flat_root, ".claudeFlat", cached(flat={
+            "five_hour": five_hour,
+            "seven_day": {"utilization": 22, "resets_at": iso(50)},
+        }))
+        done, _, _ = run(["--claude-profile", str(flat_root / ".claudeFlat"),
+                          "--codex-home", str(make_codex_home(flat_root, ".codexFlat"))],
+                         root=flat_root)
+        flat_rows = [line for _w, _p, line in pool_rows(done.stdout.split("warnings")[0])
+                     if "all (flat)" in line]
+        check(f"65 flat {label}: the 5H cell says so", len(flat_rows) == 1
+              and expect in flat_rows[0], str(flat_rows))
+        check(f"65 flat {label}: the seven_day sibling still reports",
+              bool(flat_rows) and "22%" in flat_rows[0], str(flat_rows))
+
+# The third short RESET label has to stay distinguishable from the other two for the same reason
+# they do: the cell carries the note precisely because the state it names is not the others.
+check("65 an unopened window and an inactive one read differently",
+      len({R.RESET_LABELS["no window opened yet"],
+           R.RESET_LABELS["inactive, no reset time reported"],
+           R.RESET_LABELS["no reset time reported by the backend"]}) == 3,
+      str(sorted(R.RESET_LABELS.values())))
+
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -2577,7 +2663,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 537
+MIN_CHECKS = 551
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
