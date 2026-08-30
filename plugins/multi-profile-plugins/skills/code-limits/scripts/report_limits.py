@@ -611,6 +611,9 @@ def _claude_flat_row(key: str, slot, freshness: str, now: datetime.datetime) -> 
         # under BOTH `five_hour` and `seven_day` while its `limits` array says the identical
         # thing. Reading the null as drift gapped a window whose only fault was never having
         # been used. Above zero it is still malformed -- consumption means a window opened.
+        # An ABSENT `resets_at` and an explicit null are the same answer here, as they already
+        # are in the list shape: neither states a reset time, and the reader has never had a
+        # reason to tell "the vendor said null" from "the vendor said nothing" apart.
         if percent > 0:
             raise Malformed("field-malformed")
         return Record(name, NO_CURRENT, percent=percent, freshness=freshness,

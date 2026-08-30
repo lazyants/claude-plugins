@@ -2147,9 +2147,11 @@ with tempfile.TemporaryDirectory() as tmp:
     check("58 while the binding pool beside it reads exactly the same way",
           bool(row) and not opening_code(row[0], "87%").startswith("2"), repr(row))
 
-    # The one thing `is_active` still decides: a pool reporting NO reset time at all. The vendor
-    # sends `resets_at: null` with `is_active: false` for a window it has nothing to say about,
-    # and an ACTIVE entry without a reset time is malformed rather than merely quiet.
+    # What `is_active` still decides for a pool reporting NO reset time at all: WHICH quiet state
+    # it is. The vendor sends `resets_at: null` with `is_active: false` for a window it has
+    # nothing to say about, and that reads `inactive`; the same pair with `is_active: true` reads
+    # `unopened` (section 65). Whether such a pool is malformed at all is decided by CONSUMPTION,
+    # not by this flag -- an active pool above 0% has a window open and must report its reset.
     # `resets_at` literally null -- `entry()`'s own default stands in for "unspecified", so the
     # null has to be written onto the dict rather than passed through it.
     quiet = make_claude(root, ".claudeQuiet", cached(entries=[
@@ -2589,8 +2591,11 @@ with tempfile.TemporaryDirectory() as tmp:
     check("65 and the run stays clean", done.returncode == 0, f"rc={done.returncode}\n{done.stdout}")
     check("65 its unopened window states that in its own cell",
           len(rows) == 1 and "unopened" in rows[0], str(rows))
+    # By POSITION, not by membership: the row carries both cells, so `"inactive" in row` is
+    # satisfied by either one and cannot tell which pool got which label -- the exact thing this
+    # check exists to pin. Column order on the line is 5H then WEEKLY.
     check("65 while the inactive sibling beside it still reads `inactive`",
-          bool(rows) and "inactive" in rows[0], str(rows))
+          bool(rows) and rows[0].index("unopened") < rows[0].index("inactive"), str(rows))
     check("65 and both figures are still printed",
           bool(rows) and rows[0].count("0%") == 2, str(rows))
 
@@ -2599,15 +2604,14 @@ with tempfile.TemporaryDirectory() as tmp:
     used = make_claude(root, ".claudeUsedNoReset", cached(entries=[
         dict(entry(kind="session", percent=37, active=True), resets_at=None),
         entry(kind="weekly_all", percent=44, resets=iso(50)),
-    ]), token=False)
+    ]))
     done, _, _ = run(["--claude-profile", str(used),
                       "--codex-home", str(make_codex_home(root, ".codexUsed"))], root=root)
     gapped = [line for _w, _p, line in pool_rows(done.stdout.split("warnings")[0])
               if "[field-malformed]" in line]
+    # That the healthy sibling survives its gap is section 26/33's subject, not this one's.
     check("65 an active pool with usage and no reset time still gaps",
           len(gapped) == 1 and "37%" not in gapped[0], str(gapped))
-    check("65 and its healthy sibling still reports",
-          bool(gapped) and "44%" in gapped[0], str(gapped))
 
     # An INACTIVE pool carrying usage is untouched by the rule -- its window may simply have
     # closed, which no measurement here calls malformed. Pinned so the relaxation cannot be
@@ -2626,11 +2630,15 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # The flat container has no `is_active` to consult, and the same profile carries the same
     # unopened window there: `{"utilization": 0, "resets_at": null}` under `five_hour`.
-    for label, five_hour, expect in (
-        ("an unopened window", {"utilization": 0, "resets_at": None}, "unopened"),
-        ("usage with no reset time", {"utilization": 55, "resets_at": None}, "[field-malformed]"),
+    # Keyed by `slug`, never by `expect`: a directory name derived from the expected TOKEN
+    # collides the moment two cases expect the same one, and the second fixture would overwrite
+    # the first while the loop still ran twice and reported two passes.
+    for slug, label, five_hour, expect in (
+        ("unopened", "an unopened window", {"utilization": 0, "resets_at": None}, "unopened"),
+        ("used", "usage with no reset time",
+         {"utilization": 55, "resets_at": None}, "[field-malformed]"),
     ):
-        flat_root = root / f"flat-{expect.strip('[]')}"
+        flat_root = root / f"flat-{slug}"
         make_claude(flat_root, ".claudeFlat", cached(flat={
             "five_hour": five_hour,
             "seven_day": {"utilization": 22, "resets_at": iso(50)},
@@ -2640,17 +2648,18 @@ with tempfile.TemporaryDirectory() as tmp:
                          root=flat_root)
         flat_rows = [line for _w, _p, line in pool_rows(done.stdout.split("warnings")[0])
                      if "all (flat)" in line]
+        # The healthy `seven_day` sibling on this row is section 33d's subject, on the identical
+        # fixture; only the 5H cell is new here.
         check(f"65 flat {label}: the 5H cell says so", len(flat_rows) == 1
               and expect in flat_rows[0], str(flat_rows))
-        check(f"65 flat {label}: the seven_day sibling still reports",
-              bool(flat_rows) and "22%" in flat_rows[0], str(flat_rows))
 
-# The third short RESET label has to stay distinguishable from the other two for the same reason
-# they do: the cell carries the note precisely because the state it names is not the others.
-check("65 an unopened window and an inactive one read differently",
-      len({R.RESET_LABELS["no window opened yet"],
-           R.RESET_LABELS["inactive, no reset time reported"],
-           R.RESET_LABELS["no reset time reported by the backend"]}) == 3,
+# The new short RESET label has to stay distinguishable from the two that were already there, for
+# the same reason they do: the cell carries the note precisely because the state it names is not
+# the others. That the older PAIR differs is section 53's check, not restated here.
+check("65 an unopened window reads as neither of the other two quiet states",
+      R.RESET_LABELS["no window opened yet"] not in (
+          R.RESET_LABELS["inactive, no reset time reported"],
+          R.RESET_LABELS["no reset time reported by the backend"]),
       str(sorted(R.RESET_LABELS.values())))
 
 print(f"ran {checks} checks")
@@ -2663,7 +2672,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 551
+MIN_CHECKS = 548
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

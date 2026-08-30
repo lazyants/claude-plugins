@@ -73,8 +73,9 @@ window -- and one the backend sends no reset time at all for reads `inactive`, `
 `not reported`. `unopened` is a pool at 0% with no reset time that the backend has not marked
 inactive -- either it says active, or, in the flat container, it carries no such flag at all: the
 window has never been used, so there is nothing to reset, and that is a state to report rather
-than to gap. Above 0% the same pair still gaps, because consumption means a window opened.
-Claude Code's `is_active` is deliberately not part of that: it marks whichever pool is currently
+than to gap. An ACTIVE pool above 0% with no reset time still gaps, because consumption means a
+window opened. Deciding whether a window is CURRENT is a separate question, and Claude Code's
+`is_active` is deliberately not part of THAT one: it marks whichever pool is currently
 BINDING, and exactly one pool per account carries it, so treating it as "no current window" grey
 out five-hour figures that were entirely current -- along with the reset time beside them. A cell that gapped carries its diagnostic token in place of a figure.
 Candidate-level outcomes -- a profile with no cache, one with no subscription, an unreadable
