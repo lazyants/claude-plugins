@@ -2,6 +2,22 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.3.1] — 2026-08-30
+
+### Fixed
+
+- **`code-limits` no longer gaps a profile that has simply gone unused.** A Claude Code account
+  that has consumed nothing ships its binding pool as `{"kind": "session", "percent": 0,
+  "resets_at": null, "is_active": true}` — a window that has never OPENED, so there is no reset
+  time to report. The reader treated any active pool without a reset time as drift, so that
+  profile's whole `5H` cell read `[field-malformed]` and the run raised a warning about a payload
+  that was exactly what the vendor sends. Consumption is what makes the pair contradictory, not
+  `is_active`: above zero a window is open by definition and a missing reset time is still
+  malformed, while at zero the cell now reads `unopened` beside its figure. The flat container,
+  which carries the same `{"utilization": 0, "resets_at": null}` for the same account and has no
+  `is_active` to consult, follows the same rule. Nothing an inactive entry reports is newly
+  refused — a pool whose window merely closed was accepted before and still is.
+
 ## [multi-profile-plugins 1.3.0] — 2026-08-27
 
 ### Changed

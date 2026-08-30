@@ -603,9 +603,24 @@ def _claude_flat_row(key: str, slot, freshness: str, now: datetime.datetime) -> 
     # flat one is a fallback, and a report that used it silently reads like the current shape.
     family, window = _claude_place(key)
     family = f"{family} (flat)"
+    name = f"{key} (flat)"
+    percent = _num(body.get("utilization"), 0.0, 100.0)
+    if body.get("resets_at") is None:
+        # The same unopened window the list shape reports, in the shape that has no `is_active`
+        # to consult: the profile measured here carries `{"utilization": 0, "resets_at": null}`
+        # under BOTH `five_hour` and `seven_day` while its `limits` array says the identical
+        # thing. Reading the null as drift gapped a window whose only fault was never having
+        # been used. Above zero it is still malformed -- consumption means a window opened.
+        # An ABSENT `resets_at` and an explicit null are the same answer here, as they already
+        # are in the list shape: neither states a reset time, and the reader has never had a
+        # reason to tell "the vendor said null" from "the vendor said nothing" apart.
+        if percent > 0:
+            raise Malformed("field-malformed")
+        return Record(name, NO_CURRENT, percent=percent, freshness=freshness,
+                      note="no window opened yet", family=family, window=window)
     return _window_row(
-        name=f"{key} (flat)",
-        percent=_num(body.get("utilization"), 0.0, 100.0),
+        name=name,
+        percent=percent,
         resets=_from_iso(body.get("resets_at")),
         freshness=freshness, now=now, family=family, window=window,
     )
@@ -659,11 +674,23 @@ def _claude_row(entry: dict, freshness: str, now: datetime.datetime) -> Record:
         # Measured on this machine, not hypothesised: a `weekly_scoped` entry ships
         # `resets_at: null` with `is_active: false`. That is the vendor reporting a pool with no
         # current window, so gapping the whole profile over it would be a check its owner could
-        # never clear. An ACTIVE entry with no reset time is still malformed.
-        if active:
+        # never clear.
+        #
+        # `is_active` is NOT what decides this, and reading it as though it were gapped a
+        # perfectly readable account: a profile that has consumed nothing ships
+        # `{"kind": "session", "percent": 0, "resets_at": null, "is_active": true}` -- the
+        # binding pool of an account whose window has never OPENED, so there is nothing for the
+        # vendor to say a reset time about. Its flat twins carry the same `utilization: 0`
+        # with `resets_at: null`. CONSUMPTION is what makes the pair contradictory: an ACTIVE
+        # pool above zero has a window open by definition, and a window that is open and reports
+        # no reset time is malformed. Nothing an inactive entry says is newly refused here --
+        # tightening that arm too would gap a pool whose window merely closed, which no
+        # measurement here calls malformed.
+        if active and percent > 0:
             raise Malformed("field-malformed")
+        note = "inactive, no reset time reported" if not active else "no window opened yet"
         return Record(name, NO_CURRENT, percent=percent, freshness=freshness,
-                      note="inactive, no reset time reported", family=family, window=window)
+                      note=note, family=family, window=window)
     return _window_row(
         name=name,
         percent=percent,
@@ -1353,6 +1380,7 @@ WINDOW_ORDER = {"5h": 0, "weekly": 1}
 RESET_LABELS = {
     "inactive, no reset time reported": "inactive",
     "no reset time reported by the backend": "not reported",
+    "no window opened yet": "unopened",
 }
 
 
