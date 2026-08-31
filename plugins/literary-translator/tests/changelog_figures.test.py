@@ -367,27 +367,32 @@ def _local_dict_len(filename, funcname, varname):
 # would make this file the third copy of one number, which is the shape #580 was
 # filed about.
 FIGURES = [
-    # ROTATED TO 1.74.0, and DELIBERATELY EMPTY -- the same shape the 1.72.0
-    # rotation had, and for the same reason. The #795 entry states five
-    # numbers (5265 inline tags, 763 distinct entities, 97 of them in canon,
-    # 3300 lines, eleven scripts) and not one of them is re-derivable from
-    # this tree: they are field measurements taken on a private Hebrew→English
-    # corpus that this repository does not and will not contain. A row
-    # hardcoding one would compare a literal against itself and prove nothing,
-    # which is the shape #580 was filed about.
+    # ROTATED TO 1.74.1, and DELIBERATELY EMPTY -- the third rotation in a row
+    # to reach that answer honestly (1.72.0, 1.74.0), and for the same reason
+    # each time. The #802 entry states three numbers -- 76 false warnings, and
+    # 18 of one volume's 69 -- and not one of them is re-derivable from this
+    # tree: they are field measurements taken on a private fr→ru corpus this
+    # repository does not and will not contain. A row hardcoding one would
+    # compare a literal against itself and prove nothing, which is the shape
+    # #580 was filed about.
     #
-    # The 1.73.0 rows this replaces (PLUGIN_BUNDLE_MEMBERS and friends) are
-    # not lost coverage: the gate reads the NEWEST entry only, by design, so a
-    # released entry's figures are frozen by the release rather than re-checked
-    # forever. Restore rows here the moment an entry claims a number the tree
-    # can answer.
+    # The entry's remaining numerals are not measurements in this file's sense:
+    # the version, the issue number and the release date. Its one claim about
+    # THIS tree ("Four tests pin all four outcomes") is spelled out in words
+    # rather than digits, so there is no numeral for a row to declare -- and the
+    # claim itself is pinned by those tests existing and running, not by a count
+    # restated here.
+    #
+    # The gate reads the NEWEST entry only, by design: a released entry's
+    # figures are frozen by the release rather than re-checked forever. Restore
+    # rows here the moment an entry claims a number the tree can answer.
 ]
 
 # The version FIGURES was last rotated to. An empty FIGURES makes the loop in
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.74.0"
+FIGURES_VERSION = "1.74.1"
 
 
 def _newest_entry():

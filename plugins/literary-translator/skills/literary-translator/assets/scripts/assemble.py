@@ -420,7 +420,7 @@ def _profile_get(profile: dict, dotted_path: str):
 # load_converged_segments() below accepts such a record exactly like
 # status=="converged", so a plugin upgrade can no longer strand a finished
 # book. See final_audit.py's own `count_stale_previously_converged()`
-# (`final_audit.py:1811-1893`), the sibling carve-out this one is designed
+# (`final_audit.py:1852-1934`), the sibling carve-out this one is designed
 # to always agree with over the SAME materialized runs/ledger.json snapshot.
 # ---------------------------------------------------------------------------
 
@@ -746,7 +746,7 @@ def _stale_carveout_refusal_reason(
     silently becomes deliverable. And ONLY a clean ENOENT sentinel read
     blocks -- AMBIGUOUS (a dangling symlink, an EACCES) carves out exactly
     like PRESENT, mirroring final_audit.py's own
-    count_stale_previously_converged() (`final_audit.py:1811-1893`) so the
+    count_stale_previously_converged() (`final_audit.py:1852-1934`) so the
     two whole-project completeness signals never disagree about the same
     materialized snapshot. Reading an unreadable dotfile as "absent" would
     declare a finished book undeliverable, and unrecoverably so: the
