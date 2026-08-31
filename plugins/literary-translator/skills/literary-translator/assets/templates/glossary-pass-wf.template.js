@@ -1620,10 +1620,23 @@ function approvalRecordPrompt(batch, attempt) {
 // producing codex job has since written to the attempt path. Under offline they
 // are the attempt paths, because no review and therefore no snapshot exists
 // there. See batchStep()'s two ready-returns.
-function mergeBatchesPrompt(fragments, approvalRecords) {
-  const lines = []
-  lines.push("Effort: low. Mechanical glossary batch-merge only -- no canonicalization judgment.")
-  lines.push("Durable root: " + ROOT + ".")
+// THE MERGE COMMAND ITSELF (#800), split out of mergeBatchesPrompt() below so
+// that the one authority for this command line is a function returning the
+// command rather than a sentence containing it. Same split shape #723 used for
+// checkBatchCmdForPath(), and for the same reason: glossary_dispatch_driver.py
+// runs this command locally instead of asking an agent to run it, and a driver
+// that had to recover the command by parsing prose would be a second, drifting
+// copy of it. mergeBatchesPrompt() below splices this verbatim, so the
+// pipeline() path's emitted text is byte-identical to what it was.
+//
+// PLUGIN_ROOT_ARG is part of THIS builder's output, not of the sentence around
+// it (#412): --merge-batches is one of canon_validate.py's STAMPING modes (it
+// calls _stamp_generation_hash via run_merge_batches), so it is the one command
+// this template threads PLUGIN_ROOT_ARG into -- see the header comment's
+// {{PLUGIN_ROOT}} entry for why checkBatchCmd() and verifyMergedCmd() do not
+// get it. Putting it here rather than at the splice site is what makes the
+// asymmetry a property of the command builders, testable on its own.
+function mergeBatchesCmd(fragments, approvalRecords) {
   const cmdParts = [PY, ROOT + "/scripts/canon_validate.py", "--merge-batches"]
   for (let i = 0; i < fragments.length; i++) cmdParts.push(fragments[i])
   cmdParts.push("--research-mode", RESEARCH_MODE)
@@ -1662,12 +1675,14 @@ function mergeBatchesPrompt(fragments, approvalRecords) {
       cmdParts.push(approvalRecords[i])
     }
   }
-  // #412: --merge-batches is one of canon_validate.py's STAMPING modes (it
-  // calls _stamp_generation_hash via run_merge_batches), so it is the one
-  // command this template threads PLUGIN_ROOT_ARG into -- see the header
-  // comment's {{PLUGIN_ROOT}} entry for why checkBatchCmd() and
-  // glossaryVerifyPrompt() below do not get it.
-  lines.push("Run exactly this command and capture its single printed JSON line: " + cmdParts.join(" ") + PLUGIN_ROOT_ARG)
+  return cmdParts.join(" ") + PLUGIN_ROOT_ARG
+}
+
+function mergeBatchesPrompt(fragments, approvalRecords) {
+  const lines = []
+  lines.push("Effort: low. Mechanical glossary batch-merge only -- no canonicalization judgment.")
+  lines.push("Durable root: " + ROOT + ".")
+  lines.push("Run exactly this command and capture its single printed JSON line: " + mergeBatchesCmd(fragments, approvalRecords))
   lines.push("Return that printed line's content, as text, in your own response. Do not judge or re-decide anything yourself -- a separate, disk-independent step verifies this merge afterward and is what this run actually trusts.")
   return lines.join("\n")
 }
@@ -1680,14 +1695,22 @@ function mergeBatchesPrompt(fragments, approvalRecords) {
 // verifying canon.json against the attempt paths instead would re-open exactly
 // the hole the snapshot closes, since a fresh read of a mutable attempt path can
 // return bytes that were never merged.
+// THE VERIFY COMMAND ITSELF (#800), split out of glossaryVerifyPrompt() for the
+// same reason mergeBatchesCmd() is -- see that builder's comment. It carries NO
+// PLUGIN_ROOT_ARG: --verify-merged stamps nothing, so #412's redirect does not
+// apply to it, and that asymmetry against mergeBatchesCmd() is deliberate.
+function verifyMergedCmd(fragments) {
+  const cmdParts = [PY, ROOT + "/scripts/canon_validate.py", "--verify-merged"]
+  for (let i = 0; i < fragments.length; i++) { cmdParts.push("--batch", fragments[i]) }
+  cmdParts.push("--research-mode", RESEARCH_MODE, "--expect-source-forms-file", MANIFEST_ALL_PATH)
+  return cmdParts.join(" ")
+}
+
 function glossaryVerifyPrompt(fragments) {
   const lines = []
   lines.push("Effort: low. Mechanical disk-independent merge verification only -- do not judge the comparison yourself.")
   lines.push("Durable root: " + ROOT + ".")
-  const cmdParts = [PY, ROOT + "/scripts/canon_validate.py", "--verify-merged"]
-  for (let i = 0; i < fragments.length; i++) { cmdParts.push("--batch", fragments[i]) }
-  cmdParts.push("--research-mode", RESEARCH_MODE, "--expect-source-forms-file", MANIFEST_ALL_PATH)
-  lines.push("Run exactly this command and read its one line of JSON output: " + cmdParts.join(" "))
+  lines.push("Run exactly this command and read its one line of JSON output: " + verifyMergedCmd(fragments))
   lines.push("Return a structured result with exactly these fields: verified (the command's own verified value), and, only when the command's own output actually includes it, missing (the command's own missing array, copied verbatim). Do not add, omit, or alter any value the command printed.")
   return lines.join("\n")
 }
