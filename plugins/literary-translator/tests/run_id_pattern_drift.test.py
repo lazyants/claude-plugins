@@ -98,6 +98,13 @@ EXPECTED_COPIES = frozenset(
         # to relocate a claim path out of the durable root. Registered here
         # deliberately, and byte-identical to the owner's literal.
         ("claim_record.py", "_RUN_ID_DIR_RE"),
+        # #800: glossary_dispatch_driver.py takes --run-id and builds
+        # glossary/runs/<RUN_ID>/ paths AND scopes its verdict state document by
+        # that id, so it carries the owner's rejection for the same reason
+        # claim_record.py does -- a run id that escapes the shape can relocate a
+        # path out of the durable root, and here it can also make one run's
+        # approval answer another run's merge. Byte-identical to the owner's.
+        ("glossary_dispatch_driver.py", "_RUN_ID_RE"),
     }
 )
 
@@ -198,9 +205,9 @@ def test_the_enumeration_found_a_plausible_number_of_copies():
     and the roster check would compare two empty sets if the roster were
     derived the same way. Only a minimum count catches that."""
     patterns = _all_run_id_patterns()
-    assert len(patterns) >= 5, (
+    assert len(patterns) >= 7, (
         f"the ast enumeration found only {len(patterns)} RUN_ID pattern(s) "
-        f"({sorted(patterns)}). At least 5 are known to exist, so this is an "
+        f"({sorted(patterns)}). At least 7 are known to exist, so this is an "
         f"enumeration failure -- a wrong scripts directory, a parse that "
         f"silently returned nothing -- not a clean result."
     )

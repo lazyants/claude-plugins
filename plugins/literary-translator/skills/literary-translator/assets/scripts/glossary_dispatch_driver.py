@@ -530,13 +530,25 @@ def _atomic_write_json(path: Path, obj) -> None:
         raise
 
 
-def validate_run_id(name: str) -> "str | None":
+def validate_run_id(name) -> "str | None":
     """Returns a refusal string, or None when the id is safe to splice into a
-    filesystem path. Allowlist, never a denylist of shell metacharacters."""
-    if not name:
-        return "run id is empty"
+    filesystem path. Allowlist, never a denylist of shell metacharacters.
+
+    Every refusal below is resume_setup.py's, which OWNS this contract, and the
+    set has to match its DECISIONS rather than merely its regex. The regex alone
+    admits `a..b`, and this driver's run id names both `glossary/runs/<id>/` and
+    the scope of the verdict state document -- so a value this accepts and the
+    owner refuses produces a run directory the owner's own candidate scan then
+    rejects, aborting a resume before it reaches any good candidate behind it.
+    `tests/run_id_pattern_drift.test.py` compares the two answers directly."""
+    if not isinstance(name, str) or not name:
+        return "run id must be a non-empty string"
     if not _RUN_ID_RE.fullmatch(name):
         return f"unsafe run id: {name!r}"
+    if name in (".", ".."):
+        return f"run id must not be '.' or '..'; got {name!r}"
+    if ".." in name:
+        return f"run id must not contain '..'; got {name!r}"
     return None
 
 
