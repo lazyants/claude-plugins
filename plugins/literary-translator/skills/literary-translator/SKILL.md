@@ -1700,6 +1700,10 @@ python3 ${durable_root}/scripts/glossary_dispatch_driver.py \
   --resumed-batch-indices '<the same array as {{RESUMED_BATCH_INDICES}}>'
 ```
 
+There is deliberately no retry knob: the ladder bound is READ from the template's
+own `MAX_CITATION_RETRIES`, so the driver and the `pipeline()` fallback cannot
+climb different numbers of rungs.
+
 `--plugin-root` and `--verdict-dir` are both REQUIRED and both are refusals, not
 conveniences. The driver EXECUTES the template's builders, and
 `${durable_root}/` is writable by the very codex jobs it dispatches, so it will
@@ -1714,11 +1718,16 @@ outright, as is one that is not owned by you and private.
    each with `agentType: "literary-translator:citation-judge"` and that entry's
    `judgePrompt` verbatim. That parallelism is the point; a serial loop throws
    the saving away.
-2. Write the replies to a file as
+2. Write the replies to a file **inside `--verdict-dir`** as
    `[{"batch": i, "attempt": n, "nonce": "<the entry's own nonce>", "reply": "<the
    agent's full reply>"}, ...]` and re-invoke with `--record-verdicts <that file>`
-   plus the same `--verdict-dir`, `--plugin-root` and `--run-id`.
-3. Repeat while `needs_judge[]` comes back non-empty. The run is done when the
+   plus the same `--verdict-dir`, `--plugin-root` and `--run-id`. A path outside
+   that directory is refused: the file carries the nonces that admit an approval,
+   so it is authorization input, and one written under `${durable_root}` could be
+   rewritten by a still-running codex job before it is read.
+3. Repeat while `needs_judge[]` comes back non-empty. A REJECTED batch comes
+   back in that list at the next attempt, with a fresh nonce — the recording
+   invocation advances the ladder itself, so there is nothing extra to do. The run is done when the
    output carries `"merged": true`; `not_ready[]` names any batch that failed and
    why, with the same `reason` strings the Workflow path uses.
 

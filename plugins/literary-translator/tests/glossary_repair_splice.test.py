@@ -43,6 +43,12 @@ def mod(tmp_path):
     return module
 
 
+def _dumps_entry(evidence_path):
+    import json
+    return json.dumps({"entries": [{"item_index": 0, "outcome": "fetched",
+                                    "evidence_file": evidence_path}]})
+
+
 def row(form, basis="established", **kw):
     return {"source_form": form, "basis": basis, "disposition": "accepted", **kw}
 
@@ -85,11 +91,38 @@ def test_fetched_rows_are_neither_repaired_nor_failed(mod):
     assert out == {"budget_failed": [], "repairable": []}
 
 
+class _TattlingEntry(dict):
+    """A dict that RECORDS every key anyone looks up.
+
+    Asserting on the returned pairs proves only what came back; an implementation
+    could consult `source` or `final_origin`, branch on it, discard it, and return
+    an identical shape. The #347 boundary is about what is READ, so the test has
+    to watch reads."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.touched = set()
+
+    def get(self, key, default=None):
+        self.touched.add(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self.touched.add(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        self.touched.add(key)
+        return super().__contains__(key)
+
+
 def test_outcome_read_takes_only_two_fields(mod, tmp_path):
-    """THE #347 BOUNDARY, as an assertion. Everything else in an entry is either
-    model-authored (source, source_form, basis), server-authored (final_origin,
-    chain, content_type) or the retrieved bytes themselves (evidence_file). This
-    process chooses what to fetch next, so it must read none of them."""
+    """THE #347 BOUNDARY, as an assertion about ACCESS rather than about shape.
+
+    Everything else in an entry is either model-authored (source, source_form,
+    basis), server-authored (final_origin, chain, content_type) or the retrieved
+    bytes themselves (evidence_file). This process chooses what to fetch next, so
+    it must read none of them."""
     index = tmp_path / "index.json"
     index.write_text(
         '{"entries": [{"item_index": 0, "outcome": "fetched",'
@@ -98,8 +131,48 @@ def test_outcome_read_takes_only_two_fields(mod, tmp_path):
         ' "evidence_file": "ev_000.txt", "content_type": "text/html",'
         ' "bytes": 12}]}', encoding="utf-8")
     pairs = mod.read_outcome_pairs(index)
-    assert pairs == [{"item_index": 0, "outcome": "fetched"}], (
-        "read_outcome_pairs must surface item_index and outcome and nothing else")
+    assert pairs == [{"item_index": 0, "outcome": "fetched"}]
+
+    # Re-run the same parse over a watching entry to see which keys are consulted.
+    entry = _TattlingEntry({"item_index": 0, "outcome": "fetched",
+                            "source": "https://evil.test/x", "source_form": "A",
+                            "final_origin": "https://elsewhere.test",
+                            "chain": ["a", "b"], "evidence_file": "ev_000.txt",
+                            "content_type": "text/html", "bytes": 12})
+    import json as _json
+    real_load = _json.load
+    try:
+        _json.load = lambda fh: {"entries": [entry]}
+        mod.read_outcome_pairs(index)
+    finally:
+        _json.load = real_load
+    forbidden = entry.touched - {"item_index", "outcome"}
+    assert not forbidden, (
+        f"read_outcome_pairs consulted {sorted(forbidden)}; the actor that "
+        f"chooses what to fetch next must read only fields fetch_citation.py "
+        f"itself authored")
+
+
+def test_no_evidence_body_is_ever_opened(mod, tmp_path):
+    """The other half of A4: naming an evidence_file must not lead to opening it."""
+    evidence = tmp_path / "ev_000.txt"
+    evidence.write_text("attacker-authored page body", encoding="utf-8")
+    index = tmp_path / "index.json"
+    index.write_text(_dumps_entry(str(evidence)), encoding="utf-8")
+    opened = []
+    import builtins
+    real_open = builtins.open
+
+    def watching_open(file, *a, **kw):
+        opened.append(str(file))
+        return real_open(file, *a, **kw)
+
+    builtins.open = watching_open
+    try:
+        mod.read_outcome_pairs(index)
+    finally:
+        builtins.open = real_open
+    assert str(evidence) not in opened, "an evidence body was opened"
 
 
 # ---------------------------------------------------------------------------

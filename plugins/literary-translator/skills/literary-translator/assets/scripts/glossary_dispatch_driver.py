@@ -833,8 +833,12 @@ def resolve_verdict_dir(raw: "str | None", durable_root: Path) -> Path:
             "that the codex jobs this driver dispatches cannot write.",
             exit_code=2,
         )
-    path = Path(raw).absolute()
-    droot = durable_root.absolute()
+    # RESOLVED, not merely absolute: a lexical check compares the path as typed,
+    # so a verdict dir whose ANCESTOR is a symlink into the durable root looks
+    # outside it and is not. resolve() follows every component, which makes the
+    # containment test a fact about the filesystem rather than about the string.
+    path = Path(raw).resolve(strict=False)
+    droot = durable_root.resolve(strict=False)
     try:
         path.relative_to(droot)
     except ValueError:
@@ -902,15 +906,19 @@ def read_pending(verdict_dir: Path) -> dict:
     try:
         fd = _open_channel_file(verdict_dir, PENDING_FILENAME, os.O_RDONLY)
     except FileNotFoundError:
-        return {"entries": []}
+        return {}
     with os.fdopen(fd, "r", encoding="utf-8") as fh:
         try:
             obj = json.load(fh)
         except ValueError:
-            fatal("the pending state file is not readable JSON -- refusing to "
-                  "guess which batches were awaiting a judge", exit_code=2)
-    if not isinstance(obj, dict) or not isinstance(obj.get("entries"), list):
-        fatal("the pending state file has an unrecognised shape", exit_code=2)
+            fatal("the state file is not readable JSON -- refusing to guess "
+                  "which batches were awaiting a judge", exit_code=2)
+    # Shape is load_state()'s business, not this reader's: it is the layer that
+    # knows which run the document must belong to, and a document from another
+    # run is RESET rather than refused. Checking a shape here would turn a
+    # reusable directory into a fatal error.
+    if not isinstance(obj, dict):
+        fatal("the state file does not hold a JSON object", exit_code=2)
     return obj
 
 
@@ -938,9 +946,6 @@ def new_nonce() -> str:
     return secrets.token_hex(16)
 
 
-def pending_key(batch_index: int, attempt: int) -> str:
-    return f"{batch_index}:{attempt}"
-
 
 # ---------------------------------------------------------------------------
 # RUNNING THE TEMPLATE'S COMMANDS
@@ -967,13 +972,21 @@ def run_template_cmd(cmd: str, *, timeout: float) -> "tuple[int, str, str]":
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
-def resolve_companion() -> str:
+def resolve_companion(node_bin: str = "node") -> str:
     """The installed codex-companion.mjs path, via the shipped resolver. Run from
     the DURABLE copy, exactly as segment_dispatch_driver.py does: a self-anchored
-    driver has no plugin root to run the resolver from."""
+    driver has no plugin root to run the resolver from.
+
+    BOTH arguments are part of the resolver's shipped CLI contract, not optional
+    politeness: `--durable-root` is `required=True` there, so omitting it makes the
+    resolver exit on its own argparse error and every dispatch fail before it
+    starts. `--node` decides which node binary the resolver probes the candidate
+    companion with, so passing this driver's own `--node` keeps the probe and the
+    later launch talking about the same runtime."""
     _refuse_unless_executable_leaf(RESOLVE_COMPANION_SCRIPT, "resolve_codex_companion.py")
     proc = subprocess.run(
-        [sys.executable, str(RESOLVE_COMPANION_SCRIPT)],
+        [sys.executable, str(RESOLVE_COMPANION_SCRIPT),
+         "--durable-root", str(DURABLE_ROOT), "--node", node_bin],
         capture_output=True, text=True, timeout=120,
     )
     if proc.returncode != 0:
@@ -1351,7 +1364,6 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
     #     CONTENT rejection rather than a retrieval one.
     nonce = new_nonce()
     entry = {
-        "key": pending_key(idx, attempt),
         "durable_root": str(ctx.durable_root),
         "run_id": ctx.subst["run_id"],
         "batch": idx,
@@ -1434,85 +1446,211 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
     return {"state": "repaired", "attempt": attempt + 1}
 
 
-def drive_batch(ctx: Ctx, batch: dict, resumed_indices: "set[int]") -> dict:
-    """Runs one batch's ladder until it needs a judge, or ends.
+# ---------------------------------------------------------------------------
+# THE RUN-SCOPED STATE RECORD, and the ONE transition function over it.
+#
+# The pass spans TWO driver invocations -- one prepares evidence and stops, the
+# session dispatches judges, another consumes the replies -- so every fact that
+# has to survive between them lives in ONE document, scoped to one durable_root
+# and one RUN_ID, and every path advances a batch through the SAME loop.
+#
+# It is one record and one loop because the alternative was measured and failed
+# in three ways at once: a rejection recorded on the second invocation had
+# nowhere to advance to and stranded the batch, so the shipped three-attempt
+# ladder could never run; a repair's own second PREPARE returned an intermediate
+# state straight to a caller that understood only two of them; and readiness
+# persisted with no run scoping, so a stale approval from an earlier run could
+# satisfy a later run's merge admission. All three are one root cause: half the
+# state machine lived in memory on one invocation.
+#
+# A batch is in exactly one status: pending (not yet driven), awaiting_judge
+# (the session owes a verdict), ready (approved, recorded, holds its mergePath),
+# or failed (terminal, carries its reason).
+# ---------------------------------------------------------------------------
 
-    The ladder is bounded by MAX_CITATION_RETRIES exactly as the template's is:
-    attempts 0..MAX_CITATION_RETRIES, and a repair reserves the next rung rather
-    than adding one."""
+STATE_VERSION = 1
+
+
+def fresh_state(durable_root: Path, run_id: str) -> dict:
+    return {"version": STATE_VERSION, "durable_root": str(durable_root),
+            "run_id": run_id, "batches": {}}
+
+
+def load_state(verdict_dir: Path, durable_root: Path, run_id: str) -> dict:
+    """Reads the state document, or starts a fresh one.
+
+    A document belonging to another root or run is RESET, not merged and not
+    refused. Reusing one verdict directory across runs is an ordinary operator
+    habit, so refusing would be hostile; merging would be worse than either --
+    that is exactly how an approval from a previous run reaches a later run's
+    merge. Resetting makes a reused directory behave like a fresh one."""
+    doc = read_pending(verdict_dir)
+    if not doc:
+        return fresh_state(durable_root, run_id)
+    if doc.get("version") != STATE_VERSION or \
+            doc.get("durable_root") != str(durable_root) or \
+            doc.get("run_id") != run_id:
+        log(f"verdict-dir holds state for run {doc.get('run_id')!r} under "
+            f"{doc.get('durable_root')!r}; this run is {run_id!r} under "
+            f"{durable_root} -- discarding it rather than mixing two runs")
+        return fresh_state(durable_root, run_id)
+    if not isinstance(doc.get("batches"), dict):
+        fatal("the state document's batches map has an unrecognised shape",
+              exit_code=2)
+    return doc
+
+
+def save_state(verdict_dir: Path, state: dict) -> None:
+    write_pending(verdict_dir, state)
+
+
+def batch_state(state: dict, index: int) -> dict:
+    return state["batches"].setdefault(
+        str(index), {"attempt": 0, "status": "pending", "rejection_reason": None})
+
+
+def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
+                          resumed_indices: "set[int]") -> dict:
+    """Drives ONE batch until it is awaiting a judge, ready, or terminal.
+
+    THE ONLY transition function. Both invocations enter here, so a batch resumed
+    after a rejection takes exactly the path a freshly driven one takes, and every
+    intermediate state -- needs_repair, evidence_failed, a repair's own second
+    PREPARE -- is consumed by this loop rather than escaping to a caller that
+    would read it as a failure. The bound is the template's MAX_CITATION_RETRIES."""
     idx = batch["index"]
-    attempt = 0
-    rejection_reason = None
+    st = batch_state(state, idx)
+    attempt = st["attempt"]
+    rejection_reason = st.get("rejection_reason")
+
     while True:
+        if attempt > ctx.max_citation_retries:
+            st.update(status="failed", attempt=attempt,
+                      reason="citation-review-exhausted",
+                      attemptsUsed=ctx.max_citation_retries + 1,
+                      lastRejection=rejection_reason)
+            return st
+
         result = advance_batch(ctx, batch, attempt,
                                resumed=idx in resumed_indices,
                                rejection_reason=rejection_reason)
-        state = result["state"]
+        kind = result["state"]
 
-        if state in ("awaiting_judge", "ready", "failed"):
-            return result
+        if kind == "awaiting_judge":
+            st.update(status="awaiting_judge", attempt=attempt,
+                      rejection_reason=rejection_reason,
+                      pending=result["pending"],
+                      judgePrompt=result["judgePrompt"],
+                      snapshotPath=result["snapshotPath"])
+            return st
 
-        if state == "needs_repair":
-            # TERMINAL RUNG: there is no attempt+1 to reserve, so repair is not
-            # dispatched at all. Without this the repair would create a forbidden
-            # attempt beyond the ladder and break the judge cap the driver
-            # enforces up front.
+        if kind == "ready":                       # offline only
+            st.update(status="ready", attempt=attempt,
+                      mergePath=result["mergePath"],
+                      citationReview=result.get("citationReview"))
+            return st
+
+        if kind == "failed":
+            # "state" is this function's own vocabulary and "attempt"/"status"
+            # are set explicitly; spreading any of them collides with the keyword.
+            st.update(status="failed", attempt=attempt, **{
+                k: v for k, v in result.items()
+                if k not in ("state", "attempt", "status")})
+            return st
+
+        if kind == "needs_repair":
+            # TERMINAL RUNG: no attempt+1 exists to reserve, so no repair is
+            # dispatched and the batch exhausts here. Dispatching one would create
+            # an attempt outside the ladder and break the judge cap.
             if attempt >= ctx.max_citation_retries:
-                log(f"batch {idx}: unretrievable citation(s) at the terminal "
-                    f"attempt {attempt}; no repair is dispatched")
-                return {"state": "failed", "batchIndex": idx, "attempt": attempt,
-                        "reason": "citation-review-exhausted",
-                        "attemptsUsed": attempt + 1,
-                        "lastRejection": "citations did not retrieve at the final "
-                                         "attempt: " + repr(result["failedPositions"])}
+                st.update(status="failed", attempt=attempt,
+                          reason="citation-review-exhausted",
+                          attemptsUsed=attempt + 1,
+                          lastRejection="citations did not retrieve at the final "
+                                        "attempt: " + repr(result["failedPositions"]))
+                return st
             repaired = run_repair(ctx, batch, attempt, result["failedPositions"],
                                   Path(result["snapshotPath"]))
-            # Either way the batch moves to the SAME reserved rung: a valid repair
-            # lands its spliced fragment there, an invalid one regenerates there.
+            # The rung is RESERVED either way: a valid repair writes its spliced
+            # fragment there, an invalid one regenerates there. Never attempt+2.
             attempt += 1
+            st["attempt"] = attempt
             if repaired["state"] == "repair_invalid":
                 rejection_reason = (
                     "the previous attempt's citations could not be retrieved and a "
-                    "per-item repair could not be applied")
-                continue
-            # Repaired in place: re-approve and re-fetch the spliced fragment, with
-            # a fresh PREPARE nonce, before any judge sees it.
-            built = ctx.build([{"key": "fragment", "fn": "fragmentPath",
-                                "args": [idx, attempt]}])
-            return prepare_and_hand_back(ctx, batch, attempt,
-                                         Path(built["fragment"]))
+                    "per-item repair could not be applied (" +
+                    str(repaired.get("reason")) + ")")
+            else:
+                # Repaired in place. Re-approve and re-fetch through THIS loop, so
+                # a replacement URL that also fails to retrieve reserves the next
+                # rung like any other retrieval failure instead of escaping.
+                rejection_reason = None
+            continue
 
-        if state == "evidence_failed":
+        if kind == "evidence_failed":
             if attempt >= ctx.max_citation_retries:
-                return {"state": "failed", "batchIndex": idx, "attempt": attempt,
-                        "reason": "citation-review-exhausted",
-                        "attemptsUsed": attempt + 1,
-                        "lastRejection": result.get("reason")}
+                st.update(status="failed", attempt=attempt,
+                          reason="citation-review-exhausted",
+                          attemptsUsed=attempt + 1,
+                          lastRejection=result.get("reason"))
+                return st
             rejection_reason = (
                 "the previous attempt's citation evidence could not be prepared: "
                 + str(result.get("reason")))
             attempt += 1
+            st["attempt"] = attempt
             continue
 
-        raise DriverError(f"internal error: unhandled batch state {state!r}")
+        raise DriverError(f"internal error: unhandled batch state {kind!r}")
+
+
+def drive_all(ctx: Ctx, batches: list, state: dict,
+              resumed_indices: "set[int]") -> None:
+    """Advances every batch not already settled or awaiting a judge."""
+    for batch in batches:
+        st = batch_state(state, batch["index"])
+        if st["status"] in ("ready", "failed", "awaiting_judge"):
+            continue
+        try:
+            advance_until_blocked(ctx, batch, state, resumed_indices)
+        except DriverError as exc:
+            st.update(status="failed", reason=str(exc), **exc.extra)
 
 
 # ---------------------------------------------------------------------------
 # CONSUMING VERDICTS
 # ---------------------------------------------------------------------------
 
-def record_verdicts(ctx: Ctx, verdicts_path: Path) -> dict:
-    """Consumes the session's judge replies.
+def record_verdicts(ctx: Ctx, verdicts_path: Path, state: dict) -> dict:
+    """Consumes the session's judge replies INTO the state record.
 
-    A verdict is refused unless it matches its pending entry on ALL of
-    durable_root, run_id, batch, attempt, nonce and the snapshot digest RE-HASHED
-    now -- and the nonce is consumed, so the same verdict cannot be applied twice.
-    The reply itself is read with the TEMPLATE's own rejectedAnywhere +
-    sentinelVerdict, never a Python re-implementation of them: those two carry the
-    containment-guard-then-positive-proof discipline that #228/#308 exist for, and
-    a second reader would be a second, drifting set of rules."""
+    A verdict is admitted only when it matches its batch's awaiting entry on all
+    of: this run's durable_root and RUN_ID (which the document itself is scoped
+    to), the batch and attempt, the nonce minted at PREPARE time and not yet
+    consumed, and the snapshot digest RE-HASHED now. The reply is read with the
+    TEMPLATE's own rejectedAnywhere + sentinelVerdict, never a Python
+    re-implementation -- those carry #228/#308's containment-guard-then-positive
+    -proof discipline, and a second reader would be a second set of rules.
+
+    A REJECTION IS A TRANSITION, not a note: it clears the awaiting status and
+    advances the batch to the next rung carrying the reviewer's own prose, and the
+    caller re-enters the drive loop, so the shipped three-attempt ladder actually
+    runs. Recording `approved: false` and stopping stranded the batch with nothing
+    pending and nothing owed."""
+    # The verdict file carries the nonces that admit an approval, so it belongs in
+    # the same session-owned directory as the state it answers -- not at an
+    # arbitrary path, which could sit under durable_root where a still-running
+    # codex job could rewrite it before it is read.
+    resolved = verdicts_path.resolve(strict=False)
+    if resolved.parent != ctx.verdict_dir.resolve(strict=False):
+        fatal(
+            f"--record-verdicts must name a file inside --verdict-dir "
+            f"({ctx.verdict_dir}); it carries the nonces that admit an approval, "
+            f"so it is authorization input rather than an ordinary argument",
+            exit_code=2, given=str(resolved),
+        )
     try:
-        with open(verdicts_path, "r", encoding="utf-8") as fh:
+        with open(resolved, "r", encoding="utf-8") as fh:
             supplied = json.load(fh)
     except (OSError, ValueError) as exc:
         fatal(f"could not read --record-verdicts file: {exc!r}", exit_code=2)
@@ -1520,47 +1658,34 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path) -> dict:
         fatal("--record-verdicts must hold a JSON array of "
               "{batch, attempt, nonce, reply} objects", exit_code=2)
 
-    pending = read_pending(ctx.verdict_dir)
-    by_key = {e["key"]: e for e in pending["entries"] if isinstance(e, dict)}
-    results, refusals = [], []
-
+    admitted, refusals = [], []
     for item in supplied:
         if not isinstance(item, dict):
             refusals.append({"reason": "verdict entry is not an object"})
             continue
         batch_i, attempt = item.get("batch"), item.get("attempt")
-        # Shape-check BEFORE the key is formed. A verdict file is written by the
-        # session, so a missing or non-integer field is an ordinary malformed
-        # input, not an impossible one -- and pending_key() would otherwise build
-        # a key like "None:None" that could never match and would report itself
-        # as "no pending entry", hiding the real defect behind a plausible one.
         if not isinstance(batch_i, int) or not isinstance(attempt, int):
             refusals.append({"batch": batch_i, "attempt": attempt,
                              "reason": "verdict entry has a non-integer batch or "
                                        "attempt"})
             continue
-        key = pending_key(batch_i, attempt)
-        entry = by_key.get(key)
-        if entry is None:
+        st = state["batches"].get(str(batch_i))
+        if st is None or st.get("status") != "awaiting_judge":
             refusals.append({"batch": batch_i, "attempt": attempt,
-                             "reason": "no pending entry -- this batch/attempt is "
-                                       "not awaiting a judge in this run"})
+                             "reason": "this batch is not awaiting a judge in "
+                                       "this run"})
             continue
-        if entry.get("consumed"):
+        entry = st.get("pending") or {}
+        if st.get("attempt") != attempt:
             refusals.append({"batch": batch_i, "attempt": attempt,
-                             "reason": "this verdict's nonce was already consumed"})
+                             "reason": f"this batch awaits a verdict for attempt "
+                                       f"{st.get('attempt')}"})
             continue
-        if item.get("nonce") != entry["nonce"]:
+        if item.get("nonce") != entry.get("nonce"):
             refusals.append({"batch": batch_i, "attempt": attempt,
-                             "reason": "nonce mismatch -- the verdict does not name "
-                                       "the PREPARE it is answering"})
+                             "reason": "nonce mismatch -- the verdict does not "
+                                       "name the PREPARE it is answering"})
             continue
-        if entry["durable_root"] != str(ctx.durable_root) or \
-                entry["run_id"] != ctx.subst["run_id"]:
-            refusals.append({"batch": batch_i, "attempt": attempt,
-                             "reason": "pending entry belongs to another run or root"})
-            continue
-
         snapshot = Path(ctx.build([{"key": "p", "fn": "approvedPath",
                                     "args": [batch_i, attempt]}])["p"])
         try:
@@ -1569,14 +1694,11 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path) -> dict:
             refusals.append({"batch": batch_i, "attempt": attempt,
                              "reason": f"the approved snapshot is unreadable: {exc!r}"})
             continue
-        if current_digest != entry["snapshot_sha256"]:
-            # The bytes moved under the verdict. This is the resume-replay case:
-            # same run id, same paths, regenerated content.
+        if current_digest != entry.get("snapshot_sha256"):
             refusals.append({"batch": batch_i, "attempt": attempt,
-                             "reason": "the approved snapshot's bytes changed since "
-                                       "the judge prompt was rendered"})
+                             "reason": "the approved snapshot's bytes changed "
+                                       "since the judge prompt was rendered"})
             continue
-
         reply = item.get("reply")
         if not isinstance(reply, str):
             refusals.append({"batch": batch_i, "attempt": attempt,
@@ -1591,70 +1713,81 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path) -> dict:
             {"key": "detail", "fn": "rejectionDetail",
              "args": [reply, entry["ok_sentinel"], entry["fail_sentinel"]]},
         ])
-        entry["consumed"] = _utc_now_iso()
 
         if read["contained"] or not read["verdict"]:
-            results.append({"batch": batch_i, "attempt": attempt,
-                            "approved": False, "rejection": read["detail"]})
+            st.pop("pending", None)
+            st.pop("judgePrompt", None)
+            st.update(status="pending", attempt=attempt + 1,
+                      rejection_reason=read["detail"])
+            admitted.append({"batch": batch_i, "attempt": attempt,
+                             "approved": False, "rejection": read["detail"]})
             continue
 
-        record = ctx.build([{"key": "cmd", "fn": "recordApprovalCmd",
-                             "args": [batch_i, attempt]}])["cmd"]
-        code, _out, err = run_template_cmd(record, timeout=600)
-        if code != 0:
-            # The review DID approve; the bookkeeping write failed. Refuse the
-            # merge rather than merging an approved set nobody can reconstruct --
-            # the same direction the template's own unrecordedBatches gate takes.
-            results.append({"batch": batch_i, "attempt": attempt, "approved": True,
-                            "approvalRecorded": False,
-                            "detail": (err or "")[-300:]})
-            continue
+        record_cmd = ctx.build([{"key": "cmd", "fn": "recordApprovalCmd",
+                                 "args": [batch_i, attempt]}])["cmd"]
+        code, _out, err = run_template_cmd(record_cmd, timeout=600)
         record_path = ctx.build([{"key": "p", "fn": "approvalRecordPath",
                                   "args": [batch_i, attempt]}])["p"]
-        ready_entry = {"batchIndex": batch_i, "attempt": attempt,
-                       "mergePath": str(snapshot), "approvalRecordPath": record_path,
-                       "approvalRecorded": True, "citationReview": "approved"}
-        pending.setdefault("ready", [])
-        pending["ready"] = [r for r in pending["ready"]
-                            if r.get("batchIndex") != batch_i] + [ready_entry]
-        results.append({"batch": batch_i, "attempt": attempt, "approved": True,
-                        "approvalRecorded": True, "mergePath": str(snapshot)})
+        if code != 0:
+            # The review DID approve; the bookkeeping write failed. The batch is
+            # NOT ready: merging an approved set nobody can reconstruct is the
+            # guesswork #723 exists to remove.
+            st.pop("pending", None)
+            st.pop("judgePrompt", None)
+            st.update(status="failed", attempt=attempt,
+                      reason="approval-record-write-failed",
+                      detail=(err or "")[-300:])
+            admitted.append({"batch": batch_i, "attempt": attempt,
+                             "approved": True, "approvalRecorded": False})
+            continue
 
-    pending["entries"] = list(by_key.values())
-    write_pending(ctx.verdict_dir, pending)
-    return {"recorded": results, "refused": refusals,
-            "ready": pending.get("ready", [])}
+        st.pop("pending", None)
+        st.pop("judgePrompt", None)
+        st.update(status="ready", attempt=attempt, mergePath=str(snapshot),
+                  approvalRecordPath=record_path, approvalRecorded=True,
+                  citationReview="approved")
+        admitted.append({"batch": batch_i, "attempt": attempt, "approved": True,
+                         "approvalRecorded": True, "mergePath": str(snapshot)})
+
+    return {"recorded": admitted, "refused": refusals}
 
 
 # ---------------------------------------------------------------------------
 # MERGE -- the one serialized write into canon.json.
 # ---------------------------------------------------------------------------
 
-def merge_and_verify(ctx: Ctx, ready: list) -> dict:
-    """One --merge-batches over every ready batch in index order, then the
+def merge_and_verify(ctx: Ctx, batches: list, state: dict) -> dict:
+    """One --merge-batches over THIS RUN's ready batches in index order, then the
     disk-independent --verify-merged.
 
-    All-or-nothing, exactly as the Workflow's is: merging some batches while
-    dropping one would freeze a partial canon and leave the dropped candidates
-    looking like they were never researched.
+    Admission is EXACT membership of this run's own batch list, never a subset
+    test over whatever the state document happens to hold: `expected <= have`
+    would admit a merge whose ready set came from somewhere other than this run,
+    and --verify-merged cannot catch it because it checks that every manifest form
+    is PRESENT, not that no extra fragment was merged.
 
-    Refused outright if any approved batch lacks its approval record.
-    canon_validate.py's --approval-records reader can only make the merge FAIL,
-    never permit anything, and this gate keeps that direction: a batch whose
-    record could not be written does not get merged on the strength of this
-    driver having seen an approval."""
-    unrecorded = [r["batchIndex"] for r in ready
-                  if r.get("citationReview") != "skipped-offline"
-                  and not r.get("approvalRecorded")]
+    All-or-nothing, exactly as the Workflow's is."""
+    expected = [b["index"] for b in batches]
+    ready = []
+    for idx in expected:
+        st = state["batches"].get(str(idx))
+        if not st or st.get("status") != "ready":
+            return {"merged": False, "reason": "awaiting-more-verdicts",
+                    "awaiting": [i for i in expected
+                                 if (state["batches"].get(str(i)) or {}).get("status")
+                                 != "ready"]}
+        ready.append((idx, st))
+
+    unrecorded = [idx for idx, st in ready
+                  if st.get("citationReview") != "skipped-offline"
+                  and not st.get("approvalRecorded")]
     if unrecorded:
         return {"merged": False, "reason": "approval-records-missing",
                 "unrecordedBatches": sorted(unrecorded)}
 
-    ordered = sorted(ready, key=lambda r: r["batchIndex"])
-    fragments = [r["mergePath"] for r in ordered]
-    records = [r["approvalRecordPath"] for r in ordered
-               if r.get("approvalRecordPath")]
-
+    fragments = [st["mergePath"] for _i, st in ready]
+    records = [st["approvalRecordPath"] for _i, st in ready
+               if st.get("approvalRecordPath")]
     built = ctx.build([
         {"key": "merge", "fn": "mergeBatchesCmd", "args": [fragments, records]},
         {"key": "verify", "fn": "verifyMergedCmd", "args": [fragments]},
@@ -1663,10 +1796,6 @@ def merge_and_verify(ctx: Ctx, ready: list) -> dict:
     if code != 0:
         return {"merged": False, "reason": "merge-failed",
                 "detail": (err or out or "")[-600:]}
-
-    # Disk-independent: --verify-merged fresh-reads canon.json and every listed
-    # fragment rather than trusting the merge call's own claim (#88). Run against
-    # the SAME mergePath values, in the same order.
     code, out, err = run_template_cmd(built["verify"], timeout=1800)
     if code != 0:
         return {"merged": False, "reason": "verify-failed",
@@ -1677,30 +1806,53 @@ def merge_and_verify(ctx: Ctx, ready: list) -> dict:
         return {"merged": False, "reason": "verify-unreadable"}
     if verified.get("verified") is not True or verified.get("missing"):
         return {"merged": False, "reason": "verify-refused", "verify": verified}
-    return {"merged": True, "batches": [r["batchIndex"] for r in ordered]}
+    return {"merged": True, "batches": expected}
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
+_MAX_RETRIES_RE = re.compile(r"^const MAX_CITATION_RETRIES = (\d+)\s*$", re.M)
+
+
+def template_max_citation_retries(template_text: str) -> int:
+    """The ladder bound, READ FROM THE TEMPLATE rather than offered as a flag.
+
+    It is not a driver preference. The whole point of this driver is that both
+    paths run the same pass, and the template's own comment explains why the value
+    is 2 rather than a round number. A `--max-citation-retries` flag would let one
+    path climb a rung the other cannot -- the fallback would exhaust before ever
+    creating that attempt."""
+    match = _MAX_RETRIES_RE.search(template_text)
+    if not match:
+        fatal(
+            "could not read MAX_CITATION_RETRIES from the glossary template -- "
+            "its shape changed, and this driver will not guess a ladder bound "
+            "that must match the pipeline() path's exactly.",
+            exit_code=2,
+        )
+    return int(match.group(1))
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="glossary_dispatch_driver.py",
         description="Local driver for the W3a canon-and-glossary pass (#800).",
     )
-    p.add_argument("--run-id", dest="run_id",
+    p.add_argument("--run-id", dest="run_id", required=True,
                    help="the glossary RUN_ID resume_setup.py accepted")
-    p.add_argument("--batches-file", dest="batches_file",
+    p.add_argument("--batches-file", dest="batches_file", required=True,
                    help="the glossary_batch_plan.py args array, as JSON")
     p.add_argument("--verdict-dir", dest="verdict_dir", required=True,
-                   help="session-owned directory for pending state and verdicts; "
-                        "MUST be outside the durable root")
+                   help="session-owned directory for this run's state and its "
+                        "verdicts; MUST be outside the durable root")
     p.add_argument("--plugin-root", dest="plugin_root", required=True,
                    help="the plugin install root; the ONLY copy of the workflow "
                         "template this driver will execute")
     p.add_argument("--record-verdicts", dest="record_verdicts",
-                   help="consume a JSON array of {batch, attempt, nonce, reply}")
+                   help="a JSON array of {batch, attempt, nonce, reply} INSIDE "
+                        "--verdict-dir; consumed, then the run continues")
     p.add_argument("--source-lang", dest="source_lang", default="")
     p.add_argument("--target-lang", dest="target_lang", default="")
     p.add_argument("--research-mode", dest="research_mode", default="live",
@@ -1710,8 +1862,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    default="")
     p.add_argument("--batch-agent-cap", dest="batch_agent_cap", type=int,
                    default=3500)
-    p.add_argument("--max-citation-retries", dest="max_citation_retries", type=int,
-                   default=2)
     p.add_argument("--resumed-batch-indices", dest="resumed_batch_indices",
                    default="[]")
     p.add_argument("--poll-sec", dest="poll_sec", type=float,
@@ -1732,24 +1882,25 @@ def main(argv=None) -> int:
     durable_root = DURABLE_ROOT
     verdict_dir = resolve_verdict_dir(args.verdict_dir, durable_root)
     template = resolve_template(args.plugin_root)
+    max_retries = template_max_citation_retries(read_template_text(template))
 
     try:
-        batches = json.loads(Path(args.batches_file).read_text(encoding="utf-8")) \
-            if args.batches_file else []
+        batches = json.loads(Path(args.batches_file).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         fatal(f"could not read --batches-file: {exc!r}", exit_code=2)
     if not isinstance(batches, list) or not batches:
         fatal("--batches-file must hold a non-empty JSON array of batches",
               exit_code=2)
+    for batch in batches:
+        if not isinstance(batch, dict) or not isinstance(batch.get("index"), int):
+            fatal("every batch must be an object with an integer index",
+                  exit_code=2)
     try:
         resumed = set(json.loads(args.resumed_batch_indices))
     except ValueError:
         fatal("--resumed-batch-indices must be a JSON array", exit_code=2)
 
-    # The harness is loaded past the template's own Workflow-shaped preflight; the
-    # REAL bound is enforced here, against the profile's cap.
-    judges = enforce_local_cap(len(batches), args.max_citation_retries,
-                               args.batch_agent_cap)
+    judges = enforce_local_cap(len(batches), max_retries, args.batch_agent_cap)
 
     subst = {
         "durable_root": str(durable_root),
@@ -1759,7 +1910,7 @@ def main(argv=None) -> int:
         "run_id": args.run_id,
         "effort": args.effort,
         "citation_content_types": args.citation_content_types,
-        # Loaded past, never enforced -- see enforce_local_cap.
+        # Loaded past on purpose; the real bound is enforce_local_cap() above.
         "batch_agent_cap": 10 ** 9,
         "plugin_root": str(Path(args.plugin_root).absolute()),
         "resumed_batch_indices": sorted(resumed),
@@ -1768,83 +1919,65 @@ def main(argv=None) -> int:
     with tempfile.TemporaryDirectory(prefix="glossary-driver-") as tmp:
         ctx = Ctx(template=template, subst=subst, batches=batches,
                   node_bin=args.node_bin,
-                  companion="" if args.record_verdicts else resolve_companion(),
+                  companion=resolve_companion(args.node_bin),
                   durable_root=durable_root,
                   run_dir=durable_root / "glossary" / "runs" / args.run_id,
                   verdict_dir=verdict_dir, research_mode=args.research_mode,
                   effort=args.effort, poll_sec=args.poll_sec,
                   deadline_sec=args.deadline_sec,
-                  max_citation_retries=args.max_citation_retries,
+                  max_citation_retries=max_retries,
                   tmpdir=Path(tmp))
 
+        state = load_state(verdict_dir, durable_root, args.run_id)
+        recorded = {"recorded": [], "refused": []}
         if args.record_verdicts:
-            out = record_verdicts(ctx, Path(args.record_verdicts))
-            ready = out.pop("ready", [])
-            payload = {"action": "record-verdicts", "run_id": args.run_id, **out,
-                       "ready": [r["batchIndex"] for r in ready],
-                       "merged": False, "generated": _utc_now_iso()}
-            # THE MERGE HAPPENS HERE ON A LIVE RUN, and it has to: a live batch
-            # never reaches `ready` on the driving invocation -- it hands back for
-            # a judge and exits -- so the drive path's merge branch is reachable
-            # only under offline. The run is complete when every batch this run
-            # was given has an approved, recorded entry and nothing is still
-            # awaiting a judge; only then is the all-or-nothing merge attempted.
-            still_awaiting = [e for e in read_pending(verdict_dir)["entries"]
-                              if isinstance(e, dict) and not e.get("consumed")]
-            expected = {b.get("index") for b in batches}
-            have = {r.get("batchIndex") for r in ready}
-            if not still_awaiting and not out["refused"] and expected <= have:
-                payload.update(merge_and_verify(ctx, ready))
-            else:
-                payload["reason"] = "awaiting-more-verdicts"
-                payload["awaiting"] = sorted(expected - have)
-            emit(payload)
-            return 0 if not out["refused"] else 1
+            recorded = record_verdicts(ctx, Path(args.record_verdicts), state)
+            save_state(verdict_dir, state)
+
+        # ONE drive call, on BOTH paths. A rejection recorded just above has
+        # already moved its batch back to `pending` at the next rung, so this is
+        # what actually runs the ladder rather than stranding it.
+        drive_all(ctx, batches, state, resumed)
+        save_state(verdict_dir, state)
 
         needs_judge, ready, failed = [], [], []
-        pending = read_pending(verdict_dir)
-        pending_by_key = {e["key"]: e for e in pending["entries"]
-                          if isinstance(e, dict)}
-
         for batch in batches:
-            try:
-                result = drive_batch(ctx, batch, resumed)
-            except DriverError as exc:
-                failed.append({"batchIndex": batch.get("index"),
-                               "reason": str(exc), **exc.extra})
-                continue
-            if result["state"] == "awaiting_judge":
-                pending_by_key[result["pending"]["key"]] = result["pending"]
+            idx = batch["index"]
+            st = state["batches"].get(str(idx)) or {}
+            if st.get("status") == "awaiting_judge":
                 needs_judge.append({
-                    "batch": result["batchIndex"], "attempt": result["attempt"],
-                    "nonce": result["pending"]["nonce"],
-                    "judgePrompt": result["judgePrompt"],
+                    "batch": idx, "attempt": st["attempt"],
+                    "nonce": st["pending"]["nonce"],
+                    "judgePrompt": st["judgePrompt"],
                     "agentType": "literary-translator:citation-judge",
                 })
-            elif result["state"] == "ready":
-                ready.append(result)
-            else:
-                failed.append(result)
-
-        pending["entries"] = list(pending_by_key.values())
-        write_pending(verdict_dir, pending)
+            elif st.get("status") == "ready":
+                ready.append(idx)
+            elif st.get("status") == "failed":
+                failed.append({"batchIndex": idx,
+                               **{k: v for k, v in st.items()
+                                  if k not in ("status", "pending", "judgePrompt")}})
 
         payload = {
-            "action": "drive", "run_id": args.run_id,
+            "action": "record-verdicts" if args.record_verdicts else "drive",
+            "run_id": args.run_id,
             "worstCaseJudgeCalls": judges,
+            "maxCitationRetries": max_retries,
+            "recorded": recorded["recorded"],
+            "refused": recorded["refused"],
             "needs_judge": needs_judge,
-            "ready": [r["batchIndex"] for r in ready],
+            "ready": sorted(ready),
             "not_ready": failed,
             "merged": False,
             "generated": _utc_now_iso(),
         }
-        # Offline never hands back, so an offline run reaches the merge in ONE
-        # invocation. Live runs merge on the invocation that consumes the last
-        # verdict, which is the session's next call.
-        if not needs_judge and not failed and ready:
-            payload.update(merge_and_verify(ctx, ready))
+        if not needs_judge and not failed:
+            payload.update(merge_and_verify(ctx, batches, state))
+            save_state(verdict_dir, state)
+        elif needs_judge:
+            payload["reason"] = "awaiting-more-verdicts"
         emit(payload)
-        return 0 if not failed else 1
+        return 0 if not failed and not recorded["refused"] else 1
 
 
 if __name__ == "__main__":

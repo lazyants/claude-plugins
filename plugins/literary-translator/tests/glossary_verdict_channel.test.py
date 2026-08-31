@@ -137,34 +137,42 @@ def test_a_symlinked_pending_leaf_is_refused_not_followed(project):
 # WHAT the channel accepts
 # ---------------------------------------------------------------------------
 
-def _pending_entry(mod, durable, snapshot, batch=0, attempt=0, nonce="n0"):
-    return {
-        "key": mod.pending_key(batch, attempt),
-        "durable_root": str(durable), "run_id": "run1",
-        "batch": batch, "attempt": attempt, "nonce": nonce,
-        "snapshot_sha256": mod._sha256_file(snapshot),
-        "ok_sentinel": f"CITATIONS_OK {batch} ATTEMPT {attempt}",
-        "fail_sentinel": f"CITATIONS_REJECTED {batch} ATTEMPT {attempt}",
-    }
-
-
-def test_pending_roundtrips_through_the_pinned_open(project):
+def test_state_roundtrips_through_the_pinned_open(project):
     mod = project["mod"]
     d = mod.resolve_verdict_dir(str(project["session"]), project["durable"])
-    snapshot = project["durable"] / "glossary" / "runs" / "run1" / "approved_0_attempt_0.json"
-    snapshot.write_text('[{"source_form": "A"}]', encoding="utf-8")
-    entry = _pending_entry(mod, project["durable"], snapshot)
-    mod.write_pending(d, {"entries": [entry]})
-    back = mod.read_pending(d)
-    assert back["entries"] == [entry]
+    state = mod.fresh_state(project["durable"], "run1")
+    state["batches"]["0"] = {"attempt": 0, "status": "awaiting_judge",
+                             "pending": {"nonce": "n0", "snapshot_sha256": "abc"}}
+    mod.save_state(d, state)
+    assert mod.load_state(d, project["durable"], "run1") == state
 
 
-def test_absent_pending_is_not_an_error(project):
+def test_absent_state_is_not_an_error(project):
     """The first invocation of a run has none; refusing here would make an
     ordinary first run look like tampering."""
     mod = project["mod"]
     d = mod.resolve_verdict_dir(str(project["session"]), project["durable"])
-    assert mod.read_pending(d) == {"entries": []}
+    assert mod.read_pending(d) == {}
+    assert mod.load_state(d, project["durable"], "run1")["batches"] == {}
+
+
+def test_state_for_another_run_or_root_is_reset_not_carried(project):
+    """A reused verdict directory must behave like a fresh one. Carrying a prior
+    run's readiness forward is how an approval from one run satisfies another
+    run's merge admission -- and refusing outright would make the ordinary habit
+    of reusing a session directory fatal."""
+    mod = project["mod"]
+    d = mod.resolve_verdict_dir(str(project["session"]), project["durable"])
+    state = mod.fresh_state(project["durable"], "runA")
+    state["batches"]["0"] = {"attempt": 0, "status": "ready",
+                             "mergePath": "/somewhere/approved_0_attempt_0.json",
+                             "approvalRecorded": True}
+    mod.save_state(d, state)
+    for run_id, root in (("runB", project["durable"]),
+                         ("runA", project["durable"] / "other")):
+        got = mod.load_state(d, root, run_id)
+        assert got["batches"] == {}, (
+            f"state from another run/root leaked into {run_id}")
 
 
 def test_unreadable_pending_refuses_rather_than_guessing(project):
