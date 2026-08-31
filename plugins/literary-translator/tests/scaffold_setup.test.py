@@ -104,8 +104,8 @@ EXPECTED_ORCHESTRATION_BUNDLE_MEMBERS = (
     "claim_record.py",
     "draft_ready.py",
     # #369: the THIRD double registration, same transitive-import reason --
-    # ledger_merge.py and select_segments.py load it here, six plugin members
-    # load it there.
+    # ledger_merge.py and select_segments.py load it here, seven plugin members
+    # load it there (glossary_dispatch_driver.py is the seventh, LT 1.75.0).
     "json_stdout.py",
     "ledger_merge.py",
     "language_smoke_report.py",

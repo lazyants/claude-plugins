@@ -30,6 +30,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = PLUGIN_ROOT / "skills" / "literary-translator"
 SCRIPTS = SKILL_ROOT / "assets" / "scripts"
 DRIVER = SCRIPTS / "glossary_dispatch_driver.py"
+JSON_STDOUT = SCRIPTS / "json_stdout.py"
 
 
 def load_driver(scripts_dir: Path):
@@ -39,6 +40,10 @@ def load_driver(scripts_dir: Path):
     target = scripts_dir / "glossary_dispatch_driver.py"
     if not target.exists():
         shutil.copy2(DRIVER, target)
+        # json_stdout.py is the driver's one hard sibling dependency: it is loaded
+        # by exact path at import time and the driver exits without it, exactly as a
+        # deployed copy does. Staging it keeps this fixture a real scripts/ dir.
+        shutil.copy2(JSON_STDOUT, target.parent / "json_stdout.py")
     spec = importlib.util.spec_from_file_location(
         f"gdd_{abs(hash(str(target)))}", target)
     module = importlib.util.module_from_spec(spec)

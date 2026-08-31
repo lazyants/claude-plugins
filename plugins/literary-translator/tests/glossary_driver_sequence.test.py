@@ -38,6 +38,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = PLUGIN_ROOT / "skills" / "literary-translator"
 SCRIPTS = SKILL_ROOT / "assets" / "scripts"
 DRIVER = SCRIPTS / "glossary_dispatch_driver.py"
+JSON_STDOUT = SCRIPTS / "json_stdout.py"
 RESOLVER = SCRIPTS / "resolve_codex_companion.py"
 
 NODE = shutil.which("node")
@@ -80,6 +81,10 @@ def bed(tmp_path):
     run_dir.mkdir(parents=True)
     scripts.mkdir(parents=True)
     shutil.copy2(DRIVER, scripts / "glossary_dispatch_driver.py")
+    # json_stdout.py is the driver's one hard sibling dependency: it is loaded
+    # by exact path at import time and the driver exits without it, exactly as a
+    # deployed copy does. Staging it keeps this fixture a real scripts/ dir.
+    shutil.copy2(JSON_STDOUT, scripts / "json_stdout.py")
 
     calls = tmp_path / "calls.log"
 
@@ -426,9 +431,6 @@ def test_a_verdict_file_outside_the_verdict_dir_is_refused(bed):
     assert not (bed["run_dir"] / "approval_0_attempt_0.json").exists()
 
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
-
 
 # ---------------------------------------------------------------------------
 # A resume reuses the RUN_ID -- so the state document outlives the artifacts
@@ -581,3 +583,5 @@ def test_a_rejection_at_the_final_rung_exhausts_at_that_rung(bed):
     assert failed["attemptsUsed"] == 3
     assert failed["reason"] == "citation-review-exhausted"
     assert out["merged"] is False
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))

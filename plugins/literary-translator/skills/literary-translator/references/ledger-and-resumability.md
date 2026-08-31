@@ -667,7 +667,7 @@ too. `select_segments.py` itself since #446 — it was always an
 orchestration member, and it owns the dispatch gate `claim_record.py` merely
 supplies the claim predicate for, so the same criterion had always applied to
 it. And `json_stdout.py` since #369 — `ledger_merge.py` and
-`select_segments.py` load it here, and six plugin members load it there, so
+`select_segments.py` load it here, and seven plugin members load it there, so
 the same byte-hash-allowlist criterion that registered `canon_senses.py` applies
 in both tuples at once. The remaining three (`draft_ready.py`, `ledger_merge.py`,
 `language_smoke_report.py`) are orchestration-only.

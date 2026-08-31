@@ -20,6 +20,7 @@ is why they are tested by outcome rather than by log line:
 """
 
 import importlib.util
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ import pytest
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 DRIVER = (PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
           / "glossary_dispatch_driver.py")
+JSON_STDOUT = DRIVER.parent / "json_stdout.py"
 
 
 @pytest.fixture
@@ -37,6 +39,10 @@ def mod(tmp_path):
     scripts.mkdir(parents=True)
     target = scripts / "glossary_dispatch_driver.py"
     shutil.copy2(DRIVER, target)
+    # json_stdout.py is the driver's one hard sibling dependency: it is loaded
+    # by exact path at import time and the driver exits without it, exactly as a
+    # deployed copy does. Staging it keeps this fixture a real scripts/ dir.
+    shutil.copy2(JSON_STDOUT, target.parent / "json_stdout.py")
     spec = importlib.util.spec_from_file_location("gdd_repair", target)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -44,7 +50,6 @@ def mod(tmp_path):
 
 
 def _dumps_entry(evidence_path):
-    import json
     return json.dumps({"entries": [{"item_index": 0, "outcome": "fetched",
                                     "evidence_file": evidence_path}]})
 
@@ -139,13 +144,13 @@ def test_outcome_read_takes_only_two_fields(mod, tmp_path):
                             "final_origin": "https://elsewhere.test",
                             "chain": ["a", "b"], "evidence_file": "ev_000.txt",
                             "content_type": "text/html", "bytes": 12})
-    import json as _json
-    real_load = _json.load
+
+    real_load = json.load
     try:
-        _json.load = lambda fh: {"entries": [entry]}
+        json.load = lambda fh: {"entries": [entry]}
         mod.read_outcome_pairs(index)
     finally:
-        _json.load = real_load
+        json.load = real_load
     forbidden = entry.touched - {"item_index", "outcome"}
     assert not forbidden, (
         f"read_outcome_pairs consulted {sorted(forbidden)}; the actor that "

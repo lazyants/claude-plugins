@@ -30,6 +30,7 @@ import pytest
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = PLUGIN_ROOT / "skills" / "literary-translator"
 DRIVER = SKILL_ROOT / "assets" / "scripts" / "glossary_dispatch_driver.py"
+JSON_STDOUT = SKILL_ROOT / "assets" / "scripts" / "json_stdout.py"
 TEMPLATE = SKILL_ROOT / "assets" / "templates" / "glossary-pass-wf.template.js"
 
 NODE = shutil.which("node")
@@ -42,6 +43,10 @@ def mod(tmp_path):
     scripts.mkdir(parents=True)
     target = scripts / "glossary_dispatch_driver.py"
     shutil.copy2(DRIVER, target)
+    # json_stdout.py is the driver's one hard sibling dependency: it is loaded
+    # by exact path at import time and the driver exits without it, exactly as a
+    # deployed copy does. Staging it keeps this fixture a real scripts/ dir.
+    shutil.copy2(JSON_STDOUT, target.parent / "json_stdout.py")
     spec = importlib.util.spec_from_file_location(
         f"gdd_h{abs(hash(str(target)))}", target)
     module = importlib.util.module_from_spec(spec)
@@ -146,7 +151,7 @@ _BUILDER_ARGS = {
     "evidenceDir": [0, 0], "evidenceIndexPath": [0, 0],
     "fetchCitationsCmd": [0, 0], "repairFragmentPath": [0, 0],
     "batchDispatchPrompt": [BATCH, 0, None],
-    "batchRepairPrompt": [BATCH, 0, [_ROW], None],
+    "batchRepairPrompt": [BATCH, 0, [_ROW]],
     "citationJudgePrompt": [BATCH, 0],
     "mergeBatchesCmd": [["/f0.json"], ["/a0.json"]],
     "verifyMergedCmd": [["/f0.json"]],
@@ -225,6 +230,9 @@ def test_an_offline_run_is_charged_for_no_judges_at_all(mod):
     """Outside `live` the batch reaches `ready` without a judge ever being
     rendered, so charging the live worst case refuses a run whose reachable path
     issues zero agent calls -- in the one mode chosen to need no network."""
+    # "cached" is deliberately NOT a research mode the schema or the argparse
+    # choices admit: the bound must be "not live", not "== offline", so that a
+    # third mode added later cannot silently inherit the live judge charge.
     for mode in ("offline", "cached"):
         assert mod.enforce_local_cap(34, 2, 100, mode) == 0
 

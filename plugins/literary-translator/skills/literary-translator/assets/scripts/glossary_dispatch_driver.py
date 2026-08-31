@@ -89,10 +89,12 @@ import argparse
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import subprocess
 import sys
@@ -206,6 +208,37 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# --- the shared one-line JSON serialiser (#369) -----------------------------
+# Loaded by EXACT PATH, never `import json_stdout`, for the reason
+# segment_dispatch_driver.py states at its own copy of this block: a bare
+# sibling import resolves through the global sys.modules cache regardless of
+# which staged copy the CALLER intended, so one process staging several durable
+# roots would bind the FIRST root's copy for all of them. exec_module() opens
+# this file's own sibling or raises. `.absolute()` rather than `.resolve()`,
+# so a caller's own no-follow logic still sees the path it was handed.
+_JSON_STDOUT_PATH = Path(__file__).absolute().parent / "json_stdout.py"
+try:
+    _json_stdout_spec = importlib.util.spec_from_file_location(
+        "json_stdout", _JSON_STDOUT_PATH
+    )
+    if _json_stdout_spec is None or _json_stdout_spec.loader is None:
+        raise ImportError(f"no loader for {_JSON_STDOUT_PATH}")
+    _json_stdout = importlib.util.module_from_spec(_json_stdout_spec)
+    # OSError, not ImportError alone: spec_from_file_location() happily builds a
+    # spec for a file that is not there, and it is exec_module() that raises
+    # FileNotFoundError when it opens the source.
+    _json_stdout_spec.loader.exec_module(_json_stdout)
+except (ImportError, OSError) as _json_stdout_exc:  # pragma: no cover - staging error path
+    sys.exit(
+        f"glossary_dispatch_driver.py: cannot load json_stdout.py from "
+        f"{_JSON_STDOUT_PATH} ({_json_stdout_exc}).\n"
+        "json_stdout.py must be installed alongside glossary_dispatch_driver.py "
+        "under ${durable_root}/scripts/ -- Step 0a's copy pass places it there."
+    )
+
+dumps_line = _json_stdout.dumps_line
+
+
 def fatal(message: str, exit_code: int = 2, **extra) -> NoReturn:
     """A fatal error prints a named line to stderr ONLY and prints NO stdout
     JSON -- nothing this process emits on stdout may ever be mistaken for a
@@ -225,8 +258,14 @@ def log(message: str) -> None:
 
 
 def emit(payload: dict) -> None:
-    """The ONE JSON line on stdout."""
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+    """The ONE JSON line on stdout, through the shared serialiser.
+
+    #369: U+0085, U+2028 and U+2029 survive `ensure_ascii=False` raw, and a
+    payload carrying one renders to the reading agent as TWO physical lines --
+    so the session parses a truncated object and this driver's whole result is
+    lost. Source forms come from a book; those characters are not hypothetical
+    here. `tests/stdout_json_line_escape_gate.test.py` admits no exemptions."""
+    print(dumps_line(payload, sort_keys=True), flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -969,7 +1008,6 @@ def run_template_cmd(cmd: str, *, timeout: float) -> "tuple[int, str, str]":
     and running without a shell means no metacharacter in any spliced value can
     reach a shell in the first place -- strictly narrower than the path it
     replaces, not merely equivalent."""
-    import shlex
     argv = shlex.split(cmd)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
@@ -1234,7 +1272,7 @@ class Ctx:
     """Everything the per-batch machine needs, resolved once."""
 
     def __init__(self, *, template: Path, subst: dict, batches: list, node_bin: str,
-                 companion: str, durable_root: Path, run_dir: Path, verdict_dir: Path,
+                 companion: str, durable_root: Path, verdict_dir: Path,
                  research_mode: str, effort: str, poll_sec: float, deadline_sec: float,
                  max_citation_retries: int, tmpdir: Path):
         self.template = template
@@ -1243,7 +1281,6 @@ class Ctx:
         self.node_bin = node_bin
         self.companion = companion
         self.durable_root = durable_root
-        self.run_dir = run_dir
         self.verdict_dir = verdict_dir
         self.research_mode = research_mode
         self.effort = effort
@@ -1404,7 +1441,7 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
 
     built = ctx.build([
         {"key": "repair", "fn": "batchRepairPrompt",
-         "args": [batch, attempt, failed_rows, None]},
+         "args": [batch, attempt, failed_rows]},
         {"key": "repairpath", "fn": "repairFragmentPath", "args": [idx, attempt]},
         {"key": "nextfragment", "fn": "fragmentPath", "args": [idx, attempt + 1]},
         {"key": "nextcheck", "fn": "checkBatchCmd", "args": [idx, attempt + 1]},
@@ -1585,6 +1622,26 @@ def reconcile_state(batches: list, state: dict) -> "list[dict]":
     return reset
 
 
+def _exhaust(st: dict, attempt: int, last_rejection, *, attempts_used: int) -> dict:
+    """The ladder's ONE terminal transition, recorded at the rung that ran.
+
+    `attempts_used` stays a parameter rather than being derived: the loop-top
+    guard is entered with an attempt that never ran (a hand-edited state document
+    is the only way in), so it reports the ladder's own length, while every other
+    caller exhausts at a rung it actually drove."""
+    st.update(status="failed", attempt=attempt, reason="citation-review-exhausted",
+              attemptsUsed=attempts_used, lastRejection=last_rejection)
+    return st
+
+
+def _clear_awaiting(st: dict) -> None:
+    """Drops what only an awaiting batch owns. A verdict is consumed once, so the
+    nonce and the rendered prompt must not survive the transition that answers
+    them -- on ANY branch, including the ones that go on to fail."""
+    st.pop("pending", None)
+    st.pop("judgePrompt", None)
+
+
 def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
                           resumed_indices: "set[int]") -> dict:
     """Drives ONE batch until it is awaiting a judge, ready, or terminal.
@@ -1606,11 +1663,8 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
 
     while True:
         if attempt > ctx.max_citation_retries:
-            st.update(status="failed", attempt=attempt,
-                      reason="citation-review-exhausted",
-                      attemptsUsed=ctx.max_citation_retries + 1,
-                      lastRejection=rejection_reason)
-            return st
+            return _exhaust(st, attempt, rejection_reason,
+                            attempts_used=ctx.max_citation_retries + 1)
 
         if prepared_fragment is not None:
             result = prepare_and_hand_back(ctx, batch, attempt, prepared_fragment)
@@ -1648,12 +1702,11 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
             # dispatched and the batch exhausts here. Dispatching one would create
             # an attempt outside the ladder and break the judge cap.
             if attempt >= ctx.max_citation_retries:
-                st.update(status="failed", attempt=attempt,
-                          reason="citation-review-exhausted",
-                          attemptsUsed=attempt + 1,
-                          lastRejection="citations did not retrieve at the final "
-                                        "attempt: " + repr(result["failedPositions"]))
-                return st
+                return _exhaust(
+                    st, attempt,
+                    "citations did not retrieve at the final attempt: "
+                    + repr(result["failedPositions"]),
+                    attempts_used=attempt + 1)
             repaired = run_repair(ctx, batch, attempt, result["failedPositions"],
                                   Path(result["snapshotPath"]))
             # The rung is RESERVED either way: a valid repair writes its spliced
@@ -1681,11 +1734,8 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
 
         if kind == "evidence_failed":
             if attempt >= ctx.max_citation_retries:
-                st.update(status="failed", attempt=attempt,
-                          reason="citation-review-exhausted",
-                          attemptsUsed=attempt + 1,
-                          lastRejection=result.get("reason"))
-                return st
+                return _exhaust(st, attempt, result.get("reason"),
+                                attempts_used=attempt + 1)
             rejection_reason = (
                 "the previous attempt's citation evidence could not be prepared: "
                 + str(result.get("reason")))
@@ -1807,17 +1857,13 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path, state: dict) -> dict:
         ])
 
         if read["contained"] or not read["verdict"]:
-            st.pop("pending", None)
-            st.pop("judgePrompt", None)
+            _clear_awaiting(st)
             if attempt >= ctx.max_citation_retries:
                 # The ladder is 0..max, so there is no attempt+1 to advance to.
                 # Incrementing anyway would persist and REPORT an attempt outside
                 # the ladder, naming a rung that never ran as the one that
                 # exhausted. Exhaust here instead, at the rung actually rejected.
-                st.update(status="failed", attempt=attempt,
-                          reason="citation-review-exhausted",
-                          attemptsUsed=attempt + 1,
-                          lastRejection=read["detail"])
+                _exhaust(st, attempt, read["detail"], attempts_used=attempt + 1)
             else:
                 st.update(status="pending", attempt=attempt + 1,
                           rejection_reason=read["detail"])
@@ -1825,17 +1871,17 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path, state: dict) -> dict:
                              "approved": False, "rejection": read["detail"]})
             continue
 
-        record_cmd = ctx.build([{"key": "cmd", "fn": "recordApprovalCmd",
-                                 "args": [batch_i, attempt]}])["cmd"]
-        code, _out, err = run_template_cmd(record_cmd, timeout=600)
-        record_path = ctx.build([{"key": "p", "fn": "approvalRecordPath",
-                                  "args": [batch_i, attempt]}])["p"]
+        rec = ctx.build([
+            {"key": "cmd", "fn": "recordApprovalCmd", "args": [batch_i, attempt]},
+            {"key": "path", "fn": "approvalRecordPath", "args": [batch_i, attempt]},
+        ])
+        code, _out, err = run_template_cmd(rec["cmd"], timeout=600)
+        record_path = rec["path"]
         if code != 0:
             # The review DID approve; the bookkeeping write failed. The batch is
             # NOT ready: merging an approved set nobody can reconstruct is the
             # guesswork #723 exists to remove.
-            st.pop("pending", None)
-            st.pop("judgePrompt", None)
+            _clear_awaiting(st)
             st.update(status="failed", attempt=attempt,
                       reason="approval-record-write-failed",
                       detail=(err or "")[-300:])
@@ -1843,8 +1889,7 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path, state: dict) -> dict:
                              "approved": True, "approvalRecorded": False})
             continue
 
-        st.pop("pending", None)
-        st.pop("judgePrompt", None)
+        _clear_awaiting(st)
         st.update(status="ready", attempt=attempt, mergePath=str(snapshot),
                   approvalRecordPath=record_path, approvalRecorded=True,
                   citationReview="approved")
@@ -2035,7 +2080,6 @@ def main(argv=None) -> int:
                   node_bin=args.node_bin,
                   companion=resolve_companion(args.node_bin),
                   durable_root=durable_root,
-                  run_dir=durable_root / "glossary" / "runs" / args.run_id,
                   verdict_dir=verdict_dir, research_mode=args.research_mode,
                   effort=args.effort, poll_sec=args.poll_sec,
                   deadline_sec=args.deadline_sec,

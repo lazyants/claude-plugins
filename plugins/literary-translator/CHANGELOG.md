@@ -86,6 +86,13 @@ the glossary pass was simply left behind.
   shipped design's own position — `approvalRecordPath()`'s comment says the approval record "buys
   no defence against a hostile agent … what it closes is the case that happens WITHOUT malice" —
   and this channel closes exactly that same class and says so rather than implying more.
+- **The driver's one stdout line goes through `json_stdout.dumps_line()`, like every other
+  script's** (#369). `ensure_ascii=False` leaves U+0085, U+2028 and U+2029 raw, and a payload
+  carrying one renders to the reading session as TWO physical lines — so it parses a truncated
+  object and the whole invocation's result is lost. Source forms come from a book, so those
+  characters are not hypothetical here. This makes `json_stdout.py` a hard sibling dependency,
+  loaded by exact path at import; the scaffold's copy pass already stages it, and the driver is the
+  **seventh** `PLUGIN_BUNDLE_MEMBERS` entry that loads it.
 - **The template is executed from the plugin install tree ONLY, with no durable fallback.**
   `${durable_root}/` is writable by the very codex jobs the driver dispatches, so a durable copy
   is model-writable JavaScript this process would run. The path is verified with the same

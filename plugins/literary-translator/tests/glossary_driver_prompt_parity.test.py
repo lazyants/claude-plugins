@@ -31,6 +31,7 @@ import pytest
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = PLUGIN_ROOT / "skills" / "literary-translator"
 DRIVER = SKILL_ROOT / "assets" / "scripts" / "glossary_dispatch_driver.py"
+JSON_STDOUT = SKILL_ROOT / "assets" / "scripts" / "json_stdout.py"
 TEMPLATE = SKILL_ROOT / "assets" / "templates" / "glossary-pass-wf.template.js"
 
 NODE = shutil.which("node")
@@ -50,6 +51,10 @@ def mod(tmp_path_factory):
     scripts.mkdir(parents=True)
     target = scripts / "glossary_dispatch_driver.py"
     shutil.copy2(DRIVER, target)
+    # json_stdout.py is the driver's one hard sibling dependency: it is loaded
+    # by exact path at import time and the driver exits without it, exactly as a
+    # deployed copy does. Staging it keeps this fixture a real scripts/ dir.
+    shutil.copy2(JSON_STDOUT, target.parent / "json_stdout.py")
     spec = importlib.util.spec_from_file_location("gdd_parity", target)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -77,7 +82,7 @@ def built(mod):
          "args": [["/durable/f3.json"], ["/durable/a3.json"]]},
         {"key": "verify", "fn": "verifyMergedCmd", "args": [["/durable/f3.json"]]},
         {"key": "dispatch", "fn": "batchDispatchPrompt", "args": [BATCH, 0, None]},
-        {"key": "repair", "fn": "batchRepairPrompt", "args": [BATCH, 0, ROWS, None]},
+        {"key": "repair", "fn": "batchRepairPrompt", "args": [BATCH, 0, ROWS]},
         {"key": "judge", "fn": "citationJudgePrompt", "args": [BATCH, 0]},
         {"key": "fragment", "fn": "fragmentPath", "args": [3, 0]},
         {"key": "approved", "fn": "approvedPath", "args": [3, 0]},
@@ -92,16 +97,21 @@ def built(mod):
 # Every builder the state machine consumes is reachable and non-empty.
 # ---------------------------------------------------------------------------
 
-def test_the_harness_exports_exactly_what_the_driver_declares(mod, built):
+def test_every_builder_the_state_machine_consumes_returns_a_non_empty_string(mod, built):
     """A declared builder the template does not define fails at harness time, not
-    at use time -- so a template rename cannot ship as a runtime surprise."""
-    assert set(mod.TEMPLATE_EXPORTED_FUNCTIONS), "the export list is empty"
+    at use time -- so a template rename cannot ship as a runtime surprise.
+
+    The set identity this file used to also assert here could not fail: the export
+    list is a module-level tuple literal. It IS asserted, against what the harness
+    actually returns, in glossary_dispatch_driver.test.py."""
     assert all(isinstance(v, str) and v for v in built.values())
 
 
 def test_every_declared_builder_is_actually_callable(mod):
-    """Covers the declared names this file's own table does not exercise, so the
-    list cannot grow a dead entry."""
+    """Covers the declared names this file's own table does not exercise. It does
+    NOT stop the list growing a dead entry -- these names are hardcoded here;
+    glossary_dispatch_driver.test.py compares the harness's output against
+    TEMPLATE_EXPORTED_FUNCTIONS, which is where that property lives."""
     calls = [{"key": n, "fn": n, "args": []} for n in
              ("fragmentPath", "manifestPath", "approvedPath", "approvalRecordPath",
               "evidenceDir", "evidenceIndexPath", "repairFragmentPath")]
