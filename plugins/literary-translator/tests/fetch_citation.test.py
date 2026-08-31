@@ -45,7 +45,9 @@ import importlib.util
 import io
 import ipaddress
 import ast
+import codecs
 import json
+import random
 import re
 import http.client
 import socket
@@ -833,6 +835,208 @@ def test_content_type_token_is_a_closed_set(raw, expected):
     token = fc.content_type_token(raw)
     assert token == expected
     assert token in set(fc.ALLOWED_CONTENT_PREFIXES) | {"absent", "other"}
+
+
+# --------------------------------------------------------------------------- #
+# #801: the body is decoded with the charset the response DECLARES, not with an
+# unconditional UTF-8.
+#
+# The defect these cover is silent by construction. `errors="replace"` turns
+# every non-ASCII byte of a cp1251 page into U+FFFD -- which on a Russian page
+# is every Cyrillic character, i.e. exactly the text a Russian-target project
+# needs -- while `outcome` stays "fetched", a body lands on disk and the size
+# looks plausible. Measured on a live French->Russian volume: 14 of 306
+# retrieved bodies carried >20 replacement characters, the worst 76% destroyed.
+#
+# Every fixture below is NON-ASCII in its own script. An ASCII fixture
+# round-trips identically under UTF-8 and would pass against the pre-fix code:
+# a green that means nothing.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("header,expected", [
+    # No declaration at all -> the pre-#801 behaviour, unchanged.
+    ("", "utf-8"),
+    ("text/html", "utf-8"),
+    ("text/html; charset=utf-8", "utf-8"),
+    # An ordinary legacy declaration, and the spellings a real server uses.
+    ("text/html; charset=windows-1251", "cp1251"),
+    ("text/html; charset=WINDOWS-1251", "cp1251"),
+    ('text/html; charset="windows-1251"', "cp1251"),
+    ("text/html; charset = koi8-r", "koi8-r"),
+    ("text/html; charset=cp1251; boundary=x", "cp1251"),
+    # Duplicated parameter: first wins, and it is a CLOSED decision either way.
+    ("text/html; charset=cp1251; charset=utf-8", "cp1251"),
+    # Not a charset, not a codec, or not shaped like a label -> fail closed.
+    ("text/html; charset=x-made-up", "utf-8"),
+    ("text/html; charset=", "utf-8"),
+    ("text/html; charset=../../etc/passwd", "utf-8"),
+    ("text/html; charset=" + "a" * 65, "utf-8"),
+    # us-ascii is deliberately NOT honoured: UTF-8 is a strict superset, so
+    # falling back is never worse, while honouring it would mangle a page that
+    # under-declares.
+    ("text/html; charset=us-ascii", "utf-8"),
+])
+def test_body_charset_reads_the_declared_charset_through_a_closed_set(header, expected):
+    assert fc.body_charset(header) == expected
+
+
+@pytest.mark.parametrize("header,expected", [
+    # A `;` inside a QUOTED parameter value is not a delimiter. A context-free
+    # regex takes this decoy and mis-decodes a page that declared UTF-8
+    # correctly.
+    ('text/html; note="x; charset=windows-1251; y"; charset=utf-8', "utf-8"),
+    # http.client JOINS repeated Content-Type headers with ", ". A charset must
+    # not be borrowed from a field whose media type was never the admitted one.
+    ("text/html, application/pdf; charset=windows-1251", "utf-8"),
+    # ...and the mirror image: the FIRST field's own charset survives a second
+    # field following it.
+    ("text/html; charset=windows-1251, application/pdf", "cp1251"),
+    # A quoted-pair escape inside the quoted string.
+    ('text/html; charset="windows\\-1251"', "cp1251"),
+    # An unterminated quote is malformed: no parameters at all, rather than a
+    # value whose end had to be guessed.
+    ('text/html; charset="windows-1251', "utf-8"),
+    # RFC 9110 permits OWS before the next `;`. An implementation that unquoted
+    # BEFORE trimming would not see the closing quote here, would leave the
+    # quotes in the label, and would fall back to UTF-8 -- re-creating the very
+    # defect #801 fixes, on a header that is entirely valid.
+    ('text/html; charset="windows-1251" ; boundary=x', "cp1251"),
+])
+def test_body_charset_parses_the_header_field_aware(header, expected):
+    assert fc.body_charset(header) == expected
+
+
+def test_body_charset_never_reaches_a_codec_that_is_not_a_charset():
+    """The allowlist is the whole security property, not a convenience.
+
+    `codecs.lookup` reaches Python TEXT codecs that are not charsets:
+    `unicode_escape` decodes b"\\ud800" to a LONE SURROGATE, which UTF-8 cannot
+    encode. That body would reach `result["body"].encode("utf-8")` in run_batch
+    -- OUTSIDE the per-item except guard -- and destroy the whole batch's
+    index.json, which is the exact failure `_encodable()` exists to prevent.
+    """
+    for label in ("unicode_escape", "unicode-escape", "raw_unicode_escape",
+                  "undefined", "idna", "punycode", "utf_7"):
+        assert fc.body_charset(f"text/html; charset={label}") == "utf-8"
+    # The PREMISE, pinned rather than asserted in prose: this codec really does
+    # produce something UTF-8 cannot encode. Written as a raises-check because
+    # the obvious phrasing is vacuous -- `.encode("utf-8", "surrogatepass")` is
+    # exactly the handler that makes a surrogate stop being distinguishable, so
+    # it stays green even if the codec one day returned the six literal
+    # characters and this whole test lost its subject.
+    with pytest.raises(UnicodeEncodeError):
+        b"\\ud800".decode("unicode_escape").encode("utf-8")
+
+
+LEGACY_PAGES = [
+    # (charset label, text in its own script) -- the encodings #801 names.
+    ("windows-1251", "Буаробер, установленная форма"),
+    ("windows-1255", "בוארובר"),
+    ("iso-8859-8", "בוארובר"),
+    ("euc-jp", "ブアロベール"),
+    ("gb2312", "布瓦罗贝尔"),
+]
+
+
+@pytest.mark.parametrize("label,text", LEGACY_PAGES)
+def test_a_legacy_encoded_page_arrives_readable(monkeypatch, label, text):
+    """The issue's own case, end to end. Red before #801: every one of these
+    decoded to a run of U+FFFD, and the judge then correctly reported that the
+    claimed target-language form was 'not present in any readable form in the
+    bytes provided' -- rejecting a citation that was very likely correct."""
+    body = f"<p>{text}</p>".encode(label)
+    FakeNet(monkeypatch, default=http_response(
+        200, {"Content-Type": f"text/html; charset={label}"}, body))
+
+    result = fetch("https://example.com/x")
+
+    assert result["outcome"] == "fetched"
+    assert text in result["body"]
+    assert "�" not in result["body"]
+    # The recorded byte count stays len(raw), untouched by the decode.
+    assert result["bytes"] == len(body)
+
+
+def test_the_call_site_parses_the_header_field_aware_too(monkeypatch):
+    """The field-awareness tests above call the helper directly, so a call site
+    that went back to context-free extraction would leave them all green. This
+    one drives the real fetch path with the header that distinguishes the two."""
+    text = "Буаробер"
+    body = text.encode("windows-1251")
+    FakeNet(monkeypatch, default=http_response(
+        200, {"Content-Type": 'text/html; charset="windows-1251" ; boundary=x'}, body))
+
+    result = fetch("https://example.com/x")
+
+    assert result["body"] == text
+    assert "�" not in result["body"]
+
+
+def test_an_undeclared_body_of_invalid_bytes_still_decodes_with_replace(monkeypatch):
+    """The backstop is unchanged: no declaration, and bytes that are not UTF-8,
+    still produce U+FFFD rather than an exception."""
+    FakeNet(monkeypatch, default=http_response(
+        200, {"Content-Type": "text/html"}, b"\xff" * 8))
+    result = fetch("https://example.com/x")
+    assert result["outcome"] == "fetched"
+    assert result["body"] == "�" * 8
+
+
+def test_every_allowed_charset_is_spelled_as_its_own_canonical_name():
+    """body_charset compares `codecs.lookup(label).name` against the allowlist,
+    so a member spelled as an ALIAS could never match and would silently be
+    unreachable -- a dead entry that reads exactly like a live one."""
+    for member in fc.ALLOWED_CHARSETS:
+        assert codecs.lookup(member).name == member, member
+    assert fc.DEFAULT_CHARSET in fc.ALLOWED_CHARSETS
+
+
+def test_no_allowed_charset_can_break_the_three_times_write_bound():
+    """run_batch's byte budget is proved from 'one item writes at most
+    3 * MAX_BYTES', measured when the decode was always UTF-8.
+
+    The proof is by codec FAMILY (charmap: one byte -> at most one BMP
+    character -> at most 3 UTF-8 bytes; multi-byte: several bytes collapse into
+    one character, which expands strictly less; errors="replace" emits U+FFFD,
+    itself 3 bytes, per undecodable unit). This test is the REGRESSION SAMPLE
+    for that proof, not the proof itself -- it also pins that no member raises
+    under errors="replace" and that none can emit a lone surrogate, which is
+    what would take out index.json at the write site.
+    """
+    rnd = random.Random(801)
+    samples = [bytes([b]) for b in range(256)]
+    samples += [bytes([hi, lo]) for hi in range(256) for lo in range(0, 256, 7)]
+    samples += [bytes(rnd.randrange(256) for _ in range(rnd.randrange(1, 17)))
+                for _ in range(300)]
+    samples += [b"\xff" * 9, b"\x1b$B", b"+AAA-", b"\x00\x00"]
+
+    checked = 0
+    for member in sorted(fc.ALLOWED_CHARSETS):
+        for raw in samples:
+            decoded = raw.decode(member, errors="replace")
+            written = decoded.encode("utf-8")          # raises on a surrogate
+            assert len(written) <= 3 * len(raw), (member, raw)
+            checked += 1
+    # The loop must actually have run: a zero-iteration sweep prints exactly
+    # what a passing one prints.
+    assert checked == len(fc.ALLOWED_CHARSETS) * len(samples) > 0
+
+
+def test_a_hostile_charset_cannot_destroy_the_batch_index(tmp_path, monkeypatch, capsys):
+    """MUTATION GUARD on the allowlist, and labelled as one: it passes today
+    because `unicode_escape` never reaches `raw.decode`. Widen ALLOWED_CHARSETS
+    (or drop the membership test) and this is the test that goes red -- at the
+    write site in run_batch, which sits OUTSIDE the per-item except guard, so
+    the real failure is a batch with no index.json at all."""
+    FakeNet(monkeypatch, default=http_response(
+        200, {"Content-Type": "text/html; charset=unicode_escape"}, b"\\ud800"))
+    path = write_snapshot(tmp_path, [accepted("Alpha", "https://a.example/1")])
+    out = tmp_path / "evidence"
+
+    assert fc.run_batch(path, out) == 0
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    assert index["counts"]["fetched"] == 1
+    stored = (out / index["entries"][0]["evidence_file"]).read_bytes()
+    assert stored.decode("utf-8") == "\\ud800"
 
 
 def test_the_body_is_capped_and_marked_truncated(monkeypatch):

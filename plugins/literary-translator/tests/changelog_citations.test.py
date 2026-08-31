@@ -152,7 +152,22 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # EMPTY ON PURPOSE, and rotated rather than inherited: the 1.73.0 entry --
+    # ROTATED TO 1.74.2 (#801 -- the declared charset is honoured), and EMPTY
+    # ON PURPOSE. The entry cites its subjects by FILE, CONSTANT and HEADER
+    # rather than by line (`fetch_citation.py`, `ALLOWED_CHARSETS`,
+    # `BATCH_MAX_TOTAL_BYTES`, `run_batch`, and the literal Content-Type
+    # headers that distinguish a field-aware parse from a regex) and states no
+    # `file.ext:NNN` at all -- which is the shape this guard reads. Nothing is
+    # unpinned as a result: every behavioural claim it makes is asserted in
+    # `tests/fetch_citation.test.py` against the real fetch path, and the one
+    # figure it states is re-derived from the tree in
+    # `tests/changelog_figures.test.py`.
+    #
+    # The 1.74.1 entry (#802) landed between this rotation being written and
+    # the rebase that renumbered it, and it cites no line either, so nothing was
+    # skipped by rotating past it -- verified by reading that entry, not
+    # assumed. The rotation this replaces is therefore 1.73.0's, kept as its own
+    # record: EMPTY, and empty for a different reason -- the 1.73.0 entry --
     # the fifth batch fold -- cites no `file.ext:NNN` anchor at all. It names
     # files, fields, bundle hashes and issue numbers (`refuse_finding.py`,
     # `driver_status.py`, `SAFE_STALE_CARVEOUT_FIELDS`, `plugin_bundle_hash`,

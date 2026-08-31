@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.74.2 — 2026-08-31
+
+**A citation on a legacy-encoded page is no longer unverifiable by construction (#801).**
+`fetch_citation.py` decoded every retrieved body as UTF-8, unconditionally. The response's own
+`Content-Type` was already in hand, but its `; charset=...` parameter was discarded one step
+before the decode that would have used it. With `errors="replace"`, a page served in
+`windows-1251` therefore lost **every Cyrillic character** to U+FFFD — which is precisely the
+text a Russian-target project's citation review has to read, since check 3 asks whether the page
+attests the claimed target-language form.
+
+Nothing downstream noticed. `outcome` stayed `"fetched"`, a body landed on disk, `index.json`
+was well-formed and the size looked plausible; the judge then failed the item for a reason that
+was not the citation's fault, and the operator downgraded a citation that was very likely
+correct. Measured on a live French→Russian volume: **14 of 306 retrieved bodies carried more
+than 20 replacement characters, 3.48M in total**, the worst three at 66–76% of the stored body.
+One judge reported it exactly right — the entity was identifiable from the surviving Latin
+script, and the Russian form was "not present in any readable form in the bytes provided".
+
+- **The declared charset is honoured, through a CLOSED allowlist.** `ALLOWED_CHARSETS`
+  names 34 canonical codecs — the legacy charsets reference and library sites actually
+  serve for the scripts this plugin translates. The header is attacker-authorable, so an
+  open `codecs.lookup`
+  is not an option: `unicode_escape` decodes `\ud800` to a lone surrogate, which UTF-8 cannot
+  encode, and that body would reach the evidence write in `run_batch` — **outside** the per-item
+  `except` guard — and destroy the whole batch's `index.json`. `us-ascii` is deliberately not a
+  member: UTF-8 is a strict superset, so falling back is never worse.
+- **The header is parsed field-aware, not by regex.** `;` and `,` are both ordinary characters
+  inside a quoted parameter value, and `http.client` joins repeated `Content-Type` headers with
+  `", "`. So `text/html; note="x; charset=windows-1251; y"; charset=utf-8` would have taken the
+  decoy, and `text/html, application/pdf; charset=windows-1251` would have borrowed a charset
+  from a field whose media type was never admitted. One left-to-right pass stops at the first
+  top-level comma, which binds the charset to the same field value the media-type decision read.
+  Quoted-pairs are resolved; an unterminated quote yields no parameters at all rather than a
+  value whose end had to be guessed. Whitespace is trimmed **before** the quotes are unwrapped —
+  `charset="windows-1251" ; boundary=x` is a valid header, and the other order silently
+  re-creates the defect.
+- **Everything else is unchanged, deliberately.** The media-type admission keeps its exact
+  derivation and its one-evaluation-bound-to-a-local property; `errors="replace"` remains the
+  final backstop; no field was added to `index.json`; the judge is untouched — its verdict on
+  unreadable bytes was always correct, and the point is to stop handing it unreadable bytes.
+- **The batch byte budget still holds.** `BATCH_MAX_TOTAL_BYTES` is proved from "one item writes
+  at most `3 * MAX_BYTES`", which was measured against the UTF-8 decode. The bound survives by
+  codec family: a charmap codec turns one source byte into at most one BMP character (3 UTF-8
+  bytes), a multi-byte codec collapses several source bytes into one character, and
+  `errors="replace"` emits a 3-byte U+FFFD per undecodable unit.
+
+**Not taken, and not by omission.** No body sniffing when nothing is declared — a wrong guess is
+the same failure with more machinery. No `<meta charset>` reading. A page that declares no
+charset and is not UTF-8 is still mangled, and evidence already on disk from earlier runs is not
+repaired.
+
 ## 1.74.1 — 2026-08-31
 
 **A verse quoted inside a footnote is no longer reported as having no source (#802).** W7's
