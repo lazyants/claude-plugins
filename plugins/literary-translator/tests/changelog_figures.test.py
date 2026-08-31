@@ -399,22 +399,45 @@ def _local_dict_len(filename, funcname, varname):
 # would make this file the third copy of one number, which is the shape #580 was
 # filed about.
 FIGURES = [
-    # ROTATED TO 1.74.2 (#801 -- the declared charset is honoured), and NOT
-    # empty: this entry states one number the tree can answer. The rest of its
+    # ROTATED TO 1.75.0 (#800 -- the glossary pass gets a local driver), and
+    # DELIBERATELY EMPTY, for the reason the 1.72.0, 1.74.0 and 1.74.1 rotations
+    # each reached independently.
+    #
+    # Every numeral this entry states is a FIELD MEASUREMENT taken on a private
+    # 22-batch, 850-candidate volume -- ~130 agent calls against 24, 29 of 143
+    # established citations that did not retrieve, 18 of those 29 answered by one
+    # host's 404 -- and this repository does not and will not contain that
+    # corpus. A row hardcoding one would compare a literal against itself and
+    # prove nothing, which is the shape #580 was filed about.
+    #
+    # The entry's one piece of arithmetic IS re-derivable, and is deliberately
+    # left as a formula rather than a figure: it quotes the template's own
+    # `1 + (2 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)` verbatim, naming the
+    # constants instead of multiplying them out. That is the same discipline the
+    # 1.74.2 rotation applied to `3 * MAX_BYTES` -- the derivation is stated
+    # where the constants live, so there is no literal here to go stale. The
+    # bound it expresses is pinned by tests/glossary_dispatch_driver.test.py's
+    # local-cap tests, which compute it from the arguments rather than restating
+    # it.
+    #
+    # The remaining numerals are the version, the issue numbers, the release
+    # date, and `PLUGIN_BUNDLE_MEMBERS`'s membership -- and that last one is a
+    # claim about THIS tree, but it is already gated, harder than a row here
+    # could: canon_senses_bundle.test.py parses the reference doc's English count
+    # word AND its enumeration and compares both against the tuple. Restating the
+    # count here would be the second copy that gate exists to prevent.
+    #
+    # The gate reads the NEWEST entry only, by design. Restore rows the moment an
+    # entry claims a number the tree can answer.
+    #
+    # The 1.74.2 rotation this replaces, kept as its own record: NOT empty -- that
+    # entry stated one number the tree could answer. The rest of its
     # numerals are field measurements taken on a private French->Russian volume
     # (14 of 306 bodies, 3.48M replacement characters, 66-76% of a stored body)
     # or arithmetic stated elsewhere and deliberately not copied here
     # (`3 * MAX_BYTES` is BATCH_MAX_TOTAL_BYTES's own derivation, re-derived in
     # fetch_citation.test.py against the constant rather than restated as a
     # literal -- a second copy of one number is the shape #580 was filed about).
-    Figure(
-        # The one figure a stale entry would get wrong silently: widening the
-        # allowlist without touching this sentence leaves the release notes
-        # naming a codec count the boundary no longer has.
-        phrase="names 34 canonical codecs",
-        value=34,
-        derive=lambda: _frozenset_len("fetch_citation.py", "ALLOWED_CHARSETS"),
-    ),
     # The 1.74.1 rotation this replaces, kept as its own record: DELIBERATELY
     # EMPTY -- the third rotation in a row to reach that answer honestly
     # (1.72.0, 1.74.0), and for the same reason each time. The #802 entry states
@@ -440,7 +463,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.74.2"
+FIGURES_VERSION = "1.75.0"
 
 
 def _newest_entry():

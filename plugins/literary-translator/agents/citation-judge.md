@@ -1,6 +1,6 @@
 ---
 name: citation-judge
-description: The W3 glossary pass's citation judge. Dispatched only by glossary-pass-wf.template.js, which supplies the whole task in its prompt; it is not a general-purpose reviewer and nothing else should select it.
+description: The W3 glossary pass's citation judge. Dispatched only by that pass -- either by glossary-pass-wf.template.js directly, or by the session on behalf of glossary_dispatch_driver.py, which renders the very same prompt from that template and hands it back for dispatch. Both supply the whole task in the prompt; it is not a general-purpose reviewer and nothing else should select it.
 tools: Read
 model: inherit
 ---

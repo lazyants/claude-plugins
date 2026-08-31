@@ -108,6 +108,7 @@ from typing import NoReturn
 # from ITS OWN location -- never from cwd, never from a --durable-root flag.
 # ---------------------------------------------------------------------------
 SCRIPTS_DIR = Path(__file__).absolute().parent
+
 DURABLE_ROOT = SCRIPTS_DIR.parent
 RESOLVE_COMPANION_SCRIPT = SCRIPTS_DIR / "resolve_codex_companion.py"
 
@@ -234,6 +235,17 @@ def emit(payload: dict) -> None:
 # This plugin ships no shared util module: every script is self-contained, so a
 # cross-cutting helper is DUPLICATED byte-for-byte rather than imported. These
 # two come from segment_dispatch_driver.py and must stay equal to it;
+#
+# KNOWN WART, kept ON PURPOSE rather than fixed here: the walk's two stderr
+# warnings hardcode the string "segment_dispatch_driver.py", so a refusal raised
+# while THIS driver is running names the wrong script. The path in the message is
+# still correct and specific, so an operator is not left without the offending
+# artifact. Parameterising the prefix was implemented and reverted: it requires
+# editing the sibling too (byte-identity is the whole point of this duplication),
+# and inserting one constant there shifted its line numbers enough to drift 19
+# `file:NNN` citations across the test suite. That is a large, unrelated diff to
+# buy a cosmetic improvement to a message that fires only when the no-follow walk
+# has already refused something. Tracked separately instead.
 # tests/glossary_driver_helper_drift.test.py compares the two files' copies and
 # fails if either side is touched alone.
 # ---------------------------------------------------------------------------

@@ -1676,7 +1676,68 @@ atomically writes each batch's `manifest_{index}.json` plus the aggregate
 with `canon_validate.py --check-batch` and found valid. That happens LAST, after
 the stale-attempt wipe and after the manifests exist, because those are what
 make the answer a fact; copy it into `{{RESUMED_BATCH_INDICES}}` when you
-instantiate the template (see above). Only then does each batch run
+instantiate the template (see above).
+
+**Dispatch path — `glossary_dispatch_driver.py` is the DEFAULT since 1.75.0
+(#800); the `pipeline()` template path below is the retained FALLBACK.** A
+Workflow script cannot run bash, so every deterministic step of this pass —
+reaching codex, polling the fragment, snapshotting it, fetching its citations,
+recording a verdict — costs a full `agent()` call whose only content is "now run
+this command". Measured on a live 22-batch volume: **~130 agent calls against
+24**. The driver runs those steps locally and hands back only the ONE step that
+must stay an agent, the citation judge. It changes no gate: it obtains every
+prompt and every command by executing this same template's own builder functions
+under Node, so both paths issue byte-identical commands.
+
+```
+python3 ${durable_root}/scripts/glossary_dispatch_driver.py \
+  --run-id <RUN_ID> --batches-file <the planner's args array, as JSON> \
+  --plugin-root {{PLUGIN_ROOT}} \
+  --verdict-dir <a session-owned dir OUTSIDE ${durable_root}> \
+  --source-lang <X> --target-lang <Y> --research-mode <live|offline> \
+  --effort <engine.effort> --citation-content-types <same value as the token> \
+  --batch-agent-cap <engine.batch_agent_cap> \
+  --resumed-batch-indices '<the same array as {{RESUMED_BATCH_INDICES}}>'
+```
+
+`--plugin-root` and `--verdict-dir` are both REQUIRED and both are refusals, not
+conveniences. The driver EXECUTES the template's builders, and
+`${durable_root}/` is writable by the very codex jobs it dispatches, so it will
+run only the plugin tree's copy — there is deliberately no durable fallback.
+`--verdict-dir` holds the judge verdicts, which authorize an approval record and
+a merge into an immutable canon; a path inside `${durable_root}` is refused
+outright, as is one that is not owned by you and private.
+
+**The loop the session drives.** Read the driver's one JSON line.
+
+1. `needs_judge[]` non-empty → dispatch ONE agent per entry, **in parallel**,
+   each with `agentType: "literary-translator:citation-judge"` and that entry's
+   `judgePrompt` verbatim. That parallelism is the point; a serial loop throws
+   the saving away.
+2. Write the replies to a file as
+   `[{"batch": i, "attempt": n, "nonce": "<the entry's own nonce>", "reply": "<the
+   agent's full reply>"}, ...]` and re-invoke with `--record-verdicts <that file>`
+   plus the same `--verdict-dir`, `--plugin-root` and `--run-id`.
+3. Repeat while `needs_judge[]` comes back non-empty. The run is done when the
+   output carries `"merged": true`; `not_ready[]` names any batch that failed and
+   why, with the same `reason` strings the Workflow path uses.
+
+Do NOT edit a verdict's `nonce`, reuse one twice, or answer a batch/attempt the
+driver did not ask about — each is refused, and the refusal is what keeps a
+verdict bound to the exact snapshot bytes a judge actually read.
+
+**What the driver does not do.** It never decides a name, never widens a gate,
+and never reads a retrieved citation body — the judge does that, under
+`tools: Read`. Its hand-back channel closes the same class the approval record
+closes (a command that never ran, a verdict never produced, a stale verdict
+replayed after a resume); it does **not** defend against a hostile codex job,
+because the snapshot and evidence live under `RUN_DIR` where every agent in this
+pass can write. That is this pass's existing position, not a new one.
+
+**The `pipeline()` fallback, below, remains shipped and supported** — use it if
+node is unavailable, if the driver refuses for an environment reason, or to
+cross-check a result. Per #436/#516's ordering rule the fallback is not removed
+before its replacement has carried a book end to end. On that path each batch runs
 the shared fire-and-forget dispatch → bounded poll → disk-truth pattern:
 `agent(batchDispatchPrompt(batch, attempt, rejectionReason),
 {agentType:'codex:codex-rescue',

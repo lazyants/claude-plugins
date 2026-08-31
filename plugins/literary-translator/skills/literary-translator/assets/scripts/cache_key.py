@@ -259,6 +259,18 @@ PLUGIN_BUNDLE_MEMBERS = (
     # name_candidates.json (that goes through _write_json_atomic's own
     # untouched json.dump) -- only bootstrap_names.py's optional stdout branch.
     "json_stdout.py",
+    # #800. The glossary pass's local driver, on the SAME criterion this tuple
+    # already applies to segment_dispatch_driver.py: it owns the ACCEPT decision
+    # for dispatched work. Which batches are dispatched at all (the resume-skip),
+    # whether a fragment counts as ready (the poll's gate), whether a judge verdict
+    # is admitted (the nonce / snapshot-digest / one-shot bindings), and whether
+    # the merge is attempted (the approval-record refusal) are all decided here. A
+    # bug in any of those is exactly the class that must re-invalidate durable
+    # state: a canon row merged under a driver whose verdict admission was wrong
+    # is frozen, and --verify-merged re-checks shape and coverage off disk, never
+    # verdicts. Not the orchestration bucket -- this is not a diagnostic poll, and
+    # its output authorizes a write into canon.json rather than being logged.
+    "glossary_dispatch_driver.py",
     "mass-translate-wf.template.js",
     "glossary-pass-wf.template.js",
 )
