@@ -138,6 +138,38 @@ def _tuple_len(filename, name):
     )
 
 
+def _frozenset_len(filename, name):
+    """Member count of a module-level `frozenset({...})` in a SHIPPED script,
+    read by AST for the same reason `_tuple_len` is.
+
+    The node must be `frozenset` called on a SET DISPLAY, not merely something
+    `len()` accepts: `frozenset("abc")` is a legal three-member frozenset built
+    from a string, and a row reading that would report it had counted declared
+    members. A duplicated member would also make the literal's length disagree
+    with the frozenset's, so the count is taken from the EVALUATED set."""
+    tree = ast.parse((SCRIPTS / filename).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            value = node.value
+            assert (isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Name)
+                    and value.func.id == "frozenset"
+                    and len(value.args) == 1
+                    and isinstance(value.args[0], ast.Set)), (
+                f"{name} in {filename} is no longer `frozenset({{...}})` over a "
+                f"set display, so its length is not the member count a changelog "
+                f"figure cites"
+            )
+            return len(ast.literal_eval(value.args[0]))
+    raise AssertionError(
+        f"{name} is no longer a module-level assignment in {filename} -- the "
+        f"derivation behind a changelog figure has lost its subject"
+    )
+
+
 def _test_function_count(filename):
     """How many `def test_*` functions a SHIPPED test file defines, read by AST
     rather than by counting a string. A grep for `def test_` also matches the
@@ -367,14 +399,30 @@ def _local_dict_len(filename, funcname, varname):
 # would make this file the third copy of one number, which is the shape #580 was
 # filed about.
 FIGURES = [
-    # ROTATED TO 1.74.1, and DELIBERATELY EMPTY -- the third rotation in a row
-    # to reach that answer honestly (1.72.0, 1.74.0), and for the same reason
-    # each time. The #802 entry states three numbers -- 76 false warnings, and
-    # 18 of one volume's 69 -- and not one of them is re-derivable from this
-    # tree: they are field measurements taken on a private fr→ru corpus this
-    # repository does not and will not contain. A row hardcoding one would
-    # compare a literal against itself and prove nothing, which is the shape
-    # #580 was filed about.
+    # ROTATED TO 1.74.2 (#801 -- the declared charset is honoured), and NOT
+    # empty: this entry states one number the tree can answer. The rest of its
+    # numerals are field measurements taken on a private French->Russian volume
+    # (14 of 306 bodies, 3.48M replacement characters, 66-76% of a stored body)
+    # or arithmetic stated elsewhere and deliberately not copied here
+    # (`3 * MAX_BYTES` is BATCH_MAX_TOTAL_BYTES's own derivation, re-derived in
+    # fetch_citation.test.py against the constant rather than restated as a
+    # literal -- a second copy of one number is the shape #580 was filed about).
+    Figure(
+        # The one figure a stale entry would get wrong silently: widening the
+        # allowlist without touching this sentence leaves the release notes
+        # naming a codec count the boundary no longer has.
+        phrase="names 34 canonical codecs",
+        value=34,
+        derive=lambda: _frozenset_len("fetch_citation.py", "ALLOWED_CHARSETS"),
+    ),
+    # The 1.74.1 rotation this replaces, kept as its own record: DELIBERATELY
+    # EMPTY -- the third rotation in a row to reach that answer honestly
+    # (1.72.0, 1.74.0), and for the same reason each time. The #802 entry states
+    # three numbers -- 76 false warnings, and 18 of one volume's 69 -- and not
+    # one of them is re-derivable from this tree: they are field measurements
+    # taken on a private fr->ru corpus this repository does not and will not
+    # contain. A row hardcoding one would compare a literal against itself and
+    # prove nothing, which is the shape #580 was filed about.
     #
     # The entry's remaining numerals are not measurements in this file's sense:
     # the version, the issue number and the release date. Its one claim about
@@ -392,7 +440,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.74.1"
+FIGURES_VERSION = "1.74.2"
 
 
 def _newest_entry():

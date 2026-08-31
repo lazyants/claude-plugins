@@ -93,6 +93,7 @@ Outcomes recorded per item: "fetched", "refused:<reason>", "http_error:<code>".
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import http.client
 import ipaddress
@@ -175,8 +176,11 @@ BATCH_TIMEOUT_SEC = 420.0
 # test that monkeypatches this constant alone still exercises the real
 # relationship). The last item admitted therefore starts BELOW that
 # threshold and can write at most 3 * MAX_BYTES (one item's worst case: a
-# body that is entirely invalid UTF-8, which the decode/re-encode round trip
-# triples -- see the write site's own comment). So the running total after
+# body that is entirely undecodable, which the decode/re-encode round trip
+# triples -- see the write site's own comment. Since #801 the codec is the
+# response's DECLARED charset rather than always UTF-8, and 3x is still the
+# ceiling for every member of ALLOWED_CHARSETS -- proved by codec family in
+# that constant's own comment). So the running total after
 # it is strictly below (BATCH_MAX_TOTAL_BYTES - 3 * MAX_BYTES) +
 # 3 * MAX_BYTES == BATCH_MAX_TOTAL_BYTES: the one-item overshoot now lands ON
 # the ceiling instead of past it. The threshold is deliberately NOT
@@ -236,6 +240,65 @@ ALLOWED_CONTENT_PREFIXES = ("text/", "application/xhtml", "application/xml", "ap
 # not assumed: re.match(r"^[a-z/]*$", "text/html\n") returns a match.
 CONTENT_TYPE_PREFIX_RE = re.compile(r"\A[a-z0-9][a-z0-9.+-]*/[a-z0-9.+-]*\Z")
 MAX_CONTENT_TYPE_PREFIXES = 16
+
+# The codec a retrieved body is decoded with, taken from the response's own
+# `Content-Type: ...; charset=...` (#801). Before this, the decode was
+# unconditionally UTF-8, so EVERY byte of a page served in a legacy encoding
+# became U+FFFD -- measured on a live French->Russian volume, 14 of 306
+# retrieved bodies, the worst 76% destroyed. Nothing downstream noticed: the
+# outcome is "fetched", a body is on disk, and the judge then fails the item for
+# a reason that is not the citation's fault.
+#
+# CLOSED SET, for the same reason content_type_token() reports a closed token:
+# the header is attacker-authorable, and `codecs.lookup` would otherwise reach
+# Python TEXT codecs that are not charsets at all. `unicode_escape` is the sharp
+# one -- it decodes b"\\ud800" to a LONE SURROGATE, which then reaches
+# result["body"].encode("utf-8") in run_batch, OUTSIDE the per-item except
+# guard, and destroys the whole batch's index.json. That is the exact failure
+# _encodable() exists to prevent, and its docstring's standing claim (retrieved
+# bodies "pass through decode(errors=replace), which can never emit a
+# surrogate") is what an open lookup would silently falsify. `undefined` raises
+# on every input; `idna`/`punycode` raise on ordinary bytes.
+#
+# Membership rule: the legacy charsets reference and library sites actually
+# serve for the scripts this plugin translates. `us-ascii` is deliberately NOT a
+# member -- honouring it would MANGLE a page that under-declares, while falling
+# back to UTF-8 (a strict superset) is never worse.
+#
+# THE 3x BOUND run_batch's byte budget rests on survives, by codec family
+# rather than by enumeration: every member is either a charmap codec (one source
+# byte -> at most one BMP character -> at most 3 UTF-8 bytes) or a multi-byte
+# codec (several source bytes collapse into ONE character, which expands
+# strictly less), and errors="replace" emits U+FFFD, itself 3 bytes, per
+# undecodable unit. So one item still writes at most 3 * MAX_BYTES -- see
+# BATCH_MAX_TOTAL_BYTES's own comment for what that buys.
+#
+# Every member is spelled as the CANONICAL codecs.lookup().name, because that is
+# what the membership test below compares against; a test asserts the identity
+# rather than leaving it to be noticed when a member silently never matches.
+ALLOWED_CHARSETS = frozenset({
+    "utf-8", "utf-8-sig",
+    "iso8859-1", "iso8859-2", "iso8859-5", "iso8859-7", "iso8859-8",
+    "iso8859-9", "iso8859-15",
+    "cp1250", "cp1251", "cp1252", "cp1253", "cp1254", "cp1255", "cp1256",
+    "cp1257", "cp1258",
+    "koi8-r", "koi8-u", "cp866",
+    "shift_jis", "euc_jp", "iso2022_jp", "euc_kr",
+    "gb2312", "gbk", "gb18030", "big5", "big5hkscs", "tis-620",
+    "utf-16", "utf-16-be", "utf-16-le",
+})
+DEFAULT_CHARSET = "utf-8"
+
+# The label is shape-checked BEFORE it reaches codecs.lookup, whose `encodings`
+# search function imports a module named after the normalized label. The lookup
+# is used only for its ALIAS table (windows-1251 -> cp1251, csKOI8R -> koi8-r);
+# the security decision is the ALLOWED_CHARSETS membership test on the canonical
+# name it returns, so the lookup's breadth buys convenience and grants nothing.
+# Lowercase only, because the sole caller lowercases before matching -- an
+# `A-Z` half here would be dead, and a dead half of a security gate reads as
+# coverage it does not have. A caller that ever forgot to lowercase would fail
+# CLOSED, which is the right direction for this gate.
+CHARSET_LABEL_RE = re.compile(r"\A[a-z0-9._:+-]{1,64}\Z")
 
 # Control characters anywhere in the URL. Also catches the raw CR/LF that make
 # header injection possible.
@@ -436,6 +499,123 @@ def content_type_token(ctype: str, allowed=ALLOWED_CONTENT_PREFIXES) -> str:
         if ctype.startswith(prefix):
             return prefix
     return "other"
+
+
+def first_field_parameters(raw_ctype: str) -> list:
+    """(name, raw value) pairs of the FIRST Content-Type field value.
+
+    ONE left-to-right pass, because the two delimiters this has to respect --
+    `;` between parameters and `,` between repeated header fields -- are BOTH
+    ordinary characters inside a quoted parameter value, and no context-free
+    regex can tell the two apart. Both cases are reachable without anything
+    hostile:
+
+      text/html; note="x; charset=windows-1251; y"; charset=utf-8
+
+    a regex takes the decoy inside `note` and mis-decodes a page that declared
+    UTF-8 correctly; and http.client JOINS repeated Content-Type headers with
+    ", ", so
+
+      text/html, application/pdf; charset=windows-1251
+
+    would let a regex borrow a charset from a field whose media type was never
+    the one admitted. Stopping at the first TOP-LEVEL comma binds the charset to
+    the same field value the media-type decision read.
+
+    Quoted-string values are returned UNQUOTED with their `\\x` quoted-pairs
+    resolved, so the caller never sees a delimiter it would have to re-parse.
+    Surrounding whitespace is NOT stripped -- that is the caller's, because
+    stripping it here would erase the difference between a padded value and a
+    quoted one, which is exactly the distinction the next step depends on.
+
+    An UNTERMINATED quote (or a trailing backslash) makes the whole field
+    malformed, and this returns NO parameters at all rather than a value it had
+    to guess the end of -- fail-closed, in the one place where guessing would
+    put a server-chosen codec on a body.
+    """
+    params = []
+    name = []
+    value = []
+    in_value = False
+    in_quotes = False
+    escaped = False
+    for ch in raw_ctype:
+        if escaped:
+            value.append(ch)
+            escaped = False
+            continue
+        if in_quotes:
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_quotes = False
+            else:
+                value.append(ch)
+            continue
+        if ch == '"' and in_value:
+            in_quotes = True
+            continue
+        if ch == ",":
+            break
+        if ch == ";":
+            params.append(("".join(name), "".join(value)))
+            name, value, in_value = [], [], False
+            continue
+        if ch == "=" and not in_value:
+            in_value = True
+            continue
+        (value if in_value else name).append(ch)
+    # `in_quotes` alone, and it is not an oversight: `escaped` is set only
+    # inside the quoted branch and nothing clears `in_quotes` while it is set,
+    # so a trailing backslash reaches here as an OPEN QUOTE rather than as a
+    # second condition. Brute-forced over every string up to length 6 in
+    # `" ; \ , = a x` -- zero cases where `escaped` is true and `in_quotes` is
+    # not. Testing both would read as belt-and-braces while one half never
+    # fires, which is worse than the shorter honest condition.
+    if in_quotes:
+        return []
+    params.append(("".join(name), "".join(value)))
+    # The FIRST entry is the media type itself (it precedes the first `;` and so
+    # has no `=`), never a parameter. Dropping it here rather than at the call
+    # site keeps "what this function returns" one sentence long.
+    return params[1:]
+
+
+def body_charset(raw_ctype: str) -> str:
+    """The codec to decode a retrieved body with, from the response's own
+    declared charset. Always returns a member of ALLOWED_CHARSETS.
+
+    No `allowed=` seam, deliberately, though `content_type_token()` next door
+    has one: that sibling's parameter exists because
+    `parse_content_type_prefixes` really does hand it a per-project tuple. This
+    set is closed by release, and a parameter nothing passes would advertise a
+    configurability the boundary refuses.
+
+    Every step fails CLOSED to UTF-8, which is what this function did
+    unconditionally before #801 -- so an unparseable, unknown or non-charset
+    declaration is exactly as good (and exactly as bad) as it was, and only a
+    declaration that survives the whole ladder changes any behaviour.
+    """
+    for name, raw_value in first_field_parameters(raw_ctype):
+        if name.strip().lower() != "charset":
+            continue
+        # The value arrives already unquoted; what is left is the OWS RFC 9110's
+        # grammar permits around it. `charset="windows-1251" ; boundary=x` is a
+        # VALID header, and an implementation that unquoted before trimming
+        # would not see the closing quote there, would leave the quotes in the
+        # label, and would fall back to UTF-8 -- silently re-creating the very
+        # defect this function exists to fix. Caught in plan review rather than
+        # in production, which is the only reason it is a comment and not an
+        # incident.
+        label = raw_value.strip().lower()
+        if not CHARSET_LABEL_RE.match(label):
+            return DEFAULT_CHARSET
+        try:
+            canonical = codecs.lookup(label).name
+        except LookupError:
+            return DEFAULT_CHARSET
+        return canonical if canonical in ALLOWED_CHARSETS else DEFAULT_CHARSET
+    return DEFAULT_CHARSET
 
 
 # A host whose every label is a bare integer or an 0x-hex integer, and which is
@@ -748,7 +928,8 @@ def _encodable(value):
     cannot encode, so ONE such `source` in an otherwise valid approved fragment
     raised UnicodeEncodeError out of Path.write_text and left no index at all.
     Note this is a FRAGMENT channel, not a wire one: retrieved bodies already
-    pass through decode(errors="replace"), which can never emit a surrogate.
+    pass through decode(errors="replace"), which can never emit a surrogate --
+    through ALLOWED_CHARSETS since #801, none of whose members can either.
 
     Non-strings pass through untouched -- the schema constrains those, and
     silently stringifying them here would hide a shape bug rather than fix one.
@@ -1105,7 +1286,14 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
             raise _refuse("read-timeout")
         status = resp.status
         location = resp.getheader("Location")
-        ctype = (resp.getheader("Content-Type") or "").split(";")[0].strip().lower()
+        # TWO readings of one header, deliberately independent. `ctype` keeps
+        # its exact pre-#801 derivation because it feeds the ADMISSION decision
+        # and its closed-token record; `ctype_header` is the raw field, read
+        # only by body_charset, which decides nothing about admission. Deriving
+        # one from the other would tie the boundary's admission rule to a
+        # parameter parser it has no reason to depend on.
+        ctype_header = resp.getheader("Content-Type") or ""
+        ctype = ctype_header.split(";")[0].strip().lower()
 
         if status in (301, 302, 303, 307, 308):
             if not location:
@@ -1140,7 +1328,9 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
         # admitted deliberately -- plenty of ordinary servers omit it, and
         # the body is still capped, decoded with errors="replace", and read
         # only through the delimiter -- so "absent" is recorded rather than
-        # silently indistinguishable from an allowed type.
+        # silently indistinguishable from an allowed type. (A response with no
+        # Content-Type also declares no charset, so body_charset gives it the
+        # UTF-8 this file used unconditionally before #801.)
         # ONE evaluation, bound to a local: the guard below and the value
         # recorded in index.json must be the SAME decision. Calling the
         # function twice let a future edit widen one and not the other with
@@ -1154,7 +1344,7 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
             raw = _read_bounded(resp, deadline)
         truncated = len(raw) > MAX_BYTES
         raw = raw[:MAX_BYTES]
-        body = raw.decode("utf-8", errors="replace")
+        body = raw.decode(body_charset(ctype_header), errors="replace")
         return {
             "ok": True, "status": status, "url": url, "final_origin": chain[-1]["origin"],
             "chain": chain, "content_type": ctype_token,
@@ -1361,8 +1551,8 @@ def run_batch(batch_path: Path, out_dir: Path, *,
         if result["ok"]:
             name = f"{EVIDENCE_PREFIX}{i:03d}.txt"
             # Encode ONCE and spend exactly what gets written -- not
-            # result["bytes"]. result["bytes"] is len(raw) BEFORE
-            # raw.decode("utf-8", errors="replace"), and a run of invalid bytes
+            # result["bytes"]. result["bytes"] is len(raw) BEFORE the
+            # errors="replace" decode, and a run of invalid bytes
             # can expand on decode: measured, b"\xff" * n decodes to n
             # replacement characters and re-encodes to exactly 3n bytes (NOT a
             # universal "every invalid byte becomes its own U+FFFD" -- a
