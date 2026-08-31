@@ -159,6 +159,7 @@ FINAL_AUDIT_SUMMARY_SCHEMA = json.loads(
 FN_PH = "⟦FNREF_1⟧"
 V_PH_A = "⟦VERSE_vA⟧"
 V_PH_B = "⟦VERSE_vB⟧"
+V_PH_C = "⟦VERSE_vC⟧"  # #802: a verse quoted inside a FOOTNOTE definition
 
 # A manifest segment that is deliberately NEVER given a segpack/draft/ledger
 # fragment -- classifies "not_started". Included in most fixtures below
@@ -1130,6 +1131,191 @@ def test_warn_verse_structure_paste_duplicate_field(tmp_path):
         "[seg01] VERSE-STRUCTURE verse vA: field 'rendered' == field "
         "'literal_gloss' up to whitespace (paste/duplicate -- need genuinely "
         "distinct content)" in result.stderr
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9a. WARN: verse-structure, FOOTNOTE-parented verse (#802). A verse quoted
+#     inside a footnote definition has that footnote's def block as its
+#     parent_block -- segpack.py admits exactly that -- and the definition's
+#     text lives in the segpack's `footnotes[]`, never in `blocks[]`. Reading
+#     `blocks[]` alone reported EVERY such verse as sourceless, about text the
+#     segpack was holding: 76 unclearable warnings across four volumes of one
+#     live series, 100% false positive.
+#
+#     The three cases below are the whole contract: source PRESENT must be
+#     silent, and both ways a footnote parent can genuinely be sourceless --
+#     the footnote missing entirely, and the footnote present with blank
+#     source_text -- must still warn. Without the last two, an implementation
+#     that simply exempted the `FN:` prefix would pass, and that is precisely
+#     the fix the issue rejects.
+#
+#     Each fixture is built locally rather than through clean_segpack() /
+#     clean_draft(), so no other test's shape moves.
+# ---------------------------------------------------------------------------
+
+
+def _footnote_verse_segpack(fn_source_text, parent_block):
+    """A one-block segment whose footnote 1 is referenced from its prose, plus
+    one mount:"embedded" verse vC parented to `parent_block`."""
+    return {
+        "seg": "seg01",
+        "blocks": [
+            {"id": "p1", "order_index": 0,
+             "source_html": f"<p>Some prose with a note {FN_PH} attached.</p>"},
+        ],
+        "footnotes": [{"n": 1, "source_text": fn_source_text}],
+        "verses": [
+            {"vid": "vC", "placeholder": V_PH_C, "parent_block": parent_block,
+             "mount": "embedded", "n_line": 2},
+        ],
+        "names": [], "canon_names": [], "new_names": [],
+    }
+
+
+def _footnote_verse_draft(fn_text):
+    return {
+        "seg": "seg01",
+        "blocks": {"p1": f"Some translated prose with a note {FN_PH} attached."},
+        "footnotes": {"1": fn_text},
+        "verses": {
+            "vC": {
+                "rendered": "First line rendered so\nSecond line rendered so",
+                "literal_gloss": (
+                    "The first line means one thing, the second line means "
+                    "another thing entirely"
+                ),
+            },
+        },
+        "names": [], "notes": [],
+    }
+
+
+def test_warn_verse_structure_footnote_parented_verse_has_source(tmp_path):
+    """#802 regression: the footnote's own source_text IS the parent's source
+    text, so no sourceless warning may be emitted for vC."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
+    segpack = _footnote_verse_segpack(
+        f"Une note en francais citant {V_PH_C} un vers.", "FN:1"
+    )
+    draft = _footnote_verse_draft(f"A translated note quoting {V_PH_C} a verse.")
+    add_converged_segment(root, "seg01", segpack, draft)
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, (
+        f"a footnote-embedded verse must stay HARD-clean -- a failure here means "
+        f"this fixture's isolation assumption broke:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    # Asserted on the vid, not on the whole class: other WARN lanes may
+    # legitimately have something to say about this fixture, and this test owns
+    # exactly one sentence of stderr.
+    assert "VERSE-STRUCTURE verse vC" not in result.stderr, (
+        f"footnote-parented verse reported as sourceless (#802):\n{result.stderr}"
+    )
+
+
+def test_warn_verse_structure_footnote_parent_absent_still_warns(tmp_path):
+    """The fix registers what the segpack HOLDS -- it does not exempt the
+    `FN:` prefix. A parent naming a footnote the segpack has no entry for is
+    genuinely sourceless and must still warn."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
+    segpack = _footnote_verse_segpack("Une note en francais.", "FN:9")
+    draft = _footnote_verse_draft("A translated note in English.")
+    add_converged_segment(root, "seg01", segpack, draft)
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, result.stderr
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert (
+        "[seg01] VERSE-STRUCTURE verse vC: segpack has NO original source "
+        "text for parent block 'FN:9' (a citation of the original would "
+        "be empty)" in result.stderr
+    )
+
+
+def test_warn_verse_structure_footnote_parent_blank_source_still_warns(tmp_path):
+    """The other genuinely-sourceless shape: the footnote entry EXISTS and its
+    `source_text` is blank. This is the true finding the check exists for, and
+    the one a blanket `FN:`-prefix exemption would have silenced."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
+    segpack = _footnote_verse_segpack("   ", "FN:1")  # injected defect: blank source
+    draft = _footnote_verse_draft("A translated note in English.")
+    add_converged_segment(root, "seg01", segpack, draft)
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, result.stderr
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert (
+        "[seg01] VERSE-STRUCTURE verse vC: segpack has NO original source "
+        "text for parent block 'FN:1' (a citation of the original would "
+        "be empty)" in result.stderr
+    )
+
+
+def test_warn_verse_structure_a_real_block_outranks_a_colliding_footnote(tmp_path):
+    """A blocks[] entry is the parent's DIRECT carrier and wins the `FN:{n}`
+    key. Valid data cannot collide -- a FN:{N} definition block is never a
+    member of a segment's own block_ids[] -- but nothing between here and a
+    hand-edited segpack enforces that, and registering footnotes by assignment
+    rather than setdefault would let footnote 1 blank the source of a verse
+    whose parent really is a block called "FN:1". #802 fixed the footnote case;
+    it must not move the block case."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
+    segpack = {
+        "seg": "seg01",
+        "blocks": [
+            {"id": "p1", "order_index": 0,
+             "source_html": f"<p>Some prose with a note {FN_PH} attached.</p>"},
+            # A block genuinely named "FN:1", colliding with footnote 1's key.
+            {"id": "FN:1", "order_index": 1,
+             "source_html": "<p>Premiere ligne du poeme<br/>Deuxieme ligne</p>"},
+        ],
+        # Blank source: an assignment-based registration would overwrite the
+        # block's real text with this and manufacture a warning.
+        "footnotes": [{"n": 1, "source_text": "   "}],
+        "verses": [
+            {"vid": "vA", "placeholder": V_PH_A, "parent_block": "FN:1"},
+        ],
+        "names": [], "canon_names": [], "new_names": [],
+    }
+    draft = {
+        "seg": "seg01",
+        "blocks": {
+            "p1": f"Some translated prose with a note {FN_PH} attached.",
+            "FN:1": V_PH_A,
+        },
+        "footnotes": {"1": "A translated note in English."},
+        "verses": {
+            "vA": {
+                "rendered": "First line rendered so\nSecond line rendered so",
+                "literal_gloss": (
+                    "The first line means one thing, the second line means "
+                    "another thing entirely"
+                ),
+            },
+        },
+        "names": [], "notes": [],
+    }
+    add_converged_segment(root, "seg01", segpack, draft)
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, result.stderr
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert "VERSE-STRUCTURE verse vA" not in result.stderr, (
+        f"a colliding footnote overwrote a real block's source text:\n{result.stderr}"
     )
 
 

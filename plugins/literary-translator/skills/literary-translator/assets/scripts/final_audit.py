@@ -758,6 +758,37 @@ def warn_verse_structure(seg):
     for b in (segpack.get("blocks") or []):
         if isinstance(b, dict) and b.get("id"):
             block_source[b["id"]] = (b.get("plain_text") or b.get("source_html") or "")
+    # A verse's parent_block is NOT always a blocks[] entry (#802). segpack.py
+    # admits a verse whose parent is a FOOTNOTE-definition block -- its verses[]
+    # filter accepts `footnote_def_block_ids` as readily as the segment's own
+    # block ids -- and that definition's text is carried in `footnotes[]` as
+    # {n, source_text}, never in `blocks[]`. A map built from blocks[] alone
+    # therefore reports EVERY footnote-parented verse as sourceless, about text
+    # the segpack is holding, and the operator cannot clear the class by hand.
+    # `FN:{n}` is the id to key it under: the shipped extractor mints exactly
+    # that (`fn_id = f"FN:{n}"` in extract.py.template) and records it as the
+    # manifest footnote's `def_block`, which is what segpack.py matched the
+    # parent against -- and `n` is the only part of it that survives into the
+    # segpack, which carries no def_block. A bool is excluded the way segpack.py's
+    # own validator excludes it, since `True` is an `int` and would register a
+    # "FN:True" nothing can look up. term_carriers() below reads both containers
+    # for the same reason.
+    #
+    # setdefault, never assignment: a blocks[] entry is the parent's DIRECT
+    # carrier and must win. Valid data cannot collide -- a FN:{N} definition
+    # block is never a member of a segment's own block_ids[] -- but nothing
+    # between here and a hand-edited segpack enforces that, and a plain
+    # assignment would let a footnote silently supply (or blank) the source of a
+    # block-parented verse. This lane's contract is that block parents behave
+    # exactly as they did before #802, whatever the input.
+    for f in _as_sequence(segpack.get("footnotes")):
+        if not isinstance(f, dict):
+            continue
+        n = f.get("n")
+        if not isinstance(n, int) or isinstance(n, bool):
+            continue
+        fn_source = f.get("source_text")
+        block_source.setdefault(f"FN:{n}", fn_source if isinstance(fn_source, str) else "")
     parent_block_of = {
         v["vid"]: v.get("parent_block")
         for v in (segpack.get("verses") or [])
@@ -782,7 +813,17 @@ def warn_verse_structure(seg):
             seen[field] = normed
 
         parent_block = parent_block_of.get(vid)
-        source_text = block_source.get(parent_block, "") if parent_block else ""
+        # isinstance, not a bare truth test: a corrupt segpack can carry a LIST
+        # parent_block, which is truthy AND unhashable, so `.get()` on it raises
+        # TypeError and aborts W7 before either HARD verdict prints -- a worse
+        # outcome than any wrong warning. term_carriers() guards the identical
+        # hazard the identical way. A non-string parent then reports as
+        # sourceless, which is what it is.
+        source_text = (
+            block_source.get(parent_block, "")
+            if isinstance(parent_block, str) and parent_block
+            else ""
+        )
         if not source_text.strip():
             warns.append(
                 f"[{seg}] VERSE-STRUCTURE verse {vid}: segpack has NO "

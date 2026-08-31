@@ -48,19 +48,19 @@
    ],
    "claim": "Every exception a computer can raise -- including the SystemExit cache_key.py's own fail() raises (cache_key.py:305-309), which is how a missing style_bible.md, an absent particle config and an unresolvable manifest source input all surface -- is converted by the caller into an AssembleError naming the segment and the field. \"Cannot confirm this input\" must never read as \"this input is unchanged\". (A PyYAML-less"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"final_audit.py:1811-1893\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"final_audit.py:1852-1934\", 0]": {
    "anchors": [
     "def count_stale_previously_converged",
     "state != SENTINEL_ABSENT"
    ],
-   "claim": "# moved (`stale_mismatched_fields`) on the materialized entry only, and # load_converged_segments() below accepts such a record exactly like # status==\"converged\", so a plugin upgrade can no longer strand a finished # book. See final_audit.py's own `count_stale_previously_converged()` # (`final_audit.py:1811-1893`), the sibling carve-out this one is designed # to always agree with over the SAME materialized runs/ledger.json snapshot."
+   "claim": "# moved (`stale_mismatched_fields`) on the materialized entry only, and # load_converged_segments() below accepts such a record exactly like # status==\"converged\", so a plugin upgrade can no longer strand a finished # book. See final_audit.py's own `count_stale_previously_converged()` # (`final_audit.py:1852-1934`), the sibling carve-out this one is designed # to always agree with over the SAME materialized runs/ledger.json snapshot."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"final_audit.py:1811-1893\", 1]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"final_audit.py:1852-1934\", 1]": {
    "anchors": [
     "def count_stale_previously_converged",
     "state != SENTINEL_ABSENT"
    ],
-   "claim": "absent from the allowlist by construction and refuses too, never silently becomes deliverable. And ONLY a clean ENOENT sentinel read blocks -- AMBIGUOUS (a dangling symlink, an EACCES) carves out exactly like PRESENT, mirroring final_audit.py's own count_stale_previously_converged() (`final_audit.py:1811-1893`) so the two whole-project completeness signals never disagree about the same materialized snapshot. Reading an unreadable dotfile as \"absent\" would declare a finished book undeliverable, and unrecoverably so: the operator's only route to a fresh sentinel is a retranslate, which"
+   "claim": "absent from the allowlist by construction and refuses too, never silently becomes deliverable. And ONLY a clean ENOENT sentinel read blocks -- AMBIGUOUS (a dangling symlink, an EACCES) carves out exactly like PRESENT, mirroring final_audit.py's own count_stale_previously_converged() (`final_audit.py:1852-1934`) so the two whole-project completeness signals never disagree about the same materialized snapshot. Reading an unreadable dotfile as \"absent\" would declare a finished book undeliverable, and unrecoverably so: the operator's only route to a fresh sentinel is a retranslate, which"
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/backfill_ever_converged.py\", \"cache_key.py:149-156\", 0]": {
    "anchors": [

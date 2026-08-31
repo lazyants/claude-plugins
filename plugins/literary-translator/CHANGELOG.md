@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.74.1 — 2026-08-31
+
+**A verse quoted inside a footnote is no longer reported as having no source (#802).** W7's
+`warn_verse_structure()` built its "does this verse's parent block carry source text" map from
+the segpack's `blocks[]` alone. A verse's `parent_block` may be a footnote-DEFINITION block —
+`segpack.py` admits one, its `verses[]` filter accepting `footnote_def_block_ids` as readily as
+the segment's own block ids — and that definition's text is carried in a separate `footnotes[]`
+array of `{n, source_text}`, never in `blocks[]`. So the lookup missed by construction and the
+audit printed `segpack has NO original source text for parent block 'FN:<n>'` about text the
+segpack was holding. Measured across four volumes of one live fr→ru series: 76 such warnings,
+every one of them false, and on one volume 18 of the book's 69. Nothing was ever gated on it —
+it is a WARN — but it is an unclearable class recurring at every closing audit, in the same
+channel the true findings live in.
+
+- The map now also registers each segpack footnote under `FN:{n}`, the id the shipped extractor
+  mints for that definition block and records as the manifest footnote's `def_block`. `n` is the
+  only part of that id which survives into the segpack, which carries no `def_block`.
+- **The warning is NOT suppressed for `FN:`-parented verses.** Both ways such a parent can
+  genuinely be sourceless still warn: the footnote absent from the segpack entirely, and the
+  footnote present with a blank `source_text` — the real case the check exists for.
+- **A `blocks[]` entry still wins its own id.** A footnote registers with `setdefault`, so a
+  block genuinely named `FN:1` keeps supplying the source text of any verse parented to it. Valid
+  data cannot collide — a `FN:{N}` definition block is never a member of a segment's own
+  `block_ids[]` — but nothing between the check and a hand-edited segpack enforces that, and
+  plain assignment would have let a footnote blank a real block's source. Four tests pin all four
+  outcomes, each one confirmed red against the code it guards.
+- The parent lookup is now guarded on a string. A corrupt segpack can carry a list
+  `parent_block`, which is truthy AND unhashable, so the lookup raised `TypeError` and aborted W7
+  before either HARD verdict printed — a worse outcome than any wrong warning. `term_carriers()`
+  already guarded the identical hazard the identical way.
+
+No contract, schema, or output change; block-parented verses behave exactly as before.
+
 ## 1.74.0 — 2026-08-29
 
 **A project can declare WHAT it wants indexed (#795).** Until now `output.target: obsidian`
