@@ -50,7 +50,24 @@ the glossary pass was simply left behind.
 - **Rung accounting is a reservation, not a count.** Repair reserves `attempt + 1` before
   dispatching; at the terminal rung no repair is dispatched at all (there is none to reserve, and
   one would exceed the judge cap); a repair that fails validation regenerates into that **same**
-  reserved rung, never `attempt + 2`. Total attempts per batch are exactly what they were.
+  reserved rung, never `attempt + 2`. Total attempts per batch are exactly what they were. A
+  reserved rung a repair actually POPULATED re-enters the loop at APPROVE and not at DISPATCH: the
+  ordinary dispatch prompt orders its agent to decide every candidate and atomically write that
+  same path, so handing the rung back to it would re-decide the rows the repair left alone and
+  make which bytes the next snapshot pins a matter of scheduling. The rejection at the LAST rung
+  exhausts at that rung too, rather than recording an attempt one past the ladder as the one that
+  failed.
+- **A batch's state survives between the two invocations in ONE run-scoped document**, in the
+  verdict directory, advanced by ONE transition function — so a rejection recorded on the second
+  invocation actually climbs the ladder instead of stranding the batch with nothing pending and
+  nothing owed. The document is bound to `durable_root` + `RUN_ID`: a foreign one is discarded, not
+  merged, so reusing a session directory is ordinary rather than fatal. A resume, though, reuses
+  the **same** `RUN_ID` while `resume_setup.py` deletes that run's snapshots, records and evidence
+  — so before anything else each batch's status is checked against the artifact it promises, and a
+  batch whose snapshot or approval record is gone is reset to attempt 0 and named in `reset[]`.
+  Keeping such a status is a permanent wedge: nothing transitions out of it, its old verdict is
+  refused forever because the snapshot is unreadable, and a `ready` one would point the pass's one
+  irreversible write at paths that no longer exist.
 - **The verdict hand-back is authorization, and is treated as such.** `--verdict-dir` is required,
   refused inside `durable_root`, refused unless owned by this uid and private, and every open in
   it is relative to a pinned directory descriptor with `O_NOFOLLOW` and `O_EXCL`. A verdict is

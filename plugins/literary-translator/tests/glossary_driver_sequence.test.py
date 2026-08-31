@@ -47,6 +47,18 @@ CANDIDATES = [{"name": "Alpha", "freq": 5}, {"name": "Beta", "freq": 3}]
 BATCHES = [{"index": 0, "candidates": CANDIDATES}]
 
 
+def _default_rows(bases=("established", "established")):
+    """The whole-batch decision an ordinary dispatch produces. One definition, used
+    by the companion stub AND by plant_fragment, so a fragment that appeared by
+    dispatch is indistinguishable from one a test planted -- which is the point:
+    a test may then assert on a row that DIFFERS from it and know that difference
+    came from the repair, not from the fixture."""
+    return [{"source_form": c["name"], "basis": b, "disposition": "accepted",
+             "canonical_target_form": c["name"], "confidence": "high",
+             "is_proper_name": True, "source": f"https://x.test/{i}"}
+            for i, (c, b) in enumerate(zip(CANDIDATES, bases))]
+
+
 def _write(path: Path, text: str, *, executable: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(text), encoding="utf-8")
@@ -87,9 +99,19 @@ def bed(tmp_path):
     ''')
     # The companion stub stands in for the codex turn: it reads the prompt it was
     # given, finds the run-scoped .json path that prompt tells the agent to write,
-    # and writes the rows a sidecar file supplies. Faithful in the one way that
-    # matters here -- the artifact appears DURING the driver's poll, not before it,
-    # so the driver's own stale-artifact unlink is exercised rather than defeated.
+    # and writes there. Faithful in the two ways that matter:
+    #
+    #  - the artifact appears DURING the driver's poll, not before it, so the
+    #    driver's own stale-artifact unlink is exercised rather than defeated; and
+    #  - an ORDINARY DISPATCH writes a whole-batch decision UNCONDITIONALLY, which
+    #    is exactly what the real prompt orders ("decide every candidate", one
+    #    atomic write to that path). An earlier version of this stub wrote only
+    #    what a sidecar plan listed, so a dispatch nobody wanted quietly wrote
+    #    NOTHING -- and a driver that dispatched over a freshly repaired rung
+    #    looked identical to one that did not.
+    #
+    # The sidecar plan overrides a specific artifact by filename; a repair has no
+    # default, because a repair turn that never writes is a real case.
     planted = tmp_path / "planted.json"
     planted.write_text(json.dumps({}))
     _write(tmp_path / "companion.mjs", f'''
@@ -98,10 +120,13 @@ def bed(tmp_path):
         const pf = args[args.indexOf("--prompt-file") + 1];
         const prompt = fs.readFileSync(pf, "utf8");
         const plan = JSON.parse(fs.readFileSync({str(planted)!r}, "utf8"));
+        const fresh = {json.dumps(_default_rows())};
         const paths = prompt.match(/\\S+\\/(?:out|repair)_\\d+_attempt_\\d+\\.json/g) || [];
         for (const target of new Set(paths)) {{
           const key = target.split("/").pop();
-          if (plan[key]) fs.writeFileSync(target, JSON.stringify(plan[key]));
+          fs.appendFileSync({str(calls)!r}, "companion " + key + "\\n");
+          const rows = plan[key] || (key.startsWith("out_") ? fresh : null);
+          if (rows) fs.writeFileSync(target, JSON.stringify(rows));
         }}
         console.log(JSON.stringify({{ok: true}}));
     ''')
@@ -189,13 +214,20 @@ def run_driver(bed, *extra, expect=0):
 
 
 def plant_fragment(bed, attempt=0, bases=("established", "established")):
-    """Stands in for the codex turn: writes the fragment the driver polls for."""
-    rows = [{"source_form": c["name"], "basis": b, "disposition": "accepted",
-             "canonical_target_form": c["name"], "confidence": "high",
-             "is_proper_name": True, "source": f"https://x.test/{i}"}
-            for i, (c, b) in enumerate(zip(CANDIDATES, bases))]
+    """Writes a fragment WITHOUT a dispatch, for the cases that need one to
+    pre-exist (a resumed attempt 0, a wiped-artifact resume). Ordinary dispatch
+    paths must NOT call this: the companion stub writes the same rows, and
+    planting them first hides whether the dispatch happened at all."""
+    rows = _default_rows(bases)
     (bed["run_dir"] / f"out_0_attempt_{attempt}.json").write_text(json.dumps(rows))
     return rows
+
+
+def companion_targets(bed):
+    """Every artifact the fake codex turn was asked to write, in order. This is
+    the record of which DISPATCHES actually happened."""
+    return [l.split(" ", 1)[1] for l in bed["calls"].read_text().splitlines()
+            if l.startswith("companion ")]
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +239,6 @@ def test_the_companion_resolver_is_called_with_its_required_arguments(bed):
     bare; the real script has `--durable-root` as `required=True`, so every
     dispatch died on an argparse error before codex was ever reached. Nothing in
     the unit suites touched this path."""
-    plant_fragment(bed)
     run_driver(bed)
     resolver_calls = [l for l in bed["calls"].read_text().splitlines()
                       if l.startswith("resolver ")]
@@ -232,7 +263,6 @@ def test_the_real_resolver_would_refuse_a_bare_invocation(bed):
 # ---------------------------------------------------------------------------
 
 def test_drive_hands_back_one_judge_then_a_verdict_merges(bed):
-    plant_fragment(bed)
     out, _ = run_driver(bed)
     assert out["needs_judge"], "a live batch must hand back for a judge"
     entry = out["needs_judge"][0]
@@ -254,7 +284,6 @@ def test_a_rejection_advances_the_ladder_instead_of_stranding_the_batch(bed):
     """The shipped three-attempt ladder must actually run. Recording a rejection
     as a note and stopping left the batch neither ready nor awaiting a judge, so
     attempt 1 never happened."""
-    plant_fragment(bed)
     out, _ = run_driver(bed)
     entry = out["needs_judge"][0]
 
@@ -262,8 +291,6 @@ def test_a_rejection_advances_the_ladder_instead_of_stranding_the_batch(bed):
     verdicts.write_text(json.dumps([{
         "batch": 0, "attempt": 0, "nonce": entry["nonce"],
         "reply": "source 1 does not attest the form.\nCITATIONS_REJECTED 0 ATTEMPT 0"}]))
-    # attempt 1's fragment is planted, standing in for the regenerating codex turn
-    plant_fragment(bed, attempt=1)
     out2, _ = run_driver(bed, "--record-verdicts", str(verdicts))
 
     assert out2["recorded"][0]["approved"] is False
@@ -277,7 +304,6 @@ def test_a_rejection_advances_the_ladder_instead_of_stranding_the_batch(bed):
 
 
 def test_a_verdict_cannot_be_replayed_after_it_is_consumed(bed):
-    plant_fragment(bed)
     out, _ = run_driver(bed)
     entry = out["needs_judge"][0]
     verdicts = bed["session"] / "v.json"
@@ -292,7 +318,6 @@ def test_a_verdict_cannot_be_replayed_after_it_is_consumed(bed):
 def test_a_verdict_for_bytes_that_changed_is_refused(bed):
     """The snapshot digest is re-hashed immediately before the approval record is
     written, so a verdict cannot be carried onto bytes it never named."""
-    plant_fragment(bed)
     out, _ = run_driver(bed)
     entry = out["needs_judge"][0]
     snap = bed["run_dir"] / "approved_0_attempt_0.json"
@@ -313,7 +338,6 @@ def test_state_from_another_run_is_discarded_not_merged(bed):
     """A reused verdict directory must behave like a fresh one. Carrying a
     previous run's readiness forward is how an approval from run A satisfies run
     B's merge admission."""
-    plant_fragment(bed)
     out, _ = run_driver(bed)
     entry = out["needs_judge"][0]
     verdicts = bed["session"] / "v.json"
@@ -340,10 +364,7 @@ def test_a_shared_budget_outcome_spends_no_judge(bed):
     """fetch_citation.py exits 0 on a soft budget failure, so without an explicit
     branch the batch would fall through and spend a judge on an environment
     fault — whose rejection would then be misread as a content rejection."""
-    plant_fragment(bed)
     bed["outcomes"].write_text(json.dumps(["refused:batch-byte-budget", "fetched"]))
-    for attempt in (1, 2):
-        plant_fragment(bed, attempt=attempt)
     out, _ = run_driver(bed, expect=1)
     assert out["needs_judge"] == [], "no judge may be spent on a budget failure"
     assert out["not_ready"], "the batch must be reported, not silently dropped"
@@ -352,7 +373,6 @@ def test_a_shared_budget_outcome_spends_no_judge(bed):
 def test_a_retrieval_failure_repairs_before_any_judge_runs(bed):
     """The repair is a PRE-judge step: once a judge is dispatched at all, every
     established citation in the batch has retrieved."""
-    plant_fragment(bed)
     bed["outcomes"].write_text(json.dumps(["http_error:404", "fetched"]))
 
     # What the repair TURN produces, handed to the companion stub so the artifact
@@ -367,6 +387,13 @@ def test_a_retrieval_failure_repairs_before_any_judge_runs(bed):
     assert len(fetches) >= 2, "a repaired fragment must be re-fetched before judging"
     assert out["needs_judge"], "after a successful repair the batch reaches a judge"
     assert out["needs_judge"][0]["attempt"] == 1, "the repair reserves exactly one rung"
+    assert companion_targets(bed) == ["out_0_attempt_0.json",
+                                      "repair_0_attempt_0.json"], (
+        "a valid repair POPULATES the reserved rung. Handing that rung back to "
+        "ordinary dispatch launches a whole-batch job whose prompt orders the "
+        "agent to decide every candidate and atomically write this same path -- "
+        "the untouched rows silently re-decided, and which write the next APPROVE "
+        "snapshots decided by scheduling")
     spliced = json.loads((bed["run_dir"] / "out_0_attempt_1.json").read_text())
     assert [r["source_form"] for r in spliced] == ["Alpha", "Beta"], (
         "the splice must preserve the snapshot's row order and full coverage")
@@ -383,7 +410,6 @@ def test_the_ladder_bound_comes_from_the_template(bed):
 
 
 def test_a_verdict_file_outside_the_verdict_dir_is_refused(bed):
-    plant_fragment(bed)
     out, _ = run_driver(bed)
     entry = out["needs_judge"][0]
     stray = bed["durable"] / "glossary" / "runs" / "run1" / "v.json"
@@ -402,3 +428,100 @@ def test_a_verdict_file_outside_the_verdict_dir_is_refused(bed):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# A resume reuses the RUN_ID -- so the state document outlives the artifacts
+# ---------------------------------------------------------------------------
+
+def _wipe_as_resume_setup_does(bed):
+    """What resume_setup.py does to this run's glossary directory on a MATCHING
+    resume: every approved snapshot, every approval record and every evidence
+    directory goes; out_{i}_attempt_0.json stays. The state document lives in the
+    SESSION directory, which that script never touches -- which is the whole
+    problem this pair of tests covers."""
+    for entry in bed["run_dir"].iterdir():
+        if entry.name.startswith(("approved_", "approval_", "evidence_")):
+            shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+
+
+def test_an_awaiting_judge_status_outliving_its_snapshot_is_reset_not_wedged(bed):
+    """A resume reuses the same RUN_ID, so the state document is KEPT while
+    resume_setup.py deletes the snapshot the judge was handed. Nothing then
+    transitions that batch: its old verdict is refused forever because the
+    snapshot is unreadable, and drive_all skips it because it reads as awaiting
+    one. The batch is wedged with no operator move that frees it."""
+    out, _ = run_driver(bed)
+    entry = out["needs_judge"][0]
+    assert (bed["run_dir"] / "approved_0_attempt_0.json").exists()
+
+    _wipe_as_resume_setup_does(bed)
+
+    verdicts = bed["session"] / "v.json"
+    verdicts.write_text(json.dumps([{
+        "batch": 0, "attempt": 0, "nonce": entry["nonce"],
+        "reply": "ok\nCITATIONS_OK 0 ATTEMPT 0"}]))
+    out2, _ = run_driver(bed, "--record-verdicts", str(verdicts), expect=1)
+
+    assert out2["reset"], "the stale awaiting status must be reported, not silently kept"
+    assert out2["reset"][0]["was"] == "awaiting_judge"
+    assert out2["refused"], "a verdict for a snapshot that is gone cannot be honoured"
+    assert out2["needs_judge"], (
+        "the batch must be re-prepared in this same invocation; leaving it "
+        "awaiting a verdict nobody can produce wedges it permanently")
+    assert out2["needs_judge"][0]["nonce"] != entry["nonce"], (
+        "the fresh PREPARE must mint a fresh nonce")
+    assert not (bed["run_dir"] / "approval_0_attempt_0.json").exists(), (
+        "no approval may be recorded against the wiped snapshot")
+
+
+def test_a_ready_status_outliving_its_approval_record_is_reset_not_merged(bed):
+    """The same wedge on the other skipped status, and the worse half: a `ready`
+    entry carries the mergePath and the approval record the merge will name, so
+    keeping it after those files are gone points the one irreversible write in the
+    pass at paths that no longer exist."""
+    m = load(bed)
+    d = m.resolve_verdict_dir(str(bed["session"]), bed["durable"])
+    state = m.fresh_state(bed["durable"], "run1")
+    state["batches"]["0"] = {
+        "attempt": 0, "status": "ready", "citationReview": "approved",
+        "mergePath": str(bed["run_dir"] / "approved_0_attempt_0.json"),
+        "approvalRecordPath": str(bed["run_dir"] / "approval_0_attempt_0.json"),
+        "approvalRecorded": True}
+    m.save_state(d, state)
+
+    out, _ = run_driver(bed)
+    assert out["reset"] and out["reset"][0]["was"] == "ready"
+    assert out["merged"] is False, (
+        "a readiness whose fragment and record are gone must not admit a merge")
+    assert out["needs_judge"], "the reset batch is re-driven from attempt 0"
+
+
+# ---------------------------------------------------------------------------
+# The ladder's far end
+# ---------------------------------------------------------------------------
+
+def test_a_rejection_at_the_final_rung_exhausts_at_that_rung(bed):
+    """The ladder is 0..MAX_CITATION_RETRIES. Incrementing past it on the last
+    rejection persists and REPORTS an attempt that never ran as the one that
+    exhausted -- the durable state then contradicts the contract it enforces."""
+    out, _ = run_driver(bed)
+    verdicts = bed["session"] / "v.json"
+    for attempt in (0, 1, 2):
+        entry = out["needs_judge"][0]
+        assert entry["attempt"] == attempt
+        verdicts.write_text(json.dumps([{
+            "batch": 0, "attempt": attempt, "nonce": entry["nonce"],
+            "reply": f"source 1 is not attested.\nCITATIONS_REJECTED 0 ATTEMPT {attempt}"}]))
+        out, _ = run_driver(bed, "--record-verdicts", str(verdicts),
+                            expect=1 if attempt == 2 else 0)
+
+    assert out["needs_judge"] == [], "the ladder is exhausted; no rung 3 exists"
+    assert out["maxCitationRetries"] == 2
+    failed = out["not_ready"][0]
+    assert failed["attempt"] == 2, (
+        f"the exhausting rung is the last one that ran, not one past it; got "
+        f"{failed['attempt']}")
+    assert failed["attemptsUsed"] == 3
+    assert failed["reason"] == "citation-review-exhausted"
+    assert out["merged"] is False

@@ -1443,7 +1443,12 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
         log(f"batch {idx}: the spliced fragment failed --check-batch; falling back "
             f"to whole-fragment regeneration in rung {attempt + 1}")
         return {"state": "repair_invalid", "reason": "spliced-check-failed"}
-    return {"state": "repaired", "attempt": attempt + 1}
+    # The reserved rung is now POPULATED, and the caller must be told with what:
+    # dispatching an ordinary whole-batch job at this rung would order an agent to
+    # re-decide every candidate and atomically overwrite exactly this path, which
+    # is the per-row repair undone.
+    return {"state": "repaired", "attempt": attempt + 1,
+            "fragmentPath": str(next_fragment)}
 
 
 # ---------------------------------------------------------------------------
@@ -1509,6 +1514,69 @@ def batch_state(state: dict, index: int) -> dict:
         str(index), {"attempt": 0, "status": "pending", "rejection_reason": None})
 
 
+def _stale_status_reason(st: dict) -> "str | None":
+    """Why a settled-looking status can no longer be honoured, or None.
+
+    `awaiting_judge` and `ready` are the two statuses drive_all SKIPS, and each
+    one is a promise about a file: the approved snapshot the judge is reading, or
+    the snapshot and approval record the merge will name. Both promises can be
+    broken from outside this process while the state document stays intact."""
+    status = st.get("status")
+    if status == "awaiting_judge":
+        snapshot = st.get("snapshotPath")
+        digest = (st.get("pending") or {}).get("snapshot_sha256")
+        if not snapshot or not digest:
+            return "the awaiting entry names no snapshot to verify"
+        try:
+            if _sha256_file(Path(snapshot)) != digest:
+                return "the approved snapshot's bytes changed since the hand-back"
+        except OSError:
+            return "the approved snapshot the judge was handed is gone"
+        return None
+    if status == "ready":
+        merge_path = st.get("mergePath")
+        if not merge_path or not Path(merge_path).exists():
+            return "the fragment this batch was made ready to merge is gone"
+        record = st.get("approvalRecordPath")
+        if st.get("approvalRecorded") and (not record or not Path(record).exists()):
+            return "the approval record admitting this batch to the merge is gone"
+    return None
+
+
+def reconcile_state(batches: list, state: dict) -> "list[dict]":
+    """Resets any batch whose skipped status outlives the artifacts it promises.
+
+    A resume reuses the SAME run_id, so a state document written before the
+    interruption is kept rather than discarded -- and resume_setup.py has
+    meanwhile deleted every approved snapshot, approval record and evidence
+    directory in that run. Without this, the two statuses drive_all skips become
+    permanent: an `awaiting_judge` batch re-emits a hand-back whose verdict is
+    refused forever because its snapshot is unreadable, and a `ready` batch fails
+    merge forever against a deleted path. Neither has any transition out.
+
+    So the check is on the ARTIFACT, never on a resume flag: whatever removed the
+    file, a promise about a file that is gone is not a status. A reset sends the
+    batch back through the ordinary attempt-0 path, where PREPARE mints a fresh
+    snapshot, evidence, nonce and record -- the same path a resumed batch already
+    takes, so a surviving out_{i}_attempt_0.json is still honoured."""
+    reset = []
+    for batch in batches:
+        idx = batch["index"]
+        st = state["batches"].get(str(idx))
+        if not st:
+            continue
+        reason = _stale_status_reason(st)
+        if reason is None:
+            continue
+        log(f"batch {idx}: dropping its {st.get('status')!r} status -- {reason}; "
+            f"re-driving it from attempt 0")
+        state["batches"][str(idx)] = {"attempt": 0, "status": "pending",
+                                      "rejection_reason": None}
+        reset.append({"batch": idx, "was": st.get("status"),
+                      "attempt": st.get("attempt"), "reason": reason})
+    return reset
+
+
 def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
                           resumed_indices: "set[int]") -> dict:
     """Drives ONE batch until it is awaiting a judge, ready, or terminal.
@@ -1522,6 +1590,11 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
     st = batch_state(state, idx)
     attempt = st["attempt"]
     rejection_reason = st.get("rejection_reason")
+    # Set ONLY by a valid repair: the rung it names already holds bytes that
+    # passed --check-batch, so that rung re-enters at APPROVE and never at
+    # DISPATCH. See the `repaired` branch below for why that distinction is the
+    # whole feature and not an optimisation.
+    prepared_fragment: "Path | None" = None
 
     while True:
         if attempt > ctx.max_citation_retries:
@@ -1531,9 +1604,13 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
                       lastRejection=rejection_reason)
             return st
 
-        result = advance_batch(ctx, batch, attempt,
-                               resumed=idx in resumed_indices,
-                               rejection_reason=rejection_reason)
+        if prepared_fragment is not None:
+            result = prepare_and_hand_back(ctx, batch, attempt, prepared_fragment)
+            prepared_fragment = None
+        else:
+            result = advance_batch(ctx, batch, attempt,
+                                   resumed=idx in resumed_indices,
+                                   rejection_reason=rejection_reason)
         kind = result["state"]
 
         if kind == "awaiting_judge":
@@ -1581,9 +1658,16 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
                     "per-item repair could not be applied (" +
                     str(repaired.get("reason")) + ")")
             else:
-                # Repaired in place. Re-approve and re-fetch through THIS loop, so
-                # a replacement URL that also fails to retrieve reserves the next
-                # rung like any other retrieval failure instead of escaping.
+                # Repaired in place. The reserved rung ALREADY holds the spliced
+                # fragment, so this rung re-enters at APPROVE -- re-approve and
+                # re-fetch through THIS loop, so a replacement URL that also fails
+                # to retrieve reserves the next rung like any other retrieval
+                # failure instead of escaping. Handing it back to advance_batch()
+                # would dispatch a whole-batch job whose prompt orders the agent to
+                # decide every candidate and atomically write this same path: the
+                # untouched rows would be silently re-decided, and which of the two
+                # writes the next APPROVE snapshotted would depend on scheduling.
+                prepared_fragment = Path(repaired["fragmentPath"])
                 rejection_reason = None
             continue
 
@@ -1717,8 +1801,18 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path, state: dict) -> dict:
         if read["contained"] or not read["verdict"]:
             st.pop("pending", None)
             st.pop("judgePrompt", None)
-            st.update(status="pending", attempt=attempt + 1,
-                      rejection_reason=read["detail"])
+            if attempt >= ctx.max_citation_retries:
+                # The ladder is 0..max, so there is no attempt+1 to advance to.
+                # Incrementing anyway would persist and REPORT an attempt outside
+                # the ladder, naming a rung that never ran as the one that
+                # exhausted. Exhaust here instead, at the rung actually rejected.
+                st.update(status="failed", attempt=attempt,
+                          reason="citation-review-exhausted",
+                          attemptsUsed=attempt + 1,
+                          lastRejection=read["detail"])
+            else:
+                st.update(status="pending", attempt=attempt + 1,
+                          rejection_reason=read["detail"])
             admitted.append({"batch": batch_i, "attempt": attempt,
                              "approved": False, "rejection": read["detail"]})
             continue
@@ -1929,6 +2023,11 @@ def main(argv=None) -> int:
                   tmpdir=Path(tmp))
 
         state = load_state(verdict_dir, durable_root, args.run_id)
+        # BEFORE the verdicts are read, not after: a verdict answering a hand-back
+        # whose snapshot no longer exists must be refused as "not awaiting a judge"
+        # rather than as a snapshot fault, and the batch must be re-driven in the
+        # same invocation instead of waiting for one that never comes.
+        reset_batches = reconcile_state(batches, state)
         recorded = {"recorded": [], "refused": []}
         if args.record_verdicts:
             recorded = record_verdicts(ctx, Path(args.record_verdicts), state)
@@ -1968,6 +2067,9 @@ def main(argv=None) -> int:
             "needs_judge": needs_judge,
             "ready": sorted(ready),
             "not_ready": failed,
+            # Reported, not just logged: a reset silently costs a judge call and
+            # re-runs a review the operator may believe already happened.
+            "reset": reset_batches,
             "merged": False,
             "generated": _utc_now_iso(),
         }

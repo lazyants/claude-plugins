@@ -1730,6 +1730,14 @@ outright, as is one that is not owned by you and private.
    invocation advances the ladder itself, so there is nothing extra to do. The run is done when the
    output carries `"merged": true`; `not_ready[]` names any batch that failed and
    why, with the same `reason` strings the Workflow path uses.
+4. `reset[]` names any batch the driver put back to attempt 0 because the
+   artifact its status promised is gone. A resume reuses the RUN_ID, and
+   `resume_setup.py` deletes that run's approved snapshots, approval records and
+   evidence — so a state file written before the interruption can claim a batch is
+   awaiting a judge, or ready to merge, over files that no longer exist. Such a
+   batch is re-prepared rather than left in a status nothing can transition out
+   of. It costs one more judge call; a verdict you already collected for it is
+   refused, so send the fresh `judgePrompt` instead of the old reply.
 
 Do NOT edit a verdict's `nonce`, reuse one twice, or answer a batch/attempt the
 driver did not ask about — each is refused, and the refusal is what keeps a
