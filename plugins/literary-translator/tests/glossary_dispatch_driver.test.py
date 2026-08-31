@@ -212,13 +212,21 @@ def test_the_local_bound_is_judges_not_the_workflow_estimate(mod):
     """7 batches x 3 attempts = 21 judges. The template's Workflow estimate for the
     same run is 16*7+2 = 114, so enforcing that would refuse a run this driver can
     comfortably afford."""
-    assert mod.enforce_local_cap(7, 2, 100) == 21
+    assert mod.enforce_local_cap(7, 2, 100, "live") == 21
 
 
 def test_the_local_bound_still_refuses_when_genuinely_exceeded(mod):
     with pytest.raises(SystemExit) as exc:
-        mod.enforce_local_cap(50, 2, 100)
+        mod.enforce_local_cap(50, 2, 100, "live")
     assert exc.value.code == 1
+
+
+def test_an_offline_run_is_charged_for_no_judges_at_all(mod):
+    """Outside `live` the batch reaches `ready` without a judge ever being
+    rendered, so charging the live worst case refuses a run whose reachable path
+    issues zero agent calls -- in the one mode chosen to need no network."""
+    for mode in ("offline", "cached"):
+        assert mod.enforce_local_cap(34, 2, 100, mode) == 0
 
 
 # ---------------------------------------------------------------------------

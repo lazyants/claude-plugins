@@ -69,8 +69,11 @@ the glossary pass was simply left behind.
   refused forever because the snapshot is unreadable, and a `ready` one would point the pass's one
   irreversible write at paths that no longer exist.
 - **The verdict hand-back is authorization, and is treated as such.** `--verdict-dir` is required,
-  refused inside `durable_root`, refused unless owned by this uid and private, and every open in
-  it is relative to a pinned directory descriptor with `O_NOFOLLOW` and `O_EXCL`. A verdict is
+  refused inside `durable_root`, refused unless owned by this uid and private, and the state file
+  in it is opened relative to a pinned directory descriptor with `O_NOFOLLOW` on the leaf —
+  refusing a symlink planted there, which is the move that would redirect this write back into
+  `durable_root`. The `--record-verdicts` file is read by pathname, after its resolved parent is
+  required to BE the verdict directory. A verdict is
   admitted only on `durable_root` + `RUN_ID` + batch + attempt + a nonce minted at PREPARE time
   and consumed once + the snapshot sha256 re-hashed immediately before the approval record is
   written. The nonce is per-PREPARE rather than per-dispatch on purpose: that is what closes

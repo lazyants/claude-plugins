@@ -475,26 +475,82 @@ def test_an_awaiting_judge_status_outliving_its_snapshot_is_reset_not_wedged(bed
         "no approval may be recorded against the wiped snapshot")
 
 
+def _plant_ready_state(bed, *, keep_merge_path: bool, keep_record: bool):
+    """Writes the state document an interrupted run leaves behind: batch 0 READY,
+    naming a merge fragment and an approval record. Which of the two survives is
+    the parameter, because each is a SEPARATE reconciliation condition and the
+    first one checked would otherwise mask the second."""
+    m = load(bed)
+    d = m.resolve_verdict_dir(str(bed["session"]), bed["durable"])
+    merge_path = bed["run_dir"] / "approved_0_attempt_0.json"
+    record_path = bed["run_dir"] / "approval_0_attempt_0.json"
+    if keep_merge_path:
+        merge_path.write_text(json.dumps(_default_rows()))
+    if keep_record:
+        record_path.write_text(json.dumps({"approved": True}))
+    state = m.fresh_state(bed["durable"], "run1")
+    state["batches"]["0"] = {
+        "attempt": 0, "status": "ready", "citationReview": "approved",
+        "mergePath": str(merge_path), "approvalRecordPath": str(record_path),
+        "approvalRecorded": True}
+    m.save_state(d, state)
+
+
 def test_a_ready_status_outliving_its_approval_record_is_reset_not_merged(bed):
     """The same wedge on the other skipped status, and the worse half: a `ready`
     entry carries the mergePath and the approval record the merge will name, so
     keeping it after those files are gone points the one irreversible write in the
-    pass at paths that no longer exist."""
-    m = load(bed)
-    d = m.resolve_verdict_dir(str(bed["session"]), bed["durable"])
-    state = m.fresh_state(bed["durable"], "run1")
-    state["batches"]["0"] = {
-        "attempt": 0, "status": "ready", "citationReview": "approved",
-        "mergePath": str(bed["run_dir"] / "approved_0_attempt_0.json"),
-        "approvalRecordPath": str(bed["run_dir"] / "approval_0_attempt_0.json"),
-        "approvalRecorded": True}
-    m.save_state(d, state)
+    pass at paths that no longer exist.
 
+    The merge fragment is PRESENT here and only the record is gone -- otherwise
+    the missing-fragment condition, which is checked first, would satisfy this
+    test on its own and the record check could be deleted without a red."""
+    _plant_ready_state(bed, keep_merge_path=True, keep_record=False)
     out, _ = run_driver(bed)
     assert out["reset"] and out["reset"][0]["was"] == "ready"
+    assert "approval record" in out["reset"][0]["reason"], (
+        f"the record, not the fragment, is what is missing: {out['reset'][0]}")
     assert out["merged"] is False, (
-        "a readiness whose fragment and record are gone must not admit a merge")
+        "#723's record is what admits a batch to the merge; without it nobody can "
+        "reconstruct what was approved")
     assert out["needs_judge"], "the reset batch is re-driven from attempt 0"
+
+
+def test_a_ready_status_outliving_its_merge_fragment_is_reset_not_merged(bed):
+    """The other half of the same condition: the record survived, the bytes it
+    approves did not."""
+    _plant_ready_state(bed, keep_merge_path=False, keep_record=True)
+    out, _ = run_driver(bed)
+    assert out["reset"] and out["reset"][0]["was"] == "ready"
+    assert "merge" in out["reset"][0]["reason"]
+    assert out["merged"] is False
+    assert out["needs_judge"]
+
+
+# ---------------------------------------------------------------------------
+# The CLI boundary
+# ---------------------------------------------------------------------------
+
+def test_a_resumed_index_list_that_is_not_a_list_of_ints_is_refused(bed):
+    """`set()` takes any iterable, so the JSON string "0" becomes {"0"} -- which
+    never equals the integer index 0. Batch 0 would then be treated as NOT
+    resumed and redispatched, overwriting the attempt-0 fragment resume_setup.py
+    deliberately kept and already re-checked. The value still reaches the template
+    as a well-formed array, so its own guard never sees it."""
+    plant_fragment(bed)
+    before = (bed["run_dir"] / "out_0_attempt_0.json").read_bytes()
+    for bad in ('"0"', '0', '{"0": true}', 'null', '[true]', '["0"]'):
+        batches_file = bed["tmp"] / "batches.json"
+        batches_file.write_text(json.dumps(BATCHES))
+        proc = subprocess.run(
+            [sys.executable, str(bed["scripts"] / "glossary_dispatch_driver.py"),
+             "--run-id", "run1", "--batches-file", str(batches_file),
+             "--verdict-dir", str(bed["session"]), "--plugin-root", str(SKILL_ROOT),
+             "--node", NODE, "--resumed-batch-indices", bad],
+            capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 2, f"{bad!r} was accepted"
+    assert (bed["run_dir"] / "out_0_attempt_0.json").read_bytes() == before, (
+        "a refused invocation must not have dispatched anything")
 
 
 # ---------------------------------------------------------------------------

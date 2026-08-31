@@ -744,7 +744,7 @@ def call_template_functions(template_path: Path, subst: dict, batches: list,
 
 
 def enforce_local_cap(n_batches: int, max_citation_retries: int,
-                      batch_agent_cap: int) -> int:
+                      batch_agent_cap: int, research_mode: str) -> int:
     """The driver's REAL agent-call bound: one judge per batch per attempt, and
     nothing else. Returns the worst-case judge count.
 
@@ -753,7 +753,15 @@ def enforce_local_cap(n_batches: int, max_citation_retries: int,
     re-check per attempt that this driver performs in-process. Enforcing the
     template's estimate would refuse runs the driver can comfortably afford
     (measured shape: 7 batches under a cap of 100 need at most 21 judges against
-    a 114-call Workflow estimate)."""
+    a 114-call Workflow estimate).
+
+    Outside `live` the count is ZERO, not a smaller estimate: research_mode
+    forbids basis:"established" outright, so there is no citation to review and
+    the batch reaches `ready` without a judge ever being rendered. Charging the
+    live worst case there refuses a run whose reachable path issues no agent call
+    at all -- and it refuses it in the one mode chosen to need no network."""
+    if research_mode != "live":
+        return 0
     judges = n_batches * (max_citation_retries + 1)
     if judges > batch_agent_cap:
         fatal(
@@ -1990,11 +1998,23 @@ def main(argv=None) -> int:
             fatal("every batch must be an object with an integer index",
                   exit_code=2)
     try:
-        resumed = set(json.loads(args.resumed_batch_indices))
+        resumed_raw = json.loads(args.resumed_batch_indices)
     except ValueError:
         fatal("--resumed-batch-indices must be a JSON array", exit_code=2)
+    # SHAPE, not just parseability. set() accepts any iterable, so the JSON
+    # string "0" would become {"0"} -- which never equals the integer index 0, so
+    # batch 0 would be redispatched and its already-validated attempt-0 fragment
+    # overwritten, while the value still reached the template as a well-formed
+    # array and slipped past its own guard. A scalar number raises instead.
+    if not isinstance(resumed_raw, list) or \
+            not all(isinstance(i, int) and not isinstance(i, bool)
+                    for i in resumed_raw):
+        fatal("--resumed-batch-indices must be a JSON array of integer batch "
+              "indices", exit_code=2, given=repr(resumed_raw)[:200])
+    resumed = set(resumed_raw)
 
-    judges = enforce_local_cap(len(batches), max_retries, args.batch_agent_cap)
+    judges = enforce_local_cap(len(batches), max_retries, args.batch_agent_cap,
+                               args.research_mode)
 
     subst = {
         "durable_root": str(durable_root),
