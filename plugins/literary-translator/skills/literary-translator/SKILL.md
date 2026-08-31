@@ -1747,9 +1747,13 @@ verdict bound to the exact snapshot bytes a judge actually read.
 and never reads a retrieved citation body — the judge does that, under
 `tools: Read`. Its hand-back channel closes the same class the approval record
 closes (a command that never ran, a verdict never produced, a stale verdict
-replayed after a resume); it does **not** defend against a hostile codex job,
-because the snapshot and evidence live under `RUN_DIR` where every agent in this
-pass can write. That is this pass's existing position, not a new one.
+replayed after a resume); it does **not** defend against a hostile codex job.
+`--write --cwd ${durable_root}` makes everything under that root model-writable —
+the snapshot and evidence under `RUN_DIR`, the gate scripts the driver shells,
+and the driver's own deployed copy, which this loop re-enters. That is this
+pass's existing position and `segment_dispatch_driver.py`'s since #516, not a new
+one; closing it means confining what a dispatch job may write, across both
+drivers and the gate scripts at once.
 
 **The `pipeline()` fallback, below, remains shipped and supported** — use it if
 node is unavailable, if the driver refuses for an environment reason, or to

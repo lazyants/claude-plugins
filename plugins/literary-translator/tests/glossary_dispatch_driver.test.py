@@ -237,6 +237,30 @@ def test_an_offline_run_is_charged_for_no_judges_at_all(mod):
         assert mod.enforce_local_cap(34, 2, 100, mode) == 0
 
 
+def test_an_offline_run_still_has_a_codex_job_ceiling(mod):
+    """Zero JUDGES is not zero WORK. Offline still dispatches one codex job per
+    batch, and the template's preflight -- which the driver deliberately loads
+    past -- was the only thing bounding that before. Bounding judges alone left
+    an offline run able to enqueue any number of jobs at all."""
+    assert mod.worst_case_codex_jobs(34, 2, "offline") == 34
+    assert mod.enforce_local_cap(34, 2, 100, "offline") == 0
+    with pytest.raises(SystemExit) as exc:
+        mod.enforce_local_cap(5000, 2, 100, "offline")
+    assert exc.value.code == 1
+
+
+def test_the_codex_job_ceiling_counts_the_repair_launch_too(mod):
+    """A live rung can launch TWO jobs, not one: the whole-batch dispatch and,
+    when a citation does not retrieve, the per-row repair into the reserved next
+    rung. A ceiling that counted only dispatches would admit twice the work it
+    thought it was admitting."""
+    assert mod.worst_case_codex_jobs(7, 2, "live") == 42
+    with pytest.raises(SystemExit) as exc:
+        mod.enforce_local_cap(7, 2, 41, "live")
+    assert exc.value.code == 1
+    assert mod.enforce_local_cap(7, 2, 42, "live") == 21
+
+
 # ---------------------------------------------------------------------------
 # Shared-command execution
 # ---------------------------------------------------------------------------

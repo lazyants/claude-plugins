@@ -56,12 +56,19 @@ WHAT THE HAND-BACK CHANNEL DOES AND DOES NOT DEFEND. A verdict names one snapsho
 one PREPARE, one run, and is consumed once; the state saying so lives outside `durable_root`,
 where no dispatched codex job can write. That closes the class the approval record closes --
 the command that never ran, the verdict never produced, the stale verdict replayed after a
-resume. It does NOT defend against a hostile codex job: the snapshot, `index.json` and the
-evidence bodies stay under `RUN_DIR`, which every agent in this pass can write. That is the
-shipped design's own position, not a gap this file opens -- see `approvalRecordPath()`'s
-comment in the template ("buys no defence against a hostile agent ... what it closes is the
-case that happens WITHOUT malice"). Closing the hostile class means confining what the
-dispatch job may write, which is a separate change.
+resume. It does NOT defend against a hostile codex job, and the bound is wider than the data:
+`--write --cwd durable_root` makes EVERY file under the durable root model-writable, so a
+hostile job could rewrite the snapshot, `index.json` and the evidence bodies under `RUN_DIR`,
+the gate scripts this driver shells (`canon_validate.py`, `fetch_citation.py`) -- and this
+file itself, at its deployed `${durable_root}/scripts/` path, which the documented two-
+invocation loop re-enters. Stated in full because a partial statement would imply more.
+That is the shipped design's own position, not a gap this file opens: it is the same
+position `segment_dispatch_driver.py` has held as W5's default since #516, and the same one
+`approvalRecordPath()` states in the template ("buys no defence against a hostile agent ...
+what it closes is the case that happens WITHOUT malice"). Closing it means confining what a
+dispatch job may write -- one change, covering both drivers and the gate scripts, because
+moving any single participant out of the root while the others stay would buy a name rather
+than a boundary. Tracked separately.
 
 THE FALLBACK IS NOT RETIRED. `pipeline()` remains a shipped, documented path for this pass.
 Per #436/#516's ordering rule, a fallback is not removed before its replacement has carried
@@ -794,23 +801,50 @@ def call_template_functions(template_path: Path, subst: dict, batches: list,
     return obj["values"]
 
 
+def worst_case_codex_jobs(n_batches: int, max_citation_retries: int,
+                          research_mode: str) -> int:
+    """The most background codex jobs this run can launch.
+
+    Live: one whole-batch dispatch per rung, plus at most one repair per rung.
+    Offline: exactly one dispatch per batch -- there is no citation to fetch, so
+    no repair and no rejection exists to climb a rung with."""
+    if research_mode != "live":
+        return n_batches
+    return n_batches * 2 * (max_citation_retries + 1)
+
+
 def enforce_local_cap(n_batches: int, max_citation_retries: int,
                       batch_agent_cap: int, research_mode: str) -> int:
-    """The driver's REAL agent-call bound: one judge per batch per attempt, and
-    nothing else. Returns the worst-case judge count.
+    """Refuses an oversized run before ANY dispatch, and returns the worst-case
+    JUDGE count -- which is the driver's agent-call bound but NOT its only one.
 
-    This is the number that must fit under engine.batch_agent_cap -- not the
-    template's own estimate, which counts a dispatch, a chunked wait and a
-    re-check per attempt that this driver performs in-process. Enforcing the
-    template's estimate would refuse runs the driver can comfortably afford
-    (measured shape: 7 batches under a cap of 100 need at most 21 judges against
-    a 114-call Workflow estimate).
+    TWO ceilings, because the driver's two costs are no longer the same number.
+    The Workflow spent an agent call to reach codex, so the template's single
+    preflight (`(1 + (2 + WAIT_CALLS) * attempts) * BATCHES + 2` against
+    engine.batch_agent_cap) bounded both at once. This driver launches codex
+    in-process, so:
 
-    Outside `live` the count is ZERO, not a smaller estimate: research_mode
-    forbids basis:"established" outright, so there is no citation to review and
-    the batch reaches `ready` without a judge ever being rendered. Charging the
-    live worst case there refuses a run whose reachable path issues no agent call
-    at all -- and it refuses it in the one mode chosen to need no network."""
+      - JUDGES are the agent calls, one per batch per attempt. Enforcing the
+        template's estimate here would refuse runs the driver can comfortably
+        afford (7 batches under a cap of 100 need at most 21 judges against a
+        114-call Workflow estimate). Outside `live` this count is ZERO, not a
+        smaller estimate: research_mode forbids basis:"established" outright, so
+        the batch reaches `ready` with no judge ever rendered.
+      - CODEX JOBS are the work itself, and they do NOT go to zero offline --
+        every batch still gets its dispatch. Bounding only the judges would
+        therefore have left an offline run with no ceiling at all, which the
+        template's preflight did impose (at cap 3500 it admitted 874 offline
+        batches). The caller's remedy is unchanged and is the template's own:
+        re-plan smaller batches with glossary_batch_plan.py --batch-size.
+    """
+    jobs = worst_case_codex_jobs(n_batches, max_citation_retries, research_mode)
+    if jobs > batch_agent_cap:
+        fatal(
+            f"this run's worst-case codex job count ({jobs} for {n_batches} "
+            f"{research_mode} batch(es)) exceeds engine.batch_agent_cap "
+            f"({batch_agent_cap}); re-plan smaller batches",
+            exit_code=1, codexJobs=jobs, cap=batch_agent_cap, batches=n_batches,
+        )
     if research_mode != "live":
         return 0
     judges = n_batches * (max_citation_retries + 1)
@@ -2149,13 +2183,24 @@ def main(argv=None) -> int:
             "merged": False,
             "generated": _utc_now_iso(),
         }
+        gate_refused = False
         if not needs_judge and not failed:
-            payload.update(merge_and_verify(ctx, batches, state))
+            outcome = merge_and_verify(ctx, batches, state)
+            payload.update(outcome)
             save_state(verdict_dir, state)
+            # The merge and the disk-independent verify are GATES, and the CLI
+            # contract above says a refused gate exits 1. Without this the run
+            # that most needs a non-zero status -- every batch approved, the one
+            # irreversible write refused -- emitted merged:false and exited 0,
+            # so shell-level orchestration read a failed final gate as success.
+            # "awaiting-more-verdicts" is not a refusal: it is the ordinary
+            # not-yet, and it cannot be reached from here anyway.
+            gate_refused = (not outcome.get("merged")
+                            and outcome.get("reason") != "awaiting-more-verdicts")
         elif needs_judge:
             payload["reason"] = "awaiting-more-verdicts"
         emit(payload)
-        return 0 if not failed and not recorded["refused"] else 1
+        return 0 if not (failed or recorded["refused"] or gate_refused) else 1
 
 
 if __name__ == "__main__":

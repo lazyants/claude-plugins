@@ -81,11 +81,23 @@ the glossary pass was simply left behind.
   regenerated at the very same paths — same tuple, same filenames, different bytes. Replies are
   read with the **template's own** `rejectedAnywhere` + `sentinelVerdict`, never a Python
   re-implementation of #228/#308's discipline.
-  **What it does not defend against is a hostile codex job**: the snapshot, `index.json` and the
-  evidence bodies live under `RUN_DIR`, which every agent in this pass can write. That is the
+  **What it does not defend against is a hostile codex job**, and the bound is wider than the
+  data: `--write --cwd ${durable_root}` makes everything under that root model-writable — the
+  snapshot, `index.json` and the evidence bodies under `RUN_DIR`, the gate scripts the driver
+  shells, and the driver's own deployed copy, which the two-invocation loop re-enters. Stated
+  in full because a partial statement would imply more; tracked in #806, and it is
+  `segment_dispatch_driver.py`'s position since #516 rather than anything new here. That is the
   shipped design's own position — `approvalRecordPath()`'s comment says the approval record "buys
   no defence against a hostile agent … what it closes is the case that happens WITHOUT malice" —
   and this channel closes exactly that same class and says so rather than implying more.
+- **Two ceilings, not one, and a refused final gate exits 1.** The Workflow spent an agent call
+  to reach codex, so the template's single preflight bounded agent calls and codex work at
+  once; this driver launches codex in-process, so it bounds them separately — judges (zero
+  outside `live`, where no citation is reviewed) and codex jobs (never zero: every batch is
+  still dispatched, and a live rung can launch two, the whole-batch job and the repair). And
+  `merge-failed` / `verify-failed` / `verify-unreadable` / `verify-refused` now reach the exit
+  status: the run that most needs a non-zero one is exactly the run where every batch was
+  approved and the one irreversible write refused.
 - **The driver's one stdout line goes through `json_stdout.dumps_line()`, like every other
   script's** (#369). `ensure_ascii=False` leaves U+0085, U+2028 and U+2029 raw, and a payload
   carrying one renders to the reading session as TWO physical lines — so it parses a truncated

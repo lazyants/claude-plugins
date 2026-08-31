@@ -583,5 +583,33 @@ def test_a_rejection_at_the_final_rung_exhausts_at_that_rung(bed):
     assert failed["attemptsUsed"] == 3
     assert failed["reason"] == "citation-review-exhausted"
     assert out["merged"] is False
+def test_a_refused_final_gate_exits_non_zero(bed):
+    """The CLI contract says 1 = a gate refused. The merge and the disk-independent
+    verify ARE gates, and they are the last two -- so the run that most needs a
+    non-zero status is exactly this one: every batch approved, every verdict
+    consumed, and the one irreversible write refused. Reporting that as exit 0
+    lets shell-level orchestration read a failed final gate as success."""
+    out, _ = run_driver(bed)
+    entry = out["needs_judge"][0]
+    verdicts = bed["session"] / "v.json"
+    verdicts.write_text(json.dumps([{
+        "batch": 0, "attempt": 0, "nonce": entry["nonce"],
+        "reply": "ok\nCITATIONS_OK 0 ATTEMPT 0"}]))
+    # Make --merge-batches refuse, leaving every other stub behaviour as it was.
+    # The command the driver issues is unchanged; only the gate's answer is.
+    stub = bed["scripts"] / "canon_validate.py"
+    stub.write_text(stub.read_text().replace(
+        'print(json.dumps({"merged": True})); sys.exit(0)',
+        'print(json.dumps({"merged": False, "error": "refused"})); sys.exit(1)'),
+        encoding="utf-8")
+    out2, _ = run_driver(bed, "--record-verdicts", str(verdicts), expect=1)
+    assert out2["merged"] is False
+    assert out2["reason"] == "merge-failed"
+    assert out2["not_ready"] == [], (
+        "no BATCH failed -- this exit status must come from the gate itself, "
+        "otherwise the test would pass for the wrong reason")
+    assert out2["refused"] == []
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
