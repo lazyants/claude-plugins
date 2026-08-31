@@ -440,7 +440,7 @@ SAFE_STALE_CARVEOUT_FIELDS = frozenset(
 # say", which is FALSE for the style contract: a contract edit CAN change what
 # the prose should say, and a REVERSED rule actively demanded the wrong choice
 # in every segment converged under it. One global style_contract_hash
-# (cache_key.py:273, GLOBAL_CACHE_KEY_FIELDS at :292) cannot tell an addition
+# (cache_key.py:285, GLOBAL_CACHE_KEY_FIELDS at :304) cannot tell an addition
 # from a reversal, so this population is admitted only when the operator
 # DECLARES it, per project, and every admitted segment is named. Widening the
 # allowlist instead would also silently move final_audit.py's own
@@ -1459,7 +1459,7 @@ def _live_cache_key_fields(profile: dict, seg: str, globals_cache: dict) -> dict
     81-segment book instead of 81x that.
 
     Every exception a computer can raise -- including the SystemExit
-    cache_key.py's own fail() raises (cache_key.py:305-309), which is how a
+    cache_key.py's own fail() raises (cache_key.py:317-321), which is how a
     missing style_bible.md, an absent particle config and an unresolvable
     manifest source input all surface -- is converted by the caller into an
     AssembleError naming the segment and the field. "Cannot confirm this

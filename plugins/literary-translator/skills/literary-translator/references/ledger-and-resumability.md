@@ -567,7 +567,7 @@ Exact byte-scope per field:
   catches a footnote-apparatus re-extraction change for this segment
   specifically.
 - **`plugin_bundle_hash`** (global) — sha1 of sorted,
-  filename-concatenated bytes of the eighteen generic scripts that directly
+  filename-concatenated bytes of the nineteen generic scripts that directly
   shape translate/review content (`ledger_update.py` included — its
   `reviewed_draft_sha1` binding-check logic directly determines
   correctness) plus the two workflow templates
@@ -621,14 +621,15 @@ membership.
 
 - **`plugin_bundle_hash`** (global, read from
   `${durable_root}/runs/.plugin_bundle_hash` — a marker file Step 0a writes
-  once per run, not recomputed per segment) — covers exactly **eighteen
+  once per run, not recomputed per segment) — covers exactly **nineteen
   scripts** plus the two workflow templates: `validate_draft.py`,
   `canon_validate.py`, `cache_key.py`, `draft_sha1.py`,
   `review_artifact_check.py`, `ledger_update.py`, `review_ready.py`,
   `resume_setup.py`, `glossary_batch_plan.py`, `codex_job.py`,
   `canon_senses.py`, `fetch_citation.py`, `segment_dispatch_driver.py`,
   `claim_record.py`, `reject_review.py`, `refuse_finding.py`,
-  `select_segments.py`, `json_stdout.py`, plus
+  `select_segments.py`, `json_stdout.py`,
+  `glossary_dispatch_driver.py`, plus
   `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`. Membership
   is decided by one criterion — a file whose bytes shape
   extraction/translation/review/validation content, or determine whether a
@@ -666,7 +667,7 @@ too. `select_segments.py` itself since #446 — it was always an
 orchestration member, and it owns the dispatch gate `claim_record.py` merely
 supplies the claim predicate for, so the same criterion had always applied to
 it. And `json_stdout.py` since #369 — `ledger_merge.py` and
-`select_segments.py` load it here, and six plugin members load it there, so
+`select_segments.py` load it here, and seven plugin members load it there, so
 the same byte-hash-allowlist criterion that registered `canon_senses.py` applies
 in both tuples at once. The remaining three (`draft_ready.py`, `ledger_merge.py`,
 `language_smoke_report.py`) are orchestration-only.

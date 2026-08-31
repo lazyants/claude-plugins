@@ -1,10 +1,10 @@
 {
  "declarations": {
-  "[\"plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json\", \"cache_key.py:532\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json\", \"cache_key.py:544\", 0]": {
    "anchors": [
     "compute_profile_semantics_hash"
    ],
-   "claim": "}, \"enabled\": { \"type\": \"boolean\", \"default\": true, \"description\": \"Master switch for the W3 glossary/canon RESEARCH pass. When false, W3 still runs the mandatory language smoke test (W3a's segpack.py re-runs that same extractor over every segment and W5 acts on its new_names, so name detection stays load-bearing), but skips glossary_batch_plan.py, resume_setup.py, the glossary Workflow, the canon merge, and the skeptic pass; it bootstraps an empty, fully stamped canon.json with canon_validate.py --init and rejoins at the mandatory homonym-split evidence gate exactly as the no_new_candidates SKIP branch does. An existing canon.json is NOT discarded -- --init is create-only, so its entries keep reaching every segpack. Absent means true, so every existing profile keeps validating unchanged. Outside compute_profile_semantics_hash()'s named-six allowlist (cache_key.py:532), so adding or flipping this key never re-translates a converged segment on its own -- but enabling it later and canonizing names does change affected segments' used_terms_hash and makes them dispatch-eligible again. Adding this property to profile.schema.json itself moves resume_setup.py's own _schemas_dir_hash() (it hashes every top-level *.schema.json file's raw bytes under durable_root/schemas/ into input_digest), so the FIRST Step 0a refresh after this release is a one-time resume-identity reset: any in-flight mass-translate or glossary run cannot resume across it -- it starts a fresh run_id and re-dispatches from scratch, including any partial glossary batch.\" }, \"min_candidate_freq\": { \"type\": \"integer\", \"minimum\": 1"
+   "claim": "}, \"enabled\": { \"type\": \"boolean\", \"default\": true, \"description\": \"Master switch for the W3 glossary/canon RESEARCH pass. When false, W3 still runs the mandatory language smoke test (W3a's segpack.py re-runs that same extractor over every segment and W5 acts on its new_names, so name detection stays load-bearing), but skips glossary_batch_plan.py, resume_setup.py, the glossary Workflow, the canon merge, and the skeptic pass; it bootstraps an empty, fully stamped canon.json with canon_validate.py --init and rejoins at the mandatory homonym-split evidence gate exactly as the no_new_candidates SKIP branch does. An existing canon.json is NOT discarded -- --init is create-only, so its entries keep reaching every segpack. Absent means true, so every existing profile keeps validating unchanged. Outside compute_profile_semantics_hash()'s named-six allowlist (cache_key.py:544), so adding or flipping this key never re-translates a converged segment on its own -- but enabling it later and canonizing names does change affected segments' used_terms_hash and makes them dispatch-eligible again. Adding this property to profile.schema.json itself moves resume_setup.py's own _schemas_dir_hash() (it hashes every top-level *.schema.json file's raw bytes under durable_root/schemas/ into input_digest), so the FIRST Step 0a refresh after this release is a one-time resume-identity reset: any in-flight mass-translate or glossary run cannot resume across it -- it starts a fresh run_id and re-dispatches from scratch, including any partial glossary batch.\" }, \"min_candidate_freq\": { \"type\": \"integer\", \"minimum\": 1"
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:104-107\", 0]": {
    "anchors": [
@@ -29,24 +29,24 @@
    ],
    "claim": "explicitly once two members imported it. A shared module would put this predicate's bytes outside the hash meant to cover them, so WEAKENING this guard would no longer move plugin_bundle_hash, and every durable root scaffolded beforehand would go on trusting it: the exact false-green cache_key.py:163-167 names. Consolidation stays possible -- it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the same commit."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:273\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:285\", 0]": {
    "anchors": [
     "style_contract_hash\","
    ],
-   "claim": "# allowlist above. That set means \"can never change what the prose should # say\", which is FALSE for the style contract: a contract edit CAN change what # the prose should say, and a REVERSED rule actively demanded the wrong choice # in every segment converged under it. One global style_contract_hash # (cache_key.py:273, GLOBAL_CACHE_KEY_FIELDS at :292) cannot tell an addition # from a reversal, so this population is admitted only when the operator # DECLARES it, per project, and every admitted segment is named. Widening the # allowlist instead would also silently move final_audit.py's own # project_complete arithmetic and select_segments.py's D6 semantics, which"
+   "claim": "# allowlist above. That set means \"can never change what the prose should # say\", which is FALSE for the style contract: a contract edit CAN change what # the prose should say, and a REVERSED rule actively demanded the wrong choice # in every segment converged under it. One global style_contract_hash # (cache_key.py:285, GLOBAL_CACHE_KEY_FIELDS at :292) cannot tell an addition # from a reversal, so this population is admitted only when the operator # DECLARES it, per project, and every admitted segment is named. Widening the # allowlist instead would also silently move final_audit.py's own # project_complete arithmetic and select_segments.py's D6 semantics, which"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:292\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:304\", 0, \"continuation\"]": {
    "anchors": [
     "GLOBAL_CACHE_KEY_FIELDS = frozenset"
    ],
-   "claim": "# in every segment converged under it. One global style_contract_hash # (cache_key.py:273, GLOBAL_CACHE_KEY_FIELDS at :292) cannot tell an addition # from a reversal, so this population is admitted only when the operator"
+   "claim": "# in every segment converged under it. One global style_contract_hash # (cache_key.py:285, GLOBAL_CACHE_KEY_FIELDS at :292) cannot tell an addition # from a reversal, so this population is admitted only when the operator"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:305-309\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"cache_key.py:317-321\", 0]": {
    "anchors": [
     "def fail(message: str)",
     "Fail loudly, naming the problem"
    ],
-   "claim": "Every exception a computer can raise -- including the SystemExit cache_key.py's own fail() raises (cache_key.py:305-309), which is how a missing style_bible.md, an absent particle config and an unresolvable manifest source input all surface -- is converted by the caller into an AssembleError naming the segment and the field. \"Cannot confirm this input\" must never read as \"this input is unchanged\". (A PyYAML-less"
+   "claim": "Every exception a computer can raise -- including the SystemExit cache_key.py's own fail() raises (cache_key.py:317-321), which is how a missing style_bible.md, an absent particle config and an unresolvable manifest source input all surface -- is converted by the caller into an AssembleError naming the segment and the field. \"Cannot confirm this input\" must never read as \"this input is unchanged\". (A PyYAML-less"
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"final_audit.py:1852-1934\", 0]": {
    "anchors": [
@@ -703,11 +703,11 @@
    ],
    "claim": "note's frontmatter `title` / filename fall back to the raw seg id instead of the heading text (`assembly-and-output.md`'s algorithm section spells out the fallback). This is a silent misclassification, not a validation failure — schema validation and the self-check suite both pass on it, since `type` is intentionally open-ended (`manifest.schema.json:18`). Declaring `heading_types` is the only way to opt a custom tag in."
   },
-  "[\"plugins/literary-translator/tests/assemble_live_inputs.test.py\", \"cache_key.py:662\", 0]": {
+  "[\"plugins/literary-translator/tests/assemble_live_inputs.test.py\", \"cache_key.py:674\", 0]": {
    "anchors": [
     "the plugin_bundle_hash marker file"
    ],
-   "claim": "That case rewrites `runs/.plugin_bundle_hash`, the marker Step 0a writes and `cache_key.py:662` reads back, and asserts the recomputed field really moved before asserting assembly survived it: editing a bundle script's bytes would leave the field unchanged and make the test vacuous;"
+   "claim": "That case rewrites `runs/.plugin_bundle_hash`, the marker Step 0a writes and `cache_key.py:674` reads back, and asserts the recomputed field really moved before asserting assembly survived it: editing a bundle script's bytes would leave the field unchanged and make the test vacuous;"
   },
   "[\"plugins/literary-translator/tests/authoring_hygiene_drift.test.py\", \"engine-loop.md:11\", 0]": {
    "anchors": [
@@ -782,20 +782,20 @@
    ],
    "claim": "# `resolve_cache_key_script`/`_stamp_generation_hash` are shared code, but # each of these three threads its OWN `plugin_root_str` parameter through # from `main()`'s dispatch (canon_validate.py:3970-4017) to its own # `_stamp_write_verify` call -- a regression in any one of those three # threading sites would not be caught by the `--init` test above."
   },
-  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"cache_key.py:202-264\", 0]": {
+  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"cache_key.py:202-276\", 0]": {
    "anchors": [
     "PLUGIN_BUNDLE_MEMBERS = (",
     "\"select_segments.py\",",
     "glossary-pass-wf.template.js"
    ],
-   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-264`, # `cache_key.py:271-292` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
+   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-264`, # `cache_key.py:283-304` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
   },
-  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"cache_key.py:271-292\", 0]": {
+  "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"cache_key.py:283-304\", 0]": {
    "anchors": [
     "CACHE_KEY_FIELD_ORDER = (",
     "GLOBAL_CACHE_KEY_FIELDS = frozenset(CACHE_KEY_FIELD_ORDER)"
    ],
-   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-264`, # `cache_key.py:271-292` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
+   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-264`, # `cache_key.py:283-304` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
   },
   "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"resume_setup.py:837-856\", 0]": {
    "anchors": [
@@ -803,7 +803,7 @@
     "DIGEST_SUBST_FIELDS, never SUBST_FIELDS (#735)",
     "return _sha256_hex(_canonical_json_bytes(digest_input))"
    ],
-   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-264`, # `cache_key.py:271-292` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
+   "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-264`, # `cache_key.py:283-304` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
   },
   "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:1741-1778\", 0]": {
    "anchors": [
@@ -965,7 +965,7 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3578-3584\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3660-3666\", 0]": {
    "anchors": [
     "Excluded from every bundle hash",
     "nor of `orchestration_bundle_hash`",
@@ -1064,19 +1064,19 @@
    ],
    "claim": "CORRECTED (this docstring previously claimed the reason was \"no schemas/ dir to even load review.schema.json from\" -- FALSE, and it was already false before this fix, not a regression this branch caused): review_ready.py's own main() (review_ready.py:319-349) checks the review FILE's presence/non-emptiness at line 332, strictly BEFORE it ever reaches `_load_review_schema()` at line 339 -- so the orphan location's missing segments/{seg}.review.json is what's actually reached first, never the missing schemas/ dir. Verified by running the"
   },
-  "[\"plugins/literary-translator/tests/scaffold_setup.test.py\", \"cache_key.py:656-662\", 0]": {
+  "[\"plugins/literary-translator/tests/scaffold_setup.test.py\", \"cache_key.py:668-674\", 0]": {
    "anchors": [
     "def compute_plugin_bundle_hash(profile: dict, durable_root: Path) -> str:",
     "the plugin_bundle_hash marker file"
    ],
-   "claim": "THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:656-662) READS ``${durable_root}/runs/.plugin_bundle_hash`` and ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before #194 SKILL.md's Step 0a only PROSE-described \"computes/writes\" them: no"
+   "claim": "THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:668-674) READS ``${durable_root}/runs/.plugin_bundle_hash`` and ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before #194 SKILL.md's Step 0a only PROSE-described \"computes/writes\" them: no"
   },
   "[\"plugins/literary-translator/tests/scaffold_setup.test.py\", \"resume_setup.py:837-843\", 0]": {
    "anchors": [
     "dirs[\"runs_dir\"] / \".plugin_bundle_hash\", \"plugin_bundle_hash\"",
     "dirs[\"runs_dir\"] / \".orchestration_bundle_hash\", \"orchestration_bundle_hash\""
    ],
-   "claim": "THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:656-662) READS ``${durable_root}/runs/.plugin_bundle_hash`` and ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before #194 SKILL.md's Step 0a only PROSE-described \"computes/writes\" them: no shipped script actually wrote either marker, so a real run failed with \"has Step 0a run for this project?\". ``scaffold_setup.py`` is the shipped"
+   "claim": "THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:668-674) READS ``${durable_root}/runs/.plugin_bundle_hash`` and ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before #194 SKILL.md's Step 0a only PROSE-described \"computes/writes\" them: no shipped script actually wrote either marker, so a real run failed with \"has Step 0a run for this project?\". ``scaffold_setup.py`` is the shipped"
   },
   "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"codex_job.py:1853-1887\", 0]": {
    "anchors": [
@@ -1445,7 +1445,7 @@
    ],
    "claim": "Keep the declaration stable across the whole W7→W9 chain; toggling it between steps is the only way a normal run can make the two gates disagree about the same book. (They read the moved-field list from different authorities -- W7 from `select_segments.py`'s recomputation against the CURRENT cache key, W9 from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887` drops any inherited value and re-derives that list from the same diff, so the two agree by construction on anything a run produces. Hand-editing the materialized `ledger.json` between the two steps can split them; so can editing one segment's `status` to `converged`, which skips both carve-outs"
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3578-3584\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3660-3666\", 0]": {
    "anchors": [
     "Excluded from every bundle hash",
     "nor of `orchestration_bundle_hash`",

@@ -1,7 +1,7 @@
 """tests/scaffold_setup.test.py -- regression-lock suite for #194:
 ``scaffold_setup.py`` writes the two Step-0a bundle-hash marker files.
 
-THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:656-662)
+THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:668-674)
 READS ``${durable_root}/runs/.plugin_bundle_hash`` and
 ``resume_setup.compute_input_digest`` (resume_setup.py:837-843) reads BOTH
 ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before
@@ -104,8 +104,8 @@ EXPECTED_ORCHESTRATION_BUNDLE_MEMBERS = (
     "claim_record.py",
     "draft_ready.py",
     # #369: the THIRD double registration, same transitive-import reason --
-    # ledger_merge.py and select_segments.py load it here, six plugin members
-    # load it there.
+    # ledger_merge.py and select_segments.py load it here, seven plugin members
+    # load it there (glossary_dispatch_driver.py is the seventh, LT 1.75.0).
     "json_stdout.py",
     "ledger_merge.py",
     "language_smoke_report.py",

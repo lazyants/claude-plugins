@@ -62,26 +62,26 @@
    ],
    "claim": "- **Adding a field to a candidate row or a skeptic assignment is a PROMPT decision, not a data decision.** Two workflow templates serialize the whole Python-produced structure into the prompt verbatim — `glossary-pass-wf.template.js:1013` (`JSON.stringify(batch.candidates, null, 1)`) and `skeptic-pass-wf.template.js:449` (`...(batch.assignments, null, 1)`). Nothing on the Python side hints at this: the row is built in `bootstrap_names.collect_candidates()`, written to `name_candidates.json`, and the exposure happens in another language, in another directory, outside any diff that adds the field. So a new field must be bounded and injection-checked where it is ADDED. This is why `_capped_candidate_name()` bounds `name` in the producer at all, against this"
   },
-  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"cache_key.py:498-506\", 0]": {
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"cache_key.py:510-518\", 0]": {
    "anchors": [
     "def compute_schema_hash(profile: dict, durable_root: Path) -> str:",
     "a project-local schema file (schemas/)"
    ],
-   "claim": "**Corollary (the reusable design rule): to enrich canon with adjudication/annotation data WITHOUT re-translating, put it in a SIDE-STORE keyed by `source_form`** — a sibling file (`canon_adjudications.json` is the existing precedent, or a new `canon_senses.json`) — **NEVER in the `entries{}` body.** No sidecar file is among the 15 cache-key fields (`schema_hash` = draft/review/ segpack schemas only, `cache_key.py:498-506`), so sidecar DATA edits are cache-neutral. This is why a homonym-split / evidence design stores `senses[]` / evidence in a sidecar, not in canon entries."
+   "claim": "**Corollary (the reusable design rule): to enrich canon with adjudication/annotation data WITHOUT re-translating, put it in a SIDE-STORE keyed by `source_form`** — a sibling file (`canon_adjudications.json` is the existing precedent, or a new `canon_senses.json`) — **NEVER in the `entries{}` body.** No sidecar file is among the 15 cache-key fields (`schema_hash` = draft/review/ segpack schemas only, `cache_key.py:510-518`), so sidecar DATA edits are cache-neutral. This is why a homonym-split / evidence design stores `senses[]` / evidence in a sidecar, not in canon entries."
   },
-  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"cache_key.py:650-653\", 0]": {
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"cache_key.py:662-665\", 0]": {
    "anchors": [
     "def compute_derivation_bundle_hash(profile: dict, durable_root: Path) -> str:",
     "a derivation-bundle script"
    ],
-   "claim": "\"Cache-key member = mass re-translation\" is the FLOOR; a derivation-bundle edit costs regen-THEN-retranslate. The hash itself is a raw-byte SHA1 of the concatenated members (`compute_derivation_bundle_hash`, `cache_key.py:650-653`) — no comment-stripping, so even a comment reword flips it."
+   "claim": "\"Cache-key member = mass re-translation\" is the FLOOR; a derivation-bundle edit costs regen-THEN-retranslate. The hash itself is a raw-byte SHA1 of the concatenated members (`compute_derivation_bundle_hash`, `cache_key.py:662-665`) — no comment-stripping, so even a comment reword flips it."
   },
-  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"cache_key.py:753-759\", 0]": {
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"cache_key.py:765-771\", 0]": {
    "anchors": [
     "canon = load_canon(durable_root)",
     "referenced = {name: entries[name] for name in names if name in entries}"
    ],
-   "claim": "The four surfaces above are about editing a SCHEMA or SCRIPT **file**. A distinct surface is editing `canon.json` **content**: `used_terms_hash` (15-field cache-key field #3, `cache_key.py:753-759`) hashes the **WHOLE referenced canon ENTRY object** (`{name: entries[name]}` for every name a segment references, via `canonical_json_bytes`). So **adding ANY field to a canon `entries{}` record re-translates every converged segment that references that `source_form`** — even a purely descriptive field the translator ignores; blast radius = exactly the referencing segments"
+   "claim": "The four surfaces above are about editing a SCHEMA or SCRIPT **file**. A distinct surface is editing `canon.json` **content**: `used_terms_hash` (15-field cache-key field #3, `cache_key.py:765-771`) hashes the **WHOLE referenced canon ENTRY object** (`{name: entries[name]}` for every name a segment references, via `canonical_json_bytes`). So **adding ANY field to a canon `entries{}` record re-translates every converged segment that references that `source_form`** — even a purely descriptive field the translator ignores; blast radius = exactly the referencing segments"
   },
   "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:2537-2543\", 0]": {
    "anchors": [
@@ -109,7 +109,7 @@
     "CANON_ENTRY_FIELDS = (",
     "\"is_proper_name\""
    ],
-   "claim": "(`canon_adjudications.json` is the existing precedent, or a new `canon_senses.json`) — **NEVER in the `entries{}` body.** No sidecar file is among the 15 cache-key fields (`schema_hash` = draft/review/ segpack schemas only, `cache_key.py:498-506`), so sidecar DATA edits are cache-neutral. This is why a homonym-split / evidence design stores `senses[]` / evidence in a sidecar, not in canon entries. Belt-and-braces: `CANON_ENTRY_FIELDS` (`canon_validate.py:658-667`) is the projection `_entry_from_accepted_item` writes, so a stray field on an accepted batch item is silently STRIPPED — you cannot accidentally leak entry-body data in via a merge. Note the code fix that READS the sidecar is still a bundle-member edit → surface-1 upgrade re-translation; \"cache-neutral\" is about the DATA enrichment, never the code change."
+   "claim": "(`canon_adjudications.json` is the existing precedent, or a new `canon_senses.json`) — **NEVER in the `entries{}` body.** No sidecar file is among the 15 cache-key fields (`schema_hash` = draft/review/ segpack schemas only, `cache_key.py:510-518`), so sidecar DATA edits are cache-neutral. This is why a homonym-split / evidence design stores `senses[]` / evidence in a sidecar, not in canon entries. Belt-and-braces: `CANON_ENTRY_FIELDS` (`canon_validate.py:658-667`) is the projection `_entry_from_accepted_item` writes, so a stray field on an accepted batch item is silently STRIPPED — you cannot accidentally leak entry-body data in via a merge. Note the code fix that READS the sidecar is still a bundle-member edit → surface-1 upgrade re-translation; \"cache-neutral\" is about the DATA enrichment, never the code change."
   },
   "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"diff_rendered_output.py:194\", 0]": {
    "anchors": [

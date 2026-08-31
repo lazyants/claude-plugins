@@ -188,4 +188,27 @@ AUTHORITATIVE_FIXTURE_INVENTORY = (
             "the sanctioned sys.path.insert(SCRIPTS_SRC) idiom."
         ),
     },
+    {
+        "file": "glossary_driver_sequence.test.py",
+        "category": 2,
+        "note": (
+            "Does not isolate any canon_senses consumer, and reaches shape 2 "
+            "by a FOURTH route worth naming: it names canon_validate.py as a "
+            "real path component that it WRITES rather than reads. The path is "
+            "the target of a _write() that authors a stdlib-only STUB standing "
+            "in for the gate script, so the byte at that path is this test's "
+            "own text and canon_senses is never needed at parse or run time -- "
+            "yet the literal `scripts / \"canon_validate.py\"` is "
+            "byte-identical to the isolation shape the scan looks for. As with "
+            "#361's read-the-source route, the distinguishing fact is what the "
+            "file DOES with the path, which is the file-local judgement the "
+            "scan cannot make. Its copy/loader idioms target only "
+            "glossary_dispatch_driver.py and its hard sibling json_stdout.py, "
+            "neither a consumer. Verified 2026-08-31 by reading every "
+            "shutil.copy*/spec_from_file_location/SourceFileLoader site in the "
+            "file: two copies (the driver, json_stdout.py), one loader (the "
+            "driver), and one shutil.copy2 that lives inside the stub's own "
+            "source string and copies a canon FRAGMENT, not a script."
+        ),
+    },
 )

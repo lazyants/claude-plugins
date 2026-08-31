@@ -1,5 +1,129 @@
 # Changelog
 
+## 1.75.0 — 2026-08-31
+
+**The glossary pass gets a local driver, and stops paying an agent bootstrap per deterministic
+step (#800).** `glossary-pass-wf.template.js` is a Workflow script, and a Workflow script cannot
+run bash — so reaching codex, polling a file, snapshotting a fragment and recording a verdict each
+cost a full `agent()` call whose whole content was "now run this command". #724 removed the two
+that wrapped a single command each; dispatch and the chunked wait remained, at up to
+`1 + (2 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)` calls per batch. Measured on a live 22-batch,
+850-candidate volume: **~130 agent calls, against 24** driving the same gates locally. This is the
+case #409 made for W5 and #516 settled by making `segment_dispatch_driver.py` the default there;
+the glossary pass was simply left behind.
+
+- **`glossary_dispatch_driver.py` — a sibling of the W5 driver.** Dispatch → local bounded poll →
+  approve → fetch → repair gate → hand back for the judge → consume verdicts → merge + the
+  disk-independent verify. **The gates are untouched**: it runs exactly the commands the template
+  builds, and it obtains every prompt and every command by EXECUTING the template's own builder
+  functions under Node. There is no second copy of any prompt text or command line.
+- **The one remaining agent call is the citation JUDGE**, and it stays one. It reads
+  attacker-authored page bodies, so since #353 its boundary is the harness's rather than a
+  prompt's promise — the `literary-translator:citation-judge` agent holds `tools: Read` and
+  nothing else. A local process cannot dispatch a Claude agent, so the driver stops, prints the
+  rendered judge prompt in its `needs_judge[]` hand-back, and the session dispatches one agent per
+  entry **in parallel**. That parallelism is the actual win: N judges in one round instead of N
+  serial ladders.
+- **Citations that do not RETRIEVE are now repaired in place, per row.** Measured on the same
+  volume: **29 of 143 established citations did not retrieve at all and no batch of the 22 was
+  clean**, so the shipped ladder re-decides ~40 rows to fix a handful — drawing from the same
+  distribution that produced the bad URLs, since 18 of those 29 were one host answering 404, a
+  URL-construction pattern a re-roll re-draws. `references/canon-and-glossary.md` already named
+  that degeneration ("a re-roll, not a repair"). A Workflow cannot edit a fragment; a local driver
+  can.
+- **What selects the repaired rows is never the judge.** The failed set comes from
+  `fetch_citation.py`'s own `item_index` and `outcome` — that script's loop counter and its closed
+  vocabulary. A judge-authored item list would be model output derived from attacker-authored
+  pages, so a hostile page cited for row A could name valid row B and have B silently re-decided.
+  The repair therefore runs **before** the judge, over `basis: "established"` rows only, which
+  also means that once a judge is dispatched every citation in the batch retrieved — so a
+  rejection can only be about CONTENT, and content rejections take the whole-fragment ladder
+  unchanged. Shared-budget outcomes (`refused:batch-deadline`, `refused:batch-byte-budget`) are
+  excluded from repair in their own branch: they are environment faults, and they are the one
+  lever by which a hostile server could push a *different* row into the failure set.
+- **Both the repaired rows and the splice base come from the approved SNAPSHOT**, never the
+  attempt fragment. The attempt path is still writable by the codex job that produced it, and
+  `canon_validate.py --check-batch` compares source-form **sets**, not order — so a reorder there
+  would land repaired decisions on the wrong names while every shipped gate stayed green. The
+  repair artifact must carry the exact requested `source_form` sequence; missing, extra, duplicate
+  and reordered are each refused.
+- **Rung accounting is a reservation, not a count.** Repair reserves `attempt + 1` before
+  dispatching; at the terminal rung no repair is dispatched at all (there is none to reserve, and
+  one would exceed the judge cap); a repair that fails validation regenerates into that **same**
+  reserved rung, never `attempt + 2`. Total attempts per batch are exactly what they were. A
+  reserved rung a repair actually POPULATED re-enters the loop at APPROVE and not at DISPATCH: the
+  ordinary dispatch prompt orders its agent to decide every candidate and atomically write that
+  same path, so handing the rung back to it would re-decide the rows the repair left alone and
+  make which bytes the next snapshot pins a matter of scheduling. The rejection at the LAST rung
+  exhausts at that rung too, rather than recording an attempt one past the ladder as the one that
+  failed.
+- **A batch's state survives between the two invocations in ONE run-scoped document**, in the
+  verdict directory, advanced by ONE transition function — so a rejection recorded on the second
+  invocation actually climbs the ladder instead of stranding the batch with nothing pending and
+  nothing owed. The document is bound to `durable_root` + `RUN_ID`: a foreign one is discarded, not
+  merged, so reusing a session directory is ordinary rather than fatal. A resume, though, reuses
+  the **same** `RUN_ID` while `resume_setup.py` deletes that run's snapshots, records and evidence
+  — so before anything else each batch's status is checked against the artifact it promises, and a
+  batch whose snapshot or approval record is gone is reset to attempt 0 and named in `reset[]`.
+  Keeping such a status is a permanent wedge: nothing transitions out of it, its old verdict is
+  refused forever because the snapshot is unreadable, and a `ready` one would point the pass's one
+  irreversible write at paths that no longer exist.
+- **The verdict hand-back is authorization, and is treated as such.** `--verdict-dir` is required,
+  refused inside `durable_root`, refused unless owned by this uid and private, and the state file
+  in it is opened relative to a pinned directory descriptor with `O_NOFOLLOW` on the leaf —
+  refusing a symlink planted there, which is the move that would redirect this write back into
+  `durable_root`. The `--record-verdicts` file is read by pathname, after its resolved parent is
+  required to BE the verdict directory. A verdict is
+  admitted only on `durable_root` + `RUN_ID` + batch + attempt + a nonce minted at PREPARE time
+  and consumed once + the snapshot sha256 re-hashed immediately before the approval record is
+  written. The nonce is per-PREPARE rather than per-dispatch on purpose: that is what closes
+  replay across a resume, where `resume_setup.py` deletes snapshots and evidence so both are
+  regenerated at the very same paths — same tuple, same filenames, different bytes. Replies are
+  read with the **template's own** `rejectedAnywhere` + `sentinelVerdict`, never a Python
+  re-implementation of #228/#308's discipline.
+  **What it does not defend against is a hostile codex job**, and the bound is wider than the
+  data: `--write --cwd ${durable_root}` makes everything under that root model-writable — the
+  snapshot, `index.json` and the evidence bodies under `RUN_DIR`, the gate scripts the driver
+  shells, and the driver's own deployed copy, which the two-invocation loop re-enters. Stated
+  in full because a partial statement would imply more; tracked in #806, and it is
+  `segment_dispatch_driver.py`'s position since #516 rather than anything new here. That is the
+  shipped design's own position — `approvalRecordPath()`'s comment says the approval record "buys
+  no defence against a hostile agent … what it closes is the case that happens WITHOUT malice" —
+  and this channel closes exactly that same class and says so rather than implying more.
+- **Two ceilings, not one, and a refused final gate exits 1.** The Workflow spent an agent call
+  to reach codex, so the template's single preflight bounded agent calls and codex work at
+  once; this driver launches codex in-process, so it bounds them separately — judges (zero
+  outside `live`, where no citation is reviewed) and codex jobs (never zero: every batch is
+  still dispatched, and a live rung can launch two, the whole-batch job and the repair). And
+  `merge-failed` / `verify-failed` / `verify-unreadable` / `verify-refused` now reach the exit
+  status: the run that most needs a non-zero one is exactly the run where every batch was
+  approved and the one irreversible write refused.
+- **The driver's one stdout line goes through `json_stdout.dumps_line()`, like every other
+  script's** (#369). `ensure_ascii=False` leaves U+0085, U+2028 and U+2029 raw, and a payload
+  carrying one renders to the reading session as TWO physical lines — so it parses a truncated
+  object and the whole invocation's result is lost. Source forms come from a book, so those
+  characters are not hypothetical here. This makes `json_stdout.py` a hard sibling dependency,
+  loaded by exact path at import; the scaffold's copy pass already stages it, and the driver is the
+  **seventh** `PLUGIN_BUNDLE_MEMBERS` entry that loads it.
+- **The template is executed from the plugin install tree ONLY, with no durable fallback.**
+  `${durable_root}/` is writable by the very codex jobs the driver dispatches, so a durable copy
+  is model-writable JavaScript this process would run. The path is verified with the same
+  component-by-component `O_NOFOLLOW` walk `segment_dispatch_driver.py` uses, and the bytes are
+  read through the fd that walk returned.
+- **`mergeBatchesCmd` / `verifyMergedCmd` split out of their prompt builders** (pure extraction,
+  the shape #723 used for `checkBatchCmdForPath()`): both commands previously existed only inside
+  prose, so the only way to recover one was to parse natural language. Verified byte-identical on
+  the `pipeline()` path under both `research_mode` values. `--plugin-root` rides on the merge
+  command and on no other (#412), and a test asserts exactly that asymmetry.
+- **`pipeline()` is NOT retired.** It remains this pass's shipped, documented fallback; per
+  #436/#516's ordering rule a fallback is not removed before its replacement has carried a book.
+- `glossary_dispatch_driver.py` joins `PLUGIN_BUNDLE_MEMBERS` on the same criterion the tuple
+  already applies to `segment_dispatch_driver.py` — it owns the ACCEPT decision for dispatched
+  work. **This moves `plugin_bundle_hash`**, so every converged segment in an existing project
+  flips to `stale` and re-translates; that is the lighter of the two routes
+  (`derivation_bundle_hash` would force `blocked_needs_regeneration` and a W3/W3a rerun). The cost
+  for a given project is its own `converged` count in `runs/ledger.json`.
+
 ## 1.74.2 — 2026-08-31
 
 **A citation on a legacy-encoded page is no longer unverifiable by construction (#801).**
@@ -1113,7 +1237,7 @@ Unpinned behavior is unchanged in every respect but one: when `resume_setup.py` 
 
 ### What it costs
 
-`segment_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` entry (`cache_key.py:156`), and `plugin_bundle_hash` is a GLOBAL cache-key field (`cache_key.py:193`, not in `PER_SEGMENT_FIELDS` at `cache_key.py:196-198`) — so once a project refreshes its `${durable_root}/scripts/` copy, EVERY converged segment's cache key moves and every converged unit reads `stale`. The hash itself is read back from the `runs/.plugin_bundle_hash` marker rather than recomputed per segment (`cache_key.py:563-569`), so an un-refreshed root is untouched until Step 0a re-copies. This is unavoidable for any fix that lives in this file, and it is the same cost every prior plugin-bundle release has paid.
+`segment_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` entry (`cache_key.py:156`), and `plugin_bundle_hash` is a GLOBAL cache-key field (`cache_key.py:193`, not in `PER_SEGMENT_FIELDS` at `cache_key.py:196-198`) — so once a project refreshes its `${durable_root}/scripts/` copy, EVERY converged segment's cache key moves and every converged unit reads `stale`. The hash itself is read back from the `runs/.plugin_bundle_hash` marker rather than recomputed per segment (`cache_key.py:575-581`), so an un-refreshed root is untouched until Step 0a re-copies. This is unavoidable for any fix that lives in this file, and it is the same cost every prior plugin-bundle release has paid.
 
 ## 1.46.0 — 2026-08-23
 **A source EPUB can carry RTL text in visual order instead of logical order, and nothing in this pipeline could tell you.** Extraction is byte-faithful — that is correct, and `segpack.py` is a pass-through by construction — so the mangling is upstream, from a PDF-to-EPUB conversion. But no deterministic gate here can see it: token counts, digests, schema validation and `validate_draft` never read what a fragment MEANS. The damage lands on the LLM turns. On a live Hebrew book a visual-order run tore words apart, a reviewer read a stranded fragment as a real word and filed a finding against a CORRECT draft — twice — and a translator inverted who did what to whom in a passage that reached a converged draft a full review round had already called clean. Closes #489.
