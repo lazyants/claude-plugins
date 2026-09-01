@@ -801,6 +801,38 @@ function checkBatchCmdForPath(path, index) {
     " --expect-source-forms-file " + manifestPath(index)
 }
 
+// POSIX single-quoting for ONE spliced value. Same device fetchCitationsCmd
+// already uses for each --allow-content-type, and used here for the same reason
+// rather than a new one: a value this file splices into a command string can
+// carry a character the consumer would otherwise take as syntax. It is applied
+// to exactly one value -- the #806 sandbox path below -- and never to the
+// pipeline path's own arguments, whose bytes must not move.
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'"
+}
+
+// #806 -- THE CHECK COMMAND AGAINST A CONFINED SANDBOX PATH.
+//
+// The local driver no longer lets a dispatched codex job write anywhere under
+// durable_root: it launches the job with --cwd pointed at a throwaway directory
+// verified to sit outside every git working tree, so codex-companion's own
+// workspace-write resolution confines the job to that directory, and the driver
+// publishes the artifact into RUN_DIR itself afterwards. The job therefore
+// self-checks a path under that sandbox, not under RUN_DIR.
+//
+// It goes through checkBatchCmdForPath like every other site, so the four gate
+// sites still ask ONE question composed in ONE place. What it adds is the
+// quoting: the sandbox path's parent is TMPDIR, which belongs to the operator
+// and not to this pipeline, and an unquoted path holding a space would be split
+// into two argv entries by BOTH consumers of this string -- the shell the codex
+// job runs it in, and the driver's own shlex.split() -- leaving the gate
+// checking a path nobody wrote and the batch timing out as glossary-pass-null.
+// RUN_DIR-relative callers are deliberately NOT quoted: their bytes are pinned
+// by tests and by the dispatch prompt's "re-run exactly the command above".
+function sandboxCheckBatchCmd(outPath, index) {
+  return checkBatchCmdForPath(shellQuote(outPath), index)
+}
+
 // ---------------------------------------------------------------------------
 // The APPROVED SNAPSHOT of one attempt (1.16.0) -- the bytes the
 // citation review audits and, under live, the exact bytes --merge-batches is
@@ -1009,9 +1041,15 @@ function fetchCitationsCmd(index, attempt) {
 // bare "do it again" would re-run the same reasoning over the same candidates
 // and very likely reproduce the same unverifiable URL, spending the ladder
 // without ever changing the outcome.
-function batchDispatchPrompt(batch, attempt, rejectionReason) {
+// 1.76.0 (#806): takes an optional SANDBOX OUT-PATH. Omitted -- which is every
+// pipeline() caller -- the prompt names fragmentPath() and issues
+// checkBatchCmd(), so its rendered bytes are exactly what they have always
+// been. The local driver passes the path inside the confined, outside-every-
+// repo directory it launched the job into, and publishes the result into
+// RUN_DIR itself once the gate has passed.
+function batchDispatchPrompt(batch, attempt, rejectionReason, sandboxOutPath) {
   const candidatesJson = JSON.stringify(batch.candidates, null, 1)
-  const outPath = fragmentPath(batch.index, attempt)
+  const outPath = sandboxOutPath || fragmentPath(batch.index, attempt)
   const lines = []
   // #109 -- THE ROUTING CONTROL, and it must stay the FIRST rendered line.
   // The codex:codex-rescue agent this prompt is dispatched to is a thin
@@ -1034,7 +1072,7 @@ function batchDispatchPrompt(batch, attempt, rejectionReason) {
   lines.push("--background")
   lines.push("Effort: " + EFFORT + ". Canon-and-glossary pass (codex-glossary-pass) for a " + SOURCE_LANG + " -> " + TARGET_LANG + " literary translation project, batch " + batch.index + ".")
   lines.push("Read in full, in this order: " + ROOT + "/glossary_TASK.md (the canonicalization rules and the exact per-item output contract) and " + ROOT + "/canon.json (the entries already frozen there). Never re-decide or override any source_form already present in canon.json's own entries{} -- this batch resolves only the new candidates listed below, which were already filtered against the current canon.json before you were dispatched.")
-  lines.push("research_mode = " + RESEARCH_MODE + ". If it is \"offline\": basis:\"established\" is forbidden outright for every candidate in this batch, with no exception -- use basis:\"transliterated\" when the fixed practical-transcription rule in style_bible.md (section C-translit) is enough on its own, use basis:\"sense_translated\" instead when the candidate is a speaking name with a clean sense-rendering (see the speaking-name rule below -- legal under offline too, since it makes no citation claim at all), or set disposition:\"review_queue\" instead, with a note that starts with the literal prefix \"SOURCE_UNAVAILABLE:\". If it is \"live\": basis:\"established\" is allowed, but only together with a real, citable reference source URL -- never a fabricated one.")
+  lines.push("research_mode = " + RESEARCH_MODE + ". If it is \"offline\": basis:\"established\" is forbidden outright for every candidate in this batch, with no exception -- use basis:\"transliterated\" when the fixed practical-transcription rule in " + ROOT + "/style_bible.md (section C-translit) is enough on its own, use basis:\"sense_translated\" instead when the candidate is a speaking name with a clean sense-rendering (see the speaking-name rule below -- legal under offline too, since it makes no citation claim at all), or set disposition:\"review_queue\" instead, with a note that starts with the literal prefix \"SOURCE_UNAVAILABLE:\". If it is \"live\": basis:\"established\" is allowed, but only together with a real, citable reference source URL -- never a fabricated one.")
   lines.push("This batch's candidates -- deterministically extracted by bootstrap_names.py, never yet decided by any LLM (name = the surface form as it appears in the source text, EXCEPT that it is length-bounded: a name ending in the marker glossary_TASK.md describes was machine-truncated at the bound, and glossary_TASK.md says what to do with it; freq/n_segments = how often and how widely it recurs; likely_name/multiword/mid_sentence/abbrev = this script's own recall-oriented heuristics, not a verdict; elision_ambiguous/elision_stripped_form = present only on some rows, flagging a possible article-elision ambiguity resolved by the adjudication rule below):")
   lines.push(candidatesJson)
   lines.push("For EVERY candidate above, in the SAME order, decide exactly one canon-batch item:")
@@ -1044,7 +1082,7 @@ function batchDispatchPrompt(batch, attempt, rejectionReason) {
   lines.push("- When disposition is \"accepted\": canonical_target_form, basis (\"established\" | \"transliterated\" | \"title\" | \"sense_translated\" | \"not_a_name\"), and confidence (\"high\" | \"medium\" | \"low\") are all required; when basis is \"established\", source is also required and must be a real, non-empty reference URL, never left empty and never invented.")
   lines.push("- When disposition is \"review_queue\": note is required and must explain, briefly, why the candidate is queued rather than resolved.")
   lines.push("- A title phrase (an honorific plus a bare surname or role -- for instance a form meaning \"Monsieur the Prince\" or \"the Queen Mother\") gets basis:\"title\", with canonical_target_form holding the unpacked target-language phrase; if the underlying surname is ALSO present as its own separate candidate in this same batch, resolve that one on its own merits instead of folding it into the title entry.")
-  lines.push("- A SPEAKING NAME whose correct rendering is a deliberate sense-translation rather than a transcription (style_bible.md section C) gets basis:\"sense_translated\": canonical_target_form holds the sense-rendering itself, is_proper_name is required true, and note is required and must explain the sense choice; source must be left out entirely -- sense_translated is a project-specific editorial rendering, never a citable established form. Precedence: basis:\"established\" WINS over basis:\"sense_translated\" whenever a citable conventional target form actually exists -- cite it under established instead; reserve sense_translated for exactly the case where no established-form claim can be made at all.")
+  lines.push("- A SPEAKING NAME whose correct rendering is a deliberate sense-translation rather than a transcription (" + ROOT + "/style_bible.md section C) gets basis:\"sense_translated\": canonical_target_form holds the sense-rendering itself, is_proper_name is required true, and note is required and must explain the sense choice; source must be left out entirely -- sense_translated is a project-specific editorial rendering, never a citable established form. Precedence: basis:\"established\" WINS over basis:\"sense_translated\" whenever a citable conventional target form actually exists -- cite it under established instead; reserve sense_translated for exactly the case where no established-form claim can be made at all.")
   lines.push("- ELISION AMBIGUITY: when a candidate row carries elision_ambiguous:true, it is a capitalized, sentence-initial form that MIGHT merely be an article-elision of another name rather than a distinct name of its own (its elision_stripped_form field names that other form -- e.g. \"L'Enclos\", whose elision_stripped_form is \"Enclos\"). Do NOT silently accept such a row as a standalone proper name: unless you can positively confirm from context that it genuinely IS its own distinct entity, set disposition:\"review_queue\" with a note that names its elision_stripped_form, so a human can decide whether the two forms are the same entity. Only when you are confident it is a separate name may you resolve it as accepted. This precedence holds even when the candidate also looks like a clear speaking name with an obvious sense-rendering: elision ambiguity is resolved FIRST -- a candidate carrying elision_ambiguous:true never gets basis:\"sense_translated\" directly; only once the elision question is settled may the surviving distinct name be resolved as sense_translated on its own merits.")
   // #407 -- the AFFIXED FUNCTION WORD rule. Dual-placed: glossary_TASK.md is
   // the authoritative copy, but Step 0a seeds that file ONCE and never
@@ -1072,7 +1110,15 @@ function batchDispatchPrompt(batch, attempt, rejectionReason) {
     lines.push("Fix precisely what the reviewer named. Every basis:\"established\" item you keep must have a source URL you have actually verified resolves and actually documents THAT source_form's claimed canonical_target_form -- not a plausible-looking URL, not a search-results page, not a site's front page, and not a link you reconstructed from memory of what its address ought to be. If you cannot verify a source that way, do NOT substitute a different unverified URL and do NOT keep the established claim: downgrade that one item to basis:\"transliterated\" where the fixed practical-transcription rule is enough on its own, or set disposition:\"review_queue\" with a note explaining what could not be sourced. Leave every item the reviewer did not object to exactly as it was.")
   }
   lines.push("Write this exact JSON array, in this exact order, to " + outPath + " ATOMICALLY: write it first to a fresh temp file in the SAME directory (for example a dot-prefixed name alongside the target, holding your own process id), then rename that temp file into place at exactly " + outPath + " -- so a partially-written file is never visible at that path. A plain JSON array of objects, no markdown code fence, no comment, nothing else in the file.")
-  lines.push("Then self-check by running this command and reading its one line of JSON output: " + checkBatchCmd(batch.index, attempt))
+  // The literal checkBatchCmd() call below is retained on the default branch
+  // deliberately: tests/bounded_poll_present.test.py requires every gate site
+  // to ISSUE the command through that name rather than compose one of its
+  // own, and sandboxCheckBatchCmd() -- which reaches the same single
+  // composition site -- does not spell it. Both branches are the same
+  // command; only the path they name, and its quoting, differ.
+  lines.push("Then self-check by running this command and reading its one line of JSON output: " +
+    (sandboxOutPath ? sandboxCheckBatchCmd(outPath, batch.index)
+                    : checkBatchCmd(batch.index, attempt)))
   lines.push("This command checks only this fragment's own shape, the offline backstop, and its EXACT candidate coverage against the manifest file above -- it does NOT merge into canon.json; a separate, later, serialized step folds every batch's confirmed-ready fragment into canon.json only once every batch here is done. If it prints a line with \"success\": false, it names the offending items (the first 8, then a count of the rest -- re-run it after fixing those to see the next batch) -- fix each one in your own array (reassign basis/disposition/note as the rules above require; never weaken the offline backstop, never fabricate a source URL to make the check pass, never drop or add a candidate), rewrite " + outPath + " the same atomic way, and re-run the command. Repeat until it prints a line with \"success\": true. This self-check command supersedes any older self-check prose you may find in glossary_TASK.md from a prior plugin version -- always run exactly the command above, never --batch.")
   lines.push("Once you have that success line, return exactly the line: FRAGMENT " + batch.index)
   return lines.join("\n")
@@ -1120,8 +1166,12 @@ function repairFragmentPath(index, attempt) {
 // construction. The driver validates this artifact instead -- exact source_form
 // sequence against the rows it asked for -- and then re-runs --check-batch on
 // the SPLICED whole fragment, which is the object that has to satisfy coverage.
-function batchRepairPrompt(batch, attempt, failedRows) {
-  const outPath = repairFragmentPath(batch.index, attempt)
+// 1.76.0 (#806): the same optional SANDBOX OUT-PATH as batchDispatchPrompt,
+// for the same reason. No self-check command is spliced here at all -- the
+// driver validates the repaired rows itself and writes the spliced whole
+// fragment -- so this builder needs the path and nothing else.
+function batchRepairPrompt(batch, attempt, failedRows, sandboxOutPath) {
+  const outPath = sandboxOutPath || repairFragmentPath(batch.index, attempt)
   const lines = []
   // Same routing control, same reason, same position as batchDispatchPrompt's
   // (see its comment): first line, bare token, nothing else on it.
@@ -1134,7 +1184,7 @@ function batchRepairPrompt(batch, attempt, failedRows) {
   lines.push(JSON.stringify(failedRows, null, 1))
   lines.push("For EACH item above, in the SAME order, produce exactly one replacement canon-batch item, keeping its source_form EXACTLY as given -- the source_form is the key this repair is spliced back on, so changing, reordering, adding or dropping one makes the whole repair unusable and it will be refused.")
   lines.push("- If you can supply a DIFFERENT, genuinely citable reference URL that you have actually verified resolves and actually documents THAT source_form's claimed canonical_target_form, keep basis:\"established\" and give that URL as source. Not a plausible-looking URL, not a search-results page, not a site's front page, and not a link reconstructed from memory of what its address ought to be.")
-  lines.push("- If you cannot, DO NOT substitute another unverified URL and do not keep the established claim. Downgrade that one item to basis:\"transliterated\" where the fixed practical-transcription rule in style_bible.md (section C-translit) is enough on its own, or to basis:\"sense_translated\" where the speaking-name rule applies and a clean sense-rendering exists, or set disposition:\"review_queue\" with a note explaining exactly what could not be sourced. An honest downgrade is the CORRECT outcome here and is always preferred to a second unverifiable URL -- a fabricated citation that reaches the merge is frozen for the life of the project.")
+  lines.push("- If you cannot, DO NOT substitute another unverified URL and do not keep the established claim. Downgrade that one item to basis:\"transliterated\" where the fixed practical-transcription rule in " + ROOT + "/style_bible.md (section C-translit) is enough on its own, or to basis:\"sense_translated\" where the speaking-name rule applies and a clean sense-rendering exists, or set disposition:\"review_queue\" with a note explaining exactly what could not be sourced. An honest downgrade is the CORRECT outcome here and is always preferred to a second unverifiable URL -- a fabricated citation that reaches the merge is frozen for the life of the project.")
   lines.push("- Leave canonical_target_form as it was unless the basis change itself requires a different rendering; this step exists to fix citations, not to re-open resolutions.")
   lines.push("Write this exact JSON array, holding EXACTLY these " + failedRows.length + " item(s) in this exact order and nothing else, to " + outPath + " ATOMICALLY: write it first to a fresh temp file in the SAME directory (for example a dot-prefixed name alongside the target, holding your own process id), then rename that temp file into place at exactly " + outPath + " -- so a partially-written file is never visible at that path. A plain JSON array of objects, no markdown code fence, no comment, nothing else in the file.")
   lines.push("Do NOT write, move or delete any other file in that directory: the rest of this batch is already approved and is not yours to touch.")

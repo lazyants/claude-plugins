@@ -123,12 +123,28 @@ def bed(tmp_path):
         import fs from "node:fs";
         const args = process.argv.slice(2);
         const pf = args[args.indexOf("--prompt-file") + 1];
+        const cwd = args[args.indexOf("--cwd") + 1];
+        fs.appendFileSync({str(calls)!r}, "cwd " + cwd + "\\n");
         const prompt = fs.readFileSync(pf, "utf8");
         const plan = JSON.parse(fs.readFileSync({str(planted)!r}, "utf8"));
         const fresh = {json.dumps(_default_rows())};
-        const paths = prompt.match(/\\S+\\/(?:out|repair)_\\d+_attempt_\\d+\\.json/g) || [];
-        for (const target of new Set(paths)) {{
-          const key = target.split("/").pop();
+        // #806: the artifact goes inside the sandbox this job was launched with,
+        // so the target is --cwd plus the basename the prompt names. Matching the
+        // WHOLE path out of the prompt would be wrong twice over: the self-check
+        // command names it single-quoted, and a sandbox path holding a space
+        // (a TMPDIR the operator chose) has no unambiguous regex at all.
+        const names = prompt.match(/(?:out|repair)_\\d+_attempt_\\d+\\.json/g) || [];
+        for (const key of new Set(names)) {{
+          const target = cwd + "/" + key;
+          // CONTRACT-SHAPED, like every other stub here: a real codex turn writes
+          // where the PROMPT tells it to, and it can only write inside its own
+          // sandbox. If those two are not the same directory the driver has
+          // dispatched a job that cannot produce its artifact, and this stub must
+          // say so rather than quietly writing somewhere the driver never polls.
+          if (!prompt.includes(target)) {{
+            throw new Error("the prompt does not name " + target +
+              " -- the sandbox --cwd and the prompt's out-path disagree");
+          }}
           fs.appendFileSync({str(calls)!r}, "companion " + key + "\\n");
           const rows = plan[key] || (key.startsWith("out_") ? fresh : null);
           if (rows) fs.writeFileSync(target, JSON.stringify(rows));
@@ -196,7 +212,7 @@ def load(bed):
     return m
 
 
-def run_driver(bed, *extra, expect=0):
+def run_driver(bed, *extra, expect=0, env=None):
     """Invokes the driver as a subprocess, exactly as an operator does, and
     returns its one stdout JSON line."""
     batches_file = bed["tmp"] / "batches.json"
@@ -210,7 +226,8 @@ def run_driver(bed, *extra, expect=0):
             "--citation-content-types", "text/html",
             "--poll-sec", "0.05", "--deadline-sec", "6",
             "--node", NODE, *extra]
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=180,
+                          env=({**os.environ, **env} if env else None))
     assert proc.returncode == expect, (
         f"exit {proc.returncode}, expected {expect}\nSTDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}")
     line = [l for l in proc.stdout.strip().splitlines() if l.startswith("{")]
@@ -226,6 +243,22 @@ def plant_fragment(bed, attempt=0, bases=("established", "established")):
     rows = _default_rows(bases)
     (bed["run_dir"] / f"out_0_attempt_{attempt}.json").write_text(json.dumps(rows))
     return rows
+
+
+def companion_cwds(bed):
+    """Every --cwd the fake codex turn was launched with, in order. This is the
+    record of where each dispatched job was actually confined -- read from argv,
+    never from the driver's source."""
+    return [l.split(" ", 1)[1] for l in bed["calls"].read_text().splitlines()
+            if l.startswith("cwd ")]
+
+
+def _has_enclosing_repo(path) -> bool:
+    """codex-companion's OWN workspace-root algorithm, run here rather than
+    restated: `git rev-parse --show-toplevel` walking up from `path`."""
+    proc = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True, timeout=30)
+    return proc.returncode == 0
 
 
 def companion_targets(bed):
@@ -381,8 +414,8 @@ def test_a_retrieval_failure_repairs_before_any_judge_runs(bed):
     bed["outcomes"].write_text(json.dumps(["http_error:404", "fetched"]))
 
     # What the repair TURN produces, handed to the companion stub so the artifact
-    # appears while the driver polls -- after its own stale-artifact unlink, the
-    # way a real codex turn produces it.
+    # appears while the driver polls, the way a real codex turn produces it --
+    # inside that dispatch's own sandbox, which #806 made the only place it lives.
     bed["planted"].write_text(json.dumps({"repair_0_attempt_0.json": [{
         "source_form": "Alpha", "basis": "transliterated", "disposition": "accepted",
         "canonical_target_form": "Alpha", "confidence": "high",
@@ -613,3 +646,142 @@ def test_a_refused_final_gate_exits_non_zero(bed):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# #806 -- WHAT A DISPATCHED JOB MAY WRITE
+#
+# Every assertion below reads the cwd the companion was actually LAUNCHED with,
+# and re-runs codex-companion's own workspace-root algorithm against it. Reading
+# the driver's source instead would prove only that a string was passed; it is
+# the companion's resolution, not ours, that decides the boundary.
+# ---------------------------------------------------------------------------
+
+def test_a_dispatched_job_is_confined_outside_the_durable_root(bed):
+    out, _ = run_driver(bed)
+    assert out["needs_judge"], "the batch must have reached a judge"
+    cwds = companion_cwds(bed)
+    assert cwds, "no codex job was launched at all -- nothing was proved"
+    for cwd in cwds:
+        assert not Path(cwd).is_relative_to(bed["durable"]), (
+            f"the job was launched inside the durable root at {cwd}; every file "
+            f"under it, including scripts/ and this driver's deployed copy, "
+            f"would be model-writable")
+        assert not _has_enclosing_repo(cwd), (
+            f"{cwd} has an enclosing git repository, so codex-companion would "
+            f"resolve its workspace-write root to that repo instead -- the "
+            f"sandbox would be a name, not a boundary")
+    # ...and the artifact still reaches its canonical path, published by the
+    # driver rather than written there by the job.
+    assert (bed["run_dir"] / "out_0_attempt_0.json").exists(), (
+        "the gated sandbox bytes must be published into RUN_DIR")
+
+
+def test_the_repair_dispatch_is_confined_too(bed):
+    """The repair has its OWN launch_codex call site. A one-sided assertion on
+    the ordinary dispatch would leave it unpinned."""
+    bed["outcomes"].write_text(json.dumps(["http_error:404", "fetched"]))
+    bed["planted"].write_text(json.dumps({"repair_0_attempt_0.json": [{
+        "source_form": "Alpha", "basis": "transliterated", "disposition": "accepted",
+        "canonical_target_form": "Alpha", "confidence": "high",
+        "is_proper_name": True}]}))
+    run_driver(bed)
+    assert companion_targets(bed) == ["out_0_attempt_0.json",
+                                      "repair_0_attempt_0.json"], (
+        "this test is only meaningful if a repair actually dispatched")
+    cwds = companion_cwds(bed)
+    assert len(cwds) == 2, f"expected a dispatch and a repair launch, got {cwds}"
+    assert cwds[0] != cwds[1], "each launch gets its own single-use sandbox"
+    for cwd in cwds:
+        assert not Path(cwd).is_relative_to(bed["durable"])
+        assert not _has_enclosing_repo(cwd)
+
+
+def test_confinement_holds_when_the_durable_root_is_inside_a_git_repository(bed):
+    """The case that rules out the cheaper fix.
+
+    Pointing --cwd at RUN_DIR would confine nothing here: RUN_DIR is nested under
+    durable_root, and codex-companion resolves its write root by walking UP to
+    the enclosing git top level, so it would land on this repository and hand the
+    job every file in it. durable_root coinciding with a project's own root is an
+    EXPLICITLY SUPPORTED layout (SKILL.md, Step 0a), so the boundary has to hold
+    here or it does not exist."""
+    subprocess.run(["git", "init", "-q", str(bed["durable"])], check=True, timeout=60)
+    assert _has_enclosing_repo(bed["run_dir"]), (
+        "fixture precondition: RUN_DIR must now resolve to an enclosing repo, "
+        "which is exactly what makes the RUN_DIR-as-cwd design a no-op")
+
+    out, _ = run_driver(bed)
+    assert out["needs_judge"], "the supported layout must still drive normally"
+    cwds = companion_cwds(bed)
+    assert cwds, "no codex job was launched at all -- nothing was proved"
+    for cwd in cwds:
+        assert not _has_enclosing_repo(cwd), (
+            f"{cwd} resolves to an enclosing repository even though the sandbox "
+            f"is meant to sit outside every working tree")
+
+
+def test_an_unconfined_sandbox_refuses_to_dispatch_rather_than_warning(bed, tmp_path):
+    """Strictness bias, and it is free HERE specifically: a TMPDIR inside a git
+    working tree is pathological, so refusing costs no sanctioned layout -- while
+    dispatching into it would hand the job write access to that whole repository
+    and report that it had been confined."""
+    bad_tmp = tmp_path / "tmp_in_repo"
+    bad_tmp.mkdir()
+    subprocess.run(["git", "init", "-q", str(bad_tmp)], check=True, timeout=60)
+
+    out, _ = run_driver(bed, expect=1, env={"TMPDIR": str(bad_tmp)})
+    assert companion_cwds(bed) == [], "nothing may be dispatched into an unconfined sandbox"
+    assert companion_targets(bed) == [], "no codex turn may have run"
+    assert out["not_ready"], f"the batch must be reported as not advanced: {out}"
+    reason = json.dumps(out["not_ready"])
+    assert "write-confined" in reason, f"the refusal must say why: {reason}"
+
+
+def test_a_tmpdir_holding_a_space_still_dispatches(bed, tmp_path):
+    """TMPDIR belongs to the operator, not to this pipeline. The sandbox path is
+    spliced into the --check-batch command the job is told to run and the driver
+    polls with, so an unquoted path holding a space would be split into two argv
+    entries by BOTH consumers -- and the batch would time out as
+    glossary-pass-null with nothing to say why."""
+    spaced = tmp_path / "tmp with space"
+    spaced.mkdir()
+    out, _ = run_driver(bed, env={"TMPDIR": str(spaced)})
+    assert out["needs_judge"], f"a whitespace-bearing TMPDIR must still drive: {out}"
+    cwds = companion_cwds(bed)
+    assert cwds and " " in cwds[0], (
+        f"fixture precondition: the sandbox must actually sit under the "
+        f"whitespace-bearing TMPDIR, got {cwds}")
+    assert (bed["run_dir"] / "out_0_attempt_0.json").exists()
+
+
+def test_a_symlinked_sandbox_artifact_is_never_published(bed, tmp_path):
+    """A confined job can still WRITE A SYMLINK inside its own sandbox: write
+    confinement restricts where writes LAND, never what a link's target names."""
+    mod = load(bed)
+    sandbox = tmp_path / "sbx"
+    sandbox.mkdir()
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps([{"source_form": "smuggled"}]))
+    link = sandbox / "out_0_attempt_0.json"
+    link.symlink_to(elsewhere)
+
+    target = bed["run_dir"] / "out_0_attempt_0.json"
+    with pytest.raises(mod.DriverError):
+        mod.publish_fragment(link, target, "batch 0 attempt 0")
+    assert not target.exists(), "nothing may be published from a symlinked artifact"
+
+
+def test_a_published_fragment_is_the_bytes_that_passed_the_gate(bed, tmp_path):
+    mod = load(bed)
+    sandbox = tmp_path / "sbx2"
+    sandbox.mkdir()
+    src = sandbox / "out_0_attempt_0.json"
+    # Deliberately NOT this file's own json.dumps formatting: a publish that
+    # re-serialized would silently normalise these bytes, and the gate would then
+    # have validated an object that is not the one on disk.
+    raw = b'[{"source_form":  "Alpha",\n  "basis":"transliterated"} ]'
+    src.write_bytes(raw)
+    target = bed["run_dir"] / "out_0_attempt_0.json"
+    mod.publish_fragment(src, target, "batch 0 attempt 0")
+    assert target.read_bytes() == raw, "the published bytes must be verbatim"

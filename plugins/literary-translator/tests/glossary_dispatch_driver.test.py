@@ -146,6 +146,7 @@ _ROW = {"source_form": "Alpha", "basis": "established", "disposition": "accepted
         "source": "https://dead.test/a"}
 _BUILDER_ARGS = {
     "fragmentPath": [0, 0], "manifestPath": [0], "checkBatchCmd": [0, 0],
+    "sandboxCheckBatchCmd": ["/private/tmp/ltgd.x/out_0_attempt_0.json", 0],
     "approvedPath": [0, 0], "approveBatchCmd": [0, 0],
     "approvalRecordPath": [0, 0], "recordApprovalCmd": [0, 0],
     "evidenceDir": [0, 0], "evidenceIndexPath": [0, 0],

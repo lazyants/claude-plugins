@@ -21,6 +21,7 @@ warn about.
 
 import importlib.util
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,12 @@ SKILL_ROOT = PLUGIN_ROOT / "skills" / "literary-translator"
 DRIVER = SKILL_ROOT / "assets" / "scripts" / "glossary_dispatch_driver.py"
 JSON_STDOUT = SKILL_ROOT / "assets" / "scripts" / "json_stdout.py"
 TEMPLATE = SKILL_ROOT / "assets" / "templates" / "glossary-pass-wf.template.js"
+
+# A sandbox path shaped like the real thing -- a TMPDIR-prefixed mkdtemp
+# directory OUTSIDE the durable root, holding a space, because TMPDIR is the
+# operator's and this pipeline may not assume what is in it.
+SANDBOX_OUT = "/private/tmp/lt sandboxes/ltgd.dispatch-3-0.abc/out_3_attempt_0.json"
+SANDBOX_REPAIR = "/private/tmp/lt sandboxes/ltgd.repair-3-0.abc/repair_3_attempt_0.json"
 
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node is required to execute "
@@ -89,6 +96,14 @@ def built(mod):
         {"key": "repairpath", "fn": "repairFragmentPath", "args": [3, 0]},
         {"key": "manifest", "fn": "manifestPath", "args": [3]},
         {"key": "evidence", "fn": "evidenceIndexPath", "args": [3, 0]},
+        # #806 -- the same two prompt builders, this time given an explicit
+        # sandbox out-path, plus the sandbox spelling of the check command.
+        {"key": "dispatch_sandboxed", "fn": "batchDispatchPrompt",
+         "args": [BATCH, 0, None, SANDBOX_OUT]},
+        {"key": "repair_sandboxed", "fn": "batchRepairPrompt",
+         "args": [BATCH, 0, ROWS, SANDBOX_REPAIR]},
+        {"key": "sandboxcheck", "fn": "sandboxCheckBatchCmd",
+         "args": [SANDBOX_OUT, 3]},
     ]
     return mod.call_template_functions(TEMPLATE, subst(), [BATCH], calls, NODE)
 
@@ -250,3 +265,66 @@ def test_the_token_table_resolves_every_token_the_template_declares(mod):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# #806 -- THE SANDBOX OUT-PATH IS AN ADDITION, NOT A CHANGE.
+#
+# The driver passes it; every pipeline() caller does not. The fallback path's
+# shipped prompt bytes must therefore be exactly what they were, or the two paths
+# would once again be issuing two different prompts -- the drift this whole file
+# exists to prevent, arriving through the argument list instead of through a
+# second copy of the text.
+# ---------------------------------------------------------------------------
+
+def test_the_default_dispatch_prompt_still_names_the_run_dir_fragment(built):
+    assert built["fragment"] in built["dispatch"], (
+        "with no sandbox path the dispatch prompt must name fragmentPath(), "
+        "which is what pipeline() polls")
+    assert built["check"] in built["dispatch"], (
+        "and must issue checkBatchCmd()'s exact string, which the prompt tells "
+        "the agent to re-run verbatim")
+    assert SANDBOX_OUT not in built["dispatch"]
+
+
+def test_the_default_repair_prompt_still_names_the_run_dir_repair_path(built):
+    assert built["repairpath"] in built["repair"]
+    assert SANDBOX_REPAIR not in built["repair"]
+
+
+def test_a_sandbox_path_replaces_the_out_path_and_nothing_else(built):
+    """Same prompt, one substitution. Asserted as a DIFFERENCE rather than by
+    pinning either string: a hand-copied expectation here would be the second
+    copy this file exists to prevent."""
+    plain, sandboxed = built["dispatch"], built["dispatch_sandboxed"]
+    assert built["fragment"] not in sandboxed, (
+        "the sandboxed prompt must not still name the RUN_DIR fragment -- a job "
+        "told to write there is a job that is not confined")
+    assert SANDBOX_OUT in sandboxed
+    # The self-check command CONTAINS the fragment path, so it must be replaced
+    # FIRST -- rewriting the bare path first would leave no verbatim command to
+    # match, and the assertion would fail for a reason about this test.
+    assert plain.replace(built["check"], built["sandboxcheck"]).replace(
+        built["fragment"], SANDBOX_OUT) == sandboxed, (
+        "the sandbox prompt must differ from the default one ONLY in the out-path "
+        "and its self-check command")
+
+
+def test_the_sandbox_check_command_quotes_its_path(built):
+    """TMPDIR is the operator's. An unquoted path holding a space is split into
+    two argv entries by both consumers of this string -- the shell the codex job
+    runs it in, and the driver's own shlex.split()."""
+    assert "'" + SANDBOX_OUT + "'" in built["sandboxcheck"], (
+        f"the sandbox path must be single-quoted: {built['sandboxcheck']}")
+    assert shlex.split(built["sandboxcheck"]).count(SANDBOX_OUT) == 1, (
+        "and must survive shlex as exactly one argument")
+    # The RUN_DIR spelling is deliberately NOT quoted: its bytes are pinned by
+    # the dispatch prompt's "re-run exactly the command above".
+    assert "'" not in built["check"]
+
+
+def test_the_sandbox_check_is_the_same_command_with_a_different_path(built):
+    assert built["sandboxcheck"] == built["check"].replace(
+        built["fragment"], "'" + SANDBOX_OUT + "'"), (
+        "both spellings must come from the one composition site, differing only "
+        "in the path they name")

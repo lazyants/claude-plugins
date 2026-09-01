@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.76.0 — 2026-09-01
+
+**A dispatched codex job can no longer write anything under the durable root (#806).** Until
+now every job `glossary_dispatch_driver.py` launched ran with `--write --cwd ${durable_root}`,
+which made every file under that root model-writable: `canon.json`, the snapshot, approval
+record, evidence and `index.json` under `RUN_DIR`, the gate scripts the driver shells
+(`canon_validate.py`, `fetch_citation.py`) — and the driver's own deployed copy at
+`${durable_root}/scripts/`, which the documented two-invocation loop re-enters, so a job that
+rewrote it would have its bytes executed as the session user by the very process holding the
+verdict nonces and the merge decision.
+
+- **Each launch now gets a fresh single-use directory with no enclosing git repository**, and
+  the driver publishes the artifact into `RUN_DIR` itself once the gate has passed — reading it
+  back with the no-follow walk it already uses for executables (a confined job can still write
+  a *symlink* inside its own sandbox; confinement restricts where writes land, never what a
+  link's target names) and re-checking the digest of the exact bytes it publishes. This is
+  `codex_job.py`'s #409 shape, which has run W5's dispatches this way for several releases,
+  ported rather than reinvented.
+- **Pointing `--cwd` at `RUN_DIR` would have closed nothing, and that is why it was not done.**
+  codex-companion resolves its `workspace-write` root by walking **up** from `--cwd` with
+  `git rev-parse --show-toplevel`, so a mere subdirectory of an enclosing repository still
+  resolves to that same outer top level. `durable_root` coinciding with a project's own root is
+  an explicitly supported layout, so that narrowing would have obtained nothing for exactly the
+  operators most likely to run it, while advertising a boundary it did not have. Only a
+  directory that resolves to **itself** shrinks the sandbox, and the driver verifies that with
+  codex-companion's own algorithm before dispatching — **refusing** rather than warning when it
+  does not hold. A `TMPDIR` inside a git working tree is pathological, unlike a durable root, so
+  refusing there costs no sanctioned configuration.
+- **`TMPDIR` is the operator's, so the sandbox path is quoted.** It is spliced into the
+  `--check-batch` command the job is told to run and the driver polls with; unquoted, a path
+  holding a space would be split into two argv entries by both consumers, and the batch would
+  time out as `glossary-pass-null` with nothing to say why. The `RUN_DIR` spelling stays
+  unquoted — its bytes are pinned by the dispatch prompt's "re-run exactly the command above".
+- **The `pipeline()` fallback's prompt bytes are unchanged.** `batchDispatchPrompt` and
+  `batchRepairPrompt` take the sandbox out-path as a defaulted last argument, so every Workflow
+  caller renders exactly what it rendered before. That path remains the wider one and now says
+  so: a Workflow script reaches codex through the `codex:codex-rescue` forwarder, whose write
+  root resolves by walking up from whatever cwd the session holds, and this plugin has no
+  `--cwd` to give it.
+- **3 `style_bible.md` references in the dispatch and repair prompts were relative** and
+  resolved only because cwd happened to be the durable root. They are absolute now, which is
+  correct whatever the cwd is.
+- **Prose corrected wherever it became false**, rather than left to contradict the code: the
+  driver's module docstring, `resolve_template`, the verdict-channel threat model,
+  `resolve_verdict_dir`'s refusal, `read_outcome_pairs`, `splice_repair`, `record_verdicts`, and
+  `SKILL.md`'s "What the driver does not do". Where a refusal is retained on other grounds
+  (`resolve_template` still accepts no durable copy) the rationale now says which grounds.
+- The measured population remains **zero** — no hostile job has been observed. This is a
+  boundary correction, not incident response.
+- `glossary_dispatch_driver.py` and `glossary-pass-wf.template.js` are both
+  `PLUGIN_BUNDLE_MEMBERS`, so this release moves `plugin_bundle_hash`. Any change to the driver
+  pays that; this one pays it once.
+
 ## 1.75.0 — 2026-08-31
 
 **The glossary pass gets a local driver, and stops paying an agent bootstrap per deterministic
