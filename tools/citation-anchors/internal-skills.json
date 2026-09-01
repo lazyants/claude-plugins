@@ -50,11 +50,11 @@
    ],
    "claim": "This plugin's docs cite real code lines by `file.ext:NNN` (e.g. `chapter-paths.mjs:174-178`, `capture-guard-policy.mjs:271`, `SKILL.md:100` — 6 such citations across `SKILL.md` and `references/**/*.md` as of 2026-08). Editing any cited file pushes every line below the insertion down, so a citation elsewhere silently goes stale. Two traps sit in the obvious fix."
   },
-  "[\".claude/skills/literary-translator-ops/SKILL.md\", \"glossary-pass-wf.template.js:1013\", 0]": {
+  "[\".claude/skills/literary-translator-ops/SKILL.md\", \"glossary-pass-wf.template.js:1051\", 0]": {
    "anchors": [
     "JSON.stringify(batch.candidates, null, 1)"
    ],
-   "claim": "- **Adding a field to a candidate row or a skeptic assignment is a PROMPT decision, not a data decision.** Two workflow templates serialize the whole Python-produced structure into the prompt verbatim — `glossary-pass-wf.template.js:1013` (`JSON.stringify(batch.candidates, null, 1)`) and `skeptic-pass-wf.template.js:449` (`...(batch.assignments, null, 1)`). Nothing on the Python side hints at this: the row is built in `bootstrap_names.collect_candidates()`, written to `name_candidates.json`, and the exposure happens in another language, in another directory, outside any diff that adds the field. So a new field must be bounded and injection-checked where it is"
+   "claim": "- **Adding a field to a candidate row or a skeptic assignment is a PROMPT decision, not a data decision.** Two workflow templates serialize the whole Python-produced structure into the prompt verbatim — `glossary-pass-wf.template.js:1051` (`JSON.stringify(batch.candidates, null, 1)`) and `skeptic-pass-wf.template.js:449` (`...(batch.assignments, null, 1)`). Nothing on the Python side hints at this: the row is built in `bootstrap_names.collect_candidates()`, written to `name_candidates.json`, and the exposure happens in another language, in another directory, outside any diff that adds the field. So a new field must be bounded and injection-checked where it is"
   },
   "[\".claude/skills/literary-translator-ops/SKILL.md\", \"skeptic-pass-wf.template.js:449\", 0]": {
    "anchors": [

@@ -19,7 +19,7 @@ Three rules dominate every edit here:
   edit against the five hash surfaces (see hash-migration-impact.md).
 - **Adding a field to a candidate row or a skeptic assignment is a PROMPT decision, not a data
   decision.** Two workflow templates serialize the whole Python-produced structure into the prompt
-  verbatim — `glossary-pass-wf.template.js:1013` (`JSON.stringify(batch.candidates, null, 1)`) and
+  verbatim — `glossary-pass-wf.template.js:1051` (`JSON.stringify(batch.candidates, null, 1)`) and
   `skeptic-pass-wf.template.js:449` (`...(batch.assignments, null, 1)`). Nothing on the Python side
   hints at this: the row is built in `bootstrap_names.collect_candidates()`, written to
   `name_candidates.json`, and the exposure happens in another language, in another directory, outside

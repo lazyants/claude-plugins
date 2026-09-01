@@ -29,6 +29,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -71,11 +72,28 @@ def _write(path: Path, text: str, *, executable: bool = False) -> None:
 def bed(tmp_path):
     """A durable_root the driver can self-anchor into, plus a session dir.
 
+    THE PROTECTED PAIR LIVES OUTSIDE EVERY IMPLICIT WRITE ROOT, and that is a
+    requirement of the product rather than a fixture preference. Since #806 the
+    driver REFUSES to run when the durable root or the verdict directory resolves
+    under a root codex makes writable implicitly -- `/tmp`, and `$TMPDIR`. A pytest
+    `tmp_path` is under one or the other on every platform this runs on: under
+    `$TMPDIR` on macOS, and under `/tmp` on a standard Linux CI runner, which
+    `TMPDIR` cannot be redirected away from because `/tmp` is listed
+    unconditionally. So the bed builds those two paths under the user's home
+    instead, which is what an operator's machine looks like anyway -- a durable
+    root does not normally live inside the temp dir.
+
+    Everything that is NOT one of the protected pair stays under `tmp_path`: the
+    batches file, the companion stub, the sidecars and the stub log are ordinary
+    fixture material, and the sandbox parent SHOULD be a temp root, because that is
+    where a real TMPDIR points.
+
     `scripts/` holds the real driver and CONTRACT-SHAPED stubs for the three
     programs it shells: the companion resolver, canon_validate.py and
     fetch_citation.py. Each stub records its argv so a test can assert what the
     driver actually asked for."""
-    durable = tmp_path / "durable"
+    home_base = Path(tempfile.mkdtemp(prefix="lt806-bed-", dir=str(Path.home())))
+    durable = home_base / "durable"
     scripts = durable / "scripts"
     run_dir = durable / "glossary" / "runs" / "run1"
     run_dir.mkdir(parents=True)
@@ -123,12 +141,28 @@ def bed(tmp_path):
         import fs from "node:fs";
         const args = process.argv.slice(2);
         const pf = args[args.indexOf("--prompt-file") + 1];
+        const cwd = args[args.indexOf("--cwd") + 1];
+        fs.appendFileSync({str(calls)!r}, "cwd " + cwd + "\\n");
         const prompt = fs.readFileSync(pf, "utf8");
         const plan = JSON.parse(fs.readFileSync({str(planted)!r}, "utf8"));
         const fresh = {json.dumps(_default_rows())};
-        const paths = prompt.match(/\\S+\\/(?:out|repair)_\\d+_attempt_\\d+\\.json/g) || [];
-        for (const target of new Set(paths)) {{
-          const key = target.split("/").pop();
+        // #806: the artifact goes inside the sandbox this job was launched with,
+        // so the target is --cwd plus the basename the prompt names. Matching the
+        // WHOLE path out of the prompt would be wrong twice over: the self-check
+        // command names it single-quoted, and a sandbox path holding a space
+        // (a TMPDIR the operator chose) has no unambiguous regex at all.
+        const names = prompt.match(/(?:out|repair)_\\d+_attempt_\\d+\\.json/g) || [];
+        for (const key of new Set(names)) {{
+          const target = cwd + "/" + key;
+          // CONTRACT-SHAPED, like every other stub here: a real codex turn writes
+          // where the PROMPT tells it to, and it can only write inside its own
+          // sandbox. If those two are not the same directory the driver has
+          // dispatched a job that cannot produce its artifact, and this stub must
+          // say so rather than quietly writing somewhere the driver never polls.
+          if (!prompt.includes(target)) {{
+            throw new Error("the prompt does not name " + target +
+              " -- the sandbox --cwd and the prompt's out-path disagree");
+          }}
           fs.appendFileSync({str(calls)!r}, "companion " + key + "\\n");
           const rows = plan[key] || (key.startsWith("out_") ? fresh : null);
           if (rows) fs.writeFileSync(target, JSON.stringify(rows));
@@ -182,9 +216,21 @@ def bed(tmp_path):
         print(json.dumps({{"success": True, "n_sources": len(entries)}}))
     ''')
 
-    return {"tmp": tmp_path, "durable": durable, "scripts": scripts,
-            "run_dir": run_dir, "session": tmp_path / "session",
-            "calls": calls, "outcomes": outcomes, "planted": planted}
+    # #806: the driver REFUSES to run when the durable root or the verdict
+    # directory lies under a root codex makes implicitly writable (/tmp, $TMPDIR).
+    # A pytest tmp_path is itself under $TMPDIR, so a bed that inherited the
+    # ambient TMPDIR would be refused -- correctly. Pointing TMPDIR at a directory
+    # of the bed's own puts the durable root and the session dir OUTSIDE every
+    # implicit write root, which is what an operator's machine looks like anyway,
+    # and leaves the per-launch sandboxes somewhere this test can still see.
+    sandboxes = tmp_path / "sandboxes"
+    sandboxes.mkdir()
+    yield {"tmp": tmp_path, "durable": durable, "scripts": scripts,
+           "run_dir": run_dir, "session": home_base / "session",
+           "calls": calls, "outcomes": outcomes, "planted": planted,
+           "tmpdir": sandboxes, "home_base": home_base}
+    # tmp_path is pytest's to reap; this one is ours.
+    shutil.rmtree(home_base, ignore_errors=True)
 
 
 def load(bed):
@@ -196,9 +242,16 @@ def load(bed):
     return m
 
 
-def run_driver(bed, *extra, expect=0):
-    """Invokes the driver as a subprocess, exactly as an operator does, and
-    returns its one stdout JSON line."""
+def run_driver_raw(bed, *extra, env=None):
+    """The driver as a subprocess, WITHOUT run_driver's exit-code and
+    one-JSON-line assertions. An environment fault exits 2 having emitted no
+    hand-back at all, which is the property under test -- run_driver would fail
+    on the missing line first and say nothing about why.
+
+    ONE argv, built here and nowhere else: a second copy of this command line
+    would let the ordinary path and the environment-fault path drift into
+    invoking two different drivers, and the fault path's whole claim is that it
+    is the SAME invocation an operator makes."""
     batches_file = bed["tmp"] / "batches.json"
     batches_file.write_text(json.dumps(BATCHES))
     argv = [sys.executable, str(bed["scripts"] / "glossary_dispatch_driver.py"),
@@ -210,7 +263,15 @@ def run_driver(bed, *extra, expect=0):
             "--citation-content-types", "text/html",
             "--poll-sec", "0.05", "--deadline-sec", "6",
             "--node", NODE, *extra]
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    merged = {**os.environ, "TMPDIR": str(bed["tmpdir"]), **(env or {})}
+    return subprocess.run(argv, capture_output=True, text=True, timeout=180,
+                          env=merged)
+
+
+def run_driver(bed, *extra, expect=0, env=None):
+    """Invokes the driver as a subprocess, exactly as an operator does, and
+    returns its one stdout JSON line."""
+    proc = run_driver_raw(bed, *extra, env=env)
     assert proc.returncode == expect, (
         f"exit {proc.returncode}, expected {expect}\nSTDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}")
     line = [l for l in proc.stdout.strip().splitlines() if l.startswith("{")]
@@ -228,11 +289,65 @@ def plant_fragment(bed, attempt=0, bases=("established", "established")):
     return rows
 
 
+def _logged(bed, kind):
+    """The values of one KIND of line out of the shared stub log, in call order.
+    Every fake appends `<kind> <value>`, so a reader of one kind is a prefix and
+    nothing else -- and reading it in one place keeps two readers of the same log
+    from drifting into two different notions of where a value starts.
+
+    A run refused before dispatch never creates the log at all, and "nothing was
+    logged" is exactly what such a test asserts -- so an absent file reads as the
+    empty list rather than as an error about the fixture."""
+    if not bed["calls"].exists():
+        return []
+    prefix = kind + " "
+    return [line[len(prefix):] for line in bed["calls"].read_text().splitlines()
+            if line.startswith(prefix)]
+
+
+def companion_cwds(bed):
+    """Every --cwd the fake codex turn was launched with, in order. This is the
+    record of where each dispatched job was actually confined -- read from argv,
+    never from the driver's source."""
+    return _logged(bed, "cwd")
+
+
 def companion_targets(bed):
     """Every artifact the fake codex turn was asked to write, in order. This is
     the record of which DISPATCHES actually happened."""
-    return [l.split(" ", 1)[1] for l in bed["calls"].read_text().splitlines()
-            if l.startswith("companion ")]
+    return _logged(bed, "companion")
+
+
+def _has_enclosing_repo(path) -> bool:
+    """codex-companion's OWN workspace-root algorithm, run here rather than
+    restated: `git rev-parse --show-toplevel` walking up from `path`."""
+    proc = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True, timeout=30)
+    return proc.returncode == 0
+
+
+# Gate stand-ins for the publish unit tests: publish_fragment runs whatever command
+# string it is handed through the driver's own shlex-based runner, so a real
+# canon_validate.py is not needed to pin WHERE the gate sits in the sequence.
+_PASSING_GATE = f"{sys.executable} -c pass"
+_FAILING_GATE = f"{sys.executable} -c raise(SystemExit(1))"
+
+
+@pytest.fixture
+def publish_bed(bed, tmp_path):
+    """The fixed cast every publish_fragment unit test needs, so each test spells
+    only the bytes it is actually about.
+
+    The sandbox is where the job's artifact lives and the only place the job may
+    write; `target` is the canonical RUN_DIR path a resume reads; `staging` is the
+    driver's own private name beside that target, spelled with a fixed token here
+    because these tests call publish_fragment directly and must know the name to
+    assert on it."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    return {"mod": load(bed), "sandbox": sandbox,
+            "target": bed["run_dir"] / "out_0_attempt_0.json",
+            "staging": bed["run_dir"] / ".publish_0_attempt_0_deadbeef.json"}
 
 
 # ---------------------------------------------------------------------------
@@ -381,8 +496,8 @@ def test_a_retrieval_failure_repairs_before_any_judge_runs(bed):
     bed["outcomes"].write_text(json.dumps(["http_error:404", "fetched"]))
 
     # What the repair TURN produces, handed to the companion stub so the artifact
-    # appears while the driver polls -- after its own stale-artifact unlink, the
-    # way a real codex turn produces it.
+    # appears while the driver polls, the way a real codex turn produces it --
+    # inside that dispatch's own sandbox, which #806 made the only place it lives.
     bed["planted"].write_text(json.dumps({"repair_0_attempt_0.json": [{
         "source_form": "Alpha", "basis": "transliterated", "disposition": "accepted",
         "canonical_target_form": "Alpha", "confidence": "high",
@@ -613,3 +728,254 @@ def test_a_refused_final_gate_exits_non_zero(bed):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# #806 -- WHAT A DISPATCHED JOB MAY WRITE
+#
+# Every assertion below reads the cwd the companion was actually LAUNCHED with,
+# and re-runs codex-companion's own workspace-root algorithm against it. Reading
+# the driver's source instead would prove only that a string was passed; it is
+# the companion's resolution, not ours, that decides the boundary.
+# ---------------------------------------------------------------------------
+
+def test_a_dispatched_job_is_confined_outside_the_durable_root(bed):
+    out, _ = run_driver(bed)
+    assert out["needs_judge"], "the batch must have reached a judge"
+    cwds = companion_cwds(bed)
+    assert cwds, "no codex job was launched at all -- nothing was proved"
+    for cwd in cwds:
+        assert not Path(cwd).is_relative_to(bed["durable"]), (
+            f"the job was launched inside the durable root at {cwd}; every file "
+            f"under it, including scripts/ and this driver's deployed copy, "
+            f"would be model-writable")
+        assert not _has_enclosing_repo(cwd), (
+            f"{cwd} has an enclosing git repository, so codex-companion would "
+            f"resolve its workspace-write root to that repo instead -- the "
+            f"sandbox would be a name, not a boundary")
+    # ...and the artifact still reaches its canonical path, published by the
+    # driver rather than written there by the job.
+    assert (bed["run_dir"] / "out_0_attempt_0.json").exists(), (
+        "the gated sandbox bytes must be published into RUN_DIR")
+
+
+def test_the_repair_dispatch_is_confined_too(bed):
+    """The repair has its OWN launch_codex call site. A one-sided assertion on
+    the ordinary dispatch would leave it unpinned."""
+    bed["outcomes"].write_text(json.dumps(["http_error:404", "fetched"]))
+    bed["planted"].write_text(json.dumps({"repair_0_attempt_0.json": [{
+        "source_form": "Alpha", "basis": "transliterated", "disposition": "accepted",
+        "canonical_target_form": "Alpha", "confidence": "high",
+        "is_proper_name": True}]}))
+    run_driver(bed)
+    assert companion_targets(bed) == ["out_0_attempt_0.json",
+                                      "repair_0_attempt_0.json"], (
+        "this test is only meaningful if a repair actually dispatched")
+    cwds = companion_cwds(bed)
+    assert len(cwds) == 2, f"expected a dispatch and a repair launch, got {cwds}"
+    assert cwds[0] != cwds[1], "each launch gets its own single-use sandbox"
+    for cwd in cwds:
+        assert not Path(cwd).is_relative_to(bed["durable"])
+        assert not _has_enclosing_repo(cwd)
+
+
+def test_confinement_holds_when_the_durable_root_is_inside_a_git_repository(bed):
+    """The case that rules out the cheaper fix.
+
+    Pointing --cwd at RUN_DIR would confine nothing here: RUN_DIR is nested under
+    durable_root, and codex-companion resolves its write root by walking UP to
+    the enclosing git top level, so it would land on this repository and hand the
+    job every file in it. durable_root coinciding with a project's own root is an
+    EXPLICITLY SUPPORTED layout (SKILL.md, Step 0a), so the boundary has to hold
+    here or it does not exist."""
+    subprocess.run(["git", "init", "-q", str(bed["durable"])], check=True, timeout=60)
+    assert _has_enclosing_repo(bed["run_dir"]), (
+        "fixture precondition: RUN_DIR must now resolve to an enclosing repo, "
+        "which is exactly what makes the RUN_DIR-as-cwd design a no-op")
+
+    out, _ = run_driver(bed)
+    assert out["needs_judge"], "the supported layout must still drive normally"
+    cwds = companion_cwds(bed)
+    assert cwds, "no codex job was launched at all -- nothing was proved"
+    for cwd in cwds:
+        assert not _has_enclosing_repo(cwd), (
+            f"{cwd} resolves to an enclosing repository even though the sandbox "
+            f"is meant to sit outside every working tree")
+
+
+def test_an_unconfined_sandbox_refuses_to_dispatch_rather_than_warning(bed, tmp_path):
+    """Strictness bias, and it is free HERE specifically: a TMPDIR inside a git
+    working tree is pathological, so refusing costs no sanctioned layout -- while
+    dispatching into it would hand the job write access to that whole repository
+    and report that it had been confined."""
+    bad_tmp = tmp_path / "tmp_in_repo"
+    bad_tmp.mkdir()
+    subprocess.run(["git", "init", "-q", str(bad_tmp)], check=True, timeout=60)
+
+    proc = run_driver_raw(bed, env={"TMPDIR": str(bad_tmp)})
+    assert proc.returncode == 2, (
+        f"an unconfined sandbox is an ENVIRONMENT fault, not a verdict about this "
+        f"batch -- exit 2, not {proc.returncode}\n{proc.stderr[-1500:]}")
+    assert companion_cwds(bed) == [], "nothing may be dispatched into an unconfined sandbox"
+    assert companion_targets(bed) == [], "no codex turn may have run"
+    assert "write-confined" in proc.stderr, f"the refusal must say why: {proc.stderr[-800:]}"
+
+
+def test_a_corrected_tmpdir_resumes_instead_of_finding_the_batch_wedged(bed, tmp_path):
+    """The reason the refusal exits 2 rather than failing the batch.
+
+    A DriverError here would reach drive_all(), which records status="failed" --
+    one of the two statuses the NEXT invocation skips. The operator would fix
+    TMPDIR, re-run exactly as documented, and find the batch skipped forever, a
+    recoverable environment fault turned into a run only deleting authorization
+    state can clear. So the first invocation must write no state at all."""
+    bad_tmp = tmp_path / "tmp_in_repo2"
+    bad_tmp.mkdir()
+    subprocess.run(["git", "init", "-q", str(bad_tmp)], check=True, timeout=60)
+
+    first = run_driver_raw(bed, env={"TMPDIR": str(bad_tmp)})
+    # Deliberately NOT `== 2` -- that contract belongs to the test above, and
+    # asserting it here would stop this test at the first invocation under exactly
+    # the regression it exists to catch (a refusal that fails the BATCH exits 1),
+    # leaving the wedge below untested. Only "the first invocation did not
+    # succeed" is a precondition for what follows.
+    assert first.returncode != 0, f"the bad-TMPDIR run should not have succeeded\n{first.stderr[-800:]}"
+
+    # Same run id, same verdict directory, corrected TMPDIR -- the documented
+    # re-run after fixing the environment.
+    out, _ = run_driver(bed)
+    assert out["needs_judge"], (
+        f"the corrected re-run must dispatch the batch, not skip it as failed: {out}")
+    assert companion_targets(bed) == ["out_0_attempt_0.json"], (
+        "and it must be an ORDINARY first dispatch, not a resumed rung")
+
+
+def test_a_tmpdir_holding_a_space_still_dispatches(bed, tmp_path):
+    """TMPDIR belongs to the operator, not to this pipeline. The sandbox path is
+    spliced into the --check-batch command the job is told to run and the driver
+    polls with, so an unquoted path holding a space would be split into two argv
+    entries by BOTH consumers -- and the batch would time out as
+    glossary-pass-null with nothing to say why."""
+    spaced = tmp_path / "tmp with space"
+    spaced.mkdir()
+    out, _ = run_driver(bed, env={"TMPDIR": str(spaced)})
+    assert out["needs_judge"], f"a whitespace-bearing TMPDIR must still drive: {out}"
+    cwds = companion_cwds(bed)
+    assert cwds and " " in cwds[0], (
+        f"fixture precondition: the sandbox must actually sit under the "
+        f"whitespace-bearing TMPDIR, got {cwds}")
+    assert (bed["run_dir"] / "out_0_attempt_0.json").exists()
+
+
+def test_a_symlinked_sandbox_artifact_is_never_published(publish_bed, tmp_path):
+    """A confined job can still WRITE A SYMLINK inside its own sandbox: write
+    confinement restricts where writes LAND, never what a link's target names."""
+    mod, target, staging = (publish_bed["mod"], publish_bed["target"],
+                            publish_bed["staging"])
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps([{"source_form": "smuggled"}]))
+    link = publish_bed["sandbox"] / "out_0_attempt_0.json"
+    link.symlink_to(elsewhere)
+
+    with pytest.raises(mod.DriverError):
+        mod.publish_fragment(link, target, staging, _PASSING_GATE, "batch 0 attempt 0")
+    assert not target.exists(), "nothing may be published from a symlinked artifact"
+    assert not staging.exists(), "the staging copy must not survive a refusal"
+
+
+def test_a_published_fragment_is_the_bytes_that_passed_the_gate(publish_bed):
+    mod, target, staging = (publish_bed["mod"], publish_bed["target"],
+                            publish_bed["staging"])
+    src = publish_bed["sandbox"] / "out_0_attempt_0.json"
+    # Deliberately NOT this file's own json.dumps formatting: a publish that
+    # re-serialized would silently normalise these bytes, and the gate would then
+    # have validated an object that is not the one on disk.
+    raw = b'[{"source_form":  "Alpha",\n  "basis":"transliterated"} ]'
+    src.write_bytes(raw)
+    mod.publish_fragment(src, target, staging, _PASSING_GATE, "batch 0 attempt 0")
+    assert target.read_bytes() == raw, "the published bytes must be verbatim"
+    assert not staging.exists(), "the staging copy must be renamed away, never left behind"
+
+
+def test_bytes_that_fail_the_gate_never_reach_the_canonical_path(publish_bed):
+    """The poll gates the SANDBOX artifact, which the job still owns and can rewrite
+    after passing. So what is captured is gated again, against the driver's own
+    staged copy, BEFORE the rename -- gating after it would leave a refused fragment
+    sitting at exactly the path a resume reads."""
+    mod, target, staging = (publish_bed["mod"], publish_bed["target"],
+                            publish_bed["staging"])
+    src = publish_bed["sandbox"] / "out_0_attempt_0.json"
+    src.write_bytes(b'[{"source_form": "rewritten after the gate passed"}]')
+    with pytest.raises(mod.DriverError):
+        mod.publish_fragment(src, target, staging, _FAILING_GATE, "batch 0 attempt 0")
+    assert not target.exists(), (
+        "a fragment that failed the gate must never appear at the canonical path")
+    assert not staging.exists(), "and the staged copy must be cleaned up"
+
+
+def test_a_temp_root_location_is_refused_for_either_protected_path(bed, monkeypatch):
+    """codex's workspace-write grants /tmp and $TMPDIR on top of the workspace root
+    (measured against `codex sandbox` directly), so a durable root or verdict dir
+    there stays writable by a dispatched job whatever --cwd this driver passes.
+    The boundary cannot be obtained, so the run does not start: proceeding would
+    advertise a confinement over the two paths this pass most needs protected."""
+    mod = load(bed)
+    # The helper reads TMPDIR from the environment at call time, and this test runs
+    # IN PROCESS -- so without this the ambient $TMPDIR (which pytest's tmp_path
+    # lives under) makes every path below a temp-root path, and the negative case
+    # could not exist.
+    monkeypatch.setenv("TMPDIR", str(bed["tmpdir"]))
+    # Outside BOTH implicit roots -- `/tmp` is listed unconditionally, so a path
+    # under tmp_path would not be a negative case on a Linux runner.
+    outside = bed["home_base"] / "elsewhere"
+    for droot, vdir, who in ((bed["tmpdir"] / "book", outside, "durable root"),
+                             (outside, bed["tmpdir"] / "session", "verdict directory")):
+        with pytest.raises(SystemExit) as exc:
+            mod.refuse_if_under_a_temp_root(droot, vdir)
+        assert exc.value.code == 2, f"{who}: an environment refusal exits 2"
+    # ...and a layout outside every implicit write root is not refused.
+    mod.refuse_if_under_a_temp_root(outside, outside / "session")
+
+
+def test_a_real_run_under_a_temp_root_never_starts(bed):
+    """The OPERATIONAL call, not just the helper: deleting it from main() has to go
+    red somewhere. Pointing TMPDIR at the bed's own base puts the durable root
+    under an implicit write root exactly as an ordinary $TMPDIR would."""
+    proc = run_driver_raw(bed, env={"TMPDIR": str(bed["home_base"])})
+    assert proc.returncode == 2, (
+        f"a durable root under an implicit write root must refuse\n{proc.stderr[-800:]}")
+    assert "refusing to run" in proc.stderr, proc.stderr[-600:]
+    assert companion_cwds(bed) == [], "nothing may be dispatched"
+
+
+def test_a_publication_never_adopts_a_file_it_did_not_create(publish_bed):
+    """The staging name carries a fresh random token, so a path that already
+    exists is not a stale copy of ours -- it is someone else's file at our name,
+    and adopting it is how two concurrent drivers come to share one inode."""
+    mod, target, staging = (publish_bed["mod"], publish_bed["target"],
+                            publish_bed["staging"])
+    src = publish_bed["sandbox"] / "out_0_attempt_0.json"
+    src.write_bytes(b'[{"source_form": "Alpha"}]')
+    staging.write_bytes(b"someone else's bytes")
+    with pytest.raises(OSError):
+        mod.publish_fragment(src, target, staging, _PASSING_GATE, "batch 0 attempt 0")
+    assert not target.exists()
+    assert staging.read_bytes() == b"someone else's bytes", (
+        "a collision must not answer by DELETING the other publication's file -- "
+        "until the O_EXCL open succeeds this publication owns nothing at that path")
+
+
+def test_a_sandbox_that_cannot_be_removed_is_named_rather_than_leaked(bed, monkeypatch, tmp_path):
+    """rmtree stays best-effort so cleanup cannot fail a finished batch -- but a
+    directory the job made unremovable must still be named, or it is a leak nobody
+    can find."""
+    mod = load(bed)
+    monkeypatch.setattr(mod.shutil, "rmtree", lambda *a, **k: None)
+    printed = []
+    monkeypatch.setattr(mod, "log", lambda m: printed.append(m))
+    with mod.DispatchSandbox("dispatch-9-9") as sandbox:
+        survivor = sandbox.path
+    assert survivor.exists(), "fixture precondition: rmtree was stubbed out"
+    assert any(str(survivor) in m and "could not be removed" in m for m in printed), (
+        f"the surviving sandbox path must be named in the log, got {printed}")
+    shutil.rmtree(survivor, ignore_errors=True)

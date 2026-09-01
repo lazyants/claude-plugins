@@ -934,11 +934,12 @@
    ],
    "claim": "def test_retry_diagnostic_prefers_entries_note_over_dismissal_note(tmp_path): \"\"\"#653 bot review P2 (PR #703, glossary_batch_plan.py:532-536): a name can legitimately be BOTH a resolved entries{} key AND carry a `dismiss` document in corrections[] -- the sanctioned dismiss -> --retry -> accepted-merge sequence produces exactly that overlap. If it is later absent from name_candidates.json (an ordinary source re-extraction) and"
   },
-  "[\"plugins/literary-translator/tests/glossary_batch_plan_split_exclusion.test.py\", \"glossary-pass-wf.template.js:1075\", 0]": {
+  "[\"plugins/literary-translator/tests/glossary_batch_plan_split_exclusion.test.py\", \"glossary-pass-wf.template.js:1119-1121\", 0]": {
    "anchors": [
-    "reading its one line of JSON output: \" + checkBatchCmd"
+    "reading its one line of JSON output",
+    "checkBatchCmd(batch.index, attempt)"
    ],
-   "claim": "# own self-anchored default path. Closes the gap the two sections above # cannot: a consumer coded as `if args.senses_path is None: senses = EMPTY` # passes every explicit-path test above while never loading the real # default -- exactly how the Workflow invokes this script in production # (glossary-pass-wf.template.js:1075/1232/1258 call --check-batch with no # override). Each test uses `make_durable_root` so the default sidecar is # written to a private root, never the shared plugin tree."
+   "claim": "# own self-anchored default path. Closes the gap the two sections above # cannot: a consumer coded as `if args.senses_path is None: senses = EMPTY` # passes every explicit-path test above while never loading the real # default -- exactly how the Workflow invokes this script in production # (glossary-pass-wf.template.js:1119-1121/1346/1372 call --check-batch with no # override). Each test uses `make_durable_root` so the default sidecar is # written to a private root, never the shared plugin tree."
   },
   "[\"plugins/literary-translator/tests/glossary_batch_plan_split_exclusion.test.py\", \"glossary_batch_plan.py:707\", 0]": {
    "anchors": [
@@ -965,7 +966,7 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3660-3666\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3695-3701\", 0]": {
    "anchors": [
     "Excluded from every bundle hash",
     "nor of `orchestration_bundle_hash`",
@@ -1428,37 +1429,6 @@
     "if parent not in seg_block_ids and parent not in footnote_def_block_ids:"
    ],
    "claim": "\"\"\"The verse lives inside the footnote's own DEFINITION text (FN:1), which is never a member of this segpack's own blocks[] -- yet the verse is still included in verses[] because its parent is one of this segpack's footnote_def_block_ids (segpack.py:673's ``parent not in seg_block_ids and parent not in footnote_def_block_ids`` guard).\"\"\" pack = _pack_for(\"c\", extract_mod, tmp_path) _assert_valid_and_hashes(pack)"
-  },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/fix_scope_audit.py\", \"references/person-registry.md:28-30\", 0]": {
-   "anchors": [
-    "`assets/schemas/registry/` — Step 0a's copy pass globs",
-    "NON-recursively, so a schema in that subdirectory is neither copied nor hashed"
-   ],
-   "claim": "* `assets/schemas/*.json` -> `${durable_root}/schemas/`. FLAT only: `assets/schemas/registry/` is deliberately plugin-only (references/person-registry.md:28-30) and is never copied, so it is never compared.",
-   "target": "plugins/literary-translator/skills/literary-translator/references/person-registry.md"
-  },
-  "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"ledger_merge.py:873-887\", 0]": {
-   "anchors": [
-    "entry.pop(\"stale_mismatched_fields\", None)",
-    "fields = stale_mismatched_fields.get(seg)",
-    "entry[\"stale_mismatched_fields\"] = fields"
-   ],
-   "claim": "Keep the declaration stable across the whole W7→W9 chain; toggling it between steps is the only way a normal run can make the two gates disagree about the same book. (They read the moved-field list from different authorities -- W7 from `select_segments.py`'s recomputation against the CURRENT cache key, W9 from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887` drops any inherited value and re-derives that list from the same diff, so the two agree by construction on anything a run produces. Hand-editing the materialized `ledger.json` between the two steps can split them; so can editing one segment's `status` to `converged`, which skips both carve-outs"
-  },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3660-3666\", 0]": {
-   "anchors": [
-    "Excluded from every bundle hash",
-    "nor of `orchestration_bundle_hash`",
-    "final_audit.py` is not one of",
-    "never flips a cache key or the resume-integrity digest via either bundle"
-   ],
-   "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
-  },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"references/ledger-and-resumability.md:168\", 0]": {
-   "anchors": [
-    "diagnostic-only, never part of any segment's cache key"
-   ],
-   "claim": "def test_ledger_already_accurate_ledger_merge_aside_not_flagged(): \"\"\"references/ledger-and-resumability.md:166's `ledger_merge.py` aside (\"diagnostic-only, never part of any segment's cache key\") is already accurate -- qualified in the very next sentence by the resume-integrity digest note -- and must survive untouched. None of the STALE_PHRASES keys above match this exact clause, so a correct fix never trips it.\"\"\""
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/assemble.py\", \"validate_draft.py:317\", 0]": {
    "anchors": [

@@ -1706,8 +1706,12 @@ climb different numbers of rungs.
 
 `--plugin-root` and `--verdict-dir` are both REQUIRED and both are refusals, not
 conveniences. The driver EXECUTES the template's builders, and
-`${durable_root}/` is writable by the very codex jobs it dispatches, so it will
-run only the plugin tree's copy — there is deliberately no durable fallback.
+a durable copy of the template would be JavaScript it then runs from a directory
+it does not own, so it will run only the plugin tree's copy — there is
+deliberately no durable fallback. #806 removed the sharpest writer of that copy,
+and the refusal is deliberately not relaxed on the strength of it: the
+`pipeline()` path's jobs are unconfined, a manual drive still runs with `--write`
+and cwd = the durable root, and a durable copy can be stale as easily as hostile.
 `--verdict-dir` holds the judge verdicts, which authorize an approval record and
 a merge into an immutable canon; a path inside `${durable_root}` is refused
 outright, as is one that is not owned by you and private.
@@ -1723,13 +1727,20 @@ outright, as is one that is not owned by you and private.
    agent's full reply>"}, ...]` and re-invoke with `--record-verdicts <that file>`
    plus the same `--verdict-dir`, `--plugin-root` and `--run-id`. A path outside
    that directory is refused: the file carries the nonces that admit an approval,
-   so it is authorization input, and one written under `${durable_root}` could be
-   rewritten by a still-running codex job before it is read.
+   so it is authorization input, and the directory holding it is kept separate
+   from `${durable_root}` — which the agents this pass drives do write — rather
+   than trusted to be unreachable.
 3. Repeat while `needs_judge[]` comes back non-empty. A REJECTED batch comes
    back in that list at the next attempt, with a fresh nonce — the recording
    invocation advances the ladder itself, so there is nothing extra to do. The run is done when the
    output carries `"merged": true`; `not_ready[]` names any batch that failed and
-   why, with the same `reason` strings the Workflow path uses.
+   why. Every `reason` the Workflow path uses appears unchanged, and the driver
+   may also report failures of its own, because it does work the Workflow cannot —
+   among them a repair that was refused, an approval record that could not be
+   written, and prose from a step that raised. A sandbox that cannot be confined
+   is NOT among them: that is an environment fault, so the driver exits 2 having
+   written no state at all, and the same command re-run after fixing `TMPDIR`
+   resumes where it stopped.
 4. `reset[]` names any batch the driver put back to attempt 0 because the
    artifact its status promised is gone. A resume reuses the RUN_ID, and
    `resume_setup.py` deletes that run's approved snapshots, approval records and
@@ -1747,13 +1758,37 @@ verdict bound to the exact snapshot bytes a judge actually read.
 and never reads a retrieved citation body — the judge does that, under
 `tools: Read`. Its hand-back channel closes the same class the approval record
 closes (a command that never ran, a verdict never produced, a stale verdict
-replayed after a resume); it does **not** defend against a hostile codex job.
-`--write --cwd ${durable_root}` makes everything under that root model-writable —
-the snapshot and evidence under `RUN_DIR`, the gate scripts the driver shells,
-and the driver's own deployed copy, which this loop re-enters. That is this
-pass's existing position and `segment_dispatch_driver.py`'s since #516, not a new
-one; closing it means confining what a dispatch job may write, across both
-drivers and the gate scripts at once.
+replayed after a resume).
+
+**What a dispatched codex job may write (1.76.0).** Each job the driver launches
+runs with `--cwd` pointed at a fresh single-use directory that has been verified
+to have no enclosing git repository, so codex's `workspace-write` sandbox confines
+it to that directory alone; the driver then publishes the artifact into `RUN_DIR`
+itself, re-reading it with a no-follow walk and re-checking its digest. A
+dispatched job therefore reaches **nothing** under `${durable_root}` — not
+`canon.json`, not the snapshot, approval record, evidence or `index.json` under
+`RUN_DIR`, not the gate scripts the driver shells, and not the driver's own
+deployed copy, which this loop re-enters. Reads are unaffected: a job still reads
+`glossary_TASK.md`, `canon.json` and `style_bible.md` from the durable root.
+
+**One exception, and it is measured rather than assumed.** Under `workspace-write`
+codex also grants `/tmp` and `$TMPDIR` on top of the workspace root — probed directly
+against `codex sandbox`, where a write to each succeeds from a workspace elsewhere while
+a write into `$HOME` is refused. So a `durable_root`, or a `--verdict-dir`, that itself
+lies under a temp root stays writable by a dispatched job, and no `--cwd` closes it:
+codex's own switch for excluding the temp roots would exclude the per-launch sandbox too.
+The driver **refuses to run** when either lies under a temp root, before any work and
+with nothing recorded. Keep both outside `/tmp` and `$TMPDIR` — durable state is meant to
+outlive a reboot in any case — or point `TMPDIR` elsewhere.
+
+Two further consequences worth knowing before a run. **`TMPDIR` must sit outside every git
+working tree** — inside one, codex would resolve its write root to that repository
+instead, so the driver refuses to dispatch rather than reporting a boundary it does
+not have. And **the `pipeline()` fallback below is unchanged and wider**: a Workflow
+script reaches codex through the `codex:codex-rescue` forwarder, whose write root
+resolves by walking up from whatever cwd the session holds, and this plugin has no
+`--cwd` to give it. The pass's own Claude turns still write under `RUN_DIR` by
+design; what changed is that the untrusted dispatched job is no longer one of them.
 
 **The `pipeline()` fallback, below, remains shipped and supported** — use it if
 node is unavailable, if the driver refuses for an environment reason, or to

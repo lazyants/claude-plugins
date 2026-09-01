@@ -399,71 +399,48 @@ def _local_dict_len(filename, funcname, varname):
 # would make this file the third copy of one number, which is the shape #580 was
 # filed about.
 FIGURES = [
-    # ROTATED TO 1.75.0 (#800 -- the glossary pass gets a local driver), and
-    # DELIBERATELY EMPTY, for the reason the 1.72.0, 1.74.0 and 1.74.1 rotations
-    # each reached independently.
+    # ROTATED TO 1.76.0 (#806 -- a dispatched codex job can no longer write under
+    # the durable root). ONE row, and the reasoning for what is and is not
+    # declarable is the same each rotation reaches.
     #
-    # Every numeral this entry states is a FIELD MEASUREMENT taken on a private
-    # 22-batch, 850-candidate volume -- ~130 agent calls against 24, 29 of 143
-    # established citations that did not retrieve, 18 of those 29 answered by one
-    # host's 404 -- and this repository does not and will not contain that
-    # corpus. A row hardcoding one would compare a literal against itself and
-    # prove nothing, which is the shape #580 was filed about.
+    # The 1.75.0 rotation this replaces, kept as its own record: DELIBERATELY
+    # EMPTY. Every numeral in the #800 entry was a field measurement taken on a
+    # private 22-batch, 850-candidate volume this repository does not contain,
+    # and its one piece of arithmetic was left as the template's own formula
+    # rather than multiplied out.
     #
-    # The entry's one piece of arithmetic IS re-derivable, and is deliberately
-    # left as a formula rather than a figure: it quotes the template's own
-    # `1 + (2 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)` verbatim, naming the
-    # constants instead of multiplying them out. That is the same discipline the
-    # 1.74.2 rotation applied to `3 * MAX_BYTES` -- the derivation is stated
-    # where the constants live, so there is no literal here to go stale. The
-    # bound it expresses is pinned by tests/glossary_dispatch_driver.test.py's
-    # local-cap tests, which compute it from the arguments rather than restating
-    # it.
+    # This entry states one number the tree CAN answer: how many `style_bible.md`
+    # references the glossary prompts were carrying relatively. The tree answers
+    # it by counting the absolute form now in the template, which is what the
+    # release actually changed -- not by re-counting the word in the changelog.
     #
-    # The remaining numerals are the version, the issue numbers, the release
-    # date, and `PLUGIN_BUNDLE_MEMBERS`'s membership -- and that last one is a
-    # claim about THIS tree, but it is already gated, harder than a row here
-    # could: canon_senses_bundle.test.py parses the reference doc's English count
-    # word AND its enumeration and compares both against the tuple. Restating the
-    # count here would be the second copy that gate exists to prevent.
+    # Its other numerals are not measurements in this file's sense: the version,
+    # the issue numbers (#806, #409), and the release date. The entry's claim
+    # that both edited files are `PLUGIN_BUNDLE_MEMBERS` is spelled without a
+    # count on purpose -- canon_senses_bundle.test.py already gates that tuple's
+    # membership against the reference doc harder than a row here could, and
+    # restating a total would be the second copy that gate exists to prevent.
+    # "zero" (the measured population of hostile jobs) is a field fact about the
+    # world, not a quantity derived from this tree, so there is nothing here to
+    # re-derive it against.
     #
-    # The gate reads the NEWEST entry only, by design. Restore rows the moment an
-    # entry claims a number the tree can answer.
-    #
-    # The 1.74.2 rotation this replaces, kept as its own record: NOT empty -- that
-    # entry stated one number the tree could answer. The rest of its
-    # numerals are field measurements taken on a private French->Russian volume
-    # (14 of 306 bodies, 3.48M replacement characters, 66-76% of a stored body)
-    # or arithmetic stated elsewhere and deliberately not copied here
-    # (`3 * MAX_BYTES` is BATCH_MAX_TOTAL_BYTES's own derivation, re-derived in
-    # fetch_citation.test.py against the constant rather than restated as a
-    # literal -- a second copy of one number is the shape #580 was filed about).
-    # The 1.74.1 rotation this replaces, kept as its own record: DELIBERATELY
-    # EMPTY -- the third rotation in a row to reach that answer honestly
-    # (1.72.0, 1.74.0), and for the same reason each time. The #802 entry states
-    # three numbers -- 76 false warnings, and 18 of one volume's 69 -- and not
-    # one of them is re-derivable from this tree: they are field measurements
-    # taken on a private fr->ru corpus this repository does not and will not
-    # contain. A row hardcoding one would compare a literal against itself and
-    # prove nothing, which is the shape #580 was filed about.
-    #
-    # The entry's remaining numerals are not measurements in this file's sense:
-    # the version, the issue number and the release date. Its one claim about
-    # THIS tree ("Four tests pin all four outcomes") is spelled out in words
-    # rather than digits, so there is no numeral for a row to declare -- and the
-    # claim itself is pinned by those tests existing and running, not by a count
-    # restated here.
-    #
-    # The gate reads the NEWEST entry only, by design: a released entry's
-    # figures are frozen by the release rather than re-checked forever. Restore
-    # rows here the moment an entry claims a number the tree can answer.
+    # The gate reads the NEWEST entry only, by design: a released entry's figures
+    # are frozen by the release rather than re-checked forever.
+    Figure(
+        phrase="3 `style_bible.md` references",
+        value=3,
+        derive=lambda: (
+            PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
+            / "glossary-pass-wf.template.js"
+        ).read_text(encoding="utf-8").count('ROOT + "/style_bible.md'),
+    ),
 ]
 
 # The version FIGURES was last rotated to. An empty FIGURES makes the loop in
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.75.0"
+FIGURES_VERSION = "1.76.0"
 
 
 def _newest_entry():

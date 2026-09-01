@@ -56,19 +56,41 @@ WHAT THE HAND-BACK CHANNEL DOES AND DOES NOT DEFEND. A verdict names one snapsho
 one PREPARE, one run, and is consumed once; the state saying so lives outside `durable_root`,
 where no dispatched codex job can write. That closes the class the approval record closes --
 the command that never ran, the verdict never produced, the stale verdict replayed after a
-resume. It does NOT defend against a hostile codex job, and the bound is wider than the data:
-`--write --cwd durable_root` makes EVERY file under the durable root model-writable, so a
-hostile job could rewrite the snapshot, `index.json` and the evidence bodies under `RUN_DIR`,
-the gate scripts this driver shells (`canon_validate.py`, `fetch_citation.py`) -- and this
-file itself, at its deployed `${durable_root}/scripts/` path, which the documented two-
-invocation loop re-enters. Stated in full because a partial statement would imply more.
-That is the shipped design's own position, not a gap this file opens: it is the same
-position `segment_dispatch_driver.py` has held as W5's default since #516, and the same one
-`approvalRecordPath()` states in the template ("buys no defence against a hostile agent ...
-what it closes is the case that happens WITHOUT malice"). Closing it means confining what a
-dispatch job may write -- one change, covering both drivers and the gate scripts, because
-moving any single participant out of the root while the others stay would buy a name rather
-than a boundary. Tracked separately.
+resume. It also no longer rests on the dispatched job's good behaviour for the WRITE half.
+
+WHAT A DISPATCHED JOB MAY WRITE (1.76.0, #806). Every codex job this driver launches runs
+with `--cwd` pointed at a fresh single-use directory that has been VERIFIED to have no
+enclosing git repository, so codex-companion's own workspace-write resolution confines it to
+that one directory; the driver publishes the artifact into `RUN_DIR` itself afterwards, from
+bytes it re-reads with a no-follow walk and re-digests. A dispatched job therefore reaches
+NOTHING under `durable_root`: not `canon.json`, not the snapshot, approval record, evidence
+or `index.json` under `RUN_DIR`, not the gate scripts this driver shells
+(`canon_validate.py`, `fetch_citation.py`), and not this file itself at its deployed
+`${durable_root}/scripts/` path, which the documented two-invocation loop re-enters. See
+`DispatchSandbox` for why only a directory with no enclosing repository achieves this, and
+why pointing `--cwd` at `RUN_DIR` would have achieved nothing for the supported
+`durable_root == project root` layout.
+
+WHAT THAT STILL DOES NOT BUY, stated because a partial statement would imply more. The
+`pipeline()` fallback below is UNCHANGED and wider: a Workflow script reaches codex through
+the `codex:codex-rescue` forwarder, whose workspace-write root resolves by git walk-up from
+whatever cwd the session happens to hold, and this plugin has no `--cwd` to give it. The
+pass's own Claude turns -- the PREPARE that fetches citations -- still write under `RUN_DIR`
+by design, so `RUN_DIR` is not a read-only region; what changed is that the untrusted
+DISPATCHED job is no longer one of its writers. And confinement is about WRITES, never
+reads: a job still reads `glossary_TASK.md`, `canon.json` and `style_bible.md` from the
+durable root, which is exactly what it is for.
+
+THE TEMP ROOTS ARE THE ONE EXCEPTION, and it is measured rather than assumed: under
+`workspace-write` codex 0.151.0 also grants `/tmp` and `$TMPDIR`, verified by probing
+`codex sandbox` directly (a write to each SUCCEEDS from a workspace elsewhere, while a
+write to a path in $HOME is refused). So a `durable_root` -- or a `verdict_dir` -- that
+itself lies under a temp root is still writable by a dispatched job, and no `--cwd` this
+process can pass changes that: codex's own switch for excluding the temp roots would
+exclude the sandbox too, which lives under TMPDIR. `refuse_if_under_a_temp_root()`
+therefore REFUSES such a run outright, before any work -- the boundary cannot be
+obtained there, and proceeding would advertise a confinement over the two paths whose
+integrity the rest of this file exists to protect.
 
 THE FALLBACK IS NOT RETIRED. `pipeline()` remains a shipped, documented path for this pass.
 Per #436/#516's ordering rule, a fallback is not removed before its replacement has carried
@@ -102,6 +124,8 @@ import os
 import re
 import secrets
 import shlex
+import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -155,7 +179,7 @@ _TRUNCATE_BEFORE_MARKER = "const batchResults = await pipeline("
 # Every builder the driver calls. Exported by the harness wrapper; a name here
 # that the template does not define fails at harness time, not at use time.
 TEMPLATE_EXPORTED_FUNCTIONS = (
-    "fragmentPath", "manifestPath", "checkBatchCmd",
+    "fragmentPath", "manifestPath", "checkBatchCmd", "sandboxCheckBatchCmd",
     "approvedPath", "approveBatchCmd",
     "approvalRecordPath", "recordApprovalCmd",
     "evidenceDir", "evidenceIndexPath", "fetchCitationsCmd",
@@ -600,12 +624,16 @@ def resolve_template(plugin_root: "str | None") -> Path:
     """The template's bytes are EXECUTED, so where they come from is a trust
     boundary, not a lookup convenience.
 
-    ${durable_root}/ is writable by the very codex jobs this driver dispatches
-    (see the module docstring's hand-back section), so a durable copy of the
-    template is model-writable JavaScript that this process would then run --
-    which is why there is no durable fallback here at all. The plugin install
-    tree is the only accepted source, and it is the same value SKILL.md already
-    threads as {{PLUGIN_ROOT}}.
+A durable copy of the template would be JavaScript that this process then RUNS,
+    sitting in a directory this driver does not own -- which is why there is no
+    durable fallback here at all. #806 removed the sharpest writer of that copy
+    (a dispatched codex job can no longer reach `${durable_root}/` at all -- see
+    the module docstring), and this refusal is deliberately NOT relaxed on the
+    strength of it: the `pipeline()` path's jobs are still unconfined, the manual
+    W5 drive still runs with `--write` and cwd = durable_root, and a durable copy
+    can be stale as easily as it can be hostile. The plugin install tree is the
+    only accepted source, and it is the same value SKILL.md already threads as
+    {{PLUGIN_ROOT}}.
 
     Refusing rather than falling back is the point: a fallback would turn a
     missing --plugin-root into silent execution of the weaker copy."""
@@ -891,10 +919,12 @@ def enforce_local_cap(n_batches: int, max_citation_retries: int,
 #                             issued, read back with the TEMPLATE's own reader.
 #
 # WHAT THIS DOES NOT DEFEND, stated because overclaiming here would be worse than
-# the gap: a hostile codex job. The snapshot, index.json and the evidence bodies
-# live under RUN_DIR, which every agent in this pass can write, so a job willing
-# to forge can swap them between PREPARE and the judge, or between the digest
-# check and the merge. That is the shipped design's own position -- the template's
+# the gap. Since #806 the DISPATCHED codex job is no longer a writer under
+# RUN_DIR at all -- it is confined to a throwaway directory outside every git
+# working tree. What remains is the pass's own Claude turns: the PREPARE holds
+# unrestricted Bash and writes the snapshot, index.json and the evidence bodies
+# under RUN_DIR by design, so a turn willing to forge can still swap them between
+# PREPARE and the judge, or between the digest check and the merge. That is the shipped design's own position -- the template's
 # approvalRecordPath() comment says the approval record "buys no defence against a
 # hostile agent ... what it closes is the case that happens WITHOUT malice" -- and
 # this channel closes exactly the same class: the command that never ran, the
@@ -939,8 +969,8 @@ def resolve_verdict_dir(raw: "str | None", durable_root: Path) -> Path:
     else:
         fatal(
             f"--verdict-dir {path} resolves inside the durable root {droot}. "
-            "Every codex job this driver dispatches can write there, so a "
-            "verdict placed in it would be forgeable by the very jobs it "
+            "The durable root is written by the agents this pass drives, so a "
+            "verdict placed in it would be forgeable by the very turns it "
             "authorizes.",
             exit_code=2, verdict_dir=str(path), durable_root=str(droot),
         )
@@ -1118,8 +1148,421 @@ def strip_routing_line(prompt: str) -> str:
     return rest
 
 
+# ---------------------------------------------------------------------------
+# #806 -- THE WRITE-CONFINED DISPATCH SANDBOX.
+#
+# THE PROBLEM THIS CLOSES. Until 1.76.0 every codex job this driver launched ran
+# with `--write --cwd <durable_root>`, which made EVERY file under the durable
+# root model-writable: canon.json, the snapshot and evidence under RUN_DIR, the
+# gate scripts this driver shells (canon_validate.py, fetch_citation.py), and
+# this file itself at its deployed ${durable_root}/scripts/ path -- which the
+# documented two-invocation loop re-enters, so a job that rewrote it would have
+# its bytes executed as the session user by the very process holding the verdict
+# nonces and the merge decision.
+#
+# WHY THE OBVIOUS NARROWING DOES NOT WORK, recorded because it is the answer a
+# reader will reach for first. Pointing `--cwd` at RUN_DIR closes nothing:
+# codex-companion resolves its workspace-write root by walking UP from `--cwd`
+# with `git rev-parse --show-toplevel` (lib/workspace.mjs:resolveWorkspaceRoot),
+# so a mere SUBDIRECTORY of an enclosing repository still resolves to that same
+# outer toplevel. `durable_root` coinciding with a project's own root is an
+# EXPLICITLY SUPPORTED layout (SKILL.md, Step 0a), so that narrowing would have
+# obtained nothing at all for exactly the operators most likely to run it, while
+# advertising a boundary it did not have.
+#
+# WHAT ACTUALLY CONFINES. Only a `--cwd` that resolves to ITSELF -- no enclosing
+# repository anywhere above it -- shrinks the OS-level sandbox to one directory.
+# So each launch gets a fresh single-use mkdtemp directory, VERIFIED against the
+# companion's own algorithm before anything is dispatched, and the job writes its
+# artifact there. The driver publishes it into RUN_DIR afterwards. The job then
+# reaches nothing under durable_root at all.
+#
+# THIS IS codex_job.py's #409 SHAPE, PORTED -- not a new invention. That file has
+# run W5's dispatches this way for several releases; read its module docstring
+# for the same argument at greater length. The two are deliberate copies rather
+# than a shared module: this script is stdlib-only and self-anchored, and the
+# plugin's convention for that is a copy plus a drift test.
+# ---------------------------------------------------------------------------
+
+# The four outcomes of the enclosing-repository probe. A bare boolean would be
+# wrong here and the polarity is why: ABSENCE of a repository is the SUCCESS
+# condition, so collapsing "git said no repository", "git timed out" and "git
+# could not be spawned" into one None would score every no-verdict probe as
+# confined and fail OPEN -- granting exactly the access the check exists to deny.
+_PROBE_ENCLOSED = "enclosed"          # git ran, exit 0: an enclosing repo exists
+_PROBE_STANDALONE = "standalone"      # git ran, non-zero: genuinely no repository
+_PROBE_GIT_ABSENT = "git-absent"      # git is not installed / cannot be spawned
+_PROBE_NO_VERDICT = "no-verdict"      # timed out or errored: we learned nothing
+
+# THE ONLY TWO OUTCOMES THAT MAY LICENSE A DISPATCH, and the membership of this
+# tuple is the whole confinement decision -- widening it by one member is exactly
+# the fail-open the four outcomes exist to prevent.
+#
+# A sandbox is confined iff it resolves to ITSELF under codex-companion's own
+# workspace-root algorithm (git top-level walking UP from the path, else the path
+# unchanged), read from the installed companion's lib/workspace.mjs rather than
+# assumed.
+#
+# _PROBE_NO_VERDICT is therefore ABSENT, and its absence is the fail-closed rule:
+# a bounded `git` call that timed out or could not run tells us nothing, while the
+# companion's own probe is UNBOUNDED and would still find an enclosing repository.
+# Only a probe that actually RAN may license a dispatch.
+#
+# _PROBE_GIT_ABSENT is PRESENT, and is the one no-result case that is still safe --
+# only because it is not really no-result: the companion's resolver degrades the
+# SAME way, falling back to the path itself, so there is no enclosing root for it
+# to find either.
+_CONFINED_PROBE_OUTCOMES = (_PROBE_STANDALONE, _PROBE_GIT_ABSENT)
+
+PROBE_TIMEOUT_SEC = 30
+BROKER_TEARDOWN_TIMEOUT_SEC = 5
+
+# A fragment is a JSON array of one batch's decisions -- kilobytes. The cap is a
+# bound on THIS PROCESS'S MEMORY when reading a file an untrusted job wrote, not
+# a trust check: the published bytes are re-validated downstream either way
+# (--check-batch under live, --merge-batches/--verify-merged under offline).
+MAX_PUBLISHED_FRAGMENT_BYTES = 64 << 20
+
+# ERE metacharacters, for the one pattern this file hands to `pgrep -f`.
+# Deliberately NOT re.escape(): that also escapes `-`, `&`, `~`, `#` and the
+# space, and a backslash before an ordinary character is UNDEFINED in POSIX ERE,
+# so re.escape() would build a pattern whose behaviour depends on which regex
+# implementation `pgrep` was linked against. Those exact characters are
+# reachable -- the sandbox path is TMPDIR-prefixed and TMPDIR is the operator's,
+# not this script's. Byte-identical to codex_job.py's copy, for the same reason.
+_ERE_META = frozenset(r"\.[]{}()*+?^$|")
+
+
+def _ere_escape(text: str) -> str:
+    return "".join("\\" + ch if ch in _ERE_META else ch for ch in text)
+
+
+def implicit_write_roots() -> "list[Path]":
+    """The directories codex makes writable under `workspace-write` IN ADDITION to
+    the workspace root itself.
+
+    MEASURED, not read off a doc. Under `codex sandbox -c sandbox_mode=
+    "workspace-write"` on 0.151.0, a write to `/tmp` and a write to `$TMPDIR` both
+    SUCCEED from a workspace elsewhere, while a write to an ordinary path outside
+    the workspace (a file in $HOME) is refused with EPERM. So the sandbox boundary
+    is "the workspace root, plus the temp roots", and a confinement argument that
+    names only the workspace root is incomplete.
+
+    This is what the sandbox RELIES on, too: the per-launch directory lives under
+    TMPDIR, so excluding the temp roots is not an option even where codex offers
+    it -- the job would be unable to write the artifact the pass waits on.
+
+    WHAT IS DELIBERATELY NOT HERE, recorded so the next reader does not re-open
+    it. `/var/tmp` (and its canonical `/private/var/tmp`) was raised in review as
+    a third implicit root, cited from the seatbelt policy source. Probed on this
+    runtime it is REFUSED -- `Operation not permitted` -- while the host can write
+    there freely (it is mode 1777), so the refusal is the sandbox's and not a
+    permission artifact. `/var/folders` itself, `~/.cache` and `/usr/local/share`
+    are refused too; only `/tmp`, `/private/tmp` and `$TMPDIR` are granted. Adding
+    a root that is not actually granted is not free: it would warn an operator
+    that a perfectly confined durable root is exposed, and a security warning that
+    cries wolf is one nobody reads. Re-measure before adding one."""
+    roots = [Path("/tmp")]
+    env_tmp = os.environ.get("TMPDIR")
+    if env_tmp:
+        roots.append(Path(env_tmp))
+    return roots
+
+
+def refuse_if_under_a_temp_root(durable_root: Path, verdict_dir: Path) -> None:
+    """The one confinement case no `--cwd` can reach -- REFUSED, not disclosed.
+
+    Everything else here confines a job to its own throwaway directory. That
+    argument holds for every location EXCEPT one already inside a root codex makes
+    writable implicitly: a `durable_root` there is still fully model-writable --
+    `scripts/`, `canon.json`, this file's own deployed copy -- and a `verdict_dir`
+    there is writable too, which is worse, because that directory is the
+    AUTHORIZATION channel and `resolve_verdict_dir()` places it outside the durable
+    root precisely so a dispatched job cannot reach it.
+
+    THIS SHIPPED AS A WARNING FIRST, and the reason it no longer is belongs here
+    rather than in a commit message. The argument for warning was that no
+    alternative obtains the boundary -- codex's own switch for excluding the temp
+    roots would exclude the per-launch sandbox too, which lives under TMPDIR -- and
+    that refusing would forbid a layout this plugin's own test beds used, since a
+    pytest `tmp_path` is under `$TMPDIR`. The first half is true and is why this
+    function exists at all; the second half was a reason about the TESTS, and a
+    test fixture is not a reason to weaken a production check. The fixtures now
+    point `TMPDIR` at a directory of their own, which is what a real operator's
+    machine looks like anyway: a durable root is not normally inside the temp dir.
+
+    So it fails closed. That the boundary cannot be obtained here is exactly why
+    the run must not start: proceeding would advertise a confinement the dispatched
+    job does not have, over the two paths whose integrity the rest of this file is
+    built to protect.
+
+    Compared CANONICALLY on both sides: macOS resolves `/tmp` to `/private/tmp` and
+    `$TMPDIR` under `/var/folders` to `/private/var/folders`, so a lexical test
+    would miss the very case it is for."""
+    temp_roots = []
+    for raw in implicit_write_roots():
+        try:
+            temp_roots.append(Path(os.path.realpath(str(raw))))
+        except OSError:
+            continue
+    for label, path in (("durable root", durable_root), ("verdict directory", verdict_dir)):
+        resolved = Path(os.path.realpath(str(path)))
+        for temp_root in temp_roots:
+            if resolved == temp_root or temp_root in resolved.parents:
+                fatal(
+                    f"refusing to run: the {label} {resolved} lies under {temp_root}, "
+                    f"which codex makes writable under workspace-write whatever this "
+                    f"driver passes as --cwd. A dispatched job could still write "
+                    f"there, so the per-launch sandbox would confine it away from "
+                    f"everything EXCEPT the paths this pass most needs protected. "
+                    f"Move it outside the temp roots -- durable state is meant to "
+                    f"outlive a reboot in any case -- or set TMPDIR elsewhere.",
+                    exit_code=2, offending=label, path=str(resolved),
+                    implicit_write_root=str(temp_root))
+
+
+def probe_enclosing_repo(path: Path) -> str:
+    """Runs the companion's OWN workspace-root probe against `path` and reports
+    WHICH outcome occurred, never a bare boolean -- the polarity here is inverted
+    from the usual (absence of a repository is the SUCCESS condition), so a
+    collapsed None would score a no-verdict probe as confined and fail OPEN. See
+    _CONFINED_PROBE_OUTCOMES for how each outcome is scored."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=PROBE_TIMEOUT_SEC, cwd=str(path),
+        )
+    except FileNotFoundError:
+        return _PROBE_GIT_ABSENT
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return _PROBE_NO_VERDICT
+    return _PROBE_ENCLOSED if proc.returncode == 0 else _PROBE_STANDALONE
+
+
+class DispatchSandbox:
+    """One launch's write-confined directory, as a context manager.
+
+    REFUSES rather than degrades. If the directory turns out to be reachable
+    from an enclosing git repository -- a TMPDIR inside a working tree -- the
+    dispatch does not happen. Unlike durable_root, where an enclosing repository
+    is a supported layout, a TMPDIR inside one is pathological, so refusing here
+    costs no sanctioned configuration; and an unconfined sandbox is worse than no
+    launch at all, because it would hand back exactly the access this class
+    exists to remove while reporting that it had been removed.
+
+    TEARDOWN KILLS THE BROKER BEFORE REMOVING THE DIRECTORY, and that order is
+    load-bearing. codex-companion keys a PERSISTENT broker to whatever `--cwd`
+    it is handed (`ensureBrokerSession` spawns `app-server-broker.mjs serve
+    --cwd <dir>` detached and unref'd), so a per-launch cwd leaves one broker per
+    launch behind -- the leak codex_job.py measured at 2794 state directories in
+    a single day before it added the same teardown. SIGTERM, never SIGKILL: the
+    broker's own handler closes its app-server client, taking `codex app-server`
+    and `codex-code-mode-host` down with it; SIGKILL leaves exactly those
+    children behind, which is the leak itself.
+
+    Killing a broker whose codex turn is still streaming is INTENDED. By the time
+    this context exits the driver has either taken the artifact or given up on
+    the turn, and the directory it writes into is about to disappear, so its
+    output is discarded either way -- stopping it also stops paying for it.
+
+    Best-effort teardown, never raising: cleanup on the way out must not turn a
+    finished batch into a failed one."""
+
+    def __init__(self, label: str):
+        self.label = label
+        self.path = None
+
+    def __enter__(self) -> "DispatchSandbox":
+        # BOTH failures below exit the PROCESS (code 2, this driver's documented
+        # environment/usage code) rather than raising DriverError, and that
+        # classification is the whole point rather than a style choice. A
+        # DriverError here would reach drive_all(), which records the batch
+        # `status="failed"` -- one of the two statuses the next invocation SKIPS.
+        # The operator would fix TMPDIR, re-run exactly as documented, and find
+        # the batch permanently skipped: a recoverable environment fault turned
+        # into a wedged run that only deleting authorization state can clear.
+        # Neither condition is a fact about this batch, and neither can be
+        # answered by advancing the ladder, so no state may be written about it.
+        try:
+            raw = tempfile.mkdtemp(prefix="ltgd.%s." % self.label)
+        except OSError as exc:
+            fatal(f"could not create a dispatch sandbox for {self.label}: {exc!r}",
+                  exit_code=2, label=self.label)
+        # Pin ONE canonical spelling now -- macOS's /tmp -> /private/tmp symlink
+        # otherwise yields two spellings of the same directory across this run
+        # (mkdtemp's raw return vs anything realpath'd later, including the
+        # companion's own state-dir keying), which would silently miss each other.
+        self.path = Path(os.path.realpath(raw))
+        outcome = probe_enclosing_repo(self.path)
+        if outcome not in _CONFINED_PROBE_OUTCOMES:
+            self._teardown()
+            fatal(
+                "refusing to dispatch: the codex sandbox is not write-confined "
+                f"(probe={outcome}). codex-companion resolves its workspace-write "
+                "root by walking up from --cwd to the enclosing git top level, so "
+                "a sandbox inside a working tree would hand the job write access "
+                "to that whole repository. Set TMPDIR to a directory outside every "
+                "git working tree and re-run -- nothing about this run has been "
+                "recorded, so the re-run resumes exactly where this one stopped.",
+                exit_code=2, label=self.label, sandbox_probe=outcome)
+        log(f"{self.label}: codex write root confined to {self.path} (probe={outcome})")
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self._teardown()
+        return False
+
+    def artifact(self, name: str) -> Path:
+        """The path inside this sandbox that the job will be told to write. The
+        NAME still comes from the template's own path builder -- this file never
+        invents an artifact filename -- only its directory changes."""
+        return self.path / name
+
+    def _teardown(self) -> None:
+        if self.path is None:
+            return
+        self._shutdown_broker()
+        shutil.rmtree(str(self.path), ignore_errors=True)
+        # ignore_errors keeps cleanup from turning a finished batch into a failed
+        # one, but a directory that SURVIVED must still be named: the job owned
+        # this directory and could have made it unremovable (dropped traversal
+        # permissions, a set flag), and a leaked path nobody can find is worse
+        # than a leaked path in the log. Same posture as
+        # segment_dispatch_driver.py's _teardown_staging.
+        if self.path.exists():
+            log(f"{self.label}: sandbox {self.path} could not be removed and is "
+                f"left on disk; remove it by hand")
+        self.path = None
+
+    def _shutdown_broker(self) -> None:
+        """Matched on ARGV rather than by reading the companion's own broker
+        record: reading that record would mean duplicating its private state
+        directory scheme here, where a silent upstream change would present as
+        this cleanup simply never firing -- and the record is not written for
+        every broker that exists, so an argv match is what finds an unrecorded
+        one. The match cannot hit anything else: the sandbox path is a
+        single-use mkdtemp path and it reaches the broker's own argv verbatim,
+        the pattern additionally requires app-server-broker.mjs, and the path is
+        anchored so a longer sibling path cannot match."""
+        pattern = "app-server-broker\\.mjs .*--cwd %s( |$)" % _ere_escape(str(self.path))
+        try:
+            proc = subprocess.run(["pgrep", "-f", pattern], capture_output=True,
+                                  text=True, timeout=BROKER_TEARDOWN_TIMEOUT_SEC)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return
+        # pgrep: 0 = matched, 1 = nothing matched, >=2 = pgrep itself failed.
+        # Only 0 carries pids.
+        if proc.returncode != 0:
+            return
+        own = os.getpid()
+        for field in (proc.stdout or "").split():
+            try:
+                pid = int(field)
+            except ValueError:
+                continue
+            if pid <= 1 or pid == own:
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+
+def read_sandbox_artifact(path: Path, label: str) -> bytes:
+    """Reads an artifact a dispatched codex job wrote, with the same no-follow
+    walk this file already uses for executables.
+
+    A confined job can still WRITE A SYMLINK inside its own sandbox -- write
+    confinement restricts where writes LAND, never what a symlink's target
+    string names -- so refusing anything that is not a regular file reached
+    without following a link at any step is load-bearing here, not decoration."""
+    fd, state = _open_regular_no_follow_walk(path)
+    if state != "file" or fd is None:
+        raise DriverError(
+            f"{label}: the sandbox artifact at {path} is not a regular file "
+            f"reachable without following a symlink (state={state})",
+            label=label, artifact_state=state)
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            data = fh.read(MAX_PUBLISHED_FRAGMENT_BYTES + 1)
+    except OSError as exc:
+        raise DriverError(f"{label}: could not read the sandbox artifact: {exc!r}", label=label)
+    if len(data) > MAX_PUBLISHED_FRAGMENT_BYTES:
+        raise DriverError(
+            f"{label}: the sandbox artifact exceeds {MAX_PUBLISHED_FRAGMENT_BYTES} bytes",
+            label=label)
+    return data
+
+
+def publish_fragment(sandbox_path: Path, fragment_path: Path, staging_path: Path,
+                     gate_cmd: str, label: str) -> None:
+    """Moves the job's artifact onto its canonical RUN_DIR path, gating the exact
+    bytes that land there.
+
+    THE ORDER IS THE POINT, and it is not the obvious one. Polling the sandbox
+    path until --check-batch passes gates an object the job can still rewrite: the
+    turn may outlive the poll, and it owns that file. So the poll only decides WHEN
+    to look; what is captured is then gated again, HERE, against the driver's own
+    staged copy, and only a copy that passes is renamed into place. Gating after
+    the rename would be too late -- a refused fragment would already be sitting at
+    the path a resume reads.
+
+    BYTES, never a re-serialization: the object --check-batch validated must be the
+    object that lands, or the gate and the artifact are two different things. The
+    staged copy lives in RUN_DIR beside its destination so the rename is atomic and
+    within one filesystem, and RUN_DIR is outside every dispatched job's write
+    root -- so what passes here stays passed.
+
+    The digest is re-read from the DESTINATION afterwards, which is what makes the
+    "same bytes" claim a check rather than a hope."""
+    data = read_sandbox_artifact(sandbox_path, label)
+    digest = hashlib.sha256(data).hexdigest()
+    # O_EXCL, never O_TRUNC: the name carries a fresh random token, so a path that
+    # already exists is not a stale copy of ours to overwrite -- it is someone
+    # else's file at our name, and adopting it is how two publications come to
+    # share one inode.
+    #
+    # OUTSIDE the cleanup block below, deliberately. That block unlinks
+    # staging_path on any failure, and until this open SUCCEEDS this publication
+    # owns nothing at that path -- so a collision would otherwise be answered by
+    # deleting the other publication's file, which is the ownership rule inverted.
+    fd = os.open(str(staging_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        # os.fdopen() does NOT close its argument when it raises, and from here on
+        # the cleanup below unlinks the path -- so a failure between the open and
+        # the wrapper would leave a descriptor open on a file with no name. Taking
+        # ownership explicitly is the only point at which that gap can be closed.
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if not _cmd_ok(gate_cmd, 300):
+            raise DriverError(
+                f"{label}: the bytes captured from the sandbox did not pass "
+                f"--check-batch. The turn had already passed that gate against its "
+                f"own copy, so it rewrote the artifact after passing it",
+                label=label)
+        os.replace(str(staging_path), str(fragment_path))
+    except BaseException:
+        try:
+            os.unlink(str(staging_path))
+        except OSError:
+            pass
+        raise
+    if _sha256_file(fragment_path) != digest:
+        raise DriverError(
+            f"{label}: the published fragment does not match the bytes that "
+            f"passed the gate", label=label, fragment_path=str(fragment_path))
+
+
 def launch_codex(*, companion: str, node_bin: str, prompt: str, effort: str,
-                 durable_root: Path, tmpdir: Path, label: str) -> None:
+                 sandbox_root: Path, tmpdir: Path, label: str) -> None:
     """Fires one background codex turn for a batch.
 
     The argv mirrors codex_job.py's own launch() rather than a reduced guess:
@@ -1130,21 +1573,19 @@ def launch_codex(*, companion: str, node_bin: str, prompt: str, effort: str,
     create the fragment without it, so every batch would poll to its deadline and
     report glossary-pass-null. --fresh gives each attempt its own thread.
 
-    --cwd is the DURABLE ROOT, not a per-job sandbox, and that is a deliberate
-    difference from codex_job.py. This pass's contract is that codex writes its
-    fragment directly into glossary/runs/<RUN_ID>/, so a sandbox outside the repo
-    -- which is what makes codex_job.py's #409 confinement work -- would leave the
-    job unable to produce the artifact the whole pass waits on. Relative to what
-    this replaces it is a NARROWING: the pass currently reaches codex through the
-    codex:codex-rescue forwarder, whose workspace-write root resolves by git
-    walk-up from whatever cwd the session happens to hold. It is not confinement,
-    and the module docstring says so rather than implying otherwise."""
+--cwd is the PER-LAUNCH SANDBOX (#806), never durable_root and never RUN_DIR
+    -- see DispatchSandbox above for why only a directory with no enclosing git
+    repository actually shrinks codex-companion's workspace-write resolution, and
+    why a subdirectory of the durable root does not. The caller has already proved
+    that property of this path before reaching here; this function does not
+    re-derive it, and must never be handed a root that has not been through
+    DispatchSandbox."""
     prompt_file = tmpdir / f"prompt-{label}.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
     argv = [node_bin, companion, "task", "--background", "--json", "--write", "--fresh"]
     if effort:
         argv += ["--effort", effort]
-    argv += ["--cwd", str(durable_root), "--prompt-file", str(prompt_file)]
+    argv += ["--cwd", str(sandbox_root), "--prompt-file", str(prompt_file)]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=300)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -1173,9 +1614,10 @@ def read_outcome_pairs(index_path: Path) -> "list[dict]":
     themselves. The judge reads those; this process must not, because it is the
     actor that decides what to fetch next.
 
-    Read ONCE, immediately after the fetch, and never again: index.json lives
-    under RUN_DIR, which a still-running codex job can overwrite, so the pairs
-    are captured at the one moment they are known to describe this fetch."""
+    Read ONCE, immediately after the fetch, and never again: every PREPARE
+    rewrites index.json wholesale, so the pairs are captured at the one moment
+    they are known to describe THIS fetch. (Since #806 a dispatched codex job is
+    not among the writers that could reach it -- the pass's own turns are.)"""
     try:
         with open(index_path, "r", encoding="utf-8") as fh:
             obj = json.load(fh)
@@ -1282,10 +1724,10 @@ def splice_repair(snapshot_rows: list, failed_positions: "list[int]",
     """Returns snapshot_rows with the failed positions replaced, in order.
 
     THE BASE IS THE SNAPSHOT, never the attempt fragment, and that is load-bearing
-    rather than symmetrical. The attempt path is mutable -- the codex job that
-    wrote it may still be rewriting it, which the template states at its snapshot
-    -ordering comment -- so a position derived from the snapshot and applied to
-    the attempt file can land on a different row after a reorder, and
+    rather than symmetrical. The snapshot is the artifact PINNED for this attempt,
+    while the attempt path is the pass's own working file -- so a position derived
+    from the snapshot and applied to the attempt file can land on a different row
+    after a reorder, and
     --check-batch would not catch it because it compares source-form SETS rather
     than order. The snapshot is the one artifact pinned for the attempt, so it is
     both the only correct source of positions and the only correct base."""
@@ -1358,9 +1800,6 @@ def advance_batch(ctx: Ctx, batch: dict, attempt: int, resumed: bool,
     idx = batch["index"]
     built = ctx.build([
         {"key": "fragment", "fn": "fragmentPath", "args": [idx, attempt]},
-        {"key": "check", "fn": "checkBatchCmd", "args": [idx, attempt]},
-        {"key": "dispatch", "fn": "batchDispatchPrompt",
-         "args": [batch, attempt, rejection_reason]},
     ])
     fragment_path = Path(built["fragment"])
 
@@ -1368,26 +1807,61 @@ def advance_batch(ctx: Ctx, batch: dict, attempt: int, resumed: bool,
     #    resume_setup.py already re-checked before this driver ever ran.
     if not (resumed and attempt == 0):
         log(f"batch {idx}: dispatching codex (attempt {attempt})")
-        launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
-                     prompt=strip_routing_line(built["dispatch"]), effort=ctx.effort,
-                     durable_root=ctx.durable_root, tmpdir=ctx.tmpdir,
-                     label=f"dispatch-{idx}-{attempt}")
+        # #806: the job writes inside a throwaway directory with no enclosing git
+        # repository, so it can reach nothing under durable_root. Its artifact
+        # keeps the template's own filename -- this file invents none -- and the
+        # driver publishes it to the canonical RUN_DIR path once the gate passes.
+        # The prompt and its self-check command are built AFTER the sandbox
+        # exists, because both have to name that path; that is one extra node
+        # call per attempt, against a dispatch measured in minutes.
+        with DispatchSandbox(f"dispatch-{idx}-{attempt}") as sandbox:
+            sandbox_out = sandbox.artifact(fragment_path.name)
+            # The driver's own staging copy, beside the destination so the rename
+            # is atomic. A private name, not a pass artifact -- nothing but
+            # publish_fragment() ever opens it. UNIQUE PER PUBLICATION rather than
+            # per (batch, attempt): two drivers pointed at the same run would
+            # otherwise open one deterministic name, and one could still hold a
+            # descriptor on it while the other gated and renamed -- writing
+            # through to the renamed inode and undoing the byte-binding this
+            # staging step exists to create. The token also lets the open be
+            # O_EXCL, so a publication never adopts a file it did not create.
+            staging = (fragment_path.parent /
+                       f".publish_{idx}_attempt_{attempt}_{secrets.token_hex(8)}.json")
+            dispatch = ctx.build([
+                {"key": "prompt", "fn": "batchDispatchPrompt",
+                 "args": [batch, attempt, rejection_reason, str(sandbox_out)]},
+                {"key": "check", "fn": "sandboxCheckBatchCmd",
+                 "args": [str(sandbox_out), idx]},
+                {"key": "stagecheck", "fn": "sandboxCheckBatchCmd",
+                 "args": [str(staging), idx]},
+            ])
+            launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
+                         prompt=strip_routing_line(dispatch["prompt"]), effort=ctx.effort,
+                         sandbox_root=sandbox.path, tmpdir=ctx.tmpdir,
+                         label=f"dispatch-{idx}-{attempt}")
 
-        # 2. POLL -- the SAME --check-batch command the dispatch prompt told codex
-        #    to self-check with, so readiness here and readiness there are one
-        #    question asked once, spliced from one builder.
-        ready = poll_until(lambda: _cmd_ok(built["check"], 300),
-                           deadline_sec=ctx.deadline_sec, poll_sec=ctx.poll_sec,
-                           label=f"batch {idx} attempt {attempt}")
-        if not ready:
-            # Unchanged reason string: the recovery docs key off it.
-            return {"state": "failed", "reason": "glossary-pass-null",
-                    "batchIndex": idx, "attempt": attempt,
-                    "fragmentPath": str(fragment_path)}
+            # 2. POLL -- the SAME --check-batch command the dispatch prompt told
+            #    codex to self-check with, so readiness here and readiness there
+            #    are one question asked once, spliced from one builder.
+            ready = poll_until(lambda: _cmd_ok(dispatch["check"], 300),
+                               deadline_sec=ctx.deadline_sec, poll_sec=ctx.poll_sec,
+                               label=f"batch {idx} attempt {attempt}")
+            if not ready:
+                # Unchanged reason string: the recovery docs key off it.
+                return {"state": "failed", "reason": "glossary-pass-null",
+                        "batchIndex": idx, "attempt": attempt,
+                        "fragmentPath": str(fragment_path)}
+
+            # 3. PUBLISH -- capture, re-gate the captured bytes, then rename onto
+            #    the canonical path every later step names. Inside the sandbox
+            #    context on purpose: the artifact must be taken before teardown
+            #    removes it.
+            publish_fragment(sandbox_out, fragment_path, staging,
+                             dispatch["stagecheck"], f"batch {idx} attempt {attempt}")
     else:
         log(f"batch {idx}: resume-skip -- attempt 0 fragment already validated")
 
-    # 3. OFFLINE -- research_mode forbids basis:"established" outright and
+    # 4. OFFLINE -- research_mode forbids basis:"established" outright and
     #    canon_validate.py enforces that independently at merge time, so there is
     #    no citation to review and no snapshot to take.
     if ctx.research_mode != "live":
@@ -1486,44 +1960,46 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
     expected_forms = [r.get("source_form") for r in failed_rows]
 
     built = ctx.build([
-        {"key": "repair", "fn": "batchRepairPrompt",
-         "args": [batch, attempt, failed_rows]},
         {"key": "repairpath", "fn": "repairFragmentPath", "args": [idx, attempt]},
         {"key": "nextfragment", "fn": "fragmentPath", "args": [idx, attempt + 1]},
         {"key": "nextcheck", "fn": "checkBatchCmd", "args": [idx, attempt + 1]},
     ])
-    repair_path = Path(built["repairpath"])
     next_fragment = Path(built["nextfragment"])
-
-    # A stale repair artifact from an earlier run of this same RUN_ID would sit at
-    # exactly this attempt-scoped path, and the poll below would accept it. Nothing
-    # in resume_setup.py wipes it -- this artifact is the driver's alone -- so the
-    # driver removes it itself rather than teaching another script its filename.
-    try:
-        repair_path.unlink()
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        raise DriverError(f"could not clear a stale repair fragment: {exc!r}")
 
     log(f"batch {idx}: repairing {len(failed_positions)} unretrievable citation(s) "
         f"into rung {attempt + 1}")
-    launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
-                 prompt=strip_routing_line(built["repair"]), effort=ctx.effort,
-                 durable_root=ctx.durable_root, tmpdir=ctx.tmpdir,
-                 label=f"repair-{idx}-{attempt}")
+    # #806: same confinement as the ordinary dispatch. The repair artifact is
+    # never published -- the driver reads the repaired rows here and writes the
+    # SPLICED whole fragment itself -- so the sandbox is the only place it ever
+    # exists. That also retires the stale-artifact unlink this function used to
+    # perform: a leftover from an earlier run of the same RUN_ID could sit at the
+    # attempt-scoped RUN_DIR path and be accepted by the poll, but a freshly
+    # created mkdtemp directory cannot contain one.
+    with DispatchSandbox(f"repair-{idx}-{attempt}") as sandbox:
+        repair_path = sandbox.artifact(Path(built["repairpath"]).name)
+        repair = ctx.build([
+            {"key": "prompt", "fn": "batchRepairPrompt",
+             "args": [batch, attempt, failed_rows, str(repair_path)]},
+        ])
+        launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
+                     prompt=strip_routing_line(repair["prompt"]), effort=ctx.effort,
+                     sandbox_root=sandbox.path, tmpdir=ctx.tmpdir,
+                     label=f"repair-{idx}-{attempt}")
 
-    ok = poll_until(repair_path.exists, deadline_sec=ctx.deadline_sec,
-                    poll_sec=ctx.poll_sec, label=f"batch {idx} repair {attempt}")
-    if not ok:
-        return {"state": "repair_invalid", "reason": "repair-never-written"}
-    try:
-        repair_rows = load_rows(repair_path)
-        validate_repair_rows(repair_rows, expected_forms)
-    except DriverError as exc:
-        log(f"batch {idx}: repair refused ({exc}); falling back to whole-fragment "
-            f"regeneration in the same reserved rung {attempt + 1}")
-        return {"state": "repair_invalid", "reason": "repair-shape-refused"}
+        ok = poll_until(repair_path.exists, deadline_sec=ctx.deadline_sec,
+                        poll_sec=ctx.poll_sec, label=f"batch {idx} repair {attempt}")
+        if not ok:
+            return {"state": "repair_invalid", "reason": "repair-never-written"}
+        try:
+            repair_rows = json.loads(read_sandbox_artifact(
+                repair_path, f"batch {idx} repair {attempt}").decode("utf-8"))
+            if not isinstance(repair_rows, list):
+                raise DriverError("the repair fragment is not a JSON array")
+            validate_repair_rows(repair_rows, expected_forms)
+        except (DriverError, ValueError, UnicodeDecodeError) as exc:
+            log(f"batch {idx}: repair refused ({exc}); falling back to whole-fragment "
+                f"regeneration in the same reserved rung {attempt + 1}")
+            return {"state": "repair_invalid", "reason": "repair-shape-refused"}
 
     spliced = splice_repair(snapshot_rows, failed_positions, repair_rows)
     _atomic_write_json(next_fragment, spliced)
@@ -1827,8 +2303,8 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path, state: dict) -> dict:
     pending and nothing owed."""
     # The verdict file carries the nonces that admit an approval, so it belongs in
     # the same session-owned directory as the state it answers -- not at an
-    # arbitrary path, which could sit under durable_root where a still-running
-    # codex job could rewrite it before it is read.
+    # arbitrary path, which could sit under durable_root -- written by the agents
+    # this pass drives, so it could be rewritten before it is read.
     resolved = verdicts_path.resolve(strict=False)
     if resolved.parent != ctx.verdict_dir.resolve(strict=False):
         fatal(
@@ -2074,6 +2550,8 @@ def main(argv=None) -> int:
 
     durable_root = DURABLE_ROOT
     verdict_dir = resolve_verdict_dir(args.verdict_dir, durable_root)
+    # The one layout no --cwd can confine: refused before any work (see function).
+    refuse_if_under_a_temp_root(durable_root, verdict_dir)
     template = resolve_template(args.plugin_root)
     max_retries = template_max_citation_retries(read_template_text(template))
 

@@ -1,5 +1,92 @@
 # Changelog
 
+## 1.76.0 — 2026-09-01
+
+**A dispatched codex job can no longer write anything under the durable root (#806).** Until
+now every job `glossary_dispatch_driver.py` launched ran with `--write --cwd ${durable_root}`,
+which made every file under that root model-writable: `canon.json`, the snapshot, approval
+record, evidence and `index.json` under `RUN_DIR`, the gate scripts the driver shells
+(`canon_validate.py`, `fetch_citation.py`) — and the driver's own deployed copy at
+`${durable_root}/scripts/`, which the documented two-invocation loop re-enters, so a job that
+rewrote it would have its bytes executed as the session user by the very process holding the
+verdict nonces and the merge decision.
+
+- **Each launch now gets a fresh single-use directory with no enclosing git repository**, and
+  the driver publishes the artifact into `RUN_DIR` itself once the gate has passed — reading it
+  back with the no-follow walk it already uses for executables (a confined job can still write
+  a *symlink* inside its own sandbox; confinement restricts where writes land, never what a
+  link's target names) and re-checking the digest of the exact bytes it publishes. This is
+  `codex_job.py`'s #409 shape, which has run W5's dispatches this way for several releases,
+  ported rather than reinvented.
+- **Pointing `--cwd` at `RUN_DIR` would have closed nothing, and that is why it was not done.**
+  codex-companion resolves its `workspace-write` root by walking **up** from `--cwd` with
+  `git rev-parse --show-toplevel`, so a mere subdirectory of an enclosing repository still
+  resolves to that same outer top level. `durable_root` coinciding with a project's own root is
+  an explicitly supported layout, so that narrowing would have obtained nothing for exactly the
+  operators most likely to run it, while advertising a boundary it did not have. Only a
+  directory that resolves to **itself** shrinks the sandbox, and the driver verifies that with
+  codex-companion's own algorithm before dispatching — **refusing** rather than warning when it
+  does not hold. A `TMPDIR` inside a git working tree is pathological, unlike a durable root, so
+  refusing there costs no sanctioned configuration.
+- **`TMPDIR` is the operator's, so the sandbox path is quoted.** It is spliced into the
+  `--check-batch` command the job is told to run and the driver polls with; unquoted, a path
+  holding a space would be split into two argv entries by both consumers, and the batch would
+  time out as `glossary-pass-null` with nothing to say why. The `RUN_DIR` spelling stays
+  unquoted — its bytes are pinned by the dispatch prompt's "re-run exactly the command above".
+- **The `pipeline()` fallback's prompt bytes are unchanged.** `batchDispatchPrompt` and
+  `batchRepairPrompt` take the sandbox out-path as a defaulted last argument, so every Workflow
+  caller renders exactly what it rendered before. That path remains the wider one and now says
+  so: a Workflow script reaches codex through the `codex:codex-rescue` forwarder, whose write
+  root resolves by walking up from whatever cwd the session holds, and this plugin has no
+  `--cwd` to give it.
+- **One exception, found by review and measured rather than argued.** Under `workspace-write`
+  codex also grants `/tmp` and `$TMPDIR` on top of the workspace root — probed directly against
+  `codex sandbox`, where a write to each succeeds from a workspace elsewhere while a write into
+  `$HOME` is refused. A `durable_root` or `--verdict-dir` that itself lies under a temp root
+  therefore stays writable by a dispatched job, and no `--cwd` closes it: excluding the temp
+  roots would exclude the per-launch sandbox too, which lives under `TMPDIR`. The run is
+  **refused** before any work, with nothing recorded. This shipped as a warning first, on the
+  argument that refusing would forbid a layout this plugin's own test beds used; the MR bot was
+  right that a test fixture is not a reason to weaken a production check, and the beds now point
+  `TMPDIR` at a directory of their own — which is what an operator's machine looks like anyway,
+  a durable root not normally living inside the temp dir.
+- **What passed the gate and what is published are now the same object.** The poll gates the
+  artifact inside the sandbox, which the job still owns and can rewrite after passing — so the
+  captured bytes are gated again against a driver-owned staging copy in `RUN_DIR` and only then
+  renamed into place. Gating after the rename would leave a refused fragment sitting at exactly
+  the path a resume reads.
+- **A sandbox that could not be removed is named in the log** rather than silently leaked: the
+  job owned that directory and could have made it unremovable.
+- **Each publication stages under its own name**, opened `O_EXCL`, so two drivers pointed at one
+  run cannot come to share a staging inode and write through to a fragment the other had already
+  gated and renamed.
+- **A sandbox that cannot be confined exits 2 having written no state**, rather than recording
+  the batch as failed. `failed` is one of the two statuses the next invocation SKIPS, so an
+  operator who fixed `TMPDIR` and re-ran exactly as documented would have found the batch
+  skipped forever — a recoverable environment fault turned into a run that only deleting
+  authorization state could clear. Two tests pin it: the refusal itself, and the corrected
+  re-run dispatching an ordinary first attempt.
+- **A staging collision never answers by deleting the other publication's file.** The `O_EXCL`
+  open now sits outside the cleanup block: until it succeeds this publication owns nothing at
+  that path.
+- `/var/tmp` was raised in review as a third implicitly writable root and **refuted by
+  measurement**: it is refused by the sandbox on this runtime while the host can write there
+  freely, so it is deliberately not warned about. The probe result is recorded in the code,
+  because a warning about a root that is actually confined is one nobody reads.
+- **3 `style_bible.md` references in the dispatch and repair prompts were relative** and
+  resolved only because cwd happened to be the durable root. They are absolute now, which is
+  correct whatever the cwd is.
+- **Prose corrected wherever it became false**, rather than left to contradict the code: the
+  driver's module docstring, `resolve_template`, the verdict-channel threat model,
+  `resolve_verdict_dir`'s refusal, `read_outcome_pairs`, `splice_repair`, `record_verdicts`, and
+  `SKILL.md`'s "What the driver does not do". Where a refusal is retained on other grounds
+  (`resolve_template` still accepts no durable copy) the rationale now says which grounds.
+- The measured population remains **zero** — no hostile job has been observed. This is a
+  boundary correction, not incident response.
+- `glossary_dispatch_driver.py` and `glossary-pass-wf.template.js` are both
+  `PLUGIN_BUNDLE_MEMBERS`, so this release moves `plugin_bundle_hash`. Any change to the driver
+  pays that; this one pays it once.
+
 ## 1.75.0 — 2026-08-31
 
 **The glossary pass gets a local driver, and stops paying an agent bootstrap per deterministic
