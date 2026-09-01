@@ -29,6 +29,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -71,11 +72,28 @@ def _write(path: Path, text: str, *, executable: bool = False) -> None:
 def bed(tmp_path):
     """A durable_root the driver can self-anchor into, plus a session dir.
 
+    THE PROTECTED PAIR LIVES OUTSIDE EVERY IMPLICIT WRITE ROOT, and that is a
+    requirement of the product rather than a fixture preference. Since #806 the
+    driver REFUSES to run when the durable root or the verdict directory resolves
+    under a root codex makes writable implicitly -- `/tmp`, and `$TMPDIR`. A pytest
+    `tmp_path` is under one or the other on every platform this runs on: under
+    `$TMPDIR` on macOS, and under `/tmp` on a standard Linux CI runner, which
+    `TMPDIR` cannot be redirected away from because `/tmp` is listed
+    unconditionally. So the bed builds those two paths under the user's home
+    instead, which is what an operator's machine looks like anyway -- a durable
+    root does not normally live inside the temp dir.
+
+    Everything that is NOT one of the protected pair stays under `tmp_path`: the
+    batches file, the companion stub, the sidecars and the stub log are ordinary
+    fixture material, and the sandbox parent SHOULD be a temp root, because that is
+    where a real TMPDIR points.
+
     `scripts/` holds the real driver and CONTRACT-SHAPED stubs for the three
     programs it shells: the companion resolver, canon_validate.py and
     fetch_citation.py. Each stub records its argv so a test can assert what the
     driver actually asked for."""
-    durable = tmp_path / "durable"
+    home_base = Path(tempfile.mkdtemp(prefix="lt806-bed-", dir=str(Path.home())))
+    durable = home_base / "durable"
     scripts = durable / "scripts"
     run_dir = durable / "glossary" / "runs" / "run1"
     run_dir.mkdir(parents=True)
@@ -207,10 +225,12 @@ def bed(tmp_path):
     # and leaves the per-launch sandboxes somewhere this test can still see.
     sandboxes = tmp_path / "sandboxes"
     sandboxes.mkdir()
-    return {"tmp": tmp_path, "durable": durable, "scripts": scripts,
-            "run_dir": run_dir, "session": tmp_path / "session",
-            "calls": calls, "outcomes": outcomes, "planted": planted,
-            "tmpdir": sandboxes}
+    yield {"tmp": tmp_path, "durable": durable, "scripts": scripts,
+           "run_dir": run_dir, "session": home_base / "session",
+           "calls": calls, "outcomes": outcomes, "planted": planted,
+           "tmpdir": sandboxes, "home_base": home_base}
+    # tmp_path is pytest's to reap; this one is ours.
+    shutil.rmtree(home_base, ignore_errors=True)
 
 
 def load(bed):
@@ -905,7 +925,9 @@ def test_a_temp_root_location_is_refused_for_either_protected_path(bed, monkeypa
     # lives under) makes every path below a temp-root path, and the negative case
     # could not exist.
     monkeypatch.setenv("TMPDIR", str(bed["tmpdir"]))
-    outside = bed["tmpdir"].parent / "elsewhere"
+    # Outside BOTH implicit roots -- `/tmp` is listed unconditionally, so a path
+    # under tmp_path would not be a negative case on a Linux runner.
+    outside = bed["home_base"] / "elsewhere"
     for droot, vdir, who in ((bed["tmpdir"] / "book", outside, "durable root"),
                              (outside, bed["tmpdir"] / "session", "verdict directory")):
         with pytest.raises(SystemExit) as exc:
@@ -917,9 +939,9 @@ def test_a_temp_root_location_is_refused_for_either_protected_path(bed, monkeypa
 
 def test_a_real_run_under_a_temp_root_never_starts(bed):
     """The OPERATIONAL call, not just the helper: deleting it from main() has to go
-    red somewhere. Driving with TMPDIR left at the bed's durable root puts the
-    durable root under an implicit write root exactly as an ordinary $TMPDIR would."""
-    proc = run_driver_raw(bed, env={"TMPDIR": str(bed["durable"].parent)})
+    red somewhere. Pointing TMPDIR at the bed's own base puts the durable root
+    under an implicit write root exactly as an ordinary $TMPDIR would."""
+    proc = run_driver_raw(bed, env={"TMPDIR": str(bed["home_base"])})
     assert proc.returncode == 2, (
         f"a durable root under an implicit write root must refuse\n{proc.stderr[-800:]}")
     assert "refusing to run" in proc.stderr, proc.stderr[-600:]
@@ -957,5 +979,3 @@ def test_a_sandbox_that_cannot_be_removed_is_named_rather_than_leaked(bed, monke
     assert any(str(survivor) in m and "could not be removed" in m for m in printed), (
         f"the surviving sandbox path must be named in the log, got {printed}")
     shutil.rmtree(survivor, ignore_errors=True)
-
-
