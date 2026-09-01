@@ -774,7 +774,7 @@ def test_a_symlinked_sandbox_artifact_is_never_published(bed, tmp_path):
     link.symlink_to(elsewhere)
 
     target = bed["run_dir"] / "out_0_attempt_0.json"
-    staging = bed["run_dir"] / ".publish_0_attempt_0.json"
+    staging = bed["run_dir"] / ".publish_0_attempt_0_deadbeef.json"
     with pytest.raises(mod.DriverError):
         mod.publish_fragment(link, target, staging, _PASSING_GATE, "batch 0 attempt 0")
     assert not target.exists(), "nothing may be published from a symlinked artifact"
@@ -792,7 +792,7 @@ def test_a_published_fragment_is_the_bytes_that_passed_the_gate(bed, tmp_path):
     raw = b'[{"source_form":  "Alpha",\n  "basis":"transliterated"} ]'
     src.write_bytes(raw)
     target = bed["run_dir"] / "out_0_attempt_0.json"
-    staging = bed["run_dir"] / ".publish_0_attempt_0.json"
+    staging = bed["run_dir"] / ".publish_0_attempt_0_deadbeef.json"
     mod.publish_fragment(src, target, staging, _PASSING_GATE, "batch 0 attempt 0")
     assert target.read_bytes() == raw, "the published bytes must be verbatim"
     assert not staging.exists(), "the staging copy must be renamed away, never left behind"
@@ -809,7 +809,7 @@ def test_bytes_that_fail_the_gate_never_reach_the_canonical_path(bed, tmp_path):
     src = sandbox / "out_0_attempt_0.json"
     src.write_bytes(b'[{"source_form": "rewritten after the gate passed"}]')
     target = bed["run_dir"] / "out_0_attempt_0.json"
-    staging = bed["run_dir"] / ".publish_0_attempt_0.json"
+    staging = bed["run_dir"] / ".publish_0_attempt_0_deadbeef.json"
     with pytest.raises(mod.DriverError):
         mod.publish_fragment(src, target, staging, _FAILING_GATE, "batch 0 attempt 0")
     assert not target.exists(), (
@@ -829,3 +829,45 @@ def test_a_temp_root_location_is_reported_rather_than_left_implied(bed):
         f"a bed under pytest's tmp_path is under $TMPDIR; both should warn, got {warned}")
     outside = mod.warn_if_under_a_temp_root(Path("/"), Path("/"))
     assert outside == [], f"a path outside every temp root must not warn, got {outside}"
+
+
+def test_a_publication_never_adopts_a_file_it_did_not_create(bed, tmp_path):
+    """The staging name carries a fresh random token, so a path that already
+    exists is not a stale copy of ours -- it is someone else's file at our name,
+    and adopting it is how two concurrent drivers come to share one inode."""
+    mod = load(bed)
+    sandbox = tmp_path / "sbx4"
+    sandbox.mkdir()
+    src = sandbox / "out_0_attempt_0.json"
+    src.write_bytes(b'[{"source_form": "Alpha"}]')
+    staging = bed["run_dir"] / ".publish_0_attempt_0_deadbeef.json"
+    staging.write_bytes(b"someone else's bytes")
+    target = bed["run_dir"] / "out_0_attempt_0.json"
+    with pytest.raises(OSError):
+        mod.publish_fragment(src, target, staging, _PASSING_GATE, "batch 0 attempt 0")
+    assert not target.exists()
+
+
+def test_a_sandbox_that_cannot_be_removed_is_named_rather_than_leaked(bed, monkeypatch, tmp_path):
+    """rmtree stays best-effort so cleanup cannot fail a finished batch -- but a
+    directory the job made unremovable must still be named, or it is a leak nobody
+    can find."""
+    mod = load(bed)
+    monkeypatch.setattr(mod.shutil, "rmtree", lambda *a, **k: None)
+    printed = []
+    monkeypatch.setattr(mod, "log", lambda m: printed.append(m))
+    with mod.DispatchSandbox("dispatch-9-9") as sandbox:
+        survivor = sandbox.path
+    assert survivor.exists(), "fixture precondition: rmtree was stubbed out"
+    assert any(str(survivor) in m and "could not be removed" in m for m in printed), (
+        f"the surviving sandbox path must be named in the log, got {printed}")
+    shutil.rmtree(survivor, ignore_errors=True)
+
+
+def test_a_real_run_reports_a_temp_root_location(bed):
+    """The operational call, not just the helper. A pytest bed is itself under
+    $TMPDIR, so an ordinary drive must print the warning -- deleting the call in
+    main() has to go red somewhere."""
+    _out, proc = run_driver(bed)
+    assert "WARNING" in proc.stderr and "codex makes writable" in proc.stderr, (
+        f"a run whose durable root is under $TMPDIR must say so: {proc.stderr[-800:]}")

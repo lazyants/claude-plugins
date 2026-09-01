@@ -1228,7 +1228,18 @@ def implicit_write_roots() -> "list[Path]":
 
     This is what the sandbox RELIES on, too: the per-launch directory lives under
     TMPDIR, so excluding the temp roots is not an option even where codex offers
-    it -- the job would be unable to write the artifact the pass waits on."""
+    it -- the job would be unable to write the artifact the pass waits on.
+
+    WHAT IS DELIBERATELY NOT HERE, recorded so the next reader does not re-open
+    it. `/var/tmp` (and its canonical `/private/var/tmp`) was raised in review as
+    a third implicit root, cited from the seatbelt policy source. Probed on this
+    runtime it is REFUSED -- `Operation not permitted` -- while the host can write
+    there freely (it is mode 1777), so the refusal is the sandbox's and not a
+    permission artifact. `/var/folders` itself, `~/.cache` and `/usr/local/share`
+    are refused too; only `/tmp`, `/private/tmp` and `$TMPDIR` are granted. Adding
+    a root that is not actually granted is not free: it would warn an operator
+    that a perfectly confined durable root is exposed, and a security warning that
+    cries wolf is one nobody reads. Re-measure before adding one."""
     roots = [Path("/tmp")]
     env_tmp = os.environ.get("TMPDIR")
     if env_tmp:
@@ -1486,7 +1497,11 @@ def publish_fragment(sandbox_path: Path, fragment_path: Path, staging_path: Path
     data = read_sandbox_artifact(sandbox_path, label)
     digest = hashlib.sha256(data).hexdigest()
     try:
-        fd = os.open(str(staging_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        # O_EXCL, never O_TRUNC: the name carries a fresh random token, so a path
+        # that already exists is not a stale copy of ours to overwrite -- it is
+        # someone else's file at our name, and adopting it is how two publications
+        # come to share one inode.
+        fd = os.open(str(staging_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
@@ -1767,10 +1782,15 @@ def advance_batch(ctx: Ctx, batch: dict, attempt: int, resumed: bool,
             sandbox_out = sandbox.artifact(fragment_path.name)
             # The driver's own staging copy, beside the destination so the rename
             # is atomic. A private name, not a pass artifact -- nothing but
-            # publish_fragment() ever opens it, and it is written fresh before it
-            # is gated, so a leftover from an earlier run is overwritten rather
-            # than read.
-            staging = fragment_path.parent / f".publish_{idx}_attempt_{attempt}.json"
+            # publish_fragment() ever opens it. UNIQUE PER PUBLICATION rather than
+            # per (batch, attempt): two drivers pointed at the same run would
+            # otherwise open one deterministic name, and one could still hold a
+            # descriptor on it while the other gated and renamed -- writing
+            # through to the renamed inode and undoing the byte-binding this
+            # staging step exists to create. The token also lets the open be
+            # O_EXCL, so a publication never adopts a file it did not create.
+            staging = (fragment_path.parent /
+                       f".publish_{idx}_attempt_{attempt}_{secrets.token_hex(8)}.json")
             dispatch = ctx.build([
                 {"key": "prompt", "fn": "batchDispatchPrompt",
                  "args": [batch, attempt, rejection_reason, str(sandbox_out)]},

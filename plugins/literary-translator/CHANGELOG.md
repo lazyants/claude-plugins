@@ -54,6 +54,13 @@ verdict nonces and the merge decision.
   the path a resume reads.
 - **A sandbox that could not be removed is named in the log** rather than silently leaked: the
   job owned that directory and could have made it unremovable.
+- **Each publication stages under its own name**, opened `O_EXCL`, so two drivers pointed at one
+  run cannot come to share a staging inode and write through to a fragment the other had already
+  gated and renamed.
+- `/var/tmp` was raised in review as a third implicitly writable root and **refuted by
+  measurement**: it is refused by the sandbox on this runtime while the host can write there
+  freely, so it is deliberately not warned about. The probe result is recorded in the code,
+  because a warning about a root that is actually confined is one nobody reads.
 - **3 `style_bible.md` references in the dispatch and repair prompts were relative** and
   resolved only because cwd happened to be the durable root. They are absolute now, which is
   correct whatever the cwd is.
