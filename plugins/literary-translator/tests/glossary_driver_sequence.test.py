@@ -253,6 +253,13 @@ def companion_cwds(bed):
             if l.startswith("cwd ")]
 
 
+# Gate stand-ins for the publish unit tests: publish_fragment runs whatever command
+# string it is handed through the driver's own shlex-based runner, so a real
+# canon_validate.py is not needed to pin WHERE the gate sits in the sequence.
+_PASSING_GATE = f"{sys.executable} -c pass"
+_FAILING_GATE = f"{sys.executable} -c raise(SystemExit(1))"
+
+
 def _has_enclosing_repo(path) -> bool:
     """codex-companion's OWN workspace-root algorithm, run here rather than
     restated: `git rev-parse --show-toplevel` walking up from `path`."""
@@ -767,9 +774,11 @@ def test_a_symlinked_sandbox_artifact_is_never_published(bed, tmp_path):
     link.symlink_to(elsewhere)
 
     target = bed["run_dir"] / "out_0_attempt_0.json"
+    staging = bed["run_dir"] / ".publish_0_attempt_0.json"
     with pytest.raises(mod.DriverError):
-        mod.publish_fragment(link, target, "batch 0 attempt 0")
+        mod.publish_fragment(link, target, staging, _PASSING_GATE, "batch 0 attempt 0")
     assert not target.exists(), "nothing may be published from a symlinked artifact"
+    assert not staging.exists(), "the staging copy must not survive a refusal"
 
 
 def test_a_published_fragment_is_the_bytes_that_passed_the_gate(bed, tmp_path):
@@ -783,5 +792,40 @@ def test_a_published_fragment_is_the_bytes_that_passed_the_gate(bed, tmp_path):
     raw = b'[{"source_form":  "Alpha",\n  "basis":"transliterated"} ]'
     src.write_bytes(raw)
     target = bed["run_dir"] / "out_0_attempt_0.json"
-    mod.publish_fragment(src, target, "batch 0 attempt 0")
+    staging = bed["run_dir"] / ".publish_0_attempt_0.json"
+    mod.publish_fragment(src, target, staging, _PASSING_GATE, "batch 0 attempt 0")
     assert target.read_bytes() == raw, "the published bytes must be verbatim"
+    assert not staging.exists(), "the staging copy must be renamed away, never left behind"
+
+
+def test_bytes_that_fail_the_gate_never_reach_the_canonical_path(bed, tmp_path):
+    """The poll gates the SANDBOX artifact, which the job still owns and can rewrite
+    after passing. So what is captured is gated again, against the driver's own
+    staged copy, BEFORE the rename -- gating after it would leave a refused fragment
+    sitting at exactly the path a resume reads."""
+    mod = load(bed)
+    sandbox = tmp_path / "sbx3"
+    sandbox.mkdir()
+    src = sandbox / "out_0_attempt_0.json"
+    src.write_bytes(b'[{"source_form": "rewritten after the gate passed"}]')
+    target = bed["run_dir"] / "out_0_attempt_0.json"
+    staging = bed["run_dir"] / ".publish_0_attempt_0.json"
+    with pytest.raises(mod.DriverError):
+        mod.publish_fragment(src, target, staging, _FAILING_GATE, "batch 0 attempt 0")
+    assert not target.exists(), (
+        "a fragment that failed the gate must never appear at the canonical path")
+    assert not staging.exists(), "and the staged copy must be cleaned up"
+
+
+def test_a_temp_root_location_is_reported_rather_than_left_implied(bed):
+    """codex's workspace-write grants /tmp and $TMPDIR on top of the workspace root
+    (measured against `codex sandbox` directly), so a durable root or verdict dir
+    there is still writable by a dispatched job and no --cwd changes it. pytest's
+    own tmp_path is under $TMPDIR, which is precisely why this is warned and not
+    refused -- and why the warning has to be asserted rather than assumed."""
+    mod = load(bed)
+    warned = mod.warn_if_under_a_temp_root(bed["durable"], bed["session"])
+    assert set(warned) == {"durable root", "verdict directory"}, (
+        f"a bed under pytest's tmp_path is under $TMPDIR; both should warn, got {warned}")
+    outside = mod.warn_if_under_a_temp_root(Path("/"), Path("/"))
+    assert outside == [], f"a path outside every temp root must not warn, got {outside}"

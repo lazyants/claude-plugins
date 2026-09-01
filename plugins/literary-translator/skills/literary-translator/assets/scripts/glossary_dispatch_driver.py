@@ -81,6 +81,15 @@ DISPATCHED job is no longer one of its writers. And confinement is about WRITES,
 reads: a job still reads `glossary_TASK.md`, `canon.json` and `style_bible.md` from the
 durable root, which is exactly what it is for.
 
+THE TEMP ROOTS ARE THE ONE EXCEPTION, and it is measured rather than assumed: under
+`workspace-write` codex 0.151.0 also grants `/tmp` and `$TMPDIR`, verified by probing
+`codex sandbox` directly (a write to each SUCCEEDS from a workspace elsewhere, while a
+write to a path in $HOME is refused). So a `durable_root` -- or a `verdict_dir` -- that
+itself lies under a temp root is still writable by a dispatched job, and no `--cwd` this
+process can pass changes that: codex's own switch for excluding the temp roots would
+exclude the sandbox too, which lives under TMPDIR. `warn_if_under_a_temp_root()` says so
+at the start of every run rather than leaving it implied.
+
 THE FALLBACK IS NOT RETIRED. `pipeline()` remains a shipped, documented path for this pass.
 Per #436/#516's ordering rule, a fallback is not removed before its replacement has carried
 a book end to end.
@@ -1206,6 +1215,75 @@ def _ere_escape(text: str) -> str:
     return "".join("\\" + ch if ch in _ERE_META else ch for ch in text)
 
 
+def implicit_write_roots() -> "list[Path]":
+    """The directories codex makes writable under `workspace-write` IN ADDITION to
+    the workspace root itself.
+
+    MEASURED, not read off a doc. Under `codex sandbox -c sandbox_mode=
+    "workspace-write"` on 0.151.0, a write to `/tmp` and a write to `$TMPDIR` both
+    SUCCEED from a workspace elsewhere, while a write to an ordinary path outside
+    the workspace (a file in $HOME) is refused with EPERM. So the sandbox boundary
+    is "the workspace root, plus the temp roots", and a confinement argument that
+    names only the workspace root is incomplete.
+
+    This is what the sandbox RELIES on, too: the per-launch directory lives under
+    TMPDIR, so excluding the temp roots is not an option even where codex offers
+    it -- the job would be unable to write the artifact the pass waits on."""
+    roots = [Path("/tmp")]
+    env_tmp = os.environ.get("TMPDIR")
+    if env_tmp:
+        roots.append(Path(env_tmp))
+    return roots
+
+
+def warn_if_under_a_temp_root(durable_root: Path, verdict_dir: Path) -> "list[str]":
+    """The one confinement case NO `--cwd` can reach, reported rather than refused.
+
+    Everything else here confines a job to its own throwaway directory. That
+    argument holds for every location EXCEPT one already inside a root codex makes
+    writable implicitly: a `durable_root` there is still fully model-writable --
+    `scripts/`, `canon.json`, this file's own deployed copy -- and a `verdict_dir`
+    there is writable too, which matters more, because that directory is the
+    AUTHORIZATION channel and `resolve_verdict_dir` places it outside the durable
+    root precisely so a dispatched job cannot reach it.
+
+    WARNED, NOT REFUSED, and the distinction from the sandbox's own refusal is
+    worth stating because the two look alike. `DispatchSandbox` refuses because a
+    cheap correct alternative exists and an unconfined sandbox would misreport
+    itself. Here there is no alternative for this process to take: codex's own
+    switch for excluding the temp roots would also exclude the sandbox, which
+    lives under TMPDIR, leaving the job unable to write the artifact at all. So
+    refusing would buy a refusal, not a boundary -- and it would forbid a layout
+    this plugin's own test beds legitimately use, since a pytest `tmp_path` is
+    itself under `$TMPDIR`. What is owed here is an accurate statement, made
+    loudly, once, at the start of the run.
+
+    Compared CANONICALLY on both sides: macOS resolves `/tmp` to `/private/tmp`
+    and `$TMPDIR` under `/var/folders` to `/private/var/folders`, so a lexical
+    test would miss the very case it is for. Returns what it warned about, so a
+    caller (and a test) can see the decision rather than infer it from stderr."""
+    warned = []
+    temp_roots = []
+    for raw in implicit_write_roots():
+        try:
+            temp_roots.append(Path(os.path.realpath(str(raw))))
+        except OSError:
+            continue
+    for label, path in (("durable root", durable_root), ("verdict directory", verdict_dir)):
+        resolved = Path(os.path.realpath(str(path)))
+        for temp_root in temp_roots:
+            if resolved == temp_root or temp_root in resolved.parents:
+                log(f"WARNING: the {label} {resolved} lies under {temp_root}, which "
+                    f"codex makes writable under workspace-write whatever this driver "
+                    f"passes as --cwd. A dispatched job can still write there, so the "
+                    f"per-launch sandbox does not confine it away from that path. Move "
+                    f"it outside the temp roots -- durable state is meant to outlive a "
+                    f"reboot in any case.")
+                warned.append(label)
+                break
+    return warned
+
+
 def probe_enclosing_repo(path: Path) -> str:
     """Runs the companion's OWN workspace-root probe against `path` and reports
     WHICH outcome occurred, never a bare boolean. See sandbox_is_confined()."""
@@ -1313,6 +1391,15 @@ class DispatchSandbox:
             return
         self._shutdown_broker()
         shutil.rmtree(str(self.path), ignore_errors=True)
+        # ignore_errors keeps cleanup from turning a finished batch into a failed
+        # one, but a directory that SURVIVED must still be named: the job owned
+        # this directory and could have made it unremovable (dropped traversal
+        # permissions, a set flag), and a leaked path nobody can find is worse
+        # than a leaked path in the log. Same posture as
+        # segment_dispatch_driver.py's _teardown_staging.
+        if self.path.exists():
+            log(f"{self.label}: sandbox {self.path} could not be removed and is "
+                f"left on disk; remove it by hand")
         self.path = None
 
     def _shutdown_broker(self) -> None:
@@ -1375,24 +1462,45 @@ def read_sandbox_artifact(path: Path, label: str) -> bytes:
     return data
 
 
-def publish_fragment(sandbox_path: Path, fragment_path: Path, label: str) -> None:
-    """Copies the gated sandbox artifact to its canonical RUN_DIR path.
+def publish_fragment(sandbox_path: Path, fragment_path: Path, staging_path: Path,
+                     gate_cmd: str, label: str) -> None:
+    """Moves the job's artifact onto its canonical RUN_DIR path, gating the exact
+    bytes that land there.
 
-    BYTES, never a re-serialization: the object --check-batch validated must be
-    the object that lands, or the gate and the artifact are two different things.
-    The digest re-read afterwards is what makes that a check rather than a hope."""
+    THE ORDER IS THE POINT, and it is not the obvious one. Polling the sandbox
+    path until --check-batch passes gates an object the job can still rewrite: the
+    turn may outlive the poll, and it owns that file. So the poll only decides WHEN
+    to look; what is captured is then gated again, HERE, against the driver's own
+    staged copy, and only a copy that passes is renamed into place. Gating after
+    the rename would be too late -- a refused fragment would already be sitting at
+    the path a resume reads.
+
+    BYTES, never a re-serialization: the object --check-batch validated must be the
+    object that lands, or the gate and the artifact are two different things. The
+    staged copy lives in RUN_DIR beside its destination so the rename is atomic and
+    within one filesystem, and RUN_DIR is outside every dispatched job's write
+    root -- so what passes here stays passed.
+
+    The digest is re-read from the DESTINATION afterwards, which is what makes the
+    "same bytes" claim a check rather than a hope."""
     data = read_sandbox_artifact(sandbox_path, label)
     digest = hashlib.sha256(data).hexdigest()
-    fd, tmp = tempfile.mkstemp(dir=str(fragment_path.parent), prefix=".tmp-", suffix=".json")
     try:
+        fd = os.open(str(staging_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, fragment_path)
+        if not _cmd_ok(gate_cmd, 300):
+            raise DriverError(
+                f"{label}: the bytes captured from the sandbox did not pass "
+                f"--check-batch. The turn had already passed that gate against its "
+                f"own copy, so it rewrote the artifact after passing it",
+                label=label)
+        os.replace(str(staging_path), str(fragment_path))
     except BaseException:
         try:
-            os.unlink(tmp)
+            os.unlink(str(staging_path))
         except OSError:
             pass
         raise
@@ -1657,11 +1765,19 @@ def advance_batch(ctx: Ctx, batch: dict, attempt: int, resumed: bool,
         # call per attempt, against a dispatch measured in minutes.
         with DispatchSandbox(f"dispatch-{idx}-{attempt}") as sandbox:
             sandbox_out = sandbox.artifact(fragment_path.name)
+            # The driver's own staging copy, beside the destination so the rename
+            # is atomic. A private name, not a pass artifact -- nothing but
+            # publish_fragment() ever opens it, and it is written fresh before it
+            # is gated, so a leftover from an earlier run is overwritten rather
+            # than read.
+            staging = fragment_path.parent / f".publish_{idx}_attempt_{attempt}.json"
             dispatch = ctx.build([
                 {"key": "prompt", "fn": "batchDispatchPrompt",
                  "args": [batch, attempt, rejection_reason, str(sandbox_out)]},
                 {"key": "check", "fn": "sandboxCheckBatchCmd",
                  "args": [str(sandbox_out), idx]},
+                {"key": "stagecheck", "fn": "sandboxCheckBatchCmd",
+                 "args": [str(staging), idx]},
             ])
             launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
                          prompt=strip_routing_line(dispatch["prompt"]), effort=ctx.effort,
@@ -1680,10 +1796,12 @@ def advance_batch(ctx: Ctx, batch: dict, attempt: int, resumed: bool,
                         "batchIndex": idx, "attempt": attempt,
                         "fragmentPath": str(fragment_path)}
 
-            # 3. PUBLISH -- the gated bytes, verbatim, onto the canonical path
-            #    every later step names. Inside the sandbox context on purpose:
-            #    the artifact must be taken before teardown removes it.
-            publish_fragment(sandbox_out, fragment_path, f"batch {idx} attempt {attempt}")
+            # 3. PUBLISH -- capture, re-gate the captured bytes, then rename onto
+            #    the canonical path every later step names. Inside the sandbox
+            #    context on purpose: the artifact must be taken before teardown
+            #    removes it.
+            publish_fragment(sandbox_out, fragment_path, staging,
+                             dispatch["stagecheck"], f"batch {idx} attempt {attempt}")
     else:
         log(f"batch {idx}: resume-skip -- attempt 0 fragment already validated")
 
@@ -2376,6 +2494,8 @@ def main(argv=None) -> int:
 
     durable_root = DURABLE_ROOT
     verdict_dir = resolve_verdict_dir(args.verdict_dir, durable_root)
+    # The one layout no --cwd can confine, reported once (see the function).
+    warn_if_under_a_temp_root(durable_root, verdict_dir)
     template = resolve_template(args.plugin_root)
     max_retries = template_max_citation_retries(read_template_text(template))
 

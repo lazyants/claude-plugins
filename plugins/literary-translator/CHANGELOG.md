@@ -39,6 +39,21 @@ verdict nonces and the merge decision.
   so: a Workflow script reaches codex through the `codex:codex-rescue` forwarder, whose write
   root resolves by walking up from whatever cwd the session holds, and this plugin has no
   `--cwd` to give it.
+- **One exception, found by review and measured rather than argued.** Under `workspace-write`
+  codex also grants `/tmp` and `$TMPDIR` on top of the workspace root — probed directly against
+  `codex sandbox`, where a write to each succeeds from a workspace elsewhere while a write into
+  `$HOME` is refused. A `durable_root` or `--verdict-dir` that itself lies under a temp root
+  therefore stays writable by a dispatched job, and no `--cwd` closes it: excluding the temp
+  roots would exclude the per-launch sandbox too, which lives under `TMPDIR`. Warned loudly at
+  the start of every run rather than refused — refusing would buy a refusal and not a boundary,
+  and would forbid a layout this plugin's own test beds legitimately use.
+- **What passed the gate and what is published are now the same object.** The poll gates the
+  artifact inside the sandbox, which the job still owns and can rewrite after passing — so the
+  captured bytes are gated again against a driver-owned staging copy in `RUN_DIR` and only then
+  renamed into place. Gating after the rename would leave a refused fragment sitting at exactly
+  the path a resume reads.
+- **A sandbox that could not be removed is named in the log** rather than silently leaked: the
+  job owned that directory and could have made it unremovable.
 - **3 `style_bible.md` references in the dispatch and repair prompts were relative** and
   resolved only because cwd happened to be the durable root. They are absolute now, which is
   correct whatever the cwd is.

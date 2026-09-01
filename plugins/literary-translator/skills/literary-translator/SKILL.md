@@ -1760,7 +1760,17 @@ dispatched job therefore reaches **nothing** under `${durable_root}` — not
 deployed copy, which this loop re-enters. Reads are unaffected: a job still reads
 `glossary_TASK.md`, `canon.json` and `style_bible.md` from the durable root.
 
-Two consequences worth knowing before a run. **`TMPDIR` must sit outside every git
+**One exception, and it is measured rather than assumed.** Under `workspace-write`
+codex also grants `/tmp` and `$TMPDIR` on top of the workspace root — probed directly
+against `codex sandbox`, where a write to each succeeds from a workspace elsewhere while
+a write into `$HOME` is refused. So a `durable_root`, or a `--verdict-dir`, that itself
+lies under a temp root stays writable by a dispatched job, and no `--cwd` closes it:
+codex's own switch for excluding the temp roots would exclude the per-launch sandbox too.
+The driver prints a warning naming whichever of the two is affected at the start of every
+run. Keep both outside `/tmp` and `$TMPDIR` — durable state is meant to outlive a reboot
+in any case.
+
+Two further consequences worth knowing before a run. **`TMPDIR` must sit outside every git
 working tree** — inside one, codex would resolve its write root to that repository
 instead, so the driver refuses to dispatch rather than reporting a boundary it does
 not have. And **the `pipeline()` fallback below is unchanged and wider**: a Workflow
