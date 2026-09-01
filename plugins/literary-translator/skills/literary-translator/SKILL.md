@@ -1706,8 +1706,12 @@ climb different numbers of rungs.
 
 `--plugin-root` and `--verdict-dir` are both REQUIRED and both are refusals, not
 conveniences. The driver EXECUTES the template's builders, and
-`${durable_root}/` is writable by the very codex jobs it dispatches, so it will
-run only the plugin tree's copy — there is deliberately no durable fallback.
+a durable copy of the template would be JavaScript it then runs from a directory
+it does not own, so it will run only the plugin tree's copy — there is
+deliberately no durable fallback. #806 removed the sharpest writer of that copy,
+and the refusal is deliberately not relaxed on the strength of it: the
+`pipeline()` path's jobs are unconfined, a manual drive still runs with `--write`
+and cwd = the durable root, and a durable copy can be stale as easily as hostile.
 `--verdict-dir` holds the judge verdicts, which authorize an approval record and
 a merge into an immutable canon; a path inside `${durable_root}` is refused
 outright, as is one that is not owned by you and private.
@@ -1723,13 +1727,19 @@ outright, as is one that is not owned by you and private.
    agent's full reply>"}, ...]` and re-invoke with `--record-verdicts <that file>`
    plus the same `--verdict-dir`, `--plugin-root` and `--run-id`. A path outside
    that directory is refused: the file carries the nonces that admit an approval,
-   so it is authorization input, and one written under `${durable_root}` could be
-   rewritten by a still-running codex job before it is read.
+   so it is authorization input, and the directory holding it is kept separate
+   from `${durable_root}` — which the agents this pass drives do write — rather
+   than trusted to be unreachable.
 3. Repeat while `needs_judge[]` comes back non-empty. A REJECTED batch comes
    back in that list at the next attempt, with a fresh nonce — the recording
    invocation advances the ladder itself, so there is nothing extra to do. The run is done when the
    output carries `"merged": true`; `not_ready[]` names any batch that failed and
-   why, with the same `reason` strings the Workflow path uses.
+   why. Every `reason` the Workflow path uses appears unchanged; the driver adds
+   two of its own, because it does work the Workflow cannot — a batch whose
+   captured bytes did not pass the gate a second time, and a repair that was
+   refused. A sandbox that cannot be confined is NOT among them: that is an
+   environment fault, so the driver exits 2 having written no state at all, and
+   the same command re-run after fixing `TMPDIR` resumes where it stopped.
 4. `reset[]` names any batch the driver put back to attempt 0 because the
    artifact its status promised is gone. A resume reuses the RUN_ID, and
    `resume_setup.py` deletes that run's approved snapshots, approval records and

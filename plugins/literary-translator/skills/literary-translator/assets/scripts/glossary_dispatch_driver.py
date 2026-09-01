@@ -1363,11 +1363,21 @@ class DispatchSandbox:
         self.path = None
 
     def __enter__(self) -> "DispatchSandbox":
+        # BOTH failures below exit the PROCESS (code 2, this driver's documented
+        # environment/usage code) rather than raising DriverError, and that
+        # classification is the whole point rather than a style choice. A
+        # DriverError here would reach drive_all(), which records the batch
+        # `status="failed"` -- one of the two statuses the next invocation SKIPS.
+        # The operator would fix TMPDIR, re-run exactly as documented, and find
+        # the batch permanently skipped: a recoverable environment fault turned
+        # into a wedged run that only deleting authorization state can clear.
+        # Neither condition is a fact about this batch, and neither can be
+        # answered by advancing the ladder, so no state may be written about it.
         try:
             raw = tempfile.mkdtemp(prefix="ltgd.%s." % self.label)
         except OSError as exc:
-            raise DriverError(f"could not create a dispatch sandbox for {self.label}: {exc!r}",
-                              label=self.label)
+            fatal(f"could not create a dispatch sandbox for {self.label}: {exc!r}",
+                  exit_code=2, label=self.label)
         # Pin ONE canonical spelling now -- macOS's /tmp -> /private/tmp symlink
         # otherwise yields two spellings of the same directory across this run
         # (mkdtemp's raw return vs anything realpath'd later, including the
@@ -1376,14 +1386,15 @@ class DispatchSandbox:
         outcome = probe_enclosing_repo(self.path)
         if outcome not in (_PROBE_STANDALONE, _PROBE_GIT_ABSENT):
             self._teardown()
-            raise DriverError(
+            fatal(
                 "refusing to dispatch: the codex sandbox is not write-confined "
                 f"(probe={outcome}). codex-companion resolves its workspace-write "
                 "root by walking up from --cwd to the enclosing git top level, so "
                 "a sandbox inside a working tree would hand the job write access "
                 "to that whole repository. Set TMPDIR to a directory outside every "
-                "git working tree and re-run.",
-                label=self.label, sandbox_probe=outcome)
+                "git working tree and re-run -- nothing about this run has been "
+                "recorded, so the re-run resumes exactly where this one stopped.",
+                exit_code=2, label=self.label, sandbox_probe=outcome)
         log(f"{self.label}: codex write root confined to {self.path} (probe={outcome})")
         return self
 
@@ -1496,12 +1507,17 @@ def publish_fragment(sandbox_path: Path, fragment_path: Path, staging_path: Path
     "same bytes" claim a check rather than a hope."""
     data = read_sandbox_artifact(sandbox_path, label)
     digest = hashlib.sha256(data).hexdigest()
+    # O_EXCL, never O_TRUNC: the name carries a fresh random token, so a path that
+    # already exists is not a stale copy of ours to overwrite -- it is someone
+    # else's file at our name, and adopting it is how two publications come to
+    # share one inode.
+    #
+    # OUTSIDE the cleanup block below, deliberately. That block unlinks
+    # staging_path on any failure, and until this open SUCCEEDS this publication
+    # owns nothing at that path -- so a collision would otherwise be answered by
+    # deleting the other publication's file, which is the ownership rule inverted.
+    fd = os.open(str(staging_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
-        # O_EXCL, never O_TRUNC: the name carries a fresh random token, so a path
-        # that already exists is not a stale copy of ours to overwrite -- it is
-        # someone else's file at our name, and adopting it is how two publications
-        # come to share one inode.
-        fd = os.open(str(staging_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()

@@ -57,6 +57,15 @@ verdict nonces and the merge decision.
 - **Each publication stages under its own name**, opened `O_EXCL`, so two drivers pointed at one
   run cannot come to share a staging inode and write through to a fragment the other had already
   gated and renamed.
+- **A sandbox that cannot be confined exits 2 having written no state**, rather than recording
+  the batch as failed. `failed` is one of the two statuses the next invocation SKIPS, so an
+  operator who fixed `TMPDIR` and re-ran exactly as documented would have found the batch
+  skipped forever — a recoverable environment fault turned into a run that only deleting
+  authorization state could clear. Two tests pin it: the refusal itself, and the corrected
+  re-run dispatching an ordinary first attempt.
+- **A staging collision never answers by deleting the other publication's file.** The `O_EXCL`
+  open now sits outside the cleanup block: until it succeeds this publication owns nothing at
+  that path.
 - `/var/tmp` was raised in review as a third implicitly writable root and **refuted by
   measurement**: it is refused by the sandbox on this runtime while the host can write there
   freely, so it is deliberately not warned about. The probe result is recorded in the code,

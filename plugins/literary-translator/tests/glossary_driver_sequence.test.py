@@ -235,6 +235,26 @@ def run_driver(bed, *extra, expect=0, env=None):
     return json.loads(line[0]), proc
 
 
+def run_driver_raw(bed, *extra, env=None):
+    """The driver as a subprocess, WITHOUT run_driver's one-JSON-line assertion.
+    An environment fault exits 2 having emitted no hand-back at all, which is the
+    property under test -- run_driver would fail on the missing line first and
+    say nothing about why."""
+    batches_file = bed["tmp"] / "batches.json"
+    batches_file.write_text(json.dumps(BATCHES))
+    argv = [sys.executable, str(bed["scripts"] / "glossary_dispatch_driver.py"),
+            "--run-id", "run1", "--batches-file", str(batches_file),
+            "--verdict-dir", str(bed["session"]),
+            "--plugin-root", str(SKILL_ROOT),
+            "--source-lang", "he", "--target-lang", "en",
+            "--research-mode", "live", "--effort", "high",
+            "--citation-content-types", "text/html",
+            "--poll-sec", "0.05", "--deadline-sec", "6",
+            "--node", NODE, *extra]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=180,
+                          env=({**os.environ, **env} if env else None))
+
+
 def plant_fragment(bed, attempt=0, bases=("established", "established")):
     """Writes a fragment WITHOUT a dispatch, for the cases that need one to
     pre-exist (a resumed attempt 0, a wiped-artifact resume). Ordinary dispatch
@@ -737,12 +757,37 @@ def test_an_unconfined_sandbox_refuses_to_dispatch_rather_than_warning(bed, tmp_
     bad_tmp.mkdir()
     subprocess.run(["git", "init", "-q", str(bad_tmp)], check=True, timeout=60)
 
-    out, _ = run_driver(bed, expect=1, env={"TMPDIR": str(bad_tmp)})
+    proc = run_driver_raw(bed, env={"TMPDIR": str(bad_tmp)})
+    assert proc.returncode == 2, (
+        f"an unconfined sandbox is an ENVIRONMENT fault, not a verdict about this "
+        f"batch -- exit 2, not {proc.returncode}\n{proc.stderr[-1500:]}")
     assert companion_cwds(bed) == [], "nothing may be dispatched into an unconfined sandbox"
     assert companion_targets(bed) == [], "no codex turn may have run"
-    assert out["not_ready"], f"the batch must be reported as not advanced: {out}"
-    reason = json.dumps(out["not_ready"])
-    assert "write-confined" in reason, f"the refusal must say why: {reason}"
+    assert "write-confined" in proc.stderr, f"the refusal must say why: {proc.stderr[-800:]}"
+
+
+def test_a_corrected_tmpdir_resumes_instead_of_finding_the_batch_wedged(bed, tmp_path):
+    """The reason the refusal exits 2 rather than failing the batch.
+
+    A DriverError here would reach drive_all(), which records status="failed" --
+    one of the two statuses the NEXT invocation skips. The operator would fix
+    TMPDIR, re-run exactly as documented, and find the batch skipped forever, a
+    recoverable environment fault turned into a run only deleting authorization
+    state can clear. So the first invocation must write no state at all."""
+    bad_tmp = tmp_path / "tmp_in_repo2"
+    bad_tmp.mkdir()
+    subprocess.run(["git", "init", "-q", str(bad_tmp)], check=True, timeout=60)
+
+    first = run_driver_raw(bed, env={"TMPDIR": str(bad_tmp)})
+    assert first.returncode == 2
+
+    # Same run id, same verdict directory, corrected TMPDIR -- the documented
+    # re-run after fixing the environment.
+    out, _ = run_driver(bed)
+    assert out["needs_judge"], (
+        f"the corrected re-run must dispatch the batch, not skip it as failed: {out}")
+    assert companion_targets(bed) == ["out_0_attempt_0.json"], (
+        "and it must be an ORDINARY first dispatch, not a resumed rung")
 
 
 def test_a_tmpdir_holding_a_space_still_dispatches(bed, tmp_path):
@@ -846,6 +891,9 @@ def test_a_publication_never_adopts_a_file_it_did_not_create(bed, tmp_path):
     with pytest.raises(OSError):
         mod.publish_fragment(src, target, staging, _PASSING_GATE, "batch 0 attempt 0")
     assert not target.exists()
+    assert staging.read_bytes() == b"someone else's bytes", (
+        "a collision must not answer by DELETING the other publication's file -- "
+        "until the O_EXCL open succeeds this publication owns nothing at that path")
 
 
 def test_a_sandbox_that_cannot_be_removed_is_named_rather_than_leaked(bed, monkeypatch, tmp_path):
