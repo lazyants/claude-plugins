@@ -966,7 +966,7 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3694-3700\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3695-3701\", 0]": {
    "anchors": [
     "Excluded from every bundle hash",
     "nor of `orchestration_bundle_hash`",

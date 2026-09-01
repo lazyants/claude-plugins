@@ -1734,12 +1734,13 @@ outright, as is one that is not owned by you and private.
    back in that list at the next attempt, with a fresh nonce — the recording
    invocation advances the ladder itself, so there is nothing extra to do. The run is done when the
    output carries `"merged": true`; `not_ready[]` names any batch that failed and
-   why. Every `reason` the Workflow path uses appears unchanged; the driver adds
-   two of its own, because it does work the Workflow cannot — a batch whose
-   captured bytes did not pass the gate a second time, and a repair that was
-   refused. A sandbox that cannot be confined is NOT among them: that is an
-   environment fault, so the driver exits 2 having written no state at all, and
-   the same command re-run after fixing `TMPDIR` resumes where it stopped.
+   why. Every `reason` the Workflow path uses appears unchanged, and the driver
+   may also report failures of its own, because it does work the Workflow cannot —
+   among them a repair that was refused, an approval record that could not be
+   written, and prose from a step that raised. A sandbox that cannot be confined
+   is NOT among them: that is an environment fault, so the driver exits 2 having
+   written no state at all, and the same command re-run after fixing `TMPDIR`
+   resumes where it stopped.
 4. `reset[]` names any batch the driver put back to attempt 0 because the
    artifact its status promised is gone. A resume reuses the RUN_ID, and
    `resume_setup.py` deletes that run's approved snapshots, approval records and

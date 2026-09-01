@@ -1518,7 +1518,16 @@ def publish_fragment(sandbox_path: Path, fragment_path: Path, staging_path: Path
     # deleting the other publication's file, which is the ownership rule inverted.
     fd = os.open(str(staging_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
-        with os.fdopen(fd, "wb") as fh:
+        # os.fdopen() does NOT close its argument when it raises, and from here on
+        # the cleanup below unlinks the path -- so a failure between the open and
+        # the wrapper would leave a descriptor open on a file with no name. Taking
+        # ownership explicitly is the only point at which that gap can be closed.
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())

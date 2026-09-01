@@ -321,7 +321,7 @@ STALE_PHRASES = [
     ("draft_ready.py:12", DRAFT_READY_SCRIPT, "which is diagnostic-only"),
     ("SKILL.md:489", SKILL_MD, "sibling, non-gating"),
     ("SKILL.md:491", SKILL_MD, "provenance-only for W8 reporting"),
-    ("SKILL.md:3694-3700", SKILL_MD, "non-gating `orchestration_bundle_hash` instead"),
+    ("SKILL.md:3695-3701", SKILL_MD, "non-gating `orchestration_bundle_hash` instead"),
     ("ledger:607", LEDGER_DOC, "non-gating `orchestration_bundle_hash` instead"),
     ("ledger:719", LEDGER_DOC, "purely diagnostic/provenance"),
     ("schema_literal_drift.test.py:556-558", SCHEMA_LITERAL_DRIFT_TEST, "purely diagnostic/provenance"),

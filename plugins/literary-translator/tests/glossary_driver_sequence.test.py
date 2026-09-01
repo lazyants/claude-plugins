@@ -779,7 +779,12 @@ def test_a_corrected_tmpdir_resumes_instead_of_finding_the_batch_wedged(bed, tmp
     subprocess.run(["git", "init", "-q", str(bad_tmp)], check=True, timeout=60)
 
     first = run_driver_raw(bed, env={"TMPDIR": str(bad_tmp)})
-    assert first.returncode == 2
+    # Deliberately NOT `== 2` -- that contract belongs to the test above, and
+    # asserting it here would stop this test at the first invocation under exactly
+    # the regression it exists to catch (a refusal that fails the BATCH exits 1),
+    # leaving the wedge below untested. Only "the first invocation did not
+    # succeed" is a precondition for what follows.
+    assert first.returncode != 0, f"the bad-TMPDIR run should not have succeeded\n{first.stderr[-800:]}"
 
     # Same run id, same verdict directory, corrected TMPDIR -- the documented
     # re-run after fixing the environment.
