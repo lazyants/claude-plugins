@@ -212,34 +212,16 @@ def load(bed):
     return m
 
 
-def run_driver(bed, *extra, expect=0, env=None):
-    """Invokes the driver as a subprocess, exactly as an operator does, and
-    returns its one stdout JSON line."""
-    batches_file = bed["tmp"] / "batches.json"
-    batches_file.write_text(json.dumps(BATCHES))
-    argv = [sys.executable, str(bed["scripts"] / "glossary_dispatch_driver.py"),
-            "--run-id", "run1", "--batches-file", str(batches_file),
-            "--verdict-dir", str(bed["session"]),
-            "--plugin-root", str(SKILL_ROOT),
-            "--source-lang", "he", "--target-lang", "en",
-            "--research-mode", "live", "--effort", "high",
-            "--citation-content-types", "text/html",
-            "--poll-sec", "0.05", "--deadline-sec", "6",
-            "--node", NODE, *extra]
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=180,
-                          env=({**os.environ, **env} if env else None))
-    assert proc.returncode == expect, (
-        f"exit {proc.returncode}, expected {expect}\nSTDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}")
-    line = [l for l in proc.stdout.strip().splitlines() if l.startswith("{")]
-    assert len(line) == 1, f"expected exactly one JSON line, got {proc.stdout!r}"
-    return json.loads(line[0]), proc
-
-
 def run_driver_raw(bed, *extra, env=None):
-    """The driver as a subprocess, WITHOUT run_driver's one-JSON-line assertion.
-    An environment fault exits 2 having emitted no hand-back at all, which is the
-    property under test -- run_driver would fail on the missing line first and
-    say nothing about why."""
+    """The driver as a subprocess, WITHOUT run_driver's exit-code and
+    one-JSON-line assertions. An environment fault exits 2 having emitted no
+    hand-back at all, which is the property under test -- run_driver would fail
+    on the missing line first and say nothing about why.
+
+    ONE argv, built here and nowhere else: a second copy of this command line
+    would let the ordinary path and the environment-fault path drift into
+    invoking two different drivers, and the fault path's whole claim is that it
+    is the SAME invocation an operator makes."""
     batches_file = bed["tmp"] / "batches.json"
     batches_file.write_text(json.dumps(BATCHES))
     argv = [sys.executable, str(bed["scripts"] / "glossary_dispatch_driver.py"),
@@ -255,6 +237,17 @@ def run_driver_raw(bed, *extra, env=None):
                           env=({**os.environ, **env} if env else None))
 
 
+def run_driver(bed, *extra, expect=0, env=None):
+    """Invokes the driver as a subprocess, exactly as an operator does, and
+    returns its one stdout JSON line."""
+    proc = run_driver_raw(bed, *extra, env=env)
+    assert proc.returncode == expect, (
+        f"exit {proc.returncode}, expected {expect}\nSTDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}")
+    line = [l for l in proc.stdout.strip().splitlines() if l.startswith("{")]
+    assert len(line) == 1, f"expected exactly one JSON line, got {proc.stdout!r}"
+    return json.loads(line[0]), proc
+
+
 def plant_fragment(bed, attempt=0, bases=("established", "established")):
     """Writes a fragment WITHOUT a dispatch, for the cases that need one to
     pre-exist (a resumed attempt 0, a wiped-artifact resume). Ordinary dispatch
@@ -265,19 +258,27 @@ def plant_fragment(bed, attempt=0, bases=("established", "established")):
     return rows
 
 
+def _logged(bed, kind):
+    """The values of one KIND of line out of the shared stub log, in call order.
+    Every fake appends `<kind> <value>`, so a reader of one kind is a prefix and
+    nothing else -- and reading it in one place keeps two readers of the same log
+    from drifting into two different notions of where a value starts."""
+    prefix = kind + " "
+    return [line[len(prefix):] for line in bed["calls"].read_text().splitlines()
+            if line.startswith(prefix)]
+
+
 def companion_cwds(bed):
     """Every --cwd the fake codex turn was launched with, in order. This is the
     record of where each dispatched job was actually confined -- read from argv,
     never from the driver's source."""
-    return [l.split(" ", 1)[1] for l in bed["calls"].read_text().splitlines()
-            if l.startswith("cwd ")]
+    return _logged(bed, "cwd")
 
 
-# Gate stand-ins for the publish unit tests: publish_fragment runs whatever command
-# string it is handed through the driver's own shlex-based runner, so a real
-# canon_validate.py is not needed to pin WHERE the gate sits in the sequence.
-_PASSING_GATE = f"{sys.executable} -c pass"
-_FAILING_GATE = f"{sys.executable} -c raise(SystemExit(1))"
+def companion_targets(bed):
+    """Every artifact the fake codex turn was asked to write, in order. This is
+    the record of which DISPATCHES actually happened."""
+    return _logged(bed, "companion")
 
 
 def _has_enclosing_repo(path) -> bool:
@@ -288,11 +289,28 @@ def _has_enclosing_repo(path) -> bool:
     return proc.returncode == 0
 
 
-def companion_targets(bed):
-    """Every artifact the fake codex turn was asked to write, in order. This is
-    the record of which DISPATCHES actually happened."""
-    return [l.split(" ", 1)[1] for l in bed["calls"].read_text().splitlines()
-            if l.startswith("companion ")]
+# Gate stand-ins for the publish unit tests: publish_fragment runs whatever command
+# string it is handed through the driver's own shlex-based runner, so a real
+# canon_validate.py is not needed to pin WHERE the gate sits in the sequence.
+_PASSING_GATE = f"{sys.executable} -c pass"
+_FAILING_GATE = f"{sys.executable} -c raise(SystemExit(1))"
+
+
+@pytest.fixture
+def publish_bed(bed, tmp_path):
+    """The fixed cast every publish_fragment unit test needs, so each test spells
+    only the bytes it is actually about.
+
+    The sandbox is where the job's artifact lives and the only place the job may
+    write; `target` is the canonical RUN_DIR path a resume reads; `staging` is the
+    driver's own private name beside that target, spelled with a fixed token here
+    because these tests call publish_fragment directly and must know the name to
+    assert on it."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    return {"mod": load(bed), "sandbox": sandbox,
+            "target": bed["run_dir"] / "out_0_attempt_0.json",
+            "staging": bed["run_dir"] / ".publish_0_attempt_0_deadbeef.json"}
 
 
 # ---------------------------------------------------------------------------
@@ -812,54 +830,45 @@ def test_a_tmpdir_holding_a_space_still_dispatches(bed, tmp_path):
     assert (bed["run_dir"] / "out_0_attempt_0.json").exists()
 
 
-def test_a_symlinked_sandbox_artifact_is_never_published(bed, tmp_path):
+def test_a_symlinked_sandbox_artifact_is_never_published(publish_bed, tmp_path):
     """A confined job can still WRITE A SYMLINK inside its own sandbox: write
     confinement restricts where writes LAND, never what a link's target names."""
-    mod = load(bed)
-    sandbox = tmp_path / "sbx"
-    sandbox.mkdir()
+    mod, target, staging = (publish_bed["mod"], publish_bed["target"],
+                            publish_bed["staging"])
     elsewhere = tmp_path / "elsewhere.json"
     elsewhere.write_text(json.dumps([{"source_form": "smuggled"}]))
-    link = sandbox / "out_0_attempt_0.json"
+    link = publish_bed["sandbox"] / "out_0_attempt_0.json"
     link.symlink_to(elsewhere)
 
-    target = bed["run_dir"] / "out_0_attempt_0.json"
-    staging = bed["run_dir"] / ".publish_0_attempt_0_deadbeef.json"
     with pytest.raises(mod.DriverError):
         mod.publish_fragment(link, target, staging, _PASSING_GATE, "batch 0 attempt 0")
     assert not target.exists(), "nothing may be published from a symlinked artifact"
     assert not staging.exists(), "the staging copy must not survive a refusal"
 
 
-def test_a_published_fragment_is_the_bytes_that_passed_the_gate(bed, tmp_path):
-    mod = load(bed)
-    sandbox = tmp_path / "sbx2"
-    sandbox.mkdir()
-    src = sandbox / "out_0_attempt_0.json"
+def test_a_published_fragment_is_the_bytes_that_passed_the_gate(publish_bed):
+    mod, target, staging = (publish_bed["mod"], publish_bed["target"],
+                            publish_bed["staging"])
+    src = publish_bed["sandbox"] / "out_0_attempt_0.json"
     # Deliberately NOT this file's own json.dumps formatting: a publish that
     # re-serialized would silently normalise these bytes, and the gate would then
     # have validated an object that is not the one on disk.
     raw = b'[{"source_form":  "Alpha",\n  "basis":"transliterated"} ]'
     src.write_bytes(raw)
-    target = bed["run_dir"] / "out_0_attempt_0.json"
-    staging = bed["run_dir"] / ".publish_0_attempt_0_deadbeef.json"
     mod.publish_fragment(src, target, staging, _PASSING_GATE, "batch 0 attempt 0")
     assert target.read_bytes() == raw, "the published bytes must be verbatim"
     assert not staging.exists(), "the staging copy must be renamed away, never left behind"
 
 
-def test_bytes_that_fail_the_gate_never_reach_the_canonical_path(bed, tmp_path):
+def test_bytes_that_fail_the_gate_never_reach_the_canonical_path(publish_bed):
     """The poll gates the SANDBOX artifact, which the job still owns and can rewrite
     after passing. So what is captured is gated again, against the driver's own
     staged copy, BEFORE the rename -- gating after it would leave a refused fragment
     sitting at exactly the path a resume reads."""
-    mod = load(bed)
-    sandbox = tmp_path / "sbx3"
-    sandbox.mkdir()
-    src = sandbox / "out_0_attempt_0.json"
+    mod, target, staging = (publish_bed["mod"], publish_bed["target"],
+                            publish_bed["staging"])
+    src = publish_bed["sandbox"] / "out_0_attempt_0.json"
     src.write_bytes(b'[{"source_form": "rewritten after the gate passed"}]')
-    target = bed["run_dir"] / "out_0_attempt_0.json"
-    staging = bed["run_dir"] / ".publish_0_attempt_0_deadbeef.json"
     with pytest.raises(mod.DriverError):
         mod.publish_fragment(src, target, staging, _FAILING_GATE, "batch 0 attempt 0")
     assert not target.exists(), (
@@ -881,18 +890,15 @@ def test_a_temp_root_location_is_reported_rather_than_left_implied(bed):
     assert outside == [], f"a path outside every temp root must not warn, got {outside}"
 
 
-def test_a_publication_never_adopts_a_file_it_did_not_create(bed, tmp_path):
+def test_a_publication_never_adopts_a_file_it_did_not_create(publish_bed):
     """The staging name carries a fresh random token, so a path that already
     exists is not a stale copy of ours -- it is someone else's file at our name,
     and adopting it is how two concurrent drivers come to share one inode."""
-    mod = load(bed)
-    sandbox = tmp_path / "sbx4"
-    sandbox.mkdir()
-    src = sandbox / "out_0_attempt_0.json"
+    mod, target, staging = (publish_bed["mod"], publish_bed["target"],
+                            publish_bed["staging"])
+    src = publish_bed["sandbox"] / "out_0_attempt_0.json"
     src.write_bytes(b'[{"source_form": "Alpha"}]')
-    staging = bed["run_dir"] / ".publish_0_attempt_0_deadbeef.json"
     staging.write_bytes(b"someone else's bytes")
-    target = bed["run_dir"] / "out_0_attempt_0.json"
     with pytest.raises(OSError):
         mod.publish_fragment(src, target, staging, _PASSING_GATE, "batch 0 attempt 0")
     assert not target.exists()

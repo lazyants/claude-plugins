@@ -1192,6 +1192,26 @@ _PROBE_STANDALONE = "standalone"      # git ran, non-zero: genuinely no reposito
 _PROBE_GIT_ABSENT = "git-absent"      # git is not installed / cannot be spawned
 _PROBE_NO_VERDICT = "no-verdict"      # timed out or errored: we learned nothing
 
+# THE ONLY TWO OUTCOMES THAT MAY LICENSE A DISPATCH, and the membership of this
+# tuple is the whole confinement decision -- widening it by one member is exactly
+# the fail-open the four outcomes exist to prevent.
+#
+# A sandbox is confined iff it resolves to ITSELF under codex-companion's own
+# workspace-root algorithm (git top-level walking UP from the path, else the path
+# unchanged), read from the installed companion's lib/workspace.mjs rather than
+# assumed.
+#
+# _PROBE_NO_VERDICT is therefore ABSENT, and its absence is the fail-closed rule:
+# a bounded `git` call that timed out or could not run tells us nothing, while the
+# companion's own probe is UNBOUNDED and would still find an enclosing repository.
+# Only a probe that actually RAN may license a dispatch.
+#
+# _PROBE_GIT_ABSENT is PRESENT, and is the one no-result case that is still safe --
+# only because it is not really no-result: the companion's resolver degrades the
+# SAME way, falling back to the path itself, so there is no enclosing root for it
+# to find either.
+_CONFINED_PROBE_OUTCOMES = (_PROBE_STANDALONE, _PROBE_GIT_ABSENT)
+
 PROBE_TIMEOUT_SEC = 30
 BROKER_TEARDOWN_TIMEOUT_SEC = 5
 
@@ -1297,7 +1317,10 @@ def warn_if_under_a_temp_root(durable_root: Path, verdict_dir: Path) -> "list[st
 
 def probe_enclosing_repo(path: Path) -> str:
     """Runs the companion's OWN workspace-root probe against `path` and reports
-    WHICH outcome occurred, never a bare boolean. See sandbox_is_confined()."""
+    WHICH outcome occurred, never a bare boolean -- the polarity here is inverted
+    from the usual (absence of a repository is the SUCCESS condition), so a
+    collapsed None would score a no-verdict probe as confined and fail OPEN. See
+    _CONFINED_PROBE_OUTCOMES for how each outcome is scored."""
     try:
         proc = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
@@ -1309,24 +1332,6 @@ def probe_enclosing_repo(path: Path) -> str:
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return _PROBE_NO_VERDICT
     return _PROBE_ENCLOSED if proc.returncode == 0 else _PROBE_STANDALONE
-
-
-def sandbox_is_confined(path: Path) -> bool:
-    """True iff `path` resolves to ITSELF under codex-companion's own
-    workspace-root algorithm (git top-level walking UP from `path`, else `path`
-    unchanged) -- read from the installed companion's lib/workspace.mjs, not
-    assumed.
-
-    FAILS CLOSED on a probe that produced no verdict: a bounded `git` call that
-    timed out or could not run tells us nothing, while the companion's own probe
-    is UNBOUNDED and would still find an enclosing repository. Only a probe that
-    actually RAN may license a dispatch.
-
-    Absence of `git` is the one no-result case that is still safe, and only
-    because it is not really no-result: the companion's resolver degrades the
-    SAME way -- falling back to `path` itself -- so there is no enclosing root
-    for it to find either."""
-    return probe_enclosing_repo(path) in (_PROBE_STANDALONE, _PROBE_GIT_ABSENT)
 
 
 class DispatchSandbox:
@@ -1384,7 +1389,7 @@ class DispatchSandbox:
         # companion's own state-dir keying), which would silently miss each other.
         self.path = Path(os.path.realpath(raw))
         outcome = probe_enclosing_repo(self.path)
-        if outcome not in (_PROBE_STANDALONE, _PROBE_GIT_ABSENT):
+        if outcome not in _CONFINED_PROBE_OUTCOMES:
             self._teardown()
             fatal(
                 "refusing to dispatch: the codex sandbox is not write-confined "
