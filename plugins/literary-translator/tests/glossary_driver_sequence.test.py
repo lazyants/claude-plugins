@@ -198,9 +198,19 @@ def bed(tmp_path):
         print(json.dumps({{"success": True, "n_sources": len(entries)}}))
     ''')
 
+    # #806: the driver REFUSES to run when the durable root or the verdict
+    # directory lies under a root codex makes implicitly writable (/tmp, $TMPDIR).
+    # A pytest tmp_path is itself under $TMPDIR, so a bed that inherited the
+    # ambient TMPDIR would be refused -- correctly. Pointing TMPDIR at a directory
+    # of the bed's own puts the durable root and the session dir OUTSIDE every
+    # implicit write root, which is what an operator's machine looks like anyway,
+    # and leaves the per-launch sandboxes somewhere this test can still see.
+    sandboxes = tmp_path / "sandboxes"
+    sandboxes.mkdir()
     return {"tmp": tmp_path, "durable": durable, "scripts": scripts,
             "run_dir": run_dir, "session": tmp_path / "session",
-            "calls": calls, "outcomes": outcomes, "planted": planted}
+            "calls": calls, "outcomes": outcomes, "planted": planted,
+            "tmpdir": sandboxes}
 
 
 def load(bed):
@@ -233,8 +243,9 @@ def run_driver_raw(bed, *extra, env=None):
             "--citation-content-types", "text/html",
             "--poll-sec", "0.05", "--deadline-sec", "6",
             "--node", NODE, *extra]
+    merged = {**os.environ, "TMPDIR": str(bed["tmpdir"]), **(env or {})}
     return subprocess.run(argv, capture_output=True, text=True, timeout=180,
-                          env=({**os.environ, **env} if env else None))
+                          env=merged)
 
 
 def run_driver(bed, *extra, expect=0, env=None):
@@ -262,7 +273,13 @@ def _logged(bed, kind):
     """The values of one KIND of line out of the shared stub log, in call order.
     Every fake appends `<kind> <value>`, so a reader of one kind is a prefix and
     nothing else -- and reading it in one place keeps two readers of the same log
-    from drifting into two different notions of where a value starts."""
+    from drifting into two different notions of where a value starts.
+
+    A run refused before dispatch never creates the log at all, and "nothing was
+    logged" is exactly what such a test asserts -- so an absent file reads as the
+    empty list rather than as an error about the fixture."""
+    if not bed["calls"].exists():
+        return []
     prefix = kind + " "
     return [line[len(prefix):] for line in bed["calls"].read_text().splitlines()
             if line.startswith(prefix)]
@@ -876,18 +893,37 @@ def test_bytes_that_fail_the_gate_never_reach_the_canonical_path(publish_bed):
     assert not staging.exists(), "and the staged copy must be cleaned up"
 
 
-def test_a_temp_root_location_is_reported_rather_than_left_implied(bed):
+def test_a_temp_root_location_is_refused_for_either_protected_path(bed, monkeypatch):
     """codex's workspace-write grants /tmp and $TMPDIR on top of the workspace root
     (measured against `codex sandbox` directly), so a durable root or verdict dir
-    there is still writable by a dispatched job and no --cwd changes it. pytest's
-    own tmp_path is under $TMPDIR, which is precisely why this is warned and not
-    refused -- and why the warning has to be asserted rather than assumed."""
+    there stays writable by a dispatched job whatever --cwd this driver passes.
+    The boundary cannot be obtained, so the run does not start: proceeding would
+    advertise a confinement over the two paths this pass most needs protected."""
     mod = load(bed)
-    warned = mod.warn_if_under_a_temp_root(bed["durable"], bed["session"])
-    assert set(warned) == {"durable root", "verdict directory"}, (
-        f"a bed under pytest's tmp_path is under $TMPDIR; both should warn, got {warned}")
-    outside = mod.warn_if_under_a_temp_root(Path("/"), Path("/"))
-    assert outside == [], f"a path outside every temp root must not warn, got {outside}"
+    # The helper reads TMPDIR from the environment at call time, and this test runs
+    # IN PROCESS -- so without this the ambient $TMPDIR (which pytest's tmp_path
+    # lives under) makes every path below a temp-root path, and the negative case
+    # could not exist.
+    monkeypatch.setenv("TMPDIR", str(bed["tmpdir"]))
+    outside = bed["tmpdir"].parent / "elsewhere"
+    for droot, vdir, who in ((bed["tmpdir"] / "book", outside, "durable root"),
+                             (outside, bed["tmpdir"] / "session", "verdict directory")):
+        with pytest.raises(SystemExit) as exc:
+            mod.refuse_if_under_a_temp_root(droot, vdir)
+        assert exc.value.code == 2, f"{who}: an environment refusal exits 2"
+    # ...and a layout outside every implicit write root is not refused.
+    mod.refuse_if_under_a_temp_root(outside, outside / "session")
+
+
+def test_a_real_run_under_a_temp_root_never_starts(bed):
+    """The OPERATIONAL call, not just the helper: deleting it from main() has to go
+    red somewhere. Driving with TMPDIR left at the bed's durable root puts the
+    durable root under an implicit write root exactly as an ordinary $TMPDIR would."""
+    proc = run_driver_raw(bed, env={"TMPDIR": str(bed["durable"].parent)})
+    assert proc.returncode == 2, (
+        f"a durable root under an implicit write root must refuse\n{proc.stderr[-800:]}")
+    assert "refusing to run" in proc.stderr, proc.stderr[-600:]
+    assert companion_cwds(bed) == [], "nothing may be dispatched"
 
 
 def test_a_publication_never_adopts_a_file_it_did_not_create(publish_bed):
@@ -923,10 +959,3 @@ def test_a_sandbox_that_cannot_be_removed_is_named_rather_than_leaked(bed, monke
     shutil.rmtree(survivor, ignore_errors=True)
 
 
-def test_a_real_run_reports_a_temp_root_location(bed):
-    """The operational call, not just the helper. A pytest bed is itself under
-    $TMPDIR, so an ordinary drive must print the warning -- deleting the call in
-    main() has to go red somewhere."""
-    _out, proc = run_driver(bed)
-    assert "WARNING" in proc.stderr and "codex makes writable" in proc.stderr, (
-        f"a run whose durable root is under $TMPDIR must say so: {proc.stderr[-800:]}")

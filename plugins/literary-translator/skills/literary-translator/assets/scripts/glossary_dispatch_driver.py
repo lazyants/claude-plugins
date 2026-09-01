@@ -87,8 +87,10 @@ THE TEMP ROOTS ARE THE ONE EXCEPTION, and it is measured rather than assumed: un
 write to a path in $HOME is refused). So a `durable_root` -- or a `verdict_dir` -- that
 itself lies under a temp root is still writable by a dispatched job, and no `--cwd` this
 process can pass changes that: codex's own switch for excluding the temp roots would
-exclude the sandbox too, which lives under TMPDIR. `warn_if_under_a_temp_root()` says so
-at the start of every run rather than leaving it implied.
+exclude the sandbox too, which lives under TMPDIR. `refuse_if_under_a_temp_root()`
+therefore REFUSES such a run outright, before any work -- the boundary cannot be
+obtained there, and proceeding would advertise a confinement over the two paths whose
+integrity the rest of this file exists to protect.
 
 THE FALLBACK IS NOT RETIRED. `pipeline()` remains a shipped, documented path for this pass.
 Per #436/#516's ordering rule, a fallback is not removed before its replacement has carried
@@ -1267,33 +1269,36 @@ def implicit_write_roots() -> "list[Path]":
     return roots
 
 
-def warn_if_under_a_temp_root(durable_root: Path, verdict_dir: Path) -> "list[str]":
-    """The one confinement case NO `--cwd` can reach, reported rather than refused.
+def refuse_if_under_a_temp_root(durable_root: Path, verdict_dir: Path) -> None:
+    """The one confinement case no `--cwd` can reach -- REFUSED, not disclosed.
 
     Everything else here confines a job to its own throwaway directory. That
     argument holds for every location EXCEPT one already inside a root codex makes
     writable implicitly: a `durable_root` there is still fully model-writable --
     `scripts/`, `canon.json`, this file's own deployed copy -- and a `verdict_dir`
-    there is writable too, which matters more, because that directory is the
-    AUTHORIZATION channel and `resolve_verdict_dir` places it outside the durable
+    there is writable too, which is worse, because that directory is the
+    AUTHORIZATION channel and `resolve_verdict_dir()` places it outside the durable
     root precisely so a dispatched job cannot reach it.
 
-    WARNED, NOT REFUSED, and the distinction from the sandbox's own refusal is
-    worth stating because the two look alike. `DispatchSandbox` refuses because a
-    cheap correct alternative exists and an unconfined sandbox would misreport
-    itself. Here there is no alternative for this process to take: codex's own
-    switch for excluding the temp roots would also exclude the sandbox, which
-    lives under TMPDIR, leaving the job unable to write the artifact at all. So
-    refusing would buy a refusal, not a boundary -- and it would forbid a layout
-    this plugin's own test beds legitimately use, since a pytest `tmp_path` is
-    itself under `$TMPDIR`. What is owed here is an accurate statement, made
-    loudly, once, at the start of the run.
+    THIS SHIPPED AS A WARNING FIRST, and the reason it no longer is belongs here
+    rather than in a commit message. The argument for warning was that no
+    alternative obtains the boundary -- codex's own switch for excluding the temp
+    roots would exclude the per-launch sandbox too, which lives under TMPDIR -- and
+    that refusing would forbid a layout this plugin's own test beds used, since a
+    pytest `tmp_path` is under `$TMPDIR`. The first half is true and is why this
+    function exists at all; the second half was a reason about the TESTS, and a
+    test fixture is not a reason to weaken a production check. The fixtures now
+    point `TMPDIR` at a directory of their own, which is what a real operator's
+    machine looks like anyway: a durable root is not normally inside the temp dir.
 
-    Compared CANONICALLY on both sides: macOS resolves `/tmp` to `/private/tmp`
-    and `$TMPDIR` under `/var/folders` to `/private/var/folders`, so a lexical
-    test would miss the very case it is for. Returns what it warned about, so a
-    caller (and a test) can see the decision rather than infer it from stderr."""
-    warned = []
+    So it fails closed. That the boundary cannot be obtained here is exactly why
+    the run must not start: proceeding would advertise a confinement the dispatched
+    job does not have, over the two paths whose integrity the rest of this file is
+    built to protect.
+
+    Compared CANONICALLY on both sides: macOS resolves `/tmp` to `/private/tmp` and
+    `$TMPDIR` under `/var/folders` to `/private/var/folders`, so a lexical test
+    would miss the very case it is for."""
     temp_roots = []
     for raw in implicit_write_roots():
         try:
@@ -1304,15 +1309,16 @@ def warn_if_under_a_temp_root(durable_root: Path, verdict_dir: Path) -> "list[st
         resolved = Path(os.path.realpath(str(path)))
         for temp_root in temp_roots:
             if resolved == temp_root or temp_root in resolved.parents:
-                log(f"WARNING: the {label} {resolved} lies under {temp_root}, which "
-                    f"codex makes writable under workspace-write whatever this driver "
-                    f"passes as --cwd. A dispatched job can still write there, so the "
-                    f"per-launch sandbox does not confine it away from that path. Move "
-                    f"it outside the temp roots -- durable state is meant to outlive a "
-                    f"reboot in any case.")
-                warned.append(label)
-                break
-    return warned
+                fatal(
+                    f"refusing to run: the {label} {resolved} lies under {temp_root}, "
+                    f"which codex makes writable under workspace-write whatever this "
+                    f"driver passes as --cwd. A dispatched job could still write "
+                    f"there, so the per-launch sandbox would confine it away from "
+                    f"everything EXCEPT the paths this pass most needs protected. "
+                    f"Move it outside the temp roots -- durable state is meant to "
+                    f"outlive a reboot in any case -- or set TMPDIR elsewhere.",
+                    exit_code=2, offending=label, path=str(resolved),
+                    implicit_write_root=str(temp_root))
 
 
 def probe_enclosing_repo(path: Path) -> str:
@@ -2544,8 +2550,8 @@ def main(argv=None) -> int:
 
     durable_root = DURABLE_ROOT
     verdict_dir = resolve_verdict_dir(args.verdict_dir, durable_root)
-    # The one layout no --cwd can confine, reported once (see the function).
-    warn_if_under_a_temp_root(durable_root, verdict_dir)
+    # The one layout no --cwd can confine: refused before any work (see function).
+    refuse_if_under_a_temp_root(durable_root, verdict_dir)
     template = resolve_template(args.plugin_root)
     max_retries = template_max_citation_retries(read_template_text(template))
 

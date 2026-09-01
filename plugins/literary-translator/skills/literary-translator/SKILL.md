@@ -1777,9 +1777,9 @@ against `codex sandbox`, where a write to each succeeds from a workspace elsewhe
 a write into `$HOME` is refused. So a `durable_root`, or a `--verdict-dir`, that itself
 lies under a temp root stays writable by a dispatched job, and no `--cwd` closes it:
 codex's own switch for excluding the temp roots would exclude the per-launch sandbox too.
-The driver prints a warning naming whichever of the two is affected at the start of every
-run. Keep both outside `/tmp` and `$TMPDIR` — durable state is meant to outlive a reboot
-in any case.
+The driver **refuses to run** when either lies under a temp root, before any work and
+with nothing recorded. Keep both outside `/tmp` and `$TMPDIR` — durable state is meant to
+outlive a reboot in any case — or point `TMPDIR` elsewhere.
 
 Two further consequences worth knowing before a run. **`TMPDIR` must sit outside every git
 working tree** — inside one, codex would resolve its write root to that repository

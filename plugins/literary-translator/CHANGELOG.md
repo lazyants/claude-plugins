@@ -44,9 +44,12 @@ verdict nonces and the merge decision.
   `codex sandbox`, where a write to each succeeds from a workspace elsewhere while a write into
   `$HOME` is refused. A `durable_root` or `--verdict-dir` that itself lies under a temp root
   therefore stays writable by a dispatched job, and no `--cwd` closes it: excluding the temp
-  roots would exclude the per-launch sandbox too, which lives under `TMPDIR`. Warned loudly at
-  the start of every run rather than refused — refusing would buy a refusal and not a boundary,
-  and would forbid a layout this plugin's own test beds legitimately use.
+  roots would exclude the per-launch sandbox too, which lives under `TMPDIR`. The run is
+  **refused** before any work, with nothing recorded. This shipped as a warning first, on the
+  argument that refusing would forbid a layout this plugin's own test beds used; the MR bot was
+  right that a test fixture is not a reason to weaken a production check, and the beds now point
+  `TMPDIR` at a directory of their own — which is what an operator's machine looks like anyway,
+  a durable root not normally living inside the temp dir.
 - **What passed the gate and what is published are now the same object.** The poll gates the
   artifact inside the sandbox, which the job still owns and can rewrite after passing — so the
   captured bytes are gated again against a driver-owned staging copy in `RUN_DIR` and only then
