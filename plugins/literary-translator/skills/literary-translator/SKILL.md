@@ -1737,7 +1737,19 @@ outright, as is one that is not owned by you and private.
    why. Every `reason` the Workflow path uses appears unchanged, and the driver
    may also report failures of its own, because it does work the Workflow cannot —
    among them a repair that was refused, an approval record that could not be
-   written, and prose from a step that raised. A sandbox that cannot be confined
+   written, and prose from a step that raised. Since 1.76.1 the driver also
+   watches the job it launched: one codex-companion records as `failed` or
+   `cancelled` — the batch's ordinary dispatch or a per-item repair alike; the
+   observed case is the model at capacity — ends the batch at once as
+   `reason: "codex-job-failed"`, with the companion's own message in `jobDetail`
+   and the job's id in `jobId`, instead of polling to the deadline. That batch is
+   terminal for the run exactly as `glossary-pass-null` is, so recover the same
+   way once the cause is gone. An ordinary dispatch the companion records
+   `completed` without the fragment ends the wait at once as `glossary-pass-null`
+   with `jobStatus: "completed"`; a repair job that completes without writing
+   keeps `repair-never-written` and its whole-fragment fallback. A status the
+   companion cannot answer is unknown, never a failure — the fragment stays
+   authoritative. A sandbox that cannot be confined
    is NOT among them: that is an environment fault, so the driver exits 2 having
    written no state at all, and the same command re-run after fixing `TMPDIR`
    resumes where it stopped.
