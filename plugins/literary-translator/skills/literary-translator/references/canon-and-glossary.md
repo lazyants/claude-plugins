@@ -1068,6 +1068,45 @@ the skeptic pass (`canon_sha256`) and of `suspicion_scan.py`'s worklist
 freshness gate: run a correction BETWEEN passes, not into a live one. (That was
 equally true of the hand-edit it replaces.)
 
+**Sizing a canon change BEFORE you apply it.** `compute_used_terms_hash` reads
+`canon.json` from whatever root it is handed, so the segments a *pending*
+change would re-stale are computable with no new tooling and nothing written.
+Put the post-merge `canon.json` in a scratch directory beside a symlink to the
+real `segments/`, and compare the field per segment against the live root:
+
+```
+CAND=$(mktemp -d)
+ln -s "$DURABLE/segments" "$CAND/segments"
+#  ... write the candidate (post-merge) canon to "$CAND/canon.json" ...
+for pack in "$DURABLE"/segments/segpack_*.json; do
+  seg=$(basename "$pack" .json); seg=${seg#segpack_}
+  live=$(python3 "$DURABLE/scripts/cache_key.py" --field used_terms_hash \
+           --seg "$seg" --durable-root "$DURABLE") || exit 1
+  cand=$(python3 "$DURABLE/scripts/cache_key.py" --field used_terms_hash \
+           --seg "$seg" --durable-root "$CAND") || exit 1
+  [ "$live" = "$cand" ] || echo "$seg"
+done
+```
+
+The candidate root needs nothing else — no `profile.yml`, no ownership marker,
+no `manifest.json`, no `scripts/` of its own — because `used_terms_hash` is a
+per-segment field, and `compute_one_field` loads the profile only for a global
+one. **Check both exit statuses**, as the `|| exit 1` above does. A
+`cache_key.py` that fails — a mistyped `$CAND`, a segpack the scratch root
+cannot see — writes to stderr and exits non-zero; a loop that discards
+that status compares a real digest against the empty string and prints EVERY
+segment. A broken run and a near-total re-stale then read identically, and a
+near-total re-stale is the ordinary result of a large merge, so nothing about
+the output looks wrong.
+
+The same two runs are also how you size *batching*. What batching two pending
+canon changes saves over applying them one at a time is AT LEAST the OVERLAP of
+their affected sets — a segment in only one set owes its re-review either way.
+Run the loop once per candidate batch and intersect the outputs. (It is only
+ever *more* than the overlap when the two changes partly cancel: the hash sees
+the FINAL projection, so an entry added and then corrected back re-stales
+nothing when the two are merged together.)
+
 **What a dismissal costs.** `compute_used_terms_hash` projects `entries{}`
 only, and a dismissal touches none of it — so no translate SEGMENT re-stales,
 unlike `correct`/`remove`. That is NOT the same as costing nothing: a
