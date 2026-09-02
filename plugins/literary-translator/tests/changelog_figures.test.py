@@ -87,6 +87,7 @@ responsibility, not something asserted here.
 """
 
 import ast
+import importlib.util
 import re
 from collections import namedtuple
 from decimal import Decimal
@@ -398,41 +399,48 @@ def _local_dict_len(filename, funcname, varname):
 # template's own formula rather than restated here -- declaring it a second time
 # would make this file the third copy of one number, which is the shape #580 was
 # filed about.
+def _glossary_driver_deadline_default():
+    """The glossary driver's own `--deadline-sec` default, read off its argument
+    parser rather than regexed out of the source: the parser is what an
+    operator's bare invocation actually gets, so it is the authoritative answer
+    to "how long does the driver wait"."""
+    path = SCRIPTS / "glossary_dispatch_driver.py"
+    spec = importlib.util.spec_from_file_location(
+        f"gdd_figures_{abs(hash(str(path)))}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.build_arg_parser().get_default("deadline_sec")
+
+
 FIGURES = [
-    # ROTATED TO 1.76.0 (#806 -- a dispatched codex job can no longer write under
-    # the durable root). ONE row, and the reasoning for what is and is not
-    # declarable is the same each rotation reaches.
+    # ROTATED TO 1.76.1 (#809 -- a codex job that dies at launch no longer costs
+    # its batch the whole poll deadline). TWO rows, both the same quantity: the
+    # driver's default `--deadline-sec`, stated once in seconds and once in
+    # minutes. Both are read off the driver's own parser, since the release is
+    # about what happens INSIDE that wait, not about its length -- the entry
+    # says the deadline is unchanged, and these rows are what make that true.
     #
-    # The 1.75.0 rotation this replaces, kept as its own record: DELIBERATELY
-    # EMPTY. Every numeral in the #800 entry was a field measurement taken on a
-    # private 22-batch, 850-candidate volume this repository does not contain,
-    # and its one piece of arithmetic was left as the template's own formula
-    # rather than multiplied out.
-    #
-    # This entry states one number the tree CAN answer: how many `style_bible.md`
-    # references the glossary prompts were carrying relatively. The tree answers
-    # it by counting the absolute form now in the template, which is what the
-    # release actually changed -- not by re-counting the word in the changelog.
+    # The 1.76.0 rotation this replaces, kept as its own record: ONE row, the
+    # count of `style_bible.md` references in the glossary template, derived by
+    # counting the absolute form the release introduced.
     #
     # Its other numerals are not measurements in this file's sense: the version,
-    # the issue numbers (#806, #409), and the release date. The entry's claim
-    # that both edited files are `PLUGIN_BUNDLE_MEMBERS` is spelled without a
-    # count on purpose -- canon_senses_bundle.test.py already gates that tuple's
-    # membership against the reference doc harder than a row here could, and
-    # restating a total would be the second copy that gate exists to prevent.
-    # "zero" (the measured population of hostile jobs) is a field fact about the
-    # world, not a quantity derived from this tree, so there is nothing here to
-    # re-derive it against.
+    # the issue number (#809), and the release date. "three seconds",
+    # "11-batch", "3 batches" and "~135 minutes" are field measurements from the
+    # issue's own live run on a private volume this repository does not contain,
+    # so there is nothing in the tree to re-derive them against.
     #
     # The gate reads the NEWEST entry only, by design: a released entry's figures
     # are frozen by the release rather than re-checked forever.
     Figure(
-        phrase="3 `style_bible.md` references",
-        value=3,
-        derive=lambda: (
-            PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
-            / "glossary-pass-wf.template.js"
-        ).read_text(encoding="utf-8").count('ROOT + "/style_bible.md'),
+        phrase="the whole 2700 s poll",
+        value=2700,
+        derive=_glossary_driver_deadline_default,
+    ),
+    Figure(
+        phrase="the full 45 minutes",
+        value=45,
+        derive=lambda: _glossary_driver_deadline_default() // 60,
     ),
 ]
 
@@ -440,7 +448,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.76.0"
+FIGURES_VERSION = "1.76.1"
 
 
 def _newest_entry():

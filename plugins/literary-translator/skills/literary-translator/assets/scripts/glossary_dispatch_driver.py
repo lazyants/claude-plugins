@@ -1562,8 +1562,8 @@ def publish_fragment(sandbox_path: Path, fragment_path: Path, staging_path: Path
 
 
 def launch_codex(*, companion: str, node_bin: str, prompt: str, effort: str,
-                 sandbox_root: Path, tmpdir: Path, label: str) -> None:
-    """Fires one background codex turn for a batch.
+                 sandbox_root: Path, tmpdir: Path, label: str) -> str:
+    """Fires one background codex turn for a batch and returns its jobId (#809).
 
     The argv mirrors codex_job.py's own launch() rather than a reduced guess:
 
@@ -1579,7 +1579,13 @@ def launch_codex(*, companion: str, node_bin: str, prompt: str, effort: str,
     why a subdirectory of the durable root does not. The caller has already proved
     that property of this path before reaching here; this function does not
     re-derive it, and must never be handed a root that has not been through
-    DispatchSandbox."""
+    DispatchSandbox.
+
+    The jobId is what lets the caller ask codex-companion about THIS turn later
+    (read_job_status) instead of only ever watching the artifact it may or may
+    not write. A launch that prints no usable jobId is a launch that cannot be
+    watched, so it is refused here rather than handed back to poll blind --
+    the same posture codex_job.py's own launch() takes."""
     prompt_file = tmpdir / f"prompt-{label}.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
     argv = [node_bin, companion, "task", "--background", "--json", "--write", "--fresh"]
@@ -1595,6 +1601,21 @@ def launch_codex(*, companion: str, node_bin: str, prompt: str, effort: str,
             f"codex launch returned {proc.returncode} for {label}",
             label=label, launch_stderr=(proc.stderr or "")[-1000:],
         )
+    # Empty, malformed and non-object stdout all take the same refusal path --
+    # none of them names a job this driver could later ask codex-companion about.
+    try:
+        obj = json.loads(proc.stdout)
+    except ValueError:
+        obj = None
+    job_id = obj.get("jobId") if isinstance(obj, dict) else None
+    if not isinstance(job_id, str) or not job_id:
+        raise DriverError(
+            f"codex launch printed no jobId for {label}",
+            label=label, launch_stdout=(proc.stdout or "")[-1000:],
+            launch_stderr=(proc.stderr or "")[-1000:],
+        )
+    log(f"{label}: codex job {job_id} queued")
+    return job_id
 
 
 # ---------------------------------------------------------------------------
@@ -1741,21 +1762,6 @@ def splice_repair(snapshot_rows: list, failed_positions: "list[int]",
 # POLLING
 # ---------------------------------------------------------------------------
 
-def poll_until(predicate, *, deadline_sec: float, poll_sec: float, label: str) -> bool:
-    """Local bounded poll. Replaces the template's chunked-wait apparatus
-    wholesale: that machinery exists because a Bash tool call is clamped at
-    600s and an agent's wait had to be split across several calls to stay under
-    it. A local process has no such clamp, so none of it is reimplemented here."""
-    deadline = time.monotonic() + deadline_sec
-    while True:
-        if predicate():
-            return True
-        if time.monotonic() >= deadline:
-            log(f"{label}: deadline of {deadline_sec}s expired")
-            return False
-        time.sleep(min(poll_sec, max(0.0, deadline - time.monotonic())))
-
-
 class Ctx:
     """Everything the per-batch machine needs, resolved once."""
 
@@ -1785,6 +1791,114 @@ class Ctx:
 def _cmd_ok(cmd: str, timeout: float) -> bool:
     code, _out, _err = run_template_cmd(cmd, timeout=timeout)
     return code == 0
+
+
+_JOB_TERMINAL = frozenset(("completed", "failed", "cancelled"))
+_STATUS_TIMEOUT = 120.0
+
+
+def read_job_status(*, companion: str, node_bin: str, job_id: str, sandbox_root: Path,
+                    timeout: float) -> "tuple[str | None, str | None]":
+    """Asks codex-companion for one job's recorded status, with the SAME --cwd it
+    was launched with (job records are keyed by the workspace root codex-companion
+    resolves from --cwd -- a mismatched sandbox_root would ask about a workspace
+    that never held this job).
+
+    Returns (status, detail). `status` is job["status"] when that is a string.
+    `detail` prefers job["errorMessage"] (a non-empty/non-blank string) and falls
+    back to job["summary"]; both are the companion's own words, never this
+    driver's -- the observed case is a runner exit landing in `summary`
+    ("Selected model is at capacity...") while a thrown error lands in
+    `errorMessage`.
+
+    ANY failure here -- a spawn error, the timeout, a non-zero exit, unparsable
+    stdout, or a missing/non-dict `job` -- returns (None, None): UNKNOWN, never a
+    fact about the job. The artifact poll stays in charge on an unknown read; a
+    status this driver cannot read must never turn into a failure verdict."""
+    argv = [node_bin, companion, "status", job_id, "--json", "--cwd", str(sandbox_root)]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
+    if proc.returncode != 0:
+        return None, None
+    try:
+        obj = json.loads(proc.stdout)
+    except ValueError:
+        return None, None
+    job = obj.get("job") if isinstance(obj, dict) else None
+    if not isinstance(job, dict):
+        return None, None
+    status = job.get("status")
+    status = status if isinstance(status, str) else None
+    err = job.get("errorMessage")
+    summary = job.get("summary")
+    if isinstance(err, str) and err.strip():
+        detail = err
+    elif isinstance(summary, str) and summary.strip():
+        detail = summary
+    else:
+        detail = None
+    return status, detail
+
+
+def wait_for_artifact(ctx: Ctx, *, ready, job_id: str, sandbox_root: Path,
+                      label: str) -> dict:
+    """Local bounded poll for the artifact a dispatched job writes, watching the
+    job's own recorded status alongside it (#809). Replaces the template's
+    chunked-wait apparatus wholesale, as the plain bounded poll it supersedes
+    did: that apparatus exists because a Bash tool call is clamped at 600s and
+    an agent's wait had to be split across several calls to stay under it. A
+    local process has no such clamp, so none of it is reimplemented here.
+
+    WHY THE STATUS READ EXISTS AT ALL: a job codex-companion has already recorded
+    completed/failed/cancelled is a turn that is OVER -- nothing can write the
+    artifact after it -- so waiting out the rest of the deadline on an artifact
+    check alone buys nothing. This reads the job's own status alongside the
+    artifact check so a job that failed at launch (capacity, auth, a thrown
+    error) ends the wait the moment codex-companion says so, not at the deadline.
+
+    THE ARTIFACT IS RE-CHECKED BEFORE EVERY NOT-READY RETURN. The status probe
+    itself takes real time, and a job can write its artifact and then go
+    terminal, so the artifact check at the top of the loop can predate the write
+    on either exit path -- an artifact that exists wins over the job record and
+    over the clock.
+
+    The probe is never started with no time left (`if remaining > 0`) and never
+    given more than the time left (`min(_STATUS_TIMEOUT, remaining)`), so the
+    wait cannot overrun its deadline by more than one probe that was itself
+    bounded by it.
+
+    Returns {"ready": bool, "jobStatus": str | None, "jobDetail": str | None}.
+    `ready`, `job_id` and `sandbox_root` all name the SAME turn: the artifact
+    predicate the caller built and the job this function watches while it waits."""
+    deadline = time.monotonic() + ctx.deadline_sec
+    while True:
+        if ready():
+            return {"ready": True, "jobStatus": None, "jobDetail": None}
+        remaining = deadline - time.monotonic()
+        status = detail = None
+        if remaining > 0:
+            status, detail = read_job_status(
+                companion=ctx.companion, node_bin=ctx.node_bin, job_id=job_id,
+                sandbox_root=sandbox_root, timeout=min(_STATUS_TIMEOUT, remaining))
+            remaining = deadline - time.monotonic()
+        if status in _JOB_TERMINAL or remaining <= 0:
+            if ready():
+                return {"ready": True, "jobStatus": None, "jobDetail": None}
+            if status in _JOB_TERMINAL:
+                log(f"{label}: codex job {job_id} ended {status} without the "
+                    f"artifact" + (f": {detail}" if detail else ""))
+            else:
+                log(f"{label}: deadline of {ctx.deadline_sec}s expired")
+            return {"ready": False, "jobStatus": status, "jobDetail": detail}
+        time.sleep(min(ctx.poll_sec, remaining))
+
+
+def _job_failed(outcome: dict) -> bool:
+    """The job did not run to completion -- an environmental fault, never a fact
+    about the candidates."""
+    return outcome["jobStatus"] in ("failed", "cancelled")
 
 
 def advance_batch(ctx: Ctx, batch: dict, attempt: int, resumed: bool,
@@ -1835,22 +1949,31 @@ def advance_batch(ctx: Ctx, batch: dict, attempt: int, resumed: bool,
                 {"key": "stagecheck", "fn": "sandboxCheckBatchCmd",
                  "args": [str(staging), idx]},
             ])
-            launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
-                         prompt=strip_routing_line(dispatch["prompt"]), effort=ctx.effort,
-                         sandbox_root=sandbox.path, tmpdir=ctx.tmpdir,
-                         label=f"dispatch-{idx}-{attempt}")
+            job_id = launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
+                                  prompt=strip_routing_line(dispatch["prompt"]),
+                                  effort=ctx.effort, sandbox_root=sandbox.path,
+                                  tmpdir=ctx.tmpdir, label=f"dispatch-{idx}-{attempt}")
 
             # 2. POLL -- the SAME --check-batch command the dispatch prompt told
             #    codex to self-check with, so readiness here and readiness there
-            #    are one question asked once, spliced from one builder.
-            ready = poll_until(lambda: _cmd_ok(dispatch["check"], 300),
-                               deadline_sec=ctx.deadline_sec, poll_sec=ctx.poll_sec,
-                               label=f"batch {idx} attempt {attempt}")
-            if not ready:
-                # Unchanged reason string: the recovery docs key off it.
-                return {"state": "failed", "reason": "glossary-pass-null",
+            #    are one question asked once, spliced from one builder. Watches
+            #    the job's own recorded status alongside it (#809), so a job
+            #    codex-companion marks failed/cancelled -- or completes without
+            #    writing -- ends the wait without burning the rest of the deadline.
+            outcome = wait_for_artifact(
+                ctx, ready=lambda: _cmd_ok(dispatch["check"], 300), job_id=job_id,
+                sandbox_root=sandbox.path, label=f"batch {idx} attempt {attempt}")
+            if not outcome["ready"]:
+                # Unchanged reason string: the recovery docs key off it. A job
+                # codex-companion recorded failed/cancelled gets its own reason,
+                # naming the job, instead of the generic null-artifact one.
+                return {"state": "failed",
+                        "reason": "codex-job-failed" if _job_failed(outcome)
+                                  else "glossary-pass-null",
                         "batchIndex": idx, "attempt": attempt,
-                        "fragmentPath": str(fragment_path)}
+                        "fragmentPath": str(fragment_path), "jobId": job_id,
+                        "jobStatus": outcome["jobStatus"],
+                        "jobDetail": outcome["jobDetail"]}
 
             # 3. PUBLISH -- capture, re-gate the captured bytes, then rename onto
             #    the canonical path every later step names. Inside the sandbox
@@ -1981,14 +2104,26 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
             {"key": "prompt", "fn": "batchRepairPrompt",
              "args": [batch, attempt, failed_rows, str(repair_path)]},
         ])
-        launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
-                     prompt=strip_routing_line(repair["prompt"]), effort=ctx.effort,
-                     sandbox_root=sandbox.path, tmpdir=ctx.tmpdir,
-                     label=f"repair-{idx}-{attempt}")
+        job_id = launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
+                              prompt=strip_routing_line(repair["prompt"]),
+                              effort=ctx.effort, sandbox_root=sandbox.path,
+                              tmpdir=ctx.tmpdir, label=f"repair-{idx}-{attempt}")
 
-        ok = poll_until(repair_path.exists, deadline_sec=ctx.deadline_sec,
-                        poll_sec=ctx.poll_sec, label=f"batch {idx} repair {attempt}")
-        if not ok:
+        outcome = wait_for_artifact(ctx, ready=repair_path.exists, job_id=job_id,
+                                    sandbox_root=sandbox.path,
+                                    label=f"batch {idx} repair {attempt}")
+        if not outcome["ready"]:
+            if _job_failed(outcome):
+                # TERMINAL for the batch, exactly like the dispatch failure. The
+                # repair_invalid fallback below spends the reserved rung on a
+                # whole-fragment regeneration and folds the reason into
+                # rejection prose -- right for a repair turn that ran and wrote
+                # nothing, wrong for a job that never ran: that is a retry of an
+                # environmental fault, and it would lose the job's own diagnostics.
+                return {"state": "failed", "reason": "codex-job-failed",
+                        "batchIndex": idx, "attempt": attempt, "jobId": job_id,
+                        "jobStatus": outcome["jobStatus"],
+                        "jobDetail": outcome["jobDetail"]}
             return {"state": "repair_invalid", "reason": "repair-never-written"}
         try:
             repair_rows = json.loads(read_sandbox_artifact(
@@ -2231,6 +2366,17 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
                     attempts_used=attempt + 1)
             repaired = run_repair(ctx, batch, attempt, result["failedPositions"],
                                   Path(result["snapshotPath"]))
+            if repaired["state"] == "failed":
+                # A job codex-companion recorded failed/cancelled during repair
+                # settles the batch at its CURRENT rung -- the one whose repair
+                # failed -- exactly as the `kind == "failed"` branch above settles
+                # an ordinary dispatch failure. Reached here, not there, because
+                # run_repair() returns this rather than raising: the rung it
+                # reserved must NOT be advanced past for a job that never ran.
+                st.update(status="failed", attempt=attempt, **{
+                    k: v for k, v in repaired.items()
+                    if k not in ("state", "attempt", "status")})
+                return st
             # The rung is RESERVED either way: a valid repair writes its spliced
             # fragment there, an invalid one regenerates there. Never attempt+2.
             attempt += 1

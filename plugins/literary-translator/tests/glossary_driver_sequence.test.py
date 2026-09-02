@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -137,21 +138,54 @@ def bed(tmp_path):
     # default, because a repair turn that never writes is a real case.
     planted = tmp_path / "planted.json"
     planted.write_text(json.dumps({}))
+    # #809: codex-companion's own job record, read back through a `status
+    # <jobId>` call the same way codex_job.py already reads W5's. Keyed by
+    # artifact name; a record present for a key means the ordinary `task` turn
+    # must write NOTHING for it -- the job ending "failed" or "completed" with
+    # no artifact is the whole point, and a stub that wrote the fragment anyway
+    # would let the artifact poll paper over the status this suite exercises.
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(json.dumps({}))
     _write(tmp_path / "companion.mjs", f'''
         import fs from "node:fs";
         const args = process.argv.slice(2);
-        const pf = args[args.indexOf("--prompt-file") + 1];
         const cwd = args[args.indexOf("--cwd") + 1];
+        const jobs = JSON.parse(fs.readFileSync({str(jobs)!r}, "utf8"));
+        const fresh = {json.dumps(_default_rows())};
+
+        // #809: codex-companion is TWO commands, not one -- `task` launches a
+        // background job and `status <jobId>` reads its record back. Both argvs
+        // carry --cwd, so the switch can run before either branch needs it.
+        if (args[0] === "status") {{
+          const jobId = args[1];
+          const key = jobId.startsWith("job-") ? jobId.slice(4) : jobId;
+          fs.appendFileSync({str(calls)!r}, "status " + jobId + "\\n");
+          const record = jobs[key];
+          if (record && record.unanswerable) {{
+            // The artifact appears ONLY through this failing status call, so a
+            // test can prove the status branch actually ran rather than the
+            // artifact poll alone.
+            fs.writeFileSync(cwd + "/" + key, JSON.stringify(fresh));
+            process.exit(1);
+          }}
+          const body = {{status: (record && record.status) || "running"}};
+          if (record && record.summary) body.summary = record.summary;
+          if (record && record.errorMessage) body.errorMessage = record.errorMessage;
+          console.log(JSON.stringify({{job: body}}));
+          process.exit(0);
+        }}
+
         fs.appendFileSync({str(calls)!r}, "cwd " + cwd + "\\n");
+        const pf = args[args.indexOf("--prompt-file") + 1];
         const prompt = fs.readFileSync(pf, "utf8");
         const plan = JSON.parse(fs.readFileSync({str(planted)!r}, "utf8"));
-        const fresh = {json.dumps(_default_rows())};
         // #806: the artifact goes inside the sandbox this job was launched with,
         // so the target is --cwd plus the basename the prompt names. Matching the
         // WHOLE path out of the prompt would be wrong twice over: the self-check
         // command names it single-quoted, and a sandbox path holding a space
         // (a TMPDIR the operator chose) has no unambiguous regex at all.
         const names = prompt.match(/(?:out|repair)_\\d+_attempt_\\d+\\.json/g) || [];
+        let firstKey = null;
         for (const key of new Set(names)) {{
           const target = cwd + "/" + key;
           // CONTRACT-SHAPED, like every other stub here: a real codex turn writes
@@ -164,10 +198,16 @@ def bed(tmp_path):
               " -- the sandbox --cwd and the prompt's out-path disagree");
           }}
           fs.appendFileSync({str(calls)!r}, "companion " + key + "\\n");
+          if (firstKey === null) firstKey = key;
+          // #809: a key with a job record means codex-companion is being told to
+          // report that JOB's own outcome, not to have written anything for it --
+          // an ordinary task that also silently wrote the fragment would hide the
+          // failure this suite drives at.
+          if (jobs[key]) continue;
           const rows = plan[key] || (key.startsWith("out_") ? fresh : null);
           if (rows) fs.writeFileSync(target, JSON.stringify(rows));
         }}
-        console.log(JSON.stringify({{ok: true}}));
+        console.log(JSON.stringify({{jobId: "job-" + (firstKey || "none"), status: "queued"}}));
     ''')
 
     # canon_validate stub: --check-batch succeeds once the fragment exists;
@@ -228,7 +268,7 @@ def bed(tmp_path):
     yield {"tmp": tmp_path, "durable": durable, "scripts": scripts,
            "run_dir": run_dir, "session": home_base / "session",
            "calls": calls, "outcomes": outcomes, "planted": planted,
-           "tmpdir": sandboxes, "home_base": home_base}
+           "jobs": jobs, "tmpdir": sandboxes, "home_base": home_base}
     # tmp_path is pytest's to reap; this one is ours.
     shutil.rmtree(home_base, ignore_errors=True)
 
@@ -979,3 +1019,92 @@ def test_a_sandbox_that_cannot_be_removed_is_named_rather_than_leaked(bed, monke
     assert any(str(survivor) in m and "could not be removed" in m for m in printed), (
         f"the surviving sandbox path must be named in the log, got {printed}")
     shutil.rmtree(survivor, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# #809 -- a codex job that fails at launch must not burn the full poll deadline
+#
+# Every test below sets "--deadline-sec" 120 (argparse last-wins over
+# run_driver_raw's 6) and bounds wall time under 45s: a run that actually
+# waited the deadline out takes >=120s and still finishes inside the 180s
+# subprocess timeout, so the regression this guards against is an assertion
+# failure, not a hang.
+# ---------------------------------------------------------------------------
+
+def test_a_job_that_fails_at_launch_ends_the_batch_before_the_deadline(bed):
+    """A job codex-companion already records FAILED must end the batch the
+    moment its status says so, naming the job and carrying the companion's own
+    message -- not wait out the artifact deadline for something that will
+    never arrive."""
+    bed["jobs"].write_text(json.dumps({"out_0_attempt_0.json": {
+        "status": "failed",
+        "summary": "Selected model is at capacity. Please try a different model."}}))
+    started = time.monotonic()
+    out, proc = run_driver(bed, "--deadline-sec", "120", expect=1)
+    elapsed = time.monotonic() - started
+    assert elapsed < 45, f"waited {elapsed:.1f}s -- the job's own failure was not honoured"
+    assert out["merged"] is False
+    assert len(out["not_ready"]) == 1
+    entry = out["not_ready"][0]
+    assert entry["reason"] == "codex-job-failed"
+    assert entry["jobStatus"] == "failed"
+    assert "at capacity" in entry["jobDetail"]
+    assert entry["jobId"] == "job-out_0_attempt_0.json"
+    assert _logged(bed, "status"), "the status branch was never exercised"
+    print("STATUS_LINES:", _logged(bed, "status"))
+    assert "ended failed" in proc.stderr
+
+
+def test_a_job_that_completes_without_an_artifact_stops_the_wait_too(bed):
+    """A job codex-companion marks COMPLETED without ever writing the fragment
+    is also terminal for the wait -- nothing can write the artifact after the
+    turn ended. The reason stays glossary-pass-null, the same content-shaped
+    failure it always was; only jobStatus is new, and it says the job did run."""
+    bed["jobs"].write_text(json.dumps({"out_0_attempt_0.json": {"status": "completed"}}))
+    started = time.monotonic()
+    out, _ = run_driver(bed, "--deadline-sec", "120", expect=1)
+    elapsed = time.monotonic() - started
+    assert elapsed < 45, f"waited {elapsed:.1f}s -- a completed job must not be waited out"
+    entry = out["not_ready"][0]
+    assert entry["reason"] == "glossary-pass-null"
+    assert entry["jobStatus"] == "completed"
+
+
+def test_a_failed_repair_job_settles_the_batch_at_its_rung(bed):
+    """A repair's own launch_codex call site must be watched too. A repair job
+    codex-companion marks failed must not fall into the repair_invalid
+    fallback -- that fallback spends a ladder rung re-dispatching a
+    whole-fragment job on what is an environmental fault, not a content one.
+    It settles the batch at the rung whose repair failed instead."""
+    bed["outcomes"].write_text(json.dumps(["http_error:404", "fetched"]))
+    bed["jobs"].write_text(json.dumps({"repair_0_attempt_0.json": {
+        "status": "failed", "errorMessage": "boom"}}))
+    started = time.monotonic()
+    out, _ = run_driver(bed, "--deadline-sec", "120", expect=1)
+    elapsed = time.monotonic() - started
+    assert elapsed < 45, f"waited {elapsed:.1f}s -- the repair job's failure was not honoured"
+    assert companion_targets(bed) == ["out_0_attempt_0.json", "repair_0_attempt_0.json"], (
+        "no fallback whole-fragment dispatch may follow a failed repair job")
+    entry = out["not_ready"][0]
+    assert entry["reason"] == "codex-job-failed"
+    assert entry["jobDetail"] == "boom"
+    assert entry["jobId"] == "job-repair_0_attempt_0.json"
+    assert entry["attempt"] == 0, (
+        "the batch settles at the rung whose repair failed, not the reserved "
+        "next rung it never populated")
+    assert out["merged"] is False
+
+
+def test_a_status_the_companion_cannot_answer_never_fails_a_batch(bed):
+    """An unreadable status is UNKNOWN, never failure. The artifact appears
+    only through a status call that itself exits non-zero, so a passing run
+    here proves the poll kept trusting the artifact over a status probe that
+    could not be read -- not merely that it never asked."""
+    bed["jobs"].write_text(json.dumps({"out_0_attempt_0.json": {"unanswerable": True}}))
+    started = time.monotonic()
+    out, _ = run_driver(bed, "--deadline-sec", "120")
+    elapsed = time.monotonic() - started
+    assert elapsed < 45, f"waited {elapsed:.1f}s for what should resolve in one poll"
+    assert _logged(bed, "status"), "the status branch was never exercised"
+    print("STATUS_LINES:", _logged(bed, "status"))
+    assert out["needs_judge"], f"an unreadable status must not fail the batch: {out}"

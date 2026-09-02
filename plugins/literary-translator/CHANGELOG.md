@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.76.1 — 2026-09-02
+
+**A codex job that dies at launch no longer costs its batch the whole 2700 s poll (#809).**
+`glossary_dispatch_driver.py` launched every batch's job with `--json`, discarded the job id the
+companion printed, and then polled for the fragment alone until `--deadline-sec` expired — never
+asking the job it had just started whether it was still alive. When the launch failed at once (the
+observed case: "Selected model is at capacity", which the companion records about three seconds
+in) the driver still waited the full 45 minutes and then reported `glossary-pass-null`, a reason
+the recovery docs read as "codex produced nothing valid" and answer by re-checking the candidates
+and the prompt, while the actual cause sat in full in a job record the driver never opened.
+Measured on one live 11-batch pass while another book held codex capacity: 3 batches, ~135 minutes
+of wall clock, all three fine on a later re-drive.
+
+- **The driver now keeps the job handle and watches the job.** `launch_codex()` returns the
+  `jobId` from the launch's own JSON — and refuses a launch that printed none, rather than polling
+  blind — and the wait asks `codex-companion status <jobId>` once per `--poll-sec` beside the
+  fragment check, with the same `--cwd` the job was launched under. A job the companion records
+  `failed` or `cancelled` ends the batch at once as `reason: "codex-job-failed"`, with the
+  companion's own message in `jobDetail` and the id in `jobId`. A job recorded `completed` that
+  wrote no fragment ends the wait too — still as `glossary-pass-null`, because that is exactly what
+  it means — with `jobStatus: "completed"` saying the job did run.
+- **The fragment stays authoritative.** A status the companion cannot answer is unknown, never a
+  failure, and the fragment is re-checked before every not-ready return: a job that writes its
+  fragment and then goes terminal, or a status probe that stalls into the deadline, cannot turn an
+  existing fragment into a failed batch. The probe is never started with no time left and never
+  given more than the time left.
+- **Both launch sites.** A per-item repair job that fails the same way settles the batch at its
+  current rung with the same fields, instead of spending a ladder rung on a whole-fragment
+  regeneration that would re-fail at capacity and fold the job's diagnostics into rejection prose.
+  A repair job that completes without writing keeps `repair-never-written` and its existing
+  fallback.
+- **Not built, on purpose:** no retry and no capacity probe. Failing fast with an honest reason is
+  the whole fix; the existing re-drive recovers the batch once capacity returns. The `pipeline()`
+  template fallback is unchanged — a Workflow script cannot shell the companion.
+
 ## 1.76.0 — 2026-09-01
 
 **A dispatched codex job can no longer write anything under the durable root (#806).** Until
