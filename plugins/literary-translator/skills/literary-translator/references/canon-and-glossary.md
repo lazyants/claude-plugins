@@ -1068,6 +1068,60 @@ the skeptic pass (`canon_sha256`) and of `suspicion_scan.py`'s worklist
 freshness gate: run a correction BETWEEN passes, not into a live one. (That was
 equally true of the hand-edit it replaces.)
 
+**Sizing a canon change BEFORE you apply it.** `compute_used_terms_hash` reads
+`canon.json` from whatever root it is handed, so the segments a *pending*
+change would re-stale are computable with no new tooling and nothing written.
+Put the post-merge `canon.json` in a scratch directory beside a symlink to the
+real `segments/`, and compare the field per segment against the live root:
+
+```
+DURABLE=/absolute/path/to/the/book/durable_root   # ABSOLUTE: the symlink
+CAND=$(mktemp -d) && [ -n "$CAND" ] || exit 1     # below stores it verbatim
+ln -s "$DURABLE/segments" "$CAND/segments"
+#  ... write the candidate (post-merge) canon to "$CAND/canon.json" ...
+for pack in "$DURABLE"/segments/segpack_*.json; do
+  seg=$(basename "$pack" .json); seg=${seg#segpack_}
+  live=$(python3 "$DURABLE/scripts/cache_key.py" --field used_terms_hash \
+           --seg "$seg" --durable-root "$DURABLE") || exit 1
+  cand=$(python3 "$DURABLE/scripts/cache_key.py" --field used_terms_hash \
+           --seg "$seg" --durable-root "$CAND") || exit 1
+  [ "$live" = "$cand" ] || echo "$seg"
+done
+rm -r "$CAND"   # removes the symlink, never the real segments/ behind it
+```
+
+The candidate root needs nothing else — no `profile.yml`, no ownership marker,
+no `manifest.json`, no `scripts/` of its own — because `used_terms_hash` is a
+per-segment field, and `compute_one_field` loads the profile only for a global
+one. **Check both exit statuses**, as the `|| exit 1` above does. A
+`cache_key.py` that fails — a mistyped `$CAND`, a segpack the scratch root
+cannot see — writes to stderr and exits non-zero; a loop that discards
+that status compares a real digest against the empty string and prints EVERY
+segment. A broken run and a near-total re-stale then read identically, and a
+near-total re-stale is the ordinary result of a large merge, so nothing about
+the output looks wrong.
+
+The `[ -n "$CAND" ]` guard closes the same hole in the *other* direction, and
+that one is worse because a broken run then looks like good news. An empty
+`--durable-root` is FALSY, not an error: `main()` silently falls back to the
+script's own self-anchored root, so both calls hash the LIVE canon, both exit 0,
+`|| exit 1` never fires, and the loop prints nothing at all — a confident
+"this change re-stales zero segments" from a run that never read the candidate.
+
+The same loop also sizes *batching*, run once per pending change — each against
+its OWN `$CAND`, since a second candidate root is a second post-merge canon, not
+a re-used scratch directory. What batching two pending canon changes saves over
+applying them one at a time is the re-review of the segments BOTH changes would
+move on their own — a segment only one of them touches owes its re-review either
+way. Intersect the two outputs, and treat that intersection as an ESTIMATE, not
+a bound; it is wrong in both directions. It OVERSTATES the
+saving when the two batches carry the same entry, since merging the second is
+then a no-op for that segment and the sequential cost was never doubled
+(`_merge_batch` accepts an identical re-submission as a no-op). It UNDERSTATES
+it when they partly cancel, since the hash sees only the FINAL projection, so an
+entry added and corrected back re-stales nothing once the two are merged
+together.
+
 **What a dismissal costs.** `compute_used_terms_hash` projects `entries{}`
 only, and a dismissal touches none of it — so no translate SEGMENT re-stales,
 unlike `correct`/`remove`. That is NOT the same as costing nothing: a
