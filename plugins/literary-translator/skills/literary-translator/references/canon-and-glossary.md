@@ -1075,7 +1075,8 @@ Put the post-merge `canon.json` in a scratch directory beside a symlink to the
 real `segments/`, and compare the field per segment against the live root:
 
 ```
-CAND=$(mktemp -d)
+DURABLE=/absolute/path/to/the/book/durable_root   # ABSOLUTE: the symlink
+CAND=$(mktemp -d) && [ -n "$CAND" ] || exit 1     # below stores it verbatim
 ln -s "$DURABLE/segments" "$CAND/segments"
 #  ... write the candidate (post-merge) canon to "$CAND/canon.json" ...
 for pack in "$DURABLE"/segments/segpack_*.json; do
@@ -1086,6 +1087,7 @@ for pack in "$DURABLE"/segments/segpack_*.json; do
            --seg "$seg" --durable-root "$CAND") || exit 1
   [ "$live" = "$cand" ] || echo "$seg"
 done
+rm -r "$CAND"   # removes the symlink, never the real segments/ behind it
 ```
 
 The candidate root needs nothing else — no `profile.yml`, no ownership marker,
@@ -1099,12 +1101,20 @@ segment. A broken run and a near-total re-stale then read identically, and a
 near-total re-stale is the ordinary result of a large merge, so nothing about
 the output looks wrong.
 
-The same two runs are also how you size *batching*. What batching two pending
-canon changes saves over applying them one at a time is the re-review of the
-segments BOTH changes would move on their own — a segment only one of them
-touches owes its re-review either way. Run the loop once per candidate batch
-and intersect the outputs. Treat that intersection as an ESTIMATE, not a bound;
-it is wrong in both directions for a reason worth knowing. It OVERSTATES the
+The `[ -n "$CAND" ]` guard closes the same hole in the *other* direction, and
+that one is worse because a broken run then looks like good news. An empty
+`--durable-root` is FALSY, not an error: `main()` silently falls back to the
+script's own self-anchored root, so both calls hash the LIVE canon, both exit 0,
+`|| exit 1` never fires, and the loop prints nothing at all — a confident
+"this change re-stales zero segments" from a run that never read the candidate.
+
+The same loop also sizes *batching*, run once per pending change — each against
+its OWN `$CAND`, since a second candidate root is a second post-merge canon, not
+a re-used scratch directory. What batching two pending canon changes saves over
+applying them one at a time is the re-review of the segments BOTH changes would
+move on their own — a segment only one of them touches owes its re-review either
+way. Intersect the two outputs, and treat that intersection as an ESTIMATE, not
+a bound; it is wrong in both directions. It OVERSTATES the
 saving when the two batches carry the same entry, since merging the second is
 then a no-op for that segment and the sequential cost was never doubled
 (`_merge_batch` accepts an identical re-submission as a no-op). It UNDERSTATES
