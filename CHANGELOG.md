@@ -2,6 +2,35 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [cc-usage-coach 1.0.1] — 2026-09-01
+
+Five commits landed on `main` on 2026-06-18, immediately after 1.0.0 was published, and never
+carried a version of their own. Merging is publishing in this marketplace, so those bytes have been
+shipping under the 1.0.0 label ever since — and an already-installed 1.0.0 cannot pick them up,
+because `plugin update` short-circuits on a matching version. This release exists to give them a
+number. No behaviour changes with it beyond what is listed here; the `[cc-usage-coach 1.0.0]` entry
+below already describes some of it, and is left as the record of that release rather than edited.
+
+### Fixed
+
+- **The shareable `signal_pack.json` is project-name-free.** Project names were reaching the pack
+  that is meant to be safe to share (PR #1 review).
+- **A relocated home no longer leaks the local username into the pack.** A home under a
+  non-standard parent (`/Volumes/Data/<user>`, `D:\Profiles\<user>`) is indistinguishable by path
+  SHAPE from a project directory, which the previous cut documented as an inherent limitation.
+  `extract.py` now drops any path leaf equal to the local login or home-directory name — the one
+  case where `$HOME` is legitimately known, mirroring `arc.py`'s literal-home redaction.
+- **All local-only dataset files are written `0600`, and `source_ref` is opaque.** `arc.py`,
+  `extract.py`, `lib_sessions.py` and `signals.py` all changed; the frozen fixtures and the golden
+  pack moved with them.
+
+### Changed
+
+- **The privacy claim is corrected: the report step sends data to the model.** The plugin computes
+  locally, but the step that turns the signal pack into a report is a Claude turn, and the README,
+  the root README and `SKILL.md` said otherwise. `README.md` also now states that arc inspection
+  feeds prompt text to the model.
+
 ## [multi-profile-plugins 1.3.1] — 2026-08-30
 
 ### Fixed
