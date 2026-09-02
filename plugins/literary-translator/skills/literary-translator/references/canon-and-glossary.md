@@ -1100,12 +1100,17 @@ near-total re-stale is the ordinary result of a large merge, so nothing about
 the output looks wrong.
 
 The same two runs are also how you size *batching*. What batching two pending
-canon changes saves over applying them one at a time is AT LEAST the OVERLAP of
-their affected sets — a segment in only one set owes its re-review either way.
-Run the loop once per candidate batch and intersect the outputs. (It is only
-ever *more* than the overlap when the two changes partly cancel: the hash sees
-the FINAL projection, so an entry added and then corrected back re-stales
-nothing when the two are merged together.)
+canon changes saves over applying them one at a time is the re-review of the
+segments BOTH changes would move on their own — a segment only one of them
+touches owes its re-review either way. Run the loop once per candidate batch
+and intersect the outputs. Treat that intersection as an ESTIMATE, not a bound;
+it is wrong in both directions for a reason worth knowing. It OVERSTATES the
+saving when the two batches carry the same entry, since merging the second is
+then a no-op for that segment and the sequential cost was never doubled
+(`_merge_batch` accepts an identical re-submission as a no-op). It UNDERSTATES
+it when they partly cancel, since the hash sees only the FINAL projection, so an
+entry added and corrected back re-stales nothing once the two are merged
+together.
 
 **What a dismissal costs.** `compute_used_terms_hash` projects `entries{}`
 only, and a dismissal touches none of it — so no translate SEGMENT re-stales,
