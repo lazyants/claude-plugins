@@ -58,8 +58,8 @@ stand-in for the gate or the planner. Two root shapes are used:
     to B, never to wherever the planner script itself happens to live.
 """
 import json
-import shutil
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -670,7 +670,7 @@ def _probe_naive_omit_when_absent_is_the_real_leak(tmp_path):
 #   9d-i  (real filesystem, a dangling symlink): os.lstat() on the durable
 #         sidecar SUCCEEDS -- genuinely "present" at resolve_glossary_
 #         senses_arg()'s own definitive-stat layer (select_segments.py:
-#         4396-4499, branch 2: "Present (of any kind lstat can see) -> pass
+#         4411-4502, branch 2: "Present (of any kind lstat can see) -> pass
 #         --senses-path explicitly"). So the gate correctly forwards
 #         `--senses-path` to glossary_batch_plan.py, and it is THAT
 #         script's own stricter `load_senses()`/`_path_state()` (which

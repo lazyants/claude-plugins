@@ -1,18 +1,5 @@
 {
  "declarations": {
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"glossary_batch_plan.py:199\", 0]": {
-   "anchors": [
-    "DEFAULT_MIN_CANDIDATE_FREQ = 2"
-   ],
-   "claim": "# glossary_batch_plan.py's own DEFAULT_MIN_CANDIDATE_FREQ # (glossary_batch_plan.py:199), restated here per this project's \"no shared # lib between self-contained scripts\" convention -- SKILL.md:1467-1468 names # this exact fallback \"the profile's glossary.min_candidate_freq when set, # else 2\"."
-  },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"SKILL.md:1467-1468\", 0]": {
-   "anchors": [
-    "likely_name`/`--min-candidate-freq` (the profile",
-    "`glossary.min_candidate_freq` when set, else 2"
-   ],
-   "claim": "# glossary_batch_plan.py's own DEFAULT_MIN_CANDIDATE_FREQ # (glossary_batch_plan.py:199), restated here per this project's \"no shared # lib between self-contained scripts\" convention -- SKILL.md:1467-1468 names # this exact fallback \"the profile's glossary.min_candidate_freq when set, # else 2\"."
-  },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"SKILL.md:1462\", 0]": {
    "anchors": [
     "scripts/glossary_batch_plan.py` FIRST"
@@ -153,7 +140,7 @@
    "claim": "#488 added `canon_senses.senses_for`, which computes exactly this, and this function was DELIBERATELY not re-pointed at it. The lookup here is normalized through THIS module's own `normalize_form` binding, and `tests/canon_validate_recollapse.test.py:289-301` pins the indexed fast path by monkeypatching that binding and asserting exactly one call; delegating would move the call inside canon_senses, silently reduce that count to zero, and force a passing performance test to be rewritten for a refactor #488 does not need. The shared comparator is",
    "target": "plugins/literary-translator/tests/canon_validate_recollapse.test.py"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5606\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5592\", 0]": {
    "anchors": [
     "run_id_problem = validate_run_id(run_id)"
    ],
@@ -204,7 +191,7 @@
    ],
    "claim": "\"\"\"Fold Hebrew niqqud/cantillation for the #238 MATCH KEY ONLY -- mirrors bootstrap_names.py's own ``_fold_match_marks`` (itself a mirror of ``final_audit._fold_source_marks``, ``final_audit.py:675-698``) byte-for-byte: NFD-decompose, drop every combining mark (Unicode category ``Mn``) in the Hebrew block range U+0591-U+05C7, then re-NFC. NEVER applied to an EMITTED name -- this script's own Contract-5-equivalent emit site in ``extract_candidate_names()`` stays raw regardless.\"\"\""
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_merge.py\", \"select_segments.py:773-793\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_merge.py\", \"select_segments.py:774-794\", 0]": {
    "anchors": [
     "entries = sorted(segments_dir.iterdir())",
     "TWO swallow sites",
@@ -451,13 +438,13 @@
    ],
    "claim": "rejected: this function's return value is forwarded verbatim into resume_setup.py's own `resume_from_run_ids`, and that authority's resolve_run() (resume_setup.py:901) decides a MATCH by reading `runs/<id>/input.digest` with its OWN `Path.is_file()` call (resume_setup.py:923) -- the identical swallow-pattern, one layer down, in a file this fix does not own. Passing an unreadable candidate through would not close the hole; it would only relocate it to a site this change cannot reach, while looking closed here. Refusing at the point where the ambiguity is actually discovered is the only"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"select_segments.py:1281\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"select_segments.py:1282\", 0, \"continuation\"]": {
    "anchors": [
     "_SEG_ID_RE.fullmatch(seg)"
    ],
    "claim": "# load_candidate_segments() fatals on any manifest.json `seg` failing its # validate_seg() (select_segments.py:1316-1332, the regex check at :1251) -- # every `seg` this script ever operates on already came from THAT"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"select_segments.py:1346-1362\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"select_segments.py:1347-1363\", 0]": {
    "anchors": [
     "def load_candidate_segments(manifest_path: Path = MANIFEST_PATH) -> list:",
     "problem = validate_seg(seg)",
@@ -868,25 +855,25 @@
    ],
    "claim": "\"in_progress\"})` (mass-translate-wf.template.js:2413) completes BEFORE `agent(translateDrivePrompt(seg))` (:2416) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of"
   },
-  "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5606\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5592\", 0]": {
    "anchors": [
     "run_id_problem = validate_run_id(run_id)"
    ],
    "claim": "inversion crosses: the RUN_ID resume_setup.py just minted (a real value, from a real subprocess run, never a hand-typed guess at the format) must be accepted by select_segments.py's OWN `validate_run_id()` -- the exact function D1a's `select_segments.py --run-id` flag consults (select_segments.py:5000, `run_id_problem = validate_run_id(run_id)`)."
   },
-  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1571\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1572\", 0]": {
    "anchors": [
     "return {\"category\": \"recoverable\", \"status\": status}"
    ],
    "claim": "# It is not, and it does not. `status: in_progress` classifies as `recoverable` # (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1451), and D3 (:4276) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces # --only-segs as a side effect of its population being human_escalation;"
   },
-  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1589\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1590\", 0, \"continuation\"]": {
    "anchors": [
     "DEFAULT_ELIGIBLE_CATEGORIES = frozenset"
    ],
    "claim": "# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1559), and D3 (:5009) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces"
   },
-  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5615\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5601\", 0, \"continuation\"]": {
    "anchors": [
     "D3: the authorization must be a SUBSET"
    ],
@@ -1491,6 +1478,13 @@
     "render_obsidian._segment_title(seg_nodes, seg)"
    ],
    "claim": "`validate_backlinks.py:780` reconstructs each segment note's filename by calling `_segment_title(seg_nodes, seg)` against the PERSISTED nodestream.json"
+  },
+  "[\"plugins/literary-translator/tests/select_segments_glossary_gate.test.py\", \"select_segments.py:4411-4502\", 0]": {
+   "anchors": [
+    "def resolve_glossary_senses_arg",
+    "2. Present (of any kind lstat can see) -> pass"
+   ],
+   "claim": "# 9d-i (real filesystem, a dangling symlink): os.lstat() on the durable sidecar SUCCEEDS -- genuinely \"present\" at resolve_glossary_senses_arg()'s own definitive-stat layer (select_segments.py:4411-4502, branch 2: \"Present (of any kind lstat can see) -> pass --senses-path explicitly\")."
   }
  },
  "exemptions": {

@@ -180,8 +180,9 @@ orthogonal flags override this, deliberately kept separate:
 
   --durable-root PATH   the DATA root (manifest.json, segments/, runs/).
   --plugin-root PATH    where the SIBLING SCRIPTS this script shells out
-                         to (ledger_merge.py, cache_key.py) are resolved
-                         from, as ``{PATH}/assets/scripts/<name>.py``.
+                         to (ledger_merge.py, cache_key.py, draft_ready.py,
+                         validate_draft.py, glossary_batch_plan.py) are
+                         resolved from, as ``{PATH}/assets/scripts/<name>.py``.
 
 A single root cannot serve both roles: ``${durable_root}/scripts/`` is a
 Step-0a copy that the codex process (via codex_job.py's ``--write`` over
@@ -4291,14 +4292,6 @@ def acquire_from_stalled_leases(stalled_segs: list, dirs: dict, args) -> "dict[s
 # JUDGMENT logic.
 # ---------------------------------------------------------------------------
 
-# glossary_batch_plan.py's own DEFAULT_MIN_CANDIDATE_FREQ
-# (glossary_batch_plan.py:199), restated here per this project's "no shared
-# lib between self-contained scripts" convention -- SKILL.md:1467-1468 names
-# this exact fallback "the profile's glossary.min_candidate_freq when set,
-# else 2".
-_DEFAULT_MIN_CANDIDATE_FREQ = 2
-
-
 def _tail(text: "str | None", n: int = 600) -> str:
     """Last `n` characters of `text`, or "" for None/empty -- the shared
     truncation every glossary-check-unavailable refusal below uses to relay
@@ -4306,6 +4299,37 @@ def _tail(text: "str | None", n: int = 600) -> str:
     if not text:
         return ""
     return text[-n:]
+
+
+def _glossary_refusal(
+    reason: str,
+    message: str,
+    *,
+    detail: "str | None" = None,
+    glossary_run_id: "str | None" = None,
+    outstanding_batches: "int | None" = None,
+    outstanding_candidates: "int | None" = None,
+) -> dict:
+    """Builds one #820 glossary-refusal payload. Always populates all five
+    of `reason`/`message`/`glossaryRunId`/`outstandingBatches`/
+    `outstandingCandidates` -- run()'s own #820 call site subscripts all
+    five directly (never `.get()`), so a hand-built refusal that forgot one
+    would raise KeyError there instead of reporting `reason`, which is
+    exactly the failure scan_glossary_run_ids()'s own docstring says this
+    gate refuses in place to avoid. `detail` is added to the payload ONLY
+    when not None, matching each call site's own previous conditional
+    construction -- an unconditional `detail: None` would change the
+    emitted JSON shape for the refusals that never carried one."""
+    payload = {
+        "reason": reason,
+        "message": message,
+        "glossaryRunId": glossary_run_id,
+        "outstandingBatches": outstanding_batches,
+        "outstandingCandidates": outstanding_candidates,
+    }
+    if detail is not None:
+        payload["detail"] = detail
+    return payload
 
 
 def scan_glossary_run_ids(glossary_runs_dir: Path) -> "list | dict":
@@ -4347,17 +4371,12 @@ def scan_glossary_run_ids(glossary_runs_dir: Path) -> "list | dict":
         # mean the same thing to CONDITION 1, no glossary run exists yet.
         return []
     except OSError as exc:
-        return {
-            "reason": "glossary-check-unavailable",
-            "message": (
-                f"could not establish whether {glossary_runs_dir} holds any "
-                f"glossary run ({exc}) -- refusing rather than risking a "
-                "silent admission over unmerged glossary work."
-            ),
-            "glossaryRunId": None,
-            "outstandingBatches": None,
-            "outstandingCandidates": None,
-        }
+        return _glossary_refusal(
+            "glossary-check-unavailable",
+            f"could not establish whether {glossary_runs_dir} holds any "
+            f"glossary run ({exc}) -- refusing rather than risking a "
+            "silent admission over unmerged glossary work.",
+        )
 
     run_ids = []
     for entry in entries:
@@ -4373,17 +4392,12 @@ def scan_glossary_run_ids(glossary_runs_dir: Path) -> "list | dict":
             # stat, or a dangling symlink.
             continue
         except OSError as exc:
-            return {
-                "reason": "glossary-check-unavailable",
-                "message": (
-                    f"could not establish whether {entry} is a glossary run "
-                    f"directory ({exc}) -- refusing rather than risking a "
-                    "silent admission over unmerged glossary work."
-                ),
-                "glossaryRunId": None,
-                "outstandingBatches": None,
-                "outstandingCandidates": None,
-            }
+            return _glossary_refusal(
+                "glossary-check-unavailable",
+                f"could not establish whether {entry} is a glossary run "
+                f"directory ({exc}) -- refusing rather than risking a "
+                "silent admission over unmerged glossary work.",
+            )
         if stat.S_ISDIR(entry_stat.st_mode):
             run_ids.append(entry.name)
 
@@ -4394,7 +4408,7 @@ def scan_glossary_run_ids(glossary_runs_dir: Path) -> "list | dict":
     return sorted(run_ids, reverse=True)
 
 
-def resolve_glossary_senses_arg(dirs: dict, durable_root: Path) -> "tuple[str | None, dict | None]":
+def resolve_glossary_senses_arg(dirs: dict) -> "tuple[str | None, dict | None]":
     """Resolves the exact `--senses-path` argument (or the decision to omit
     it) to hand glossary_batch_plan.py, and is the one input CONDITION 2
     cannot simply pass through: glossary_batch_plan.py's own `main()` sets
@@ -4403,10 +4417,12 @@ def resolve_glossary_senses_arg(dirs: dict, durable_root: Path) -> "tuple[str | 
     caller error -- so passing the flag unconditionally would fatal on
     every project that has no sidecar, which is most of them.
 
-    Returns `(senses_path_arg, refusal)`: exactly one of the two is
-    non-None. `senses_path_arg` is either the resolved sidecar path (as a
-    str, ready for the subprocess argv) or None (meaning: omit the flag,
-    let the planner fall back to its own default). `refusal` is a
+    Returns `(senses_path_arg, refusal)`: AT MOST one of the two is
+    non-None -- `(None, None)` is itself a valid, ordinary result (the
+    ENOENT/ENOENT fall-through below) meaning "omit the flag, let the
+    planner fall back to its own default", not merely the absence of a
+    resolved path. `senses_path_arg` is either the resolved sidecar path
+    (as a str, ready for the subprocess argv) or None. `refusal` is a
     glossary-senses-indeterminate dict in the #820 shape
     (`glossaryRunId`/`outstandingBatches`/`outstandingCandidates` all null)
     when the decision could not be made safely.
@@ -4440,26 +4456,22 @@ def resolve_glossary_senses_arg(dirs: dict, durable_root: Path) -> "tuple[str | 
     Passing the flag unconditionally is NOT an option (see above); reading
     the durable sidecar with anything less than a definitive stat is NOT an
     option either (round 3 MAJOR: `Path.exists()` would silently fall
-    through to the SAME leak one layer earlier). Five stats, no new planner
-    flag, no reversal of glossary_batch_plan.py's own "never takes a
-    --durable-root flag" contract."""
+    through to the SAME leak one layer earlier). No new planner flag, no
+    reversal of glossary_batch_plan.py's own "never takes a --durable-root
+    flag" contract."""
+    durable_root = dirs["durable_root"]
     durable_senses_path = durable_root / "canon_senses.json"
     try:
         os.lstat(durable_senses_path)
     except FileNotFoundError:
         pass  # definitive ENOENT -- fall through to the probe below.
     except OSError as exc:
-        return None, {
-            "reason": "glossary-senses-indeterminate",
-            "message": (
-                f"could not establish whether {durable_senses_path} exists "
-                f"({exc}) -- refusing rather than risking a silent read of "
-                "the wrong project's homonym-split sidecar."
-            ),
-            "glossaryRunId": None,
-            "outstandingBatches": None,
-            "outstandingCandidates": None,
-        }
+        return None, _glossary_refusal(
+            "glossary-senses-indeterminate",
+            f"could not establish whether {durable_senses_path} exists "
+            f"({exc}) -- refusing rather than risking a silent read of "
+            "the wrong project's homonym-split sidecar.",
+        )
     else:
         return str(durable_senses_path), None
 
@@ -4471,41 +4483,34 @@ def resolve_glossary_senses_arg(dirs: dict, durable_root: Path) -> "tuple[str | 
         # nothing, which IS "no splits yet" for this project.
         return None, None
     except OSError as exc:
-        return None, {
-            "reason": "glossary-senses-indeterminate",
-            "message": (
-                f"{durable_senses_path} is absent, and the planner's own "
-                f"default sidecar {probe_path} could not be established "
-                f"either ({exc}) -- refusing rather than risking a silent "
-                "read of the wrong project's homonym-split sidecar."
-            ),
-            "glossaryRunId": None,
-            "outstandingBatches": None,
-            "outstandingCandidates": None,
-        }
+        return None, _glossary_refusal(
+            "glossary-senses-indeterminate",
+            f"{durable_senses_path} is absent, and the planner's own "
+            f"default sidecar {probe_path} could not be established "
+            f"either ({exc}) -- refusing rather than risking a silent "
+            "read of the wrong project's homonym-split sidecar.",
+        )
     else:
-        return None, {
-            "reason": "glossary-senses-indeterminate",
-            "message": (
-                f"{durable_senses_path} is absent, but the planner's own "
-                f"default sidecar {probe_path} is occupied -- omitting "
-                "--senses-path would let glossary_batch_plan.py silently "
-                "read a DIFFERENT project's homonym-split sidecar, which "
-                "could exclude a candidate genuinely outstanding here. "
-                "Refusing rather than risking a false admission."
-            ),
-            "glossaryRunId": None,
-            "outstandingBatches": None,
-            "outstandingCandidates": None,
-        }
+        return None, _glossary_refusal(
+            "glossary-senses-indeterminate",
+            f"{durable_senses_path} is absent, but the planner's own "
+            f"default sidecar {probe_path} is occupied -- omitting "
+            "--senses-path would let glossary_batch_plan.py silently "
+            "read a DIFFERENT project's homonym-split sidecar, which "
+            "could exclude a candidate genuinely outstanding here. "
+            "Refusing rather than risking a false admission.",
+        )
 
 
 def check_glossary_current(dirs: dict) -> "dict | None":
     """The full #820 predicate. Returns None to ADMIT, or a refusal dict
     (`{"reason", "message", "glossaryRunId", "outstandingBatches",
     "outstandingCandidates"}`, plus `"detail"` on the glossary-check-
-    unavailable path) to REFUSE. Never raises -- run()'s own call site is
-    the only place a refusal here becomes a `fatal()`.
+    unavailable refusals raised from the glossary_batch_plan.py SUBPROCESS
+    branches below -- the two glossary-check-unavailable refusals raised by
+    `scan_glossary_run_ids()` above carry no `detail`) to REFUSE. Never
+    raises -- run()'s own call site is the only place a refusal here
+    becomes a `fatal()`.
 
     ORDER, LOAD-BEARING (post-implementation fix -- the first cut of this
     gate loaded `profile.yml` unconditionally, before either admitting
@@ -4536,12 +4541,16 @@ def check_glossary_current(dirs: dict) -> "dict | None":
     re-deriving it. `-B` (sys.dont_write_bytecode is set too late inside
     glossary_batch_plan.py itself, AFTER its `canon_senses` import, to stop
     that import writing a .pyc into a tree this gate must only read). The
-    three data paths (`--name-candidates`/`--canon`, plus `--min-candidate-
-    freq`) are explicit and bound to `dirs["durable_root"]`, never left to
-    the planner's own self-anchored defaults -- with the SCRIPT resolved
-    from `--plugin-root` (round 1 MAJOR), every one of those defaults would
-    silently name the wrong project. `--senses-path` is resolved separately
-    by `resolve_glossary_senses_arg()` (round 2/3 MAJOR; see its own
+    two data paths (`--name-candidates`/`--canon`) are explicit and bound to
+    `dirs["durable_root"]`, never left to the planner's own self-anchored
+    defaults -- with the SCRIPT resolved from `--plugin-root` (round 1
+    MAJOR), those defaults would silently name the wrong project.
+    `--min-candidate-freq` is passed only when profile.yml sets
+    `glossary.min_candidate_freq` explicitly; omitted otherwise, exactly
+    like `--senses-path` below, so the planner's own argparse default
+    applies -- a plain integer, not a path, so the wrong-project risk above
+    does not apply to it. `--senses-path` is resolved separately by
+    `resolve_glossary_senses_arg()` (round 2/3 MAJOR; see its own
     docstring) because it cannot simply be forwarded the same way.
 
     A check that could not be ESTABLISHED must not print like one that
@@ -4590,7 +4599,7 @@ def check_glossary_current(dirs: dict) -> "dict | None":
     if glossary_cfg["enabled"] is False:
         return None
 
-    senses_path_arg, senses_refusal = resolve_glossary_senses_arg(dirs, durable_root)
+    senses_path_arg, senses_refusal = resolve_glossary_senses_arg(dirs)
     if senses_refusal is not None:
         return senses_refusal
 
@@ -4598,81 +4607,60 @@ def check_glossary_current(dirs: dict) -> "dict | None":
         sys.executable,
         "-B",
         str(dirs["glossary_batch_plan_script"]),
-        "--min-candidate-freq",
-        str(glossary_cfg["min_candidate_freq"]),
         "--name-candidates",
         str(durable_root / "name_candidates.json"),
         "--canon",
         str(durable_root / "canon.json"),
     ]
+    if glossary_cfg["min_candidate_freq"] is not None:
+        cmd += ["--min-candidate-freq", str(glossary_cfg["min_candidate_freq"])]
     if senses_path_arg is not None:
         cmd += ["--senses-path", senses_path_arg]
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, close_fds=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raw_stderr = getattr(exc, "stderr", None)
         detail = _tail(raw_stderr if isinstance(raw_stderr, str) else str(exc))
-        return {
-            "reason": "glossary-check-unavailable",
-            "message": (
-                "could not run glossary_batch_plan.py to check whether the "
-                f"W3 glossary pass for run {newest_run_id!r} is complete "
-                f"({exc}) -- a check that could not be established must not "
-                "print like one that passed."
-            ),
-            "glossaryRunId": None,
-            "outstandingBatches": None,
-            "outstandingCandidates": None,
-            "detail": detail,
-        }
+        return _glossary_refusal(
+            "glossary-check-unavailable",
+            "could not run glossary_batch_plan.py to check whether the "
+            f"W3 glossary pass for run {newest_run_id!r} is complete "
+            f"({exc}) -- a check that could not be established must not "
+            "print like one that passed.",
+            detail=detail,
+        )
 
     if proc.returncode != 0:
         detail = _tail(proc.stderr)
-        return {
-            "reason": "glossary-check-unavailable",
-            "message": (
-                f"glossary_batch_plan.py exited {proc.returncode} while "
-                f"checking whether the W3 glossary pass for run "
-                f"{newest_run_id!r} is complete -- cannot tell whether W5 "
-                f"dispatch is safe. {detail}"
-            ),
-            "glossaryRunId": None,
-            "outstandingBatches": None,
-            "outstandingCandidates": None,
-            "detail": detail,
-        }
+        return _glossary_refusal(
+            "glossary-check-unavailable",
+            f"glossary_batch_plan.py exited {proc.returncode} while "
+            f"checking whether the W3 glossary pass for run "
+            f"{newest_run_id!r} is complete -- cannot tell whether W5 "
+            f"dispatch is safe. {detail}",
+            detail=detail,
+        )
 
     try:
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError:
         detail = _tail(proc.stderr)
-        return {
-            "reason": "glossary-check-unavailable",
-            "message": (
-                "glossary_batch_plan.py did not print exactly one "
-                f"parseable JSON line on stdout: stdout={proc.stdout!r} "
-                f"stderr={proc.stderr!r}"
-            ),
-            "glossaryRunId": None,
-            "outstandingBatches": None,
-            "outstandingCandidates": None,
-            "detail": detail,
-        }
+        return _glossary_refusal(
+            "glossary-check-unavailable",
+            "glossary_batch_plan.py did not print exactly one parseable "
+            f"JSON line on stdout: stdout={_tail(proc.stdout)!r}",
+            detail=detail,
+        )
 
     if not isinstance(payload, dict) or "no_new_candidates" not in payload:
         detail = _tail(proc.stderr)
-        return {
-            "reason": "glossary-check-unavailable",
-            "message": (
-                "glossary_batch_plan.py's stdout did not contain the "
-                f"expected 'no_new_candidates' field: {payload!r}"
-            ),
-            "glossaryRunId": None,
-            "outstandingBatches": None,
-            "outstandingCandidates": None,
-            "detail": detail,
-        }
+        return _glossary_refusal(
+            "glossary-check-unavailable",
+            "glossary_batch_plan.py's stdout did not contain the expected "
+            f"'no_new_candidates' field: {_tail(repr(payload))}",
+            detail=detail,
+        )
 
     if payload["no_new_candidates"] is True:
         return None
@@ -4680,48 +4668,46 @@ def check_glossary_current(dirs: dict) -> "dict | None":
     batches = payload.get("batches")
     if not isinstance(batches, list):
         detail = _tail(proc.stderr)
-        return {
-            "reason": "glossary-check-unavailable",
-            "message": (
-                "glossary_batch_plan.py reported no_new_candidates: false "
-                f"but its 'batches' field was not a list: {payload!r}"
-            ),
-            "glossaryRunId": None,
-            "outstandingBatches": None,
-            "outstandingCandidates": None,
-            "detail": detail,
-        }
+        return _glossary_refusal(
+            "glossary-check-unavailable",
+            "glossary_batch_plan.py reported no_new_candidates: false but "
+            f"its 'batches' field was not a list: {_tail(repr(payload))}",
+            detail=detail,
+        )
 
     n_batches = len(batches)
+    # Best-effort over well-formed entries only: a `batches` entry that is
+    # not a dict, or whose `names` is not a list, still counts toward
+    # `n_batches` above but contributes 0 here, so the two numbers can
+    # diverge on a malformed entry. The refusal below fires either way, so
+    # this is cosmetic -- the shipped planner never emits a malformed entry.
     n_candidates = sum(
         len(b["names"])
         for b in batches
         if isinstance(b, dict) and isinstance(b.get("names"), list)
     )
-    return {
-        "reason": "glossary-pass-unmerged",
-        "message": (
-            f"this project has {n_batches} outstanding glossary batch(es) "
-            f"covering {n_candidates} candidate name(s) not yet in "
-            f"canon.json, and a glossary run exists under "
-            f"{glossary_runs_dir} (newest: {newest_run_id}) -- finish (or "
-            "resume) the W3/W3a glossary pass before dispatching W5, or "
-            "pass --allow-unmerged-glossary if you have decided to "
-            "override deliberately."
-        ),
-        "glossaryRunId": newest_run_id,
-        "outstandingBatches": n_batches,
-        "outstandingCandidates": n_candidates,
-    }
+    return _glossary_refusal(
+        "glossary-pass-unmerged",
+        f"this project has {n_batches} outstanding glossary batch(es) "
+        f"covering {n_candidates} candidate name(s) not yet in "
+        f"canon.json, and a glossary run exists under "
+        f"{glossary_runs_dir} (newest: {newest_run_id}) -- finish (or "
+        "resume) the W3/W3a glossary pass before dispatching W5, or "
+        "pass --allow-unmerged-glossary if you have decided to "
+        "override deliberately.",
+        glossary_run_id=newest_run_id,
+        outstanding_batches=n_batches,
+        outstanding_candidates=n_candidates,
+    )
 
 
 def load_glossary_config(durable_root: Path) -> dict:
-    """Returns `{"enabled": bool, "min_candidate_freq": int}`, resolved from
-    profile.yml via the ownership marker -- mirrors segment_dispatch_
-    driver.py's own `load_engine_config()`'s ownership-marker ->
-    `owner_profile_path` -> `yaml.safe_load` shape, duplicated per this
-    project's "no shared lib between self-contained scripts" convention.
-    Only the two fields this gate needs are read.
+    """Returns `{"enabled": bool, "min_candidate_freq": int | None}`,
+    resolved from profile.yml via the ownership marker -- mirrors
+    segment_dispatch_driver.py's own `load_engine_config()`'s
+    ownership-marker -> `owner_profile_path` -> `yaml.safe_load` shape,
+    duplicated per this project's "no shared lib between self-contained
+    scripts" convention. Only the two fields this gate needs are read.
 
     `enabled`: `glossary.get("enabled") is not False`. Explicit `is not
     False`, never a truthy `.get()` -- profile.schema.json's own
@@ -4735,10 +4721,12 @@ def load_glossary_config(durable_root: Path) -> dict:
 
     `min_candidate_freq`: the profile's `glossary.min_candidate_freq` when
     present and a positive non-bool int (profile.schema.json: `type
-    integer, minimum 1`), else `_DEFAULT_MIN_CANDIDATE_FREQ`. A
-    present-but-invalid value is fatal -- a profile that names an invalid
-    threshold is a profile error, not a value for this gate to silently
-    repair.
+    integer, minimum 1`), else `None` -- meaning check_glossary_current()
+    omits `--min-candidate-freq` from the planner's argv entirely, exactly
+    the way it already omits `--senses-path`, and glossary_batch_plan.py's
+    own argparse default takes over. A present-but-invalid value is fatal
+    -- a profile that names an invalid threshold is a profile error, not a
+    value for this gate to silently repair.
 
     The `glossary` block itself is schema-REQUIRED, with `research_mode`
     required inside it -- an absent block is a profile error, not a case
@@ -4784,9 +4772,7 @@ def load_glossary_config(durable_root: Path) -> dict:
     enabled = glossary.get("enabled") is not False
 
     min_candidate_freq = glossary.get("min_candidate_freq")
-    if min_candidate_freq is None:
-        min_candidate_freq = _DEFAULT_MIN_CANDIDATE_FREQ
-    elif (
+    if min_candidate_freq is not None and (
         not isinstance(min_candidate_freq, int)
         or isinstance(min_candidate_freq, bool)
         or min_candidate_freq < 1

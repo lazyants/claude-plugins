@@ -45,11 +45,11 @@ Zero converged means the move is free.
 mismatched converged segment to `stale` → **re-translate only**. But
 `derivation_bundle_hash ∈ DERIVATION_STATE_FIELDS` (`select_segments.py:1081-1093`, alongside
 `particle_config_hash` / `source_extraction_hash` / `source_input_hash`) → routes to
-**`blocked_needs_regeneration`** (`select_segments.py:1532`): rerun **W3/W3a only**
+**`blocked_needs_regeneration`** (`select_segments.py:1533`): rerun **W3/W3a only**
 (`bootstrap_names.py` → glossary pass → `segpack.py`) FIRST, THEN re-translate — strictly HEAVIER.
 `derivation_bundle_hash` and `particle_config_hash` both route through `_w3_regen_step`
 (`select_segments.py:1095-1147`) — **W3/W3a, never W2**; W2 only reruns for `source_extraction_hash` /
-`source_input_hash` (`_W2_REGEN_STEP`, `select_segments.py:1156`). Verify this membership/remedy mapping
+`source_input_hash` (`_W2_REGEN_STEP`, `select_segments.py:1157`). Verify this membership/remedy mapping
 against `select_segments.py` itself before restating it — this exact doc's own remedy text drifted to
 an overstated "W2/W3/W3a" once already (codex round-3 finding, 2026-07-23, #282/#283 plan review),
 verified wrong against `select_segments.py`'s field→function mapping directly; the enumeration and remedy
@@ -160,8 +160,8 @@ enrichment, never the code change.
 ## `schema_hash` is NOT regeneration-gated; a schema-description edit is free-on-top
 
 Only particle / extraction / input / **derivation** hash mismatches trigger
-`blocked_needs_regeneration` (`select_segments.py:1503`); a `schema_hash`-only mismatch is ordinary
-`stale` (`select_segments.py:1544`). So editing a cache-key schema's **description** on top of a release
+`blocked_needs_regeneration` (`select_segments.py:1504`); a `schema_hash`-only mismatch is ordinary
+`stale` (`select_segments.py:1545`). So editing a cache-key schema's **description** on top of a release
 that ALREADY flips `plugin_bundle_hash` is **zero marginal workload** — the 15-field composite
 `cache_key` is already invalidated, so it's the same single re-translation, not a second one. Corollary:
 a schema-description fix rides FREE on any already-cache-key-flipping release (and a
@@ -214,7 +214,7 @@ empty-merge bypass no longer works." Cite `--restamp-derivation` only.
 plugin feature):** segment classification is gated on ledger-FRAGMENT PRESENCE, not on hash content.
 `_read_fragments()` (`ledger_merge.py:368-422`) returns `{}` when `runs/ledger.d/` is missing, and
 otherwise keys each fragment by its filename stem (one file per segment, `runs/ledger.d/{seg}.json`);
-`classify_segment()` (`select_segments.py:1550-1555`) returns `{"category": "not_started"}` whenever a
+`classify_segment()` (`select_segments.py:1551-1556`) returns `{"category": "not_started"}` whenever a
 segment has NO record in the merged ledger at all. Deleting a blocked segment's
 `runs/ledger.d/{seg}.json` fragment therefore ALSO clears `blocked_needs_regeneration` — not via any
 restamp, but by discarding that segment's entire convergence record, forcing a full FRESH re-translation

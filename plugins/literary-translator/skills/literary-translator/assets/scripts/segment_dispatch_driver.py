@@ -895,7 +895,7 @@ def fatal(message: str, exit_code: int = 1, **extra) -> NoReturn:
 # json"), and _read_review_obj()'s copy of the same. The REAL protection is
 # cross-file, not "this script never does it": select_segments.py's own
 # load_candidate_segments() fatals on any manifest.json `seg` failing its
-# validate_seg() (select_segments.py:1346-1362, the regex check at :1281) --
+# validate_seg() (select_segments.py:1347-1363, the regex check at :1282) --
 # every `seg` this script ever operates on already came from THAT
 # validated output (the `segs` list Step 1's own gate returns), never from
 # an unvalidated source, before this script ever builds a path from one.
