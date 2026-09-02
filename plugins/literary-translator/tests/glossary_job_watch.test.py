@@ -193,11 +193,18 @@ def test_wait_for_artifact_keeps_polling_while_status_is_unreadable(mod, monkeyp
     assert calls["ready"] == 3
 
 
-def test_wait_for_artifact_stops_immediately_on_a_terminal_status(mod, monkeypatch):
-    """(b) status ("failed", "cap") on the very first read, ready() always
-    false. The batch must end within the poll iteration that read the
-    terminal status -- never after another sleep -- so time.sleep raising if
-    called at all is the assertion, not merely a convenience mock."""
+@pytest.mark.parametrize("status,detail", [
+    ("failed", "cap"),
+    ("cancelled", "stopped by the operator"),
+])
+def test_wait_for_artifact_stops_immediately_on_a_terminal_status(
+        mod, monkeypatch, status, detail):
+    """(b) a terminal status on the very first read, ready() always false. The
+    batch must end within the poll iteration that read the terminal status --
+    never after another sleep -- so time.sleep raising if called at all is the
+    assertion, not merely a convenience mock. `cancelled` is pinned here in its
+    own right: an operator's /codex:cancel is the other way a job ends without
+    running, and dropping it from _JOB_TERMINAL would restore the full wait."""
     calls = {"ready": 0}
 
     def ready():
@@ -207,12 +214,12 @@ def test_wait_for_artifact_stops_immediately_on_a_terminal_status(mod, monkeypat
     def no_sleep(*a, **k):
         raise AssertionError("must not sleep once the job is terminal")
 
-    monkeypatch.setattr(mod, "read_job_status", lambda **kw: ("failed", "cap"))
+    monkeypatch.setattr(mod, "read_job_status", lambda **kw: (status, detail))
     monkeypatch.setattr(mod.time, "sleep", no_sleep)
     ctx = FakeCtx(deadline_sec=60, poll_sec=0.01)
     out = mod.wait_for_artifact(ctx, ready=ready, job_id="j1",
                                 sandbox_root=Path("/sbx"), label="batch 0 attempt 0")
-    assert out == {"ready": False, "jobStatus": "failed", "jobDetail": "cap"}
+    assert out == {"ready": False, "jobStatus": status, "jobDetail": detail}
     assert calls["ready"] == 2, "the first check plus the post-terminal re-check, no more"
 
 

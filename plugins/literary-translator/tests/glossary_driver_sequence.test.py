@@ -160,6 +160,10 @@ def bed(tmp_path):
           const jobId = args[1];
           const key = jobId.startsWith("job-") ? jobId.slice(4) : jobId;
           fs.appendFileSync({str(calls)!r}, "status " + jobId + "\\n");
+          // Job records are keyed by the workspace root the real companion
+          // resolves from --cwd, so a status asked with any other cwd would
+          // find no job. Logged so a test can hold it against the launch cwd.
+          fs.appendFileSync({str(calls)!r}, "statuscwd " + cwd + "\\n");
           const record = jobs[key];
           if (record && record.unanswerable) {{
             // The artifact appears ONLY through this failing status call, so a
@@ -1051,7 +1055,10 @@ def test_a_job_that_fails_at_launch_ends_the_batch_before_the_deadline(bed):
     assert "at capacity" in entry["jobDetail"]
     assert entry["jobId"] == "job-out_0_attempt_0.json"
     assert _logged(bed, "status"), "the status branch was never exercised"
-    print("STATUS_LINES:", _logged(bed, "status"))
+    assert set(_logged(bed, "statuscwd")) == {companion_cwds(bed)[0]}, (
+        "the status must be asked with the cwd the job was launched under -- "
+        "the companion keys its job records by that root and answers nothing "
+        "for any other")
     assert "ended failed" in proc.stderr
 
 
@@ -1093,6 +1100,11 @@ def test_a_failed_repair_job_settles_the_batch_at_its_rung(bed):
         "the batch settles at the rung whose repair failed, not the reserved "
         "next rung it never populated")
     assert out["merged"] is False
+    cwds = companion_cwds(bed)
+    assert len(cwds) == 2 and cwds[0] != cwds[1], "a dispatch and a repair launch"
+    assert set(_logged(bed, "statuscwd")) == {cwds[1]}, (
+        "the repair's status must be asked with the REPAIR launch's own sandbox, "
+        "never the dispatch's -- the two are different single-use directories")
 
 
 def test_a_status_the_companion_cannot_answer_never_fails_a_batch(bed):
@@ -1106,5 +1118,4 @@ def test_a_status_the_companion_cannot_answer_never_fails_a_batch(bed):
     elapsed = time.monotonic() - started
     assert elapsed < 45, f"waited {elapsed:.1f}s for what should resolve in one poll"
     assert _logged(bed, "status"), "the status branch was never exercised"
-    print("STATUS_LINES:", _logged(bed, "status"))
     assert out["needs_judge"], f"an unreadable status must not fail the batch: {out}"
