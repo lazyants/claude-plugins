@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.77.0 — 2026-09-02
+
+**W5 no longer dispatches while this project's W3 glossary pass is outstanding (#820).** The W5
+admission path had a rich set of preconditions — segpack/canon freshness, the claim profiles, the
+convergence sentinel, the resume-integrity gate, the project lease — and no precondition at all on
+the glossary. The ordering is load-bearing: the glossary pass is what freezes name forms in
+`canon.json`, so merged BEFORE W5 it hands the translator final forms, and merged AFTER W5 has
+converged every name it canonizes that the drafts rendered differently becomes a prose/canon conflict
+in already-reviewed text.
+
+Measured once, on a live 47-segment book whose pass stalled at 9 of 11 batches for a reason outside
+the pipeline. Nothing blocked W5, so the book converged 47/47 with every gate green; merging the last
+two batches then added 65 canon entries, re-staled 44 of 47 segments, and the extra review pass
+returned 155 findings, 43 of them canon conflicts. Only 13 of those entries carried
+`basis: established` and saw a citation judge, and several canonized forms have zero occurrences in
+the delivered text while the form they displace is well established there — so a late merge does not
+merely cost a review pass, it can put unattested forms in a position to overrule reviewed prose. The
+hazard was already written down: that project's own `profile.yml` comment on `glossary.enabled` warns
+that enabling it later "can re-stale and re-dispatch already-translated segments once names get
+canonized". A session that had read it launched W5 anyway, which is the argument for a gate rather
+than another sentence.
+
+- **The gate lives in `select_segments.py`, not in the driver.** Both W5 launchers gate on that one
+  preflight — `segment_dispatch_driver.py` shells it itself, and a session driving the retained
+  `mass-translate-wf.template.js` + `pipeline()` fallback runs it before dispatch — so the decision
+  logic exists once and both paths inherit it. `segment_dispatch_driver.py` only forwards the new
+  flag, adding no meaning of its own.
+- **It refuses only when BOTH halves hold:** a run directory exists under
+  `${durable_root}/glossary/runs/`, AND `glossary_batch_plan.py` reports `no_new_candidates: false`.
+  A project with `glossary.enabled: false`, and a project that has never dispatched a glossary pass,
+  are admitted with no flag. Replayed against the incident's real commits: the pre-merge canon (247
+  entries) refuses with 2 outstanding batches, the post-merge canon (312 entries) admits.
+- **Why the second half asks the planner rather than reading the run directory.** There is no durable
+  `merged: true` anywhere. The glossary driver's state document lives in a `--verdict-dir` that
+  `resolve_verdict_dir()` refuses to place inside the durable root, `merged` is returned in-process,
+  and the merge writes only `canon.json`. Adding a marker would need two writers, a backfill for every
+  project whose glossary already merged, and would still refuse forever over an abandoned run.
+  `glossary_batch_plan.py` already answers "what does W3 still have to adjudicate" from durable state
+  alone, and already encodes every exclusion a hand-rolled check would get wrong — `entries{}`,
+  `review_queue[]`, `corrections[]` dismissals, adjudicated homonym splits, the frequency floor, and
+  the elision force-include.
+- **The planner is invoked root-bound, not self-anchored.** Its three data paths are passed
+  explicitly from the target durable root, because it derives its defaults from its own physical
+  parent — with the script resolved from `--plugin-root`, every default would name the wrong project.
+  The optional `canon_senses.json` sidecar is the one input that cannot simply be passed (a missing
+  EXPLICIT path is a caller error, a missing default means "no splits yet"), so its absence is
+  established with a definitive `lstat` — never `Path.exists()`, which collapses `EACCES` and every
+  other lookup error to "absent" — and the planner's own default path is probed before the flag is
+  omitted. Anything found there refuses rather than reading a different project's splits.
+- **`--allow-unmerged-glossary`** authorizes exactly this dispatch and clears no other refusal. It is
+  on both `select_segments.py` and `segment_dispatch_driver.py`, which forwards it verbatim.
+  `--classify-only` stays a pure read and never triggers the gate.
+- **Known limitation, stated rather than left to be discovered.** The gate cannot see a glossary run
+  whose only outstanding work is a `--retry`-reopened `review_queue` name: on disk that is
+  byte-identical to a completed run that adjudicated the same name back to the queue, so no read-only
+  predicate over durable artifacts separates the two. Separately, the gate binds the fallback
+  launcher by the same convention that binds every other `select_segments.py` admission gate — the
+  fallback takes its `SEGS` from Workflow args and nothing mechanically forces the preflight call.
+  Neither is introduced by this release.
+- **Upgrade cost.** `segment_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` file, so this release
+  moves `plugin_bundle_hash`: on an upgraded project every converged segment reclassifies as `stale`
+  (re-translate only — no derivation-bundle member is touched), and an interrupted run mints a fresh
+  `RUN_ID`. A book in progress should ship before taking this release.
+
 ## 1.76.1 — 2026-09-02
 
 **A codex job that dies at launch no longer costs its batch the whole 2700 s poll (#809).**

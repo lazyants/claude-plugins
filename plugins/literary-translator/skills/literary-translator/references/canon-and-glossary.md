@@ -1297,6 +1297,23 @@ create-only: it never re-stamps an
 existing `canon.json`, since `select_segments.py`'s derivation-state gate
 reads exactly the two hashes it would overwrite.
 
+**#820 — that same marker is now also W5's admission precondition.** The
+ordering of W3 against W5 is load-bearing and was, until 1.77.0, enforced by
+nothing: the glossary pass is what freezes name forms in `canon.json`, so a
+merge that lands AFTER W5 has converged turns every name it canonizes that the
+drafts rendered differently into a prose/canon conflict in already-reviewed
+text. `select_segments.py` therefore refuses to emit `SEGS` when a run
+directory exists under `${durable_root}/glossary/runs/` AND
+`glossary_batch_plan.py` still reports `no_new_candidates: false` — the same
+call described above, made by the gate rather than by the orchestrating
+session, with its three data paths bound explicitly to the target durable root
+because this script self-anchors its defaults to its own physical parent. Both
+halves are required, so `glossary.enabled: false` and a project that never
+dispatched a pass are admitted with no flag; `--allow-unmerged-glossary` is
+the deliberate override. There is no durable `merged: true` anywhere to gate
+on instead — see SKILL.md's W5 preflight bullet for the full account,
+including the one state the gate cannot see.
+
 ## `segpack.py`'s canon injection contract
 
 Every per-segment pack gets:

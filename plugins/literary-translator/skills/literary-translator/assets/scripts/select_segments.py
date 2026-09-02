@@ -136,6 +136,15 @@ What it does (SKILL.md's W5 "Mass-translate" section, authoritative):
      (its `note` field used to say the identical untrue thing). Each run
      id's OWN evidence is still named per-id in the message detail
      (`evidence: drafts`/`workflow_dir`/`drafts+workflow_dir`), unchanged.
+  8. #820: refuses an AUTHORIZING invocation when the project's W3 glossary
+     pass has a `glossary/runs/<RUN_ID>/` run outstanding (batches
+     glossary_batch_plan.py has not yet reported `no_new_candidates: true`
+     for). A book merged mid-flight can re-stale and re-dispatch already-
+     reviewed segments once late-canonized names reach canon.json -- see
+     `check_glossary_current()` for the predicate and `--allow-unmerged-
+     glossary` for the deliberate override. Short-circuited by
+     `glossary.enabled: false` and by no glossary run existing at all --
+     see `load_glossary_config()`/`check_glossary_current()`.
 
 CLI flags:
 
@@ -313,6 +322,17 @@ except (ImportError, OSError) as _json_stdout_exc:  # pragma: no cover - staging
 
 dumps_line = _json_stdout.dumps_line
 
+# #820: the glossary admission gate needs profile.yml's glossary block.
+# Optional, matching segment_dispatch_driver.py::load_engine_config()'s own
+# `import yaml` / `yaml = None` fallback -- the missing-dependency message is
+# raised at the point of USE (load_glossary_config()), not at import time,
+# because every OTHER caller of this script (a plain classification report
+# with no dispatch, or --classify-only) never needs PyYAML at all.
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 # #438's claim admission gate needs claim_record.py -- a flat sibling
 # import, the same idiom scaffold_setup.py already uses for `import
 # cache_key`, rather than a duplicated copy, because claim_record.py's own
@@ -342,6 +362,10 @@ CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 # validate_draft.py's own module docstrings: "this script is a LEAF").
 DRAFT_READY_SCRIPT = SCRIPTS_DIR / "draft_ready.py"
 VALIDATE_DRAFT_SCRIPT = SCRIPTS_DIR / "validate_draft.py"
+# #820: the glossary admission gate's own leaf checker -- resolved the SAME
+# way as CACHE_KEY_SCRIPT (see resolve_dirs()'s own tamper-rule docstring:
+# never resolve a checker from inside the tree it checks).
+GLOSSARY_BATCH_PLAN_SCRIPT = SCRIPTS_DIR / "glossary_batch_plan.py"
 
 
 def resolve_dirs(durable_root_str, plugin_root_str=None):
@@ -350,8 +374,9 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
     otherwise.
 
     `plugin_root_str` is a SEPARATE, independent input governing where the
-    SIBLING SCRIPTS this script shells out to (ledger_merge.py, cache_key.py)
-    are resolved from -- deliberately NEVER derived from `durable_root_str`.
+    SIBLING SCRIPTS this script shells out to (ledger_merge.py, cache_key.py,
+    glossary_batch_plan.py) are resolved from -- deliberately NEVER derived
+    from `durable_root_str`.
     `${durable_root}/scripts/` is copied there by Step 0a and is writable by
     the codex process these scripts gate (codex_job.py runs it with --write
     over the whole durable root) -- resolving the checker from inside the
@@ -378,6 +403,7 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
         cache_key_script = CACHE_KEY_SCRIPT
         draft_ready_script = DRAFT_READY_SCRIPT
         validate_draft_script = VALIDATE_DRAFT_SCRIPT
+        glossary_batch_plan_script = GLOSSARY_BATCH_PLAN_SCRIPT
     else:
         plugin_scripts_dir = Path(plugin_root_str).resolve() / "assets" / "scripts"
         ledger_merge_script = plugin_scripts_dir / "ledger_merge.py"
@@ -386,6 +412,9 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
         # both are leaves, resolved the identical way.
         draft_ready_script = plugin_scripts_dir / "draft_ready.py"
         validate_draft_script = plugin_scripts_dir / "validate_draft.py"
+        # #820: same --plugin-root-aware resolution again -- glossary_batch_
+        # plan.py is a third leaf, same tamper rule as the two above.
+        glossary_batch_plan_script = plugin_scripts_dir / "glossary_batch_plan.py"
 
     return {
         "durable_root": durable_root,
@@ -394,6 +423,7 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
         "cache_key_script": cache_key_script,
         "draft_ready_script": draft_ready_script,
         "validate_draft_script": validate_draft_script,
+        "glossary_batch_plan_script": glossary_batch_plan_script,
     }
 
 
@@ -4051,7 +4081,7 @@ def acquire_and_hold_lease(lock_path: Path, what: str) -> "tuple[bool, str]":
     the admission decision rest on state that changed while we waited).
 
     The self-test after a successful acquire is
-    segment_dispatch_driver.py:1313-1369's, with ONE deliberate difference: it
+    segment_dispatch_driver.py:1315-1370's, with ONE deliberate difference: it
     warns and proceeds, THIS REFUSES. The asymmetry is the point. On an
     unenforced mount the driver's own acquire is merely not exclusive, whereas
     this script's standalone path would FALSELY ACQUIRE runs/.driver.lock while
@@ -4240,6 +4270,534 @@ def acquire_from_stalled_leases(stalled_segs: list, dirs: dict, args) -> "dict[s
                 f"{FROM_STALLED_DISCLOSURE}"
             ]
     return failures
+
+
+# ---------------------------------------------------------------------------
+# #820: glossary admission gate -- W5 must not dispatch while the project's
+# W3 glossary pass has a run outstanding. A book merged mid-flight can
+# re-stale and re-dispatch already-reviewed, already-paid-for segments once
+# late-canonized names reach canon.json -- see run()'s own call site for the
+# LOAD-BEARING placement (before anything below it starts writing) and
+# `references/canon-and-glossary.md` for the incident this closes.
+#
+# THE IRON RULE still applies here exactly as everywhere else in this
+# plugin: this gate makes no accuracy/identity call of its own. It reads
+# glossary_batch_plan.py's own verdict (the same script W3's orchestrating
+# session already runs to decide whether to dispatch the glossary pass at
+# all) rather than re-deriving "is there unmerged glossary work" from raw
+# candidate/canon data -- reimplementing that predicate here would drift
+# from the shipped one exactly the way this plugin's "no shared lib"
+# convention already accepts for byte-identical CONSTANTS, but never for
+# JUDGMENT logic.
+# ---------------------------------------------------------------------------
+
+# glossary_batch_plan.py's own DEFAULT_MIN_CANDIDATE_FREQ
+# (glossary_batch_plan.py:199), restated here per this project's "no shared
+# lib between self-contained scripts" convention -- SKILL.md:1467-1468 names
+# this exact fallback "the profile's glossary.min_candidate_freq when set,
+# else 2".
+_DEFAULT_MIN_CANDIDATE_FREQ = 2
+
+
+def _tail(text: "str | None", n: int = 600) -> str:
+    """Last `n` characters of `text`, or "" for None/empty -- the shared
+    truncation every glossary-check-unavailable refusal below uses to relay
+    a child process's stderr without risking an unbounded refusal payload."""
+    if not text:
+        return ""
+    return text[-n:]
+
+
+def scan_glossary_run_ids(glossary_runs_dir: Path) -> "list | dict":
+    """CONDITION 1 of the #820 predicate: every RUN_ID under
+    `{durable_root}/glossary/runs/` whose name is accepted by
+    `validate_run_id()` and which stats as a directory, newest first.
+
+    Returns `[]` when no glossary run exists at all (the directory is
+    missing, or exists but holds no run-shaped entry) -- the filer's
+    "no glossary run" must-pass-with-no-flag case. Returns a refusal dict
+    (`{"reason": "glossary-check-unavailable", "message", "glossaryRunId":
+    None, "outstandingBatches": None, "outstandingCandidates": None}`) the
+    instant any entry -- or the directory itself -- cannot be established
+    DEFINITIVELY. Never raises.
+
+    Modeled on `scan_workflow_run_ids()` above (name-shape check BEFORE any
+    stat; `os.stat()`, never `Path.is_dir()`, so an unreadable entry cannot
+    silently read as "not a directory"), but DIVERGES from it on purpose at
+    the point that function defers to main()'s generic `except Exception`
+    catch-all: that catch-all reports only `{"success": false, "error":
+    ...}`, with no `reason` field, and this gate's caller needs a
+    structured refusal (`glossaryRunId`/`outstandingBatches`/
+    `outstandingCandidates` all null, per the payload's one shape) rather
+    than a bare error string -- so an unstattable entry is refused HERE,
+    not left to propagate. Absence and failure must not print identically.
+
+    NEVER globs INSIDE a run directory -- `evidence_N_attempt_M` entries
+    under a glossary run are DIRECTORIES, and a glob for `evidence_*.json`
+    there returns zero and reads as clean (the incident that motivated
+    #820's filer to insist on this). This function only asks whether the
+    run directory itself exists; CONDITION 2 (`check_glossary_current()`)
+    is what actually asks glossary_batch_plan.py whether it is done."""
+    try:
+        entries = sorted(glossary_runs_dir.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        # DEFINITIVELY no glossary/runs/ directory -- the ordinary state of
+        # a project that has never run the W3 glossary pass. Converges with
+        # "the directory exists but holds no run-shaped entry" below: both
+        # mean the same thing to CONDITION 1, no glossary run exists yet.
+        return []
+    except OSError as exc:
+        return {
+            "reason": "glossary-check-unavailable",
+            "message": (
+                f"could not establish whether {glossary_runs_dir} holds any "
+                f"glossary run ({exc}) -- refusing rather than risking a "
+                "silent admission over unmerged glossary work."
+            ),
+            "glossaryRunId": None,
+            "outstandingBatches": None,
+            "outstandingCandidates": None,
+        }
+
+    run_ids = []
+    for entry in entries:
+        # Name-shape check FIRST, before any stat -- a disqualifying name
+        # needs nothing established about the filesystem, exactly the
+        # discipline scan_workflow_run_ids() applies to runs/workflows/.
+        if validate_run_id(entry.name) is not None:
+            continue
+        try:
+            entry_stat = os.stat(entry)
+        except (FileNotFoundError, NotADirectoryError):
+            # DEFINITIVELY not a run: gone between the listing and the
+            # stat, or a dangling symlink.
+            continue
+        except OSError as exc:
+            return {
+                "reason": "glossary-check-unavailable",
+                "message": (
+                    f"could not establish whether {entry} is a glossary run "
+                    f"directory ({exc}) -- refusing rather than risking a "
+                    "silent admission over unmerged glossary work."
+                ),
+                "glossaryRunId": None,
+                "outstandingBatches": None,
+                "outstandingCandidates": None,
+            }
+        if stat.S_ISDIR(entry_stat.st_mode):
+            run_ids.append(entry.name)
+
+    # RUN_IDs are the colon-free YYYYMMDDTHHMMSSZ form, so lexicographic
+    # order == chronological order -- the same property
+    # _resumable_run_id_candidates() (segment_dispatch_driver.py) already
+    # relies on for its own newest-first ordering.
+    return sorted(run_ids, reverse=True)
+
+
+def resolve_glossary_senses_arg(dirs: dict, durable_root: Path) -> "tuple[str | None, dict | None]":
+    """Resolves the exact `--senses-path` argument (or the decision to omit
+    it) to hand glossary_batch_plan.py, and is the one input CONDITION 2
+    cannot simply pass through: glossary_batch_plan.py's own `main()` sets
+    `senses_explicit = args.senses_path is not None` and treats a missing
+    DEFAULT sidecar as "no splits yet" but a missing EXPLICIT one as a
+    caller error -- so passing the flag unconditionally would fatal on
+    every project that has no sidecar, which is most of them.
+
+    Returns `(senses_path_arg, refusal)`: exactly one of the two is
+    non-None. `senses_path_arg` is either the resolved sidecar path (as a
+    str, ready for the subprocess argv) or None (meaning: omit the flag,
+    let the planner fall back to its own default). `refusal` is a
+    glossary-senses-indeterminate dict in the #820 shape
+    (`glossaryRunId`/`outstandingBatches`/`outstandingCandidates` all null)
+    when the decision could not be made safely.
+
+    In this exact order (round 2/3 MAJOR):
+
+      1. `os.lstat({durable_root}/canon_senses.json)` -- NOT `Path.exists()`
+         and NOT `Path.is_file()`, which collapse EACCES/ELOOP/every other
+         lookup error to "absent" and would move the false-GREEN this whole
+         function exists to prevent one step earlier.
+      2. Present (of any kind lstat can see) -> pass `--senses-path`
+         explicitly and let glossary_batch_plan.py's own `load_senses()`
+         validate and read it.
+      3. Any error other than ENOENT -> refuse, naming the path. Only a
+         DEFINITIVE ENOENT falls through to the probe below.
+      4. On definitive ENOENT, probe the planner's own default sidecar --
+         `dirs["glossary_batch_plan_script"].resolve().parents[1] /
+         "canon_senses.json"` -- with the same definitive lstat. WHY: the
+         planner self-anchors its own `DEFAULT_SENSES_PATH` to its own
+         physical parent, so with the script resolved from --plugin-root
+         (this file's own `resolve_dirs()`), that default would name a
+         DIFFERENT project's sidecar entirely. A split adjudicated THERE
+         could silently exclude a candidate that is genuinely outstanding
+         for THIS project -- a false GREEN on a safety gate (round 2
+         MAJOR). ANYTHING at that probe path, or any probe error other than
+         ENOENT, refuses, naming BOTH paths. Only a definitive ENOENT on
+         the probe too falls all the way through to omitting the flag --
+         at that point the planner's own default resolves to nothing,
+         which genuinely IS "no splits yet" for this project.
+
+    Passing the flag unconditionally is NOT an option (see above); reading
+    the durable sidecar with anything less than a definitive stat is NOT an
+    option either (round 3 MAJOR: `Path.exists()` would silently fall
+    through to the SAME leak one layer earlier). Five stats, no new planner
+    flag, no reversal of glossary_batch_plan.py's own "never takes a
+    --durable-root flag" contract."""
+    durable_senses_path = durable_root / "canon_senses.json"
+    try:
+        os.lstat(durable_senses_path)
+    except FileNotFoundError:
+        pass  # definitive ENOENT -- fall through to the probe below.
+    except OSError as exc:
+        return None, {
+            "reason": "glossary-senses-indeterminate",
+            "message": (
+                f"could not establish whether {durable_senses_path} exists "
+                f"({exc}) -- refusing rather than risking a silent read of "
+                "the wrong project's homonym-split sidecar."
+            ),
+            "glossaryRunId": None,
+            "outstandingBatches": None,
+            "outstandingCandidates": None,
+        }
+    else:
+        return str(durable_senses_path), None
+
+    probe_path = dirs["glossary_batch_plan_script"].resolve().parents[1] / "canon_senses.json"
+    try:
+        os.lstat(probe_path)
+    except FileNotFoundError:
+        # Definitively absent too: the planner's own default resolves to
+        # nothing, which IS "no splits yet" for this project.
+        return None, None
+    except OSError as exc:
+        return None, {
+            "reason": "glossary-senses-indeterminate",
+            "message": (
+                f"{durable_senses_path} is absent, and the planner's own "
+                f"default sidecar {probe_path} could not be established "
+                f"either ({exc}) -- refusing rather than risking a silent "
+                "read of the wrong project's homonym-split sidecar."
+            ),
+            "glossaryRunId": None,
+            "outstandingBatches": None,
+            "outstandingCandidates": None,
+        }
+    else:
+        return None, {
+            "reason": "glossary-senses-indeterminate",
+            "message": (
+                f"{durable_senses_path} is absent, but the planner's own "
+                f"default sidecar {probe_path} is occupied -- omitting "
+                "--senses-path would let glossary_batch_plan.py silently "
+                "read a DIFFERENT project's homonym-split sidecar, which "
+                "could exclude a candidate genuinely outstanding here. "
+                "Refusing rather than risking a false admission."
+            ),
+            "glossaryRunId": None,
+            "outstandingBatches": None,
+            "outstandingCandidates": None,
+        }
+
+
+def check_glossary_current(dirs: dict) -> "dict | None":
+    """The full #820 predicate. Returns None to ADMIT, or a refusal dict
+    (`{"reason", "message", "glossaryRunId", "outstandingBatches",
+    "outstandingCandidates"}`, plus `"detail"` on the glossary-check-
+    unavailable path) to REFUSE. Never raises -- run()'s own call site is
+    the only place a refusal here becomes a `fatal()`.
+
+    ORDER, LOAD-BEARING (post-implementation fix -- the first cut of this
+    gate loaded `profile.yml` unconditionally, before either admitting
+    condition, which meant EVERY authorizing selector call newly required
+    an ownership marker and profile.yml -- a behavior change far wider than
+    this gate, and it broke every existing fixture that never needed either
+    before):
+
+    CONDITION 1 (`scan_glossary_run_ids()`) FIRST: does a glossary run
+    exist at all under `{durable_root}/glossary/runs/`? No -> admit,
+    WITHOUT ever calling `load_glossary_config()` -- a project with no
+    glossary run reads no profile.yml and touches no ownership marker.
+    Unstattable -> refuse (relayed verbatim).
+
+    Only once a run directory is confirmed to exist does this function call
+    `load_glossary_config()`. `glossary_cfg["enabled"] is False` then
+    short-circuits: a project that opted out has nothing to wait for (the
+    filer's other must-pass-with-no-flag case). Reordering condition 1
+    ahead of the enabled check is semantically identical to checking
+    `enabled` first -- "no run" and "not enabled" both admit, and neither
+    depends on the other -- it only changes which one short-circuits
+    without paying for the other.
+
+    CONDITION 2: invoke glossary_batch_plan.py -- the shipped authority on
+    "what W3 still has to adjudicate", the SAME script the orchestrating
+    session already runs at W3 to decide whether to dispatch the glossary
+    pass (SKILL.md:1462) -- and read its own verdict rather than
+    re-deriving it. `-B` (sys.dont_write_bytecode is set too late inside
+    glossary_batch_plan.py itself, AFTER its `canon_senses` import, to stop
+    that import writing a .pyc into a tree this gate must only read). The
+    three data paths (`--name-candidates`/`--canon`, plus `--min-candidate-
+    freq`) are explicit and bound to `dirs["durable_root"]`, never left to
+    the planner's own self-anchored defaults -- with the SCRIPT resolved
+    from `--plugin-root` (round 1 MAJOR), every one of those defaults would
+    silently name the wrong project. `--senses-path` is resolved separately
+    by `resolve_glossary_senses_arg()` (round 2/3 MAJOR; see its own
+    docstring) because it cannot simply be forwarded the same way.
+
+    A check that could not be ESTABLISHED must not print like one that
+    passed: non-zero exit, `OSError`, `TimeoutExpired`, or stdout that is
+    not exactly one parseable JSON object all refuse with reason
+    "glossary-check-unavailable" and a `detail` of the child's last 600
+    stderr characters. The dominant real case is glossary_batch_plan.py's
+    own loud "name_candidates.json not found -- run bootstrap_names.py for
+    this project first" -- exactly the right thing to show an operator
+    about to dispatch W5 on a glossary-enabled project that never completed
+    W3.
+
+    `no_new_candidates: true` -> admit. Otherwise -> refuse with reason
+    "glossary-pass-unmerged", naming the run id and counting both the
+    outstanding batches and the total candidate names across them.
+
+    WORDING, load-bearing (post-implementation fix): the refusal message
+    reports the outstanding-batch/candidate counts and the newest run id as
+    TWO SEPARATE facts, never welded into one sentence that reads as
+    "these candidates belong to that run". CONDITION 2 is project-scoped --
+    glossary_batch_plan.py reports what the PROJECT still has to adjudicate
+    against the current canon.json, and knows nothing about which run any
+    candidate belongs to; CONDITION 1 only proves a run directory exists on
+    disk. The two conditions are independent evidence for the same
+    refusal, not one continuous fact, and this is exactly the non-goal the
+    plan states explicitly: "the refusal names the newest run id, not 'the
+    unmerged run' -- claiming the named run is the unmerged one would be a
+    claim the check did not make." On a project with an abandoned earlier
+    run and a later, unrelated run, a welded sentence would be false. Do
+    NOT re-merge these into one clause without re-deriving that the merged
+    claim is actually true."""
+    durable_root = dirs["durable_root"]
+    glossary_runs_dir = durable_root / "glossary" / "runs"
+    scan_result = scan_glossary_run_ids(glossary_runs_dir)
+    if isinstance(scan_result, dict):
+        return scan_result
+    if not scan_result:
+        return None
+    newest_run_id = scan_result[0]
+
+    # Only NOW -- a glossary run genuinely exists -- does this function read
+    # profile.yml. See the docstring's ORDER note: reading it any earlier
+    # forces the ownership-marker/profile.yml requirement onto every
+    # authorizing selector call, glossary run or not.
+    glossary_cfg = load_glossary_config(durable_root)
+    if glossary_cfg["enabled"] is False:
+        return None
+
+    senses_path_arg, senses_refusal = resolve_glossary_senses_arg(dirs, durable_root)
+    if senses_refusal is not None:
+        return senses_refusal
+
+    cmd = [
+        sys.executable,
+        "-B",
+        str(dirs["glossary_batch_plan_script"]),
+        "--min-candidate-freq",
+        str(glossary_cfg["min_candidate_freq"]),
+        "--name-candidates",
+        str(durable_root / "name_candidates.json"),
+        "--canon",
+        str(durable_root / "canon.json"),
+    ]
+    if senses_path_arg is not None:
+        cmd += ["--senses-path", senses_path_arg]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, close_fds=True)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raw_stderr = getattr(exc, "stderr", None)
+        detail = _tail(raw_stderr if isinstance(raw_stderr, str) else str(exc))
+        return {
+            "reason": "glossary-check-unavailable",
+            "message": (
+                "could not run glossary_batch_plan.py to check whether the "
+                f"W3 glossary pass for run {newest_run_id!r} is complete "
+                f"({exc}) -- a check that could not be established must not "
+                "print like one that passed."
+            ),
+            "glossaryRunId": None,
+            "outstandingBatches": None,
+            "outstandingCandidates": None,
+            "detail": detail,
+        }
+
+    if proc.returncode != 0:
+        detail = _tail(proc.stderr)
+        return {
+            "reason": "glossary-check-unavailable",
+            "message": (
+                f"glossary_batch_plan.py exited {proc.returncode} while "
+                f"checking whether the W3 glossary pass for run "
+                f"{newest_run_id!r} is complete -- cannot tell whether W5 "
+                f"dispatch is safe. {detail}"
+            ),
+            "glossaryRunId": None,
+            "outstandingBatches": None,
+            "outstandingCandidates": None,
+            "detail": detail,
+        }
+
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        detail = _tail(proc.stderr)
+        return {
+            "reason": "glossary-check-unavailable",
+            "message": (
+                "glossary_batch_plan.py did not print exactly one "
+                f"parseable JSON line on stdout: stdout={proc.stdout!r} "
+                f"stderr={proc.stderr!r}"
+            ),
+            "glossaryRunId": None,
+            "outstandingBatches": None,
+            "outstandingCandidates": None,
+            "detail": detail,
+        }
+
+    if not isinstance(payload, dict) or "no_new_candidates" not in payload:
+        detail = _tail(proc.stderr)
+        return {
+            "reason": "glossary-check-unavailable",
+            "message": (
+                "glossary_batch_plan.py's stdout did not contain the "
+                f"expected 'no_new_candidates' field: {payload!r}"
+            ),
+            "glossaryRunId": None,
+            "outstandingBatches": None,
+            "outstandingCandidates": None,
+            "detail": detail,
+        }
+
+    if payload["no_new_candidates"] is True:
+        return None
+
+    batches = payload.get("batches")
+    if not isinstance(batches, list):
+        detail = _tail(proc.stderr)
+        return {
+            "reason": "glossary-check-unavailable",
+            "message": (
+                "glossary_batch_plan.py reported no_new_candidates: false "
+                f"but its 'batches' field was not a list: {payload!r}"
+            ),
+            "glossaryRunId": None,
+            "outstandingBatches": None,
+            "outstandingCandidates": None,
+            "detail": detail,
+        }
+
+    n_batches = len(batches)
+    n_candidates = sum(
+        len(b["names"])
+        for b in batches
+        if isinstance(b, dict) and isinstance(b.get("names"), list)
+    )
+    return {
+        "reason": "glossary-pass-unmerged",
+        "message": (
+            f"this project has {n_batches} outstanding glossary batch(es) "
+            f"covering {n_candidates} candidate name(s) not yet in "
+            f"canon.json, and a glossary run exists under "
+            f"{glossary_runs_dir} (newest: {newest_run_id}) -- finish (or "
+            "resume) the W3/W3a glossary pass before dispatching W5, or "
+            "pass --allow-unmerged-glossary if you have decided to "
+            "override deliberately."
+        ),
+        "glossaryRunId": newest_run_id,
+        "outstandingBatches": n_batches,
+        "outstandingCandidates": n_candidates,
+    }
+
+
+def load_glossary_config(durable_root: Path) -> dict:
+    """Returns `{"enabled": bool, "min_candidate_freq": int}`, resolved from
+    profile.yml via the ownership marker -- mirrors segment_dispatch_
+    driver.py's own `load_engine_config()`'s ownership-marker ->
+    `owner_profile_path` -> `yaml.safe_load` shape, duplicated per this
+    project's "no shared lib between self-contained scripts" convention.
+    Only the two fields this gate needs are read.
+
+    `enabled`: `glossary.get("enabled") is not False`. Explicit `is not
+    False`, never a truthy `.get()` -- profile.schema.json's own
+    `"default": true` on `glossary.enabled` is documentation-only, nothing
+    fills it in at validation time, and `profile_validate.py`'s own
+    `check_glossary_disabled_conflicts_with_skeptic_pass()`
+    (profile_validate.py:845-846) spells out the identical convention:
+    "Tests glossary.enabled is False explicitly, NEVER a falsy .get(): an
+    ABSENT glossary.enabled means true". Only an EXPLICIT `false` disables
+    this gate.
+
+    `min_candidate_freq`: the profile's `glossary.min_candidate_freq` when
+    present and a positive non-bool int (profile.schema.json: `type
+    integer, minimum 1`), else `_DEFAULT_MIN_CANDIDATE_FREQ`. A
+    present-but-invalid value is fatal -- a profile that names an invalid
+    threshold is a profile error, not a value for this gate to silently
+    repair.
+
+    The `glossary` block itself is schema-REQUIRED, with `research_mode`
+    required inside it -- an absent block is a profile error, not a case
+    this gate invents support for."""
+    if yaml is None:
+        fatal(
+            "missing required dependency 'PyYAML' to read profile.yml. "
+            "Install with: pip install -r requirements.txt from the "
+            "literary-translator plugin's own directory."
+        )
+    marker_path = durable_root / ".literary-translator-root.json"
+    if not marker_path.is_file():
+        fatal(
+            f"ownership marker not found: {marker_path} -- run Step 0a "
+            "(durable-root scaffolding) before this gate."
+        )
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fatal(f"ownership marker at {marker_path} is not valid JSON: {exc}")
+    owner_profile_path = marker.get("owner_profile_path") if isinstance(marker, dict) else None
+    if not owner_profile_path:
+        fatal(f"ownership marker at {marker_path} has no owner_profile_path")
+    profile_path = Path(owner_profile_path)
+    if not profile_path.is_file():
+        fatal(f"profile.yml not found at {profile_path} (per {marker_path})")
+    try:
+        profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        fatal(f"profile.yml at {profile_path} is not valid YAML: {exc}")
+    if not isinstance(profile, dict):
+        fatal(f"profile.yml at {profile_path} did not parse to a mapping")
+
+    glossary = profile.get("glossary")
+    if not isinstance(glossary, dict):
+        fatal(
+            f"profile.yml at {profile_path} missing required field: glossary "
+            "(profile.schema.json requires this block, with research_mode "
+            "required inside it -- an absent block is a profile error, not "
+            "a case this gate invents support for)"
+        )
+
+    enabled = glossary.get("enabled") is not False
+
+    min_candidate_freq = glossary.get("min_candidate_freq")
+    if min_candidate_freq is None:
+        min_candidate_freq = _DEFAULT_MIN_CANDIDATE_FREQ
+    elif (
+        not isinstance(min_candidate_freq, int)
+        or isinstance(min_candidate_freq, bool)
+        or min_candidate_freq < 1
+    ):
+        fatal(
+            f"profile.yml at {profile_path}: glossary.min_candidate_freq "
+            f"must be a positive integer, got {min_candidate_freq!r} "
+            "(profile.schema.json: type integer, minimum 1)"
+        )
+
+    return {"enabled": enabled, "min_candidate_freq": min_candidate_freq}
 
 
 # ---------------------------------------------------------------------------
@@ -4435,6 +4993,36 @@ def run(args, dirs: dict) -> dict:
     # dedicated error, and before the return so no caller can receive an
     # authorizing result it did not earn.
     authorizes_dispatch = not args.classify_only
+
+    # #820: W5 must not dispatch while the project's W3 glossary pass has a
+    # run outstanding. LOAD-BEARING PLACEMENT: everything below this point
+    # starts WRITING (claim admission at D2/D5.3, the previously_converged/
+    # lost_sentinels sentinel census, then re-stamped draft dispatch
+    # tokens), so refusing HERE, before any of that, is what keeps this
+    # gate free of side effects. Gated on `authorizes_dispatch`, the same
+    # condition the #409 Step 3 refusal below uses -- --classify-only stays
+    # a pure read and never refuses here. check_glossary_current() itself
+    # decides whether profile.yml even needs reading (only once a glossary
+    # run is confirmed to exist) -- see its own docstring's ORDER note.
+    if authorizes_dispatch and not args.allow_unmerged_glossary:
+        glossary_refusal = check_glossary_current(dirs)
+        if glossary_refusal is not None:
+            fatal(
+                glossary_refusal["message"],
+                reason=glossary_refusal["reason"],
+                glossaryRunId=glossary_refusal["glossaryRunId"],
+                outstandingBatches=glossary_refusal["outstandingBatches"],
+                outstandingCandidates=glossary_refusal["outstandingCandidates"],
+                # #820 fix: the pinned call site originally omitted this,
+                # dropping the child's relayed stderr on the wire for every
+                # glossary-check-unavailable refusal -- exactly the
+                # diagnostic (glossary_batch_plan.py's own "run
+                # bootstrap_names.py for this project first") an operator
+                # needs. Forwarded only when the refusal carries one, so
+                # glossary-pass-unmerged's payload shape is unchanged.
+                **({"detail": glossary_refusal["detail"]} if "detail" in glossary_refusal else {}),
+            )
+
     previously_converged = []
     ambiguous_sentinels = []
     # #442. The THIRD bucket, and the only one whose evidence is not the
@@ -5858,6 +6446,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "'stale' and stale is dispatch-eligible by default -- which would "
             "silently re-translate finished, paid-for work. Naming this flag "
             "is the authorization; it does not delete the durable sentinel."
+        ),
+    )
+    parser.add_argument(
+        "--allow-unmerged-glossary",
+        action="store_true",
+        help=(
+            "#820: permit dispatching W5 while this project has outstanding glossary "
+            "batches not yet merged into canon.json AND a glossary run exists under "
+            "${durable_root}/glossary/runs/ (two independent facts -- see check_glossary_"
+            "current()'s own WORDING note for why they are never stated as one). Without "
+            "this flag such a selection is refused, because canonizing names AFTER "
+            "translation re-stales and re-dispatches already-translated, already-reviewed "
+            "segments once the late-merged forms reach canon.json -- the exact incident "
+            "this gate exists to stop. Naming this flag is the authorization; it waives "
+            "NOTHING ELSE -- every other admission gate (previously-converged, #409 Step "
+            "3, claim admission) still applies in full."
         ),
     )
     parser.add_argument(

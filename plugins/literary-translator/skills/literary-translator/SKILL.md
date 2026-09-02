@@ -2241,6 +2241,41 @@ called. It:
   through — the sanctioned remedy is `backfill_resume_gate_ack.py --apply`,
   which records, per run id, that it predates the gate (never fabricating a
   digest). `--classify-only` reads without ever triggering this gate.
+- **#820:** a FOURTH refusal, and the one that orders W3 against W5 —
+  `select_segments.py` FATALs when this project has an unfinished W3 glossary
+  pass. Two things must BOTH hold: a run directory exists under
+  `${durable_root}/glossary/runs/`, and `glossary_batch_plan.py` still reports
+  outstanding name candidates (`no_new_candidates: false`). Requiring both is
+  what lets a project with `glossary.enabled: false`, and a project that has
+  never dispatched a glossary pass at all, through with no flag.
+  The hazard is ORDERING, not correctness. The glossary pass is what freezes
+  name forms in `canon.json`: merged BEFORE W5 it hands the translator final
+  forms, merged AFTER W5 has converged every name it canonizes that the drafts
+  rendered differently becomes a prose/canon conflict in already-reviewed text.
+  Measured once, on a 47-segment book whose pass stalled at 9 of 11 batches for
+  a reason outside the pipeline — nothing blocked W5, so the book converged
+  47/47 with every gate green; merging the last two batches then added 65 canon
+  entries, re-staled 44 of 47 segments, and the extra review pass returned 155
+  findings, 43 of them canon conflicts. Only 13 of those entries carried
+  `basis: established` and saw a citation judge, and several name forms with
+  ZERO occurrences in the delivered text, displacing forms well established
+  there — so a late merge does not merely cost a review pass, it can put
+  unattested forms in a position to overrule reviewed prose.
+  There is no durable `merged: true` to read anywhere (the glossary driver's
+  state lives in a `--verdict-dir` it refuses to place inside the durable root,
+  and the merge writes only `canon.json`), which is why the second half of the
+  predicate asks the shipped planner what W3 still has to do rather than
+  inferring completeness from run-directory contents.
+  `--allow-unmerged-glossary` authorizes exactly this dispatch and nothing
+  else — it clears none of the refusals above — and is the sanctioned answer
+  for an operator who has decided to proceed. `--classify-only` reads without
+  ever triggering this gate.
+  **What this gate cannot see**, recorded here because prose is the only place
+  it can live: a glossary run whose ONLY outstanding work is a `--retry`-
+  reopened `review_queue` name. On disk that state is byte-identical to a
+  completed run that adjudicated the same name back to the queue — the name
+  sits in `review_queue[]` and in that run's `manifest_all.json` either way —
+  so no read-only predicate over durable artifacts separates them.
 
 **1.2.0: the deterministic pre-workflow step, after `SEGS` and before
 `pipeline()`.** With `SEGS` finalized, invoke `resume_setup.py` (kind
@@ -2465,6 +2500,7 @@ the spawned worker keeps running, producing a false "completed"):
 nohup python3 {durable_root}/scripts/segment_dispatch_driver.py \
     --plugin-root {plugin_root} \
     [--only-segs SEG1,SEG2,...] [--allow-retranslate-converged] \
+        [--allow-unmerged-glossary] \
     > {durable_root}/runs/driver.<SESSION_ID>.log 2>&1 < /dev/null & disown
 ```
 
@@ -2474,8 +2510,12 @@ its own journal directory.) Full CLI: `--durable-root PATH`/`--plugin-root
 PATH` (this driver's own sibling-script resolution — data root vs. install
 root, same split as every other #409 script — also threaded through to
 `select_segments.py`'s identical flags), `--only-segs SEG1,SEG2,...`/
-`--allow-retranslate-converged`/`--allow-empty` (forwarded verbatim to
-`select_segments.py`'s own flags of the same name, above), `--from-cap`/
+`--allow-retranslate-converged`/`--allow-empty`/`--allow-unmerged-glossary`
+(forwarded verbatim to `select_segments.py`'s own flags of the same name,
+above — this driver adds no independent meaning to any of them; the #820
+glossary admission gate the last of them waives lives in the SELECTOR, not
+here, so the fallback launcher inherits it from that same preflight call),
+`--from-cap`/
 `--from-converged`/`--from-stalled SEG1,SEG2,...` (also forwarded verbatim to
 `select_segments.py`'s own claim-ADMISSION flags of the same name — single-
 phase and durable-writing, a claim record plus a re-stamped draft
