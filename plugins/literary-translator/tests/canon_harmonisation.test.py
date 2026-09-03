@@ -965,10 +965,17 @@ def test_report_control_bearing_canon_entry_cannot_forge_via_skeleton(tmp_path):
     skill."""
     root = make_durable_root(tmp_path / "durable_root")
 
-    # Controls json.dumps() leaves raw: DEL, a C1 CSI introducer with a
-    # line-erase sequence, NEL, and the two Zl/Zp separators.
-    hostile_source = "בָאבְרִינִצֶער" + chr(0x7f) + chr(0x9b) + "[2K" + chr(0x2028)
-    hostile_target = "Mordechai Babrinitzer" + chr(0x85) + chr(0x2029) + "{"
+    # THE WHOLE CLASS json.dumps() leaves raw, not a sample of it: every
+    # codepoint from U+007F through U+009F (DEL plus the entire C1 block,
+    # NEL and the CSI introducer among them), and the two Zl/Zp
+    # separators. Naming only a handful would let a mutant that escaped
+    # exactly those pass while leaving, say, U+0080 raw -- the same
+    # character-list drift that cost the note sanitiser two rounds.
+    # json.dumps escapes C0 (U+0000-U+001F) itself, so C0 is not part of
+    # what this fixture has to prove.
+    raw_survivors = "".join(chr(cp) for cp in range(0x7f, 0xa0))
+    hostile_source = "בָאבְרִינִצֶער" + raw_survivors + "[2K" + chr(0x2028)
+    hostile_target = "Mordechai Babrinitzer" + raw_survivors + chr(0x2029) + "{"
     entries = [
         canon_entry(hostile_source, hostile_target),
         canon_entry("בֳאבְרִינִצֶער", "Mordechai Bobrinitzer"),
@@ -1003,9 +1010,14 @@ def test_report_control_bearing_canon_entry_cannot_forge_via_skeleton(tmp_path):
     )
     assert chr(0x2028) not in proc.stderr
     assert chr(0x2029) not in proc.stderr
-    assert "\\u007f" in proc.stderr
-    assert "\\u009b" in proc.stderr
-    assert "\\u0085" in proc.stderr
+    missing = [
+        f"\\u{cp:04x}" for cp in range(0x7f, 0xa0)
+        if f"\\u{cp:04x}" not in proc.stderr
+    ]
+    assert not missing, (
+        f"every U+007F..U+009F codepoint must appear as its visible escape; "
+        f"missing: {missing}\n{proc.stderr}"
+    )
     assert "\\u2028" in proc.stderr
     assert "\\u2029" in proc.stderr
 
