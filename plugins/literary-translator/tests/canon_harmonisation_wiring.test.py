@@ -114,8 +114,17 @@ PARTICLE_CONFIG_FLAG = "--particle-config"
 # before PARTICLE_CONFIG_FLAG's one occurrence.
 MANDATORY_GATE_HEADING = "Mandatory homonym-split evidence gate (category 5, always runs)"
 
-SERIALISE_MARKER = "serialises the WHOLE of `canon.json`'s `entries{}`"
-DIGEST_MARKER = "the sha256 of `canon.json`'s exact bytes"
+CORPUS_FILE_MARKER = "${durable_root}/harmonisation/corpus_<UTC timestamp>_<8 hex>.json"
+CORPUS_KEEP_DIGEST_MARKER = "keeps that digest in its own context, nowhere on disk"
+SERIALISE_MARKER = "every `entries{}` record"
+DRAFT_CORPUS_MARKER = "`ledger_merge.py::_read_fragments(ledger_d)`"
+STALE_REVIEW_MARKER = "drafts_excluded_stale_review"
+CANDIDATES_DISABLED_MARKER = "without opening `name_candidates.json`"
+NO_OP_MARKER = "at least one `canon` observation OR at least two `draft`"
+CORPUS_ARG_MARKER = "--expect-corpus-sha256"
+TRUSTED_CHANNEL_MARKER = "is the TRUSTED CHANNEL"
+LINK_GROUPS_MARKER = "`canon_link_groups.json` ruling is"
+DIGEST_MARKER = "The session computes this file's\n   sha256"
 
 DISPATCH_MARKER = "agentType:'codex:codex-rescue'"
 WAIT_MARKER = "A bounded **WAIT**"
@@ -123,9 +132,16 @@ CHECK_MARKER = "canon_harmonisation.py --check"
 REPORT_MARKER = "canon_harmonisation.py --report"
 DURABLE_SIDECAR_PATH = "${durable_root}/canon_harmonisation.json"
 
-QUESTION_ONE_MARKER = "which `canonical_target_form` values denote ONE"
-QUESTION_TWO_MARKER = "POLICY diverges, an English exonym such as `of Częstochowa`"
+QUESTION_ONE_MARKER = "which\n   target values denote ONE referent spelled two different ways"
+QUESTION_THREE_MARKER = "target value is frozen for MORE THAN ONE referent"
+QUESTION_FOUR_MARKER = "which source form is used for more than one referent"
+QUESTION_TWO_MARKER = "where the transliteration POLICY diverges, an English exonym such as"
 
+# The no-op branch states the same continuation, so this phrase alone no
+# longer identifies the FAILURE disposition: ASSERTION 6 would be satisfied
+# by the wrong sentence and pin nothing. The disposition's own opening is
+# what makes the marker unique to it.
+DISPOSITION_HEADING = "**Failure disposition — explicitly NOT a gate.**"
 CONTINUES_TO_SKEPTIC_MARKER = "the pipeline continues to the skeptic pass when"
 CONTINUES_TO_W3A_MARKER = "otherwise straight to W3a below"
 END_OF_DISPOSITION_SENTENCE = "already ran."
@@ -327,6 +343,52 @@ def _assert_questions(text: str) -> None:
         "ASSERTION 5 (questions): the divergent-transliteration-policy "
         "question is missing from the window"
     )
+    # #823's scope correction: a merge-only pass ships the more damaging
+    # error. Questions (iii) and (iv) are the split direction, and without
+    # them the step silently reverts to the merge-only shape the correction
+    # was written against.
+    assert QUESTION_THREE_MARKER in window, (
+        "ASSERTION 5 (questions): the shared-target question (which target "
+        "value is frozen for MORE THAN ONE referent) is missing from the "
+        "window -- the step would be merge-only again"
+    )
+    assert QUESTION_FOUR_MARKER in window, (
+        "ASSERTION 5 (questions): the multi-referent question (which source "
+        "form is used for more than one referent) is missing from the window "
+        "-- nothing else in the pipeline DISCOVERS that shape"
+    )
+
+
+def _assert_corpus_contract(text: str) -> None:
+    """ASSERTION 8: the corpus file, its digest channel, the fail-closed
+    draft gather, the disabled-branch rule, the redefined no-op, and the
+    sidecar-invalidation paragraph. Each of these is a rule a session can
+    silently not follow, and every one of them was a review finding: without
+    the corpus file the check has nothing trustworthy to validate against;
+    without the session-held digest the anchor proves only self-consistency;
+    without the fail-closed gather an unreadable draft population reads as an
+    empty one; without the disabled-branch rule a stale name_candidates.json
+    is mistaken for a fresh read; without the redefined no-op the mixed and
+    all-draft proposals are unreachable in the real workflow; and without the
+    sidecar paragraph a retarget silently leaves occurrences credited to
+    nobody."""
+    start, end = _window(text)
+    window = text[start:end]
+    for marker, what in (
+        (CORPUS_FILE_MARKER, "the per-attempt corpus file path"),
+        (CORPUS_KEEP_DIGEST_MARKER, "the session-held corpus digest"),
+        (SERIALISE_MARKER, "the canon corpus"),
+        (DRAFT_CORPUS_MARKER, "the fail-closed fragment reader"),
+        (STALE_REVIEW_MARKER, "the reviewed-draft exclusion count"),
+        (CANDIDATES_DISABLED_MARKER, "the disabled-branch candidate rule"),
+        (NO_OP_MARKER, "the no-op condition read off the corpus"),
+        (CORPUS_ARG_MARKER, "the --expect-corpus-sha256 argument"),
+        (TRUSTED_CHANNEL_MARKER, "the trusted-channel rationale"),
+        (LINK_GROUPS_MARKER, "the canon_link_groups.json invalidation"),
+    ):
+        assert marker in window, (
+            f"ASSERTION 8 (corpus contract): {what} is missing from the window"
+        )
 
 
 def _assert_non_blocking(text: str) -> None:
@@ -410,6 +472,10 @@ def test_check_command():
 
 def test_questions():
     _assert_questions(_skill_text())
+
+
+def test_corpus_contract():
+    _assert_corpus_contract(_skill_text())
 
 
 def test_non_blocking_disposition():
@@ -563,14 +629,19 @@ def test_mutation_delete_question_one_goes_red():
 
 def test_mutation_delete_continues_to_w3a_sentence_goes_red():
     text = _skill_text()
-    start_idx = text.find(CONTINUES_TO_SKEPTIC_MARKER)
-    assert start_idx != -1, "could not locate the continues-to-skeptic-pass marker to mutate"
+    start_idx = text.find(DISPOSITION_HEADING)
+    assert start_idx != -1, "could not locate the failure-disposition heading to mutate"
     end_idx = text.find(END_OF_DISPOSITION_SENTENCE, start_idx)
     assert end_idx != -1, "could not locate the end of the failure-disposition sentence"
     end_idx += len(END_OF_DISPOSITION_SENTENCE)
     mutated = text[:start_idx] + text[end_idx:]
-    assert CONTINUES_TO_SKEPTIC_MARKER not in mutated
-    assert CONTINUES_TO_W3A_MARKER not in mutated
+    # NOT "the phrase is gone from the file": the no-op branch states the same
+    # continuation, so what this mutation must prove is that the DISPOSITION
+    # is gone -- one fewer occurrence, and its own heading absent.
+    assert DISPOSITION_HEADING not in mutated
+    assert mutated.count(CONTINUES_TO_SKEPTIC_MARKER) == (
+        text.count(CONTINUES_TO_SKEPTIC_MARKER) - 1
+    )
     with pytest.raises(AssertionError, match="ASSERTION 6"):
         _assert_non_blocking(mutated)
 
@@ -597,3 +668,35 @@ if __name__ == "__main__":
     import sys
 
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+@pytest.mark.parametrize("marker_name", [
+    "CORPUS_FILE_MARKER",
+    "CORPUS_KEEP_DIGEST_MARKER",
+    "SERIALISE_MARKER",
+    "DRAFT_CORPUS_MARKER",
+    "STALE_REVIEW_MARKER",
+    "CANDIDATES_DISABLED_MARKER",
+    "NO_OP_MARKER",
+    "CORPUS_ARG_MARKER",
+    "TRUSTED_CHANNEL_MARKER",
+    "LINK_GROUPS_MARKER",
+])
+def test_mutation_delete_each_corpus_contract_marker_goes_red(marker_name):
+    """One mutation PER marker, table-driven. A doc-structural assertion whose
+    needle no mutation removes is a needle nothing proves can go red: it would
+    keep passing against prose that had drifted out from under it, which is
+    exactly the failure this whole file exists to prevent."""
+    marker = globals()[marker_name]
+    text = _skill_text()
+    assert marker in text, f"{marker_name} is not in SKILL.md to begin with"
+    # EVERY occurrence, not just the first: two of these markers are stated
+    # twice in the window (the argument appears in the command block and again
+    # in the rationale; the exclusion count appears in the gather steps and in
+    # the list of what reaches the corpus file). Deleting one copy leaves the
+    # other, and the assertion would correctly still pass -- which says nothing
+    # about whether it can go red. What ASSERTION 8 pins is that the CONCEPT is
+    # present at all, so the mutation has to remove the concept.
+    mutated = text.replace(marker, "")
+    with pytest.raises(AssertionError, match="ASSERTION 8"):
+        _assert_corpus_contract(mutated)

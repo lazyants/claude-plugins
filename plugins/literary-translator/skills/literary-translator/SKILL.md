@@ -2070,45 +2070,101 @@ true, "batches": []}` SKIP path, and the "Otherwise run the
 codex-glossary-pass" path alike — so this step is reached by all three by
 construction, with no branch check of its own.
 
-**No-op branch, stated first:** fewer than 2 records in `canon.json`'s
-`entries{}` means there is nothing to compare. Nothing is dispatched, no
-sidecar is written; say so in one line and continue to the skeptic pass
-when `glossary.skeptic_pass.enabled` is true, otherwise straight to W3a
-below. Never back to the mandatory gate above — that gate has already run.
+Five ordered actions. Step 1 always runs — it is what the no-op decision
+below reads from — steps 2-5 run only when that decision says dispatch:
 
-Otherwise, five ordered actions:
+1. The session builds one **corpus file** and writes it to
+   `${durable_root}/harmonisation/corpus_<UTC timestamp>_<8 hex>.json` —
+   the same per-attempt naming the attempt artifact in step 2 uses,
+   required absent before writing. The session computes this file's
+   sha256 and **keeps that digest in its own context, nowhere on disk**,
+   for step 4. This is what makes the read structural rather than
+   instructional: the pass is handed the whole corpus and never opens
+   `canon.json`, a draft, or `name_candidates.json` directly, so it
+   cannot look at a subset. One prompt comfortably holds the largest live
+   canon (390 entries) — there is no batching problem at this stage,
+   which is precisely why this catches what the 40-item glossary batches
+   cannot. Three corpora, each an OBSERVATION `(corpus, source_form,
+   target_form)`:
+   - **canon** — every `entries{}` record: `source_form` with its
+     `canonical_target_form`.
+   - **draft** — every CONVERGED segment's `segments/<seg>.draft.json`
+     `names[]`, gathered fail-closed at three steps, each contributing a
+     count that goes into both the corpus file and this step's printed
+     line — a corpus that gathered nothing must never read like one that
+     found nothing:
+     1. **Which fragments exist** — `ledger_merge.py::_read_fragments(ledger_d)`,
+        never `final_audit.py::load_converged_fragments()`. The latter's
+        `is_dir()` + `glob()` reads answer `True` / `[]` for a POPULATED
+        directory at mode `0o000` (`ledger_merge.py:374-385`), which would
+        report an unreadable draft population as an empty one — absence
+        and failure printing identically, the one failure this corpus
+        must not have. Any errno other than ENOENT/ENOTDIR from
+        `_read_fragments` is FATAL here (exit 2), never folded into an
+        empty corpus.
+     2. **Which of them may contribute** — `status == "converged"` is not
+        sufficient: a fragment contributes only when its
+        `reviewed_draft_sha1` matches the draft's current
+        `draft_content_sha1(...)`, the same comparison
+        `final_audit.py::hard_check_stale_review` makes
+        (`final_audit.py:448-483`). A converged fragment edited after its
+        review fails this, is EXCLUDED, and is counted in
+        `drafts_excluded_stale_review`.
+     3. **Which rows inside a surviving draft** — `final_audit.py`'s own
+        `_name_entry_forms` (`final_audit.py:498`), which already accepts
+        both `names[]` field conventions. A row it returns `(None,
+        None)` for is skipped and counted in `draft_rows_skipped`.
 
-1. The session serialises the WHOLE of `canon.json`'s `entries{}` — every
-   `source_form` with its `canonical_target_form`, `basis` and `note` —
-   into the dispatch prompt, exactly as `glossary-pass-wf.template.js`
-   serialises `batch.candidates` verbatim into its own; **and beside it
-   the sha256 of `canon.json`'s exact bytes**, which the pass must copy
-   back into the artifact's `canon_sha256` field. This is what makes the
-   whole-canon read structural rather than instructional: the pass cannot
-   look at a subset because it is handed the whole set, and it never opens
-   `canon.json` at all. One prompt comfortably holds the largest live
-   canon (390 entries) — there is no batching problem at this stage, which
-   is precisely why this catches what the 40-item glossary batches cannot.
+     `converged_segments`, `drafts_excluded_stale_review` and
+     `draft_rows_skipped` all go into the corpus file.
+   - **candidate** — `name_candidates.json`'s `candidates[]`, source form
+     and `freq` only, on the two `glossary.enabled` branches, where
+     `bootstrap_names.py` ran immediately before the planner and
+     therefore before the SKIP decision; `candidates_source:
+     "bootstrap"`. On the `glossary.enabled: false` disabled branch the
+     session writes an explicit empty list and `candidates_source:
+     "disabled"` **without opening `name_candidates.json`** — a stale
+     file left on disk from an earlier run can never be mistaken for a
+     fresh read on this branch.
+
+   `canon: X -> A` and a converged `draft: X -> B` are two separate rows,
+   never collapsed by precedence — exactly the discrepancy shape
+   `final_audit.py`'s GLOSSARY-DIFF already reports elsewhere, and which
+   dropping either row would have erased.
+
+   **No-op decision, read off the corpus file just built, never
+   recomputed from live files:** dispatch (steps 2-5) only when the
+   corpus holds at least one `canon` observation OR at least two `draft`
+   observations. Otherwise nothing is dispatched and no sidecar is
+   written; print the three per-corpus counts above plus
+   `candidates_source` in one line — never a bare "nothing to compare" —
+   and continue to the skeptic pass when `glossary.skeptic_pass.enabled`
+   is true, otherwise straight to W3a below. Never back to the mandatory
+   gate above — that gate has already run.
 2. **One** schema-less, fire-and-forget `agentType:'codex:codex-rescue'`
-   dispatch at `engine.effort` — the R7 canon-pass shape above — asking
-   two questions: (i) which `canonical_target_form` values denote ONE
-   referent spelled two different ways, and (ii) where the transliteration
-   POLICY diverges, an English exonym such as `of Częstochowa` standing
-   beside a transliterated byname such as `Tshenstchover` being a rule
-   decision rather than a typo. The pass writes a PER-ATTEMPT path, never
-   the durable sidecar: `${durable_root}/harmonisation/attempt_<UTC
-   timestamp>_<8 hex>.json`. The session creates
-   `${durable_root}/harmonisation/` if absent (Step 0a's fixed scaffold
-   does not create it) and requires the chosen path to be absent before
-   dispatching. The nonce is generated here rather than reusing a
-   `RUN_ID`, because two of the three rejoin branches skip
+   dispatch at `engine.effort` — the R7 canon-pass shape above — handed
+   the corpus file from step 1 and asking FOUR questions: (i) which
+   target values denote ONE referent spelled two different ways; (ii)
+   where the transliteration POLICY diverges, an English exonym such as
+   `of Częstochowa` standing beside a transliterated byname such as
+   `Tshenstchover` being a rule decision rather than a typo; (iii) which
+   target value is frozen for MORE THAN ONE referent — one vault page
+   credited to two different people, the more damaging direction of the
+   two; (iv) which source form is used for more than one referent. The
+   pass writes a PER-ATTEMPT path, never the durable sidecar:
+   `${durable_root}/harmonisation/attempt_<UTC timestamp>_<8 hex>.json`.
+   The session creates `${durable_root}/harmonisation/` if absent (Step
+   0a's fixed scaffold does not create it) and requires the chosen path
+   to be absent before dispatching. The nonce is generated here rather
+   than reusing a `RUN_ID`, because two of the three rejoin branches skip
    `resume_setup.py` and never resolve one.
 3. A bounded **WAIT**.
 4. The session, as the sole acceptance authority, checks the attempt and
    publishes it on a pass:
 
    ```
-   python3 ${durable_root}/scripts/canon_harmonisation.py --check <the attempt path from step 2> \
+   python3 ${durable_root}/scripts/canon_harmonisation.py --check <attempt path from step 2> \
+     --corpus <corpus path from step 1> --expect-corpus-sha256 <digest from step 1> \
      --approve-to ${durable_root}/canon_harmonisation.json
    ```
 
@@ -2118,18 +2174,49 @@ Otherwise, five ordered actions:
    check. The per-attempt path exists precisely so this check cannot bind
    a PREVIOUS run's artifact.
 
+   `--expect-corpus-sha256` is the TRUSTED CHANNEL, and it is why step 1
+   kept its digest only in the session's own context rather than writing
+   it anywhere the pass could read: the corpus file sits in the writable
+   durable root, so a digest `--check` merely recomputed from that file
+   on disk would prove only that the file is self-consistent — a pass
+   with durable-root write access could rewrite the corpus with
+   fabricated observations and stamp the matching digest into its own
+   attempt artifact, and a check reading only disk would pass. `--check`
+   compares three values before `_atomic_publish` runs: the digest the
+   session computed BEFORE dispatching (the one value the dispatched pass
+   cannot reach), the corpus file's current bytes, and the attempt
+   artifact's own `corpus_sha256` field — all three must agree.
+
    Compare the `canon_sha256` in the check's own stdout summary against
    the digest computed in step 1, and treat a mismatch exactly like a
    failed check. `--check` can only confirm that the artifact's anchor
    matches canon.json AS IT IS ON DISK NOW; the dispatched pass holds
    write access to the same `durable_root`, so a pass that edited
    canon.json and re-stamped the new digest would satisfy the script and
-   only this comparison catches it.
+   only this comparison catches it. This is the same shape
+   `--expect-corpus-sha256` now applies to the corpus, moved inside the
+   checker because a session-side comparison made after the fact happens
+   too late to prevent publication.
 5. **Only after step 4 exits 0**, render the report:
 
    ```
    python3 ${durable_root}/scripts/canon_harmonisation.py --report
    ```
+
+   **Before acting on any proposal:** applying it via `canon_validate.py
+   --correct` can CREATE a fold collision that did not exist when
+   `canon_link_groups.json` was adjudicated — consolidating two spellings
+   onto one target is precisely the operation that makes two previously
+   distinct fold keys one. Every `canon_link_groups.json` ruling is
+   therefore invalid after a retarget until re-checked, and an uncovered
+   collision withholds that group's `## Mentions` occurrences from the
+   render while `validate_backlinks.py` reports `warnings: 0`, because
+   coverage is measured over a universe those forms were just removed
+   from. No script here re-checks link groups automatically or decides
+   identity — this is prose for the operator to read at the moment they
+   apply a correction, not a gate, because a gate refusing to proceed
+   after every correction would block the merge direction this feature
+   exists to enable.
 
 **Failure disposition — explicitly NOT a gate.** A WAIT timeout, a
 `--check` exit 1, or a `--check` exit 2 suppresses `--report` and

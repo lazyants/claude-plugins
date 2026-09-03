@@ -1525,6 +1525,7 @@ names.
   "schema_version": 1,
   "generated_at": "2026-09-03T12:00:00+00:00",
   "canon_sha256": "<sha256 of canon.json's exact bytes at read time>",
+  "corpus_sha256": "<sha256 of the corpus file's exact bytes at read time>",
   "proposals": [
     {
       "kind": "divergent_spelling",
@@ -1538,54 +1539,180 @@ names.
 }
 ```
 
-`kind` is one of `divergent_spelling` (one referent under two spellings) or
-`divergent_policy` (a transliteration-policy inconsistency — an English
-exonym beside a transliterated byname, a rule decision rather than a typo).
 `note` is REQUIRED and non-blank in the schema itself (`"pattern": "\\S"`),
 the identical rule `canon-link-groups.schema.json` states for the same
 reason: the file records a call it does not make, and a proposal with no
 stated reason is indistinguishable from a mistake.
 
+### The corpus file — the trusted input both script modes check against
+
+The dispatched pass reasons over one corpus file, `SKILL.md`'s W-step step
+1 builds it, and `canon-harmonisation-corpus.schema.json`
+(`additionalProperties: false` throughout) is its contract:
+
+- `schema_version` (const 1), `generated_at`, `canon_sha256` — the same
+  digest the whole-canon read already computes.
+- `observations`: a flat array of `{corpus, source_form, target_form}`,
+  `corpus` one of `canon` | `draft` | `candidate`. `target_form` is a
+  string for `canon` and `draft`; `null` for `candidate` — a candidate is
+  a frequency-ranked source form with no frozen target yet. A `draft`
+  observation additionally REQUIRES `n_segments`; a `candidate`
+  observation additionally REQUIRES `freq` (an `if`/`then` pair keyed on
+  `corpus`, not prose). Both travel into a proposal's matched member,
+  because `--report` never receives `--corpus` and renders them from the
+  artifact alone.
+- `candidates_source`: `bootstrap` | `disabled`, recording WHY the
+  candidate rows are what they are rather than leaving an empty list
+  ambiguous between "none found" and "not gathered".
+- `converged_segments`, `drafts_excluded_stale_review`,
+  `draft_rows_skipped`: integers, the three counts the fail-closed draft
+  gather in `SKILL.md`'s W-step step 1 produces.
+
+A `canon: X -> A` row and a converged `draft: X -> B` row for the same
+`source_form` are two separate observations, never collapsed by
+precedence — the same discrepancy shape `final_audit.py`'s GLOSSARY-DIFF
+already reports, and which dropping either row would have erased.
+
+### The five proposal kinds
+
+A member now names one OBSERVATION in the corpus file, byte-exact on all
+three of `corpus`, `source_form` and `target_form` — not, as before, a
+`canonical_target_form` read against `canon['entries']` alone.
+
+| kind | members | rule | operator route |
+| --- | --- | --- | --- |
+| `divergent_spelling` | ≥2 target-bearing observations | ≥2 distinct `target_form` | `--correct` per canon member |
+| `divergent_policy` | ≥2 target-bearing observations | ≥2 distinct `target_form` | `--correct` per canon member |
+| `shared_target` | ≥2 **canon** observations | exactly 1 distinct `target_form` among them | `--correct`, giving them DIFFERENT targets |
+| `multi_referent` | exactly 1 member TOTAL, `corpus: canon` | `referents`: ≥2 distinct strings | `canon_senses.json` |
+| `uncanonized_variant` | ≥1 canon + ≥1 `candidate` | every candidate member's `source_form` ABSENT from live `canon.json` | a NEW canon entry |
+
+- `shared_target` requires two CANON observations: a frozen target is a
+  canon property, and no draft or candidate row can establish that two
+  referents share one vault page — the more damaging direction, since one
+  page for two people is worse than two pages for one.
+- `divergent_spelling` and `divergent_policy` may be satisfied entirely by
+  draft observations — the class that was invisible before this corpus
+  existed, because it never reached `canon.json` at all. Their route is
+  NOT `--correct`, which refuses a `source_form` absent from canon
+  (`canon_validate.py:3131-3137`) and sends it to the ordinary glossary merge
+  instead — see `--report` below.
+- `multi_referent` is **exactly one member, total** — not one canon member
+  plus whatever else, which counting only canon members would have
+  accepted. Its one structural protection against a content-free
+  assertion is `referents`, so distinctness is measured after collapsing
+  internal whitespace runs and trimming: `"Reb Noson"` and `"Reb  Noson"`
+  are ONE referent, not two. The script checks the count and the
+  distinctness, never the identity claim — `canon_senses.json` is where
+  the identity call is recorded, by a human or an adjudication pass, and
+  the mandatory homonym-split gate above then demands its evidence.
+- A corpus tag is not proof of absence from canon: `bootstrap_names.py`
+  emits every detected form and only `glossary_batch_plan.py` later drops
+  the ones already resolved (`glossary_batch_plan.py:390-414`), so a
+  corpus built right after a glossary merge can carry `candidate`
+  observations whose source forms ARE canon keys. `uncanonized_variant`
+  therefore checks absence against LIVE `canon.json`, never against the
+  observation's `candidate` tag.
+- Every refusal names the kind, the rule, and the count measured.
+
 **Both script modes.** `scripts/canon_harmonisation.py --check PATH
-[--approve-to DEST]` is the orchestrating session's acceptance authority
-over an ATTEMPT file the dispatched pass wrote: it validates the artifact
-against `canon-harmonisation.schema.json`, confirms `canon_sha256` matches
-the canon on disk, confirms every `members[].source_form` is a byte-exact
-key of `canon['entries']` and every `members[].canonical_target_form`
-matches that entry's stored value byte-exact, confirms each proposal has
-≥2 members with pairwise-distinct `source_form`s and ≥2 distinct target
-forms among them, and refuses a duplicate proposal. Exit 0 clean / 1
-gate-fail / 2 fatal; `--approve-to DEST` publishes the validated bytes
-atomically to `DEST` only on a PASS, mirroring `canon_validate.py
---check-batch --approve-to` — the per-attempt input path is what stops a
-check run after a fire-and-forget dispatch from accepting a PREVIOUS run's
-artifact. `scripts/canon_harmonisation.py --report [--harmonisation PATH]`
-is the read-only human-facing render: schema-validates first, then prints
-each proposal with member targets read FRESH from `canon.json` (never from
-the artifact), a `canon_current: false` flag when the sidecar's
-`canon_sha256` no longer matches disk, and a copy-pasteable `--correct`
-skeleton per proposal. It always exits 0 on a structurally valid artifact —
-it reports, it never blocks — and an empty `proposals: []` prints as "the
-pass returned no proposals", never as a certificate that the canon is
-consistent.
+--corpus CORPUS --expect-corpus-sha256 HEX [--approve-to DEST]` is the
+orchestrating session's acceptance authority over an ATTEMPT file the
+dispatched pass wrote. `--corpus` and `--expect-corpus-sha256` are both
+REQUIRED (their absence is a usage error, exit 2, no stdout) and are the
+same trusted-channel shape as the whole-canon `canon_sha256` anchor,
+applied to the corpus: the corpus file lives in the writable durable root,
+so a digest merely recomputed from its own bytes on disk would prove only
+self-consistency — a pass could rewrite the corpus with fabricated
+observations and stamp a matching digest into its own artifact. `--check`
+compares three values before `_atomic_publish` runs — the digest the
+session computed BEFORE dispatching (held only in its own context, where
+the dispatched pass cannot reach it), the corpus file's current bytes, and
+the artifact's own `corpus_sha256` field — and all three must agree. It
+also validates the artifact against `canon-harmonisation.schema.json`,
+confirms `canon_sha256` matches the canon on disk (unchanged from before
+this corpus existed), confirms every member byte-matches an observation in
+the corpus file on all three of `corpus`, `source_form` and `target_form`
+(a member naming a `candidate` observation when `candidates_source` is
+`disabled` cannot match, because that list is empty — the refusal falls
+out of the data rather than needing its own rule), confirms every member's
+`n_segments`/`freq` equals the matched observation's, applies the per-kind
+matrix above, and refuses a duplicate proposal — pairwise-distinct
+`(corpus, source_form, target_form)`, not `source_form` alone, so a canon
+row and a divergent draft row for the same source form are two members
+rather than a duplicate. Exit 0 clean / 1 gate-fail / 2 fatal;
+`--approve-to DEST` publishes the validated bytes atomically to `DEST`
+only on a PASS, mirroring `canon_validate.py --check-batch --approve-to` —
+the per-attempt input path is what stops a check run after a
+fire-and-forget dispatch from accepting a PREVIOUS run's artifact.
+
+`scripts/canon_harmonisation.py --report [--harmonisation PATH]` is the
+read-only human-facing render: schema-validates first, then for each
+member — a `draft` observation renders `<source_form!r> -> <target_form!r>
+(draft, N segments)`; a `candidate` observation renders `<source_form!r>
+-> NOT IN CANON (candidate, freq N)` only when genuinely absent from live
+`canon.json`, otherwise its CURRENT canon target and the canon route below,
+because the tag records where the row was read, not what canon holds now.
+A `--correct` skeleton prints for every member whose `source_form` is a
+live canon key, and only for those — the test is canon-key membership at
+report time, since `--correct` refuses a form that is not a canon key and
+a draft or candidate observation may well name one; a member genuinely
+absent from canon gets a line naming the ordinary glossary-merge route
+instead, so an all-draft `divergent_*` proposal over absent forms prints
+no skeleton at all. `multi_referent` prints no skeleton; its line names
+`canon_senses.json` and the mandatory gate that will then require its
+evidence. `--report` also flags `canon_current: false` when the sidecar's
+`canon_sha256` no longer matches disk. It always exits 0 on a structurally
+valid artifact — it reports, it never blocks — and an empty `proposals:
+[]` prints as "the pass returned no proposals", never as a certificate
+that the canon is consistent.
 
 **The iron rule applies unchanged.** Neither mode ever decides whether two
 forms are the same referent. `--check` is purely structural — schema
-validity, the canon-anchor digest, byte-exact membership, anti-fabrication
-of the quoted target values, and proposal well-formedness — never an
-identity call. The decision comes from the same places every other
-identity decision does (a human, or the dispatched codex pass's own
-judgement, subject to the operator's `--correct`), never from the checker.
+validity, the canon- and corpus-anchor digests, byte-exact membership,
+anti-fabrication of the quoted target values, and proposal well-formedness
+per the kind matrix — never an identity call. The decision comes from the
+same places every other identity decision does (a human, or the dispatched
+codex pass's own judgement, subject to the operator's `--correct`), never
+from the checker.
+
+**Applying a correction can invalidate `canon_link_groups.json`.**
+Consolidating two spellings onto one target via `canon_validate.py
+--correct` is precisely the operation that can turn two previously
+distinct `#238/#241` fold keys into one — a fold collision the link-groups
+sidecar above was never adjudicated against, because it did not exist when
+that adjudication ran. Every `canon_link_groups.json` ruling is therefore
+invalid after a retarget until re-checked: an uncovered collision withholds
+that group's `## Mentions` occurrences from the render while
+`validate_backlinks.py` still reports `warnings: 0`, because its coverage
+is measured over a universe those forms were just removed from — the same
+"zero warnings over an already-shrunk universe" shape the link-groups
+section above measured for the pre-#497 fold-collision case. No script
+here re-checks link groups automatically; this is prose the operator reads
+at the moment they apply a correction, not a gate, because a gate refusing
+to proceed after every correction would block the merge direction this
+feature exists to enable.
 
 **Migration cost.** `canon_harmonisation.py` is not a member of
 `PLUGIN_BUNDLE_MEMBERS` or `DERIVATION_BUNDLE_MEMBERS` (`cache_key.py`'s
 own tuples are the authority — see `hash-migration-impact.md`), so
 adopting the sidecar costs zero re-translation: `compute_used_terms_hash`
 projects `entries{}` only, and the sidecar sits outside all 15 cache-key
-fields. The one real cost is `canon-harmonisation.schema.json` joining
-`resume_setup.py`'s `_schemas_dir_hash()` (and `skeptic_setup.py`'s
-separate duplicate of the same hash) — the FIRST Step 0a refresh after
+fields. The corpus file adds a SECOND schema,
+`canon-harmonisation-corpus.schema.json`, alongside the edited
+`canon-harmonisation.schema.json` — both land in the schemas directory, so
+the priced surface is the same one either way: `resume_setup.py`'s
+`_schemas_dir_hash()` (and `skeptic_setup.py`'s separate duplicate of the
+same hash) joins two files instead of one. The FIRST Step 0a refresh after
 this ships moves the resume digest, so an interrupted mass-translate or
 glossary run cannot resume across it; converged segments stay reusable,
 and what redoes is bounded to the `recoverable` and `human_escalation`
-populations in flight at the moment of upgrade.
+populations in flight at the moment of upgrade. The same refresh
+invalidates skeptic resume identity, since `skeptic_setup.py`'s duplicate
+feeds the skeptic input digest — the next skeptic run gets a fresh
+`RUN_ID`. Nothing else moves: no cache-key field, no `used_terms_hash`
+change, no render version, no `FROZEN_INPUT_SPECS` member. Drafts,
+`runs/ledger.d/*.json` and `name_candidates.json` are READ by the corpus
+gather, never written, and importing `final_audit.py` for its two
+functions puts `canon_harmonisation.py` in no bundle — bundle membership
+is by explicit tuple, not by import.

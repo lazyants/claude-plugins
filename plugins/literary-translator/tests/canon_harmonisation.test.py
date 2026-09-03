@@ -103,6 +103,7 @@ SCHEMAS_SRC_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "s
 
 SCRIPT_SRC = SCRIPTS_SRC_DIR / "canon_harmonisation.py"
 SCHEMA_SRC = SCHEMAS_SRC_DIR / "canon-harmonisation.schema.json"
+CORPUS_SCHEMA_SRC = SCHEMAS_SRC_DIR / "canon-harmonisation-corpus.schema.json"
 assert SCRIPT_SRC.is_file(), f"canon_harmonisation.py not found at {SCRIPT_SRC}"
 assert SCHEMA_SRC.is_file(), f"canon-harmonisation.schema.json not found at {SCHEMA_SRC}"
 
@@ -131,6 +132,8 @@ def make_durable_root(root: Path) -> Path:
     shutil.copy2(SCRIPT_SRC, scripts_dir / "canon_harmonisation.py")
     shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     shutil.copy2(SCHEMA_SRC, schemas_dir / "canon-harmonisation.schema.json")
+    shutil.copy2(
+        CORPUS_SCHEMA_SRC, schemas_dir / "canon-harmonisation-corpus.schema.json")
     return root
 
 
@@ -203,19 +206,70 @@ def canon_sha256_of(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def member(source_form, canonical_target_form) -> dict:
-    return {"source_form": source_form, "canonical_target_form": canonical_target_form}
+def member(source_form, canonical_target_form, corpus="canon", **extra) -> dict:
+    """One proposal member. `corpus` defaults to "canon" because that is what
+    every pre-existing test in this file is about; a draft or candidate member
+    additionally carries n_segments / freq, which --check verifies against the
+    corpus observation it matched."""
+    row = {
+        "corpus": corpus,
+        "source_form": source_form,
+        "canonical_target_form": canonical_target_form,
+    }
+    row.update(extra)
+    return row
+
+
+def observation(source_form, target_form, corpus="canon", **extra) -> dict:
+    """One corpus-file observation -- the thing a member must byte-match on
+    all three of (corpus, source_form, target_form)."""
+    row = {"corpus": corpus, "source_form": source_form, "target_form": target_form}
+    row.update(extra)
+    return row
+
+
+def corpus_doc(canon_sha256, observations, candidates_source="bootstrap",
+               converged_segments=0, drafts_excluded_stale_review=0,
+               draft_rows_skipped=0,
+               generated_at="2026-01-01T00:00:00+00:00") -> dict:
+    return {
+        "schema_version": 1,
+        "generated_at": generated_at,
+        "canon_sha256": canon_sha256,
+        "candidates_source": candidates_source,
+        "converged_segments": converged_segments,
+        "drafts_excluded_stale_review": drafts_excluded_stale_review,
+        "draft_rows_skipped": draft_rows_skipped,
+        "observations": observations,
+    }
+
+
+def write_corpus(root: Path, doc: dict, name="corpus_1.json"):
+    """Writes a corpus file under {root}/harmonisation/ and returns
+    (path, sha256_of_its_exact_bytes). The digest is what the SESSION would
+    hold: --check compares it, the file's current bytes, and the artifact's
+    own corpus_sha256, and all three must agree."""
+    path = root / "harmonisation" / name
+    raw = write_json(path, doc)
+    return path, hashlib.sha256(raw).hexdigest()
+
+
+def observations_for(entries: list) -> list:
+    """The canon observations a corpus would carry for these canon entries."""
+    return [observation(e["source_form"], e["canonical_target_form"]) for e in entries]
 
 
 def proposal(kind, members, note="A harmonisation note explaining the identity call.") -> dict:
     return {"kind": kind, "members": members, "note": note}
 
 
-def harmonisation_doc(canon_sha256, proposals, generated_at="2026-01-01T00:00:00+00:00") -> dict:
+def harmonisation_doc(canon_sha256, proposals, corpus_sha256="c" * 64,
+                      generated_at="2026-01-01T00:00:00+00:00") -> dict:
     return {
         "schema_version": 1,
         "generated_at": generated_at,
         "canon_sha256": canon_sha256,
+        "corpus_sha256": corpus_sha256,
         "proposals": proposals,
     }
 
@@ -245,17 +299,39 @@ def _extract_first_correct_skeleton(stderr: str) -> str:
     return "\n".join(lines[start:end + 1])
 
 
+def check_attempt(root: Path, doc: dict, corpus_path, corpus_sha, *extra,
+                  name="attempt_1.json", stamp=True):
+    """Writes `doc` as a per-attempt artifact and runs --check against it with
+    the corpus arguments every real invocation carries. Returns (attempt_path,
+    CompletedProcess)."""
+    attempt = root / "harmonisation" / name
+    if stamp:
+        doc = {**doc, "corpus_sha256": corpus_sha}
+    write_json(attempt, doc)
+    proc = run_harmonisation(
+        root, "--check", str(attempt),
+        "--corpus", str(corpus_path),
+        "--expect-corpus-sha256", corpus_sha,
+        *extra,
+    )
+    return attempt, proc
+
+
 def two_member_fixture(root: Path):
     """The ordinary happy-path fixture: two canon entries under diverging
     canonical_target_forms, and a matching, correctly-anchored two-member
     divergent_spelling proposal naming both. Returns
-    (canon_sha256, entries_list, artifact_doc)."""
+    (canon_sha256, entries_list, artifact_doc, corpus_path, corpus_sha256).
+    The corpus carries one observation per canon entry, which is what every
+    --check in this file is validated against."""
     entries = [
         canon_entry("בָאבְרִינִצֶער", "Mordechai Babrinitzer"),
         canon_entry("בֳאבְרִינִצֶער", "Mordechai Bobrinitzer"),
     ]
     raw = write_canon(root, entries)
     csha = canon_sha256_of(raw)
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations_for(entries)))
     doc = harmonisation_doc(csha, [
         proposal(
             "divergent_spelling",
@@ -266,7 +342,10 @@ def two_member_fixture(root: Path):
             note="One byname, two vowelisations of the same place-name base.",
         ),
     ])
-    return csha, entries, doc
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations_for(entries)))
+    doc["corpus_sha256"] = corpus_sha
+    return csha, entries, doc, corpus_path, corpus_sha
 
 
 # ===========================================================================
@@ -276,11 +355,8 @@ def two_member_fixture(root: Path):
 
 def test_check_exit0_two_member_divergent_spelling_proposal(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 0, proc.stderr
     summary = parse_stdout(proc)
     assert summary == {
@@ -289,6 +365,12 @@ def test_check_exit0_two_member_divergent_spelling_proposal(tmp_path):
         "proposals_count": 1,
         "entries_in_canon": 2,
         "canon_sha256": csha,
+        "corpus_sha256": corpus_sha,
+        "observations_in_corpus": 2,
+        "candidates_source": "bootstrap",
+        "converged_segments": 0,
+        "drafts_excluded_stale_review": 0,
+        "draft_rows_skipped": 0,
         "approved_to": None,
     }
 
@@ -298,10 +380,14 @@ def test_check_exit0_empty_proposals_nonzero_entries_in_canon(tmp_path):
     entries = [canon_entry("Marie", "Marie"), canon_entry("Jean", "Jean")]
     raw = write_canon(root, entries)
     csha = canon_sha256_of(raw)
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations_for(entries)))
     attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, harmonisation_doc(csha, []))
+    write_json(attempt, harmonisation_doc(csha, [], corpus_sha))
 
-    proc = run_harmonisation(root, "--check", str(attempt))
+    proc = run_harmonisation(
+        root, "--check", str(attempt), "--corpus", str(corpus_path),
+        "--expect-corpus-sha256", corpus_sha)
     assert proc.returncode == 0, proc.stderr
     summary = parse_stdout(proc)
     assert summary["proposals_count"] == 0
@@ -316,13 +402,15 @@ def test_check_exit0_empty_proposals_nonzero_entries_in_canon(tmp_path):
 
 def test_check_approve_to_writes_validated_bytes_on_pass(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     attempt = root / "harmonisation" / "attempt_1.json"
     raw = write_json(attempt, doc)
     dest = root / "canon_harmonisation.json"
     assert not dest.exists()
 
-    proc = run_harmonisation(root, "--check", str(attempt), "--approve-to", str(dest))
+    proc = run_harmonisation(
+        root, "--check", str(attempt), "--corpus", str(corpus_path),
+        "--expect-corpus-sha256", corpus_sha, "--approve-to", str(dest))
     assert proc.returncode == 0, proc.stderr
     summary = parse_stdout(proc)
     assert summary["approved_to"] == str(dest)
@@ -333,7 +421,7 @@ def test_check_approve_to_writes_validated_bytes_on_pass(tmp_path):
 @pytest.mark.parametrize("preexisting", [False, True])
 def test_check_approve_to_not_created_or_touched_on_exit1(tmp_path, preexisting):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     # Corrupt the anchor (b) so this is a clean exit-1 gate-fail, not exit 2.
     doc["canon_sha256"] = "0" * 64 if csha != "0" * 64 else "1" * 64
     attempt = root / "harmonisation" / "attempt_1.json"
@@ -343,7 +431,9 @@ def test_check_approve_to_not_created_or_touched_on_exit1(tmp_path, preexisting)
     if preexisting:
         dest.write_bytes(preexisting_bytes)
 
-    proc = run_harmonisation(root, "--check", str(attempt), "--approve-to", str(dest))
+    proc = run_harmonisation(
+        root, "--check", str(attempt), "--corpus", str(corpus_path),
+        "--expect-corpus-sha256", corpus_sha, "--approve-to", str(dest))
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     if preexisting:
@@ -359,7 +449,12 @@ def test_check_approve_to_not_created_on_exit2(tmp_path):
     write_json(attempt, harmonisation_doc("0" * 64, []))
     dest = root / "canon_harmonisation.json"
 
-    proc = run_harmonisation(root, "--check", str(attempt), "--approve-to", str(dest))
+    # Any well-formed corpus: these cases fail before membership is ever
+    # reached, so passing one keeps the test about the failure it names.
+    corpus_path, corpus_sha = write_corpus(root, corpus_doc("0" * 64, []))
+    proc = run_harmonisation(
+        root, "--check", str(attempt), "--corpus", str(corpus_path),
+        "--expect-corpus-sha256", corpus_sha, "--approve-to", str(dest))
     assert proc.returncode == 2, proc.stdout
     assert_no_stdout(proc)
     assert not dest.exists()
@@ -378,13 +473,15 @@ def test_check_approve_to_os_replace_failure_does_not_orphan_temp_file(tmp_path)
     IsADirectoryError (POSIX rename(2) onto an existing directory) --
     deterministic on every platform this suite runs on, no fragile mock."""
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     attempt = root / "harmonisation" / "attempt_1.json"
     write_json(attempt, doc)
     dest = root / "canon_harmonisation.json"
     dest.mkdir()  # DEST is a directory -- os.replace(tmp, DEST) must fail
 
-    proc = run_harmonisation(root, "--check", str(attempt), "--approve-to", str(dest))
+    proc = run_harmonisation(
+        root, "--check", str(attempt), "--corpus", str(corpus_path),
+        "--expect-corpus-sha256", corpus_sha, "--approve-to", str(dest))
     assert proc.returncode == 2, proc.stdout  # CanonHarmonisationFatalError -> exit 2
     assert_no_stdout(proc)
     assert dest.is_dir(), "DEST itself must be untouched by a failed publish"
@@ -406,14 +503,16 @@ def test_check_approve_to_unusable_parent_is_fatal_not_a_gate_failure(tmp_path):
     Forces the REAL failure, no mock: `blocker` is a regular file, and
     DEST is a path underneath it."""
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     attempt = root / "harmonisation" / "attempt_1.json"
     write_json(attempt, doc)
     blocker = root / "blocker"
     blocker.write_text("not a directory", encoding="utf-8")
     dest = blocker / "canon_harmonisation.json"
 
-    proc = run_harmonisation(root, "--check", str(attempt), "--approve-to", str(dest))
+    proc = run_harmonisation(
+        root, "--check", str(attempt), "--corpus", str(corpus_path),
+        "--expect-corpus-sha256", corpus_sha, "--approve-to", str(dest))
     assert proc.returncode == 2, proc.stdout  # CanonHarmonisationFatalError -> exit 2
     assert_no_stdout(proc)
     assert "Traceback" not in proc.stderr, (
@@ -434,7 +533,7 @@ def test_canon_entry_that_is_not_an_object_is_fatal(tmp_path, mode):
     difference decides whether the operator re-runs the pass or fixes
     their canon."""
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     # Rewrite canon.json with one entry mapped to a bare string.
     keyed = {e["source_form"]: e for e in entries}
     keyed[entries[0]["source_form"]] = entries[0]["canonical_target_form"]
@@ -448,9 +547,7 @@ def test_canon_entry_that_is_not_an_object_is_fatal(tmp_path, mode):
     }, ensure_ascii=False).encode("utf-8"))
 
     if mode == "check":
-        attempt = root / "harmonisation" / "attempt_1.json"
-        write_json(attempt, doc)
-        proc = run_harmonisation(root, "--check", str(attempt))
+        attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     else:
         write_json(root / "canon_harmonisation.json", doc)
         proc = run_harmonisation(root, "--report")
@@ -471,12 +568,9 @@ def test_canon_entry_that_is_not_an_object_is_fatal(tmp_path, mode):
 
 def test_check_exit1_blank_note(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     doc["proposals"][0]["note"] = "   "  # whitespace-only -- pattern "\\S" must reject
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert str(attempt) in proc.stderr
@@ -485,12 +579,9 @@ def test_check_exit1_blank_note(tmp_path):
 
 def test_check_exit1_unknown_kind(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     doc["proposals"][0]["kind"] = "not_a_real_kind"
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert str(attempt) in proc.stderr
@@ -499,12 +590,9 @@ def test_check_exit1_unknown_kind(tmp_path):
 
 def test_check_exit1_missing_required_field(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     del doc["proposals"][0]["note"]
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert str(attempt) in proc.stderr
@@ -513,12 +601,9 @@ def test_check_exit1_missing_required_field(tmp_path):
 
 def test_check_exit1_stray_additional_property(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     doc["unexpected_top_level_key"] = True
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert str(attempt) in proc.stderr
@@ -532,13 +617,10 @@ def test_check_exit1_stray_additional_property(tmp_path):
 
 def test_check_exit1_canon_sha256_mismatch(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     wrong = ("0" if csha[0] != "0" else "1") + csha[1:]
     doc["canon_sha256"] = wrong
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert str(attempt) in proc.stderr
@@ -553,12 +635,9 @@ def test_check_exit1_canon_sha256_mismatch(tmp_path):
 
 def test_check_exit1_unknown_source_form(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     doc["proposals"][0]["members"][1]["source_form"] = "not-a-canon-key-at-all"
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert "proposals[0]" in proc.stderr
@@ -577,16 +656,15 @@ def test_check_exit1_nfc_nfd_near_miss_must_refuse(tmp_path):
     entries = [canon_entry(nfc_form, "Cafe Rebbe"), canon_entry("Other Name", "Cafe Rebbe")]
     raw = write_canon(root, entries)
     csha = canon_sha256_of(raw)
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations_for(entries)))
     doc = harmonisation_doc(csha, [
         proposal("divergent_spelling", [
             member(nfd_form, "Cafe Rebbe"),  # NFD -- NOT a byte-exact canon key
             member("Other Name", "Cafe Rebbe"),
         ]),
     ])
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert "proposals[0]" in proc.stderr
@@ -595,12 +673,9 @@ def test_check_exit1_nfc_nfd_near_miss_must_refuse(tmp_path):
 
 def test_check_exit1_misquoted_canonical_target_form(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     doc["proposals"][0]["members"][0]["canonical_target_form"] = "Some Wrong Target"
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert "proposals[0]" in proc.stderr
@@ -612,13 +687,12 @@ def test_check_exit1_single_member_proposal(tmp_path):
     entries = [canon_entry("Solo", "Solo Target")]
     raw = write_canon(root, entries)
     csha = canon_sha256_of(raw)
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations_for(entries)))
     doc = harmonisation_doc(csha, [
         proposal("divergent_spelling", [member("Solo", "Solo Target")]),
     ])
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert "proposals[0]" in proc.stderr
@@ -629,6 +703,8 @@ def test_check_exit1_duplicate_source_form_within_proposal(tmp_path):
     entries = [canon_entry("Alpha", "Target A"), canon_entry("Beta", "Target B")]
     raw = write_canon(root, entries)
     csha = canon_sha256_of(raw)
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations_for(entries)))
     doc = harmonisation_doc(csha, [
         proposal("divergent_spelling", [
             member("Alpha", "Target A"),
@@ -636,10 +712,7 @@ def test_check_exit1_duplicate_source_form_within_proposal(tmp_path):
             member("Alpha", "Target A"),  # repeats the first member's source_form
         ]),
     ])
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert "proposals[0]" in proc.stderr
@@ -654,16 +727,15 @@ def test_check_exit1_all_members_share_one_target_form(tmp_path):
     ]
     raw = write_canon(root, entries)
     csha = canon_sha256_of(raw)
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations_for(entries)))
     doc = harmonisation_doc(csha, [
         proposal("divergent_spelling", [
             member("Alpha", "Same Target"),
             member("Beta", "Same Target"),
         ]),
     ])
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert "proposals[0]" in proc.stderr
@@ -672,14 +744,11 @@ def test_check_exit1_all_members_share_one_target_form(tmp_path):
 
 def test_check_exit1_duplicate_proposal(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     duplicate = json.loads(json.dumps(doc["proposals"][0]))
     duplicate["note"] = "A different note, same kind and same member source_forms."
     doc["proposals"].append(duplicate)
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
-
-    proc = run_harmonisation(root, "--check", str(attempt))
+    attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert "proposals[1]" in proc.stderr
@@ -697,7 +766,12 @@ def test_check_exit2_canon_json_absent(tmp_path):
     write_json(attempt, harmonisation_doc("0" * 64, []))
     assert not (root / "canon.json").exists()
 
-    proc = run_harmonisation(root, "--check", str(attempt))
+    # Any well-formed corpus: these cases fail before membership is ever
+    # reached, so passing one keeps the test about the failure it names.
+    corpus_path, corpus_sha = write_corpus(root, corpus_doc("0" * 64, []))
+    proc = run_harmonisation(
+        root, "--check", str(attempt), "--corpus", str(corpus_path),
+        "--expect-corpus-sha256", corpus_sha)
     assert proc.returncode == 2, proc.stdout
     assert_no_stdout(proc)
     assert "canon.json" in proc.stderr
@@ -709,7 +783,12 @@ def test_check_exit2_path_is_unreadable_directory(tmp_path):
     attempt = root / "harmonisation" / "attempt_1.json"
     attempt.mkdir(parents=True)  # a directory, not a file -- unreadable as JSON
 
-    proc = run_harmonisation(root, "--check", str(attempt))
+    # Any well-formed corpus: these cases fail before membership is ever
+    # reached, so passing one keeps the test about the failure it names.
+    corpus_path, corpus_sha = write_corpus(root, corpus_doc("0" * 64, []))
+    proc = run_harmonisation(
+        root, "--check", str(attempt), "--corpus", str(corpus_path),
+        "--expect-corpus-sha256", corpus_sha)
     assert proc.returncode == 2, proc.stdout
     assert_no_stdout(proc)
     assert str(attempt) in proc.stderr
@@ -722,7 +801,12 @@ def test_check_exit2_schemas_dir_absent(tmp_path):
     write_json(attempt, harmonisation_doc("0" * 64, []))
     assert not (root / "schemas").exists()
 
-    proc = run_harmonisation(root, "--check", str(attempt))
+    # Any well-formed corpus: these cases fail before membership is ever
+    # reached, so passing one keeps the test about the failure it names.
+    corpus_path, corpus_sha = write_corpus(root, corpus_doc("0" * 64, []))
+    proc = run_harmonisation(
+        root, "--check", str(attempt), "--corpus", str(corpus_path),
+        "--expect-corpus-sha256", corpus_sha)
     assert proc.returncode == 2, proc.stdout
     assert_no_stdout(proc)
     assert "schemas" in proc.stderr
@@ -735,7 +819,7 @@ def test_check_exit2_schemas_dir_absent(tmp_path):
 
 def test_report_exit0_with_proposals(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     write_json(root / "canon_harmonisation.json", doc)
 
     proc = run_harmonisation(root, "--report")
@@ -778,7 +862,7 @@ def test_report_correct_skeleton_null_placeholder_refused_by_real_validator(tmp_
     stages canon_validate.py -- against the SAME canon.json this
     --report run was anchored to, so old_entry matches what's on disk."""
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     write_json(root / "canon_harmonisation.json", doc)
 
     proc = run_harmonisation(root, "--report")
@@ -843,9 +927,12 @@ def test_report_correct_skeleton_null_placeholder_refused_by_real_validator(tmp_
 
 def test_report_exit0_empty_proposals_prints_not_a_certificate_wording(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    raw = write_canon(root, [canon_entry("Marie", "Marie")])
+    entries = [canon_entry("Marie", "Marie")]
+    raw = write_canon(root, entries)
     csha = canon_sha256_of(raw)
-    write_json(root / "canon_harmonisation.json", harmonisation_doc(csha, []))
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations_for(entries)))
+    write_json(root / "canon_harmonisation.json", harmonisation_doc(csha, [], corpus_sha))
 
     proc = run_harmonisation(root, "--report")
     assert proc.returncode == 0, proc.stderr
@@ -858,7 +945,7 @@ def test_report_exit0_empty_proposals_prints_not_a_certificate_wording(tmp_path)
 
 def test_report_exit0_canon_current_false_after_canon_changes_underneath(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     write_json(root / "canon_harmonisation.json", doc)
 
     # Mutate canon.json underneath the artifact: change one entry's own
@@ -880,7 +967,7 @@ def test_report_exit0_canon_current_false_after_canon_changes_underneath(tmp_pat
 
 def test_report_exit0_removed_member_renders_stored_value_marked_removed(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     write_json(root / "canon_harmonisation.json", doc)
 
     # Remove one of the two entries from canon.json entirely (the
@@ -920,7 +1007,7 @@ def test_report_hostile_note_cannot_forge_report_structure(tmp_path):
     chr(), never pasted, per the unicode-boundary-text-authoring project
     skill."""
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
 
     forged_entry = canon_entry("בָאבְרִינִצֶער", "Mordechai Babrinitzer")
     forged_skeleton = json.dumps(
@@ -1161,6 +1248,8 @@ def test_startup_fatal_missing_json_stdout_exits_2_not_1(tmp_path):
     schemas_dir.mkdir(parents=True)
     shutil.copy2(SCRIPT_SRC, scripts_dir / "canon_harmonisation.py")
     shutil.copy2(SCHEMA_SRC, schemas_dir / "canon-harmonisation.schema.json")
+    shutil.copy2(
+        CORPUS_SCHEMA_SRC, schemas_dir / "canon-harmonisation-corpus.schema.json")
     # json_stdout.py deliberately NOT staged.
     write_canon(root, [canon_entry("Marie", "Marie")])
 
@@ -1177,7 +1266,7 @@ def test_report_read_only_mode_does_not_write_bytecode_cache(tmp_path):
     sys.dont_write_bytecode, so a writable ${durable_root}/scripts/ could
     gain a __pycache__/json_stdout....pyc on every --report run."""
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     write_json(root / "canon_harmonisation.json", doc)
 
     proc = run_harmonisation(root, "--report")
@@ -1205,13 +1294,15 @@ def test_check_stdout_one_physical_line_with_boundary_char_in_approved_to_path(t
     str.splitlines() -- the same property sibling suites pin through their
     own JSON fields."""
     root = make_durable_root(tmp_path / "durable_root")
-    csha, entries, doc = two_member_fixture(root)
+    csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     attempt = root / "harmonisation" / "attempt_1.json"
     write_json(attempt, doc)
     boundary_char = chr(0x2028)
     dest = root / f"canon_harmonisation{boundary_char}sidecar.json"
 
-    proc = run_harmonisation(root, "--check", str(attempt), "--approve-to", str(dest))
+    proc = run_harmonisation(
+        root, "--check", str(attempt), "--corpus", str(corpus_path),
+        "--expect-corpus-sha256", corpus_sha, "--approve-to", str(dest))
     assert proc.returncode == 0, proc.stderr
     assert len(proc.stdout.splitlines()) == 1, (
         f"a literal U+2028 in approved_to must not split stdout into two physical lines:\n"
@@ -1259,7 +1350,10 @@ def test_noninterference_canon_validate_and_audit_unaffected_by_sidecar(tmp_path
 
     raw_canon = (root / "canon.json").read_bytes()
     csha = canon_sha256_of(raw_canon)
-    write_json(root / "canon_harmonisation.json", harmonisation_doc(csha, []))
+    # The sidecar's own corpus digest is immaterial here: this test is about
+    # canon_validate.py and canon_adjudication_audit.py being blind to the
+    # file's existence, and neither ever reads it.
+    write_json(root / "canon_harmonisation.json", harmonisation_doc(csha, [], "0" * 64))
     assert (root / "canon_harmonisation.json").is_file()
 
     proc_v_after = _run_subprocess(root / "scripts" / "canon_validate.py", "--research-mode", "offline")
@@ -1292,6 +1386,8 @@ def test_rtl_multiword_apostrophe_forms_round_trip_through_check_and_report(tmp_
     ]
     raw = write_canon(root, entries)
     csha = canon_sha256_of(raw)
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations_for(entries)))
     doc = harmonisation_doc(csha, [
         proposal(
             "divergent_policy",
@@ -1302,11 +1398,9 @@ def test_rtl_multiword_apostrophe_forms_round_trip_through_check_and_report(tmp_
             note="Same rebbe: a formal title beside an affectionate byname.",
         ),
     ])
-    attempt = root / "harmonisation" / "attempt_1.json"
-    write_json(attempt, doc)
     dest = root / "canon_harmonisation.json"
-
-    proc_check = run_harmonisation(root, "--check", str(attempt), "--approve-to", str(dest))
+    attempt, proc_check = check_attempt(
+        root, doc, corpus_path, corpus_sha, "--approve-to", str(dest))
     assert proc_check.returncode == 0, proc_check.stderr
     check_summary = parse_stdout(proc_check)
     assert check_summary["proposals_count"] == 1
@@ -1330,7 +1424,7 @@ def test_rtl_multiword_apostrophe_forms_round_trip_through_check_and_report(tmp_
 def test_two_member_fixture_validates_against_the_real_schema(tmp_path):
     root = tmp_path / "durable_root_for_schema_check"
     root.mkdir()
-    _csha, _entries, doc = two_member_fixture(root)
+    _csha, _entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
     jsonschema.Draft202012Validator(HARMONISATION_SCHEMA).validate(doc)
 
 
@@ -1351,3 +1445,377 @@ def test_rtl_fixture_validates_against_the_real_schema():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ===========================================================================
+# The five-kind matrix (#823 scope correction 1) and the corpus contract
+# (#823 scope correction 2)
+# ===========================================================================
+
+
+def matrix_fixture(root: Path):
+    """A canon of two entries sharing ONE target plus a third under its own,
+    a converged-draft observation that DISAGREES with canon about the first
+    entry, and one candidate observation that never reached canon. Every kind
+    in the matrix has a legitimate proposal over this fixture, so a test can
+    vary one rule at a time instead of rebuilding the world."""
+    entries = [
+        canon_entry("Noson", "R. Nathan"),
+        canon_entry("Nathan b. Leibele", "R. Nathan"),
+        canon_entry("Chaykel", "Chaykel"),
+    ]
+    raw = write_canon(root, entries)
+    csha = canon_sha256_of(raw)
+    observations = observations_for(entries) + [
+        observation("Noson", "Reb Noson", corpus="draft", n_segments=4),
+        observation("Weinberg", None, corpus="candidate", freq=7),
+    ]
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations, converged_segments=4))
+    return csha, corpus_path, corpus_sha
+
+
+def test_shared_target_two_canon_members_one_target_passes(tmp_path):
+    """#823 scope correction 1: 'one target string frozen for two different
+    people' is the INVERSE of the divergent case and the more damaging one --
+    two men land on one vault page. Before this kind existed the schema could
+    not express it at all and --check refused any group whose members agreed
+    on a target."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("shared_target", [
+        member("Noson", "R. Nathan"),
+        member("Nathan b. Leibele", "R. Nathan"),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 0, proc.stderr
+    assert parse_stdout(proc)["proposals_count"] == 1
+
+
+def test_shared_target_with_two_distinct_targets_is_refused(tmp_path):
+    """A shared_target proposal whose members do NOT share a target is a
+    divergent_* proposal wearing the wrong label. Refused naming the kind and
+    the count, so it is never silently re-read as another kind."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("shared_target", [
+        member("Noson", "R. Nathan"),
+        member("Chaykel", "Chaykel"),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert_no_stdout(proc)
+    assert "shared_target" in proc.stderr
+    assert "exactly 1 distinct target" in proc.stderr
+
+
+def test_shared_target_needs_two_canon_members_not_a_draft_one(tmp_path):
+    """A frozen target is a CANON property: only two canon entries can put two
+    referents on one vault page. A draft row saying the same thing is an
+    observation about a translation, not about what canon froze -- so one
+    canon member plus one draft member is refused."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("shared_target", [
+        member("Noson", "R. Nathan"),
+        member("Noson", "Reb Noson", corpus="draft", n_segments=4),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "at least 2 members whose corpus is 'canon'" in proc.stderr
+
+
+def test_divergent_spelling_with_one_distinct_target_is_refused(tmp_path):
+    """The original #823 rule, still enforced for the divergent kinds: members
+    that already agree on a target have nothing to harmonise."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("divergent_spelling", [
+        member("Noson", "R. Nathan"),
+        member("Nathan b. Leibele", "R. Nathan"),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "divergent_spelling" in proc.stderr
+    assert "at least 2 distinct target" in proc.stderr
+
+
+def test_all_draft_divergent_passes_and_offers_no_correct_skeleton(tmp_path):
+    """#823 scope correction 2: roughly a fifth of the real findings never
+    reach canon.json at all. A divergence living wholly in the per-segment
+    corpus must therefore be REPORTABLE -- requiring a canon anchor would make
+    exactly that class unreportable. Its route is not --correct, which refuses
+    a source_form it cannot find in entries{}, so the report must offer no
+    skeleton and say what the route actually is."""
+    root = make_durable_root(tmp_path / "durable_root")
+    entries = [canon_entry("Anchor", "Anchor")]
+    raw = write_canon(root, entries)
+    csha = canon_sha256_of(raw)
+    observations = observations_for(entries) + [
+        observation("Lipovetsker", "Lipovetsker", corpus="draft", n_segments=2),
+        observation("Lipovetsker", "Lipovetzker", corpus="draft", n_segments=1),
+    ]
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations, converged_segments=3))
+    doc = harmonisation_doc(csha, [proposal("divergent_spelling", [
+        member("Lipovetsker", "Lipovetsker", corpus="draft", n_segments=2),
+        member("Lipovetsker", "Lipovetzker", corpus="draft", n_segments=1),
+    ])])
+    _attempt, proc = check_attempt(
+        root, doc, corpus_path, corpus_sha,
+        "--approve-to", str(root / "canon_harmonisation.json"))
+    assert proc.returncode == 0, proc.stderr
+
+    report = run_harmonisation(root, "--report")
+    assert report.returncode == 0, report.stderr
+    assert "NOT IN CANON" in report.stderr
+    assert "ordinary glossary merge" in report.stderr
+    assert [ln for ln in report.stderr.splitlines() if ln == "{"] == [], (
+        "an all-draft proposal over forms absent from canon must offer no "
+        f"--correct skeleton:\n{report.stderr}"
+    )
+
+
+def test_canon_and_disagreeing_draft_row_are_two_members_of_one_proposal(tmp_path):
+    """The observation TRIPLE, not the source form, is what a member names.
+    `canon: X -> A` beside a converged `draft: X -> B` is the cross-segment
+    discrepancy final_audit.py's WARN glossary-diff already reports; keying
+    membership or duplicate-detection by source_form alone would collapse the
+    two rows this pass exists to put in front of the operator."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("divergent_spelling", [
+        member("Noson", "R. Nathan"),
+        member("Noson", "Reb Noson", corpus="draft", n_segments=4),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_member_absent_from_the_corpus_is_refused(tmp_path):
+    """Membership is checked against the corpus the session DISPATCHED, not
+    against live canon.json: a row the pass invented is refused even when a
+    form of that name exists somewhere."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("divergent_spelling", [
+        member("Noson", "R. Nathan"),
+        member("Invented", "Invented Target"),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "is not a byte-exact observation in the corpus" in proc.stderr
+
+
+@pytest.mark.parametrize("mutation,label", [
+    ({"corpus": "draft"}, "wrong corpus"),
+    ({"canonical_target_form": "Something Else"}, "wrong target"),
+])
+def test_member_matching_only_part_of_the_triple_is_refused(tmp_path, mutation, label):
+    """Matching on the whole triple is what makes a corpus tag unforgeable: a
+    row relabelled into another corpus, or requoted with another target, is
+    simply not in the corpus and is refused."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    bad = member("Noson", "R. Nathan")
+    bad.update(mutation)
+    if bad["corpus"] == "draft":
+        bad["n_segments"] = 4
+    doc = harmonisation_doc(csha, [proposal("divergent_spelling", [
+        bad, member("Chaykel", "Chaykel"),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "is not a byte-exact observation in the corpus" in proc.stderr, label
+
+
+def test_member_count_disagreeing_with_the_observation_is_refused(tmp_path):
+    """--report never receives --corpus, so it renders n_segments/freq from the
+    artifact. An unverified count would therefore be a number the pass chose
+    for the operator to read."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("divergent_spelling", [
+        member("Noson", "R. Nathan"),
+        member("Noson", "Reb Noson", corpus="draft", n_segments=99),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "n_segments=99" in proc.stderr
+
+
+def test_multi_referent_one_canon_member_with_two_referents_passes(tmp_path):
+    """#823 scope correction 1, vol4's largest instance: twelve bare
+    given-name entries each merging every bearer onto one page. The mandatory
+    homonym-split gate cannot find these -- it only enumerates splits ALREADY
+    authored in canon_senses.json and states NOT ENUMERATED otherwise -- so
+    nothing in the pipeline discovered them before this kind."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [dict(
+        proposal("multi_referent", [member("Chaykel", "Chaykel")]),
+        referents=["the Chaykel of vol1", "Chaykel the shochet"],
+    )])
+    _attempt, proc = check_attempt(
+        root, doc, corpus_path, corpus_sha,
+        "--approve-to", str(root / "canon_harmonisation.json"))
+    assert proc.returncode == 0, proc.stderr
+
+    report = run_harmonisation(root, "--report")
+    assert report.returncode == 0, report.stderr
+    assert "referents claimed:" in report.stderr
+    assert "canon_senses.json" in report.stderr
+    assert [ln for ln in report.stderr.splitlines() if ln == "{"] == [], (
+        "multi_referent's route is a canon_senses.json split, not a retarget -- "
+        f"it must offer no --correct skeleton:\n{report.stderr}"
+    )
+
+
+def test_multi_referent_with_a_second_member_is_refused(tmp_path):
+    """'Exactly one member TOTAL', not 'one canon member plus whatever': an
+    implementation counting only canon members would let arbitrary draft or
+    candidate rows ride along on a claim about a single entry."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [dict(
+        proposal("multi_referent", [
+            member("Chaykel", "Chaykel"),
+            member("Noson", "Reb Noson", corpus="draft", n_segments=4),
+        ]),
+        referents=["one", "two"],
+    )])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "exactly 1 member whose corpus is 'canon'" in proc.stderr
+
+
+def test_multi_referent_referents_differing_only_by_whitespace_are_one(tmp_path):
+    """`referents` is this kind's ONLY structural protection against a
+    content-free assertion, so distinctness is measured after collapsing
+    internal whitespace -- raw distinctness would let a duplicate defeat it."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [dict(
+        proposal("multi_referent", [member("Chaykel", "Chaykel")]),
+        referents=["Reb Noson", "Reb  Noson"],
+    )])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "distinct after whitespace normalisation" in proc.stderr
+
+
+def test_uncanonized_variant_passes_and_routes_the_candidate_to_a_new_entry(tmp_path):
+    """#823 scope correction 2's own examples -- Weinberg, Lipovetsker and the
+    rest -- exist only outside canon. The route for such a form is a NEW canon
+    entry through the ordinary glossary merge, never --correct, which refuses
+    a source_form it cannot find."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("uncanonized_variant", [
+        member("Chaykel", "Chaykel"),
+        member("Weinberg", None, corpus="candidate", freq=7),
+    ])])
+    _attempt, proc = check_attempt(
+        root, doc, corpus_path, corpus_sha,
+        "--approve-to", str(root / "canon_harmonisation.json"))
+    assert proc.returncode == 0, proc.stderr
+
+    report = run_harmonisation(root, "--report")
+    assert "NOT IN CANON (candidate, freq 7)" in report.stderr
+    assert "ordinary glossary merge" in report.stderr
+    assert len([ln for ln in report.stderr.splitlines() if ln == "{"]) == 1, (
+        "exactly one --correct skeleton, for the canon member only:\n"
+        f"{report.stderr}"
+    )
+
+
+def test_uncanonized_variant_naming_a_live_canon_key_is_refused(tmp_path):
+    """A corpus tag records WHERE a row was read, never what canon holds now.
+    name_candidates.json carries the extractor's complete list and only
+    glossary_batch_plan.py later drops the forms already resolved, so a
+    candidate observation's source_form may well be a canon key -- and then it
+    is not uncanonized at all."""
+    root = make_durable_root(tmp_path / "durable_root")
+    entries = [canon_entry("Anchor", "Anchor"), canon_entry("Weinberg", "Weinberg")]
+    raw = write_canon(root, entries)
+    csha = canon_sha256_of(raw)
+    observations = observations_for(entries) + [
+        observation("Weinberg", None, corpus="candidate", freq=7),
+    ]
+    corpus_path, corpus_sha = write_corpus(root, corpus_doc(csha, observations))
+    doc = harmonisation_doc(csha, [proposal("uncanonized_variant", [
+        member("Anchor", "Anchor"),
+        member("Weinberg", None, corpus="candidate", freq=7),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "IS a key of canon.json" in proc.stderr
+
+
+def test_corpus_digest_mismatch_is_refused_and_publishes_nothing(tmp_path):
+    """The artifact must quote the digest the session dispatched."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("shared_target", [
+        member("Noson", "R. Nathan"),
+        member("Nathan b. Leibele", "R. Nathan"),
+    ])], corpus_sha256="d" * 64)
+    dest = root / "canon_harmonisation.json"
+    _attempt, proc = check_attempt(
+        root, doc, corpus_path, corpus_sha, "--approve-to", str(dest), stamp=False)
+    assert proc.returncode == 1, proc.stdout
+    assert_no_stdout(proc)
+    assert not dest.exists()
+
+
+def test_a_self_consistent_rewrite_of_the_corpus_is_still_refused(tmp_path):
+    """THE TRUSTED CHANNEL, negative control. The corpus file lives in the
+    durable root the dispatched pass can WRITE, so a digest recomputed from
+    that file and compared only against the artifact's own field proves
+    self-consistency and nothing else: the pass can rewrite the corpus with
+    fabricated observations AND stamp the matching digest into its artifact.
+    --expect-corpus-sha256 carries the digest the session computed BEFORE
+    dispatching, which the pass cannot reach -- so this run, consistent on
+    disk in every respect, must still be refused and publish nothing."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+
+    forged_observations = [
+        observation("Fabricated A", "One Target"),
+        observation("Fabricated B", "One Target"),
+    ]
+    forged_raw = write_json(corpus_path, corpus_doc(csha, forged_observations))
+    forged_sha = hashlib.sha256(forged_raw).hexdigest()
+    assert forged_sha != corpus_sha, "fixture sanity: the rewrite must move the digest"
+
+    doc = harmonisation_doc(csha, [proposal("shared_target", [
+        member("Fabricated A", "One Target"),
+        member("Fabricated B", "One Target"),
+    ])], corpus_sha256=forged_sha)
+    dest = root / "canon_harmonisation.json"
+    _attempt, proc = check_attempt(
+        root, doc, corpus_path, corpus_sha, "--approve-to", str(dest), stamp=False)
+    assert proc.returncode == 1, proc.stdout
+    assert_no_stdout(proc)
+    assert not dest.exists(), "nothing may be published on a corpus the session did not send"
+    assert "--expect-corpus-sha256" in proc.stderr
+
+
+@pytest.mark.parametrize("argv_tail,label", [
+    ((), "neither"),
+    (("--corpus", "SOME_PATH"), "corpus without the expected digest"),
+    (("--expect-corpus-sha256", "0" * 64), "digest without the corpus"),
+])
+def test_check_without_the_corpus_arguments_is_a_usage_error(tmp_path, argv_tail, label):
+    """Both arguments are REQUIRED with --check. Making them optional would
+    silently restore the old behaviour -- membership checked against live
+    canon.json -- for any caller that forgot one."""
+    root = make_durable_root(tmp_path / "durable_root")
+    write_canon(root, [canon_entry("Marie", "Marie")])
+    attempt = root / "harmonisation" / "attempt_1.json"
+    write_json(attempt, harmonisation_doc("0" * 64, []))
+    tail = tuple(str(attempt.parent / "corpus_1.json") if a == "SOME_PATH" else a
+                 for a in argv_tail)
+    proc = run_harmonisation(root, "--check", str(attempt), *tail)
+    assert proc.returncode == 2, (label, proc.stdout)
+    assert_no_stdout(proc)

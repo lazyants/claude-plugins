@@ -153,9 +153,11 @@ Exit codes throughout: 0 clean, 1 gate-fail (--check only), 2 fatal.
 """
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 import sys
 import unicodedata
 from pathlib import Path
@@ -235,6 +237,7 @@ SCHEMAS_DIR = DURABLE_ROOT / "schemas"
 CANON_PATH = DURABLE_ROOT / "canon.json"
 HARMONISATION_FILENAME = "canon_harmonisation.json"
 SCHEMA_FILENAME = "canon-harmonisation.schema.json"
+CORPUS_SCHEMA_FILENAME = "canon-harmonisation-corpus.schema.json"
 
 
 class CanonHarmonisationFatalError(Exception):
@@ -358,15 +361,17 @@ def _build_schema_registry(schemas_dir: Path) -> "Registry":
     return Registry().with_resources(resources)
 
 
-def _schema_errors(doc: dict, schemas_dir: Path):
-    """Validates `doc` against canon-harmonisation.schema.json (registered
-    from `schemas_dir`, alongside every sibling schema there) and returns
-    the sorted list of jsonschema ValidationErrors (empty if valid). Raises
+def _schema_errors(doc: dict, schemas_dir: Path, schema_filename: str = SCHEMA_FILENAME):
+    """Validates `doc` against `schema_filename` (registered from
+    `schemas_dir`, alongside every sibling schema there) and returns the
+    sorted list of jsonschema ValidationErrors (empty if valid). Raises
     CanonHarmonisationFatalError (exit 2, both modes) if the schemas
     directory or the schema file itself cannot be loaded -- a missing
-    schema is a deployment problem, never a gate-fail."""
+    schema is a deployment problem, never a gate-fail. Two schemas are
+    validated through this one path: the attempt artifact and, in --check,
+    the corpus file the session dispatched."""
     registry = _build_schema_registry(schemas_dir)
-    schema = _load_schema_document(schemas_dir / SCHEMA_FILENAME)
+    schema = _load_schema_document(schemas_dir / schema_filename)
     validator = jsonschema.Draft202012Validator(schema, registry=registry)
     return sorted(validator.iter_errors(doc), key=lambda e: [str(p) for p in e.path])
 
@@ -399,88 +404,492 @@ def _first_duplicate(items):
     return None
 
 
-def _check_proposals(doc: dict, entries: dict) -> None:
+def _load_sibling(module_name: str, scripts_dir: Path):
+    """Loads a staged sibling script by EXACT PATH, never `import <name>`,
+    for the same reason json_stdout.py is loaded that way above: a bare
+    sibling import resolves through the global sys.modules cache regardless
+    of which staged copy the caller intended. Raises
+    CanonHarmonisationFatalError (exit 2) when the sibling is absent -- a
+    missing staged script is a deployment fault, never a gate-fail."""
+    path = scripts_dir / f"{module_name}.py"
+    try:
+        spec = _importlib_util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no loader for {path}")
+        module = _importlib_util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except (ImportError, OSError) as exc:
+        raise CanonHarmonisationFatalError(
+            f"cannot load {module_name}.py from {path} ({exc}) -- it must be staged "
+            "alongside canon_harmonisation.py under ${durable_root}/scripts/"
+        )
+    return module
+
+
+def build_corpus(
+    durable_root_str: "str | None",
+    candidates_source: str,
+    out_str: "str | None",
+) -> dict:
+    """Gathers the three corpora and writes the corpus file the dispatch is
+    serialised from and --check is then validated against.
+
+    This is a SCRIPT rather than session prose because every step of it is
+    mechanical -- read these files, keep these rows, count the ones dropped
+    -- and none of it is an identity call. Leaving it as prose would also
+    leave the fail-closed rules below unenforceable: they are exactly the
+    kind of rule a session skips without noticing.
+
+    Fail-closed at all three draft steps, because the failure that matters
+    here is a corpus that GATHERED nothing reading like one that FOUND
+    nothing."""
+    durable_root = Path(durable_root_str) if durable_root_str else DURABLE_ROOT
+    scripts_dir = Path(__file__).absolute().parent
+    canon_path = durable_root / "canon.json"
+
+    canon_bytes, entries = _load_canon(canon_path)
+    canon_sha256 = hashlib.sha256(canon_bytes).hexdigest()
+
+    observations = []
+    for source_form, entry in entries.items():
+        observations.append({
+            "corpus": "canon",
+            "source_form": source_form,
+            "target_form": entry.get("canonical_target_form"),
+        })
+
+    # --- draft corpus ------------------------------------------------------
+    # (1) WHICH FRAGMENTS EXIST. ledger_merge._read_fragments, never
+    # final_audit.load_converged_fragments: the latter asks with is_dir() +
+    # glob(), and #463 measured that a ledger.d at mode 0o000 answers
+    # is_dir() -> True and glob("*.json") -> [], so an unreadable POPULATED
+    # directory reports itself empty. Here that would mean "no drafts" --
+    # absence and failure printing identically. _read_fragments tells
+    # ENOENT/ENOTDIR (genuinely nothing written yet) from every other errno.
+    # Reading fragments rather than the materialized runs/ledger.json is
+    # required on its own: the default driver writes only fragments and
+    # leaves ledger.json at its pre-run state.
+    ledger_merge = _load_sibling("ledger_merge", scripts_dir)
+    final_audit = _load_sibling("final_audit", scripts_dir)
+    ledger_d = durable_root / "runs" / "ledger.d"
+    try:
+        fragments = ledger_merge._read_fragments(ledger_d)
+    except (OSError, ledger_merge.LedgerMergeError) as exc:
+        # _read_fragments returns {} for ENOENT/ENOTDIR (genuinely nothing
+        # written yet) and raises LedgerMergeError for every other errno --
+        # the "could-not-look is not nothing-is-there" distinction #463 put
+        # there. Catching its own exception type is the point: without it a
+        # PermissionError surfaces as a traceback under exit 1, which in this
+        # script's convention means the ARTIFACT is bad.
+        raise CanonHarmonisationFatalError(
+            f"cannot enumerate ledger fragments at {ledger_d} ({exc}) -- refusing to "
+            "report an empty draft corpus for a directory that may be populated"
+        )
+
+    converged_segments = 0
+    drafts_excluded_stale_review = 0
+    draft_rows_skipped = 0
+    draft_pairs = {}
+    for seg in sorted(fragments):
+        fragment = fragments[seg]
+        if not isinstance(fragment, dict) or fragment.get("status") != "converged":
+            continue
+        # (2) WHICH MAY CONTRIBUTE. status == "converged" is not sufficient:
+        # a draft edited after its review carries names no reviewer saw, so
+        # the fragment's reviewed_draft_sha1 must still match the draft's
+        # current content -- the same comparison final_audit.py's
+        # hard_check_stale_review makes.
+        expected = fragment.get("reviewed_draft_sha1")
+        draft_file = durable_root / "segments" / f"{seg}.draft.json"
+        if not isinstance(expected, str) or not expected or not draft_file.is_file():
+            drafts_excluded_stale_review += 1
+            continue
+        try:
+            current = final_audit.draft_content_sha1(draft_file)
+        except (OSError, ValueError, json.JSONDecodeError):
+            drafts_excluded_stale_review += 1
+            continue
+        if current != expected:
+            drafts_excluded_stale_review += 1
+            continue
+
+        try:
+            draft = json.loads(draft_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CanonHarmonisationFatalError(
+                f"converged, review-current draft {draft_file} could not be read "
+                f"({exc}) -- refusing to silently drop it from the corpus"
+            )
+        converged_segments += 1
+        # (3) WHICH ROWS INSIDE. final_audit._name_entry_forms already
+        # accepts both field conventions draft.schema.json permits; a row it
+        # cannot read is COUNTED, never silently dropped.
+        for row in (draft.get("names") or []):
+            source_form, target_form = final_audit._name_entry_forms(row)
+            if source_form is None:
+                draft_rows_skipped += 1
+                continue
+            draft_pairs.setdefault((source_form, target_form), set()).add(seg)
+
+    for (source_form, target_form), segs in sorted(draft_pairs.items()):
+        observations.append({
+            "corpus": "draft",
+            "source_form": source_form,
+            "target_form": target_form,
+            "n_segments": len(segs),
+        })
+
+    # --- candidate corpus --------------------------------------------------
+    # On the glossary.enabled:false branch the bootstrap never ran and
+    # deletes nothing, so a stale name_candidates.json can sit there looking
+    # present. The corpus records WHY the rows are what they are and the
+    # file is not opened at all -- which is why nothing here is nullable.
+    if candidates_source == "bootstrap":
+        candidates_path = durable_root / "name_candidates.json"
+        _raw, candidates_doc = _read_json_bytes(candidates_path, "name_candidates.json")
+        rows = candidates_doc.get("candidates")
+        if not isinstance(rows, list):
+            raise CanonHarmonisationFatalError(
+                f"{candidates_path} has no candidates[] array -- "
+                "--candidates-source bootstrap says the extractor ran"
+            )
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            freq = row.get("freq")
+            if isinstance(name, str) and name.strip() and isinstance(freq, int) and freq >= 1:
+                observations.append({
+                    "corpus": "candidate",
+                    "source_form": name,
+                    "target_form": None,
+                    "freq": freq,
+                })
+
+    doc = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "canon_sha256": canon_sha256,
+        "candidates_source": candidates_source,
+        "converged_segments": converged_segments,
+        "drafts_excluded_stale_review": drafts_excluded_stale_review,
+        "draft_rows_skipped": draft_rows_skipped,
+        "observations": observations,
+    }
+    raw = json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+
+    schema_failure = _schema_failure_message(
+        doc, durable_root / "schemas", Path(out_str) if out_str else durable_root,
+        schema_filename=CORPUS_SCHEMA_FILENAME,
+    )
+    if schema_failure:
+        # The builder's OWN output failing its schema is a fault in this
+        # script, not in the project: fatal, and nothing is written.
+        raise CanonHarmonisationFatalError(schema_failure)
+
+    n_canon = sum(1 for o in observations if o["corpus"] == "canon")
+    n_draft = sum(1 for o in observations if o["corpus"] == "draft")
+    n_candidate = sum(1 for o in observations if o["corpus"] == "candidate")
+
+    out_path = Path(out_str) if out_str else (
+        durable_root / "harmonisation"
+        / f"corpus_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+          f"_{os.urandom(4).hex()}.json"
+    )
+    _atomic_publish(out_path, raw)
+
+    return {
+        "success": True,
+        "mode": "build-corpus",
+        "corpus_path": str(out_path),
+        "corpus_sha256": hashlib.sha256(raw).hexdigest(),
+        "canon_sha256": canon_sha256,
+        "candidates_source": candidates_source,
+        "canon_observations": n_canon,
+        "draft_observations": n_draft,
+        "candidate_observations": n_candidate,
+        "converged_segments": converged_segments,
+        "drafts_excluded_stale_review": drafts_excluded_stale_review,
+        "draft_rows_skipped": draft_rows_skipped,
+        # The no-op test, computed here rather than left to the session:
+        # dispatch when there is at least one canon observation to anchor
+        # against, or at least two draft observations to disagree.
+        "should_dispatch": n_canon >= 1 or n_draft >= 2,
+    }
+
+
+def _load_corpus(corpus_path: Path, expected_sha256: str, schemas_dir: Path) -> dict:
+    """Reads, anchors and schema-validates the corpus file the session
+    serialised into this pass's prompt, and returns
+    {(corpus, source_form, target_form): observation}.
+
+    THE THREE-WAY COMPARISON is the whole point and it happens here, before
+    any proposal is looked at and long before _atomic_publish. The corpus
+    file lives in the durable root the dispatched pass can WRITE, so a
+    digest recomputed from that file and compared only against the
+    artifact's own field proves self-consistency and nothing else: a pass
+    could rewrite the corpus with fabricated observations, stamp the
+    matching digest into its artifact, and pass. `expected_sha256` is the
+    digest the SESSION computed before dispatching and kept in its own
+    context, where the pass cannot reach it -- so expected, on-disk and
+    artifact must all three agree.
+
+    The observations are keyed by the whole TRIPLE rather than by
+    source_form: `canon: X -> A` beside a converged `draft: X -> B` is the
+    cross-segment discrepancy shape final_audit.py's WARN glossary-diff
+    already reports, and keying by source_form alone would collapse the two
+    rows this pass exists to put in front of the operator."""
+    raw, doc = _read_json_bytes(corpus_path, "harmonisation corpus")
+
+    actual = hashlib.sha256(raw).hexdigest()
+    if actual != expected_sha256:
+        raise CanonHarmonisationRefusal(
+            f"{corpus_path} does not match --expect-corpus-sha256: the session "
+            f"dispatched {expected_sha256}, the file on disk now hashes to {actual}"
+        )
+
+    schema_failure = _schema_failure_message(
+        doc, schemas_dir, corpus_path, schema_filename=CORPUS_SCHEMA_FILENAME
+    )
+    if schema_failure:
+        raise CanonHarmonisationRefusal(schema_failure)
+
+    observations = {}
+    for observation in doc["observations"]:
+        key = (
+            observation["corpus"],
+            observation["source_form"],
+            observation["target_form"],
+        )
+        observations[key] = observation
+    return {"doc": doc, "observations": observations}
+
+
+def _normalise_referent(text: str) -> str:
+    """Trims and collapses internal whitespace runs, so `referents` entries
+    differing only in spacing count as ONE referent. `referents` is
+    multi_referent's only structural protection against a content-free
+    assertion, and raw distinctness would let "Reb Noson" and "Reb  Noson"
+    defeat it."""
+    return " ".join(text.split())
+
+
+# The per-kind cardinality and target rules, kept as ONE table rather than a
+# chain of branches: every kind's rule is then visible in one place, and a
+# kind added to the schema without a rule here fails loudly in
+# _check_proposals rather than falling through to a default that would let
+# it pass unchecked.
+KIND_RULES = {
+    "divergent_spelling": "divergent",
+    "divergent_policy": "divergent",
+    "shared_target": "shared_target",
+    "multi_referent": "multi_referent",
+    "uncanonized_variant": "uncanonized_variant",
+}
+
+
+def _check_proposals(doc: dict, entries: dict, observations: dict) -> None:
     """(c)-(g): every proposal-level and cross-proposal structural check.
     Raises CanonHarmonisationRefusal on the FIRST violation found, always
-    naming the offending proposal's index (and, for (d)/(e), the
-    source_form at fault) via `offending`."""
+    naming the offending proposal's index (and, where one is at fault, the
+    source_form) via `offending`.
+
+    Membership is checked against the CORPUS the session dispatched, not
+    against live canon.json: the corpus is what the pass was actually shown,
+    and a check against anything else could refuse a correct proposal (the
+    canon moved) or accept a fabricated one (a row the pass invented that
+    happens to exist now). The one thing still measured against LIVE canon
+    is uncanonized_variant's absence rule and, in --report, every member's
+    route -- a corpus tag records where a row was read, never what canon
+    holds now (name_candidates.json carries the extractor's whole list and
+    only glossary_batch_plan.py later drops the forms already resolved)."""
     seen_signatures = set()
     for idx, proposal in enumerate(doc["proposals"]):
         members = proposal["members"]
-
-        # (c) cardinality, checked before any per-member lookup: a proposal
-        # naming fewer than 2 members asserts nothing to harmonise.
-        if len(members) < 2:
-            raise CanonHarmonisationRefusal(
-                f"proposals[{idx}]: has {len(members)} member(s) -- a harmonisation "
-                "proposal needs at least 2 to name anything to harmonise",
-                offending={"proposal_index": idx, "member_count": len(members)},
+        kind = proposal["kind"]
+        rule = KIND_RULES.get(kind)
+        if rule is None:
+            # Unreachable through the schema, which enumerates the kinds --
+            # but a kind added there without a rule here must fail LOUD
+            # rather than fall through to a default that checks nothing.
+            raise CanonHarmonisationFatalError(
+                f"proposals[{idx}]: kind {kind!r} has no rule in KIND_RULES -- "
+                "the schema and this script disagree about the kinds that exist"
             )
 
-        source_forms = []
-        target_forms = set()
+        triples = []
+        canon_members = []
+        target_bearing = []
         for member in members:
+            corpus = member["corpus"]
             source_form = member["source_form"]
-            canonical_target_form = member["canonical_target_form"]
+            target_form = member["canonical_target_form"]
+            triple = (corpus, source_form, target_form)
 
-            # (d) byte-exact membership -- a plain dict lookup never folds,
-            # casefolds, or NFC/NFD-normalises, so a form matching a canon
-            # key only after normalisation correctly misses here and is
-            # refused rather than silently tolerated.
-            if source_form not in entries:
+            # (d) byte-exact membership in the dispatched corpus. A plain
+            # dict lookup never folds, casefolds, or NFC/NFD-normalises, so
+            # a form matching an observation only after normalisation
+            # correctly misses here. Matching the whole triple is what makes
+            # a corpus tag unforgeable: a row cannot be relabelled into
+            # another corpus, because the relabelled triple is not there.
+            observation = observations.get(triple)
+            if observation is None:
                 raise CanonHarmonisationRefusal(
-                    f"proposals[{idx}]: source_form {source_form!r} is not a byte-exact "
-                    "key of canon.json's entries{} (never folded, casefolded, or "
-                    "NFC/NFD-normalised)",
+                    f"proposals[{idx}]: member ({corpus!r}, {source_form!r}, "
+                    f"{target_form!r}) is not a byte-exact observation in the "
+                    "corpus this pass was dispatched with",
                     offending={"proposal_index": idx, "source_form": source_form},
                 )
 
-            # (e) anti-fabrication: the artifact must not misquote the very
-            # canon it claims to be anchored to.
-            stored_target_form = entries[source_form].get("canonical_target_form")
-            if canonical_target_form != stored_target_form:
-                raise CanonHarmonisationRefusal(
-                    f"proposals[{idx}]: canonical_target_form {canonical_target_form!r} for "
-                    f"source_form {source_form!r} does not match canon.json's stored value "
-                    f"{stored_target_form!r}",
-                    offending={"proposal_index": idx, "source_form": source_form},
-                )
+            # (d) the carried reporting counts must be the corpus's own.
+            # --report never receives --corpus, so it renders these from the
+            # artifact; an unverified count would be a number the pass chose.
+            for field in ("n_segments", "freq"):
+                if member.get(field) != observation.get(field):
+                    raise CanonHarmonisationRefusal(
+                        f"proposals[{idx}]: member {source_form!r} carries "
+                        f"{field}={member.get(field)!r}, the corpus observation says "
+                        f"{observation.get(field)!r}",
+                        offending={"proposal_index": idx, "source_form": source_form},
+                    )
 
-            source_forms.append(source_form)
-            target_forms.add(canonical_target_form)
+            triples.append(triple)
+            if corpus == "canon":
+                canon_members.append(member)
+            if target_form is not None:
+                target_bearing.append(target_form)
 
-        # (f) pairwise-distinct source_forms within this one proposal.
-        duplicate_source_form = _first_duplicate(source_forms)
-        if duplicate_source_form is not None:
+        # (f) pairwise-distinct TRIPLES within this one proposal. Distinct
+        # triples rather than distinct source_forms, because one source form
+        # legitimately appears twice when two corpora disagree about it --
+        # which is exactly the finding this pass exists to surface.
+        duplicate_triple = _first_duplicate(triples)
+        if duplicate_triple is not None:
             raise CanonHarmonisationRefusal(
-                f"proposals[{idx}]: source_form {duplicate_source_form!r} appears more than "
-                "once in members[] -- source_forms within one proposal must be pairwise "
+                f"proposals[{idx}]: member ({duplicate_triple[0]!r}, "
+                f"{duplicate_triple[1]!r}, {duplicate_triple[2]!r}) appears more than "
+                "once in members[] -- members within one proposal must be pairwise "
                 "distinct",
-                offending={"proposal_index": idx, "source_form": duplicate_source_form},
+                offending={"proposal_index": idx, "source_form": duplicate_triple[1]},
             )
 
-        # (f) at least 2 distinct target forms -- a proposal whose members
-        # already agree on canonical_target_form has nothing to harmonise
-        # (exact-equality of targets is already suspicion_scan.py's
-        # merge_participant; this script's whole reason to exist is the
-        # DIVERGENT case).
-        if len(target_forms) < 2:
-            raise CanonHarmonisationRefusal(
-                f"proposals[{idx}]: every member already shares one canonical_target_form "
-                f"({sorted(target_forms)!r}) -- nothing to harmonise",
-                offending={"proposal_index": idx},
-            )
+        _check_kind_rule(idx, kind, rule, members, canon_members, target_bearing,
+                         proposal, entries)
 
         # (g) no two proposals may name the same kind over the same set of
-        # member source_forms.
-        signature = (proposal["kind"], frozenset(source_forms))
+        # member observations.
+        signature = (kind, frozenset(triples))
         if signature in seen_signatures:
             raise CanonHarmonisationRefusal(
                 f"proposals[{idx}]: duplicate proposal -- another proposal already names "
-                f"the same kind ({proposal['kind']!r}) over the same member source_forms",
+                f"the same kind ({kind!r}) over the same member observations",
                 offending={"proposal_index": idx},
             )
         seen_signatures.add(signature)
+
+
+def _check_kind_rule(idx, kind, rule, members, canon_members, target_bearing,
+                     proposal, entries) -> None:
+    """(c)/(e): the cardinality and target rule for ONE kind. Split out of
+    _check_proposals so each kind's rule reads as one block and every
+    refusal can name the kind and the count it measured -- a mislabelled
+    proposal is then refused with the reason, never silently re-read as
+    another kind."""
+    distinct_targets = set(target_bearing)
+
+    if rule == "divergent":
+        # The original #823 question: >=2 target-bearing members disagreeing
+        # about the target. May be satisfied entirely by `draft` members --
+        # an inconsistency living wholly in the per-segment corpus is the
+        # class the issue's scope correction says is invisible today, and
+        # requiring a canon anchor would make it unreportable.
+        if len(target_bearing) < 2:
+            raise CanonHarmonisationRefusal(
+                f"proposals[{idx}]: kind {kind!r} needs at least 2 target-bearing "
+                f"members, got {len(target_bearing)}",
+                offending={"proposal_index": idx, "member_count": len(target_bearing)},
+            )
+        if len(distinct_targets) < 2:
+            raise CanonHarmonisationRefusal(
+                f"proposals[{idx}]: kind {kind!r} needs at least 2 distinct target "
+                f"forms, got {len(distinct_targets)} ({sorted(distinct_targets)!r}) -- "
+                "members that already agree have nothing to harmonise",
+                offending={"proposal_index": idx},
+            )
+        return
+
+    if rule == "shared_target":
+        # The INVERSE and the more damaging direction: two canon entries
+        # frozen under ONE target give two different people one vault page.
+        # CANON members specifically -- a frozen target is a canon property,
+        # and no draft or candidate row can establish that two referents
+        # share a page.
+        if len(canon_members) < 2:
+            raise CanonHarmonisationRefusal(
+                f"proposals[{idx}]: kind 'shared_target' needs at least 2 members whose "
+                f"corpus is 'canon', got {len(canon_members)} -- a frozen target is a "
+                "canon property, so a draft or candidate row cannot establish one",
+                offending={"proposal_index": idx, "member_count": len(canon_members)},
+            )
+        canon_targets = {m["canonical_target_form"] for m in canon_members}
+        if len(canon_targets) != 1:
+            raise CanonHarmonisationRefusal(
+                f"proposals[{idx}]: kind 'shared_target' needs exactly 1 distinct target "
+                f"form among its canon members, got {len(canon_targets)} "
+                f"({sorted(canon_targets)!r}) -- differing targets are a divergent_* "
+                "proposal, not a shared one",
+                offending={"proposal_index": idx},
+            )
+        return
+
+    if rule == "multi_referent":
+        # Exactly ONE member, total. "One canon member plus whatever" would
+        # let arbitrary draft or candidate rows ride along on a claim that
+        # is about a single entry covering several people.
+        if len(members) != 1 or len(canon_members) != 1:
+            raise CanonHarmonisationRefusal(
+                f"proposals[{idx}]: kind 'multi_referent' needs exactly 1 member whose "
+                f"corpus is 'canon', got {len(members)} member(s) of which "
+                f"{len(canon_members)} canon",
+                offending={"proposal_index": idx, "member_count": len(members)},
+            )
+        # `referents` is this kind's only structural protection against a
+        # content-free assertion, so distinctness is measured after
+        # collapsing whitespace: "Reb Noson" and "Reb  Noson" are ONE.
+        normalised = [_normalise_referent(r) for r in proposal["referents"]]
+        if len(set(normalised)) < 2:
+            raise CanonHarmonisationRefusal(
+                f"proposals[{idx}]: kind 'multi_referent' needs at least 2 referents "
+                f"distinct after whitespace normalisation, got "
+                f"{len(set(normalised))} ({sorted(set(normalised))!r})",
+                offending={"proposal_index": idx},
+            )
+        return
+
+    # rule == "uncanonized_variant": a form that never reached canon is
+    # proposed as a variant of one that did.
+    candidate_members = [m for m in members if m["corpus"] == "candidate"]
+    if not canon_members or not candidate_members:
+        raise CanonHarmonisationRefusal(
+            f"proposals[{idx}]: kind 'uncanonized_variant' needs at least 1 'canon' "
+            f"member and at least 1 'candidate' member, got {len(canon_members)} canon "
+            f"and {len(candidate_members)} candidate",
+            offending={"proposal_index": idx},
+        )
+    for member in candidate_members:
+        # Measured against LIVE canon, not against the corpus tag.
+        # name_candidates.json is the extractor's COMPLETE list; only
+        # glossary_batch_plan.py later drops the forms already resolved, so
+        # a candidate observation's source_form may well be a canon key --
+        # and then it is not uncanonized at all.
+        source_form = member["source_form"]
+        if source_form in entries:
+            raise CanonHarmonisationRefusal(
+                f"proposals[{idx}]: kind 'uncanonized_variant' names {source_form!r} as "
+                "a candidate member, but it IS a key of canon.json's entries{} -- the "
+                "corpus tag records where the row was read, not what canon holds now",
+                offending={"proposal_index": idx, "source_form": source_form},
+            )
 
 
 def _atomic_publish(dest: Path, raw: bytes) -> None:
@@ -537,14 +946,16 @@ def _atomic_publish(dest: Path, raw: bytes) -> None:
                 pass
 
 
-def _schema_failure_message(doc: dict, schemas_dir: Path, path: Path) -> "str | None":
+def _schema_failure_message(
+    doc: dict, schemas_dir: Path, path: Path, schema_filename: str = SCHEMA_FILENAME
+) -> "str | None":
     """The ONE wording for a schema rejection, shared by both modes. Two
     verbatim copies of a contract string drift; this one does not, and the
     tests pin the wording in exactly one place. Only the FIRST error is
     reported (the list _schema_errors returns is sorted, so "first" is
     deterministic) -- an operator fixes one thing at a time, and the
     remaining errors are re-derived on the next run."""
-    errors = _schema_errors(doc, schemas_dir)
+    errors = _schema_errors(doc, schemas_dir, schema_filename=schema_filename)
     if not errors:
         return None
     first = errors[0]
@@ -552,10 +963,22 @@ def _schema_failure_message(doc: dict, schemas_dir: Path, path: Path) -> "str | 
     return f"{path} failed schema validation at '{loc}': {first.message}"
 
 
-def run_check(path_str: str, approve_to_str: "str | None") -> dict:
+def run_check(
+    path_str: str,
+    approve_to_str: "str | None",
+    corpus_str: str,
+    expect_corpus_sha256: str,
+) -> dict:
     path = Path(path_str)
     canon_bytes, entries = _load_canon(CANON_PATH)
     canon_sha256 = hashlib.sha256(canon_bytes).hexdigest()
+
+    # The corpus is loaded, anchored against the session's own expected
+    # digest and schema-validated BEFORE the artifact is looked at, and long
+    # before _atomic_publish: a corpus that is not the one dispatched makes
+    # every later membership check meaningless, so there is nothing to be
+    # gained by reading further.
+    corpus = _load_corpus(Path(corpus_str), expect_corpus_sha256, SCHEMAS_DIR)
 
     raw, doc = _read_json_bytes(path, "harmonisation attempt artifact")
 
@@ -564,7 +987,12 @@ def run_check(path_str: str, approve_to_str: "str | None") -> dict:
         raise CanonHarmonisationRefusal(schema_failure)
 
     _check_anchor(doc, canon_sha256, path)
-    _check_proposals(doc, entries)
+    if doc["corpus_sha256"] != expect_corpus_sha256:
+        raise CanonHarmonisationRefusal(
+            f"{path} claims corpus_sha256 {doc['corpus_sha256']}, but the session "
+            f"dispatched {expect_corpus_sha256}"
+        )
+    _check_proposals(doc, entries, corpus["observations"])
 
     approved_to = None
     if approve_to_str is not None:
@@ -572,12 +1000,19 @@ def run_check(path_str: str, approve_to_str: "str | None") -> dict:
         _atomic_publish(dest, raw)
         approved_to = str(dest)
 
+    corpus_doc = corpus["doc"]
     return {
         "success": True,
         "mode": "check",
         "proposals_count": len(doc["proposals"]),
         "entries_in_canon": len(entries),
         "canon_sha256": canon_sha256,
+        "corpus_sha256": expect_corpus_sha256,
+        "observations_in_corpus": len(corpus_doc["observations"]),
+        "candidates_source": corpus_doc["candidates_source"],
+        "converged_segments": corpus_doc["converged_segments"],
+        "drafts_excluded_stale_review": corpus_doc["drafts_excluded_stale_review"],
+        "draft_rows_skipped": corpus_doc["draft_rows_skipped"],
         "approved_to": approved_to,
     }
 
@@ -673,14 +1108,49 @@ def _render_report(doc: dict, entries: dict, canon_current: bool) -> None:
         for member in proposal["members"]:
             source_form = member["source_form"]
             stored_target_form = member["canonical_target_form"]
+            corpus = member["corpus"]
             entry = entries.get(source_form)
-            if entry is None:
-                lines.append(f"    {source_form!r} -> REMOVED (was: {stored_target_form!r})")
-            else:
+            # EVERY line below is decided by whether the form is a LIVE canon
+            # key, never by `corpus`. The tag records where the row was read;
+            # name_candidates.json carries the extractor's complete list and
+            # only glossary_batch_plan.py later drops the forms already
+            # resolved, so a `candidate` row's form may be a canon key -- and
+            # a `canon` row's form may have been removed since.
+            if entry is not None:
                 lines.append(
                     f"    {source_form!r} -> {entry.get('canonical_target_form')!r}"
                 )
+            elif corpus == "canon":
+                lines.append(f"    {source_form!r} -> REMOVED (was: {stored_target_form!r})")
+            elif corpus == "draft":
+                lines.append(
+                    f"    {source_form!r} -> {stored_target_form!r} "
+                    f"(draft, {member['n_segments']} segment(s); NOT IN CANON)"
+                )
+            else:
+                lines.append(
+                    f"    {source_form!r} -> NOT IN CANON "
+                    f"(candidate, freq {member['freq']})"
+                )
+        if proposal["kind"] == "multi_referent":
+            referents = ", ".join(
+                _escape_terminal_controls(r) for r in proposal["referents"]
+            )
+            lines.append(f"    referents claimed: {referents}")
         lines.append(f"    note: {sanitized_note}")
+        if proposal["kind"] == "multi_referent":
+            # No --correct skeleton at all: the claim is that ONE entry covers
+            # several people, and the answer to that is a canon_senses.json
+            # split, which the mandatory homonym-split gate then requires
+            # evidence for. --correct would retarget the entry, which is a
+            # different operation entirely.
+            lines.append(
+                "    no --correct skeleton: a source form covering several referents is "
+                "recorded as a split in canon_senses.json, and the mandatory "
+                "homonym-split gate then requires that split's evidence. --correct "
+                "retargets an entry, which is a different operation."
+            )
+            continue
         lines.append(
             "    --correct skeleton(s) (canon_validate.py --correct PATH; this script "
             "never decides which spelling wins -- new_entry.canonical_target_form is "
@@ -692,10 +1162,25 @@ def _render_report(doc: dict, entries: dict, canon_current: bool) -> None:
             source_form = member["source_form"]
             entry = entries.get(source_form)
             if entry is None:
-                lines.append(
-                    f"      # {source_form!r} was already removed from canon.json's "
-                    "entries{} -- no --correct skeleton to offer."
-                )
+                # canon_validate.py --correct refuses a source_form that is not
+                # a canon key and sends it to the ordinary glossary merge, so a
+                # skeleton naming one would be a paste that cannot work. The
+                # test is live canon-key membership, not the member's corpus:
+                # a `canon` member whose entry has since been removed and a
+                # `draft`/`candidate` member that was never canonized both land
+                # here, and the line says which.
+                if member["corpus"] == "canon":
+                    lines.append(
+                        f"      # {source_form!r} was already removed from canon.json's "
+                        "entries{} -- no --correct skeleton to offer."
+                    )
+                else:
+                    lines.append(
+                        f"      # {source_form!r} is not in canon.json's entries{{}} -- "
+                        "--correct refuses a form it cannot find, so the route is a NEW "
+                        "canon entry through the ordinary glossary merge, not a "
+                        "correction."
+                    )
                 continue
             skeleton = {
                 "source_form": source_form,
@@ -796,6 +1281,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "canon.json's current entries{}. Mutually exclusive with --report.",
     )
     parser.add_argument(
+        "--build-corpus", action="store_true",
+        help="Gather the three corpora (canon entries, converged-draft names[], "
+             "name_candidates rows) into the corpus file the dispatch is serialised "
+             "from and --check is validated against. Prints its path, its sha256 and "
+             "the per-corpus counts. Mutually exclusive with --check and --report.",
+    )
+    parser.add_argument(
+        "--candidates-source", metavar="WHICH", default=None,
+        choices=["bootstrap", "disabled"],
+        help="REQUIRED with --build-corpus: 'bootstrap' when this W3 ran "
+             "bootstrap_names.py, so name_candidates.json is fresh; 'disabled' on the "
+             "glossary.enabled:false branch, where the file is NOT read at all because "
+             "an older run's copy would look identical to a fresh one.",
+    )
+    parser.add_argument(
+        "--out", metavar="PATH", default=None,
+        help="Only with --build-corpus: where to write the corpus file (default: "
+             "{durable_root}/harmonisation/corpus_<UTC>_<8 hex>.json).",
+    )
+    parser.add_argument(
+        "--corpus", metavar="PATH", default=None,
+        help="REQUIRED with --check: the corpus file the session serialised into "
+             "this pass's prompt. Members are checked for byte-exact membership "
+             "against it, never against live canon.json.",
+    )
+    parser.add_argument(
+        "--expect-corpus-sha256", metavar="HEX", default=None,
+        help="REQUIRED with --check: the sha256 the session computed over --corpus "
+             "BEFORE dispatching. The corpus file lives in the durable root the "
+             "dispatched pass can write, so this session-held value -- not a digest "
+             "recomputed from disk -- is what makes the corpus an anchor.",
+    )
+    parser.add_argument(
         "--approve-to", metavar="DEST", default=None,
         help="Only with --check: on a PASS, atomically publish PATH's exact bytes "
              "to DEST (the durable sidecar). Writes nothing on failure.",
@@ -812,7 +1330,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--durable-root", metavar="DIR", default=None,
-        help=f"Only with --report: base directory the other --report defaults "
+        help=f"With --report or --build-corpus: base directory the other defaults "
              f"are computed from (default: this script's own self-anchored "
              f"durable root, {DURABLE_ROOT}).",
     )
@@ -835,12 +1353,66 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     have_check = args.check is not None
     have_report = args.report
-    if have_check and have_report:
-        parser.error("--check and --report are mutually exclusive -- pass exactly one.")
-    if not have_check and not have_report:
-        parser.error("nothing to do -- pass --check PATH or --report. See --help.")
+    have_build = args.build_corpus
+    if sum([have_check, have_report, have_build]) > 1:
+        parser.error(
+            "--check, --report and --build-corpus are mutually exclusive -- pass "
+            "exactly one."
+        )
+    if not (have_check or have_report or have_build):
+        parser.error(
+            "nothing to do -- pass --build-corpus, --check PATH or --report. See --help."
+        )
+
+    if have_build:
+        if args.candidates_source is None:
+            parser.error(
+                "--candidates-source required with --build-corpus: whether this W3 ran "
+                "bootstrap_names.py decides whether name_candidates.json may be read at "
+                "all, and that is not readable from disk."
+            )
+        build_only_offenders = [
+            name for name, value in (
+                ("--check", args.check),
+                ("--corpus", args.corpus),
+                ("--expect-corpus-sha256", args.expect_corpus_sha256),
+                ("--approve-to", args.approve_to),
+                ("--harmonisation", args.harmonisation),
+                ("--canon-path", args.canon_path),
+                ("--schemas-dir", args.schemas_dir),
+            ) if value is not None
+        ]
+        if build_only_offenders:
+            parser.error(
+                f"{', '.join(build_only_offenders)} not valid with --build-corpus."
+            )
+        return args
+
+    if args.candidates_source is not None or args.out is not None:
+        offending = [
+            name for name, value in (
+                ("--candidates-source", args.candidates_source),
+                ("--out", args.out),
+            ) if value is not None
+        ]
+        parser.error(f"{', '.join(offending)} only valid with --build-corpus.")
 
     if have_check:
+        missing = [
+            name for name, value in (
+                ("--corpus", args.corpus),
+                ("--expect-corpus-sha256", args.expect_corpus_sha256),
+            ) if value is None
+        ]
+        if missing:
+            parser.error(
+                f"{', '.join(missing)} required with --check -- a proposal is checked "
+                "against the corpus the session dispatched, not against live canon.json."
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", args.expect_corpus_sha256):
+            parser.error(
+                "--expect-corpus-sha256 must be 64 lowercase hex characters."
+            )
         report_only = [
             ("--harmonisation", args.harmonisation),
             ("--durable-root", args.durable_root),
@@ -853,8 +1425,16 @@ def parse_args(argv=None) -> argparse.Namespace:
                 f"{', '.join(offending_flags)} only valid with --report, not --check."
             )
     else:  # have_report
-        if args.approve_to is not None:
-            parser.error("--approve-to only valid with --check, not --report.")
+        check_only = [
+            ("--approve-to", args.approve_to),
+            ("--corpus", args.corpus),
+            ("--expect-corpus-sha256", args.expect_corpus_sha256),
+        ]
+        offending_flags = [name for name, value in check_only if value is not None]
+        if offending_flags:
+            parser.error(
+                f"{', '.join(offending_flags)} only valid with --check, not --report."
+            )
 
     return args
 
@@ -863,7 +1443,14 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     try:
         if args.check is not None:
-            summary = run_check(args.check, args.approve_to)
+            summary = run_check(
+                args.check, args.approve_to, args.corpus,
+                args.expect_corpus_sha256,
+            )
+        elif args.build_corpus:
+            summary = build_corpus(
+                args.durable_root, args.candidates_source, args.out
+            )
         else:
             summary = run_report(
                 args.harmonisation, args.durable_root, args.canon_path, args.schemas_dir

@@ -321,11 +321,11 @@ STALE_PHRASES = [
     ("draft_ready.py:12", DRAFT_READY_SCRIPT, "which is diagnostic-only"),
     ("SKILL.md:489", SKILL_MD, "sibling, non-gating"),
     ("SKILL.md:491", SKILL_MD, "provenance-only for W8 reporting"),
-    ("SKILL.md:3854-3860", SKILL_MD, "non-gating `orchestration_bundle_hash` instead"),
+    ("SKILL.md:3941-3947", SKILL_MD, "non-gating `orchestration_bundle_hash` instead"),
     ("ledger:607", LEDGER_DOC, "non-gating `orchestration_bundle_hash` instead"),
     ("ledger:719", LEDGER_DOC, "purely diagnostic/provenance"),
     ("schema_literal_drift.test.py:556-558", SCHEMA_LITERAL_DRIFT_TEST, "purely diagnostic/provenance"),
-    ("orchestration-and-batching.md:238", ORCHESTRATION_DOC, "is diagnostic only, never part of the composite"),
+    ("orchestration-and-batching.md:252", ORCHESTRATION_DOC, "is diagnostic only, never part of the composite"),
     ("schema_literal_drift.test.py:31-32", SCHEMA_LITERAL_DRIFT_TEST, "never gated against"),
     ("select_segments.py:12", SELECT_SEGMENTS_SCRIPT, "purely diagnostic/orchestration"),
 ]
@@ -387,7 +387,7 @@ def test_ledger_already_accurate_ledger_merge_aside_not_flagged():
 
 
 def test_orchestration_batching_already_accurate_review_resume_sentence_not_flagged():
-    """orchestration-and-batching.md:233's `review_ready.py`/
+    """orchestration-and-batching.md:247's `review_ready.py`/
     `resume_setup.py` sentence ("gating members, not diagnostic-only") is
     already accurate and must survive untouched -- distinct from the
     line directly below it (158) which WAS the stale, flat
