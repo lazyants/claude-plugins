@@ -2212,13 +2212,35 @@ construction, with no branch check of its own.
 Five ordered actions. Step 1 always runs — it is what the no-op decision
 below reads from — steps 2-5 run only when that decision says dispatch:
 
-1. The session builds one **corpus file** and writes it to
-   `${durable_root}/harmonisation/corpus_<UTC timestamp>_<8 hex>.json` —
-   the same per-attempt naming the attempt artifact in step 2 uses,
-   required absent before writing. The session computes this file's
-   sha256 and **keeps that digest in its own context, nowhere on disk**,
-   for step 4. This is what makes the read structural rather than
-   instructional: the pass is handed the whole corpus and never opens
+1. The session builds one **corpus file** by RUNNING the gatherer — never
+   by assembling the corpora itself:
+
+   ```
+   python3 ${durable_root}/scripts/canon_harmonisation.py --build-corpus \
+     --durable-root ${durable_root} \
+     --candidates-source <bootstrap on either glossary.enabled branch, disabled on glossary.enabled:false>
+   ```
+
+   **This command is the step, not an illustration of it.** Every
+   fail-closed rule below lives in that script; a session that gathered
+   the corpora by hand would satisfy none of them and would produce a
+   corpus that hashes and validates exactly like a correct one. The one
+   judgement the session supplies is `--candidates-source`, because which
+   W3 branch ran is not readable from disk (see the candidate corpus
+   below).
+
+   It writes `${durable_root}/harmonisation/corpus_<UTC timestamp>_<8
+   hex>.json` — the same per-attempt naming the attempt artifact in step
+   2 uses, required absent before writing — and prints ONE stdout JSON
+   line carrying `corpus_path`, `corpus_sha256`, the three per-corpus
+   observation counts, `converged_segments`,
+   `drafts_excluded_stale_review`, `draft_rows_skipped`,
+   `candidates_source` and `should_dispatch`. The session **keeps
+   `corpus_sha256` in its own context, nowhere on disk**, for step 4, and
+   reads `should_dispatch` for the no-op decision below.
+
+   Handing the pass one whole corpus is what makes the read structural
+   rather than instructional: it never opens
    `canon.json`, a draft, or `name_candidates.json` directly, so it
    cannot look at a subset. One prompt comfortably holds the largest live
    canon (390 entries) — there is no batching problem at this stage,
@@ -2271,10 +2293,10 @@ below reads from — steps 2-5 run only when that decision says dispatch:
    `final_audit.py`'s GLOSSARY-DIFF already reports elsewhere, and which
    dropping either row would have erased.
 
-   **No-op decision, read off the corpus file just built, never
-   recomputed from live files:** dispatch (steps 2-5) only when the
-   corpus holds at least one `canon` observation OR at least two `draft`
-   observations. Otherwise nothing is dispatched and no sidecar is
+   **No-op decision — step 1's own `should_dispatch`, never recomputed:**
+   dispatch (steps 2-5) only when that field is `true`. It is `true` when
+   the corpus holds at least one `canon` observation OR at least two
+   `draft` observations. Otherwise nothing is dispatched and no sidecar is
    written; print the three per-corpus counts above plus
    `candidates_source` in one line — never a bare "nothing to compare" —
    and continue to the skeptic pass when `glossary.skeptic_pass.enabled`

@@ -298,6 +298,11 @@ def test_build_corpus_unreadable_populated_ledger_d_is_fatal_not_empty(tmp_path)
         f"traceback:\n{proc.stderr}"
     )
     assert str(ledger_d) in proc.stderr
+    # And nothing was written: a fatal that still left a corpus file behind
+    # would leave a short corpus on disk for a later run to pick up.
+    assert list((root / "harmonisation").glob("corpus_*.json")) == [], (
+        "a failed gather must publish no corpus file"
+    )
 
 
 # ===========================================================================
@@ -544,3 +549,160 @@ def test_build_corpus_same_source_form_different_targets_yields_two_observations
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ===========================================================================
+# Malformed gathered input is a REFUSAL, never a quiet "found nothing"
+# ===========================================================================
+
+
+def test_build_corpus_fragment_without_a_usable_status_is_fatal(tmp_path):
+    """A ledger fragment this script cannot read is corruption, not a segment
+    that has not converged. Skipping it silently is the unreadable-ledger.d
+    failure one level down: the corpus comes back short with every counter at
+    zero and nothing anywhere saying so."""
+    root = make_corpus_durable_root(tmp_path / "durable_root")
+    write_canon(root, [canon_entry("CanonSource", "CanonTarget")])
+    ledger_d = root / "runs" / "ledger.d"
+    ledger_d.mkdir(parents=True, exist_ok=True)
+    (ledger_d / "seg01.json").write_text(
+        json.dumps({"seg": "seg01"}), encoding="utf-8")  # no status at all
+
+    proc = run_harmonisation(root, "--build-corpus", "--candidates-source", "disabled")
+    assert proc.returncode == 2, proc.stdout
+    assert_no_stdout(proc)
+    assert "Traceback" not in proc.stderr
+    assert "no usable status" in proc.stderr
+
+
+def test_build_corpus_converged_draft_without_a_names_array_is_fatal(tmp_path):
+    """draft.schema.json REQUIRES names[] as an array. Reading a missing one
+    as an empty list would report a corrupt draft as a segment that genuinely
+    contributed no names -- the same substitution, in the one place the union
+    input comes from."""
+    root = make_corpus_durable_root(tmp_path / "durable_root")
+    write_canon(root, [canon_entry("CanonSource", "CanonTarget")])
+    draft_path = root / "segments" / "seg01.draft.json"
+    draft_path.parent.mkdir(parents=True, exist_ok=True)
+    draft_path.write_text(json.dumps(
+        {"seg": "seg01", "blocks": [], "footnotes": [], "verses": [], "notes": []},
+        ensure_ascii=False), encoding="utf-8")
+    write_fragment(root, "seg01", status="converged",
+                   reviewed_draft_sha1=draft_content_sha1_of(root, draft_path))
+
+    proc = run_harmonisation(root, "--build-corpus", "--candidates-source", "disabled")
+    assert proc.returncode == 2, proc.stdout
+    assert_no_stdout(proc)
+    assert "Traceback" not in proc.stderr
+    assert "no names[] array" in proc.stderr
+
+
+@pytest.mark.parametrize("row,needle", [
+    ("not an object", "not an object"),
+    ({"freq": 3}, "no usable name"),
+    ({"name": "Weinberg"}, "no usable freq"),
+    ({"name": "Weinberg", "freq": 0}, "no usable freq"),
+])
+def test_build_corpus_malformed_candidate_row_is_fatal(tmp_path, row, needle):
+    """bootstrap_names.py writes every one of these rows itself, so a
+    malformed one is a corrupt file rather than a row this script may decline.
+    Dropping it silently removes exactly the union rows the feature exists to
+    expose, and reports success while doing it."""
+    root = make_corpus_durable_root(tmp_path / "durable_root")
+    write_canon(root, [canon_entry("CanonSource", "CanonTarget")])
+    write_candidates(root, [row])
+
+    proc = run_harmonisation(root, "--build-corpus", "--candidates-source", "bootstrap")
+    assert proc.returncode == 2, proc.stdout
+    assert_no_stdout(proc)
+    assert "Traceback" not in proc.stderr
+    assert needle in proc.stderr
+
+
+def test_build_corpus_refuses_to_overwrite_an_existing_out_path(tmp_path):
+    """A corpus file is per-attempt and the digest the session keeps refers to
+    THAT one, so silently replacing it would leave a kept digest pointing at
+    bytes that are gone."""
+    root = make_corpus_durable_root(tmp_path / "durable_root")
+    write_canon(root, [canon_entry("CanonSource", "CanonTarget")])
+    out = root / "harmonisation" / "corpus_fixed.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("{}", encoding="utf-8")
+
+    proc = run_harmonisation(root, "--build-corpus", "--candidates-source", "disabled",
+                             "--out", str(out))
+    assert proc.returncode == 2, proc.stdout
+    assert_no_stdout(proc)
+    assert "never overwritten" in proc.stderr
+    assert out.read_text(encoding="utf-8") == "{}", "the existing file must be untouched"
+
+
+# ===========================================================================
+# The corpus file's SERIALISATION, pinned as literal bytes
+# ===========================================================================
+
+# One empty-observation corpus as the exact UTF-8 bytes build_corpus would
+# write for it, plus their sha256. Not a re-derivation: key order, the
+# two-space indent, ensure_ascii and the trailing newline all change these
+# bytes, and the single-file anchor deliberately has no canonical serialiser
+# to appeal to -- --check compares a digest over whatever bytes are on disk.
+# So the shape has to be pinned somewhere, and a vector computed by the same
+# json.dumps call it is meant to guard would pin nothing.
+EMPTY_CORPUS_BYTES = (
+    b'{\n'
+    b'  "candidates_source": "disabled",\n'
+    b'  "canon_sha256": "' + b"0" * 64 + b'",\n'
+    b'  "converged_segments": 0,\n'
+    b'  "draft_rows_skipped": 0,\n'
+    b'  "drafts_excluded_stale_review": 0,\n'
+    b'  "generated_at": "2026-01-01T00:00:00+00:00",\n'
+    b'  "observations": [],\n'
+    b'  "schema_version": 1\n'
+    b'}\n'
+)
+EMPTY_CORPUS_SHA256 = (
+    "9fed678f7c2a676d750684299c1ad73c15f37157e32683cbf1d66892a1e0ca43"
+)
+
+
+def test_empty_corpus_literal_byte_vector():
+    """The vector itself: these exact bytes hash to this exact digest. If the
+    pair ever disagrees, the test file has been edited without recomputing,
+    and every claim below it is worthless."""
+    assert hashlib.sha256(EMPTY_CORPUS_BYTES).hexdigest() == EMPTY_CORPUS_SHA256
+    assert len(EMPTY_CORPUS_BYTES) == 307
+
+
+def test_build_corpus_serialisation_matches_the_pinned_shape(tmp_path):
+    """The bytes build_corpus actually writes, re-serialised from the document
+    it wrote with the SAME options the vector encodes, must be byte-identical
+    to what is on disk. This is what ties the live writer to the vector above:
+    a change to indent, sort_keys, ensure_ascii or the trailing newline moves
+    the file's digest, and the digest is the whole anchor."""
+    root = make_corpus_durable_root(tmp_path / "durable_root")
+    write_canon(root, [canon_entry("CanonSource", "CanonTarget")])
+    proc = run_harmonisation(root, "--build-corpus", "--candidates-source", "disabled")
+    assert proc.returncode == 0, proc.stderr
+    summary = parse_stdout(proc)
+
+    raw = Path(summary["corpus_path"]).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == summary["corpus_sha256"]
+
+    doc = json.loads(raw)
+    expected = json.dumps(
+        doc, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    assert raw == expected, (
+        "the corpus file's serialisation no longer matches the pinned shape "
+        "(sorted keys, two-space indent, ensure_ascii=False, trailing newline)"
+    )
+
+    # And the vector's own shape is the one the writer produces: same options,
+    # same result, for a document with no observations.
+    vector_doc = json.loads(EMPTY_CORPUS_BYTES)
+    assert json.dumps(
+        vector_doc, ensure_ascii=False, indent=2, sort_keys=True
+    ).encode("utf-8") + b"\n" == EMPTY_CORPUS_BYTES
+    assert set(vector_doc) == set(doc), (
+        "the pinned vector and the live writer disagree about which top-level "
+        "fields a corpus file carries"
+    )

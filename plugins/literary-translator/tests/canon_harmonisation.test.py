@@ -1819,3 +1819,96 @@ def test_check_without_the_corpus_arguments_is_a_usage_error(tmp_path, argv_tail
     proc = run_harmonisation(root, "--check", str(attempt), *tail)
     assert proc.returncode == 2, (label, proc.stdout)
     assert_no_stdout(proc)
+
+
+def test_only_the_corpus_bytes_change_and_the_check_still_refuses(tmp_path):
+    """#823 delta review, MINOR: the two digest tests above both move the
+    ARTIFACT's field, so an implementation that compared only the artifact
+    against --expect-corpus-sha256 and never hashed the corpus file would
+    refuse both and pass both. This case moves ONLY the file on disk: the
+    expected digest and the artifact's field stay at the original value, so
+    it fails if and only if the on-disk leg of the three-way comparison is
+    really computed."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("shared_target", [
+        member("Noson", "R. Nathan"),
+        member("Nathan b. Leibele", "R. Nathan"),
+    ])], corpus_sha256=corpus_sha)
+
+    tampered = write_json(corpus_path, corpus_doc(
+        csha, observations_for([canon_entry("Noson", "R. Nathan")])))
+    assert hashlib.sha256(tampered).hexdigest() != corpus_sha, (
+        "fixture sanity: the rewrite must move the file's digest"
+    )
+
+    dest = root / "canon_harmonisation.json"
+    _attempt, proc = check_attempt(
+        root, doc, corpus_path, corpus_sha, "--approve-to", str(dest), stamp=False)
+    assert proc.returncode == 1, proc.stdout
+    assert_no_stdout(proc)
+    assert not dest.exists()
+
+
+def test_divergent_policy_with_one_distinct_target_is_refused(tmp_path):
+    """The kind matrix is per-kind, so divergent_policy needs its own negative
+    row: a rule enforced for divergent_spelling only would leave the other
+    divergent kind unchecked."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("divergent_policy", [
+        member("Noson", "R. Nathan"),
+        member("Nathan b. Leibele", "R. Nathan"),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "divergent_policy" in proc.stderr
+    assert "at least 2 distinct target" in proc.stderr
+
+
+def test_uncanonized_variant_without_a_canon_member_is_refused(tmp_path):
+    """A proposal made only of candidate rows has nothing anchoring it to the
+    canon it proposes to extend."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("uncanonized_variant", [
+        member("Weinberg", None, corpus="candidate", freq=7),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "at least 1 'canon' member" in proc.stderr
+
+
+def test_member_freq_disagreeing_with_the_observation_is_refused(tmp_path):
+    """The n_segments case above covers the draft field; freq is the candidate
+    one and is verified by the same rule, so it needs its own row -- a check
+    written for one field only would leave the other a number the pass chose."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, corpus_path, corpus_sha = matrix_fixture(root)
+    doc = harmonisation_doc(csha, [proposal("uncanonized_variant", [
+        member("Chaykel", "Chaykel"),
+        member("Weinberg", None, corpus="candidate", freq=999),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "freq=999" in proc.stderr
+
+
+def test_candidate_member_against_a_disabled_corpus_is_refused(tmp_path):
+    """On the glossary.enabled:false branch the session writes an empty
+    candidate list, so a candidate member cannot match any observation. The
+    refusal falls out of the data rather than needing its own rule -- this
+    test is what proves that is actually true."""
+    root = make_durable_root(tmp_path / "durable_root")
+    entries = [canon_entry("Anchor", "Anchor")]
+    raw = write_canon(root, entries)
+    csha = canon_sha256_of(raw)
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations_for(entries), candidates_source="disabled"))
+    doc = harmonisation_doc(csha, [proposal("uncanonized_variant", [
+        member("Anchor", "Anchor"),
+        member("Weinberg", None, corpus="candidate", freq=7),
+    ])])
+    _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
+    assert proc.returncode == 1, proc.stdout
+    assert "is not a byte-exact observation in the corpus" in proc.stderr

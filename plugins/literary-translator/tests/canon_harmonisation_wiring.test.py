@@ -114,17 +114,24 @@ PARTICLE_CONFIG_FLAG = "--particle-config"
 # before PARTICLE_CONFIG_FLAG's one occurrence.
 MANDATORY_GATE_HEADING = "Mandatory homonym-split evidence gate (category 5, always runs)"
 
-CORPUS_FILE_MARKER = "${durable_root}/harmonisation/corpus_<UTC timestamp>_<8 hex>.json"
-CORPUS_KEEP_DIGEST_MARKER = "keeps that digest in its own context, nowhere on disk"
+# The COMMAND, not a description of it. A step that only DESCRIBES gathering
+# leaves every fail-closed rule in the script unreachable: a session doing it
+# by hand produces a corpus that hashes and validates exactly like a correct
+# one, so nothing downstream can tell the difference.
+BUILD_COMMAND_MARKER = "canon_harmonisation.py --build-corpus"
+BUILD_BRANCH_ARG_MARKER = "--candidates-source <bootstrap on either glossary.enabled branch"
+SHOULD_DISPATCH_MARKER = "step 1's own `should_dispatch`, never recomputed"
+CORPUS_FILE_MARKER = "${durable_root}/harmonisation/corpus_<UTC timestamp>_<8\n   hex>.json"
+CORPUS_KEEP_DIGEST_MARKER = "in its own context, nowhere on disk**, for step 4"
 SERIALISE_MARKER = "every `entries{}` record"
 DRAFT_CORPUS_MARKER = "`ledger_merge.py::_read_fragments(ledger_d)`"
 STALE_REVIEW_MARKER = "drafts_excluded_stale_review"
 CANDIDATES_DISABLED_MARKER = "without opening `name_candidates.json`"
-NO_OP_MARKER = "at least one `canon` observation OR at least two `draft`"
+NO_OP_MARKER = "at least one `canon` observation OR at least two"
 CORPUS_ARG_MARKER = "--expect-corpus-sha256"
 TRUSTED_CHANNEL_MARKER = "is the TRUSTED CHANNEL"
 LINK_GROUPS_MARKER = "`canon_link_groups.json` ruling is"
-DIGEST_MARKER = "The session computes this file's\n   sha256"
+DIGEST_MARKER = "prints ONE stdout JSON"
 
 DISPATCH_MARKER = "agentType:'codex:codex-rescue'"
 WAIT_MARKER = "A bounded **WAIT**"
@@ -387,6 +394,9 @@ def _assert_corpus_contract(text: str) -> None:
     start, end = _window(text)
     window = text[start:end]
     for marker, what in (
+        (BUILD_COMMAND_MARKER, "the --build-corpus invocation itself"),
+        (BUILD_BRANCH_ARG_MARKER, "the --candidates-source branch argument"),
+        (SHOULD_DISPATCH_MARKER, "the no-op decision read off should_dispatch"),
         (CORPUS_FILE_MARKER, "the per-attempt corpus file path"),
         (CORPUS_KEEP_DIGEST_MARKER, "the session-held corpus digest"),
         (SERIALISE_MARKER, "the canon corpus"),
@@ -575,10 +585,18 @@ def test_mutation_swap_check_and_report_goes_red():
     start, end = _window(text)
     window = text[start:end]
     matches = list(FENCE_RE.finditer(window))
-    assert len(matches) == 2, f"expected exactly 2 fenced blocks in the window, found {len(matches)}"
+    # THREE blocks since the gatherer became a command of its own: build,
+    # then check, then report. The count is asserted rather than assumed so
+    # that a fourth block added later cannot make the selection below silently
+    # pick the wrong pair.
+    assert len(matches) == 3, f"expected exactly 3 fenced blocks in the window, found {len(matches)}"
+    build_matches = [m for m in matches if BUILD_COMMAND_MARKER in m.group(1)]
     check_matches = [m for m in matches if CHECK_MARKER in m.group(1)]
     report_matches = [m for m in matches if REPORT_MARKER in m.group(1)]
-    assert len(check_matches) == 1 and len(report_matches) == 1
+    assert len(build_matches) == 1 and len(check_matches) == 1 and len(report_matches) == 1
+    assert build_matches[0].start(1) < check_matches[0].start(1), (
+        "the corpus must be built before it can be checked against"
+    )
     m_check, m_report = check_matches[0], report_matches[0]
     assert m_check is not m_report
 
@@ -683,6 +701,9 @@ if __name__ == "__main__":
 
 
 @pytest.mark.parametrize("marker_name", [
+    "BUILD_COMMAND_MARKER",
+    "BUILD_BRANCH_ARG_MARKER",
+    "SHOULD_DISPATCH_MARKER",
     "CORPUS_FILE_MARKER",
     "CORPUS_KEEP_DIGEST_MARKER",
     "SERIALISE_MARKER",

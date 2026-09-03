@@ -492,7 +492,23 @@ def build_corpus(
     draft_pairs = {}
     for seg in sorted(fragments):
         fragment = fragments[seg]
-        if not isinstance(fragment, dict) or fragment.get("status") != "converged":
+        # A fragment this script cannot READ is corruption, not a segment that
+        # has not converged. Skipping it silently is the same failure the
+        # unreadable-ledger.d case is about, one level down: the corpus would
+        # come back short with every counter at zero and nothing to say so.
+        if not isinstance(fragment, dict):
+            raise CanonHarmonisationFatalError(
+                f"ledger fragment for {seg!r} is a {type(fragment).__name__}, not an "
+                "object -- refusing to treat unreadable state as a segment that has "
+                "not converged"
+            )
+        status = fragment.get("status")
+        if not isinstance(status, str) or not status:
+            raise CanonHarmonisationFatalError(
+                f"ledger fragment for {seg!r} carries no usable status "
+                f"({status!r}) -- refusing to guess whether it converged"
+            )
+        if status != "converged":
             continue
         # (2) WHICH MAY CONTRIBUTE. status == "converged" is not sufficient:
         # a draft edited after its review carries names no reviewer saw, so
@@ -520,11 +536,22 @@ def build_corpus(
                 f"converged, review-current draft {draft_file} could not be read "
                 f"({exc}) -- refusing to silently drop it from the corpus"
             )
+        names = draft.get("names")
+        if not isinstance(names, list):
+            # draft.schema.json REQUIRES names[] as an array. A converged,
+            # review-current draft without one is corruption; `or []` would
+            # turn it into "this segment contributed no names", which reads
+            # exactly like a segment that genuinely had none.
+            raise CanonHarmonisationFatalError(
+                f"converged, review-current draft {draft_file} has no names[] array "
+                f"(got {type(names).__name__}) -- refusing to read that as a segment "
+                "with no names"
+            )
         converged_segments += 1
         # (3) WHICH ROWS INSIDE. final_audit._name_entry_forms already
         # accepts both field conventions draft.schema.json permits; a row it
         # cannot read is COUNTED, never silently dropped.
-        for row in (draft.get("names") or []):
+        for row in names:
             source_form, target_form = final_audit._name_entry_forms(row)
             if source_form is None:
                 draft_rows_skipped += 1
@@ -553,18 +580,34 @@ def build_corpus(
                 f"{candidates_path} has no candidates[] array -- "
                 "--candidates-source bootstrap says the extractor ran"
             )
-        for row in rows:
+        for index, row in enumerate(rows):
+            # bootstrap_names.py writes every one of these rows itself, so a
+            # malformed one is a corrupt file rather than a row this script may
+            # decline. Dropping it silently would remove exactly the union rows
+            # this feature exists to expose, and report success while doing it.
             if not isinstance(row, dict):
-                continue
+                raise CanonHarmonisationFatalError(
+                    f"{candidates_path}: candidates[{index}] is a "
+                    f"{type(row).__name__}, not an object"
+                )
             name = row.get("name")
             freq = row.get("freq")
-            if isinstance(name, str) and name.strip() and isinstance(freq, int) and freq >= 1:
-                observations.append({
-                    "corpus": "candidate",
-                    "source_form": name,
-                    "target_form": None,
-                    "freq": freq,
-                })
+            if not isinstance(name, str) or not name.strip():
+                raise CanonHarmonisationFatalError(
+                    f"{candidates_path}: candidates[{index}] has no usable name "
+                    f"({name!r})"
+                )
+            if not isinstance(freq, int) or isinstance(freq, bool) or freq < 1:
+                raise CanonHarmonisationFatalError(
+                    f"{candidates_path}: candidates[{index}] ({name!r}) has no usable "
+                    f"freq ({freq!r})"
+                )
+            observations.append({
+                "corpus": "candidate",
+                "source_form": name,
+                "target_form": None,
+                "freq": freq,
+            })
 
     doc = {
         "schema_version": 1,
@@ -596,6 +639,16 @@ def build_corpus(
         / f"corpus_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
           f"_{os.urandom(4).hex()}.json"
     )
+    # Create-once, not _atomic_publish: that helper's os.replace overwrite is
+    # right for the durable sidecar, which is meant to be replaced, and wrong
+    # here. A corpus file is per-attempt and the digest the session keeps
+    # refers to THIS one; silently overwriting an existing path would leave a
+    # kept digest pointing at bytes that are gone.
+    if out_path.exists():
+        raise CanonHarmonisationFatalError(
+            f"{out_path} already exists -- a corpus file is per-attempt and is "
+            "never overwritten"
+        )
     _atomic_publish(out_path, raw)
 
     return {
