@@ -2062,6 +2062,82 @@ report's `homonym_split` row reads `NOT ENUMERATED` and the summary carries
 `senses_enumerated: false`, so a vacuous zero is never mistaken for an
 enumerated-clean one.
 
+**Canon target-harmonisation read (always runs, advisory)** — every one of
+the three W3-rejoin branches above has already converged on the mandatory
+homonym-split evidence gate immediately above by the time this step runs —
+the `glossary.enabled: false` disabled branch, the `{"no_new_candidates":
+true, "batches": []}` SKIP path, and the "Otherwise run the
+codex-glossary-pass" path alike — so this step is reached by all three by
+construction, with no branch check of its own.
+
+**No-op branch, stated first:** fewer than 2 records in `canon.json`'s
+`entries{}` means there is nothing to compare. Nothing is dispatched, no
+sidecar is written; say so in one line and continue to the skeptic pass
+when `glossary.skeptic_pass.enabled` is true, otherwise straight to W3a
+below. Never back to the mandatory gate above — that gate has already run.
+
+Otherwise, five ordered actions:
+
+1. The session serialises the WHOLE of `canon.json`'s `entries{}` — every
+   `source_form` with its `canonical_target_form`, `basis` and `note` —
+   into the dispatch prompt, exactly as `glossary-pass-wf.template.js`
+   serialises `batch.candidates` verbatim into its own; **and beside it
+   the sha256 of `canon.json`'s exact bytes**, which the pass must copy
+   back into the artifact's `canon_sha256` field. This is what makes the
+   whole-canon read structural rather than instructional: the pass cannot
+   look at a subset because it is handed the whole set, and it never opens
+   `canon.json` at all. One prompt comfortably holds the largest live
+   canon (390 entries) — there is no batching problem at this stage, which
+   is precisely why this catches what the 40-item glossary batches cannot.
+2. **One** schema-less, fire-and-forget `agentType:'codex:codex-rescue'`
+   dispatch at `engine.effort` — the R7 canon-pass shape above — asking
+   two questions: (i) which `canonical_target_form` values denote ONE
+   referent spelled two different ways, and (ii) where the transliteration
+   POLICY diverges, an English exonym such as `of Częstochowa` standing
+   beside a transliterated byname such as `Tshenstchover` being a rule
+   decision rather than a typo. The pass writes a PER-ATTEMPT path, never
+   the durable sidecar: `${durable_root}/harmonisation/attempt_<UTC
+   timestamp>_<8 hex>.json`. The session creates
+   `${durable_root}/harmonisation/` if absent (Step 0a's fixed scaffold
+   does not create it) and requires the chosen path to be absent before
+   dispatching. The nonce is generated here rather than reusing a
+   `RUN_ID`, because two of the three rejoin branches skip
+   `resume_setup.py` and never resolve one.
+3. A bounded **WAIT**.
+4. The session, as the sole acceptance authority, checks the attempt and
+   publishes it on a pass:
+
+   ```
+   python3 ${durable_root}/scripts/canon_harmonisation.py --check <the attempt path from step 2> \
+     --approve-to ${durable_root}/canon_harmonisation.json
+   ```
+
+   A background dispatch returns before its job finishes, so the
+   dispatch's own return proves nothing about the artifact; and the pass
+   self-attesting that it validated its own output is a claim, not a
+   check. The per-attempt path exists precisely so this check cannot bind
+   a PREVIOUS run's artifact.
+5. **Only after step 4 exits 0**, render the report:
+
+   ```
+   python3 ${durable_root}/scripts/canon_harmonisation.py --report
+   ```
+
+**Failure disposition — explicitly NOT a gate.** A WAIT timeout, a
+`--check` exit 1, or a `--check` exit 2 suppresses `--report` and
+publishes nothing; the step prints
+`harmonisation unavailable — no canon conclusion` naming the reason, and
+the pipeline continues to the skeptic pass when
+`glossary.skeptic_pass.enabled` is true, otherwise straight to W3a below —
+forward, never back to the mandatory gate that already ran. The step
+never stops the pipeline.
+
+Acting on a proposal is the existing `canon_validate.py --correct` route
+(`#495` above), unchanged; do this BEFORE the skeptic pass, since a
+`--correct` changes `canon.json`'s bytes and the skeptic pass holds them
+as a frozen input. A correction costs bounded re-review of the segments
+referencing that form, never re-translation.
+
 **Skeptic pass (RFC #215 Phase 2, opt-in + advisory)** — an adversarial re-read of the
 frozen canon by a file-capable agent, gated on `glossary.skeptic_pass.enabled`, which
 defaults to false and is off in every live book. Its full procedure — batching, the

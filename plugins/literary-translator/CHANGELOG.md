@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.80.0 — 2026-09-03
+
+**The frozen canon now gets one whole-canon read for divergent target forms (#823).** Nothing in the
+pipeline compared `canonical_target_form` ACROSS canon entries. `_merge_batch` refuses a collision
+only when two batch items claim different resolutions for the same `source_form`, and
+`final_audit.py`'s GLOSSARY-DIFF groups by `source_form` too — so a canon could freeze with one
+referent under two different target spellings and every shipped gate reported success. The glossary
+pass cannot see it either: candidates are chunked into batches of 40 in frequency order and each
+batch is adjudicated by its own agent with no sight of the others, so two bearers of one byname
+routinely land in different batches.
+
+Measured on a live 47-segment he→en volume (canon 312 entries): the canon was hand-corrected five
+times after freeze, moving 12 target forms — `Kiblitcher`→`of Kiblitch` ×4, `Puks`→`Fuchs`,
+`Bobrinitzer`→`Babrinitzer`, `Tulchiner`→`of Tulchin`, `of Częstochowa`→`Tshenstchover` and more. At
+least 4 had both conflicting forms already sitting in `entries{}` at freeze time, before a single
+word was translated. Each correction re-staled its carriers and bought a cross-segment sweep; the two
+name-harmonisation commits touched 41 and 44 draft files, and one name was harmonised the wrong way
+first and reversed a round later.
+
+A new W-step, unconditional on every project with at least two canon entries, runs immediately after
+the mandatory homonym-split evidence gate and before the skeptic pass and W3a. The orchestrating
+session serialises the WHOLE of `entries{}` into a single codex dispatch together with the sha256 of
+`canon.json`'s bytes, asks which target forms denote one referent spelled two ways and where the
+transliteration POLICY diverges, then validates the returned artifact itself with the new
+`canon_harmonisation.py --check` before publishing it as `canon_harmonisation.json` and rendering it
+with `--report`. Deliberately NOT a deterministic prefilter: `Puks`/`Fuchs` and
+`of Częstochowa`/`Tshenstchover` share almost nothing at the string level, and a matcher's failure
+mode here is a silent zero that reads as a clean canon.
+
+It is advisory and it never halts. A WAIT timeout or a failed check suppresses the report, publishes
+nothing, and continues to W3a. Acting on a proposal is the existing `canon_validate.py --correct`
+route, unchanged — the script surfaces the pair and renders a correction skeleton, but leaves the
+canonical form itself as `<CHOOSE-ONE-CANONICAL-FORM>`: the identity call stays the operator's, per
+the iron rule. An empty result is reported as "the pass returned no proposals", never as a
+certificate that the canon is consistent.
+
+**Migration.** No re-translation: `canon_harmonisation.py` is in neither `PLUGIN_BUNDLE_MEMBERS` nor
+`DERIVATION_BUNDLE_MEMBERS`, `compute_schema_hash` covers only the draft/review/segpack schemas, and
+the new sidecar sits outside all 15 cache-key fields, so no converged segment goes stale. The one
+real cost is the RESUME digest: the new `canon-harmonisation.schema.json` moves
+`resume_setup.py`'s `_schemas_dir_hash` — which globs every `schemas/*.schema.json` — and
+`skeptic_setup.py`'s separate duplicate of it. So the first Step 0a refresh after this release is a
+one-time resume-identity reset. Converged segments stay reusable; what redoes is every segment
+holding a draft without having converged — the `recoverable` AND `human_escalation` populations,
+which lose reviewed text plus any hand-applied fix rounds. Enumerate those two populations before
+upgrading a book that is mid-flight.
+
+
 ## 1.79.0 — 2026-09-03
 
 **A canon correction no longer resets the whole book's review round budget (#824).** Every

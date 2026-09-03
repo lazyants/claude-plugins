@@ -1475,3 +1475,117 @@ spellings. Membership is **byte-exact** against `canon['entries']` keys:
 never folded, never NFC-normalized, and a member that is not a key is a hard
 load error rather than a tolerated no-op, because a silent no-op is exactly
 the failure that would leave an operator believing their pass was applied.
+
+## `canon_harmonisation.json` — one whole-canon read for divergent `canonical_target_form`s (#823)
+
+A fourth optional sidecar beside `canon_senses.json`, `canon_adjudications.json`
+and `canon_link_groups.json`: a place to record a proposal `canon.json`'s 1:1
+name dictionary cannot express, without touching a hashed field. #823 itself
+proposed emitting proposals into the existing `review_queue[]`; that route is
+structurally closed, for four independent reasons:
+
+1. **Silently dropped.** Every harmonisation proposal is by construction
+   about entries that are already ACCEPTED — the whole point is comparing
+   two already-frozen `canonical_target_form` values — and `_merge_batch`'s
+   `review_queue` branch drops any submission whose `source_form` already
+   keys `entries{}`, with no error at all: `if source_form in entries:
+   continue` (`canon_validate.py:2516-2521`).
+2. **Refused by the whole-file invariant (#102).** `_assert_no_entries_review_queue_overlap`
+   (`canon_validate.py:2552-2578`) raises on any `source_form` present in
+   both `entries{}` and `review_queue[]`, and Pass 2 runs it on every write
+   path — so even a proposal that somehow reached the queue would fail the
+   very next validation.
+3. **No slot for a pair.** The QUEUED branch of `canon-batch.schema.json`
+   (`canon-batch.schema.json:66-86`) is `additionalProperties:false`,
+   required `[source_form, is_proper_name, disposition, note]`, with a
+   single scalar `source_form`. A harmonisation proposal names two or more
+   referents; widening that shape would be an edit to a hashed schema file
+   (see `hash-migration-impact.md`'s sidecar rule, and "Sizing a canon
+   change" above).
+4. **Two live side effects.** `glossary_batch_plan.py` builds its
+   re-research EXCLUSION set from `review_queue[].source_form`
+   (`glossary_batch_plan.py:302-318`), and `canon_adjudication_audit.py`'s
+   category 4 counts every queued row as BLOCKING until drained or
+   risk-accepted (`canon_adjudication_audit.py:989-1007`, `:1275-1282`,
+   `:1725-1731`) — landing a proposal there would make it a Deliver-time
+   blocker on any project that enabled that gate, the opposite of what an
+   advisory read is for.
+
+A new top-level key in `canon.json` itself is rejected for the same reason
+`canon_link_groups.json` above is a sidecar and not a key: `_content_view`
+(`canon_validate.py:2596-2627`) treats any non-`generation_hashes` key as
+CONTENT, so adding one would force a `generation_hashes` re-stamp with
+nothing actually regenerated — the #291 hole this function's own docstring
+names.
+
+**Shape:**
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-03T12:00:00+00:00",
+  "canon_sha256": "<sha256 of canon.json's exact bytes at read time>",
+  "proposals": [
+    {
+      "kind": "divergent_spelling",
+      "members": [
+        {"source_form": "...", "canonical_target_form": "..."},
+        {"source_form": "...", "canonical_target_form": "..."}
+      ],
+      "note": "..."
+    }
+  ]
+}
+```
+
+`kind` is one of `divergent_spelling` (one referent under two spellings) or
+`divergent_policy` (a transliteration-policy inconsistency — an English
+exonym beside a transliterated byname, a rule decision rather than a typo).
+`note` is REQUIRED and non-blank in the schema itself (`"pattern": "\\S"`),
+the identical rule `canon-link-groups.schema.json` states for the same
+reason: the file records a call it does not make, and a proposal with no
+stated reason is indistinguishable from a mistake.
+
+**Both script modes.** `scripts/canon_harmonisation.py --check PATH
+[--approve-to DEST]` is the orchestrating session's acceptance authority
+over an ATTEMPT file the dispatched pass wrote: it validates the artifact
+against `canon-harmonisation.schema.json`, confirms `canon_sha256` matches
+the canon on disk, confirms every `members[].source_form` is a byte-exact
+key of `canon['entries']` and every `members[].canonical_target_form`
+matches that entry's stored value byte-exact, confirms each proposal has
+≥2 members with pairwise-distinct `source_form`s and ≥2 distinct target
+forms among them, and refuses a duplicate proposal. Exit 0 clean / 1
+gate-fail / 2 fatal; `--approve-to DEST` publishes the validated bytes
+atomically to `DEST` only on a PASS, mirroring `canon_validate.py
+--check-batch --approve-to` — the per-attempt input path is what stops a
+check run after a fire-and-forget dispatch from accepting a PREVIOUS run's
+artifact. `scripts/canon_harmonisation.py --report [--harmonisation PATH]`
+is the read-only human-facing render: schema-validates first, then prints
+each proposal with member targets read FRESH from `canon.json` (never from
+the artifact), a `canon_current: false` flag when the sidecar's
+`canon_sha256` no longer matches disk, and a copy-pasteable `--correct`
+skeleton per proposal. It always exits 0 on a structurally valid artifact —
+it reports, it never blocks — and an empty `proposals: []` prints as "the
+pass returned no proposals", never as a certificate that the canon is
+consistent.
+
+**The iron rule applies unchanged.** Neither mode ever decides whether two
+forms are the same referent. `--check` is purely structural — schema
+validity, the canon-anchor digest, byte-exact membership, anti-fabrication
+of the quoted target values, and proposal well-formedness — never an
+identity call. The decision comes from the same places every other
+identity decision does (a human, or the dispatched codex pass's own
+judgement, subject to the operator's `--correct`), never from the checker.
+
+**Migration cost.** `canon_harmonisation.py` is not a member of
+`PLUGIN_BUNDLE_MEMBERS` or `DERIVATION_BUNDLE_MEMBERS` (`cache_key.py`'s
+own tuples are the authority — see `hash-migration-impact.md`), so
+adopting the sidecar costs zero re-translation: `compute_used_terms_hash`
+projects `entries{}` only, and the sidecar sits outside all 15 cache-key
+fields. The one real cost is `canon-harmonisation.schema.json` joining
+`resume_setup.py`'s `_schemas_dir_hash()` (and `skeptic_setup.py`'s
+separate duplicate of the same hash) — the FIRST Step 0a refresh after
+this ships moves the resume digest, so an interrupted mass-translate or
+glossary run cannot resume across it; converged segments stay reusable,
+and what redoes is bounded to the `recoverable` and `human_escalation`
+populations in flight at the moment of upgrade.

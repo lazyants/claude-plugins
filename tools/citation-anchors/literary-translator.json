@@ -979,15 +979,6 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3770-3776\", 0]": {
-   "anchors": [
-    "Excluded from every bundle hash",
-    "nor of `orchestration_bundle_hash`",
-    "final_audit.py` is not one of",
-    "never flips a cache key or the resume-integrity digest via either bundle"
-   ],
-   "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
-  },
   "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:489\", 0]": {
    "anchors": [
     "ORCHESTRATION_BUNDLE_MEMBERS` — non-gating for convergence, never part of the"
@@ -1011,18 +1002,6 @@
     "covered instead by `orchestration_bundle_hash` -- non-gating for convergence"
    ],
    "claim": "STALE_PHRASES = [ (\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"),"
-  },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"orchestration-and-batching.md:219\", 0]": {
-   "anchors": [
-    "diagnostic-only, unlike their sibling readiness/merge scripts below"
-   ],
-   "claim": "def test_orchestration_batching_already_accurate_review_resume_sentence_not_flagged(): \"\"\"orchestration-and-batching.md:215's `review_ready.py`/ `resume_setup.py` sentence (\"gating members, not diagnostic-only\") is already accurate and must survive untouched -- distinct from the line directly below it (158) which WAS the stale, flat orchestration_bundle_hash characterization this file's fix targets.\"\"\""
-  },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"orchestration-and-batching.md:224\", 0]": {
-   "anchors": [
-    "orchestration_bundle_hash` is non-gating for convergence — never part of"
-   ],
-   "claim": "(\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"), (\"schema_literal_drift.test.py:31-32\", SCHEMA_LITERAL_DRIFT_TEST, \"never gated against\"), (\"select_segments.py:12\", SELECT_SEGMENTS_SCRIPT, \"purely diagnostic/orchestration\"), ]"
   },
   "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"references/ledger-and-resumability.md:168\", 0]": {
    "anchors": [
@@ -1485,6 +1464,88 @@
     "2. Present (of any kind lstat can see) -> pass"
    ],
    "claim": "# 9d-i (real filesystem, a dangling symlink): os.lstat() on the durable sidecar SUCCEEDS -- genuinely \"present\" at resolve_glossary_senses_arg()'s own definitive-stat layer (select_segments.py:4411-4502, branch 2: \"Present (of any kind lstat can see) -> pass --senses-path explicitly\")."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2516-2521\", 0]": {
+   "anchors": [
+    "elif disposition == \"review_queue\":",
+    "if source_form in entries:"
+   ],
+   "claim": "keys `entries{}`, with no error at all: `if source_form in entries: continue` (`canon_validate.py:2516-2521`). 2. **Refused by the whole-file invariant (#102).*"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2552-2578\", 0]": {
+   "anchors": [
+    "def _assert_no_entries_review_queue_overlap",
+    "no source_form may be both a key",
+    "entries_forms & queued_forms"
+   ],
+   "claim": "2. **Refused by the whole-file invariant (#102).** `_assert_no_entries_review_queue_overlap` (`canon_validate.py:2552-2578`) raises on any `source_form` present"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon-batch.schema.json:66-86\", 0]": {
+   "anchors": [
+    "\"title\": \"QUEUED\"",
+    "\"required\": [\"source_form\", \"is_proper_name\", \"disposition\", \"note\"]",
+    "\"additionalProperties\": false"
+   ],
+   "claim": "3. **No slot for a pair.** The QUEUED branch of `canon-batch.schema.json` (`canon-batch.schema.json:66-86`) is `additionalProperties:false`, required `[source_f"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"glossary_batch_plan.py:302-318\", 0]": {
+   "anchors": [
+    "review_queue = canon.get(\"review_queue\", [])",
+    "queued.add(source_form)"
+   ],
+   "claim": "re-research EXCLUSION set from `review_queue[].source_form` (`glossary_batch_plan.py:302-318`), and `canon_adjudication_audit.py`'s category 4 counts every queu"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_adjudication_audit.py:989-1007\", 0]": {
+   "anchors": [
+    "def compute_cat4_items",
+    "every review_queue[] item",
+    "no proper-name scope"
+   ],
+   "claim": "category 4 counts every queued row as BLOCKING until drained or risk-accepted (`canon_adjudication_audit.py:989-1007`, `:1275-1282`, `:1725-1731`) — landing a p"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_adjudication_audit.py:1275-1282\", 0, \"continuation\"]": {
+   "anchors": [
+    "def crosscheck_queue",
+    "_risk_accepted"
+   ],
+   "claim": "category 4 counts every queued row as BLOCKING until drained or risk-accepted (`canon_adjudication_audit.py:989-1007`, `:1275-1282`, `:1725-1731`) — landing a p"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_adjudication_audit.py:1725-1731\", 0, \"continuation\"]": {
+   "anchors": [
+    "blocking_count = (",
+    "len(unaccepted_items)",
+    "gate_passed = blocking_count == 0"
+   ],
+   "claim": "risk-accepted (`canon_adjudication_audit.py:989-1007`, `:1275-1282`, `:1725-1731`) — landing a proposal there would make it a Deliver-time blocker on any projec"
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2596-2627\", 0]": {
+   "anchors": [
+    "def _content_view",
+    "everything except the stamp itself",
+    "if k != \"generation_hashes\""
+   ],
+   "claim": "`canon_link_groups.json` above is a sidecar and not a key: `_content_view` (`canon_validate.py:2596-2627`) treats any non-`generation_hashes` key as CONTENT, so"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3846-3852\", 0]": {
+   "anchors": [
+    "Excluded from every bundle hash",
+    "nor of `orchestration_bundle_hash`",
+    "final_audit.py` is not one of",
+    "never flips a cache key or the resume-integrity digest via either bundle"
+   ],
+   "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"orchestration-and-batching.md:238\", 0]": {
+   "anchors": [
+    "orchestration_bundle_hash` is non-gating for convergence — never part of"
+   ],
+   "claim": "(\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"), (\"schema_literal_drift.test.py:31-32\", SCHEMA_LITERAL_DRIFT_TEST, \"never gated against\"), (\"select_segments.py:12\", SELECT_SEGMENTS_SCRIPT, \"purely diagnostic/orchestration\"), ]"
+  },
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"orchestration-and-batching.md:233\", 0]": {
+   "anchors": [
+    "diagnostic-only, unlike their sibling readiness/merge scripts below"
+   ],
+   "claim": "def test_orchestration_batching_already_accurate_review_resume_sentence_not_flagged(): \"\"\"orchestration-and-batching.md:215's `review_ready.py`/ `resume_setup.py` sentence (\"gating members, not diagnostic-only\") is already accurate and must survive untouched -- distinct from the line directly below it (158) which WAS the stale, flat orchestration_bundle_hash characterization this file's fix targets.\"\"\""
   }
  },
  "exemptions": {

@@ -106,6 +106,20 @@ is the orchestration-level summary of what each stage hands to the next):
   SKILL.md for the exact command and
   `canon-and-glossary.md`/`canon_adjudication_audit.py` for the
   evidence-verification mechanics.
+- **Canon target-harmonisation read (always runs, advisory)** — after the
+  mandatory gate above, on every project with ≥2 records in `canon.json`'s
+  `entries{}`: the session serialises the WHOLE `entries{}` plus the sha256
+  of `canon.json`'s exact bytes into one dispatch prompt, fires ONE
+  schema-less `codex:codex-rescue` dispatch asking which target forms
+  denote one referent under two spellings and where transliteration policy
+  diverges, a bounded WAIT, then `scripts/canon_harmonisation.py --check
+  <attempt path> --approve-to ${durable_root}/canon_harmonisation.json` as
+  the sole acceptance authority, then — only on that pass —
+  `scripts/canon_harmonisation.py --report`. A WAIT timeout or a failed check suppresses the report and
+  continues forward — to the skeptic pass when enabled, otherwise straight
+  to W3a — never back to the gate above. Fewer than 2 `entries{}` records
+  is a no-op: nothing is dispatched, nothing is written. See SKILL.md and
+  `canon-and-glossary.md` for the full contract.
 - **W3a Segpack generation** — `segpack.py` over every candidate segment in
   `manifest.json`'s `segments[]`, body and translate-decision `FRONTBACK:{id}`
   elements alike, now that canon exists; a missing/invalid segpack for any
