@@ -749,6 +749,23 @@ to check it. Second, the PROOF that it worked: a re-stamped draft is adoptable
 again, and the next dispatch's journal says so — `"kind": "review"` for that
 segment, with no translate job beside it.
 
+**The re-stamp does not touch review artifacts, and since 1.79.0 it no longer
+needs to (#824).** A `<seg>.review.json` still carries the token of the run that
+wrote it, so `segment_dispatch_driver.py` cannot read it as a VERDICT about the
+new run — that is `_matched_review_round_label()`'s job and it is unchanged. It
+does now read one thing out of it: the round LABEL. How many review rounds a
+segment has spent is a fact about the segment, not about the run, so a review
+naming this segment at a numbered round under a PRIOR run carries its label
+forward instead of restarting the loop at round 1. It matters because a fresh
+`RUN_ID` is minted by any per-segment cache-key move — one corrected canon entry
+is enough, since every segment's `cache_key` is a digest `domain` member — so
+before this the whole book's round budget reset each time a name was corrected
+and `engine.max_fix_rounds` was never reached. Two guards bound it: the label
+advances only when the fix that round asked for has actually landed (the draft
+moved, and not because of a retranslation), and a unit that has converged at
+least once is excluded, because re-opening a converged unit starts a new loop
+rather than continuing an old one.
+
 `resumeFromRunId` is explicitly scoped to continuing the same interrupted
 batch run. It is never the same mechanism as the ledger-driven
 skip-if-cached/resume classification, which is re-derived from fragments,

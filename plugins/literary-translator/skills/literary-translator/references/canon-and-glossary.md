@@ -1068,6 +1068,18 @@ the skeptic pass (`canon_sha256`) and of `suspicion_scan.py`'s worklist
 freshness gate: run a correction BETWEEN passes, not into a live one. (That was
 equally true of the hand-edit it replaces.)
 
+Because those bytes move, a correction also moves the carriers' `used_terms_hash`
+and therefore `input_digest`, so the next W5 invocation mints a fresh `RUN_ID`
+for the whole book. Since **1.79.0** that no longer costs the book its review
+round budget (#824) **on the `segment_dispatch_driver.py` path, which is the
+default**: a segment still in its first convergence loop resumes at the round it
+had reached rather than at round 1, so `engine.max_fix_rounds` stays reachable
+however many corrections intervene. The retained Workflow-template fallback runs
+its own loop and still starts every segment at round 1. The fresh `RUN_ID` still orphans
+in-flight draft tokens and still meets #742's foreign-draft refusal, whose
+documented re-stamp remains the route through it — see
+`references/ledger-and-resumability.md`.
+
 **Sizing a canon change BEFORE you apply it.** `compute_used_terms_hash` reads
 `canon.json` from whatever root it is handed, so the segments a *pending*
 change would re-stale are computable with no new tooling and nothing written.

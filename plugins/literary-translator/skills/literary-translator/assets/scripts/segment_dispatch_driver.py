@@ -379,6 +379,24 @@ survived no run. This driver adds the DURABLE record, not a second
 announcement -- relaying the selector's stderr is #551's job, and a
 driver-side re-print of a line the relay already carries would put the
 same fact in the run log twice.
+Two more selector fields are REQUIRED on every invocation since #824,
+`previously_converged` and `lost_sentinels`, unioned with the claim keys by
+`parse_ever_converged_selected()` into `ctx.ever_converged_selected`. They
+decide which selected units are still in their FIRST convergence loop, and a
+missing key is refused by name rather than defaulted to `[]` -- the same rule
+`eligible_not_dispatched` follows, and here the default would fail in the
+WIDENING direction. What they gate is the round BUDGET, never a verdict: a
+review artifact whose `dispatch_token` names this segment under a PRIOR run at
+a numbered round still proves how many rounds that segment has spent, and
+`derive_next_action()` now carries that label forward instead of restarting at
+1. It has to, because any per-segment cache_key move mints a fresh RUN_ID --
+one corrected canon entry is enough -- so before this the whole book's round
+budget reset every time an operator corrected a name, and
+`engine.max_fix_rounds` never bit. The stored VERDICT stays untrusted exactly
+as before (`_matched_review_round_label()` is unchanged), and the re-review
+this dispatches is a real one: its token carries THIS run's id, so
+`review_ready.py --expect-token` refuses the stale artifact and
+`codex_job.py`'s `safe_adopt()` cannot adopt it.
 `--from-stalled` additionally carries `--driver-lease-held` forward to
 `select_segments.py` whenever at least one id is requested under it, but
 only ever on this code path -- run after `acquire_driver_lock()` has
@@ -2113,6 +2131,68 @@ def parse_claims_from_cap_over_sentinel(select_result: dict, claims: dict, admit
             )
         seen.add(seg)
     return list(over_sentinel)
+
+
+# #824: the selector payload fields parse_ever_converged_selected() REQUIRES,
+# beside the claim keys it unions them with. Module level rather than a literal
+# inside the function so the count is readable from the source by an AST reader
+# (tests/changelog_figures.test.py derives its release figure from exactly this
+# tuple) and so the two names have one home rather than two.
+EVER_CONVERGED_SELECTOR_FIELDS = ("previously_converged", "lost_sentinels")
+
+
+def parse_ever_converged_selected(select_result: dict, claims: dict) -> frozenset:
+    """#824: the SELECTED segments this invocation must treat as having
+    converged at least once -- the population whose review loop starts fresh
+    at round 1 rather than carrying a round label across a RUN_ID change (see
+    derive_next_action()'s own prior-run branch).
+
+    No single field select_segments.py emits answers this, so the set is a
+    UNION of three it does, and each member is load-bearing:
+
+      `previously_converged` -- its sentinel census over the selected ids
+        (select_segments.py's own SENTINEL_PRESENT branch). It is emitted
+        CLEARED of every successfully admitted sentinel-bearing claim, which
+        that script does deliberately and its own claim tests assert, so on
+        its own it would omit exactly the re-opened units this set exists to
+        name.
+      `set(claims)` -- restores that cleared population. It also subsumes
+        `claims_from_cap_over_sentinel` entirely: parse_claims_from_cap_over_
+        sentinel() above refuses any member that is not already a claims key.
+      `lost_sentinels` -- the #442 population: a converged/stale ledger row
+        whose sentinel is gone. Such a unit carries no claim when it was
+        admitted by plain --allow-retranslate-converged, and is absent from
+        `previously_converged` because that branch requires the sentinel.
+
+    Both list fields are REQUIRED, refused by name rather than defaulted to
+    [], for the reason `eligible_not_dispatched`'s own check gives: an absent
+    key would read as "nothing ever converged", which is the direction that
+    WIDENS the carry-forward to units that must not get it. A driver/selector
+    skew here is exactly the case exit 2 exists for.
+
+    Returns a frozenset -- the only consumer is a membership test, and an
+    immutable value cannot be mutated by one worker under another."""
+    out = set(claims)
+    for field in EVER_CONVERGED_SELECTOR_FIELDS:
+        value = select_result.get(field)
+        if not isinstance(value, list):
+            fatal(
+                f"select_segments.py's JSON output has no {field!r} array -- this driver "
+                f"cannot tell which selected units have already converged once, and reading "
+                f"a missing key as [] would let a re-opened unit inherit a prior run's round "
+                f"label instead of starting a fresh loop. Refused rather than defaulted "
+                f"(#824).",
+                exit_code=2,
+            )
+        for seg in value:
+            problem = validate_seg(seg)
+            if problem is not None:
+                fatal(
+                    f"{field} names {seg!r}, an unsafe segment id ({problem}) (#824)",
+                    exit_code=2,
+                )
+            out.add(seg)
+    return frozenset(out)
 
 
 # ---------------------------------------------------------------------------
@@ -4350,7 +4430,8 @@ class DispatchContext:
     construction (safe to share across ThreadPoolExecutor workers)."""
 
     def __init__(self, *, dirs, run_id, translate_cfg, companion_path,
-                 durable_root_str, plugin_root_str, node_bin, session_id, claims=None):
+                 durable_root_str, plugin_root_str, node_bin, session_id, claims=None,
+                 ever_converged_selected=None):
         self.dirs = dirs
         self.run_id = run_id
         self.translate_cfg = translate_cfg
@@ -4373,6 +4454,24 @@ class DispatchContext:
         # keyed off the durable record because it must answer for runs and
         # processes this dict cannot reach. Both run, in that order.
         self.claims = claims if claims is not None else {}
+        # #824: the selected ids that have converged at least once -- built by
+        # parse_ever_converged_selected() from the selector's own payload, and
+        # read by derive_next_action()'s prior-run round-label branch to decide
+        # which units start a fresh loop at round 1 instead of carrying a round
+        # label across a RUN_ID change.
+        #
+        # The DEFAULT is the empty frozenset so a direct construction (every
+        # one of them is a test) needs no new argument, and the REQUIREDNESS
+        # lives in the payload parse instead: run() has the single production
+        # construction and always passes the parsed value, which is refused by
+        # name when the selector did not emit it. A default that widened the
+        # carry-forward in production would be the wrong direction, and this
+        # split is what keeps it out of production without touching 19 test
+        # call sites.
+        self.ever_converged_selected = (
+            frozenset(ever_converged_selected) if ever_converged_selected is not None
+            else frozenset()
+        )
 
 
 def _run_gate(script: Path, argv_rest: list, ctx: "DispatchContext", *, supports_plugin_root: bool) -> bool:
@@ -4407,6 +4506,116 @@ def _matched_review_round_label(review_obj, run_id: str, seg: str, max_fix_round
         if token == review_dispatch_token(run_id, seg, label):
             return label
     return None
+
+
+def _prior_run_round_label(review_obj, run_id: str, seg: str, max_fix_rounds: int) -> "str | None":
+    """#824: the NUMBERED round label a stored review carries when its
+    `dispatch_token` names THIS segment under a DIFFERENT run, else None.
+
+    This answers a strictly different question from _matched_review_round_label()
+    directly above, and the split is the whole point of this issue. That
+    function asks "is this review evidence about THIS run", and its answer must
+    stay No for a foreign token -- nothing here weakens it. This one asks only
+    "how many rounds has this segment already spent", which is a fact about the
+    SEGMENT and survives a change of RUN_ID. Before #824 the two were answered
+    by one comparison, so a fresh RUN_ID -- which one edited canon entry is
+    enough to mint, since every segment's cache_key is a digest domain member --
+    reset every segment's round label to 1 and pushed engine.max_fix_rounds out
+    of reach for the whole book.
+
+    Parsed by CONSTRUCTION rather than by splitting the token: the label is the
+    `label` for which some `candidate_run` satisfies
+    `token == f"{candidate_run}:{seg}:r{label}"`, which is exactly the shape
+    review_dispatch_token() builds. A RUN_ID cannot contain ':' (resume_setup.py's
+    own RUN_ID_RE) and a seg id is [A-Za-z0-9_] with an optional literal
+    'FRONTBACK:' prefix (validate_seg()), so the `:{seg}:r{label}` tail is an
+    unambiguous suffix -- but ONLY once the leftover prefix is itself checked to
+    be a valid RUN_ID, because a `FRONTBACK:`-prefixed segment's own token ends
+    with the bare segment's suffix too. That check is made below, and it is what
+    makes the parse a parse rather than a coincidence.
+
+    "final" is deliberately NOT recognised here. It is ABSORBING
+    (_next_round_label()), so carrying it would hand a segment a terminal label
+    with no fix budget left -- the #540 shape -- and the cost of refusing it is
+    that one segment restarts its rounds, which is the safe direction.
+
+    Every doubt returns None, which the caller maps to today's round 1: an
+    absent or non-string token, a token naming a different segment, a token
+    naming THIS run (already answered above), or a label outside
+    1..max_fix_rounds."""
+    if not isinstance(review_obj, dict):
+        return None
+    token = review_obj.get("dispatch_token")
+    if not isinstance(token, str):
+        return None
+    for n in range(1, max_fix_rounds + 1):
+        label = str(n)
+        suffix = f":{seg}:r{label}"
+        if not token.endswith(suffix):
+            continue
+        candidate_run = token[: -len(suffix)]
+        if not candidate_run or candidate_run == run_id:
+            # Empty: a token with no run component at all, which
+            # review_dispatch_token() never produces. Equal: a same-run token,
+            # which _matched_review_round_label() owns.
+            return None
+        if validate_run_id(candidate_run) is not None:
+            # The remaining prefix must itself be a RUN_ID this project could
+            # have minted, or the suffix match was a COINCIDENCE rather than a
+            # parse. The case that makes this load-bearing: "OLD:FRONTBACK:seg01:r2"
+            # is the legitimate token of the distinct admitted segment
+            # "FRONTBACK:seg01", and it ends with ":seg01:r2" as well -- so
+            # deriving seg01's budget from it would read another segment's
+            # history. Its leftover prefix "OLD:FRONTBACK" carries a ':' and no
+            # RUN_ID may, which is exactly what this rejects.
+            return None
+        return label
+    return None
+
+
+def _carried_round_label(prior_label: str, review_obj: dict, seg: str, segments_dir: Path,
+                         dirs: dict, review_path: Path, max_fix_rounds: int) -> str:
+    """#824: the round label to dispatch at, given that `prior_label` is the
+    round a PRIOR run's review already reached for this segment.
+
+    A stored review at label L is NOT proof that round L was spent, and this
+    function makes the same distinction the same-run path already makes rather
+    than a simpler one that would silently differ from it:
+
+      * the draft still hashes to what that review recorded -> the fix it asked
+        for has not landed, so the round is still outstanding and the label is
+        RETAINED (the same-run branch returns needs_fix at the matched label in
+        this state);
+      * the draft moved, but a translate was dispatched after that review
+        (_translate_in_progress_since()) -> what CAUSED the movement is then
+        ambiguous. That helper proves a translate was dispatched, never that one
+        produced the draft now on disk -- read its own docstring, which
+        enumerates the interrupted and adopted false positives -- so the label is
+        retained rather than spent on a movement no fix can be shown to own,
+        exactly as the same-run branch declines to spend a round for it;
+      * the draft moved with no such evidence -> a fix landed, and the label
+        ADVANCES.
+
+    Advancing on the label alone would let a canon correction between a review
+    and its fix turn consume the round; advancing on a bare hash mismatch would
+    consume it for a movement a fix cannot be shown to have caused. At engine.max_fix_rounds=1 either one jumps
+    straight to "final" and caps a segment that received no fix turn at all.
+
+    Every unreadable input retains `prior_label`: a missing or non-string
+    stored draft_sha1, or a draft this process cannot hash. Retaining costs one
+    re-review; advancing wrongly costs a fix round that cannot be recovered."""
+    reviewed_sha1 = review_obj.get("draft_sha1")
+    if not isinstance(reviewed_sha1, str) or not reviewed_sha1:
+        return prior_label
+    try:
+        current_sha1 = current_draft_sha1(seg, segments_dir, dirs["scripts_dir"])
+    except DriverError:
+        return prior_label
+    if current_sha1 is None or current_sha1 == reviewed_sha1:
+        return prior_label
+    if _translate_in_progress_since(dirs, seg, review_path):
+        return prior_label
+    return _next_round_label(prior_label, max_fix_rounds)
 
 
 # The fixed head of every promotion note. It exists ONLY so that
@@ -4872,6 +5081,35 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         # Absent, malformed, or belonging to a different run/round shape --
         # treated exactly like "no review yet" (safe degradation, matches
         # select_segments.py's own "unrecognized -> recoverable" default).
+        #
+        # #824: with ONE exception, and it is about the round BUDGET, never
+        # about the verdict. A review whose token names this segment under a
+        # PRIOR run still proves how many rounds this segment has spent, and
+        # a fresh RUN_ID is minted by any cache_key move -- one corrected canon
+        # entry is enough -- so without this branch a mid-book correction reset
+        # every segment's label to 1 and engine.max_fix_rounds never bit.
+        #
+        # Nothing below reads the stale review's `clean`, `findings` or
+        # `coverage_ok`; its `draft_sha1` is read by _carried_round_label() as a
+        # budget discriminator only, the same use the same-run branch already
+        # makes of it. And the review this dispatches is a REAL one: the token
+        # is built from THIS run's id, so review_ready.py --expect-token refuses
+        # the stored artifact and codex_job.py's safe_adopt() cannot adopt it.
+        #
+        # Scoped to segments still in their FIRST convergence loop.
+        # ctx.ever_converged_selected names every selected unit that has
+        # converged once -- a re-opened loop legitimately starts at round 1, and
+        # `stale` units reach this driver with no claim at all, so the claim map
+        # alone could not express it.
+        prior_run_label = _prior_run_round_label(review_obj, run_id, seg, max_fix_rounds)
+        if prior_run_label is not None and seg not in ctx.ever_converged_selected:
+            return {
+                "action": "review",
+                "round_label": _carried_round_label(
+                    prior_run_label, review_obj, seg, segments_dir, dirs,
+                    review_path, max_fix_rounds,
+                ),
+            }
         return {"action": "review", "round_label": "1"}
 
     # #392 round-2 item 8: the fabricated-finding gate, PORTED (never
@@ -7392,6 +7630,14 @@ def run(args, dirs: dict) -> dict:
             else []
         )
 
+        # #824: validated on EVERY invocation, for the reason parse_claims_field()
+        # gives for its own -- and with a sharper consequence than a report-only
+        # field has, because reading a missing key as "nothing ever converged"
+        # would WIDEN the round-label carry-forward to re-opened units. See
+        # parse_ever_converged_selected()'s own docstring for the three payload
+        # fields it unions and why each is needed.
+        ever_converged_selected = parse_ever_converged_selected(select_result, claims)
+
         # #530: the eligible units this dispatch is NOT carrying. Computed by
         # select_segments.py (which owns DEFAULT_ELIGIBLE_CATEGORIES) and read
         # from its payload rather than re-derived here -- a second copy of that
@@ -7560,6 +7806,7 @@ def run(args, dirs: dict) -> dict:
             dirs=dirs, run_id=run_id, translate_cfg=translate_cfg, companion_path=companion_path,
             durable_root_str=args.durable_root, plugin_root_str=args.plugin_root,
             node_bin=args.node, session_id=session_id, claims=claims,
+            ever_converged_selected=ever_converged_selected,
         )
 
         append_journal(

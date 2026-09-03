@@ -446,43 +446,44 @@ def _glossary_driver_deadline_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.77.1 (#825 -- the Canon bullet priced a canon correction as
-    # re-translation), and EMPTY ON PURPOSE. The entry's subjects are one clause
-    # of shipped prose, the retired-wording pin that now guards it, and the two
-    # changelog-facing rotations any new entry drags along, and it names all of
-    # them by FILE, CONSTANT and SECTION. It states no OTHERWISE-UNGUARDED count,
-    # which is the only kind a Figure row buys anything for. An earlier draft did
-    # state several -- how many assertions the new pin row enters, how many
-    # baselines carry the retired needle, how many lines the rewritten block
-    # spans -- and those sentences were rewritten to name the artifacts instead,
-    # because each was a number a later edit in this same release could move with
-    # nothing watching. The two counts the entry still states, that the retired
-    # sentence occurred exactly ONCE in the frozen baseline tree and occurs ZERO
-    # times now, are deliberately kept: they are not unguarded. They are the
-    # literal subject of two assertions in `tests/retired_wording_pins.test.py`,
-    # which re-derive them from git on every run and fail loudly rather than
-    # advisorily. A Figure row would be a second, weaker copy of a check that
-    # already exists.
+    # ROTATED TO 1.79.0 (#824 -- a canon correction no longer resets the whole
+    # book's review round budget). ONE row: how many selector payload fields the
+    # driver newly REQUIRES in order to name the units that have already
+    # converged once, read by AST off the tuple the parser iterates rather than
+    # counted by hand. It is the entry's one claim about this tree that the tree
+    # can answer, and it is otherwise unguarded -- nothing else fails if the
+    # entry says "2" while the parser reads three fields.
     #
-    # Deliberately NOT rows: the version, the issue number, and "nineteen
-    # releases" of history between the rejected older baseline and this one.
-    # That last one IS derivable from a file this test reads -- it is the count
-    # of version headings in `CHANGELOG.md` between 1.58.0 and this entry -- and
-    # it is excluded for the other reason the docstring gives: it measures
-    # FROZEN history, which no later edit in this release can move, and
-    # within-release drift is the only thing this file exists to catch.
+    # Deliberately NOT rows, because they describe the CONTRACT rather than
+    # measure the tree: "round 1", "label L", "max_fix_rounds=1", "at least
+    # once". Nor the version, the issue numbers, or the date.
     #
-    # The 1.77.0 rotation this replaces, kept as its own record: ONE row, the
-    # number of data paths the W5 glossary gate passes to
-    # `glossary_batch_plan.py` off the target durable root, derived from the
-    # argv construction rather than counted by hand.
+    # The 1.77.1 rotation this replaces, kept as its own record: EMPTY on
+    # purpose. That entry's subjects were named by FILE, CONSTANT and SECTION
+    # rather than counted, and the two counts it did state (the retired sentence
+    # occurring exactly ONCE in the frozen baseline tree and ZERO times now) are
+    # the literal subject of two assertions in
+    # `tests/retired_wording_pins.test.py`, which re-derive them from git on
+    # every run -- a Figure row would have been a second, weaker copy of a check
+    # that already exists.
+    #
+    # The 1.77.0 rotation before it: ONE row, the number of data paths the W5
+    # glossary gate passes to `glossary_batch_plan.py` off the target durable
+    # root, derived from the argv construction rather than counted by hand.
+    Figure(
+        phrase="requires 2 more selector payload",
+        value=2,
+        derive=lambda: _tuple_len(
+            "segment_dispatch_driver.py", "EVER_CONVERGED_SELECTOR_FIELDS"
+        ),
+    ),
 ]
 
 # The version FIGURES was last rotated to. An empty FIGURES makes the loop in
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.77.1"
+FIGURES_VERSION = "1.79.0"
 
 
 def _newest_entry():

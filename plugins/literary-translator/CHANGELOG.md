@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.79.0 — 2026-09-03
+
+**A canon correction no longer resets the whole book's review round budget (#824).** Every
+segment's `cache_key` is a member of `resume_setup.py`'s mass `input_digest` domain, and
+`used_terms_hash` moves whenever a canon entry a segment carries is edited — correctly, because
+that is the per-segment staleness signal. The side effect was that the *run identity* moved too: one
+corrected name minted a fresh `RUN_ID` for the whole book, no segment's stored review token matched
+any more, and `segment_dispatch_driver.py` restarted every segment's review loop at round 1.
+`engine.max_fix_rounds` is consulted against that label, so the cap was pushed out of reach each
+time an operator corrected a name.
+
+`derive_next_action()` now separates the two questions that one token comparison used to answer. A
+review artifact naming this segment under a PRIOR run is still **never** read as a verdict about the
+current run — `_matched_review_round_label()` is unchanged — but its round LABEL is carried forward,
+because how many rounds a segment has spent is a fact about the segment rather than about the run.
+The re-review that follows is a real one: its dispatch token carries the current `RUN_ID`, so
+`review_ready.py --expect-token` refuses the stale artifact and `codex_job.py`'s `safe_adopt()`
+cannot adopt it.
+
+Two guards bound the carry-forward, and both exist because a stored review at label L is not proof
+that round L was spent:
+
+- the label advances only when the fix that review asked for has actually landed — the draft moved,
+  and no translate was dispatched since that review (`_translate_in_progress_since()`), which is
+  the same discriminator the same-run path already applies. That helper proves a dispatch, never
+  that it produced the draft now on disk, so the label is retained whenever the cause of the
+  movement is ambiguous. Advancing on the label alone would let a
+  correction between a review and its fix turn consume the round; at `max_fix_rounds=1` that caps a
+  segment which never received a fix turn;
+- a unit that has converged at least once is excluded, so re-opening it starts a fresh loop rather
+  than continuing an old one. The driver builds that population by unioning the selector's
+  `previously_converged`, `lost_sentinels` and claim ids — three fields rather than one, because
+  `previously_converged` is emitted cleared of successfully admitted claims and a `stale` unit
+  reaches the driver with no claim at all. The driver therefore requires 2 more selector payload
+  fields, refused by name rather than defaulted to `[]`, since that default would widen the
+  carry-forward rather than narrow it.
+
+Run identity itself is unchanged: `resume_setup.py` is not touched, so every resume-integrity
+property the digest enforces is exactly as before. A correction still mints a fresh `RUN_ID` and
+still meets #742's foreign-draft refusal, whose documented draft re-stamp is still the route
+through it — what changed is that the route no longer costs the book its round budget.
+
+Scope: this is the `segment_dispatch_driver.py` path, which is the default. The retained
+Workflow-template fallback runs its own loop and never calls `derive_next_action()`, so its
+`reviewFixLoop()` still starts every segment at round 1 — unchanged by this release, and
+unchanged by it in either direction.
+
+Known limitation: a unit that has lost BOTH witnesses of its earlier convergence — its
+`.ever_converged` sentinel gone AND its ledger row since moved off `converged`/`stale` — is
+invisible to all three payload fields, so it carries a label instead of starting a fresh loop.
+Reaching that state takes a lost sentinel, an `--allow-retranslate-converged` admission, a
+successful retranslation, an interrupted driver, and only then a canon correction. The consequence
+is a shortened fix budget and a possibly early cap, which `--from-cap` reopens; it is never a
+segment declared converged without a review.
+
+
 ## 1.77.1 — 2026-09-03
 
 **`SKILL.md`'s Canon bullet priced a canon correction as RE-TRANSLATION of every carrier (#825).**
@@ -50,6 +106,7 @@ Both changelog-facing guards rotate with the entry, as they must: `changelog_fig
 declares an empty `FIGURES` at `FIGURES_VERSION` 1.77.1, because this entry states no figure the tree
 can re-derive, and `changelog_citations.test.py` keeps its empty `CITATION_ANCHORS` with its comment
 rotated — recording, rather than hiding, that the map sat unrotated across 1.75.0 through 1.77.0.
+
 
 ## 1.77.0 — 2026-09-02
 

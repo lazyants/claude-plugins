@@ -32,6 +32,7 @@ script `select_segments.test.py`/`ledger_merge.test.py` use, for the same
 reason (scope this file to the driver's OWN logic, not re-prove
 `cache_key.py`'s 15-field hashing, which has its own dedicated test file).
 """
+import ast
 import fcntl
 import hashlib
 import importlib.util
@@ -972,6 +973,11 @@ _SELECT_SEGMENTS_WITHOUT_THE_FIELD = (
     '    "success": True, "segs": ["seg01"], "claims": {},\n'
     '    "claims_admitted_via": {},\n'
     '    "counts": {}, "classification": {}, "ids_by_category": {},\n'
+    # #824 added two more required fields whose check runs EARLIER than
+    # this stub's own subject, so the stub supplies them -- otherwise the
+    # test would pass on the wrong refusal, exactly as the
+    # claims_admitted_via note below records.
+    '    "previously_converged": [], "lost_sentinels": [],\n'
     "}))\n"
     "sys.exit(0)\n"
 )
@@ -1005,6 +1011,10 @@ def test_a_selector_payload_without_the_field_is_refused_not_defaulted(tmp_path)
     # which is exactly the failure the comment above describes for
     # `claims_admitted_via`.
     assert "claims_from_cap_over_sentinel" not in _SELECT_SEGMENTS_WITHOUT_THE_FIELD
+    # #824's two fields are checked BEFORE this one, so the stub supplies them
+    # for the same reason it supplies claims_admitted_via.
+    assert "previously_converged" in _SELECT_SEGMENTS_WITHOUT_THE_FIELD
+    assert "lost_sentinels" in _SELECT_SEGMENTS_WITHOUT_THE_FIELD
 
     proc = run_driver(root, timeout=60)
 
@@ -1398,6 +1408,11 @@ _SELECT_SEGMENTS_FROM_CAP_WITHOUT_OVER_SENTINEL = (
     '    "claims_admitted_via": {"seg01": "from-cap"},\n'
     '    "eligible_not_dispatched": [],\n'
     '    "counts": {}, "classification": {}, "ids_by_category": {},\n'
+    # #824 added two more required fields whose check runs EARLIER than
+    # this stub's own subject, so the stub supplies them -- otherwise the
+    # test would pass on the wrong refusal, exactly as the
+    # claims_admitted_via note below records.
+    '    "previously_converged": [], "lost_sentinels": [],\n'
     "}))\n"
     "sys.exit(0)\n"
 )
@@ -5077,16 +5092,26 @@ def test_a_clean_review_stale_against_an_edited_draft_re_reviews_instead_of_live
 _DNA_RUN_ID = "20260101T000000Z"
 
 
-def _dna_setup(root):
+def _dna_setup(root, *, ever_converged=()):
     """Common setup for the derive_next_action() branch tests below: a
     fully staged Phase 2 fixture, a driver module loaded from IT (never the
     module-level DRIVER, see _load_fixture_driver()'s own docstring), and a
-    DispatchContext at max_fix_rounds=2 (rounds "1", "2", then "final")."""
+    DispatchContext at max_fix_rounds=2 (rounds "1", "2", then "final").
+
+    #824: `ever_converged` names the segments this invocation must treat as
+    having already converged once -- what parse_ever_converged_selected()
+    builds in run() from the selector's own previously_converged /
+    lost_sentinels / claims payload. Empty by default, which is the same value
+    the constructor's own default produces, so every pre-#824 caller is
+    unaffected. A parameter rather than a second construction helper: a copy of
+    this 8-keyword call would drift the day DispatchContext gains a required
+    argument."""
     driver_mod = _load_fixture_driver(root)
     ctx = driver_mod.DispatchContext(
         dirs=driver_mod.resolve_dirs(None), run_id=_DNA_RUN_ID, translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
         companion_path=FIXTURE_COMPANION_PATH, durable_root_str=None, plugin_root_str=None,
         node_bin="node", session_id="test-session",
+        ever_converged_selected=frozenset(ever_converged),
     )
     return driver_mod, ctx
 
@@ -5125,16 +5150,32 @@ def test_derive_next_action_review_round_1_when_review_token_matches_no_candidat
     """A review.json present but belonging to a DIFFERENT run (stale token,
     e.g. left over from before a resume) -- treated exactly like "no review
     yet", matching select_segments.py's own "unrecognized -> recoverable"
-    default, never a crash or a wrong-round match."""
+    default, never a crash or a wrong-round match.
+
+    #824 NARROWED this, deliberately, and the fixture moved with it. A foreign
+    token whose ROUND is unrecognisable is still "no review yet", which is what
+    this test now pins. A foreign token at a RECOGNISED numbered round is no
+    longer discarded: its label is carried forward, because how many rounds a
+    segment has spent is a fact about the SEGMENT that survives a change of
+    RUN_ID, and discarding it reset every segment's budget each time one canon
+    entry was corrected. That branch is owned by
+    test_dna_round_label_carries_forward_across_a_run_id_change and its
+    siblings; what has NOT changed, and is still asserted here, is that a
+    foreign review is never read as a VERDICT about this run."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)
     (root / "segments" / "seg01.review.json").write_text(
         json.dumps({"clean": True, "coverage_ok": True, "findings": [], "draft_sha1": "irrelevant",
-                    "dispatch_token": "SOME-OTHER-RUN:seg01:r1"}, ensure_ascii=False),
+                    "dispatch_token": "SOME-OTHER-RUN:seg01:rNOT-A-ROUND"}, ensure_ascii=False),
         encoding="utf-8",
     )
-    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "1"}
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "1",
+    }, (
+        "a foreign-run review is never a verdict about this run, whatever its "
+        "own `clean` says"
+    )
 
 
 def test_derive_next_action_already_converged_round_1_when_clean_and_draft_matches(tmp_path):
@@ -5154,8 +5195,8 @@ def test_derive_next_action_already_converged_round_1_when_clean_and_draft_match
 def test_derive_next_action_already_converged_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """codex round-4 ("Tests that could not fail"): current_draft_sha1()'s
     third argument -- dirs["scripts_dir"] -- is what makes this "clean and
-    draft matches" branch (segment_dispatch_driver.py:4962, feeding the
-    already_converged decision at :4989) hash the draft using the TRUSTED
+    draft matches" branch (segment_dispatch_driver.py:5200, feeding the
+    already_converged decision at :5227) hash the draft using the TRUSTED
     plugin tree's draft_sha1.py under --plugin-root, never the durable
     root's own writable, self-anchored copy (current_draft_sha1()'s own
     `scripts_dir=SCRIPTS_DIR` default). That default matters because the
@@ -6189,7 +6230,7 @@ def test_derive_next_action_fabricated_loc_gate_respects_node_bin(tmp_path):
 
 def test_derive_next_action_invalid_post_fix_draft_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """The invalid_post_fix_draft branch's own current_draft_sha1() call
-    (segment_dispatch_driver.py:4846) is a SECOND call site sharing the
+    (segment_dispatch_driver.py:5055) is a SECOND call site sharing the
     identical --plugin-root trust boundary as the already_converged
     branch's (see the sibling test above) -- untested here for the same
     reason: every existing --plugin-root fixture stages the REAL,
@@ -10045,3 +10086,360 @@ def test_review_task_template_block_states_the_book_scope_rule():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ===========================================================================
+# #824 -- the round BUDGET survives a RUN_ID change for a segment still in
+# its first convergence loop, while its stored VERDICT stays untrusted.
+#
+# One corrected canon entry moves that segment's used_terms_hash, which is a
+# member of resume_setup.py's mass digest domain, so the whole book gets a
+# fresh RUN_ID. Before this, every segment's review token stopped matching and
+# every round label restarted at 1, so engine.max_fix_rounds was pushed out of
+# reach each time an operator corrected a name.
+#
+# The tests below are written against derive_next_action() directly, which is
+# where the decision lives; _dna_setup() builds the DispatchContext at
+# max_fix_rounds=2, so the labels in play are "1", "2" and then "final".
+# ===========================================================================
+
+_DNA_PRIOR_RUN_ID = "20251231T235959Z"
+
+
+def _dna_prior_run_fixture(root, driver_mod, *, round_label, draft_moved):
+    """Stages the #824 shape: a draft on disk, and a review.json stamped for a
+    PRIOR run at `round_label`. `draft_moved` decides whether the review's
+    recorded draft_sha1 matches the draft currently on disk -- i.e. whether the
+    fix that review asked for has landed.
+
+    Returns the base mtime, in integer epoch seconds so os.utime()/st_mtime
+    round-trip it exactly whatever the filesystem's timestamp resolution: the
+    review is stamped at base + 10, so a caller placing a ledger fragment
+    strictly after it has a deterministic tick to aim past."""
+    base = int(time.time()) - 3600
+    _dna_write_draft(root, driver_mod)
+    current_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(
+        root, driver_mod, round_label=round_label, clean=False, coverage_ok=True,
+        draft_sha1=("a-sha1-from-before-the-fix" if draft_moved else current_sha1),
+        findings=[{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}],
+        run_id=_DNA_PRIOR_RUN_ID,
+    )
+    os.utime(root / "segments" / "seg01.review.json", (base + 10, base + 10))
+    return base
+
+
+def test_dna_round_label_carries_forward_across_a_run_id_change(tmp_path):
+    """THE regression-catcher for #824. A prior run's round-2 review, whose
+    fix has landed (the draft moved), resumes at round "final" under the new
+    run -- max_fix_rounds=2, so "final" is what follows "2" -- rather than
+    restarting the whole budget at "1"."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=True)
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "final",
+    }
+
+
+def test_dna_carry_forward_advances_only_by_one_round(tmp_path):
+    """The same shape one round earlier: a prior run's round-1 review with the
+    fix landed advances to "2", never straight to the cap."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_prior_run_fixture(root, driver_mod, round_label="1", draft_moved=True)
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "2",
+    }
+
+
+def test_dna_carry_forward_does_not_advance_while_the_fix_is_outstanding(tmp_path):
+    """A stored review at label L is NOT proof that round L was spent. When the
+    draft still hashes to what that review recorded, the fix it asked for has
+    not landed, so the label is RETAINED -- the same decision the same-run path
+    makes when it returns needs_fix at the matched label.
+
+    Advancing here would consume a round to a canon correction that happened
+    between a review and its fix turn. At max_fix_rounds=1 that jumps straight
+    to "final" and caps a segment that never received a fix turn at all."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    # Prior label "2", not "1": at "1" the expected answer coincides with what
+    # the pre-#824 driver returned for ANY foreign token, so the test would pass
+    # against an implementation that had never read the label at all.
+    _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=False)
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "2",
+    }
+
+
+def test_dna_carry_forward_does_not_advance_over_a_retranslation(tmp_path):
+    """The draft moved, but a translate was dispatched AFTER that review, so
+    the movement is a RETRANSLATION rather than a landed fix and the label is
+    retained. This is _translate_in_progress_since()'s own discriminator, and
+    the same-run branch already declines to spend a round for this state.
+
+    Without it, a bare hash mismatch would consume a fix round that no fix
+    turn ever used."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    # Prior label "2" for the same reason the outstanding-fix test uses it: at
+    # "1" the expectation coincides with the pre-#824 answer for any foreign
+    # token, and the test would not be able to fail for the right reason.
+    base = _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=True)
+    # STRICTLY newer than the review: the pre-dispatch in_progress write that
+    # process_segment()'s translate branch causes.
+    _dna_write_ledger_fragment(root, mtime=base + 20, status="in_progress")
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "2",
+    }
+
+
+def test_dna_prior_run_final_label_does_not_carry(tmp_path):
+    """"final" is ABSORBING (_next_round_label()), so carrying it would hand a
+    segment a terminal label with no fix budget -- the #540 shape. The cost of
+    refusing it is that one segment restarts its rounds, the safe direction."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1="a-sha1-from-before-the-fix", run_id=_DNA_PRIOR_RUN_ID)
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "1",
+    }
+
+
+def test_dna_ever_converged_segment_still_restarts_at_round_one(tmp_path):
+    """A unit that has converged at least once is re-opening a loop, not
+    continuing one, so it keeps today's fresh round-1 behaviour. run() names
+    that population by unioning the selector's previously_converged,
+    lost_sentinels and claims -- three fields rather than one because the
+    selector CLEARS previously_converged of successfully admitted claims, and
+    because a `stale` unit reaches this driver with no claim at all."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root, ever_converged=("seg01",))
+    _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=True)
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "1",
+    }
+
+
+@pytest.mark.parametrize("token", [
+    None,                                   # absent
+    12345,                                  # not a string
+    "no-colons-at-all",                     # not token-shaped
+    ":seg01:r1",                            # empty run component
+    f"{_DNA_PRIOR_RUN_ID}:seg01:r9",        # label outside 1..max_fix_rounds
+    f"{_DNA_PRIOR_RUN_ID}:seg01:rABC",      # label not a recognised round
+    f"{_DNA_PRIOR_RUN_ID}:seg01",           # no round component
+    # Names ANOTHER segment. Not malformed -- a perfectly good token for seg02 --
+    # which is why the label is matched by CONSTRUCTION against this segment's
+    # own id rather than by splitting whatever the token happens to contain.
+    f"{_DNA_PRIOR_RUN_ID}:seg02:r2",
+    # The legitimate token of the DISTINCT admitted segment "FRONTBACK:seg01".
+    # It ends with ":seg01:r2" as well, so a suffix match alone would read
+    # another segment's round history into this one; the leftover prefix
+    # "OLD:FRONTBACK" is not a valid RUN_ID, which is what refuses it.
+    "OLD:FRONTBACK:seg01:r2",
+])
+def test_dna_unusable_prior_run_token_does_not_carry(tmp_path, token):
+    """Every token this function cannot USE as evidence about this segment maps
+    to today's round 1 -- never a crash, and never a wrong-round match. Some are
+    malformed; the last two are well-formed tokens that simply belong to another
+    segment or another round shape, which is the same outcome for a different
+    reason."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    review = {"clean": False, "coverage_ok": True, "findings": [], "draft_sha1": "irrelevant"}
+    if token is not None:
+        review["dispatch_token"] = token
+    (root / "segments" / "seg01.review.json").write_text(
+        json.dumps(review, ensure_ascii=False), encoding="utf-8"
+    )
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "1",
+    }
+
+
+def test_dna_same_run_token_behaviour_is_unchanged(tmp_path):
+    """The control that keeps the carry-forward honest: a token naming THIS run
+    still goes through _matched_review_round_label() and reaches its existing
+    outcome, asserted as that concrete outcome rather than as "not round 1"."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1, findings=findings)
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "needs_fix", "round_label": "1", "findings": findings,
+    }
+
+
+def test_dna_a_foreign_run_review_artifact_is_never_adoptable(tmp_path):
+    """The invariant the carry-forward RELIES on, pinned against the REAL gate
+    rather than a string comparison: whatever label is carried, the token this
+    action dispatches under is built from THIS run's id, so review_ready.py
+    --expect-token refuses the stored prior-run artifact and codex_job.py's
+    safe_adopt() cannot adopt it. A carried label that could be satisfied by
+    the artifact already on disk would never reach a reviewer at all.
+
+    Green before this change as well as after -- it is here so a later edit to
+    the token construction cannot silently make the stale artifact adoptable."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    # draft_moved=False on purpose: review_ready.py checks the draft hash BEFORE
+    # the token, so a mismatched hash would refuse first and this test would pass
+    # without the token comparison ever running -- green for the wrong gate.
+    _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=False)
+
+    action = driver_mod.derive_next_action("seg01", ctx)
+    expect_token = driver_mod.review_dispatch_token(
+        _DNA_RUN_ID, "seg01", action["round_label"]
+    )
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS_SRC_DIR / "review_ready.py"), "seg01",
+         "--expect-token", expect_token,
+         "--durable-root", str(root), "--plugin-root", str(ASSETS_DIR.parent)],
+        capture_output=True, text=True, cwd=str(root), timeout=120,
+    )
+
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode != 0, (
+        f"review_ready.py must REFUSE the prior-run review artifact against this "
+        f"run's own token {expect_token!r} -- if it passes, codex_job.py's "
+        f"safe_adopt() adopts the stale verdict and no reviewer ever runs "
+        f"(stdout={proc.stdout!r} stderr={proc.stderr!r})"
+    )
+    assert "token" in combined.lower(), (
+        f"the refusal must be the TOKEN check, not an earlier gate -- otherwise "
+        f"this test is green for a reason that has nothing to do with the run "
+        f"component: {combined!r}"
+    )
+
+    # POSITIVE CONTROL. The same invocation, differing ONLY in the run
+    # component of the expected token, must ACCEPT -- which is what proves the
+    # refusal above is about the run component and not about a missing script,
+    # an unreadable fixture, or a hash the gate checks first.
+    own = subprocess.run(
+        [sys.executable, str(SCRIPTS_SRC_DIR / "review_ready.py"), "seg01",
+         "--expect-token", driver_mod.review_dispatch_token(
+             _DNA_PRIOR_RUN_ID, "seg01", "2"),
+         "--durable-root", str(root), "--plugin-root", str(ASSETS_DIR.parent)],
+        capture_output=True, text=True, cwd=str(root), timeout=120,
+    )
+    assert own.returncode == 0, (
+        f"the gate must ACCEPT the artifact against its OWN token -- if it does "
+        f"not, the refusal above proves nothing about the run component "
+        f"(stdout={own.stdout!r} stderr={own.stderr!r})"
+    )
+
+
+@pytest.mark.parametrize("field", ["previously_converged", "lost_sentinels"])
+def test_parse_ever_converged_selected_refuses_a_missing_field_by_name(field):
+    """REQUIRED, never defaulted to []. A missing key would read as "nothing
+    ever converged", which is the direction that WIDENS the carry-forward to
+    re-opened units -- the same reasoning eligible_not_dispatched's own check
+    records for itself."""
+    payload = {"previously_converged": [], "lost_sentinels": []}
+    del payload[field]
+
+    with pytest.raises(DRIVER.DriverError) as excinfo:
+        DRIVER.parse_ever_converged_selected(payload, {})
+
+    assert excinfo.value.exit_code == 2
+    assert field in str(excinfo.value), (
+        f"the refusal must name the missing field: {excinfo.value}"
+    )
+
+
+@pytest.mark.parametrize("bad", [
+    {"previously_converged": "seg01", "lost_sentinels": []},
+    {"previously_converged": [], "lost_sentinels": {"seg01": True}},
+    {"previously_converged": ["../escape"], "lost_sentinels": []},
+    {"previously_converged": [], "lost_sentinels": [17]},
+])
+def test_parse_ever_converged_selected_refuses_malformed_members(bad):
+    with pytest.raises(DRIVER.DriverError) as excinfo:
+        DRIVER.parse_ever_converged_selected(bad, {})
+
+    assert excinfo.value.exit_code == 2
+
+
+def test_parse_ever_converged_selected_unions_all_three_populations():
+    """The union is the whole point: previously_converged is emitted CLEARED of
+    successfully admitted sentinel-bearing claims, so the claim keys restore
+    that population, and lost_sentinels adds the #442 units admitted under
+    --allow-retranslate-converged with no claim at all."""
+    payload = {"previously_converged": ["seg01"], "lost_sentinels": ["seg03"]}
+
+    result = DRIVER.parse_ever_converged_selected(payload, {"seg02": "from-converged"})
+
+    assert result == frozenset({"seg01", "seg02", "seg03"})
+
+
+def test_run_wires_the_parsed_ever_converged_set_into_the_dispatch_context():
+    """#824 WIRING. Every behavioural test above injects
+    `ever_converged_selected` into DispatchContext directly, so deleting run()'s
+    own parse-and-pass would leave all of them green while production ran with
+    the constructor's empty default -- which fails in the WIDENING direction,
+    carrying a round label into every re-opened unit.
+
+    Asserted by reading run()'s source rather than by driving a whole selector
+    fixture: what is at risk is one keyword argument at one call site, and an
+    AST read fails loudly the moment it stops being passed, or stops being
+    passed the PARSED value."""
+    tree = ast.parse(DRIVER_SRC.read_text(encoding="utf-8"))
+    run_fn = next(
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run"), None
+    )
+    assert run_fn is not None, "segment_dispatch_driver.py has no module-level run()"
+
+    parsed_names = {
+        node.targets[0].id
+        for node in ast.walk(run_fn)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "parse_ever_converged_selected"
+    }
+    assert parsed_names == {"ever_converged_selected"}, (
+        f"run() must call parse_ever_converged_selected() exactly once and bind its "
+        f"result; found {sorted(parsed_names)}"
+    )
+
+    ctx_calls = [
+        node for node in ast.walk(run_fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "DispatchContext"
+    ]
+    assert len(ctx_calls) == 1, (
+        f"run() is expected to construct exactly one DispatchContext; found "
+        f"{len(ctx_calls)} -- a second one would need this wiring too"
+    )
+    passed = {
+        kw.arg: kw.value for kw in ctx_calls[0].keywords if kw.arg is not None
+    }
+    assert "ever_converged_selected" in passed, (
+        "run()'s DispatchContext construction must pass ever_converged_selected -- "
+        "without it production silently falls back to the constructor's empty "
+        "default and the round-label carry-forward widens to every re-opened unit"
+    )
+    value = passed["ever_converged_selected"]
+    assert isinstance(value, ast.Name) and value.id in parsed_names, (
+        "it must be passed the value parse_ever_converged_selected() returned, not "
+        "a literal or a re-derived expression"
+    )
