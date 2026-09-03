@@ -644,12 +644,7 @@ def build_corpus(
     # here. A corpus file is per-attempt and the digest the session keeps
     # refers to THIS one; silently overwriting an existing path would leave a
     # kept digest pointing at bytes that are gone.
-    if out_path.exists():
-        raise CanonHarmonisationFatalError(
-            f"{out_path} already exists -- a corpus file is per-attempt and is "
-            "never overwritten"
-        )
-    _atomic_publish(out_path, raw)
+    _atomic_publish(out_path, raw, create_only=True)
 
     return {
         "success": True,
@@ -945,7 +940,7 @@ def _check_kind_rule(idx, kind, rule, members, canon_members, target_bearing,
             )
 
 
-def _atomic_publish(dest: Path, raw: bytes) -> None:
+def _atomic_publish(dest: Path, raw: bytes, create_only: bool = False) -> None:
     """Publishes `raw` at `dest`: write a temp file in DEST's own directory,
     fsync it, then os.replace() over whatever was there. See the module
     docstring's --approve-to section for why this OVERWRITES (unlike
@@ -985,14 +980,34 @@ def _atomic_publish(dest: Path, raw: bytes) -> None:
             f.write(raw)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, dest)
+        if create_only:
+            # os.link, not exists()-then-replace: the check-then-act pair has a
+            # window, and Path.exists() follows symlinks, so a DANGLING symlink
+            # at dest answers False and os.replace would then clobber whatever
+            # it points at. link() is atomic and fails with EEXIST on any
+            # existing name, symlink included. Used for the per-attempt corpus
+            # file, whose digest the session is holding; the durable sidecar is
+            # meant to be replaced and keeps os.replace.
+            try:
+                os.link(tmp_path, dest)
+            except FileExistsError:
+                raise CanonHarmonisationFatalError(
+                    f"{dest} already exists -- a corpus file is per-attempt and is "
+                    "never overwritten"
+                )
+        else:
+            os.replace(tmp_path, dest)
         replaced = True
     except OSError as exc:
         raise CanonHarmonisationFatalError(
             f"--approve-to could not publish the validated snapshot at {dest}: {exc}"
         )
     finally:
-        if not replaced:
+        # os.link leaves the source name in place, so the temp is cleaned up on
+        # SUCCESS too in that mode -- not only on the failure path os.replace
+        # needs. Swallowed either way: a failed cleanup must never replace the
+        # fatal this function may already be raising.
+        if not replaced or create_only:
             try:
                 tmp_path.unlink(missing_ok=True)
             except OSError:

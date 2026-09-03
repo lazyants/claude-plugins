@@ -706,3 +706,95 @@ def test_build_corpus_serialisation_matches_the_pinned_shape(tmp_path):
         "the pinned vector and the live writer disagree about which top-level "
         "fields a corpus file carries"
     )
+
+
+# A SECOND vector, non-ASCII this time. The empty one above is ASCII-only, so
+# it is byte-identical under ensure_ascii=False and ensure_ascii=True: a
+# regression that started escaping every non-Latin source form would keep it
+# green while moving the digest of every real corpus this plugin builds, and
+# the digest is the whole anchor. Built with chr()-free literal text because
+# the forms themselves are the subject here, not any boundary character.
+NON_ASCII_CORPUS_SHA256 = (
+    "4c94385884a0ac4a786653111483505d1e43b0568eb3aa1af296f8e33ee3d016"
+)
+
+
+def _non_ascii_corpus_doc():
+    return {
+        "canon_sha256": "0" * 64,
+        "candidates_source": "bootstrap",
+        "converged_segments": 1,
+        "draft_rows_skipped": 0,
+        "drafts_excluded_stale_review": 0,
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "observations": [
+            {"corpus": "canon", "source_form": "בָאבְרִינִצֶער",
+             "target_form": "Mordechai Babrinitzer"},
+            {"corpus": "draft", "source_form": "בָאבְרִינִצֶער",
+             "target_form": "Mordechai Bobrinitzer", "n_segments": 2},
+        ],
+        "schema_version": 1,
+    }
+
+
+def test_non_ascii_corpus_byte_vector_pins_ensure_ascii():
+    """The vector, and the property the ASCII one cannot carry: serialising
+    the same document with ensure_ascii=True must NOT reach this digest. That
+    is what makes this pair a guard on the writer's option rather than a
+    restatement of it."""
+    doc = _non_ascii_corpus_doc()
+    raw = json.dumps(
+        doc, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    assert hashlib.sha256(raw).hexdigest() == NON_ASCII_CORPUS_SHA256
+    assert len(raw) == 605
+
+    escaped = json.dumps(
+        doc, ensure_ascii=True, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    assert escaped != raw
+    assert hashlib.sha256(escaped).hexdigest() != NON_ASCII_CORPUS_SHA256
+
+
+def test_build_corpus_writes_non_ascii_forms_unescaped(tmp_path):
+    """The LIVE writer over non-Latin data: the bytes on disk must carry the
+    source form itself, not a \\uXXXX escape of it, and their digest must be
+    the one the run reported. A corpus of Hebrew or Yiddish names is the
+    normal case for this plugin, so an ASCII-only fixture tests the writer on
+    data it will almost never see."""
+    root = make_corpus_durable_root(tmp_path / "durable_root")
+    source_form = "בָאבְרִינִצֶער"
+    write_canon(root, [canon_entry(source_form, "Mordechai Babrinitzer")])
+
+    proc = run_harmonisation(root, "--build-corpus", "--candidates-source", "disabled")
+    assert proc.returncode == 0, proc.stderr
+    summary = parse_stdout(proc)
+
+    raw = Path(summary["corpus_path"]).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == summary["corpus_sha256"]
+    assert source_form.encode("utf-8") in raw, (
+        "the corpus file must carry the source form itself; an escaped copy "
+        "parses back the same but moves the digest of every real corpus"
+    )
+    assert b"\\u05d1" not in raw
+
+
+def test_build_corpus_refuses_a_dangling_symlink_at_the_out_path(tmp_path):
+    """The reason create-once is os.link rather than exists()-then-replace.
+    Path.exists() FOLLOWS symlinks, so a dangling one answers False: a check
+    would pass and os.replace would then write through the link's name. link()
+    fails with EEXIST on any existing name, symlink included, and does it
+    atomically -- there is no window between the check and the act."""
+    root = make_corpus_durable_root(tmp_path / "durable_root")
+    write_canon(root, [canon_entry("CanonSource", "CanonTarget")])
+    out = root / "harmonisation" / "corpus_fixed.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.symlink_to(root / "nothing_here.json")
+    assert not out.exists(), "fixture sanity: a dangling symlink must answer False"
+    assert out.is_symlink()
+
+    proc = run_harmonisation(root, "--build-corpus", "--candidates-source", "disabled",
+                             "--out", str(out))
+    assert proc.returncode == 2, proc.stdout
+    assert_no_stdout(proc)
+    assert "never overwritten" in proc.stderr
+    assert out.is_symlink(), "the link itself must be untouched"
+    assert not (root / "nothing_here.json").exists(), "nothing may be written through it"
