@@ -152,6 +152,28 @@ AUTHORITATIVE_FIXTURE_INVENTORY = (
         ),
     },
     {
+        "file": "changelog_figures.test.py",
+        "category": 2,
+        "note": (
+            "Does not isolate any canon_senses consumer. Its ONE "
+            "spec_from_file_location loads glossary_dispatch_driver.py -- "
+            "not a consumer -- to read its argument parser's own "
+            "--deadline-sec default. It names glossary_batch_plan.py in two "
+            "places, neither an isolation: once in a docstring, and once as "
+            "the 1.80.0 FIGURES row's derive, which does read_text() + "
+            "ast.parse on that script to recover the DEFAULT_BATCH_SIZE "
+            "literal the changelog entry cites. That is the SAME AST-read "
+            "pattern fetch_citation.test.py is inventoried for above, and "
+            "for the same reason: glossary_batch_plan.py does a bare `from "
+            "canon_senses import ...` at module scope, so importing it "
+            "would need the sys.path surgery this guard exists to police, "
+            "while reading its source text needs no canon_senses at parse "
+            "time or run time. Verified 2026-09-03 by grepping every "
+            "shutil.copy*/spec_from_file_location/SourceFileLoader site in "
+            "the file: exactly one, naming glossary_dispatch_driver.py."
+        ),
+    },
+    {
         "file": "select_segments.test.py",
         "category": 2,
         "note": (
