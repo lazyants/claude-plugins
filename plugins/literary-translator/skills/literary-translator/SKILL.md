@@ -2243,11 +2243,25 @@ called. It:
   digest). `--classify-only` reads without ever triggering this gate.
 - **#820:** a FOURTH refusal, and the one that orders W3 against W5 —
   `select_segments.py` FATALs when this project has an unfinished W3 glossary
-  pass. Two things must BOTH hold: a run directory exists under
-  `${durable_root}/glossary/runs/`, and `glossary_batch_plan.py` still reports
-  outstanding name candidates (`no_new_candidates: false`). Requiring both is
-  what lets a project with `glossary.enabled: false`, and a project that has
-  never dispatched a glossary pass at all, through with no flag.
+  pass. A run directory must first exist under `${durable_root}/glossary/runs/`
+  — that condition alone is what lets a project with `glossary.enabled: false`,
+  and a project that has never dispatched a glossary pass at all, through with
+  no flag. Once one does exist, THREE checks run in order and any refusal wins:
+  `glossary_batch_plan.py` still reporting outstanding name candidates
+  (`no_new_candidates: false`); then a STRUCTURAL completion check, refusing
+  `glossary-run-incomplete` when any `manifest_<index>.json` in a run directory
+  lacks its `out_<index>_attempt_0.json`, i.e. a batch that was never
+  adjudicated; then a FROZEN-PLAN check, refusing `glossary-run-plan-outstanding`
+  when the planner — re-invoked at `--min-candidate-freq 1` — still reports a
+  name that any run's `manifest_all.json` froze.
+  The last two exist because the first reads MUTABLE inputs. A pass freezes its
+  batch plan at launch, so raising `glossary.min_candidate_freq` in `profile.yml`
+  mid-pass, or regenerating `name_candidates.json`, could otherwise retire a
+  name the run is still going to merge — a false admission of exactly the
+  ordering this gate exists to prevent. The structural check consults no project
+  input at all, which is why it is the one that closes candidate REMOVAL; the
+  floor-1 re-invocation is intersected with the frozen set so a low-frequency
+  straggler no run ever froze cannot refuse a fully-merged project forever.
   The hazard is ORDERING, not correctness. The glossary pass is what freezes
   name forms in `canon.json`: merged BEFORE W5 it hands the translator final
   forms, merged AFTER W5 has converged every name it canonizes that the drafts
@@ -2263,9 +2277,12 @@ called. It:
   unattested forms in a position to overrule reviewed prose.
   There is no durable `merged: true` to read anywhere (the glossary driver's
   state lives in a `--verdict-dir` it refuses to place inside the durable root,
-  and the merge writes only `canon.json`), which is why the second half of the
-  predicate asks the shipped planner what W3 still has to do rather than
-  inferring completeness from run-directory contents.
+  and the merge writes only `canon.json`), which is why the first check asks the
+  shipped planner what W3 still has to adjudicate instead of trying to read
+  completeness off a marker that does not exist. The structural check does read
+  run-directory contents, but only for a fact the directory genuinely settles —
+  whether a frozen batch ever produced its output — never for whether a name was
+  merged.
   `--allow-unmerged-glossary` authorizes exactly this dispatch and nothing
   else — it clears none of the refusals above — and is the sanctioned answer
   for an operator who has decided to proceed. `--classify-only` reads without
@@ -2275,7 +2292,13 @@ called. It:
   reopened `review_queue` name. On disk that state is byte-identical to a
   completed run that adjudicated the same name back to the queue — the name
   sits in `review_queue[]` and in that run's `manifest_all.json` either way —
-  so no read-only predicate over durable artifacts separates them.
+  so no read-only predicate over durable artifacts separates them. Nor can it
+  see a run whose batches ALL completed, whose names were never merged, AND
+  whose names were later removed from `name_candidates.json`: the frozen-plan
+  check asks the planner, and the planner sources names from that file alone
+  (`glossary_batch_plan.py:712`), so a name absent from it cannot resurface at
+  any floor. Closing that would mean re-deciding canon membership inside
+  `select_segments.py`, which is the iron rule's territory, not a script's.
 
 **1.2.0: the deterministic pre-workflow step, after `SEGS` and before
 `pipeline()`.** With `SEGS` finalized, invoke `resume_setup.py` (kind

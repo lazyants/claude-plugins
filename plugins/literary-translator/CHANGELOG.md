@@ -27,12 +27,24 @@ than another sentence.
   `mass-translate-wf.template.js` + `pipeline()` fallback runs it before dispatch — so the decision
   logic exists once and both paths inherit it. `segment_dispatch_driver.py` only forwards the new
   flag, adding no meaning of its own.
-- **It refuses only when BOTH halves hold:** a run directory exists under
-  `${durable_root}/glossary/runs/`, AND `glossary_batch_plan.py` reports `no_new_candidates: false`.
-  A project with `glossary.enabled: false`, and a project that has never dispatched a glossary pass,
-  are admitted with no flag. Replayed against the incident's real commits: the pre-merge canon (247
+- **A run directory must exist first,** under `${durable_root}/glossary/runs/`. That condition alone
+  is what admits, with no flag, a project with `glossary.enabled: false` and a project that has never
+  dispatched a glossary pass. Once one exists, THREE checks run in order and any refusal wins:
+  `glossary_batch_plan.py` reporting `no_new_candidates: false`; a STRUCTURAL completion check
+  (`glossary-run-incomplete`) when any `manifest_<index>.json` lacks its `out_<index>_attempt_0.json`,
+  i.e. a batch that was never adjudicated; and a FROZEN-PLAN check (`glossary-run-plan-outstanding`)
+  when the planner, re-invoked at `--min-candidate-freq 1`, still names something any run's
+  `manifest_all.json` froze. Replayed against the incident's real commits: the pre-merge canon (247
   entries) refuses with 2 outstanding batches, the post-merge canon (312 entries) admits.
-- **Why the second half asks the planner rather than reading the run directory.** There is no durable
+- **The last two exist because the first reads MUTABLE inputs.** A pass freezes its batch plan at
+  launch, so raising `glossary.min_candidate_freq` mid-pass, or regenerating `name_candidates.json`,
+  could retire a name the run is still going to merge — a false admission of the very ordering this
+  gate exists to enforce. The structural check consults no project input at all, which is what closes
+  candidate REMOVAL; the floor-1 re-invocation is intersected with the frozen set, so a low-frequency
+  straggler that no run ever froze cannot refuse a fully-merged project forever. The cheap check runs
+  first, so a refusal short-circuits before any second subprocess, and every indeterminate branch in
+  both refuses rather than admitting.
+- **Why the first check asks the planner rather than reading canon directly.** There is no durable
   `merged: true` anywhere. The glossary driver's state document lives in a `--verdict-dir` that
   `resolve_verdict_dir()` refuses to place inside the durable root, `merged` is returned in-process,
   and the merge writes only `canon.json`. Adding a marker would need two writers, a backfill for every
@@ -58,7 +70,11 @@ than another sentence.
   predicate over durable artifacts separates the two. Separately, the gate binds the fallback
   launcher by the same convention that binds every other `select_segments.py` admission gate — the
   fallback takes its `SEGS` from Workflow args and nothing mechanically forces the preflight call.
-  Neither is introduced by this release.
+  Neither is introduced by this release. Nor can the gate see a run whose batches ALL completed,
+  whose names were never merged, AND whose names were later removed from `name_candidates.json`: the
+  frozen-plan check asks the planner, and the planner sources names from that file alone, so a name
+  absent from it cannot resurface at any floor. Closing that would mean re-deciding canon membership
+  inside `select_segments.py`, which the iron rule puts off limits.
 - **Upgrade cost.** `segment_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` file, so this release
   moves `plugin_bundle_hash`: on an upgraded project every converged segment reclassifies as `stale`
   (re-translate only — no derivation-bundle member is touched), and an interrupted run mints a fresh

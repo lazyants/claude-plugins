@@ -140,7 +140,7 @@
    "claim": "#488 added `canon_senses.senses_for`, which computes exactly this, and this function was DELIBERATELY not re-pointed at it. The lookup here is normalized through THIS module's own `normalize_form` binding, and `tests/canon_validate_recollapse.test.py:289-301` pins the indexed fast path by monkeypatching that binding and asserting exactly one call; delegating would move the call inside canon_senses, silently reduce that count to zero, and force a passing performance test to be rewritten for a refactor #488 does not need. The shared comparator is",
    "target": "plugins/literary-translator/tests/canon_validate_recollapse.test.py"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5592\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:6003\", 0]": {
    "anchors": [
     "run_id_problem = validate_run_id(run_id)"
    ],
@@ -855,7 +855,7 @@
    ],
    "claim": "\"in_progress\"})` (mass-translate-wf.template.js:2413) completes BEFORE `agent(translateDrivePrompt(seg))` (:2416) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of"
   },
-  "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5592\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:6003\", 0]": {
    "anchors": [
     "run_id_problem = validate_run_id(run_id)"
    ],
@@ -873,7 +873,7 @@
    ],
    "claim": "# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1559), and D3 (:5009) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces"
   },
-  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5601\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:6012\", 0, \"continuation\"]": {
    "anchors": [
     "D3: the authorization must be a SUBSET"
    ],
@@ -979,7 +979,7 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3747-3753\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3770-3776\", 0]": {
    "anchors": [
     "Excluded from every bundle hash",
     "nor of `orchestration_bundle_hash`",
@@ -1485,6 +1485,18 @@
     "2. Present (of any kind lstat can see) -> pass"
    ],
    "claim": "# 9d-i (real filesystem, a dangling symlink): os.lstat() on the durable sidecar SUCCEEDS -- genuinely \"present\" at resolve_glossary_senses_arg()'s own definitive-stat layer (select_segments.py:4411-4502, branch 2: \"Present (of any kind lstat can see) -> pass --senses-path explicitly\")."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"glossary_batch_plan.py:712\", 0]": {
+   "anchors": [
+    "rows = load_name_candidates(name_candidates_path)"
+   ],
+   "claim": "CONDITION 3b cannot see a frozen name REMOVED OUTRIGHT from a regenerated name_candidates.json: glossary_batch_plan.py's own rows/candidate_names are sourced from that file alone (glossary_batch_plan.py:712's load_name_candidates() call), so a name absent from it can never resurface in any of the planner's batches[].names, whatever the floor."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/SKILL.md\", \"glossary_batch_plan.py:712\", 0]": {
+   "anchors": [
+    "rows = load_name_candidates(name_candidates_path)"
+   ],
+   "claim": "the frozen-plan check asks the planner, and the planner sources names from that file alone (glossary_batch_plan.py:712), so a name absent from it cannot resurface at any floor."
   }
  },
  "exemptions": {
