@@ -392,6 +392,78 @@ def test_check_approve_to_os_replace_failure_does_not_orphan_temp_file(tmp_path)
     assert leftovers == [], f"os.replace() failure orphaned a temp file: {leftovers}"
 
 
+def test_check_approve_to_unusable_parent_is_fatal_not_a_gate_failure(tmp_path):
+    """#823 closing security pass, MINOR 1. _atomic_publish()'s
+    `dest.parent.mkdir(...)` sat OUTSIDE the try/except OSError wrapping
+    the rest of the publish, so a DEST whose parent path is a regular file
+    raised a bare FileExistsError -- an uncaught traceback under exit 1.
+
+    Exit 1 in this script's convention means the ARTIFACT is bad, so a
+    perfectly valid proposal set was discarded and the W-step reported the
+    wrong reason for it. A publish that cannot happen is a FATAL (exit 2),
+    which is exactly what the os.replace sibling above already asserts.
+
+    Forces the REAL failure, no mock: `blocker` is a regular file, and
+    DEST is a path underneath it."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, entries, doc = two_member_fixture(root)
+    attempt = root / "harmonisation" / "attempt_1.json"
+    write_json(attempt, doc)
+    blocker = root / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    dest = blocker / "canon_harmonisation.json"
+
+    proc = run_harmonisation(root, "--check", str(attempt), "--approve-to", str(dest))
+    assert proc.returncode == 2, proc.stdout  # CanonHarmonisationFatalError -> exit 2
+    assert_no_stdout(proc)
+    assert "Traceback" not in proc.stderr, (
+        f"a filesystem fault must surface as this script's named fatal, "
+        f"not a raw traceback:\n{proc.stderr}"
+    )
+    assert blocker.read_text(encoding="utf-8") == "not a directory"
+
+
+@pytest.mark.parametrize("mode", ["check", "report"])
+def test_canon_entry_that_is_not_an_object_is_fatal(tmp_path, mode):
+    """#823 closing security pass, MINOR 2. _load_canon() checked that
+    entries{} is a dict but never that its VALUES are. Both modes then call
+    `.get("canonical_target_form")` on a record, so a canon.json mapping a
+    name straight to a string -- a hand edit, a truncated write -- raised
+    AttributeError as an uncaught traceback under exit 1, blaming the
+    artifact for a canon fault. A canon fault is a fatal (exit 2), and the
+    difference decides whether the operator re-runs the pass or fixes
+    their canon."""
+    root = make_durable_root(tmp_path / "durable_root")
+    csha, entries, doc = two_member_fixture(root)
+    # Rewrite canon.json with one entry mapped to a bare string.
+    keyed = {e["source_form"]: e for e in entries}
+    keyed[entries[0]["source_form"]] = entries[0]["canonical_target_form"]
+    (root / "canon.json").write_bytes(json.dumps({
+        "entries": keyed,
+        "review_queue": [],
+        "generation_hashes": {
+            "particle_config_hash": "test-hash",
+            "derivation_bundle_hash": "test-hash",
+        },
+    }, ensure_ascii=False).encode("utf-8"))
+
+    if mode == "check":
+        attempt = root / "harmonisation" / "attempt_1.json"
+        write_json(attempt, doc)
+        proc = run_harmonisation(root, "--check", str(attempt))
+    else:
+        write_json(root / "canon_harmonisation.json", doc)
+        proc = run_harmonisation(root, "--report")
+
+    assert proc.returncode == 2, proc.stdout
+    assert_no_stdout(proc)
+    assert "Traceback" not in proc.stderr, (
+        f"a malformed canon entry must surface as this script's named "
+        f"fatal, not a raw traceback:\n{proc.stderr}"
+    )
+    assert "not an entry object" in proc.stderr
+
+
 # ===========================================================================
 # --check exit 1 -- schema failures (a), naming the DOCUMENT, not an index
 # ===========================================================================

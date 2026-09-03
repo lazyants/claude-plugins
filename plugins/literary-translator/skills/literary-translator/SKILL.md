@@ -2117,6 +2117,14 @@ Otherwise, five ordered actions:
    self-attesting that it validated its own output is a claim, not a
    check. The per-attempt path exists precisely so this check cannot bind
    a PREVIOUS run's artifact.
+
+   Compare the `canon_sha256` in the check's own stdout summary against
+   the digest computed in step 1, and treat a mismatch exactly like a
+   failed check. `--check` can only confirm that the artifact's anchor
+   matches canon.json AS IT IS ON DISK NOW; the dispatched pass holds
+   write access to the same `durable_root`, so a pass that edited
+   canon.json and re-stamped the new digest would satisfy the script and
+   only this comparison catches it.
 5. **Only after step 4 exits 0**, render the report:
 
    ```

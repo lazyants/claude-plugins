@@ -183,7 +183,7 @@ def _window(text: str) -> tuple[int, int]:
     return start, end
 
 
-def _assert_placement(text: str) -> tuple[int, int]:
+def _assert_placement(text: str) -> None:
     start, end = _window(text)
 
     # Branch coverage needs no assertion of its own here: all three
@@ -213,7 +213,6 @@ def _assert_placement(text: str) -> tuple[int, int]:
         "ASSERTION 1 (placement): the harmonisation W-step's window must "
         "close at or before W3a Segpack generation"
     )
-    return start, end
 
 
 def _assert_input(text: str) -> None:

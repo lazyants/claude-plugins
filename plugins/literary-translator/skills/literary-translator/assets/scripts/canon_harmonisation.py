@@ -234,7 +234,6 @@ DURABLE_ROOT = SCRIPTS_DIR.parent
 SCHEMAS_DIR = DURABLE_ROOT / "schemas"
 CANON_PATH = DURABLE_ROOT / "canon.json"
 HARMONISATION_FILENAME = "canon_harmonisation.json"
-HARMONISATION_PATH = DURABLE_ROOT / HARMONISATION_FILENAME
 SCHEMA_FILENAME = "canon-harmonisation.schema.json"
 
 
@@ -294,12 +293,21 @@ def _read_json_bytes(path: Path, label: str):
 
 
 def _load_canon(canon_path: Path):
-    """Returns (raw_bytes, doc, entries) for canon.json at `canon_path`.
+    """Returns (raw_bytes, entries) for canon.json at `canon_path`.
     Raises CanonHarmonisationFatalError on anything short of a readable
-    JSON object carrying an entries{} mapping -- this script trusts
-    canon_validate.py's own validate-only pass to have already enforced
-    canon-file.schema.json's full shape; it only needs entries{} itself to
-    be present and dict-shaped to anchor and look up against."""
+    JSON object carrying an entries{} mapping of dict-shaped records --
+    this script trusts canon_validate.py's own validate-only pass to have
+    already enforced canon-file.schema.json's full shape; it only needs
+    entries{} itself to anchor and look up against.
+
+    The per-VALUE check is not redundant with that trust: both modes call
+    `.get("canonical_target_form")` on a record, so a canon.json whose
+    entries{} maps a name straight to a string -- a hand edit, a truncated
+    write -- would raise AttributeError and surface as an uncaught
+    traceback under exit 1, which in this script's convention means "the
+    ARTIFACT is bad". A canon fault is a fatal (exit 2), and saying so is
+    the difference between the operator re-running the pass and the
+    operator fixing their canon."""
     raw, doc = _read_json_bytes(canon_path, "canon.json")
     entries = doc.get("entries")
     if not isinstance(entries, dict):
@@ -307,7 +315,13 @@ def _load_canon(canon_path: Path):
             f"canon.json at {canon_path} has no entries{{}} mapping "
             f"(got {type(entries).__name__ if entries is not None else 'missing'})"
         )
-    return raw, doc, entries
+    for source_form, entry in entries.items():
+        if not isinstance(entry, dict):
+            raise CanonHarmonisationFatalError(
+                f"canon.json at {canon_path} maps {source_form!r} to a "
+                f"{type(entry).__name__}, not an entry object"
+            )
+    return raw, entries
 
 
 # ---------------------------------------------------------------------------
@@ -493,10 +507,17 @@ def _atomic_publish(dest: Path, raw: bytes) -> None:
     exception type (plus CanonHarmonisationRefusal), so anything else
     reaching it would surface as an uncaught traceback instead of the
     named fatal."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = dest.parent / f".{dest.name}.tmp.{os.getpid()}.{os.urandom(4).hex()}"
     replaced = False
     try:
+        # INSIDE the try on purpose: mkdir raises OSError of its own (a
+        # regular file where a parent directory is expected raises
+        # FileExistsError), and outside it that escaped as an uncaught
+        # traceback under exit 1 -- "the ARTIFACT is bad" in this script's
+        # convention, for what is actually a filesystem fault. Publishing
+        # failures are fatals (exit 2), which is what the sibling
+        # os.replace failure already asserts.
+        dest.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         with os.fdopen(fd, "wb") as f:
             f.write(raw)
@@ -516,20 +537,31 @@ def _atomic_publish(dest: Path, raw: bytes) -> None:
                 pass
 
 
+def _schema_failure_message(doc: dict, schemas_dir: Path, path: Path) -> "str | None":
+    """The ONE wording for a schema rejection, shared by both modes. Two
+    verbatim copies of a contract string drift; this one does not, and the
+    tests pin the wording in exactly one place. Only the FIRST error is
+    reported (the list _schema_errors returns is sorted, so "first" is
+    deterministic) -- an operator fixes one thing at a time, and the
+    remaining errors are re-derived on the next run."""
+    errors = _schema_errors(doc, schemas_dir)
+    if not errors:
+        return None
+    first = errors[0]
+    loc = "/".join(str(p) for p in first.path) or "<root>"
+    return f"{path} failed schema validation at '{loc}': {first.message}"
+
+
 def run_check(path_str: str, approve_to_str: "str | None") -> dict:
     path = Path(path_str)
-    canon_bytes, _canon_doc, entries = _load_canon(CANON_PATH)
+    canon_bytes, entries = _load_canon(CANON_PATH)
     canon_sha256 = hashlib.sha256(canon_bytes).hexdigest()
 
     raw, doc = _read_json_bytes(path, "harmonisation attempt artifact")
 
-    errors = _schema_errors(doc, SCHEMAS_DIR)
-    if errors:
-        first = errors[0]
-        loc = "/".join(str(p) for p in first.path) or "<root>"
-        raise CanonHarmonisationRefusal(
-            f"{path} failed schema validation at '{loc}': {first.message}"
-        )
+    schema_failure = _schema_failure_message(doc, SCHEMAS_DIR, path)
+    if schema_failure:
+        raise CanonHarmonisationRefusal(schema_failure)
 
     _check_anchor(doc, canon_sha256, path)
     _check_proposals(doc, entries)
@@ -725,15 +757,11 @@ def run_report(
 
     _raw, doc = _read_json_bytes(harmonisation_path, "canon_harmonisation.json")
 
-    errors = _schema_errors(doc, schemas_dir)
-    if errors:
-        first = errors[0]
-        loc = "/".join(str(p) for p in first.path) or "<root>"
-        raise CanonHarmonisationFatalError(
-            f"{harmonisation_path} failed schema validation at '{loc}': {first.message}"
-        )
+    schema_failure = _schema_failure_message(doc, schemas_dir, harmonisation_path)
+    if schema_failure:
+        raise CanonHarmonisationFatalError(schema_failure)
 
-    canon_bytes, _canon_doc, entries = _load_canon(canon_path)
+    canon_bytes, entries = _load_canon(canon_path)
     canon_sha256 = hashlib.sha256(canon_bytes).hexdigest()
     canon_current = doc["canon_sha256"] == canon_sha256
 
