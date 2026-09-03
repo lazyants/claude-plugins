@@ -336,14 +336,16 @@ re-invalidate converged work against.
     python3 segment_dispatch_driver.py
         [--durable-root PATH] [--plugin-root PATH]
         [--only-segs SEG1,SEG2,...] [--allow-retranslate-converged]
-        [--allow-empty] [--from-cap SEG1,SEG2,...] [--from-converged SEG1,SEG2,...]
+        [--allow-empty] [--allow-unmerged-glossary]
+        [--from-cap SEG1,SEG2,...] [--from-converged SEG1,SEG2,...]
         [--from-stalled SEG1,SEG2,...]
         [--max-concurrent-codex-jobs N] [--node BIN]
 
 Forwards `--only-segs`/`--allow-retranslate-converged`/`--allow-empty`/
-`--from-cap`/`--from-converged`/`--from-stalled` verbatim to
-`select_segments.py` -- see that script's own module docstring for their
-exact semantics; this script adds no independent meaning to any of them.
+`--allow-unmerged-glossary`/`--from-cap`/`--from-converged`/`--from-stalled`
+verbatim to `select_segments.py` -- see that script's own module docstring
+for their exact semantics; this script adds no independent meaning to any
+of them.
 `--from-cap`/`--from-converged`/`--from-stalled` (#438, #455) request
 claim admission for the named ids from the Step 1 gate call, and that
 admission is SINGLE-PHASE: the one `select_segments.py` invocation this
@@ -893,7 +895,7 @@ def fatal(message: str, exit_code: int = 1, **extra) -> NoReturn:
 # json"), and _read_review_obj()'s copy of the same. The REAL protection is
 # cross-file, not "this script never does it": select_segments.py's own
 # load_candidate_segments() fatals on any manifest.json `seg` failing its
-# validate_seg() (select_segments.py:1316-1332, the regex check at :1251) --
+# validate_seg() (select_segments.py:1347-1363, the regex check at :1282) --
 # every `seg` this script ever operates on already came from THAT
 # validated output (the `segs` list Step 1's own gate returns), never from
 # an unvalidated source, before this script ever builds a path from one.
@@ -1629,6 +1631,7 @@ def run_select_segments(
     only_segs=None,
     allow_retranslate_converged=False,
     allow_empty=False,
+    allow_unmerged_glossary=False,
     from_cap=None,
     from_converged=None,
     from_stalled=None,
@@ -1733,6 +1736,8 @@ def run_select_segments(
         cmd += ["--allow-retranslate-converged"]
     if allow_empty:
         cmd += ["--allow-empty"]
+    if allow_unmerged_glossary:
+        cmd += ["--allow-unmerged-glossary"]
     if from_cap is not None:
         cmd += ["--from-cap", from_cap]
     if from_converged is not None:
@@ -7005,6 +7010,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Forwarded verbatim to select_segments.py's own --allow-empty.",
     )
     parser.add_argument(
+        "--allow-unmerged-glossary",
+        action="store_true",
+        help=(
+            "Forwarded verbatim to select_segments.py's own "
+            "--allow-unmerged-glossary. Waives an admission precondition "
+            "that otherwise refuses W5 while this project has an unfinished "
+            "W3 glossary pass. This driver adds no independent meaning to it."
+        ),
+    )
+    parser.add_argument(
         "--from-cap",
         default=None,
         metavar="SEG1,SEG2,...",
@@ -7282,6 +7297,7 @@ def run(args, dirs: dict) -> dict:
             only_segs=args.only_segs,
             allow_retranslate_converged=args.allow_retranslate_converged,
             allow_empty=args.allow_empty,
+            allow_unmerged_glossary=args.allow_unmerged_glossary,
             from_cap=args.from_cap,
             from_converged=args.from_converged,
             from_stalled=args.from_stalled,

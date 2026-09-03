@@ -387,7 +387,7 @@ def _read_fragments(ledger_d: Path = LEDGER_D) -> dict:
     One `iterdir()` inside one try answers all of it: ENOENT/ENOTDIR are
     the definitive not-there, and every other OSError is a could-not-look
     that REFUSES rather than reporting emptiness -- the same split, and
-    deliberately the same shape, as select_segments.py:743-763. The
+    deliberately the same shape, as select_segments.py:774-794. The
     .json filter replaces the glob pattern exactly, name for name (see the
     endswith() comment in the loop): ledger_update.py stages
     `{seg}.json.tmp.{pid}` and publishes `{seg}.json`, so a staged temp file

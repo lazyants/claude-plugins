@@ -222,7 +222,7 @@ def validate_run_id(run_id):
 
     WHY THIS MODULE NEEDS ITS OWN COPY AT ALL: the asymmetry that made
     claimed_path() a path-traversal hole. The WRITER validated its run id
-    before minting a claim (select_segments.py:5018, called from its claim
+    before minting a claim (select_segments.py:5772, called from its claim
     block) and every READER built the same path from an unvalidated one.
     A run id can reach a reader from an untrusted place -- draft_ready.py's
     `_claim_run_id()` derives it from a draft's own `dispatch_token`, a

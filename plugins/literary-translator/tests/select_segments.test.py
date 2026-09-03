@@ -3410,6 +3410,18 @@ SENTINEL_NON_PARTICIPANTS = (
     # shells out to, whose participation is pinned above. Re-verified by the
     # ROLE check below rather than taken on the strength of this comment.
     "segment_dispatch_driver.py",
+    # #820's glossary-merge backfill. It owns its OWN durable record
+    # (`glossary/runs/<run_id>/merged.json`, whose absence is what the W5
+    # admission gate refuses on) and names `ever_converged` twice, both in
+    # prose: once to name `backfill_ever_converged.py` as one of the two
+    # sibling backfills whose shape it is modelled on, and once to cite
+    # `classify_ever_converged_sentinel()`'s AMBIGUOUS state as the precedent
+    # for refusing to overwrite a marker it cannot parse. Naming a sibling
+    # SCRIPT is not participating in its contract, and citing a fail-closed
+    # precedent is the roster's own stated case. It reads no sentinel, writes
+    # no sentinel, and carries no copy of the predicate -- re-verified by the
+    # ROLE check below rather than taken on the strength of this comment.
+    "backfill_glossary_merge_ack.py",
 )
 
 

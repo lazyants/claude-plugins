@@ -43,13 +43,13 @@ Zero converged means the move is free.
 
 **Within surface 1, members do NOT migrate equally.** `plugin_bundle_hash` and `schema_hash` route a
 mismatched converged segment to `stale` → **re-translate only**. But
-`derivation_bundle_hash ∈ DERIVATION_STATE_FIELDS` (`select_segments.py:1051-1063`, alongside
+`derivation_bundle_hash ∈ DERIVATION_STATE_FIELDS` (`select_segments.py:1081-1093`, alongside
 `particle_config_hash` / `source_extraction_hash` / `source_input_hash`) → routes to
-**`blocked_needs_regeneration`** (`select_segments.py:1502`): rerun **W3/W3a only**
+**`blocked_needs_regeneration`** (`select_segments.py:1533`): rerun **W3/W3a only**
 (`bootstrap_names.py` → glossary pass → `segpack.py`) FIRST, THEN re-translate — strictly HEAVIER.
 `derivation_bundle_hash` and `particle_config_hash` both route through `_w3_regen_step`
-(`select_segments.py:1065-1117`) — **W3/W3a, never W2**; W2 only reruns for `source_extraction_hash` /
-`source_input_hash` (`_W2_REGEN_STEP`, `select_segments.py:1126`). Verify this membership/remedy mapping
+(`select_segments.py:1095-1147`) — **W3/W3a, never W2**; W2 only reruns for `source_extraction_hash` /
+`source_input_hash` (`_W2_REGEN_STEP`, `select_segments.py:1157`). Verify this membership/remedy mapping
 against `select_segments.py` itself before restating it — this exact doc's own remedy text drifted to
 an overstated "W2/W3/W3a" once already (codex round-3 finding, 2026-07-23, #282/#283 plan review),
 verified wrong against `select_segments.py`'s field→function mapping directly; the enumeration and remedy
@@ -151,7 +151,7 @@ re-translating, put it in a SIDE-STORE keyed by `source_form`** — a sibling fi
 `entries{}` body.** No sidecar file is among the 15 cache-key fields (`schema_hash` = draft/review/
 segpack schemas only, `cache_key.py:510-518`), so sidecar DATA edits are cache-neutral. This is why a
 homonym-split / evidence design stores `senses[]` / evidence in a sidecar, not in canon entries.
-Belt-and-braces: `CANON_ENTRY_FIELDS` (`canon_validate.py:658-667`) is the projection
+Belt-and-braces: `CANON_ENTRY_FIELDS` (`canon_validate.py:688-690`) is the projection
 `_entry_from_accepted_item` writes, so a stray field on an accepted batch item is silently STRIPPED —
 you cannot accidentally leak entry-body data in via a merge. Note the code fix that READS the sidecar is
 still a bundle-member edit → surface-1 upgrade re-translation; "cache-neutral" is about the DATA
@@ -160,8 +160,8 @@ enrichment, never the code change.
 ## `schema_hash` is NOT regeneration-gated; a schema-description edit is free-on-top
 
 Only particle / extraction / input / **derivation** hash mismatches trigger
-`blocked_needs_regeneration` (`select_segments.py:1473`); a `schema_hash`-only mismatch is ordinary
-`stale` (`select_segments.py:1514`). So editing a cache-key schema's **description** on top of a release
+`blocked_needs_regeneration` (`select_segments.py:1504`); a `schema_hash`-only mismatch is ordinary
+`stale` (`select_segments.py:1545`). So editing a cache-key schema's **description** on top of a release
 that ALREADY flips `plugin_bundle_hash` is **zero marginal workload** — the 15-field composite
 `cache_key` is already invalidated, so it's the same single re-translation, not a second one. Corollary:
 a schema-description fix rides FREE on any already-cache-key-flipping release (and a
@@ -182,31 +182,31 @@ again.**
 The underlying trap is unchanged: the "rerun W3/W3a then re-translate" path is **not reachable via the
 glossary pass alone** for a fully-converged project (canon frozen, **zero unresolved glossary
 candidates**). The ONLY writer of `canon.json`'s `derivation_bundle_hash` was glossary **MERGE** mode
-(`_stamp_write_verify`, `canon_validate.py:2537-2543`; callers `run_merge` / `run_merge_batches` /
+(`_stamp_write_verify`, `canon_validate.py:2668-2673`; callers `run_merge` / `run_merge_batches` /
 `run_init` / `run_restamp_derivation`). The glossary pass **SKIPS entirely** when there are no candidates
 (`glossary_batch_plan.py:752-756`, a *tested* supported state, prints `{"no_new_candidates": true,
 "batches": []}`) → canon was never restamped → segpack rebuild copies the stale hash **verbatim, never
 recomputed** (`segpack.py:798-809`) → `select_segments` stayed `blocked_needs_regeneration`.
 
 **The sanctioned escape: `canon_validate.py --restamp-derivation`, then rerun `segpack.py`.**
-`run_restamp_derivation` (`canon_validate.py:2705-2745`) re-records the CURRENT `particle_config_hash` /
+`run_restamp_derivation` (`canon_validate.py:2836-2876`) re-records the CURRENT `particle_config_hash` /
 `derivation_bundle_hash` onto an existing `canon.json` **without touching its entries**
 (`force_restamp=True` into the shared `_stamp_write_verify`). `select_segments.py`'s own
-`blocked_needs_regeneration` hint already names it (`_w3_regen_step`, `select_segments.py:1110-1117`:
+`blocked_needs_regeneration` hint already names it (`_w3_regen_step`, `select_segments.py:1140-1147`:
 "...or, on a project with no new candidates left to merge, canon_validate.py --restamp-derivation --
 then segpack.py"). The full blocked → `--restamp-derivation` → `segpack.py` → cleared recovery is pinned
 end to end by `tests/derivation_gate_recovery_e2e.test.py` against the real scripts, no stub. Restamping
 alone still only reaches ordinary `stale` (re-translate), **never `reusable`** — the underlying file
 bytes genuinely changed, so `cache_key_mismatch` stays true even once the derivation-state fields
-themselves catch up (`classify_converged_segment`'s fall-through, `select_segments.py:1473-1517`, esp.
-`:1511-1517`). **Limitation, stated in the CHANGELOG rather than hidden:** `--restamp-derivation` is
+themselves catch up (`classify_converged_segment`'s fall-through, `select_segments.py:1503-1547`, esp.
+`:1541-1547`). **Limitation, stated in the CHANGELOG rather than hidden:** `--restamp-derivation` is
 operator-trusted — it does NOT itself verify the "no new candidates left to merge" precondition it
 documents.
 
 **Superseded workaround — do NOT cite this anymore.** The prior undocumented/unsanctioned trick
 ("`run_merge_batches` restamps unconditionally → a `--merge-batches <empty-batch>` forces a restamp",
 issue #193) is exactly what 1.15.0/#291 **removed**: `_stamp_write_verify` no longer restamps
-unconditionally (`canon_validate.py:2537-2564`, "a merge that changes nothing no longer moves
+unconditionally (`canon_validate.py:2668-2687`, "a merge that changes nothing no longer moves
 `generation_hashes`"), and `derivation_gate_recovery_e2e.test.py` has a step asserting "the pre-1.15.0
 empty-merge bypass no longer works." Cite `--restamp-derivation` only.
 
@@ -214,7 +214,7 @@ empty-merge bypass no longer works." Cite `--restamp-derivation` only.
 plugin feature):** segment classification is gated on ledger-FRAGMENT PRESENCE, not on hash content.
 `_read_fragments()` (`ledger_merge.py:368-422`) returns `{}` when `runs/ledger.d/` is missing, and
 otherwise keys each fragment by its filename stem (one file per segment, `runs/ledger.d/{seg}.json`);
-`classify_segment()` (`select_segments.py:1520-1525`) returns `{"category": "not_started"}` whenever a
+`classify_segment()` (`select_segments.py:1551-1556`) returns `{"category": "not_started"}` whenever a
 segment has NO record in the merged ledger at all. Deleting a blocked segment's
 `runs/ledger.d/{seg}.json` fragment therefore ALSO clears `blocked_needs_regeneration` — not via any
 restamp, but by discarding that segment's entire convergence record, forcing a full FRESH re-translation

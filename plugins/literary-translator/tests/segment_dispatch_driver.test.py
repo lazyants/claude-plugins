@@ -5154,8 +5154,8 @@ def test_derive_next_action_already_converged_round_1_when_clean_and_draft_match
 def test_derive_next_action_already_converged_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """codex round-4 ("Tests that could not fail"): current_draft_sha1()'s
     third argument -- dirs["scripts_dir"] -- is what makes this "clean and
-    draft matches" branch (segment_dispatch_driver.py:4957, feeding the
-    already_converged decision at :4984) hash the draft using the TRUSTED
+    draft matches" branch (segment_dispatch_driver.py:4962, feeding the
+    already_converged decision at :4989) hash the draft using the TRUSTED
     plugin tree's draft_sha1.py under --plugin-root, never the durable
     root's own writable, self-anchored copy (current_draft_sha1()'s own
     `scripts_dir=SCRIPTS_DIR` default). That default matters because the
@@ -6189,7 +6189,7 @@ def test_derive_next_action_fabricated_loc_gate_respects_node_bin(tmp_path):
 
 def test_derive_next_action_invalid_post_fix_draft_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """The invalid_post_fix_draft branch's own current_draft_sha1() call
-    (segment_dispatch_driver.py:4841) is a SECOND call site sharing the
+    (segment_dispatch_driver.py:4846) is a SECOND call site sharing the
     identical --plugin-root trust boundary as the already_converged
     branch's (see the sibling test above) -- untested here for the same
     reason: every existing --plugin-root fixture stages the REAL,

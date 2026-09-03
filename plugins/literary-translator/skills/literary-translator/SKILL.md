@@ -2241,6 +2241,64 @@ called. It:
   through — the sanctioned remedy is `backfill_resume_gate_ack.py --apply`,
   which records, per run id, that it predates the gate (never fabricating a
   digest). `--classify-only` reads without ever triggering this gate.
+- **#820:** a FOURTH refusal, and the one that orders W3 against W5 —
+  `select_segments.py` FATALs when this project has an unfinished W3 glossary
+  pass. A run directory must first exist under `${durable_root}/glossary/runs/`
+  — that condition alone is what lets a project with `glossary.enabled: false`,
+  and a project that has never dispatched a glossary pass at all, through with
+  no flag. Once one does exist, TWO checks run and either refusal wins:
+  `glossary_batch_plan.py` still reporting outstanding name candidates
+  (`no_new_candidates: false`), and a MERGE-MARKER check refusing
+  `glossary-run-unmerged` when any run directory lacks a valid
+  `merged.json`.
+  The hazard is ORDERING, not correctness. The glossary pass is what freezes
+  name forms in `canon.json`: merged BEFORE W5 it hands the translator final
+  forms, merged AFTER W5 has converged every name it canonizes that the drafts
+  rendered differently becomes a prose/canon conflict in already-reviewed text.
+  Measured once, on a 47-segment book whose pass stalled at 9 of 11 batches for
+  a reason outside the pipeline — nothing blocked W5, so the book converged
+  47/47 with every gate green; merging the last two batches then added 65 canon
+  entries, re-staled 44 of 47 segments, and the extra review pass returned 155
+  findings, 43 of them canon conflicts. Only 13 of those entries carried
+  `basis: established` and saw a citation judge, and several name forms with
+  ZERO occurrences in the delivered text, displacing forms well established
+  there — so a late merge does not merely cost a review pass, it can put
+  unattested forms in a position to overrule reviewed prose.
+  **The gate reads a recorded fact rather than inferring one, and that is the
+  whole design.** `canon_validate.py --merge-batches` writes
+  `${durable_root}/glossary/runs/<run_id>/merged.json` on a successful merge,
+  via `--glossary-merge-marker`, which the template's `mergeBatchesCmd()`
+  passes unconditionally — so BOTH W3 launch paths record it, the driver
+  because it builds its merge command from that builder, and a hand-driven
+  merge because it runs the same command. Two earlier designs tried to infer
+  merge state from durable artifacts and both were wrong in the same way: every
+  readable signal is either MUTABLE (the live `profile.yml` threshold, the
+  current `name_candidates.json`, both of which can retire a name a run already
+  froze) or silent about whether the merge itself ever happened. A marker whose
+  `run_id` disagrees with its own directory name is a copied file, not a merge
+  record, and is refused rather than trusted.
+  **This gate is correct going forward and unsatisfiable backwards**, exactly
+  like #409's resume-integrity gate: a project whose glossary merged before
+  1.77.0 has run directories with no marker and would refuse forever. The
+  sanctioned remedy is `backfill_glossary_merge_ack.py --apply`, which writes
+  an acknowledgement marker (`source: "backfill-ack"`, which the gate accepts
+  exactly like a real merge) and REFUSES to acknowledge any run whose
+  `manifest_<index>.json` lacks its `out_<index>_attempt_0.json` — a batch that
+  was never adjudicated is genuinely unfinished, and waving it through would be
+  the very defect this gate exists to prevent. It is a dry run unless `--apply`
+  is passed, and it never overwrites a real merge record.
+  `--allow-unmerged-glossary` authorizes exactly this dispatch and nothing
+  else — it clears none of the refusals above — and is the sanctioned answer
+  for an operator who has decided to proceed. `--classify-only` reads without
+  ever triggering this gate.
+  **What this gate cannot see**, recorded here because prose is the only place
+  it can live: nothing about whether the names a merge canonized were the RIGHT
+  ones. The marker records that a merge completed and was verified, not that
+  its adjudications were correct — that judgement belongs to the citation
+  review inside W3, and no gate in `select_segments.py` can or should re-make
+  it. An operator who acknowledges a legacy run with the backfill is asserting
+  the same thing about a run that predates the marker, and the marker's own
+  `note` says so rather than claiming a verified merge.
 
 **1.2.0: the deterministic pre-workflow step, after `SEGS` and before
 `pipeline()`.** With `SEGS` finalized, invoke `resume_setup.py` (kind
@@ -2465,6 +2523,7 @@ the spawned worker keeps running, producing a false "completed"):
 nohup python3 {durable_root}/scripts/segment_dispatch_driver.py \
     --plugin-root {plugin_root} \
     [--only-segs SEG1,SEG2,...] [--allow-retranslate-converged] \
+        [--allow-unmerged-glossary] \
     > {durable_root}/runs/driver.<SESSION_ID>.log 2>&1 < /dev/null & disown
 ```
 
@@ -2474,8 +2533,12 @@ its own journal directory.) Full CLI: `--durable-root PATH`/`--plugin-root
 PATH` (this driver's own sibling-script resolution — data root vs. install
 root, same split as every other #409 script — also threaded through to
 `select_segments.py`'s identical flags), `--only-segs SEG1,SEG2,...`/
-`--allow-retranslate-converged`/`--allow-empty` (forwarded verbatim to
-`select_segments.py`'s own flags of the same name, above), `--from-cap`/
+`--allow-retranslate-converged`/`--allow-empty`/`--allow-unmerged-glossary`
+(forwarded verbatim to `select_segments.py`'s own flags of the same name,
+above — this driver adds no independent meaning to any of them; the #820
+glossary admission gate the last of them waives lives in the SELECTOR, not
+here, so the fallback launcher inherits it from that same preflight call),
+`--from-cap`/
 `--from-converged`/`--from-stalled SEG1,SEG2,...` (also forwarded verbatim to
 `select_segments.py`'s own claim-ADMISSION flags of the same name — single-
 phase and durable-writing, a claim record plus a re-stamped draft

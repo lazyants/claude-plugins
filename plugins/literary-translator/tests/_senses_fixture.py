@@ -167,6 +167,24 @@ AUTHORITATIVE_FIXTURE_INVENTORY = (
         ),
     },
     {
+        "file": "backfill_glossary_merge_ack.test.py",
+        "category": 2,
+        "note": (
+            "Does not isolate any canon_senses consumer. Its shutil.copy* "
+            "targets are backfill_glossary_merge_ack.py -- a #820 backfill "
+            "that reads and writes only glossary/runs/<run_id>/merged.json "
+            "-- and json_stdout.py, a leaf helper. It names canon_validate.py "
+            "twice and only in prose: once in the module docstring, to say "
+            "which writer the marker normally comes from (`canon_validate.py "
+            "--merge-batches`), and once inside an assertion-failure message "
+            "asserting the retrofit marker must NOT claim to be a real "
+            "canon_validate.py merge. Verified 2026-09-03 by reading every "
+            "shutil.copy*/spec_from_file_location/SourceFileLoader site in "
+            "the file: exactly two copies, neither naming a consumer script, "
+            "and no in-process load of one."
+        ),
+    },
+    {
         "file": "canon_validate_plugin_root.test.py",
         "category": 2,
         "note": (

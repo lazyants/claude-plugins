@@ -1,5 +1,18 @@
 {
  "declarations": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"SKILL.md:1462\", 0]": {
+   "anchors": [
+    "scripts/glossary_batch_plan.py` FIRST"
+   ],
+   "claim": "CONDITION 2: invoke glossary_batch_plan.py -- the shipped authority on \"what W3 still has to adjudicate\", the SAME script the orchestrating session already runs at W3 to decide whether to dispatch the glossary pass (SKILL.md:1462) -- and read its own verdict rather than re-deriving it."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"profile_validate.py:845-846\", 0]": {
+   "anchors": [
+    "Tests `glossary.enabled is False` explicitly",
+    "ABSENT `glossary.enabled` means `true`"
+   ],
+   "claim": "`profile_validate.py`'s own `check_glossary_disabled_conflicts_with_skeptic_pass()` (profile_validate.py:845-846) spells out the identical convention: \"Tests glossary.enabled is False explicitly, NEVER a falsy .get(): an ABSENT glossary.enabled means true\". Only an EXPLICIT `false` disables this gate."
+  },
   "[\"plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json\", \"cache_key.py:544\", 0]": {
    "anchors": [
     "compute_profile_semantics_hash"
@@ -127,7 +140,7 @@
    "claim": "#488 added `canon_senses.senses_for`, which computes exactly this, and this function was DELIBERATELY not re-pointed at it. The lookup here is normalized through THIS module's own `normalize_form` binding, and `tests/canon_validate_recollapse.test.py:289-301` pins the indexed fast path by monkeypatching that binding and asserting exactly one call; delegating would move the call inside canon_senses, silently reduce that count to zero, and force a passing performance test to be rewritten for a refactor #488 does not need. The shared comparator is",
    "target": "plugins/literary-translator/tests/canon_validate_recollapse.test.py"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5018\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5772\", 0]": {
    "anchors": [
     "run_id_problem = validate_run_id(run_id)"
    ],
@@ -178,7 +191,7 @@
    ],
    "claim": "\"\"\"Fold Hebrew niqqud/cantillation for the #238 MATCH KEY ONLY -- mirrors bootstrap_names.py's own ``_fold_match_marks`` (itself a mirror of ``final_audit._fold_source_marks``, ``final_audit.py:675-698``) byte-for-byte: NFD-decompose, drop every combining mark (Unicode category ``Mn``) in the Hebrew block range U+0591-U+05C7, then re-NFC. NEVER applied to an EMITTED name -- this script's own Contract-5-equivalent emit site in ``extract_candidate_names()`` stays raw regardless.\"\"\""
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_merge.py\", \"select_segments.py:743-763\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/ledger_merge.py\", \"select_segments.py:774-794\", 0]": {
    "anchors": [
     "entries = sorted(segments_dir.iterdir())",
     "TWO swallow sites",
@@ -425,13 +438,13 @@
    ],
    "claim": "rejected: this function's return value is forwarded verbatim into resume_setup.py's own `resume_from_run_ids`, and that authority's resolve_run() (resume_setup.py:901) decides a MATCH by reading `runs/<id>/input.digest` with its OWN `Path.is_file()` call (resume_setup.py:923) -- the identical swallow-pattern, one layer down, in a file this fix does not own. Passing an unreadable candidate through would not close the hole; it would only relocate it to a site this change cannot reach, while looking closed here. Refusing at the point where the ambiguity is actually discovered is the only"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"select_segments.py:1251\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"select_segments.py:1282\", 0, \"continuation\"]": {
    "anchors": [
     "_SEG_ID_RE.fullmatch(seg)"
    ],
    "claim": "# load_candidate_segments() fatals on any manifest.json `seg` failing its # validate_seg() (select_segments.py:1316-1332, the regex check at :1251) -- # every `seg` this script ever operates on already came from THAT"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"select_segments.py:1316-1332\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py\", \"select_segments.py:1347-1363\", 0]": {
    "anchors": [
     "def load_candidate_segments(manifest_path: Path = MANIFEST_PATH) -> list:",
     "problem = validate_seg(seg)",
@@ -527,7 +540,7 @@
    ],
    "claim": "# unchanged draft the moment its baseline went missing. Reuses # `current_cache_key`, computed once directly above: a second # cache_key.py subprocess call here would be exactly the kind of # second, later-timestamped invocation D4's own \"the key as of # publication\" contract must not tolerate (claim_record.py:438-439). stored_cache_key_for_drift = ledger_record.get(\"cache_key\") if not isinstance(stored_cache_key_for_drift, dict):"
   },
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"segment_dispatch_driver.py:1313-1369\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"segment_dispatch_driver.py:1315-1370\", 0]": {
    "anchors": [
     "codex round-3: a runtime self-test",
     "self_test_fd = None",
@@ -775,7 +788,7 @@
    ],
    "claim": "def _parse_obsidian_frontmatter_enum(): \"\"\"obsidian.md:58 -- the entity-note frontmatter's `basis:` pipe-enum line inside the fenced YAML example block.\"\"\" text = OBSIDIAN_SPEC.read_text(encoding=\"utf-8\") m = re.search(r\"^basis:\\s*([a-z_ |]+)$\", text, re.MULTILINE) assert m, \"no 'basis: a | b | c' frontmatter line found in obsidian.md\""
   },
-  "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:3970-4017\", 0]": {
+  "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:4155-4195\", 0]": {
    "anchors": [
     "elif args.restamp_derivation:",
     "elif args.batch is not None:"
@@ -805,24 +818,24 @@
    ],
    "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-264`, # `cache_key.py:283-304` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
   },
-  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:1741-1778\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:1745-1783\", 0]": {
    "anchors": [
     "is forwarded HERE, and ONLY here",
     "cmd += [\"--driver-lease-held\"]"
    ],
-   "claim": "--from-stalled additionally drives run()'s own runs/.driver.lock acquisition and its --driver-lease-held forwarding to the child selector (segment_dispatch_driver.py:1741-1778) -- both real here, not stubbed, since this test calls run() directly rather than through a subprocess and nothing about that machinery is mocked.\"\"\" seg = \"seg21\" root = wiring_make_driver_root_from_stalled(tmp_path, seg)"
+   "claim": "--from-stalled additionally drives run()'s own runs/.driver.lock acquisition and its --driver-lease-held forwarding to the child selector (segment_dispatch_driver.py:1745-1783) -- both real here, not stubbed, since this test calls run() directly rather than through a subprocess and nothing about that machinery is mocked.\"\"\" seg = \"seg21\" root = wiring_make_driver_root_from_stalled(tmp_path, seg)"
   },
-  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7546\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7562\", 0]": {
    "anchors": [
     "session_id=session_id, claims=claims"
    ],
-   "claim": "# =========================================================================== # C -- the WIRING itself: does segment_dispatch_driver.py's own run() # (segment_dispatch_driver.py:7517's `claims=claims`) actually carry a REAL # select_segments.py admission into ctx.claims, or does # claim_capability_refusal_for_translate() only ever get exercised against a # context THIS SUITE injected `claims=` into by hand? Every test in Sections # A/B builds DispatchContext directly and passes `claims=` itself -- deleting"
+   "claim": "# =========================================================================== # C -- the WIRING itself: does segment_dispatch_driver.py's own run() # (segment_dispatch_driver.py:7562's `claims=claims`) actually carry a REAL # select_segments.py admission into ctx.claims, or does # claim_capability_refusal_for_translate() only ever get exercised against a # context THIS SUITE injected `claims=` into by hand? Every test in Sections # A/B builds DispatchContext directly and passes `claims=` itself -- deleting"
   },
-  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7546\", 1]": {
+  "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7562\", 1]": {
    "anchors": [
     "session_id=session_id, claims=claims"
    ],
-   "claim": "construct DispatchContext directly and inject `claims=` themselves, so they prove `claim_capability_refusal_for_translate()` works but prove NOTHING about whether run() actually populates `ctx.claims` from the selector's own output -- deleting `claims=claims` from the real construction at segment_dispatch_driver.py:7517 leaves all eleven of them green, because none of them ever go through run() at all."
+   "claim": "construct DispatchContext directly and inject `claims=` themselves, so they prove `claim_capability_refusal_for_translate()` works but prove NOTHING about whether run() actually populates `ctx.claims` from the selector's own output -- deleting `claims=claims` from the real construction at segment_dispatch_driver.py:7562 leaves all eleven of them green, because none of them ever go through run() at all."
   },
   "[\"plugins/literary-translator/tests/claim_prompt_contract.test.py\", \"mass-translate-wf.template.js:1673\", 0]": {
    "anchors": [
@@ -842,25 +855,25 @@
    ],
    "claim": "\"in_progress\"})` (mass-translate-wf.template.js:2413) completes BEFORE `agent(translateDrivePrompt(seg))` (:2416) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of"
   },
-  "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5018\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5772\", 0]": {
    "anchors": [
     "run_id_problem = validate_run_id(run_id)"
    ],
    "claim": "inversion crosses: the RUN_ID resume_setup.py just minted (a real value, from a real subprocess run, never a hand-typed guess at the format) must be accepted by select_segments.py's OWN `validate_run_id()` -- the exact function D1a's `select_segments.py --run-id` flag consults (select_segments.py:5000, `run_id_problem = validate_run_id(run_id)`)."
   },
-  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1541\", 0]": {
+  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1572\", 0]": {
    "anchors": [
     "return {\"category\": \"recoverable\", \"status\": status}"
    ],
    "claim": "# It is not, and it does not. `status: in_progress` classifies as `recoverable` # (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1451), and D3 (:4276) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces # --only-segs as a side effect of its population being human_escalation;"
   },
-  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1559\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1590\", 0, \"continuation\"]": {
    "anchors": [
     "DEFAULT_ELIGIBLE_CATEGORIES = frozenset"
    ],
    "claim": "# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1559), and D3 (:5009) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces"
   },
-  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5027\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5781\", 0, \"continuation\"]": {
    "anchors": [
     "D3: the authorization must be a SUBSET"
    ],
@@ -966,7 +979,7 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3707-3713\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3770-3776\", 0]": {
    "anchors": [
     "Excluded from every bundle hash",
     "nor of `orchestration_bundle_hash`",
@@ -1179,25 +1192,25 @@
    ],
    "claim": "never a hand-forged digest (a forged one would prove nothing about the real resolution path). Each call sends a payload with no `resume_from_run_ids` field at all (the same shape resolve_run_id() builds for a first-ever run), so resume_setup.py's own resolve_run() always mints fresh (resume_setup.py:930-934); since nothing about the project changed between the two calls, compute_input_digest() returns the IDENTICAL value both times (resume_setup.py:775). Returns (older_id, newer_id) -- asserts newer_id sorts after older_id, matching _resumable_run_id_candidates()'s own \"lexicographic == chronological\""
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4841\", 0]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4846\", 0]": {
    "anchors": [
     "current_sha1 = current_draft_sha1(seg, segments_dir, dirs[\"scripts_dir\"])"
    ],
-   "claim": "\"\"\"The invalid_post_fix_draft branch's own current_draft_sha1() call (segment_dispatch_driver.py:4813) is a SECOND call site sharing the identical --plugin-root trust boundary as the already_converged branch's (see the sibling test above) -- untested here for the same reason: every existing --plugin-root fixture stages the REAL, unmodified draft_sha1.py at both the durable root and the plugin",
+   "claim": "\"\"\"The invalid_post_fix_draft branch's own current_draft_sha1() call (segment_dispatch_driver.py:4846) is a SECOND call site sharing the identical --plugin-root trust boundary as the already_converged branch's (see the sibling test above) -- untested here for the same reason: every existing --plugin-root fixture stages the REAL, unmodified draft_sha1.py at both the durable root and the plugin",
    "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py"
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4957\", 0]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4962\", 0]": {
    "anchors": [
     "current_sha1 = current_draft_sha1(seg, segments_dir, dirs[\"scripts_dir\"])"
    ],
-   "claim": "\"\"\"codex round-4 (\"Tests that could not fail\"): current_draft_sha1()'s third argument -- dirs[\"scripts_dir\"] -- is what makes this \"clean and draft matches\" branch (segment_dispatch_driver.py:4929, feeding the already_converged decision at :4956) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable root's own writable, self-anchored copy (current_draft_sha1()'s own `scripts_dir=SCRIPTS_DIR` default). That default matters because the",
+   "claim": "\"\"\"codex round-4 (\"Tests that could not fail\"): current_draft_sha1()'s third argument -- dirs[\"scripts_dir\"] -- is what makes this \"clean and draft matches\" branch (segment_dispatch_driver.py:4962, feeding the already_converged decision at :4989) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable root's own writable, self-anchored copy (current_draft_sha1()'s own `scripts_dir=SCRIPTS_DIR` default). That default matters because the",
    "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py"
   },
-  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4984\", 0, \"continuation\"]": {
+  "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:4989\", 0, \"continuation\"]": {
    "anchors": [
     "\"action\": \"already_converged\""
    ],
-   "claim": "draft matches\" branch (segment_dispatch_driver.py:4957, feeding the already_converged decision at :4984) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable"
+   "claim": "draft matches\" branch (segment_dispatch_driver.py:4962, feeding the already_converged decision at :4989) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable"
   },
   "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:1800-1810\", 0]": {
    "anchors": [
@@ -1465,6 +1478,13 @@
     "render_obsidian._segment_title(seg_nodes, seg)"
    ],
    "claim": "`validate_backlinks.py:780` reconstructs each segment note's filename by calling `_segment_title(seg_nodes, seg)` against the PERSISTED nodestream.json"
+  },
+  "[\"plugins/literary-translator/tests/select_segments_glossary_gate.test.py\", \"select_segments.py:4411-4502\", 0]": {
+   "anchors": [
+    "def resolve_glossary_senses_arg",
+    "2. Present (of any kind lstat can see) -> pass"
+   ],
+   "claim": "# 9d-i (real filesystem, a dangling symlink): os.lstat() on the durable sidecar SUCCEEDS -- genuinely \"present\" at resolve_glossary_senses_arg()'s own definitive-stat layer (select_segments.py:4411-4502, branch 2: \"Present (of any kind lstat can see) -> pass --senses-path explicitly\")."
   }
  },
  "exemptions": {
