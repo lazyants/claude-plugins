@@ -105,6 +105,19 @@ EXPECTED_COPIES = frozenset(
         # path out of the durable root, and here it can also make one run's
         # approval answer another run's merge. Byte-identical to the owner's.
         ("glossary_dispatch_driver.py", "_RUN_ID_RE"),
+        # #820: canon_validate.py --merge-batches derives the run id from its
+        # --glossary-merge-marker path's parent directory and stamps it INTO the
+        # marker the W5 gate reads, so it owns the owner's rejection for a
+        # sharper reason than path safety alone -- an id that escapes the shape
+        # could write a marker the gate then matches against a directory it does
+        # not belong to. Byte-identical to the owner's literal.
+        ("canon_validate.py", "RUN_ID_RE"),
+        # #820: backfill_glossary_merge_ack.py scans glossary/runs/<RUN_ID>/ and
+        # writes an acknowledgement marker into each, so it carries the same
+        # rejection its writer does -- and it must refuse an unsafe directory
+        # name loudly rather than acknowledging it. Byte-identical to the
+        # owner's literal.
+        ("backfill_glossary_merge_ack.py", "_RUN_ID_RE"),
     }
 )
 
