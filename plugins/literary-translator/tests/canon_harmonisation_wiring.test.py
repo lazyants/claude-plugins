@@ -209,7 +209,19 @@ def _assert_placement(text: str) -> None:
     # that gate's own invocation is therefore reached by every branch by
     # construction, and this test only needs to pin THAT placement, not
     # re-derive the convergence.
-    particle_offset = text.find(PARTICLE_CONFIG_FLAG)
+    # The GATE's own --particle-config occurrence, found by searching from the
+    # gate's heading -- never text.find() from the top of the file. The flag
+    # appears five times in SKILL.md and the first is in W3's earlier section,
+    # hundreds of lines above the gate, so a bare find() returns an offset that
+    # is smaller than `start` no matter WHERE the harmonisation block sits: the
+    # comparison below would pass for a block moved anywhere after that early
+    # occurrence, which is the whole thing this assertion exists to forbid.
+    gate_offset = text.find(MANDATORY_GATE_HEADING)
+    assert gate_offset != -1, (
+        "ASSERTION 1 (placement): the mandatory homonym-split gate's own "
+        "heading is missing from SKILL.md"
+    )
+    particle_offset = text.find(PARTICLE_CONFIG_FLAG, gate_offset)
     assert particle_offset != -1, (
         "ASSERTION 1 (placement): the mandatory gate's own --particle-config "
         "invocation is missing from SKILL.md"

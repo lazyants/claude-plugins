@@ -89,6 +89,7 @@ responsibility, not something asserted here.
 import ast
 import importlib.util
 import re
+import sys
 from collections import namedtuple
 from decimal import Decimal
 from pathlib import Path
@@ -470,8 +471,27 @@ def _glossary_driver_deadline_default():
     return module.build_arg_parser().get_default("deadline_sec")
 
 
+def _name_discovery_passes_default():
+    """name_discovery.py's own default `--passes`, read off its argument parser
+    for the same reason the sibling above reads the glossary driver's: the
+    parser is what a bare invocation gets, so it is the authoritative answer to
+    "how many passes does discovery actually run", and no schema `default`
+    annotation fills it in (nothing in this plugin does)."""
+    path = SCRIPTS / "name_discovery.py"
+    spec = importlib.util.spec_from_file_location(
+        f"nd_figures_{abs(hash(str(path)))}", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
+    return module.build_arg_parser().get_default("passes")
+
+
 FIGURES = [
-    # ROTATED TO 1.80.0 (#823 -- the frozen canon gets one whole-canon read for
+    # ROTATED TO 1.81.0 (#823 -- the frozen canon's whole-canon read now covers
+    # the SPLIT direction and the union input, per the issue's scope correction).
     # divergent target forms). TWO rows, both numbers the entry asserts about
     # THIS tree rather than about a book:
     #
@@ -496,6 +516,10 @@ FIGURES = [
     # many selector payload fields segment_dispatch_driver.py newly REQUIRES to
     # name the units that have already converged once, read by AST off
     # `EVER_CONVERGED_SELECTOR_FIELDS` rather than counted by hand.
+    #
+    # The 1.80.0 rotation this replaces, kept as its own record: ONE row, the
+    # `--passes` default of the LLM name-discovery driver (#286), read off its
+    # own argument parser rather than counted by hand.
     Figure(
         phrase="batches of 40",
         value=40,
@@ -512,7 +536,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.80.0"
+FIGURES_VERSION = "1.81.0"
 
 
 def _newest_entry():

@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.80.0 — 2026-09-03
+## 1.81.0 — 2026-09-03
 
 **The frozen canon now gets one whole-canon read for divergent target forms (#823).** Nothing in the
 pipeline compared `canonical_target_form` ACROSS canon entries. `_merge_batch` refuses a collision
@@ -49,7 +49,161 @@ holding a draft without having converged — the `recoverable` AND `human_escala
 which lose reviewed text plus any hand-applied fix rounds. Enumerate those two populations before
 upgrading a book that is mid-flight.
 
+**The pass covers both directions and three corpora, not a merge over `canon.json` alone.** Run
+read-only over four finished volumes, the merge-only shape described in #823 misses and mis-handles
+measurable fractions of the class it is aimed at, so the shipped step is wider than that issue's
+own first description.
 
+- **It splits as well as merges.** One target string frozen for two different people is the more
+  damaging direction — one vault page credited to two men — and `shared_target` reports it. Its
+  sibling, one source form covering several bearers, is `multi_referent`; nothing in the pipeline
+  DISCOVERED that shape before, because the mandatory homonym-split gate enumerates only splits
+  already authored in `canon_senses.json` and states `NOT ENUMERATED` otherwise. It validates an
+  answer; it does not find the question. `multi_referent` proposes, the operator records the split
+  in `canon_senses.json`, and that gate then demands its evidence exactly as before.
+- **It reads a union, not `entries{}` alone.** Canon entries, the `names[]` rows of CONVERGED
+  segment drafts, and `name_candidates.json` rows. A form that never reached canon is an
+  `uncanonized_variant` whose route is a NEW entry through the ordinary glossary merge, never
+  `--correct`, which refuses a `source_form` it cannot find. A divergence living wholly in the
+  draft corpus is reportable on its own: requiring a canon anchor would make exactly the class
+  that never reaches canon unreportable.
+- **A retarget invalidates `canon_link_groups.json`.** Consolidating two spellings onto one target
+  is precisely the operation that makes two previously distinct fold keys one, so a correction can
+  CREATE a collision no group covers. An uncovered collision withholds that group's `## Mentions`
+  occurrences while `validate_backlinks.py` reports `warnings: 0` — coverage measured over a
+  universe those forms were just removed from. Re-check the ruling after applying anything here.
+
+**What the pass is checked against is written down, not re-derived.** The session serialises the
+three corpora into one per-attempt corpus file and passes it to `--check` with
+`--expect-corpus-sha256`, the digest it computed BEFORE dispatching and keeps in its own context.
+The corpus file lives in the durable root the dispatched pass can write, so a digest recomputed
+from disk would prove only that the artifact agrees with whatever the pass last wrote there;
+expected, on-disk and artifact must all three agree before anything is published. Members are
+matched byte-exactly on the whole `(corpus, source_form, target_form)` triple, so a canon row and a
+converged draft row that disagree about the same name are two members of one proposal rather than
+one erasing the other.
+
+`--build-corpus` gathers the corpora fail-closed: `ledger_merge.py`'s `_read_fragments` rather than
+`final_audit.py`'s `load_converged_fragments`, whose `is_dir()` + `glob()` report a populated but
+unreadable `runs/ledger.d` as empty; a converged fragment contributes names only while its
+`reviewed_draft_sha1` still matches the draft on disk, so a draft hand-edited after its review
+feeds nothing into a canon proposal; and every drop is counted in the output, because a corpus that
+gathered nothing must never read like one that found nothing.
+
+
+## 1.80.0 — 2026-09-03
+
+**An uncased source can now derive its `name_inventory` with an LLM, inside the plugin (#286).**
+Hebrew, Yiddish and Arabic letters are Unicode category `Lo`, so `bootstrap_names.py`'s
+candidate path — gated on `is_upper_initial()` — yields a structural zero on them, forever, however
+the heuristic is tuned. `name_inventory` was the only bypass, and the only way to fill it was by
+hand. Four Hebrew→English volumes (211 segments) each solved that with the same book-local script
+outside `durable_root`, which the plugin could not see, validate, or version. That script is now a
+shipped one: `scripts/name_discovery.py`.
+
+`--dispatch` fans out N independent cheap-tier codex passes per segment, each in its own single-use
+write-confined sandbox; `--fold` unions the harvest, verifies every returned form against the source
+with `language_smoke_report.py`'s own `inventory_forms_seen` census, and freezes the survivors into
+the project's `languages/<code>.local.json`; `--verify-inventory` is the one-input check W3 runs
+before `bootstrap_names.py`. Opt in with `glossary.name_discovery.enabled`. The `Lu`-gate is
+untouched and the cased path is unchanged — `bootstrap_names.py`, `segpack.py` and `cache_key.py`
+are byte-identical, so `derivation_bundle_hash` and `plugin_bundle_hash` do not move.
+
+The sampling shape is measured rather than assumed, on a real volume's name-richest chapter: six
+concurrent cheap-tier passes returned 121 entities in 63 s of wall clock, against 111 for three
+high-tier passes at about 450 s. Precision is 92–96% at every tier, so the tier buys recall only,
+and what surfaces is governed by sampling variance. The shipped default is that measurement:
+`--passes` defaults to 6 at the `low` tier, so a bare invocation runs the shape that was actually
+benchmarked rather than one an operator has to reconstruct from this entry. An iterative refinement chain is worse and loses
+work — 83 → 83 → 83 → 87 → 98 → **89** over six steps, the last deleting 11 correct forms it had
+been handed — so each pass here receives no accumulated list and no prior state. The deterministic
+occurrence filter is what makes the cheap tier safe: in the production run it dropped 1,141 of 1,776
+harvested forms.
+
+**The fold is bound to the run it folds, and to the file that run was
+dispatched against.** `--fold` refuses unless `--particle-config` names
+`run_manifest["particle_config"]`: comparing tokenizer semantics is not the
+same check, since any other `.local.json` with the same `PARTICLES` /
+`STOPWORDS` / `has_elision` / `ELISION_RE` passes that one, and a mistyped
+target would otherwise publish this run's inventory into a config it never
+measured while leaving the intended one untouched. It also re-applies the whole
+form-list contract to every harvest it reads back — a harvest is a file the
+workflow invites the operator to edit before folding, so a bound applied only
+at the model-reply boundary is not applied to everything that reaches the
+inventory — and it compares each harvest's `model`/`effort` against the run
+manifest rather than merely requiring the keys to be present. Harvest and
+inventory hashes are taken over a JSON encoding rather than a space-join: a
+space is legal inside a name, so `["A", "B"]` and `["A B"]` would share a hash
+and the already-committed shortcut would republish the first fold's provenance
+for the second, reporting success.
+
+The committed-state shortcut keys on EVERY input the sidecar's contents depend
+on — the harvest, the config, and the honorific prefixes. Keying on the first
+two alone silently ignored a changed `--honorific-prefix` for an already
+committed run, republishing the previous invocation's grouping metrics and
+reporting success. A shortcut whose key is narrower than its output is a false
+green by construction.
+
+Prompt drift is a stale run on every route. `prompt_sha1` was in the dispatch
+identity but in neither the fold's input re-verification nor the resume
+planner, so a plugin upgrade that reworded `PROMPT_TEMPLATE` left `--fold`
+willing to publish a harvest gathered under the old question while `--dispatch`
+refused to extend it. All three now compare the current template.
+
+`--fold` also REBUILDS the expected unit set from the manifest it has just
+verified rather than reading it back out of the run manifest. `manifest_sha1`
+proves the manifest's bytes; it says nothing about the `units` array, which
+lives in the run manifest and IS the completeness check's expected set —
+deleting one otherwise-valid entry leaves every survivor legal, stops that
+unit's harvests from being expected, and publishes an inventory missing every
+name unique to it, exit `0`. Deriving the set removes that trust instead of
+checking it.
+
+**W3 re-entry is COMPUTED, by a third read-only mode.** `--resume-plan` scans
+`runs/name-discovery/`, evaluates against every run directory exactly the
+bindings `--fold` enforces, and emits one JSON line saying which run W3
+re-enters and with which command: `fold` for a current run whose
+publication has BEGUN — committed, or caught in the crash window between the
+config write and the sidecar write, which the immutable backup marks. Neither
+may be preceded by `--dispatch`: the first refuses it with exit `2`, the second
+on `backup_sha1` because dispatch would rebuild the identity from the
+already-rewritten config, and either way the chain halts before the fold that
+finishes publication. `dispatch_then_fold` for a current run with nothing
+published yet, `fresh` when nothing on disk is resumable, and `ambiguous` (exit
+`1`) whenever more than one run is current in ANY combination — including a
+committed run beside an unfinished one, since that unfinished run may be the
+deliberate replacement meant to supersede it. Deciding which run is the
+project's is an identity call, not a timestamp comparison and not a preference
+for whichever finished first. A stale committed run left behind by a
+`manifest.json` edit is reported and never chosen, so it cannot shadow the
+replacement dispatched to succeed it. This replaces a branch table that had
+been written in prose for the session to execute against a directory listing;
+every fact the decision needs already lived in the script, and the prose
+ordering of committed-vs-incomplete, current-vs-stale and single-vs-several was
+wrong in a different way each time it was rewritten. `--verify-inventory` is
+deliberately NOT that gate: it reads one input and answers only whether
+`name_inventory` is non-empty, so a stale inventory from a moved
+`manifest.json` passes it. A fresh run id REPLACES the inventory rather than
+merging into it, so re-running a stochastic pass after a completed one can drop
+names that run found and moves `particle_config_hash` a second time for no new
+information.
+
+**Migration, and it is not free for an existing caseless book.** `--fold` rewrites the resolved
+`particle_config`, so `particle_config_hash` moves and every converged segment of that book goes
+stale. Run discovery at W3 on a fresh book, or price it first with `--fold --dry-run`, which writes
+nothing at all. The pre-discovery file is preserved verbatim under
+`runs/name-discovery/<RUN_ID>/`. Adding `glossary.name_discovery` to `profile.schema.json` also
+moves `resume_setup.py`'s mass and glossary `input_digest` and `skeptic_setup.py`'s digest, for
+every project — those hash the whole `schemas/` directory. That is resume identity only; it does not
+by itself invalidate converged translations.
+
+**Two residuals, disclosed rather than discovered later.** A discovered form still has to survive
+`glossary_batch_plan.py`'s curation, which admits a row only when `likely_name` is true and its
+frequency clears `glossary.min_candidate_freq` — so a single-token name occurring exactly once and
+only sentence-initially is dropped there even though the census confirmed it. That loss is identical
+for a hand-built inventory and predates this release. And discovery will legitimately surface both a
+bare and a title-bearing spelling of one name when both occur; deciding they denote one entity is an
+identity call, not a script's.
 ## 1.79.0 — 2026-09-03
 
 **A canon correction no longer resets the whole book's review round budget (#824).** Every

@@ -1,10 +1,10 @@
 {
   "declarations": {
-    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"SKILL.md:1462\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"SKILL.md:1601\", 0]": {
       "anchors": [
         "scripts/glossary_batch_plan.py` FIRST"
       ],
-      "claim": "CONDITION 2: invoke glossary_batch_plan.py -- the shipped authority on \"what W3 still has to adjudicate\", the SAME script the orchestrating session already runs at W3 to decide whether to dispatch the glossary pass (SKILL.md:1462) -- and read its own verdict rather than re-deriving it."
+      "claim": "CONDITION 2: invoke glossary_batch_plan.py -- the shipped authority on \"what W3 still has to adjudicate\", the SAME script the orchestrating session already runs at W3 to decide whether to dispatch the glossary pass (SKILL.md:1601) -- and read its own verdict rather than re-deriving it."
     },
     "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"profile_validate.py:845-846\", 0]": {
       "anchors": [
@@ -1526,7 +1526,7 @@
       ],
       "claim": "`canon_link_groups.json` above is a sidecar and not a key: `_content_view` (`canon_validate.py:2596-2627`) treats any non-`generation_hashes` key as CONTENT, so"
     },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3941-3947\", 0]": {
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4080-4086\", 0]": {
       "anchors": [
         "Excluded from every bundle hash",
         "nor of `orchestration_bundle_hash`",

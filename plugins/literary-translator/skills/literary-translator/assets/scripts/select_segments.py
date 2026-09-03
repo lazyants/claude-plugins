@@ -4676,7 +4676,7 @@ def check_glossary_current(dirs: dict) -> "dict | None":
     CONDITION 2: invoke glossary_batch_plan.py -- the shipped authority on
     "what W3 still has to adjudicate", the SAME script the orchestrating
     session already runs at W3 to decide whether to dispatch the glossary
-    pass (SKILL.md:1462) -- and read its own verdict rather than
+    pass (SKILL.md:1601) -- and read its own verdict rather than
     re-deriving it. `-B` (sys.dont_write_bytecode is set too late inside
     glossary_batch_plan.py itself, AFTER its `canon_senses` import, to stop
     that import writing a .pyc into a tree this gate must only read). The
