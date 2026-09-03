@@ -23,8 +23,10 @@ Two guards bound the carry-forward, and both exist because a stored review at la
 that round L was spent:
 
 - the label advances only when the fix that review asked for has actually landed — the draft moved,
-  and not because of a retranslation (`_translate_in_progress_since()`), which is the same
-  discriminator the same-run path already applies. Advancing on the label alone would let a
+  and no translate was dispatched since that review (`_translate_in_progress_since()`), which is
+  the same discriminator the same-run path already applies. That helper proves a dispatch, never
+  that it produced the draft now on disk, so the label is retained whenever the cause of the
+  movement is ambiguous. Advancing on the label alone would let a
   correction between a review and its fix turn consume the round; at `max_fix_rounds=1` that caps a
   segment which never received a fix turn;
 - a unit that has converged at least once is excluded, so re-opening it starts a fresh loop rather
@@ -39,6 +41,11 @@ Run identity itself is unchanged: `resume_setup.py` is not touched, so every res
 property the digest enforces is exactly as before. A correction still mints a fresh `RUN_ID` and
 still meets #742's foreign-draft refusal, whose documented draft re-stamp is still the route
 through it — what changed is that the route no longer costs the book its round budget.
+
+Scope: this is the `segment_dispatch_driver.py` path, which is the default. The retained
+Workflow-template fallback runs its own loop and never calls `derive_next_action()`, so its
+`reviewFixLoop()` still starts every segment at round 1 — unchanged by this release, and
+unchanged by it in either direction.
 
 Known limitation: a unit that has lost BOTH witnesses of its earlier convergence — its
 `.ever_converged` sentinel gone AND its ledger row since moved off `converged`/`stale` — is

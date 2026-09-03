@@ -4529,7 +4529,10 @@ def _prior_run_round_label(review_obj, run_id: str, seg: str, max_fix_rounds: in
     review_dispatch_token() builds. A RUN_ID cannot contain ':' (resume_setup.py's
     own RUN_ID_RE) and a seg id is [A-Za-z0-9_] with an optional literal
     'FRONTBACK:' prefix (validate_seg()), so the `:{seg}:r{label}` tail is an
-    unambiguous suffix and no admitted id pair can make it match the wrong label.
+    unambiguous suffix -- but ONLY once the leftover prefix is itself checked to
+    be a valid RUN_ID, because a `FRONTBACK:`-prefixed segment's own token ends
+    with the bare segment's suffix too. That check is made below, and it is what
+    makes the parse a parse rather than a coincidence.
 
     "final" is deliberately NOT recognised here. It is ABSORBING
     (_next_round_label()), so carrying it would hand a segment a terminal label
@@ -4556,6 +4559,16 @@ def _prior_run_round_label(review_obj, run_id: str, seg: str, max_fix_rounds: in
             # review_dispatch_token() never produces. Equal: a same-run token,
             # which _matched_review_round_label() owns.
             return None
+        if validate_run_id(candidate_run) is not None:
+            # The remaining prefix must itself be a RUN_ID this project could
+            # have minted, or the suffix match was a COINCIDENCE rather than a
+            # parse. The case that makes this load-bearing: "OLD:FRONTBACK:seg01:r2"
+            # is the legitimate token of the distinct admitted segment
+            # "FRONTBACK:seg01", and it ends with ":seg01:r2" as well -- so
+            # deriving seg01's budget from it would read another segment's
+            # history. Its leftover prefix "OLD:FRONTBACK" carries a ':' and no
+            # RUN_ID may, which is exactly what this rejects.
+            return None
         return label
     return None
 
@@ -4574,15 +4587,18 @@ def _carried_round_label(prior_label: str, review_obj: dict, seg: str, segments_
         RETAINED (the same-run branch returns needs_fix at the matched label in
         this state);
       * the draft moved, but a translate was dispatched after that review
-        (_translate_in_progress_since()) -> the movement is a RETRANSLATION,
-        not a fix, so the label is retained here too, exactly as the same-run
-        branch declines to spend a round for it;
+        (_translate_in_progress_since()) -> what CAUSED the movement is then
+        ambiguous. That helper proves a translate was dispatched, never that one
+        produced the draft now on disk -- read its own docstring, which
+        enumerates the interrupted and adopted false positives -- so the label is
+        retained rather than spent on a movement no fix can be shown to own,
+        exactly as the same-run branch declines to spend a round for it;
       * the draft moved with no such evidence -> a fix landed, and the label
         ADVANCES.
 
     Advancing on the label alone would let a canon correction between a review
     and its fix turn consume the round; advancing on a bare hash mismatch would
-    consume it for a retranslation. At engine.max_fix_rounds=1 either one jumps
+    consume it for a movement a fix cannot be shown to have caused. At engine.max_fix_rounds=1 either one jumps
     straight to "final" and caps a segment that received no fix turn at all.
 
     Every unreadable input retains `prior_label`: a missing or non-string

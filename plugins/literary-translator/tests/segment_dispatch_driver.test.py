@@ -32,6 +32,7 @@ script `select_segments.test.py`/`ledger_merge.test.py` use, for the same
 reason (scope this file to the driver's OWN logic, not re-prove
 `cache_key.py`'s 15-field hashing, which has its own dedicated test file).
 """
+import ast
 import fcntl
 import hashlib
 import importlib.util
@@ -5184,8 +5185,8 @@ def test_derive_next_action_already_converged_round_1_when_clean_and_draft_match
 def test_derive_next_action_already_converged_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """codex round-4 ("Tests that could not fail"): current_draft_sha1()'s
     third argument -- dirs["scripts_dir"] -- is what makes this "clean and
-    draft matches" branch (segment_dispatch_driver.py:5184, feeding the
-    already_converged decision at :5211) hash the draft using the TRUSTED
+    draft matches" branch (segment_dispatch_driver.py:5200, feeding the
+    already_converged decision at :5227) hash the draft using the TRUSTED
     plugin tree's draft_sha1.py under --plugin-root, never the durable
     root's own writable, self-anchored copy (current_draft_sha1()'s own
     `scripts_dir=SCRIPTS_DIR` default). That default matters because the
@@ -6219,7 +6220,7 @@ def test_derive_next_action_fabricated_loc_gate_respects_node_bin(tmp_path):
 
 def test_derive_next_action_invalid_post_fix_draft_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """The invalid_post_fix_draft branch's own current_draft_sha1() call
-    (segment_dispatch_driver.py:5039) is a SECOND call site sharing the
+    (segment_dispatch_driver.py:5055) is a SECOND call site sharing the
     identical --plugin-root trust boundary as the already_converged
     branch's (see the sibling test above) -- untested here for the same
     reason: every existing --plugin-root fixture stages the REAL,
@@ -10165,10 +10166,13 @@ def test_dna_carry_forward_does_not_advance_while_the_fix_is_outstanding(tmp_pat
     to "final" and caps a segment that never received a fix turn at all."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
-    _dna_prior_run_fixture(root, driver_mod, round_label="1", draft_moved=False)
+    # Prior label "2", not "1": at "1" the expected answer coincides with what
+    # the pre-#824 driver returned for ANY foreign token, so the test would pass
+    # against an implementation that had never read the label at all.
+    _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=False)
 
     assert driver_mod.derive_next_action("seg01", ctx) == {
-        "action": "review", "round_label": "1",
+        "action": "review", "round_label": "2",
     }
 
 
@@ -10182,13 +10186,16 @@ def test_dna_carry_forward_does_not_advance_over_a_retranslation(tmp_path):
     turn ever used."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
-    base, _ = _dna_prior_run_fixture(root, driver_mod, round_label="1", draft_moved=True)
+    # Prior label "2" for the same reason the outstanding-fix test uses it: at
+    # "1" the expectation coincides with the pre-#824 answer for any foreign
+    # token, and the test would not be able to fail for the right reason.
+    base, _ = _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=True)
     # STRICTLY newer than the review: the pre-dispatch in_progress write that
     # process_segment()'s translate branch causes.
     _dna_write_ledger_fragment(root, mtime=base + 20, status="in_progress")
 
     assert driver_mod.derive_next_action("seg01", ctx) == {
-        "action": "review", "round_label": "1",
+        "action": "review", "round_label": "2",
     }
 
 
@@ -10250,6 +10257,11 @@ def test_dna_prior_run_token_for_a_different_segment_does_not_carry(tmp_path):
     f"{_DNA_PRIOR_RUN_ID}:seg01:r9",        # label outside 1..max_fix_rounds
     f"{_DNA_PRIOR_RUN_ID}:seg01:rABC",      # label not a recognised round
     f"{_DNA_PRIOR_RUN_ID}:seg01",           # no round component
+    # The legitimate token of the DISTINCT admitted segment "FRONTBACK:seg01".
+    # It ends with ":seg01:r2" as well, so a suffix match alone would read
+    # another segment's round history into this one; the leftover prefix
+    # "OLD:FRONTBACK" is not a valid RUN_ID, which is what refuses it.
+    "OLD:FRONTBACK:seg01:r2",
 ])
 def test_dna_malformed_prior_run_token_does_not_carry(tmp_path, token):
     """Every doubt maps to today's round 1 -- never a crash, and never a
@@ -10312,23 +10324,50 @@ def test_dna_a_foreign_run_review_artifact_is_never_adoptable(tmp_path):
     the token construction cannot silently make the stale artifact adoptable."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
-    _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=True)
+    # draft_moved=False on purpose: review_ready.py checks the draft hash BEFORE
+    # the token, so a mismatched hash would refuse first and this test would pass
+    # without the token comparison ever running -- green for the wrong gate.
+    _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=False)
 
     action = driver_mod.derive_next_action("seg01", ctx)
     expect_token = driver_mod.review_dispatch_token(
         _DNA_RUN_ID, "seg01", action["round_label"]
     )
     proc = subprocess.run(
-        [sys.executable, str(root / "scripts" / "review_ready.py"),
-         "--seg", "seg01", "--expect-token", expect_token],
-        capture_output=True, text=True, cwd=str(root), timeout=60,
+        [sys.executable, str(SCRIPTS_SRC_DIR / "review_ready.py"), "seg01",
+         "--expect-token", expect_token,
+         "--durable-root", str(root), "--plugin-root", str(ASSETS_DIR.parent)],
+        capture_output=True, text=True, cwd=str(root), timeout=120,
     )
 
+    combined = proc.stdout + proc.stderr
     assert proc.returncode != 0, (
         f"review_ready.py must REFUSE the prior-run review artifact against this "
         f"run's own token {expect_token!r} -- if it passes, codex_job.py's "
         f"safe_adopt() adopts the stale verdict and no reviewer ever runs "
         f"(stdout={proc.stdout!r} stderr={proc.stderr!r})"
+    )
+    assert "token" in combined.lower(), (
+        f"the refusal must be the TOKEN check, not an earlier gate -- otherwise "
+        f"this test is green for a reason that has nothing to do with the run "
+        f"component: {combined!r}"
+    )
+
+    # POSITIVE CONTROL. The same invocation, differing ONLY in the run
+    # component of the expected token, must ACCEPT -- which is what proves the
+    # refusal above is about the run component and not about a missing script,
+    # an unreadable fixture, or a hash the gate checks first.
+    own = subprocess.run(
+        [sys.executable, str(SCRIPTS_SRC_DIR / "review_ready.py"), "seg01",
+         "--expect-token", driver_mod.review_dispatch_token(
+             _DNA_PRIOR_RUN_ID, "seg01", "2"),
+         "--durable-root", str(root), "--plugin-root", str(ASSETS_DIR.parent)],
+        capture_output=True, text=True, cwd=str(root), timeout=120,
+    )
+    assert own.returncode == 0, (
+        f"the gate must ACCEPT the artifact against its OWN token -- if it does "
+        f"not, the refusal above proves nothing about the run component "
+        f"(stdout={own.stdout!r} stderr={own.stderr!r})"
     )
 
 
@@ -10373,3 +10412,60 @@ def test_parse_ever_converged_selected_unions_all_three_populations():
     result = DRIVER.parse_ever_converged_selected(payload, {"seg02": "from-converged"})
 
     assert result == frozenset({"seg01", "seg02", "seg03"})
+
+
+def test_run_wires_the_parsed_ever_converged_set_into_the_dispatch_context():
+    """#824 WIRING. Every behavioural test above injects
+    `ever_converged_selected` into DispatchContext directly, so deleting run()'s
+    own parse-and-pass would leave all of them green while production ran with
+    the constructor's empty default -- which fails in the WIDENING direction,
+    carrying a round label into every re-opened unit.
+
+    Asserted by reading run()'s source rather than by driving a whole selector
+    fixture: what is at risk is one keyword argument at one call site, and an
+    AST read fails loudly the moment it stops being passed, or stops being
+    passed the PARSED value."""
+    tree = ast.parse(DRIVER_SRC.read_text(encoding="utf-8"))
+    run_fn = next(
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run"), None
+    )
+    assert run_fn is not None, "segment_dispatch_driver.py has no module-level run()"
+
+    parsed_names = {
+        node.targets[0].id
+        for node in ast.walk(run_fn)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "parse_ever_converged_selected"
+    }
+    assert parsed_names == {"ever_converged_selected"}, (
+        f"run() must call parse_ever_converged_selected() exactly once and bind its "
+        f"result; found {sorted(parsed_names)}"
+    )
+
+    ctx_calls = [
+        node for node in ast.walk(run_fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "DispatchContext"
+    ]
+    assert len(ctx_calls) == 1, (
+        f"run() is expected to construct exactly one DispatchContext; found "
+        f"{len(ctx_calls)} -- a second one would need this wiring too"
+    )
+    passed = {
+        kw.arg: kw.value for kw in ctx_calls[0].keywords if kw.arg is not None
+    }
+    assert "ever_converged_selected" in passed, (
+        "run()'s DispatchContext construction must pass ever_converged_selected -- "
+        "without it production silently falls back to the constructor's empty "
+        "default and the round-label carry-forward widens to every re-opened unit"
+    )
+    value = passed["ever_converged_selected"]
+    assert isinstance(value, ast.Name) and value.id in parsed_names, (
+        "it must be passed the value parse_ever_converged_selected() returned, not "
+        "a literal or a re-derived expression"
+    )
