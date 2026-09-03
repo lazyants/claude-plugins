@@ -1043,6 +1043,12 @@ def main():
         # drive this fake with --from-cap. Empty because this fake claims
         # nothing, and the field is a SUBSET of `claims` by contract.
         "claims_from_cap_over_sentinel": [],
+        # #824: REQUIRED of every selector, for the same reason and with the
+        # same refusal -- parse_ever_converged_selected() fatals without either
+        # of them, and here the missing-key default would be the WIDENING one.
+        # Empty because this fake emits no segs at all, so no selected unit can
+        # have converged before.
+        "previously_converged": [], "lost_sentinels": [],
         "counts": {}, "classification": {}, "eligible_not_dispatched": [],
     }))
 
