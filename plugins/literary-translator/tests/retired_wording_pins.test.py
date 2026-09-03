@@ -105,6 +105,7 @@ MASS_TRANSLATE_TEMPLATE = ASSETS / "templates" / "mass-translate-wf.template.js"
 ENGINE_LOOP_DOC = (
     PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "engine-loop.md"
 )
+SKILL_DOC = PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md"
 
 GIT = shutil.which("git")
 pytestmark = pytest.mark.skipif(
@@ -212,9 +213,27 @@ BASELINE_PRE_1_63_0 = "e2cf120971837d3713a73a7e1f6905f01143acef"
 # because a concurrent release adds one without this comment noticing.
 BASELINE_LT_368 = "912eef245ba556b927e1a298b20f0086f1a3b222"
 
+# The 1.77.0 release commit (#820) -- the IMMEDIATE PARENT of the #825 branch,
+# and the baseline for the SKILL.md row below. Same non-fragility as the two
+# above: it is already on origin/main as the tip of a merged PR, so no merge
+# method chosen for the #825 branch can move it out of main's ancestry.
+#
+# It gets its own SHA rather than reusing one of the five above, and the reason
+# is provenance rather than presence. The retired sentence DOES occur once at
+# both BASELINE_PRE_1_63_0 and BASELINE_LT_368, so either would satisfy
+# presence-before and absence-after. What neither can satisfy is the third
+# assertion's actual claim -- that the needle is among the lines THIS change
+# removed. Measured: against BASELINE_LT_368 the diff for this file is 103
+# hunks of nineteen releases' unrelated history, and the removed side then
+# contains the needle for reasons that have nothing to do with #825; against
+# this SHA it is one hunk. A row bound to a many-releases-old baseline passes
+# while proving only that the sentence went away SOMETIME, which is the shape
+# the module docstring calls a permanently green row.
+BASELINE_825 = "ac9e9355fb300cc0ac42fef9bdd8461ffa456adc"
+
 PIN_BASELINES = (
     BASELINE_RELEASE, BASELINE_FIX_ROUND, BASELINE_1_35_0, BASELINE_PRE_1_63_0,
-    BASELINE_LT_368,
+    BASELINE_LT_368, BASELINE_825,
 )
 
 
@@ -671,6 +690,27 @@ RETIRED = [
         "the same false claim as the row above, in the shipped reference doc rather "
         "than in a template comment. Retired in the same release for the same "
         "reason, and separately because the two files have independent editors",
+    ),
+    # -- 1.77.1 (#825): SKILL.md -----------------------------------------
+    # On BASELINE_825, the immediate pre-fix tree -- see that constant for why
+    # an older baseline that also carries this needle is NOT interchangeable
+    # with it here.
+    (
+        BASELINE_825, SKILL_DOC,
+        "R4's rule is that each of them is RE-TRANSLATED, not merely re-reviewed.",
+        "an admissible `--from-converged` claim then authorizes bounded RE-REVIEW "
+        "and never re-translates the draft.", 1,
+        "the PRE-1.25.0 price of correcting a frozen `canon.json` entry, still "
+        "quoted in the Canon bullet of the class-sweep section long after the "
+        "release that changed it. `references/canon-and-glossary.md` records the "
+        "provenance itself: since 1.25.0 every segment the correction reaches is "
+        "admissible for bounded RE-REVIEW, and 'before that release the same edit "
+        "stranded those units, which is why the older prose here called it "
+        "re-translation'. The successor is worded about the DRAFT rather than "
+        "about dispatch, and every part of that phrasing is load-bearing -- an "
+        "unqualified 'never re-translation', a 'cannot reach translate' and an "
+        "unconditional 'each is admissible' would each be false in their own "
+        "direction. The 1.77.1 CHANGELOG entry says which and why",
     ),
 ]
 

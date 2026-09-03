@@ -152,16 +152,32 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.74.2 (#801 -- the declared charset is honoured), and EMPTY
-    # ON PURPOSE. The entry cites its subjects by FILE, CONSTANT and HEADER
-    # rather than by line (`fetch_citation.py`, `ALLOWED_CHARSETS`,
-    # `BATCH_MAX_TOTAL_BYTES`, `run_batch`, and the literal Content-Type
-    # headers that distinguish a field-aware parse from a regex) and states no
-    # `file.ext:NNN` at all -- which is the shape this guard reads. Nothing is
-    # unpinned as a result: every behavioural claim it makes is asserted in
-    # `tests/fetch_citation.test.py` against the real fetch path, and the one
-    # figure it states is re-derived from the tree in
-    # `tests/changelog_figures.test.py`.
+    # ROTATED TO 1.77.1 (#825 -- the Canon bullet priced a canon correction as
+    # re-translation), and EMPTY ON PURPOSE. That entry cites its subjects by
+    # FILE, SECTION and CONSTANT rather than by line -- `SKILL.md`'s Canon
+    # bullet, `references/canon-and-glossary.md`, `--from-converged`,
+    # `--allow-retranslate-converged`, `tests/retired_wording_pins.test.py` --
+    # and states no line citation at all, which is the shape this guard reads.
+    # Deliberate, and not merely convenient: the whole change is a rewrite
+    # inside one hard-wrapped block of `SKILL.md`, so any line the entry pinned
+    # would sit next to the range it describes. Nothing is unpinned as a
+    # result: the wording claim is asserted in both directions, against a
+    # frozen baseline, in `tests/retired_wording_pins.test.py`.
+    #
+    # Verified at THIS cut, not assumed: appending a bogus line citation to the
+    # 1.77.1 entry turned the undeclared-anchor half of the test below RED, so
+    # it is reading this entry and not an older one. The bogus citation is not
+    # spelled here, for the reason the 1.74.2 note below gives.
+    #
+    # The rotations this replaces, kept as their own record so they are not
+    # lost with the comment. 1.74.2 (#801 -- the declared charset is honoured):
+    # EMPTY, citing `fetch_citation.py`, `ALLOWED_CHARSETS`,
+    # `BATCH_MAX_TOTAL_BYTES`, `run_batch` and literal Content-Type headers by
+    # name rather than by line. The dict then sat empty and UNROTATED across
+    # 1.75.0 through 1.77.0, so nothing here attests those entries were ever
+    # examined -- the same silence the 1.70.0 note below records, and the exact
+    # failure mode this comment's own MAINTENANCE CONTRACT exists to make
+    # visible.
     #
     # The 1.74.1 entry (#802) landed between this rotation being written and
     # the rebase that renumbered it, and it cites no line either, so nothing was
@@ -177,7 +193,7 @@ CITATION_ANCHORS = {
     # inside the very range it describes -- and two of the citations it would
     # have had to spell are ones this release itself renumbered.
     #
-    # Verified at this cut, not assumed: appending a bogus line citation to
+    # Verified at the 1.74.2 cut, not assumed: appending a bogus line citation to
     # the entry turned this file's own undeclared-anchor half RED, so the check
     # is reading THIS entry rather than an older one, and a line citation added
     # here later goes red until it is declared. The bogus citation is NOT
