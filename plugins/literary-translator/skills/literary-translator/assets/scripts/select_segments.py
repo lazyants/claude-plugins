@@ -4082,7 +4082,7 @@ def acquire_and_hold_lease(lock_path: Path, what: str) -> "tuple[bool, str]":
     the admission decision rest on state that changed while we waited).
 
     The self-test after a successful acquire is
-    segment_dispatch_driver.py:1315-1370's, with ONE deliberate difference: it
+    segment_dispatch_driver.py:1333-1388's, with ONE deliberate difference: it
     warns and proceeds, THIS REFUSES. The asymmetry is the point. On an
     unenforced mount the driver's own acquire is merely not exclusive, whereas
     this script's standalone path would FALSELY ACQUIRE runs/.driver.lock while
