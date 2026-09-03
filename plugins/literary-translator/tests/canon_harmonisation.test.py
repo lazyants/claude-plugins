@@ -944,6 +944,88 @@ def test_report_hostile_note_cannot_forge_report_structure(tmp_path):
     assert "\\u009b" in note_lines[0]
 
 
+def test_report_control_bearing_canon_entry_cannot_forge_via_skeleton(tmp_path):
+    """#823 code review, finding A (MAJOR, round 3): the round-2 fix closed
+    the whole Unicode `Cc` category on `note`, but `note` is not the only
+    model-authored string the report prints. Each --correct skeleton is a
+    json.dumps() of `source_form` plus the WHOLE canon entry, and
+    json.dumps escapes only C0 (U+0000-U+001F, which JSON forbids raw) --
+    it leaves U+007F, the entire C1 block (U+0080-U+009F, DEL and CSI
+    among them) and U+2028/U+2029 as literal characters. The member lines
+    a few lines above are safe only because repr() escapes those
+    codepoints; a JSON dump is not a repr. So a canon entry carrying a
+    control character -- canon.json rows are LLM-authored too, and
+    canon-entry.schema.json constrains them by pattern, not by category --
+    reached the operator's terminal raw through the skeleton block, able
+    to repaint or split the report exactly as a hostile note could.
+
+    Note is deliberately BENIGN here: this test must fail if and only if
+    the SKELETON path is unescaped. Every control character is built with
+    chr(), never pasted, per the unicode-boundary-text-authoring project
+    skill."""
+    root = make_durable_root(tmp_path / "durable_root")
+
+    # Controls json.dumps() leaves raw: DEL, a C1 CSI introducer with a
+    # line-erase sequence, NEL, and the two Zl/Zp separators.
+    hostile_source = "בָאבְרִינִצֶער" + chr(0x7f) + chr(0x9b) + "[2K" + chr(0x2028)
+    hostile_target = "Mordechai Babrinitzer" + chr(0x85) + chr(0x2029) + "{"
+    entries = [
+        canon_entry(hostile_source, hostile_target),
+        canon_entry("בֳאבְרִינִצֶער", "Mordechai Bobrinitzer"),
+    ]
+    raw = write_canon(root, entries)
+    doc = harmonisation_doc(canon_sha256_of(raw), [
+        proposal(
+            "divergent_spelling",
+            [
+                member(hostile_source, hostile_target),
+                member("בֳאבְרִינִצֶער", "Mordechai Bobrinitzer"),
+            ],
+            note="One byname, two vowelisations of the same place-name base.",
+        ),
+    ])
+    write_json(root / "canon_harmonisation.json", doc)
+
+    proc = run_harmonisation(root, "--report")
+    assert proc.returncode == 0, proc.stderr
+    parse_stdout(proc)
+
+    # The RULE, asserted over the WHOLE rendered report: the only `Cc`
+    # character this script may emit is '\n', its own physical line
+    # separator. Everything else -- whatever its provenance -- must have
+    # been escaped to a visible \uXXXX form.
+    offending = sorted(
+        {ch for ch in proc.stderr if unicodedata.category(ch) == "Cc" and ch != "\n"}
+    )
+    assert not offending, (
+        f"raw Cc control character(s) reached stderr unescaped: "
+        f"{[hex(ord(ch)) for ch in offending]}\n{proc.stderr}"
+    )
+    assert chr(0x2028) not in proc.stderr
+    assert chr(0x2029) not in proc.stderr
+    assert "\\u007f" in proc.stderr
+    assert "\\u009b" in proc.stderr
+    assert "\\u0085" in proc.stderr
+    assert "\\u2028" in proc.stderr
+    assert "\\u2029" in proc.stderr
+
+    # Escaping the SERIALISED dump must be lossless: \uXXXX inside a JSON
+    # string literal parses back to the identical character, so the
+    # skeleton an operator pastes still names the exact canon row.
+    skeleton = json.loads(_extract_first_correct_skeleton(proc.stderr))
+    assert skeleton["source_form"] == hostile_source
+    assert skeleton["old_entry"]["canonical_target_form"] == hostile_target
+    assert skeleton["new_entry"]["canonical_target_form"] is None
+
+    # And the escaping must not have broken the report's own structure:
+    # still exactly 2 top-level skeleton blocks, one per member.
+    top_level_open_braces = [ln for ln in proc.stderr.splitlines() if ln == "{"]
+    assert len(top_level_open_braces) == 2, (
+        f"expected exactly 2 top-level '{{' lines, got {len(top_level_open_braces)}:"
+        f"\n{proc.stderr}"
+    )
+
+
 def test_report_exit2_schema_invalid_artifact_no_stdout(tmp_path):
     root = make_durable_root(tmp_path / "durable_root")
     write_canon(root, [canon_entry("Marie", "Marie")])

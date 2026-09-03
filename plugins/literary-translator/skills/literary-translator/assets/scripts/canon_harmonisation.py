@@ -554,12 +554,15 @@ def run_check(path_str: str, approve_to_str: "str | None") -> dict:
 # --report: read-only render.
 # ---------------------------------------------------------------------------
 
-def _sanitize_note(note: str) -> str:
+def _escape_terminal_controls(text: str, keep: "frozenset[str]" = frozenset()) -> str:
     """Neutralises every control character and Unicode line/paragraph
-    separator a model-authored `note` may carry, before it reaches
-    operator-facing report text: _render_report's bare `note:` line, and
-    the same note text embedded in a --correct skeleton's own `reason`
-    field. `note` is free LLM-authored prose and the schema's only
+    separator model-authored text may carry, before it reaches
+    operator-facing report text. Three call sites, all in _render_report:
+    the bare `note:` line, the same note text embedded in a --correct
+    skeleton's `reason` field, and the SERIALISED skeleton block as a
+    whole (whose `source_form`, `old_entry` and `new_entry` come from the
+    artifact and from canon.json without passing through repr()).
+    `note` is free LLM-authored prose and the schema's only
     constraint on it is non-blank (pattern "\\S") -- so it may carry
     anything from a plain str.splitlines() boundary (newline, U+0085, ...)
     to a raw terminal control sequence (ESC, backspace, DEL, another C1
@@ -582,6 +585,14 @@ def _sanitize_note(note: str) -> str:
     SEPARATOR and U+2029 PARAGRAPH SEPARATOR, which are `Zl`/`Zp` rather
     than `Cc` and so need their own check.
 
+    `keep` names the characters a caller has ALREADY established are this
+    script's own structure rather than artifact content -- only the
+    skeleton call site uses it, for the real newlines json.dumps(indent=2)
+    puts between the dump's own physical lines. It is never a way to let
+    an artifact-supplied character through: json.dumps escapes every C0
+    character inside a string, so a raw newline in that dump can only be
+    one this script emitted.
+
     Escapes each such character to a visible \\uXXXX form (the same
     visible-escape convention json_stdout.dumps_line already uses for the
     codepoints json.dumps itself leaves raw) rather than stripping it, so
@@ -594,9 +605,10 @@ def _sanitize_note(note: str) -> str:
     json_stdout.py exists to close on stdout)."""
     return "".join(
         f"\\u{ord(ch):04x}"
-        if unicodedata.category(ch) == "Cc" or ch in (chr(0x2028), chr(0x2029))
+        if ch not in keep
+        and (unicodedata.category(ch) == "Cc" or ch in (chr(0x2028), chr(0x2029)))
         else ch
-        for ch in note
+        for ch in text
     )
 
 
@@ -622,10 +634,10 @@ def _render_report(doc: dict, entries: dict, canon_current: bool) -> None:
     for idx, proposal in enumerate(proposals):
         lines.append(f"[{idx}] kind: {proposal['kind']}")
         # Sanitised ONCE per proposal and reused below (the bare note line
-        # and every --correct skeleton's `reason`): see _sanitize_note's own
+        # and every --correct skeleton's `reason`): see _escape_terminal_controls' own
         # docstring for why `note` is the one artifact-supplied string this
         # renderer must never print raw.
-        sanitized_note = _sanitize_note(proposal["note"])
+        sanitized_note = _escape_terminal_controls(proposal["note"])
         for member in proposal["members"]:
             source_form = member["source_form"]
             stored_target_form = member["canonical_target_form"]
@@ -670,7 +682,31 @@ def _render_report(doc: dict, entries: dict, canon_current: bool) -> None:
                     "canon_validate.py --correct refuses) with it before re-running --correct."
                 ),
             }
-            lines.append(json.dumps(skeleton, ensure_ascii=False, indent=2, sort_keys=True))
+            # Round 3 (MAJOR): json.dumps escapes C0 (U+0000-U+001F) because
+            # JSON forbids it raw, but leaves U+007F, the whole C1 block
+            # (U+0080-U+009F, DEL and CSI among them) and U+2028/U+2029 as
+            # literal characters. `source_form` and the canon entry copied
+            # into old_entry/new_entry are LLM-authored and only pattern-
+            # constrained, so a control-bearing canon row would reach the
+            # operator's terminal raw through THIS block -- the member lines
+            # above are safe only because repr() escapes those codepoints,
+            # and a JSON dump is not a repr. Escaping the SERIALISED text is
+            # safe and lossless: control characters can only occur inside a
+            # JSON string literal (every structural byte is ASCII-printable),
+            # and \uXXXX there parses back to the identical string. Escaping
+            # the dump rather than passing ensure_ascii=True keeps the
+            # non-Latin source forms the operator must read and edit legible.
+            lines.append(
+                _escape_terminal_controls(
+                    json.dumps(skeleton, ensure_ascii=False, indent=2, sort_keys=True),
+                    # indent=2 puts REAL newlines between the dump's own
+                    # physical lines; they are this script's structure, not
+                    # artifact content. No other C0 character can survive
+                    # json.dumps (it escapes every one inside a string), so
+                    # keeping exactly '\n' loses nothing.
+                    keep=frozenset("\n"),
+                )
+            )
     print("\n".join(lines), file=sys.stderr)
 
 
