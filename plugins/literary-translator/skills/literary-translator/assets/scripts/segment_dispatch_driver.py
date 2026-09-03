@@ -2185,10 +2185,10 @@ def parse_ever_converged_selected(select_result: dict, claims: dict) -> frozense
                 exit_code=2,
             )
         for seg in value:
-            problem = validate_seg(seg) if isinstance(seg, str) else f"{seg!r} is not a string"
+            problem = validate_seg(seg)
             if problem is not None:
                 fatal(
-                    f"{field} names an unsafe segment id ({problem}) (#824)",
+                    f"{field} names {seg!r}, an unsafe segment id ({problem}) (#824)",
                     exit_code=2,
                 )
             out.add(seg)
@@ -7630,6 +7630,14 @@ def run(args, dirs: dict) -> dict:
             else []
         )
 
+        # #824: validated on EVERY invocation, for the reason parse_claims_field()
+        # gives for its own -- and with a sharper consequence than a report-only
+        # field has, because reading a missing key as "nothing ever converged"
+        # would WIDEN the round-label carry-forward to re-opened units. See
+        # parse_ever_converged_selected()'s own docstring for the three payload
+        # fields it unions and why each is needed.
+        ever_converged_selected = parse_ever_converged_selected(select_result, claims)
+
         # #530: the eligible units this dispatch is NOT carrying. Computed by
         # select_segments.py (which owns DEFAULT_ELIGIBLE_CATEGORIES) and read
         # from its payload rather than re-derived here -- a second copy of that
@@ -7651,14 +7659,6 @@ def run(args, dirs: dict) -> dict:
         # (the copy pass runs before the bundle markers are written); how often
         # is not measured, and exit 2 naming the field is the chosen fail-loud
         # tradeoff.
-        # #824: validated on EVERY invocation, for the reason parse_claims_field()
-        # gives for its own -- and with a sharper consequence than a report-only
-        # field has, because reading a missing key as "nothing ever converged"
-        # would WIDEN the round-label carry-forward to re-opened units. See
-        # parse_ever_converged_selected()'s own docstring for the three payload
-        # fields it unions and why each is needed.
-        ever_converged_selected = parse_ever_converged_selected(select_result, claims)
-
         eligible_not_dispatched = select_result.get("eligible_not_dispatched")
         if not isinstance(eligible_not_dispatched, list):
             fatal(

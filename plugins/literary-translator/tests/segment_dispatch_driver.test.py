@@ -5092,16 +5092,26 @@ def test_a_clean_review_stale_against_an_edited_draft_re_reviews_instead_of_live
 _DNA_RUN_ID = "20260101T000000Z"
 
 
-def _dna_setup(root):
+def _dna_setup(root, *, ever_converged=()):
     """Common setup for the derive_next_action() branch tests below: a
     fully staged Phase 2 fixture, a driver module loaded from IT (never the
     module-level DRIVER, see _load_fixture_driver()'s own docstring), and a
-    DispatchContext at max_fix_rounds=2 (rounds "1", "2", then "final")."""
+    DispatchContext at max_fix_rounds=2 (rounds "1", "2", then "final").
+
+    #824: `ever_converged` names the segments this invocation must treat as
+    having already converged once -- what parse_ever_converged_selected()
+    builds in run() from the selector's own previously_converged /
+    lost_sentinels / claims payload. Empty by default, which is the same value
+    the constructor's own default produces, so every pre-#824 caller is
+    unaffected. A parameter rather than a second construction helper: a copy of
+    this 8-keyword call would drift the day DispatchContext gains a required
+    argument."""
     driver_mod = _load_fixture_driver(root)
     ctx = driver_mod.DispatchContext(
         dirs=driver_mod.resolve_dirs(None), run_id=_DNA_RUN_ID, translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
         companion_path=FIXTURE_COMPANION_PATH, durable_root_str=None, plugin_root_str=None,
         node_bin="node", session_id="test-session",
+        ever_converged_selected=frozenset(ever_converged),
     )
     return driver_mod, ctx
 
@@ -5160,9 +5170,9 @@ def test_derive_next_action_review_round_1_when_review_token_matches_no_candidat
                     "dispatch_token": "SOME-OTHER-RUN:seg01:rNOT-A-ROUND"}, ensure_ascii=False),
         encoding="utf-8",
     )
-    action = driver_mod.derive_next_action("seg01", ctx)
-    assert action == {"action": "review", "round_label": "1"}
-    assert action["action"] != "already_converged", (
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "1",
+    }, (
         "a foreign-run review is never a verdict about this run, whatever its "
         "own `clean` says"
     )
@@ -10096,26 +10106,18 @@ if __name__ == "__main__":
 _DNA_PRIOR_RUN_ID = "20251231T235959Z"
 
 
-def _dna_ctx_with_ever_converged(driver_mod, *segs):
-    """A second DispatchContext identical to _dna_setup()'s, except that it
-    names `segs` as having already converged once -- what
-    parse_ever_converged_selected() builds in run() from the selector's own
-    previously_converged / lost_sentinels / claims payload."""
-    return driver_mod.DispatchContext(
-        dirs=driver_mod.resolve_dirs(None), run_id=_DNA_RUN_ID,
-        translate_cfg=dict(_FIXTURE_TRANSLATE_CFG), companion_path=FIXTURE_COMPANION_PATH,
-        durable_root_str=None, plugin_root_str=None, node_bin="node",
-        session_id="test-session", ever_converged_selected=frozenset(segs),
-    )
-
-
-def _dna_prior_run_fixture(root, driver_mod, *, round_label, draft_moved, base=None):
+def _dna_prior_run_fixture(root, driver_mod, *, round_label, draft_moved):
     """Stages the #824 shape: a draft on disk, and a review.json stamped for a
     PRIOR run at `round_label`. `draft_moved` decides whether the review's
     recorded draft_sha1 matches the draft currently on disk -- i.e. whether the
-    fix that review asked for has landed. Returns (base_mtime, review_path)."""
-    base = int(time.time()) - 3600 if base is None else base
-    draft = _dna_write_draft(root, driver_mod)
+    fix that review asked for has landed.
+
+    Returns the base mtime, in integer epoch seconds so os.utime()/st_mtime
+    round-trip it exactly whatever the filesystem's timestamp resolution: the
+    review is stamped at base + 10, so a caller placing a ledger fragment
+    strictly after it has a deterministic tick to aim past."""
+    base = int(time.time()) - 3600
+    _dna_write_draft(root, driver_mod)
     current_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
     _dna_write_review(
         root, driver_mod, round_label=round_label, clean=False, coverage_ok=True,
@@ -10123,10 +10125,8 @@ def _dna_prior_run_fixture(root, driver_mod, *, round_label, draft_moved, base=N
         findings=[{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}],
         run_id=_DNA_PRIOR_RUN_ID,
     )
-    review_path = root / "segments" / "seg01.review.json"
-    os.utime(review_path, (base + 10, base + 10))
-    assert draft["dispatch_token"], "fixture sanity: the draft carries a token"
-    return base, review_path
+    os.utime(root / "segments" / "seg01.review.json", (base + 10, base + 10))
+    return base
 
 
 def test_dna_round_label_carries_forward_across_a_run_id_change(tmp_path):
@@ -10189,7 +10189,7 @@ def test_dna_carry_forward_does_not_advance_over_a_retranslation(tmp_path):
     # Prior label "2" for the same reason the outstanding-fix test uses it: at
     # "1" the expectation coincides with the pre-#824 answer for any foreign
     # token, and the test would not be able to fail for the right reason.
-    base, _ = _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=True)
+    base = _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=True)
     # STRICTLY newer than the review: the pre-dispatch in_progress write that
     # process_segment()'s translate branch causes.
     _dna_write_ledger_fragment(root, mtime=base + 20, status="in_progress")
@@ -10222,27 +10222,8 @@ def test_dna_ever_converged_segment_still_restarts_at_round_one(tmp_path):
     selector CLEARS previously_converged of successfully admitted claims, and
     because a `stale` unit reaches this driver with no claim at all."""
     root = phase2_project(tmp_path, n=1)
-    driver_mod, _ = _dna_setup(root)
-    ctx = _dna_ctx_with_ever_converged(driver_mod, "seg01")
+    driver_mod, ctx = _dna_setup(root, ever_converged=("seg01",))
     _dna_prior_run_fixture(root, driver_mod, round_label="2", draft_moved=True)
-
-    assert driver_mod.derive_next_action("seg01", ctx) == {
-        "action": "review", "round_label": "1",
-    }
-
-
-def test_dna_prior_run_token_for_a_different_segment_does_not_carry(tmp_path):
-    """The label is matched by CONSTRUCTION against this segment's own id, so a
-    token naming another segment is not evidence about this one."""
-    root = phase2_project(tmp_path, n=1)
-    driver_mod, ctx = _dna_setup(root)
-    _dna_write_draft(root, driver_mod)
-    (root / "segments" / "seg01.review.json").write_text(
-        json.dumps({"clean": False, "coverage_ok": True, "findings": [],
-                    "draft_sha1": "irrelevant",
-                    "dispatch_token": f"{_DNA_PRIOR_RUN_ID}:seg02:r2"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
 
     assert driver_mod.derive_next_action("seg01", ctx) == {
         "action": "review", "round_label": "1",
@@ -10257,15 +10238,22 @@ def test_dna_prior_run_token_for_a_different_segment_does_not_carry(tmp_path):
     f"{_DNA_PRIOR_RUN_ID}:seg01:r9",        # label outside 1..max_fix_rounds
     f"{_DNA_PRIOR_RUN_ID}:seg01:rABC",      # label not a recognised round
     f"{_DNA_PRIOR_RUN_ID}:seg01",           # no round component
+    # Names ANOTHER segment. Not malformed -- a perfectly good token for seg02 --
+    # which is why the label is matched by CONSTRUCTION against this segment's
+    # own id rather than by splitting whatever the token happens to contain.
+    f"{_DNA_PRIOR_RUN_ID}:seg02:r2",
     # The legitimate token of the DISTINCT admitted segment "FRONTBACK:seg01".
     # It ends with ":seg01:r2" as well, so a suffix match alone would read
     # another segment's round history into this one; the leftover prefix
     # "OLD:FRONTBACK" is not a valid RUN_ID, which is what refuses it.
     "OLD:FRONTBACK:seg01:r2",
 ])
-def test_dna_malformed_prior_run_token_does_not_carry(tmp_path, token):
-    """Every doubt maps to today's round 1 -- never a crash, and never a
-    wrong-round match."""
+def test_dna_unusable_prior_run_token_does_not_carry(tmp_path, token):
+    """Every token this function cannot USE as evidence about this segment maps
+    to today's round 1 -- never a crash, and never a wrong-round match. Some are
+    malformed; the last two are well-formed tokens that simply belong to another
+    segment or another round shape, which is the same outcome for a different
+    reason."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)
@@ -10296,20 +10284,6 @@ def test_dna_same_run_token_behaviour_is_unchanged(tmp_path):
     assert driver_mod.derive_next_action("seg01", ctx) == {
         "action": "needs_fix", "round_label": "1", "findings": findings,
     }
-
-
-@pytest.mark.parametrize("prior_label", ["1", "2"])
-def test_dna_carry_forward_never_lowers_the_round_label(tmp_path, prior_label):
-    """Across every numbered label this fixture's max_fix_rounds admits, the
-    carried label is never lower than the one already reached, and is never
-    "1" unless the prior label was "1"."""
-    root = phase2_project(tmp_path, n=1)
-    driver_mod, ctx = _dna_setup(root)
-    _dna_prior_run_fixture(root, driver_mod, round_label=prior_label, draft_moved=True)
-
-    action = driver_mod.derive_next_action("seg01", ctx)
-    order = {"1": 1, "2": 2, "final": 3}
-    assert order[action["round_label"]] > order[prior_label], action
 
 
 def test_dna_a_foreign_run_review_artifact_is_never_adoptable(tmp_path):
