@@ -98,6 +98,15 @@ EXPECTED_COPIES = frozenset(
         # to relocate a claim path out of the durable root. Registered here
         # deliberately, and byte-identical to the owner's literal.
         ("claim_record.py", "_RUN_ID_DIR_RE"),
+        # #286: name_discovery.py takes --run-id and builds
+        # runs/name-discovery/<RUN_ID>/ -- the run manifest, the harvest, the
+        # lock sentinel and the pre-discovery config backup all live under it,
+        # so an unsafe id can relocate every one of them out of the durable
+        # root. It validates before ANY path is constructed, and carries the
+        # owner's whole decision (not only the fullmatch): the pattern admits
+        # dots freely, so `.`, `..` and any value CONTAINING `..` pass it and
+        # are refused by the two branches after it.
+        ("name_discovery.py", "_RUN_ID_DIR_RE"),
         # #800: glossary_dispatch_driver.py takes --run-id and builds
         # glossary/runs/<RUN_ID>/ paths AND scopes its verdict state document by
         # that id, so it carries the owner's rejection for the same reason

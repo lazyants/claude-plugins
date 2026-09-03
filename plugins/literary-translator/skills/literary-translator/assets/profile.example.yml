@@ -382,6 +382,35 @@ glossary:
     # discarded: `false` keeps injecting the entries it already holds. Absent means `true` (see
     # profile.schema.json's own default), but this example ships the sentinel so every fresh
     # project answers the question consciously rather than inheriting the default silently.
+  # name_discovery -- LLM-based proper-name discovery, for an UNCASED source only (#286).
+  # Commented out DELIBERATELY, and with no CHOOSE_ sentinel: it is opt-in, it does nothing
+  # on a cased source, and a sentinel here would demand an answer from every project.
+  #
+  # On Hebrew/Yiddish/Arabic text bootstrap_names.py's candidate path yields a STRUCTURAL
+  # zero -- it is gated on is_upper_initial() and those letters are Unicode category Lo -- so
+  # name_inventory is the only route to any candidate at all. Enabling this makes W3 run
+  # scripts/name_discovery.py --dispatch then --fold then --verify-inventory, as one fail-fast
+  # chain BEFORE the language smoke test and before either glossary branch. There is no
+  # fallback to the Lu-gate by design: on a caseless source that produces an empty canon which
+  # every downstream gate accepts.
+  #
+  # MIGRATION COST, before you switch it on: --fold rewrites the resolved
+  # languages/<code>.local.json, so particle_config_hash MOVES and every converged segment of
+  # this book goes stale. Run it at W3 on a fresh book, or price it with --fold --dry-run first.
+  #
+  # name_discovery:
+  #   enabled: true
+  #   passes: 6            # MEASURED: six concurrent cheap passes = 121 entities in 63s,
+  #                        # against 111 for three high-tier passes at ~450s. Repeats beat
+  #                        # reasoning effort decisively; union growth was still climbing at 8.
+  #   effort: low          # MEASURED: precision is 92-96% at EVERY tier, so the tier buys
+  #                        # recall only, at 7-11x the wall clock.
+  #   max_parallel: 6
+  #   honorific_prefixes: []   # This language's leading titles, for --fold's dedup METRICS
+  #                            # only. It NEVER drops a form -- both a bare and a
+  #                            # title-bearing spelling stay in the inventory when both
+  #                            # occur, because collapsing them is an identity call the
+  #                            # IRON RULE reserves for the glossary adjudicator.
   research_mode: CHOOSE_live_or_offline  # Ships as an intentionally INVALID placeholder.
                                           # REQUIRED, no default -- live | offline. The explicit, human-set
                                           # precondition for whether THIS run's glossary-pass codex agent actually

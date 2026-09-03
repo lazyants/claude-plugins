@@ -427,8 +427,44 @@ Re-run `language_smoke_report.py` against the **same** sample, checked
 names, and elision/particle cases — never silently swap in an easier sample
 to make the gate pass. If `pass:true` now, W3 can proceed — but on an
 uncased-script source a `pass:true` certifies only what the `Lu`-gated
-detector could reach, not native-script name coverage; inventory those
-names by hand before trusting it.
+detector could reach, not native-script name coverage; fill `name_inventory`
+before trusting it — with `scripts/name_discovery.py` (#286, the shipped
+route) or by hand, per the two-routes section below.
+
+### Two ways to fill `name_inventory` on an uncased source (#286)
+
+Everything below this heading describes the HAND-BUILT route, which is still
+fully supported and is what `--verify-inventory` accepts. Since 1.80.0 there is
+a second, shipped route, and on a book of any size it is the one to reach for:
+
+**`scripts/name_discovery.py` derives the inventory with an LLM and verifies it
+deterministically.** `--dispatch` runs N independent cheap-tier codex passes
+over each segment, asking for every proper name spelled byte-for-byte;
+`--fold` unions the harvest, checks every returned form against the source with
+`language_smoke_report.py`'s own `inventory_forms_seen` census, and freezes the
+survivors into the resolved `.local.json`'s `name_inventory`. Discovery and
+identity are the model's job; structural verification stays a script's. W3 runs
+the chain before the language smoke test — see SKILL.md's "W3 OPENS with LLM
+name discovery" block for the exact commands, the fail-loud rule, and the
+`particle_config_hash` migration cost.
+
+Why it exists rather than better tuning: the `Lu`-gate is unfixable by
+construction on these scripts, and a hand-supplied list is a recall ceiling
+nobody measures. Measured on a real Hebrew volume, a 571-form curated inventory
+reached about 60% of the distinct keys the book actually needed, and the misses
+decomposed into exactly the classes a surface matcher cannot close — connector
+spelling variance, fused proclitics, and context-only references. The sampling
+shape is measured too: six concurrent cheap-tier passes found 121 entities in
+63 s of wall clock against 111 for three high-tier passes at about 450 s, with
+precision 92–96% at every tier, so repeats buy recall and the tier does not.
+
+The hand-built route below remains the right choice for a short text, for a
+book whose full name list already exists in an external registry, or for
+topping up a discovered inventory with a form the model never returned. The two
+compose: `--fold` REPLACES the key outright, so hand additions belong in the
+file after the last discovery run (or in a fresh run's harvest), and the
+pre-discovery file is always preserved at
+`runs/name-discovery/<RUN_ID>/particle_config.before.json`.
 
 ### Uncased-script `.local.json` + `name_inventory` example (generic)
 

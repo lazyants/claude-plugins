@@ -195,7 +195,7 @@ Modeled on `final_audit.py` / `canon_validate.py` / `review_artifact_check.py` /
   in.** No default-filling validator runs anywhere in the plugin; `profile_validate.py` schema-validates
   the config exactly as WRITTEN, so an absent key stays absent and every consumer must independently
   resolve "absent means X" itself. Verified on `output.adapter_config.obsidian.mentions_section.enabled`
-  (`profile.schema.json:791-794`, `default: true` — its own description literally says: "this 'default'
+  (`profile.schema.json:833-836`, `default: true` — its own description literally says: "this 'default'
   annotation is documentation only, see the three runtime predicates in
   render_obsidian.py/assemble.py/validate_backlinks.py for the actual mechanism"). The REAL
   enable-predicate is `mentions_cfg.get("enabled") is not False`, hand-duplicated byte-for-byte across

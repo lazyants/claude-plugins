@@ -552,6 +552,46 @@
           "maxItems": 16,
           "uniqueItems": true
         },
+        "name_discovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "LLM-based proper-name discovery for an UNCASED source (#286). On Hebrew/Yiddish/Arabic text bootstrap_names.py's candidate path yields a STRUCTURAL zero -- it is gated on is_upper_initial() and those letters are Unicode category Lo -- so `name_inventory` is the only route to any candidate at all. `enabled: true` makes W3 run scripts/name_discovery.py --dispatch (N independent cheap-tier codex passes per segment) then --fold (a deterministic occurrence filter over the union, frozen into the resolved languages/<code>.local.json's name_inventory) then --verify-inventory, as one fail-fast chain BEFORE the language smoke test and before either glossary branch. A non-zero exit HALTS W3: there is deliberately no fallback to the Lu-gate, which on a caseless source produces an empty canon every downstream gate accepts. NOTE the migration cost -- --fold rewrites the particle_config, so particle_config_hash MOVES and every converged segment of the book goes stale; run it at W3 on a fresh book, or price it with --fold --dry-run first. Compatible with `glossary.enabled: false`, where a populated inventory still changes what W5 sees through segpack.py's own extraction even against an empty canon. Every `default` below is DOCUMENTATION ONLY -- nothing in this plugin fills a schema default in; name_discovery.py resolves each one independently in its own argparse, and W3 is what reads this block and passes the flags.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Run the discovery chain at W3. Leave absent/false on a cased source: the Lu-gated candidate path is unchanged and has no need of it."
+            },
+            "passes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16,
+              "default": 6,
+              "description": "Independent passes per segment, unioned. MEASURED on a real he->en volume's name-richest chapter: six concurrent cheap-tier passes reached 121 entities in 63s of wall clock, against 111 for three high-tier passes at ~450s, and union growth was still climbing at eight passes. Repeats beat reasoning effort decisively -- this is the knob that buys recall, not `effort`."
+            },
+            "effort": {
+              "type": "string",
+              "enum": ["low", "medium", "high", "xhigh"],
+              "default": "low",
+              "description": "codex reasoning effort per pass. MEASURED: precision is 92-96% at EVERY tier, so the tier buys recall only, and a higher tier costs 7-11x the wall clock per run. Raise it only to add the +11-14 entities a high-tier pass finds that eight cheap ones missed."
+            },
+            "max_parallel": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16,
+              "default": 6,
+              "description": "Concurrent codex jobs in flight. Each gets its own single-use write-confined sandbox and its own broker, which is torn down with it."
+            },
+            "honorific_prefixes": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1, "maxLength": 32 },
+              "maxItems": 64,
+              "uniqueItems": true,
+              "default": [],
+              "description": "Leading titles this source language uses (e.g. a rabbinic honorific), for --fold's deterministic dedup METRICS. MEASURED need: one pass in eight returned every line stripped of its leading title, which inflated a naive union count from 108 to 148 -- duplicates presenting as coverage. It NEVER drops a form: deciding that a bare and a title-bearing spelling denote one entity is an identity call the IRON RULE reserves for the glossary adjudicator, and both spellings legitimately occur in the source, so both belong in the inventory. Cross-entry harmonisation of such a pair is issue #823's subject."
+            }
+          }
+        },
         "skeptic_pass": {
           "type": "object",
           "additionalProperties": false,
