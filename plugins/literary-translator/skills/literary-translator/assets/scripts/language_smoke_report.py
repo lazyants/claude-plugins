@@ -6,7 +6,20 @@ Generalizes the extraction algorithm proven in historiettes-t3's
 into a config-driven re-implementation used ONLY to build this report --
 `scripts/bootstrap_names.py` (the production candidate-name extractor the
 glossary pass actually consumes) is a SEPARATE script with its own copy of
-the same generalized algorithm. Deliberate simplification versus the real
+the same generalized algorithm. Since #286 this file has a SECOND
+consumer, so "used ONLY to build this report" is no longer the whole
+truth: `scripts/name_discovery.py` imports `load_particle_config`,
+`_inventory_scan_pieces`, `inventory_forms_seen`, `segment_plain_text`,
+`segment_clean_text`, `sha1_bytes` and `SENTINEL_RE` from here and calls
+them directly. `inventory_forms_seen` in particular is now the SURVIVAL
+RULE for LLM-discovered name candidates, not merely a report statistic --
+it decides which harvested forms reach a project's `name_inventory` and
+therefore its canon. Changing what it counts changes durable data. It
+was reused rather than re-implemented deliberately: a third copy of the
+fold would be a false-PASS risk (a census that silently under-counts
+prints exactly what a passing one prints), and this is the only
+implementation that records EVERY terminal at every position, which the
+subsumed-form case needs -- see that function's own docstring. Deliberate simplification versus the real
 source: the source's extra `CONTRACTION_RE` heuristic (a hardcoded French
 prefix list -- "J|C|N|S|Qu|Lorsqu|Puisqu|Jusqu|Quoiqu" -- for rejecting
 elided contractions like "Qu'il") is NOT reproduced here, because

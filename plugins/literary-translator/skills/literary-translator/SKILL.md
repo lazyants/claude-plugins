@@ -1386,6 +1386,140 @@ baseline content, a truncated/hollowed block, `reading_order_reversal`) are in
 `validate_conservation.py`'s own module docstring. Read either only when
 `source.conservation` is declared.
 
+**W3 OPENS with LLM name discovery, on an uncased source (#286).** After W2
+produces `manifest.json`, this is the FIRST thing W3 does — before the
+three-hash/smoke-test logic below and before either glossary branch — and its
+placement is load-bearing rather than stylistic. Placed after the smoke
+test, the report would certify a `particle_config` the fold then replaces;
+placed inside the `glossary.enabled: false` branch further down, a
+glossary-ENABLED project would take that branch's `Otherwise` clause and skip
+discovery entirely, reaching `bootstrap_names.py` (which has no discovery
+prerequisite and exits `0` over whatever it finds) and then the `#290` SKIP
+branch's empty-canon initializer — the exact degradation this step exists to
+prevent.
+
+Applies when `glossary.name_discovery.enabled` is `true`. On an uncased source
+(Hebrew/Yiddish/Arabic) `bootstrap_names.py`'s candidate path yields a
+STRUCTURAL zero — it is gated on `is_upper_initial()` and those letters are
+Unicode category `Lo` — so `name_inventory` is the only route to any candidate
+at all, and until now the only way to fill it was by hand. Run, as ONE
+fail-fast chain, substituting the profile's own `glossary.name_discovery`
+values.
+
+**RE-ENTRY IS COMPUTED, NOT BRANCHED ON BY HAND.** W3 can be re-entered after
+an interruption, and which run to resume — with which command — is not a
+judgement to make from a directory listing. Ask the script:
+
+```
+python3 ${durable_root}/scripts/name_discovery.py --resume-plan \
+  --particle-config <particle_config's literal value>
+```
+
+It is read-only, and it evaluates exactly the bindings `--fold` enforces
+(`manifest_sha1`, the Unicode database, the census contract, the tokenizer
+semantics, the target filename, and the rebuilt unit set) against every run
+directory present. Its one JSON line carries `action`, and W3 does what it says:
+
+- `fold` — that `run_id` is current and publication has BEGUN. Run `--fold`
+  for it ALONE. Do NOT run `--dispatch` first, for two different reasons the
+  plan has already told apart: a COMMITTED run refuses dispatch with exit `2`
+  (`run_committed`), and a run caught in the crash window between the config
+  write and the sidecar write refuses it on `backup_sha1`, because dispatch
+  would rebuild the run identity from the already-rewritten config. Either way
+  a `--dispatch && --fold` chain halts before the fold that finishes
+  publication.
+- `dispatch_then_fold` — that `run_id` is current and nothing has been
+  published for it yet. Run its `--dispatch` (which completes only the missing
+  slots) and then its `--fold`.
+- `fresh` — nothing on disk is resumable against the current inputs. Mint a new
+  `RUN_ID` and run the chain below. A stale committed run from before a
+  `manifest.json` edit is reported and never chosen, so it cannot shadow the
+  replacement dispatched to succeed it.
+- `ambiguous`, exit `1` — more than one run is current against these inputs,
+  in ANY combination: two unfinished runs, or a committed one beside an
+  unfinished one. HALT and ask the operator which run is the project's. The
+  unfinished run may be the deliberate replacement whose result is meant to
+  supersede the committed one, and nothing on disk says which — so neither this
+  script nor the session decides it, by timestamp or by preferring the
+  committed one.
+
+`--fold` remains the gate in every case: it re-verifies every binding and then
+either republishes the existing sidecar unchanged or commits, which is also how
+a crash between the config write and the sidecar write finishes publication. A
+non-zero exit HALTS W3 — the inputs moved under the run, and the remedy is a
+fresh `RUN_ID`, never a hand-edit.
+
+**`--verify-inventory` is NOT the resume gate.** It reads ONE input, the
+resolved `particle_config`, and answers only "is `name_inventory` non-empty",
+so a stale inventory from a book whose `manifest.json` has since moved passes
+it. It is the pipeline's FINAL check, and the whole check for the hand-built
+route documented below.
+
+Note what a fresh `RUN_ID` costs once one has completed: it does not merge, it
+REPLACES the `name_inventory` with its own survivors, so re-running a stochastic
+pass can drop names the finished run found and moves `particle_config_hash` a
+second time, staling every converged segment again for no new information. That
+is why the decision is computed from run state rather than from the inventory.
+
+Substitute the profile's own `glossary.name_discovery` values:
+
+```
+python3 ${durable_root}/scripts/name_discovery.py --dispatch \
+  --run-id <RUN_ID> --particle-config <particle_config's literal value> \
+  --passes <passes> --effort <effort> --max-parallel <max_parallel> \
+&& python3 ${durable_root}/scripts/name_discovery.py --fold \
+  --run-id <RUN_ID> --particle-config <particle_config's literal value> \
+  [--honorific-prefix P]... \
+&& python3 ${durable_root}/scripts/name_discovery.py --verify-inventory \
+  --particle-config <particle_config's literal value>
+```
+
+`--dispatch` fans out `segments × passes` independent cheap-tier codex jobs,
+each in its own single-use write-confined sandbox, and writes one harvest file
+per slot; exit `1` means some slot failed, and re-running with the SAME
+`RUN_ID` completes only the gaps. `--fold` refuses an incomplete or unbound
+harvest (exit `2`), unions what remains, verifies every harvested form against
+the source with `language_smoke_report.py`'s own `inventory_forms_seen` census,
+and freezes the survivors into the resolved `languages/<code>.local.json`'s
+`name_inventory`. Each `--honorific-prefix` carries one entry of
+`glossary.name_discovery.honorific_prefixes`; it feeds dedup METRICS only and
+never drops a form.
+
+**A non-zero exit anywhere HALTS W3.** Do not fall back to the `Lu`-gate, do
+not hand-write a `name_inventory` to get past a failure, and do not proceed to
+`bootstrap_names.py`. `--verify-inventory` is the check that makes a silently
+empty inventory loud: it reads ONE input, the resolved `particle_config`, and
+exits `1` when its `name_inventory` is empty. It deliberately does NOT attest
+that discovery ran — a hand-built inventory is the documented route below and a
+project satisfying the pipeline that way is correct — so the thing checked and
+the thing `bootstrap_names.py` loads are the same bytes, resolved by the same
+rule.
+
+**The migration cost, stated before you run it.** `--fold` rewrites the
+`particle_config`, so `particle_config_hash` MOVES and every converged segment
+of this book goes stale. Run discovery at W3 on a FRESH book, or price it first
+with `--fold --dry-run`, which computes and reports while writing nothing at
+all. The pre-discovery file is preserved verbatim at
+`${durable_root}/runs/name-discovery/<RUN_ID>/particle_config.before.json`, and
+`.../name-discovery.json` records the whole provenance (model, effort, passes,
+per-pass counts, union size, survivors, honorific groups, both config hashes).
+
+**Two things this step does NOT fix, so a short canon is not a mystery later.**
+A discovered form still has to survive `glossary_batch_plan.py`'s curation,
+which admits a row only when `likely_name` is true and its frequency clears
+`glossary.min_candidate_freq`: a single-token name occurring exactly once and
+only sentence-initially is dropped there even though the occurrence census
+confirmed it. That loss is identical for a hand-built inventory and predates
+this step. And discovery will legitimately surface BOTH a bare and a
+title-bearing spelling of one name when both occur in the source; deciding they
+denote one entity is an identity call, not a script's, and is tracked
+separately.
+
+**`glossary.enabled: false` is compatible with discovery, not contradictory.**
+W3a's `segpack.py` re-runs the extractor over every segment and W5 acts on the
+`new_names` it produces, so a populated inventory still changes what the
+translator sees even against an empty canon.
+
 **W3 Bootstrap style bible + language smoke test.** After W2 produces
 `manifest.json`, W3's own procedural code (never `profile.schema.json`)
 computes three hashes: the resolved `particle_config` file's content hash, a
@@ -1413,7 +1547,12 @@ On an uncased-script source (Hebrew/Yiddish/Arabic — no `Lu` uppercase
 letters), `pass:true` here certifies only what `bootstrap_names.py`'s
 `Lu`-gated candidate detector could reach, never native-script name
 coverage — see the uncased-script caveat in
-`references/language-pair-parameterization.md` before trusting it. Since
+`references/language-pair-parameterization.md` before trusting it. **Since
+1.80.0 the supported way to fill `name_inventory` is the discovery chain
+that opened this step** (`scripts/name_discovery.py`, #286); a hand-built
+inventory remains valid and is what `--verify-inventory` accepts, but it is
+no longer the only answer, and on a book of any size it is a recall ceiling
+nobody measures. Since
 1.10.0, `name_inventory` matching (both extractors) is mark- and
 connector-insensitive (issues #238/#241): an unpointed, space-joined
 inventory entry also matches a pointed and/or maqaf/geresh/gershayim-joined

@@ -1,10 +1,10 @@
 {
  "declarations": {
-  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"SKILL.md:1462\", 0]": {
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"SKILL.md:1601\", 0]": {
    "anchors": [
     "scripts/glossary_batch_plan.py` FIRST"
    ],
-   "claim": "CONDITION 2: invoke glossary_batch_plan.py -- the shipped authority on \"what W3 still has to adjudicate\", the SAME script the orchestrating session already runs at W3 to decide whether to dispatch the glossary pass (SKILL.md:1462) -- and read its own verdict rather than re-deriving it."
+   "claim": "CONDITION 2: invoke glossary_batch_plan.py -- the shipped authority on \"what W3 still has to adjudicate\", the SAME script the orchestrating session already runs at W3 to decide whether to dispatch the glossary pass (SKILL.md:1601) -- and read its own verdict rather than re-deriving it."
   },
   "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"profile_validate.py:845-846\", 0]": {
    "anchors": [
@@ -979,7 +979,7 @@
    ],
    "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
   },
-  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3770-3776\", 0]": {
+  "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:3909-3915\", 0]": {
    "anchors": [
     "Excluded from every bundle hash",
     "nor of `orchestration_bundle_hash`",

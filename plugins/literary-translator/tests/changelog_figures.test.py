@@ -89,6 +89,7 @@ responsibility, not something asserted here.
 import ast
 import importlib.util
 import re
+import sys
 from collections import namedtuple
 from decimal import Decimal
 from pathlib import Path
@@ -445,37 +446,58 @@ def _glossary_driver_deadline_default():
     return module.build_arg_parser().get_default("deadline_sec")
 
 
+def _name_discovery_passes_default():
+    """name_discovery.py's own default `--passes`, read off its argument parser
+    for the same reason the sibling above reads the glossary driver's: the
+    parser is what a bare invocation gets, so it is the authoritative answer to
+    "how many passes does discovery actually run", and no schema `default`
+    annotation fills it in (nothing in this plugin does)."""
+    path = SCRIPTS / "name_discovery.py"
+    spec = importlib.util.spec_from_file_location(
+        f"nd_figures_{abs(hash(str(path)))}", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
+    return module.build_arg_parser().get_default("passes")
+
+
 FIGURES = [
-    # ROTATED TO 1.79.0 (#824 -- a canon correction no longer resets the whole
-    # book's review round budget). ONE row: how many selector payload fields the
-    # driver newly REQUIRES in order to name the units that have already
-    # converged once, read by AST off the tuple the parser iterates rather than
-    # counted by hand. It is the entry's one claim about this tree that the tree
-    # can answer, and it is otherwise unguarded -- nothing else fails if the
-    # entry says "2" while the parser reads three fields.
+    # ROTATED TO 1.80.0 (#286 -- LLM name discovery for uncased sources). ONE
+    # row: the shipped default `--passes`, read off name_discovery.py's own
+    # argument parser rather than regexed out of the source, because the parser
+    # is what a bare invocation actually gets. That is the entry's one claim
+    # about THIS tree that the tree can answer, and it is worth pinning: the
+    # release's whole argument is that repeats beat reasoning effort, so a
+    # default that drifted away from the benchmarked shape would make the entry
+    # describe a run nobody performs.
     #
-    # Deliberately NOT rows, because they describe the CONTRACT rather than
-    # measure the tree: "round 1", "label L", "max_fix_rounds=1", "at least
-    # once". Nor the version, the issue numbers, or the date.
+    # Everything else numeric in the entry is deliberately NOT a row. The 121 /
+    # 63 s / 111 / ~450 s A/B, the 92-96% precision band, the 83 -> ... -> 89
+    # chain, the 1,141 of 1,776 filter drop, the 211 segments and the four
+    # volumes are field measurements from live private volumes this repository
+    # does not contain -- the same exclusion the 1.77.0 rotation records for its
+    # 47-segment book and the 1.76.1 one for its "~135 minutes". The version,
+    # the issue number and the date are not measurements.
     #
-    # The 1.77.1 rotation this replaces, kept as its own record: EMPTY on
-    # purpose. That entry's subjects were named by FILE, CONSTANT and SECTION
-    # rather than counted, and the two counts it did state (the retired sentence
-    # occurring exactly ONCE in the frozen baseline tree and ZERO times now) are
-    # the literal subject of two assertions in
-    # `tests/retired_wording_pins.test.py`, which re-derive them from git on
-    # every run -- a Figure row would have been a second, weaker copy of a check
-    # that already exists.
-    #
-    # The 1.77.0 rotation before it: ONE row, the number of data paths the W5
-    # glossary gate passes to `glossary_batch_plan.py` off the target durable
-    # root, derived from the argv construction rather than counted by hand.
+    # The rotations this replaces, each kept as its own record. 1.79.0 (#824):
+    # ONE row, how many selector payload fields the driver newly REQUIRES in
+    # order to name the units that have already converged once, read by AST off
+    # the tuple the parser iterates; that entry's "round 1", "label L",
+    # "max_fix_rounds=1" and "at least once" were deliberately not rows, because
+    # they describe the CONTRACT rather than measure the tree. 1.77.1: EMPTY on
+    # purpose -- its subjects were named by FILE, CONSTANT and SECTION rather
+    # than by count, and the two counts it did state are the literal subject of
+    # assertions in tests/retired_wording_pins.test.py, so a Figure row would
+    # have been a second, weaker copy of an existing check. 1.77.0: ONE row, the
+    # number of data paths the W5 gate passes to `glossary_batch_plan.py` off
+    # the target durable root, derived from its argv construction.
     Figure(
-        phrase="requires 2 more selector payload",
-        value=2,
-        derive=lambda: _tuple_len(
-            "segment_dispatch_driver.py", "EVER_CONVERGED_SELECTOR_FIELDS"
-        ),
+        phrase="`--passes` defaults to 6",
+        value=6,
+        derive=_name_discovery_passes_default,
     ),
 ]
 
@@ -483,7 +505,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.79.0"
+FIGURES_VERSION = "1.80.0"
 
 
 def _newest_entry():

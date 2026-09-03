@@ -185,6 +185,29 @@ AUTHORITATIVE_FIXTURE_INVENTORY = (
         ),
     },
     {
+        "file": "name_discovery.test.py",
+        "category": 2,
+        "note": (
+            "Does not isolate any canon_senses consumer. Its shutil.copy* "
+            "sites are three: the STAGED_SCRIPTS loop, the schemas loop, and "
+            "two one-off copies of a harvest file it has already written "
+            "itself. STAGED_SCRIPTS deliberately EXCLUDES "
+            "glossary_batch_plan.py -- the bed stages only name_discovery.py, "
+            "the census it imports, and that census's own siblings -- and "
+            "its spec_from_file_location sites load name_discovery.py and a "
+            "byte-copy owner from the real scripts directory with "
+            "sys.path.insert, which this guard already treats as handled. It "
+            "names glossary_batch_plan.py in code in exactly two places, "
+            "neither of which loads or copies it: the d28 parametrize list, "
+            "which blob-compares that file in its REAL location against "
+            "origin/main to prove #286 did not touch a plugin-bundle member, "
+            "and that test's assertion message naming the same members. "
+            "Verified 2026-09-03 by reading every "
+            "shutil.copy*/spec_from_file_location/SourceFileLoader site in "
+            "the file: none names a consumer script."
+        ),
+    },
+    {
         "file": "canon_validate_plugin_root.test.py",
         "category": 2,
         "note": (
