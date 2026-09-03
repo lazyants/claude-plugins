@@ -29,30 +29,36 @@ than another sentence.
   flag, adding no meaning of its own.
 - **A run directory must exist first,** under `${durable_root}/glossary/runs/`. That condition alone
   is what admits, with no flag, a project with `glossary.enabled: false` and a project that has never
-  dispatched a glossary pass. Once one exists, THREE checks run in order and any refusal wins:
-  `glossary_batch_plan.py` reporting `no_new_candidates: false`; a STRUCTURAL completion check
-  (`glossary-run-incomplete`) when any `manifest_<index>.json` lacks its `out_<index>_attempt_0.json`,
-  i.e. a batch that was never adjudicated; and a FROZEN-PLAN check (`glossary-run-plan-outstanding`)
-  when the planner, re-invoked at `--min-candidate-freq 1`, still names something any run's
-  `manifest_all.json` froze. Replayed against the incident's real commits: the pre-merge canon (247
-  entries) refuses with 2 outstanding batches, the post-merge canon (312 entries) admits.
-- **The last two exist because the first reads MUTABLE inputs.** A pass freezes its batch plan at
-  launch, so raising `glossary.min_candidate_freq` mid-pass, or regenerating `name_candidates.json`,
-  could retire a name the run is still going to merge — a false admission of the very ordering this
-  gate exists to enforce. The structural check consults no project input at all, which is what closes
-  candidate REMOVAL; the floor-1 re-invocation is intersected with the frozen set, so a low-frequency
-  straggler that no run ever froze cannot refuse a fully-merged project forever. The cheap check runs
-  first, so a refusal short-circuits before any second subprocess, and every indeterminate branch in
-  both refuses rather than admitting.
-- **Why the first check asks the planner rather than reading canon directly.** There is no durable
-  `merged: true` anywhere. The glossary driver's state document lives in a `--verdict-dir` that
-  `resolve_verdict_dir()` refuses to place inside the durable root, `merged` is returned in-process,
-  and the merge writes only `canon.json`. Adding a marker would need two writers, a backfill for every
-  project whose glossary already merged, and would still refuse forever over an abandoned run.
-  `glossary_batch_plan.py` already answers "what does W3 still have to adjudicate" from durable state
-  alone, and already encodes every exclusion a hand-rolled check would get wrong — `entries{}`,
-  `review_queue[]`, `corrections[]` dismissals, adjudicated homonym splits, the frequency floor, and
-  the elision force-include.
+  dispatched a glossary pass. Once one exists, TWO checks run and either refusal wins:
+  `glossary_batch_plan.py` reporting `no_new_candidates: false`, and a MERGE-MARKER check refusing
+  `glossary-run-unmerged` when any run directory lacks a valid `merged.json`. Replayed against the
+  incident's real commits: the pre-merge canon (247 entries) refuses with 2 outstanding batches, the
+  post-merge canon (312 entries) admits.
+- **The gate reads a recorded fact instead of inferring one, and W3 now records it.**
+  `canon_validate.py --merge-batches` takes `--glossary-merge-marker PATH` and writes
+  `{"schema": "glossary-run-merged/1", "run_id", "merged_at", "batches", "source": "merge"}` there on
+  a successful, verified merge. The template's `mergeBatchesCmd()` passes it unconditionally, so BOTH
+  W3 launch paths record it — the driver because it builds its merge command from that builder, and a
+  hand-driven merge because it runs the same command. A failed marker write fails the merge loudly
+  rather than leaving an unrecorded merge behind, and a marker whose `run_id` disagrees with its own
+  directory is a copied file, not a merge record, so it is refused rather than trusted.
+- **This reverses the reasoning two earlier rounds of this branch shipped, and the reversal is the
+  point.** Both tried to infer merge state from what was already on disk, and both were wrong the
+  same way: every readable signal is either MUTABLE — the live `profile.yml` threshold and the
+  current `name_candidates.json`, either of which can retire a name a run already froze — or silent
+  about whether the merge happened at all. The objection to a marker was that it needed two writers
+  and a backfill. Measurement retired the first half: `glossary_dispatch_driver.py` builds its merge
+  command from the template's own `mergeBatchesCmd()`, so the two launch paths converge on one
+  command and one writer covers both. The second half is real, and is answered the way this plugin
+  has answered it twice before.
+- **Correct going forward, unsatisfiable backwards — so it ships with a backfill.** A project whose
+  glossary merged before this release has run directories with no marker and would refuse forever.
+  `backfill_glossary_merge_ack.py --apply` writes an acknowledgement (`source: "backfill-ack"`, which
+  the gate accepts exactly like a real merge), mirroring `backfill_resume_gate_ack.py` for #409's
+  resume-integrity gate. It REFUSES to acknowledge a run whose `manifest_<index>.json` lacks its
+  `out_<index>_attempt_0.json` — a batch that was never adjudicated is genuinely unfinished, and
+  waving it through would be this issue's own defect. Dry run unless `--apply`; never overwrites a
+  real merge record; exits non-zero when it refused anything.
 - **The planner is invoked root-bound, not self-anchored.** Its 3 data paths are passed
   explicitly from the target durable root, because it derives its defaults from its own physical
   parent — with the script resolved from `--plugin-root`, every default would name the wrong project.
@@ -64,18 +70,18 @@ than another sentence.
 - **`--allow-unmerged-glossary`** authorizes exactly this dispatch and clears no other refusal. It is
   on both `select_segments.py` and `segment_dispatch_driver.py`, which forwards it verbatim.
   `--classify-only` stays a pure read and never triggers the gate.
-- **Known limitation, stated rather than left to be discovered.** The gate cannot see a glossary run
-  whose only outstanding work is a `--retry`-reopened `review_queue` name: on disk that is
-  byte-identical to a completed run that adjudicated the same name back to the queue, so no read-only
-  predicate over durable artifacts separates the two. Separately, the gate binds the fallback
+- **Known limitations, stated rather than left to be discovered.** A `--retry`-reopened
+  `review_queue` name is the one the marker does not cover, and the marker sharpens rather than
+  removes it: the record says a merge completed and was verified, not that nothing has been reopened
+  since, so a run whose marker predates a `--retry` admits. Closing it means re-stamping on retry,
+  which belongs with the retry path rather than the gate. Separately, the gate binds the fallback
   launcher by the same convention that binds every other `select_segments.py` admission gate — the
   fallback takes its `SEGS` from Workflow args and nothing mechanically forces the preflight call.
-  Neither is introduced by this release. Nor can the gate see a run whose batches ALL completed,
-  whose names were never merged, AND whose names were later removed from `name_candidates.json`: the
-  frozen-plan check asks the planner, and the planner sources names from that file alone, so a name
-  absent from it cannot resurface at any floor. Closing that would mean re-deciding canon membership
-  inside `select_segments.py`, which the iron rule puts off limits.
-- **Upgrade cost.** `segment_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` file, so this release
+  Neither is introduced by this release. The gate also says nothing about whether the names a merge
+  canonized were the RIGHT ones; that judgement is the citation review's inside W3, and no gate in
+  `select_segments.py` can or should re-make it.
+- **Upgrade cost.** `segment_dispatch_driver.py` and `canon_validate.py` are both
+  `PLUGIN_BUNDLE_MEMBERS` files, so this release
   moves `plugin_bundle_hash`: on an upgraded project every converged segment reclassifies as `stale`
   (re-translate only — no derivation-bundle member is touched), and an interrupted run mints a fresh
   `RUN_ID`. A book in progress should ship before taking this release.

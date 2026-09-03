@@ -1754,6 +1754,20 @@ function mergeBatchesCmd(fragments, approvalRecords) {
   const cmdParts = [PY, ROOT + "/scripts/canon_validate.py", "--merge-batches"]
   for (let i = 0; i < fragments.length; i++) cmdParts.push(fragments[i])
   cmdParts.push("--research-mode", RESEARCH_MODE)
+  // #820. Unconditional, unlike --citations-reviewed just below: the marker
+  // is what makes a genuine merge legible to select_segments.py's W5
+  // admission gate at all, on EVERY research mode and EVERY entry point
+  // (this pipeline() call and glossary_dispatch_driver.py's own driver both
+  // build this same command via ctx.build({fn:"mergeBatchesCmd",...}) -- see
+  // that driver's merge_and_verify()). A merge that skipped writing it would
+  // be indistinguishable to the gate from one that never ran, so there is no
+  // condition under which omitting it is correct the way omitting
+  // --citations-reviewed under offline is. Built from RUN_DIR, not a new
+  // substitution placeholder: the path is this run's own
+  // "glossary/runs/RUN_ID/merged.json" under the already-substituted
+  // DURABLE_ROOT/RUN_ID this template already has in scope, so no new
+  // token is needed here.
+  cmdParts.push("--glossary-merge-marker", RUN_DIR + "/merged.json")
   // #505: canon_validate.py refuses to freeze a basis:"established" citation
   // under live unless the caller attests an independent citation review
   // approved these exact bytes -- because the review lives HERE, in this

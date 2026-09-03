@@ -2246,22 +2246,11 @@ called. It:
   pass. A run directory must first exist under `${durable_root}/glossary/runs/`
   — that condition alone is what lets a project with `glossary.enabled: false`,
   and a project that has never dispatched a glossary pass at all, through with
-  no flag. Once one does exist, THREE checks run in order and any refusal wins:
+  no flag. Once one does exist, TWO checks run and either refusal wins:
   `glossary_batch_plan.py` still reporting outstanding name candidates
-  (`no_new_candidates: false`); then a STRUCTURAL completion check, refusing
-  `glossary-run-incomplete` when any `manifest_<index>.json` in a run directory
-  lacks its `out_<index>_attempt_0.json`, i.e. a batch that was never
-  adjudicated; then a FROZEN-PLAN check, refusing `glossary-run-plan-outstanding`
-  when the planner — re-invoked at `--min-candidate-freq 1` — still reports a
-  name that any run's `manifest_all.json` froze.
-  The last two exist because the first reads MUTABLE inputs. A pass freezes its
-  batch plan at launch, so raising `glossary.min_candidate_freq` in `profile.yml`
-  mid-pass, or regenerating `name_candidates.json`, could otherwise retire a
-  name the run is still going to merge — a false admission of exactly the
-  ordering this gate exists to prevent. The structural check consults no project
-  input at all, which is why it is the one that closes candidate REMOVAL; the
-  floor-1 re-invocation is intersected with the frozen set so a low-frequency
-  straggler no run ever froze cannot refuse a fully-merged project forever.
+  (`no_new_candidates: false`), and a MERGE-MARKER check refusing
+  `glossary-run-unmerged` when any run directory lacks a valid
+  `merged.json`.
   The hazard is ORDERING, not correctness. The glossary pass is what freezes
   name forms in `canon.json`: merged BEFORE W5 it hands the translator final
   forms, merged AFTER W5 has converged every name it canonizes that the drafts
@@ -2275,30 +2264,41 @@ called. It:
   ZERO occurrences in the delivered text, displacing forms well established
   there — so a late merge does not merely cost a review pass, it can put
   unattested forms in a position to overrule reviewed prose.
-  There is no durable `merged: true` to read anywhere (the glossary driver's
-  state lives in a `--verdict-dir` it refuses to place inside the durable root,
-  and the merge writes only `canon.json`), which is why the first check asks the
-  shipped planner what W3 still has to adjudicate instead of trying to read
-  completeness off a marker that does not exist. The structural check does read
-  run-directory contents, but only for a fact the directory genuinely settles —
-  whether a frozen batch ever produced its output — never for whether a name was
-  merged.
+  **The gate reads a recorded fact rather than inferring one, and that is the
+  whole design.** `canon_validate.py --merge-batches` writes
+  `${durable_root}/glossary/runs/<run_id>/merged.json` on a successful merge,
+  via `--glossary-merge-marker`, which the template's `mergeBatchesCmd()`
+  passes unconditionally — so BOTH W3 launch paths record it, the driver
+  because it builds its merge command from that builder, and a hand-driven
+  merge because it runs the same command. Two earlier designs tried to infer
+  merge state from durable artifacts and both were wrong in the same way: every
+  readable signal is either MUTABLE (the live `profile.yml` threshold, the
+  current `name_candidates.json`, both of which can retire a name a run already
+  froze) or silent about whether the merge itself ever happened. A marker whose
+  `run_id` disagrees with its own directory name is a copied file, not a merge
+  record, and is refused rather than trusted.
+  **This gate is correct going forward and unsatisfiable backwards**, exactly
+  like #409's resume-integrity gate: a project whose glossary merged before
+  1.77.0 has run directories with no marker and would refuse forever. The
+  sanctioned remedy is `backfill_glossary_merge_ack.py --apply`, which writes
+  an acknowledgement marker (`source: "backfill-ack"`, which the gate accepts
+  exactly like a real merge) and REFUSES to acknowledge any run whose
+  `manifest_<index>.json` lacks its `out_<index>_attempt_0.json` — a batch that
+  was never adjudicated is genuinely unfinished, and waving it through would be
+  the very defect this gate exists to prevent. It is a dry run unless `--apply`
+  is passed, and it never overwrites a real merge record.
   `--allow-unmerged-glossary` authorizes exactly this dispatch and nothing
   else — it clears none of the refusals above — and is the sanctioned answer
   for an operator who has decided to proceed. `--classify-only` reads without
   ever triggering this gate.
   **What this gate cannot see**, recorded here because prose is the only place
-  it can live: a glossary run whose ONLY outstanding work is a `--retry`-
-  reopened `review_queue` name. On disk that state is byte-identical to a
-  completed run that adjudicated the same name back to the queue — the name
-  sits in `review_queue[]` and in that run's `manifest_all.json` either way —
-  so no read-only predicate over durable artifacts separates them. Nor can it
-  see a run whose batches ALL completed, whose names were never merged, AND
-  whose names were later removed from `name_candidates.json`: the frozen-plan
-  check asks the planner, and the planner sources names from that file alone
-  (`glossary_batch_plan.py:712`), so a name absent from it cannot resurface at
-  any floor. Closing that would mean re-deciding canon membership inside
-  `select_segments.py`, which is the iron rule's territory, not a script's.
+  it can live: nothing about whether the names a merge canonized were the RIGHT
+  ones. The marker records that a merge completed and was verified, not that
+  its adjudications were correct — that judgement belongs to the citation
+  review inside W3, and no gate in `select_segments.py` can or should re-make
+  it. An operator who acknowledges a legacy run with the backfill is asserting
+  the same thing about a run that predates the marker, and the marker's own
+  `note` says so rather than claiming a verified merge.
 
 **1.2.0: the deterministic pre-workflow step, after `SEGS` and before
 `pipeline()`.** With `SEGS` finalized, invoke `resume_setup.py` (kind

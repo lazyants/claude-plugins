@@ -4502,352 +4502,142 @@ def resolve_glossary_senses_arg(dirs: dict) -> "tuple[str | None, dict | None]":
         )
 
 
-def read_glossary_run_manifest_names(manifest_path: Path) -> "list | str":
-    """Reads one glossary run's `manifest_all.json` -- written exactly once,
-    atomically, by resume_setup.py's `write_glossary_manifests()` (that
-    function's own docstring: "the aggregate union of every batch,
-    deduped") -- as a plain list of candidate-name strings, or a string
-    error message on any failure. NEVER raises.
-
-    Mirrors `read_json_nonfatal()`'s failure taxonomy exactly (same four
-    branches: not found / not UTF-8 / OSError / not valid JSON), but the
-    CONTAINER shape differs on purpose: `manifest_all.json` is a JSON
-    ARRAY of strings, not an object, so `read_json_nonfatal()`'s own
-    `isinstance(doc, dict)` gate would reject a well-formed manifest
-    outright -- this is a deliberate second copy of that taxonomy for the
-    array shape, not a call to the dict-shaped one."""
-    try:
-        raw = manifest_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return f"manifest_all.json not found at {manifest_path}"
-    except UnicodeDecodeError as exc:
-        return f"manifest_all.json at {manifest_path} is not valid UTF-8: {exc}"
-    except OSError as exc:
-        return f"could not read manifest_all.json at {manifest_path}: {exc}"
-    try:
-        doc = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return f"manifest_all.json at {manifest_path} is not valid JSON: {exc}"
-    if not isinstance(doc, list) or not all(isinstance(n, str) for n in doc):
-        return f"manifest_all.json at {manifest_path} is not a JSON array of strings"
-    return doc
+GLOSSARY_RUN_MERGED_SCHEMA = "glossary-run-merged/1"
 
 
-def check_glossary_run_structural_completion(
-    glossary_runs_dir: Path,
-    run_ids: list,
-    newest_run_id: str,
+def check_glossary_runs_merged(
+    glossary_runs_dir: Path, run_ids: list, newest_run_id: str
 ) -> "dict | None":
-    """CONDITION 3a of the #820 predicate -- the PRIMARY fix (team-lead's
-    round-2 revision, after `freeze-tests`'s own analysis proved
-    CONDITION 3b's union+intersect design could never catch a frozen name
-    that is REMOVED OUTRIGHT from a regenerated `name_candidates.json`:
-    glossary_batch_plan.py's own `rows`/`candidate_names` are sourced from
-    that file alone -- see `glossary_batch_plan.py:712`'s `load_name_
-    candidates()` call -- so a name absent from it can never resurface in
-    ANY of the planner's batches[].names, whatever the floor CONDITION 3b
-    passes. CONDITION 3a closes the removal case without touching any
-    mutable project input at all: for every run directory, every
-    `manifest_<index>.json` (per-batch, written by resume_setup.py's
-    write_glossary_manifests()) must have a matching
-    `out_<index>_attempt_0.json` fragment -- the SAME fragment
-    resume_setup.py's own `probe_resumed_batches()` polls for -- or that
-    batch was never adjudicated and the run is unfinished.
+    """CONDITION 3 of the #820 predicate (post-follow-up revision) --
+    called ONLY from `check_glossary_current()`, and only once CONDITION 2
+    has already admitted at the LIVE `profile.yml` threshold. Replaces the
+    original two-part CONDITION 3 (structural completion + frozen-set
+    intersection, both of which existed to RE-DERIVE "was this run merged"
+    from mutable project inputs -- `name_candidates.json` and the live
+    `profile.yml` threshold -- neither of which is a direct statement of
+    the fact this condition actually needs) with one authoritative read:
+    `canon_validate.py --merge-batches` now WRITES, on successful merge, a
+    marker at `{run_dir}/merged.json`
+    (`{"schema": "glossary-run-merged/1", "run_id", "merged_at", "batches",
+    "source"}`); `backfill_glossary_merge_ack.py` writes the same file,
+    with `"source": "backfill-ack"`, for runs that predate this gate. This
+    condition simply requires every run directory `scan_glossary_run_ids()`
+    found to carry one -- no re-derivation, no subprocess, no reasoning
+    about candidate frequency or canon membership at all.
 
-    EXISTENCE only, never content: shelling canon_validate.py
-    --check-batch here to validate a fragment's CONTENT is deliberately
-    out of scope -- `probe_resumed_batches()`'s own docstring resolves its
-    checker script from the writable durable root on the explicit grounds
-    that "that rule protects a gate, and this probe is not one"; THIS
-    function IS a gate, so borrowing that probe's self-anchoring would
-    import a tamper surface for no benefit. A present-but-corrupt fragment
-    is out of scope for 3a; only absence is the signal.
+    Iterates EVERY `run_id` in `run_ids` (all of them, not just
+    `newest_run_id` -- an older run with no marker is exactly as dangerous
+    as the newest one lacking one; matching every run in `run_ids` is what
+    the deleted structural-completion/frozen-set conditions also insisted
+    on, for the same reason). For each run:
 
-    Evaluated BEFORE 3b (`check_glossary_run_plan_outstanding()`, below) --
-    cheaper (no subprocess) and more fundamental: a still-running pass has
-    missing fragments regardless of what the live profile.yml threshold or
-    the current name_candidates.json say, which is exactly what 3b alone
-    cannot see.
+      - `{run_dir}/merged.json` absent (`FileNotFoundError` on the read) ->
+        counts toward `unmerged_run_ids`; NOT a failure, the ordinary state
+        of a run mid-W3/W3a or one that predates this gate and has not yet
+        been acknowledged.
+      - Present but unreadable (`OSError`/`UnicodeDecodeError`), not valid
+        JSON, not a JSON object, missing/mismatched `"schema"`, or whose
+        own `"run_id"` field disagrees with the run's OWN directory name ->
+        refuse immediately with reason "glossary-run-plan-unreadable" (the
+        reason this predicate already used for "the frozen plan could not
+        be established", reused rather than inventing a fourth), naming
+        the marker path. The `run_id` mismatch matters most: a marker
+        legitimately belongs to exactly one run, and a copy or symlink
+        planted under a different run's directory must never be trusted as
+        that run's own merge record.
+      - Present, readable, well-formed, and self-consistent -> that run is
+        accounted for, whatever its `"source"` (`"merge"` or
+        `"backfill-ack"` both admit identically -- an acknowledged run is
+        admitted exactly like a merged one, which is the whole point of
+        the backfill path).
 
-    Iterates every `run_id` in `run_ids` (all of them, not just
-    `newest_run_id` -- same reasoning as 3b's own union: an older
-    unfinished run is exactly as dangerous). Missing fragment(s) anywhere
-    -> refuse with reason "glossary-run-incomplete",
-    `outstandingBatches` = the TOTAL count of manifests missing their
-    fragment across every run, `outstandingCandidates` = None (this
-    reason counts BATCHES, never candidate names -- the two reasons must
-    stay distinguishable by which count is populated), `glossaryRunId` =
-    `newest_run_id`.
-
-    Fail-closed, reusing "glossary-run-plan-unreadable" verbatim -- NEVER
-    a new fourth reason string, and NEVER "glossary-check-unavailable"
-    (this function runs no subprocess at all) -- for either form of "the
-    frozen plan could not be ESTABLISHED", as distinct from "was
-    established and is unfinished": a run directory that cannot be
-    enumerated (`iterdir()` raises), or a `manifest_<index>.json` filename
-    whose `<index>` will not parse as an integer. Both name the offending
-    path. The unreadable-fragment-stat case (an `OSError` other than
-    `FileNotFoundError` on the `out_<index>_attempt_0.json` stat itself)
-    refuses the same way, for the same reason -- absence and failure must
-    not print identically, the same discipline `scan_glossary_run_ids()`
-    already applies to its own directory listing."""
-    missing = 0
+    After the loop: any run lacking a marker -> refuse with reason
+    "glossary-run-unmerged", `outstandingBatches` = None,
+    `outstandingCandidates` = None (this condition counts RUNS, not
+    batches or candidate names -- neither of the other two reasons'
+    counted quantities applies here), `glossaryRunId` = `newest_run_id`,
+    naming how many runs lack a marker, the runs directory, the newest run
+    id, and the three remedies (finish/resume W3/W3a, run
+    backfill_glossary_merge_ack.py --apply for a run that predates this
+    gate, or pass --allow-unmerged-glossary). Every run accounted for ->
+    admit (`None`)."""
+    unmerged_run_ids = []
     for run_id in run_ids:
-        run_dir = glossary_runs_dir / run_id
+        marker_path = glossary_runs_dir / run_id / "merged.json"
         try:
-            entries = sorted(run_dir.iterdir())
+            raw = marker_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            # DEFINITIVELY no merge marker for this run yet -- the ordinary
+            # state of a run still in progress, or one that predates this
+            # gate and has not been backfill-acknowledged. Not a failure.
+            unmerged_run_ids.append(run_id)
+            continue
+        except UnicodeDecodeError as exc:
+            return _glossary_refusal(
+                "glossary-run-plan-unreadable",
+                f"{marker_path} is not valid UTF-8 ({exc}) -- refusing "
+                "rather than risking a silent admission over a run whose "
+                "merge status cannot be established.",
+                glossary_run_id=newest_run_id,
+            )
         except OSError as exc:
             return _glossary_refusal(
                 "glossary-run-plan-unreadable",
-                f"glossary run {run_id!r} directory {run_dir} could not be "
-                f"enumerated ({exc}) -- refusing rather than risking a "
-                "silent admission over a run whose own batch completion "
-                "cannot be established.",
+                f"could not read {marker_path} ({exc}) -- refusing rather "
+                "than risking a silent admission over a run whose merge "
+                "status cannot be established.",
                 glossary_run_id=newest_run_id,
             )
-        for entry in entries:
-            name = entry.name
-            if (
-                name == "manifest_all.json"
-                or not name.startswith("manifest_")
-                or not name.endswith(".json")
-            ):
-                continue
-            index_str = name[len("manifest_"):-len(".json")]
-            try:
-                index = int(index_str)
-            except ValueError:
-                return _glossary_refusal(
-                    "glossary-run-plan-unreadable",
-                    f"{entry} -- batch index {index_str!r} in this "
-                    "manifest filename does not parse as an integer -- "
-                    "refusing rather than risking a silent admission over "
-                    "a batch whose completion cannot be established.",
-                    glossary_run_id=newest_run_id,
-                )
-            fragment_path = run_dir / f"out_{index}_attempt_0.json"
-            try:
-                os.stat(fragment_path)
-            except FileNotFoundError:
-                missing += 1
-            except OSError as exc:
-                return _glossary_refusal(
-                    "glossary-run-plan-unreadable",
-                    f"could not establish whether {fragment_path} exists "
-                    f"({exc}) -- refusing rather than risking a silent "
-                    "admission over a batch whose completion cannot be "
-                    "established.",
-                    glossary_run_id=newest_run_id,
-                )
-
-    if missing == 0:
-        return None
-
-    return _glossary_refusal(
-        "glossary-run-incomplete",
-        f"{missing} glossary batch(es) under {glossary_runs_dir} (newest "
-        f"run: {newest_run_id}) have a frozen manifest but no matching "
-        "adjudication output yet -- the W3/W3a glossary pass for this "
-        "project is still in progress. Finish (or resume) it before "
-        "dispatching W5, or pass --allow-unmerged-glossary if you have "
-        "decided to override deliberately.",
-        glossary_run_id=newest_run_id,
-        outstanding_batches=missing,
-    )
-
-
-def check_glossary_run_plan_outstanding(
-    dirs: dict,
-    glossary_runs_dir: Path,
-    run_ids: list,
-    newest_run_id: str,
-    senses_path_arg: "str | None",
-) -> "dict | None":
-    """CONDITION 3b of the #820 predicate -- called ONLY from
-    `check_glossary_current()`, and only once CONDITION 2 has already
-    admitted at the LIVE `profile.yml` threshold AND CONDITION 3a
-    (`check_glossary_run_structural_completion()`, evaluated first because
-    it is cheaper and more fundamental) has ALSO admitted -- a run with
-    any batch still missing its adjudication fragment refuses at 3a and
-    never reaches this function. See `check_glossary_current()`'s own
-    docstring for why CONDITION 2 alone is insufficient: it re-derives
-    "what's outstanding" from the mutable live threshold and the mutable
-    current `name_candidates.json`, so raising the threshold between a
-    run's dispatch and W5 can make CONDITION 2 forget a name the run
-    already froze.
-
-    Binds the check to what the run(s) actually froze instead:
-
-      1. Union `manifest_all.json` from EVERY run directory in `run_ids`
-         (all of them, not just `newest_run_id` -- an older, still
-         unfinished run is exactly as dangerous as the newest one). A
-         missing/unreadable/malformed manifest in a run directory that
-         itself exists refuses HERE, with reason
-         "glossary-run-plan-unreadable" naming the offending path --
-         fail-closed, the same discipline `scan_glossary_run_ids()` and
-         `resolve_glossary_senses_arg()` already apply to their own
-         indeterminate cases.
-      2. If nothing was ever frozen (every run's manifest is empty), admit
-         without spending a subprocess call -- an empty frozen set can
-         never intersect non-empty.
-      3. Otherwise, invoke glossary_batch_plan.py again -- identical to
-         CONDITION 2's own call (same `--name-candidates`/`--canon`/
-         `--senses-path`) except `--min-candidate-freq 1`: a floor of 1
-         means no name any run froze can vanish from the planner's answer
-         purely because the live profile.yml threshold was raised above
-         the frequency it had when the run started. The planner still
-         applies every canon exclusion itself (entries{}/review_queue[]/
-         corrections[]/adjudicated splits/elision force-include) -- THE
-         IRON RULE: that identity logic stays in glossary_batch_plan.py,
-         never re-derived here. Subprocess failure modes (non-zero exit,
-         OSError/TimeoutExpired, unparseable stdout, missing
-         'no_new_candidates' field, non-list 'batches') fail closed with
-         the SAME "glossary-check-unavailable" reason CONDITION 2 uses for
-         its own identical failure modes -- this is still one planner
-         invocation whose non-answer must not print like an answer.
-      4. Intersect the floor-1 planner's still-outstanding names with the
-         frozen set from step 1. A name the floor-1 planner still reports
-         but that no run ever froze (a fresh low-frequency straggler below
-         the project's real threshold) is NOT counted -- only names a run
-         actually froze AND the planner still finds outstanding refuse, so
-         a fully-merged project stays admitted. Non-empty intersection ->
-         refuse with reason "glossary-run-plan-outstanding", counting the
-         intersecting names as `outstandingCandidates`; `outstandingBatches`
-         is deliberately `None` (this condition counts names project-wide
-         across every run's frozen manifest, and attributing that count to
-         one run's batch count would misstate its provenance, the same
-         non-goal CONDITION 2's own docstring states for its "which run"
-         wording).
-
-    ACCEPTED RESIDUAL, not fixed here (team-lead's own call): a run whose
-    every batch completed (3a passes), whose frozen names were NEVER
-    merged into canon.json, AND whose names were then removed from a
-    regenerated `name_candidates.json` is invisible to BOTH 3a (structural
-    completion alone says nothing about merge status) and this function
-    (the intersection at step 4 can only ever contain names the CURRENT
-    `name_candidates.json` still holds -- glossary_batch_plan.py's own
-    `rows`/`candidate_names` are sourced from that file alone). Closing
-    this would need canon-membership reasoning inside this gate, which THE
-    IRON RULE ("scripts surface candidates and enforce schemas, they never
-    make an accuracy/identity call") puts off limits. This is documented,
-    accepted behavior, not a claim that it is safe -- see
-    `tests/select_segments_glossary_gate.test.py`'s own pin of it, so any
-    future change to it is a deliberate decision, not a silent
-    regression."""
-    durable_root = dirs["durable_root"]
-    frozen_names = set()
-    for run_id in run_ids:
-        manifest_path = glossary_runs_dir / run_id / "manifest_all.json"
-        names = read_glossary_run_manifest_names(manifest_path)
-        if isinstance(names, str):
+        try:
+            doc = json.loads(raw)
+        except json.JSONDecodeError as exc:
             return _glossary_refusal(
                 "glossary-run-plan-unreadable",
-                f"glossary run {run_id!r} under {glossary_runs_dir} has no "
-                f"readable frozen candidate manifest ({names}) -- refusing "
+                f"{marker_path} is not valid JSON ({exc}) -- refusing "
                 "rather than risking a silent admission over a run whose "
-                "own frozen plan cannot be established.",
+                "merge status cannot be established.",
                 glossary_run_id=newest_run_id,
             )
-        frozen_names.update(names)
+        if not isinstance(doc, dict):
+            return _glossary_refusal(
+                "glossary-run-plan-unreadable",
+                f"{marker_path} is not a JSON object -- refusing rather "
+                "than risking a silent admission over a run whose merge "
+                "status cannot be established.",
+                glossary_run_id=newest_run_id,
+            )
+        if doc.get("schema") != GLOSSARY_RUN_MERGED_SCHEMA:
+            return _glossary_refusal(
+                "glossary-run-plan-unreadable",
+                f"{marker_path} does not carry schema "
+                f"{GLOSSARY_RUN_MERGED_SCHEMA!r} (got {doc.get('schema')!r}) "
+                "-- refusing rather than risking a silent admission over a "
+                "run whose merge status cannot be established.",
+                glossary_run_id=newest_run_id,
+            )
+        if doc.get("run_id") != run_id:
+            return _glossary_refusal(
+                "glossary-run-plan-unreadable",
+                f"{marker_path} claims run_id {doc.get('run_id')!r}, which "
+                f"does not match its own parent directory name {run_id!r} "
+                "-- refusing rather than risking admission on a marker "
+                "copied from a different run.",
+                glossary_run_id=newest_run_id,
+            )
 
-    if not frozen_names:
-        return None
-
-    cmd = [
-        sys.executable,
-        "-B",
-        str(dirs["glossary_batch_plan_script"]),
-        "--name-candidates",
-        str(durable_root / "name_candidates.json"),
-        "--canon",
-        str(durable_root / "canon.json"),
-        "--min-candidate-freq",
-        "1",
-    ]
-    if senses_path_arg is not None:
-        cmd += ["--senses-path", senses_path_arg]
-
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raw_stderr = getattr(exc, "stderr", None)
-        detail = _tail(raw_stderr if isinstance(raw_stderr, str) else str(exc))
-        return _glossary_refusal(
-            "glossary-check-unavailable",
-            "could not run glossary_batch_plan.py at floor frequency 1 to "
-            f"check whether run {newest_run_id!r}'s frozen candidates are "
-            f"still outstanding ({exc}) -- a check that could not be "
-            "established must not print like one that passed.",
-            detail=detail,
-        )
-
-    if proc.returncode != 0:
-        detail = _tail(proc.stderr)
-        return _glossary_refusal(
-            "glossary-check-unavailable",
-            f"glossary_batch_plan.py exited {proc.returncode} at floor "
-            f"frequency 1 while checking run {newest_run_id!r}'s frozen "
-            f"candidates -- cannot tell whether W5 dispatch is safe. "
-            f"{detail}",
-            detail=detail,
-        )
-
-    try:
-        payload = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        detail = _tail(proc.stderr)
-        return _glossary_refusal(
-            "glossary-check-unavailable",
-            "glossary_batch_plan.py (floor frequency 1) did not print "
-            f"exactly one parseable JSON line on stdout: "
-            f"stdout={_tail(proc.stdout)!r}",
-            detail=detail,
-        )
-
-    if not isinstance(payload, dict) or "no_new_candidates" not in payload:
-        detail = _tail(proc.stderr)
-        return _glossary_refusal(
-            "glossary-check-unavailable",
-            "glossary_batch_plan.py's stdout (floor frequency 1) did not "
-            f"contain the expected 'no_new_candidates' field: "
-            f"{_tail(repr(payload))}",
-            detail=detail,
-        )
-
-    if payload["no_new_candidates"] is True:
-        return None
-
-    batches = payload.get("batches")
-    if not isinstance(batches, list):
-        detail = _tail(proc.stderr)
-        return _glossary_refusal(
-            "glossary-check-unavailable",
-            "glossary_batch_plan.py (floor frequency 1) reported "
-            f"no_new_candidates: false but its 'batches' field was not a "
-            f"list: {_tail(repr(payload))}",
-            detail=detail,
-        )
-
-    plan_names = set()
-    for b in batches:
-        if isinstance(b, dict) and isinstance(b.get("names"), list):
-            plan_names.update(n for n in b["names"] if isinstance(n, str))
-
-    outstanding = frozen_names & plan_names
-    if not outstanding:
+    if not unmerged_run_ids:
         return None
 
     return _glossary_refusal(
-        "glossary-run-plan-outstanding",
-        f"{len(outstanding)} candidate name(s) frozen by this project's "
-        f"glossary run manifests under {glossary_runs_dir} (newest: "
-        f"{newest_run_id}) are still outstanding -- a live profile.yml "
-        "threshold change cannot retire a name a run already froze. "
-        "Finish (or resume) the W3/W3a glossary pass before dispatching "
-        "W5, or pass --allow-unmerged-glossary if you have decided to "
-        "override deliberately.",
+        "glossary-run-unmerged",
+        f"{len(unmerged_run_ids)} glossary run(s) under {glossary_runs_dir} "
+        f"(newest: {newest_run_id}) have no merge marker yet -- the "
+        "W3/W3a glossary pass for this project has not recorded that its "
+        "batches were merged. Finish (or resume) it, run "
+        "backfill_glossary_merge_ack.py --apply for a run that predates "
+        "this gate, or pass --allow-unmerged-glossary if you have decided "
+        "to override deliberately.",
         glossary_run_id=newest_run_id,
-        outstanding_candidates=len(outstanding),
     )
 
 
@@ -4917,55 +4707,41 @@ def check_glossary_current(dirs: dict) -> "dict | None":
     "glossary-pass-unmerged", naming the run id and counting both the
     outstanding batches and the total candidate names across them.
 
-    CONDITION 3 is now TWO PARTS, evaluated in order, both only once
+    CONDITION 3 (`check_glossary_runs_merged()`), evaluated only once
     CONDITION 2 has admitted -- a CONDITION 2 refusal already fails closed
-    and returns immediately, before either part runs:
-
-    CONDITION 3a (`check_glossary_run_structural_completion()`), FIRST --
-    round-2 revision, added after `freeze-tests`'s own analysis proved 3b
-    alone has a hole 3b cannot close: glossary_batch_plan.py sources its
-    candidate rows from `name_candidates.json` alone, so a frozen name
-    REMOVED OUTRIGHT from a regenerated `name_candidates.json` can never
-    resurface in ANY planner call, whatever the floor. 3a closes this
-    without reading any mutable project input: for every run directory,
-    every `manifest_<index>.json` (per-batch, written by resume_setup.py's
-    `write_glossary_manifests()`) must have a matching
-    `out_<index>_attempt_0.json` adjudication fragment (existence only,
-    never content -- see that function's own docstring for why validating
-    fragment CONTENT here would import a tamper surface). Any batch
-    missing its fragment means the run is still in progress, independent
-    of what the live profile.yml or name_candidates.json currently say.
-    Refuses with reason "glossary-run-incomplete",
-    `outstandingBatches` = count of batches missing their fragment
-    project-wide, `outstandingCandidates` = None. Fails closed with reason
-    "glossary-run-plan-unreadable" (never a new reason, never
-    "glossary-check-unavailable" -- 3a runs no subprocess) when a run
-    directory cannot be enumerated or a manifest filename's index will not
-    parse.
-
-    CONDITION 3b (`check_glossary_run_plan_outstanding()`), evaluated only
-    once 3a has ALSO admitted -- CONDITION 2 alone re-derives "what's
-    outstanding" from two MUTABLE project inputs -- the live `profile.yml`
-    threshold and the current `name_candidates.json` -- so it can be
-    fooled by threshold drift alone (as opposed to 3a's candidate-removal
-    hole): a W3 pass that is still in flight froze its own batch plan
-    (`manifest_all.json`) at dispatch time; if the operator raises
-    `glossary.min_candidate_freq` before W5, CONDITION 2's live
-    re-derivation can drop a name the frozen plan still names, and falsely
-    admit while that name is genuinely still in flight. 3b closes this by
-    binding the check to what the run(s) actually froze instead of the
-    live inputs: union every run directory's `manifest_all.json` (not just
-    the newest), re-invoke glossary_batch_plan.py at
-    `--min-candidate-freq 1` so no frozen name can vanish purely because
-    the live threshold rose, and intersect the still-outstanding names
-    with the frozen set. See `check_glossary_run_plan_outstanding()`'s own
-    docstring for the full four-step predicate, its accepted residual
-    (a structurally-complete run whose names were never merged AND later
-    removed from name_candidates.json -- invisible to both 3a and 3b, and
-    deliberately not fixed, per THE IRON RULE), and its two failure
-    reasons ("glossary-run-plan-unreadable" for an unreadable frozen
-    manifest, "glossary-check-unavailable" reused for a floor-1 planner
-    call that cannot be established).
+    and returns immediately, before this runs. Superseded design: the
+    original CONDITION 3 was two parts (a structural-completion check over
+    per-batch adjudication fragments, then a frozen-manifest/floor-1
+    intersection), both of which existed to RE-DERIVE "was this run's W3
+    pass actually finished and merged" from mutable project inputs --
+    `name_candidates.json`'s current contents and the live `profile.yml`
+    threshold -- because nothing durable stated the fact directly. Two
+    review rounds found that inference alone can never close every hole
+    (a name can be frozen, adjudicated, AND removed from a regenerated
+    `name_candidates.json` before ever reaching canon.json, which is
+    invisible to both a structural check and a candidate-set
+    intersection). `canon_validate.py --merge-batches` now WRITES the fact
+    directly: on a successful merge it stamps `{run_dir}/merged.json`
+    (`backfill_glossary_merge_ack.py` writes the same marker, with
+    `"source": "backfill-ack"`, for runs that predate this gate), and
+    CONDITION 3 now just reads it -- no re-derivation, no subprocess, no
+    reasoning about candidate frequency or canon membership. Every run
+    directory `scan_glossary_run_ids()` found (all of them, not just
+    `newest_run_id` -- an older run with no marker is exactly as dangerous
+    as the newest one lacking one) must carry a marker whose `schema` is
+    `"glossary-run-merged/1"` and whose own `run_id` field matches its
+    parent directory name (a marker copied from a different run is not
+    that run's own merge record). A run missing its marker entirely is the
+    ordinary "still in progress" state; refuses with reason
+    "glossary-run-unmerged" (`outstandingBatches`/`outstandingCandidates`
+    both None -- this condition counts RUNS, neither batches nor candidate
+    names). A marker that IS present but unreadable, unparseable, not a
+    JSON object, wrong-schema, or `run_id`-mismatched fails closed with
+    reason "glossary-run-plan-unreadable" (the reason this predicate
+    already used for "a frozen fact could not be established", reused
+    rather than inventing a fourth), naming the marker path. See
+    `check_glossary_runs_merged()`'s own docstring for the full per-run
+    predicate.
 
     WORDING, load-bearing (post-implementation fix): the refusal message
     reports the outstanding-batch/candidate counts and the newest run id as
@@ -4983,9 +4759,9 @@ def check_glossary_current(dirs: dict) -> "dict | None":
     NOT re-merge these into one clause without re-deriving that the merged
     claim is actually true. CONDITION 3's own refusal keeps the same
     discipline: it names the newest run id for continuity with CONDITION
-    2's refusal shape, but its count is a PROJECT-WIDE union across every
-    run's frozen manifest, never attributed to the newest run alone -- see
-    `check_glossary_run_plan_outstanding()`'s docstring, step 4."""
+    2's refusal shape, but its count (when populated at all) is never
+    attributed to the newest run alone -- see
+    `check_glossary_runs_merged()`'s own docstring."""
     durable_root = dirs["durable_root"]
     glossary_runs_dir = durable_root / "glossary" / "runs"
     scan_result = scan_glossary_run_ids(glossary_runs_dir)
@@ -5067,14 +4843,7 @@ def check_glossary_current(dirs: dict) -> "dict | None":
         )
 
     if payload["no_new_candidates"] is True:
-        structural_refusal = check_glossary_run_structural_completion(
-            glossary_runs_dir, scan_result, newest_run_id
-        )
-        if structural_refusal is not None:
-            return structural_refusal
-        return check_glossary_run_plan_outstanding(
-            dirs, glossary_runs_dir, scan_result, newest_run_id, senses_path_arg
-        )
+        return check_glossary_runs_merged(glossary_runs_dir, scan_result, newest_run_id)
 
     batches = payload.get("batches")
     if not isinstance(batches, list):

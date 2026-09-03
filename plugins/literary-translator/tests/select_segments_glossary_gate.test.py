@@ -248,6 +248,36 @@ def make_glossary_run(root: Path, run_id="R") -> Path:
     return run_dir
 
 
+def write_glossary_run_merged_marker(
+    run_dir: Path,
+    run_id: str,
+    *,
+    source="merge",
+    merged_at="2026-01-01T00:00:00Z",
+    batches=(0,),
+) -> None:
+    """Writes {run_dir}/merged.json in exactly the shape
+    canon_validate.py --merge-batches / backfill_glossary_merge_ack.py
+    produce: schema/run_id/merged_at/batches/source. `run_id` defaults to
+    matching the caller's own run directory -- the dedicated mismatch test
+    (see the #820 follow-up block below test 11) passes a DIFFERENT value
+    explicitly to prove the gate catches a marker that does not belong to
+    the run it sits under."""
+    (run_dir / "merged.json").write_text(
+        json.dumps(
+            {
+                "schema": "glossary-run-merged/1",
+                "run_id": run_id,
+                "merged_at": merged_at,
+                "batches": list(batches),
+                "source": source,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
 def make_full_project(tmp_path, name="durable_root", glossary_yaml=DEFAULT_GLOSSARY_PROFILE_YAML):
     """A self-anchored durable_root: select_segments.py + ledger_merge.py +
     glossary_batch_plan.py + canon_senses.py under {root}/scripts/, the
@@ -362,12 +392,10 @@ def test_2_admits_when_planner_reports_no_new_candidates(tmp_path):
     root = make_full_project(tmp_path)
     write_name_candidates(root, [])  # -> {"no_new_candidates": true, "batches": []}
     run_dir = make_glossary_run(root, "R")
-    # A real run dir always carries a frozen manifest_all.json (resume_setup.py's
-    # write_glossary_manifests() writes it the moment a run starts) -- an
-    # empty frozen plan here, matching "this run queued zero candidates".
-    # Needed since the #820 follow-up (frozen-plan gate, see the block below
-    # test 11) fails CLOSED on a run dir whose frozen plan cannot be read.
-    write_glossary_manifest_all(run_dir, [])
+    # CONDITION 3 (see the #820 follow-up block below test 11) requires
+    # every run dir to carry a merge marker before admitting -- without
+    # one, this run reads as still-unmerged and the gate refuses.
+    write_glossary_run_merged_marker(run_dir, "R")
 
     proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
@@ -438,12 +466,11 @@ def test_6_min_candidate_freq_from_profile_reaches_the_child(tmp_path):
     )
     write_name_candidates(root, [{"name": "Bob", "freq": 2, "likely_name": True}])
     run_dir = make_glossary_run(root, "R")
-    # This run's OWN frozen plan never queued "Bob" (unlike test 12/14,
-    # which deliberately freeze "Bob" under an earlier, lower threshold) --
-    # required so the #820 follow-up's frozen-plan condition (see the block
-    # below test 11) doesn't itself refuse here, keeping this test's own
-    # point (the live threshold reaches the child) isolated from that one.
-    write_glossary_manifest_all(run_dir, [])
+    # CONDITION 3 (see the #820 follow-up block below test 11) requires a
+    # merge marker before admitting -- required so it doesn't itself
+    # refuse here, keeping this test's own point (the live threshold
+    # reaches the child) isolated from that one.
+    write_glossary_run_merged_marker(run_dir, "R")
 
     proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
@@ -1087,182 +1114,60 @@ def test_11_driver_forwards_the_flag_and_gets_past_the_selector_gate(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# #820 follow-up (frozen-plan gate): a PR review bot found the two-condition
-# predicate above fail-open. CONDITION 2 (`check_glossary_current()`) asks
-# glossary_batch_plan.py "is there outstanding work" using the LIVE
-# profile.yml threshold and the CURRENT name_candidates.json. A W3 pass
-# freezes its own batch plan into `{run_dir}/manifest_all.json`
-# (resume_setup.py's `write_glossary_manifests()`) the moment it starts. So a
-# run planned at min_candidate_freq:2 holds a frequency-2 name; raise the
-# live profile to 3 before W5, and the planner drops that name from its
-# LIVE-threshold report, reports no_new_candidates:true, and the gate wrongly
-# ADMITS -- while the in-flight W3 pass can still merge that name
-# afterwards. Regenerating name_candidates.json mid-pass is the same class
-# of hole.
+# #820 follow-up (durable merge marker): a PR review bot found the original
+# two-condition predicate above fail-open, and the FIRST repair (two more
+# CONDITION-3 sub-checks -- a per-batch structural-completion scan, then a
+# frozen-manifest/floor-1-candidate-intersection) fixed the bot's own
+# reproduction but two further review rounds each found a fresh hole: both
+# sub-checks were INFERENCE over mutable project state (name_candidates.json,
+# the live profile.yml threshold) standing in for a fact nothing durable
+# recorded -- "was this run's W3 pass actually merged". A name that was
+# frozen, adjudicated, and then removed from a regenerated
+# name_candidates.json before ever reaching canon.json was invisible to
+# both sub-checks, whatever the floor.
 #
-# The fix adds a THIRD condition, evaluated only once a run directory is
-# known to exist (i.e. only when CONDITION 1 has already found at least one
-# run dir): union the names from every run's manifest_all.json, call the
-# planner a SECOND time with --min-candidate-freq 1 (so no frozen name can
-# vanish because the live threshold moved), intersect the planner's
-# batches[].names with that frozen set, and refuse when the intersection is
-# non-empty. manifest_all.json is itself built from the planner's own
-# batches[].names (write_glossary_manifests()), so the two name sets are
-# identical in provenance and form -- this is not a second, independently
-# invented predicate, it is the same one re-run against a threshold that
-# cannot silently exclude a name the frozen plan already committed to.
+# The fix closes the hole at its root instead of adding a third inference
+# layer: canon_validate.py --merge-batches now WRITES the fact directly, a
+# `{run_dir}/merged.json` marker stamped on successful merge
+# (`{"schema": "glossary-run-merged/1", "run_id", "merged_at", "batches",
+# "source": "merge"}`); backfill_glossary_merge_ack.py writes the SAME
+# marker shape (`"source": "backfill-ack"`, plus a `"note"` field) for runs
+# that predate this gate -- an acknowledged run admits exactly like a
+# merged one. CONDITION 3 (`check_glossary_runs_merged()`) now just reads
+# the marker for every run directory CONDITION 1 found; the entire
+# structural-completion/frozen-set-intersection machinery, and every test
+# that existed only to pin ITS edge cases, is gone -- there is no floor-1
+# planner call, no per-batch adjudication-fragment scan, and no
+# manifest_all.json read left in select_segments.py at all.
 #
-# New reason "glossary-run-plan-outstanding" (outstandingCandidates = the
-# size of the intersection, glossaryRunId = the newest run id,
-# outstandingBatches = None -- the frozen set is a union across runs, so no
-# single batch number can honestly be attributed to it). A frozen plan that
-# cannot be read at all (manifest_all.json missing/unreadable/not a JSON
-# array of strings, in a run dir that exists) fails CLOSED with reason
-# "glossary-run-plan-unreadable", naming the offending path -- never
-# silently treated as "no frozen names". The floor-1 planner subprocess
-# itself failing/timing out/emitting unparseable output reuses the EXISTING
-# "glossary-check-unavailable" reason (same shape CONDITION 2 already uses
-# for its own subprocess failures).
+# New reason "glossary-run-unmerged" for the ordinary "this run has not
+# recorded a merge yet" case (`outstandingBatches`/`outstandingCandidates`
+# both None -- this condition counts RUNS, never batches or candidate
+# names), `glossaryRunId` = newest run id. A marker that IS present but
+# unreadable, not valid JSON, not a JSON object, wrong-`schema`, or whose
+# own `run_id` disagrees with its parent directory fails CLOSED with
+# reason "glossary-run-plan-unreadable" -- the SAME reason the earlier
+# design already used for "a frozen fact could not be established", reused
+# rather than inventing a fourth -- naming the marker path. The `run_id`
+# mismatch case matters most: it is what stops a marker being copied or
+# symlinked from one run into another and trusted as that run's own record.
 # ---------------------------------------------------------------------------
 
 
-def write_glossary_manifest_all(run_dir: Path, names) -> None:
-    """Writes {run_dir}/manifest_all.json in exactly the shape
-    resume_setup.py's write_glossary_manifests() produces: a sorted,
-    deduped JSON array of source-form strings (never the per-batch
-    manifest_{index}.json files, which this gate's new condition never
-    reads)."""
-    (run_dir / "manifest_all.json").write_text(
-        json.dumps(sorted(set(names)), ensure_ascii=False), encoding="utf-8"
-    )
-
-
-def write_glossary_run_fragments(run_dir: Path, batches: dict) -> None:
-    """Writes a STRUCTURALLY COMPLETE run for CONDITION 3a/3b's two-part
-    predicate (team-lead's revision after freeze-tests's own analysis
-    showed 3b's intersection alone could never catch a name that vanished
-    from a regenerated name_candidates.json -- see 2a/2b/2c below and the
-    residual-limitation test after them). `batches` is `{index: [names,
-    ...]}`. For each entry, writes manifest_{index}.json (sorted, deduped
-    -- exactly resume_setup.py's write_glossary_manifests() shape) PLUS a
-    matching out_{index}_attempt_0.json fragment (existence only -- 3a
-    never reads its content, see check_glossary_run_plan_outstanding's own
-    docstring/select_segments.py), and manifest_all.json (the union across
-    every batch, deduped, sorted -- what 3b's frozen-set intersection
-    reads).
-
-    ORDERING TRAP, called out explicitly per team-lead's brief: ANY run dir
-    this suite builds with an outstanding frozen name must be structurally
-    COMPLETE this way, or CONDITION 3a refuses FIRST with
-    "glossary-run-incomplete", masking whatever the test actually means to
-    pin at 3b -- unless the test is deliberately ABOUT 3a itself (2a/2b),
-    which write manifest_{index}.json directly and omit the fragment on
-    purpose instead of calling this helper."""
-    all_names = []
-    for index, names in batches.items():
-        (run_dir / f"manifest_{index}.json").write_text(
-            json.dumps(sorted(set(names)), ensure_ascii=False), encoding="utf-8"
-        )
-        (run_dir / f"out_{index}_attempt_0.json").write_text("{}", encoding="utf-8")
-        all_names.extend(names)
-    (run_dir / "manifest_all.json").write_text(
-        json.dumps(sorted(set(all_names)), ensure_ascii=False), encoding="utf-8"
-    )
-
-
-def _run_planner_directly(root: Path, *, min_candidate_freq: int) -> dict:
-    """Invokes the REAL, staged glossary_batch_plan.py directly (never the
-    gate) against `root`'s own name_candidates.json/canon.json, at the given
-    threshold -- used only to PROVE, independently of select_segments.py,
-    what the live-threshold call alone would have reported. Mirrors
-    test_9's `_probe_naive_self_anchoring_is_the_real_hazard` pattern: a
-    probe function, not a pytest test in its own right."""
-    proc = subprocess.run(
-        [
-            sys.executable, "-B", str(root / "scripts" / "glossary_batch_plan.py"),
-            "--name-candidates", str(root / "name_candidates.json"),
-            "--canon", str(root / "canon.json"),
-            "--min-candidate-freq", str(min_candidate_freq),
-        ],
-        capture_output=True, text=True, timeout=30, cwd=str(root),
-    )
-    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    return json.loads(proc.stdout.strip().splitlines()[-1])
+# write_glossary_run_merged_marker() itself is defined near make_glossary_run(),
+# above -- test_2 and test_6 (both earlier in this file) need it too, once
+# they moved off manifest_all.json onto the durable marker.
 
 
 # ---------------------------------------------------------------------------
-# 12. The bot's exact reproduction, and the most important test in this
-#     block: a run froze "Bob" at freq 2; the live profile is then raised to
-#     min_candidate_freq:3 with name_candidates.json UNCHANGED. The
-#     pre-fix, CONDITION-2-only gate asks the planner ONLY at the live
-#     threshold (3), "Bob" (freq 2) drops out, no_new_candidates:true, and
-#     it admits -- proven directly below by calling the real planner at the
-#     live threshold before ever invoking the gate. The fixed gate's THIRD
-#     condition (floor-1 call + frozen-set intersection) must still see
-#     "Bob" and refuse.
+# 12. A run with a valid "source": "merge" marker -> admits.
 # ---------------------------------------------------------------------------
 
-def test_12_refuses_when_a_raised_live_threshold_hides_a_frozen_low_freq_name(tmp_path):
-    root = make_full_project(
-        tmp_path, glossary_yaml=glossary_profile_yaml(min_candidate_freq=3)
-    )
-    write_name_candidates(root, [{"name": "Bob", "freq": 2, "likely_name": True}])
+def test_12_admits_with_a_valid_merge_marker(tmp_path):
+    root = make_full_project(tmp_path)
+    write_name_candidates(root, [])  # -> CONDITION 2 admits, reaching CONDITION 3
     run_dir = make_glossary_run(root, "R")
-    # Structurally COMPLETE (every manifest_{index}.json has its matching
-    # out_{index}_attempt_0.json) -- required so CONDITION 3a passes and this
-    # test actually reaches 3b, the predicate it means to pin. See 2b below
-    # for the companion test proving 3a fires FIRST when the run is NOT
-    # complete.
-    write_glossary_run_fragments(run_dir, {0: ["Bob"]})
-
-    # Proves this test provably covers the regression: the OLD (pre-fix)
-    # two-condition logic's own CONDITION 2 -- the planner called ONLY at
-    # the live threshold -- would have reported no_new_candidates:true here,
-    # i.e. admitted. "Bob" is invisible to that call, not merely under a
-    # generic threshold.
-    live_threshold_payload = _run_planner_directly(root, min_candidate_freq=3)
-    assert live_threshold_payload["no_new_candidates"] is True, live_threshold_payload
-
-    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
-    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    payload = parse_stdout(proc)
-    assert_glossary_refusal(payload, "glossary-run-plan-outstanding")
-    assert payload["glossaryRunId"] == "R", payload
-    assert payload["outstandingCandidates"] == 1, payload
-    assert payload["outstandingBatches"] is None, payload
-
-
-# ---------------------------------------------------------------------------
-# 13. INTERSECTION MUST NOT OVER-REFUSE: a run's frozen names are ALL
-#     already merged into canon.json, plus an UNRELATED low-frequency
-#     straggler that no run ever froze and that sits below the live
-#     threshold. Without intersecting against the frozen set, a bare
-#     "floor-1 planner call reports any batch at all" rule would refuse
-#     here FOREVER (the straggler always resurfaces at floor 1) -- this
-#     test is what pins that the fix does not brick a fully-merged project.
-# ---------------------------------------------------------------------------
-
-def test_13_intersection_does_not_over_refuse_a_fully_merged_run(tmp_path):
-    root = make_full_project(tmp_path)  # default min_candidate_freq (2)
-    run_dir = make_glossary_run(root, "R")
-    # Structurally complete -- see write_glossary_run_fragments()'s own
-    # ORDERING TRAP note: without this, 3a would refuse first and this test
-    # would pass for the wrong reason.
-    write_glossary_run_fragments(run_dir, {0: ["Fiona", "Gilbert"]})
-    write_canon(root, entries={"Fiona": {}, "Gilbert": {}})
-    # Never frozen by any run, and below the LIVE threshold (2) -- excluded
-    # by CONDITION 2 too -- but ABOVE floor 1, so it resurfaces in the
-    # floor-1 planner call CONDITION 3 makes. It must be filtered OUT by
-    # the frozen-set intersection, not treated as outstanding.
-    write_name_candidates(root, [{"name": "Zelda", "freq": 1, "likely_name": True}])
-
-    # Confirms the straggler really does resurface at floor 1 -- i.e. this
-    # fixture genuinely exercises the intersection, not an empty planner
-    # report that would pass for an unrelated reason.
-    floor1_payload = _run_planner_directly(root, min_candidate_freq=1)
-    assert floor1_payload["no_new_candidates"] is False, floor1_payload
-    floor1_names = {n for b in floor1_payload["batches"] for n in b["names"]}
-    assert floor1_names == {"Zelda"}, floor1_payload
+    write_glossary_run_merged_marker(run_dir, "R", source="merge")
 
     proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
@@ -1271,96 +1176,165 @@ def test_13_intersection_does_not_over_refuse_a_fully_merged_run(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 14. AN OLDER UNFINISHED RUN STILL COUNTS: two run directories, R1 (older)
-#     and R2 (newer, lexicographically -- validate_run_id()'s permissive
-#     alnum shape sorts "R2" after "R1"). R2 is fully merged; R1 still has
-#     an outstanding frozen name that the LIVE threshold (raised, exactly
-#     like test 12) hides from CONDITION 2. If the fix only unioned the
-#     NEWEST run's manifest_all.json instead of every run's, this would
-#     wrongly admit -- the union across ALL runs, not just the newest, is
-#     the point.
+# 13. A run with a valid "source": "backfill-ack" marker -> admits, exactly
+#     like "merge" -- an acknowledged run is admitted exactly like a merged
+#     one, the whole point of the backfill path.
 # ---------------------------------------------------------------------------
 
-def test_14_an_older_runs_frozen_name_still_counts_via_the_union(tmp_path):
-    root = make_full_project(
-        tmp_path, glossary_yaml=glossary_profile_yaml(min_candidate_freq=3)
-    )
-    # Both runs structurally complete -- see write_glossary_run_fragments()'s
-    # own ORDERING TRAP note.
-    r1 = make_glossary_run(root, "R1")
-    write_glossary_run_fragments(r1, {0: ["Fiona"]})
-    r2 = make_glossary_run(root, "R2")
-    write_glossary_run_fragments(r2, {0: ["Gilbert"]})
-    write_canon(root, entries={"Gilbert": {}})  # R2's own frozen name: merged
-    # "Fiona" (R1's frozen name): still a candidate, at a freq the raised
-    # live threshold (3) hides from CONDITION 2, exactly like test 12.
-    write_name_candidates(root, [{"name": "Fiona", "freq": 2, "likely_name": True}])
-
-    live_threshold_payload = _run_planner_directly(root, min_candidate_freq=3)
-    assert live_threshold_payload["no_new_candidates"] is True, live_threshold_payload
-
-    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
-    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    payload = parse_stdout(proc)
-    assert_glossary_refusal(payload, "glossary-run-plan-outstanding")
-    assert payload["glossaryRunId"] == "R2", payload  # newest run id, per contract
-    assert payload["outstandingCandidates"] == 1, payload
-
-
-# ---------------------------------------------------------------------------
-# 15a/15b. FAIL-CLOSED ON AN UNREADABLE FROZEN PLAN: manifest_all.json
-#     absent from an existing run dir (15a), and present but holding a JSON
-#     object rather than an array (15b). Both must refuse with
-#     "glossary-run-plan-unreadable", naming the offending path -- never
-#     silently read as "no frozen names" (which would be a false admission
-#     on exactly the class of hole this whole condition exists to close).
-# ---------------------------------------------------------------------------
-
-def test_15a_refuses_when_manifest_all_is_missing(tmp_path):
+def test_13_admits_with_a_valid_backfill_ack_marker(tmp_path):
     root = make_full_project(tmp_path)
     write_name_candidates(root, [])
-    make_glossary_run(root, "R")
-    manifest_path = root / "glossary" / "runs" / "R" / "manifest_all.json"
-    # Deliberately no write_glossary_manifest_all() call -- the run dir
-    # exists (CONDITION 1 sees it) but never froze a plan.
-    assert not manifest_path.exists()
-
-    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
-    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    payload = parse_stdout(proc)
-    assert_glossary_refusal(payload, "glossary-run-plan-unreadable")
-    blob = json.dumps(payload)
-    assert str(manifest_path) in blob, payload
-
-
-def test_15b_refuses_when_manifest_all_is_not_an_array(tmp_path):
-    root = make_full_project(tmp_path)
-    write_name_candidates(root, [])
-    make_glossary_run(root, "R")
-    manifest_path = root / "glossary" / "runs" / "R" / "manifest_all.json"
-    manifest_path.write_text(json.dumps({"not": "an array"}), encoding="utf-8")
-
-    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
-    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    payload = parse_stdout(proc)
-    assert_glossary_refusal(payload, "glossary-run-plan-unreadable")
-    blob = json.dumps(payload)
-    assert str(manifest_path) in blob, payload
-
-
-# ---------------------------------------------------------------------------
-# 16. --allow-unmerged-glossary still overrides the NEW condition, exactly
-#     as it already does for CONDITION 2 (test 5) -- test 12's exact
-#     fixture, with the flag added.
-# ---------------------------------------------------------------------------
-
-def test_16_allow_unmerged_glossary_admits_over_the_new_condition(tmp_path):
-    root = make_full_project(
-        tmp_path, glossary_yaml=glossary_profile_yaml(min_candidate_freq=3)
-    )
-    write_name_candidates(root, [{"name": "Bob", "freq": 2, "likely_name": True}])
     run_dir = make_glossary_run(root, "R")
-    write_glossary_run_fragments(run_dir, {0: ["Bob"]})  # test_12's exact fixture
+    write_glossary_run_merged_marker(run_dir, "R", source="backfill-ack")
+
+    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert_admitted_with_segs(payload)
+
+
+# ---------------------------------------------------------------------------
+# 14. A run with NO marker at all -> refuses "glossary-run-unmerged", never
+#     silently treated as "nothing to wait for".
+# ---------------------------------------------------------------------------
+
+def test_14_refuses_when_a_run_has_no_merge_marker(tmp_path):
+    root = make_full_project(tmp_path)
+    write_name_candidates(root, [])
+    make_glossary_run(root, "R")
+    # Deliberately no write_glossary_run_merged_marker() call.
+
+    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert_glossary_refusal(payload, "glossary-run-unmerged")
+    assert payload["glossaryRunId"] == "R", payload
+    assert payload["outstandingBatches"] is None, payload
+    assert payload["outstandingCandidates"] is None, payload
+    assert "1 glossary run(s)" in payload["error"], payload
+    assert "(newest: R)" in payload["error"], payload
+    assert "backfill_glossary_merge_ack.py" in payload["error"], payload
+    assert "--allow-unmerged-glossary" in payload["error"], payload
+
+
+# ---------------------------------------------------------------------------
+# 15. TWO runs, the newer marked and the older NOT -> still refuses. Every
+#     run CONDITION 1 found must be accounted for, not just the newest --
+#     an abandoned older run with no marker is exactly as dangerous as the
+#     newest one lacking one.
+# ---------------------------------------------------------------------------
+
+def test_15_refuses_when_an_older_run_lacks_a_marker_even_if_the_newest_has_one(tmp_path):
+    root = make_full_project(tmp_path)
+    write_name_candidates(root, [])
+    make_glossary_run(root, "R1")  # older: deliberately no marker
+    r2 = make_glossary_run(root, "R2")
+    write_glossary_run_merged_marker(r2, "R2")  # newest: merged
+
+    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert_glossary_refusal(payload, "glossary-run-unmerged")
+    assert payload["glossaryRunId"] == "R2", payload  # newest run id, per contract
+    assert "1 glossary run(s)" in payload["error"], payload
+
+
+# ---------------------------------------------------------------------------
+# 16a-16d. A marker that IS present but cannot be trusted -- each refuses
+#     "glossary-run-plan-unreadable", naming the offending path. 16d (the
+#     run_id mismatch) matters most: it is what stops a marker copied or
+#     symlinked from a different run being trusted as this run's own record.
+# ---------------------------------------------------------------------------
+
+def test_16a_unreadable_marker_refuses_as_plan_unreadable(tmp_path):
+    root = make_full_project(tmp_path)
+    write_name_candidates(root, [])
+    run_dir = make_glossary_run(root, "R")
+    write_glossary_run_merged_marker(run_dir, "R")
+    marker_path = run_dir / "merged.json"
+    os.chmod(marker_path, 0o000)
+    try:
+        proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
+    finally:
+        os.chmod(marker_path, 0o644)  # restore so pytest's tmp_path cleanup can proceed
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert_glossary_refusal(payload, "glossary-run-plan-unreadable")
+    blob = json.dumps(payload)
+    assert str(marker_path) in blob, payload
+
+
+def test_16b_marker_that_is_not_a_json_object_refuses_as_plan_unreadable(tmp_path):
+    root = make_full_project(tmp_path)
+    write_name_candidates(root, [])
+    run_dir = make_glossary_run(root, "R")
+    marker_path = run_dir / "merged.json"
+    marker_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+
+    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert_glossary_refusal(payload, "glossary-run-plan-unreadable")
+    blob = json.dumps(payload)
+    assert str(marker_path) in blob, payload
+
+
+def test_16c_marker_with_the_wrong_schema_refuses_as_plan_unreadable(tmp_path):
+    root = make_full_project(tmp_path)
+    write_name_candidates(root, [])
+    run_dir = make_glossary_run(root, "R")
+    marker_path = run_dir / "merged.json"
+    marker_path.write_text(
+        json.dumps({
+            "schema": "some-other-schema/1",
+            "run_id": "R",
+            "merged_at": "2026-01-01T00:00:00Z",
+            "batches": [0],
+            "source": "merge",
+        }),
+        encoding="utf-8",
+    )
+
+    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert_glossary_refusal(payload, "glossary-run-plan-unreadable")
+    blob = json.dumps(payload)
+    assert str(marker_path) in blob, payload
+
+
+def test_16d_marker_whose_run_id_disagrees_with_its_directory_refuses(tmp_path):
+    """The case that matters most: a marker's own run_id field naming a
+    DIFFERENT run than the directory it sits under -- exactly what a
+    marker copied or symlinked from one run into another would produce.
+    Never trusted as this run's own merge record."""
+    root = make_full_project(tmp_path)
+    write_name_candidates(root, [])
+    run_dir = make_glossary_run(root, "R")
+    write_glossary_run_merged_marker(run_dir, "SOME-OTHER-RUN")  # mismatched run_id
+    marker_path = run_dir / "merged.json"
+
+    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert_glossary_refusal(payload, "glossary-run-plan-unreadable")
+    blob = json.dumps(payload)
+    assert str(marker_path) in blob, payload
+    assert "'SOME-OTHER-RUN'" in payload["error"], payload
+    assert "'R'" in payload["error"], payload
+
+
+# ---------------------------------------------------------------------------
+# 17. --allow-unmerged-glossary still overrides the new condition, exactly
+#     as it already does for CONDITION 2 (test 5) -- an unmarked run,
+#     with the flag added.
+# ---------------------------------------------------------------------------
+
+def test_17_allow_unmerged_glossary_admits_over_the_new_condition(tmp_path):
+    root = make_full_project(tmp_path)
+    write_name_candidates(root, [])
+    make_glossary_run(root, "R")  # deliberately no marker
 
     proc = run_select(
         root / "scripts" / "select_segments.py", "--allow-unmerged-glossary", cwd=root
@@ -1371,18 +1345,15 @@ def test_16_allow_unmerged_glossary_admits_over_the_new_condition(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 17. --classify-only stays a pure read and never triggers the new
+# 18. --classify-only stays a pure read and never triggers the new
 #     condition, exactly as it already never triggers CONDITION 2 (test
-#     10) -- test 12's exact fixture, classified instead of dispatched.
+#     10) -- an unmarked run, classified instead of dispatched.
 # ---------------------------------------------------------------------------
 
-def test_17_classify_only_never_triggers_the_new_condition(tmp_path):
-    root = make_full_project(
-        tmp_path, glossary_yaml=glossary_profile_yaml(min_candidate_freq=3)
-    )
-    write_name_candidates(root, [{"name": "Bob", "freq": 2, "likely_name": True}])
-    make_glossary_run(root, "R")
-    write_glossary_manifest_all(root / "glossary" / "runs" / "R", ["Bob"])
+def test_18_classify_only_never_triggers_the_new_condition(tmp_path):
+    root = make_full_project(tmp_path)
+    write_name_candidates(root, [])
+    make_glossary_run(root, "R")  # deliberately no marker
 
     proc = run_select(root / "scripts" / "select_segments.py", "--classify-only", cwd=root)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
@@ -1390,231 +1361,6 @@ def test_17_classify_only_never_triggers_the_new_condition(tmp_path):
     assert payload["success"] is True, payload
     assert payload["authorizes_dispatch"] is False, payload
     assert payload["segs"] == ["seg01"], payload
-
-
-# ---------------------------------------------------------------------------
-# #820 follow-up, ROUND 2 (design revision): freeze-tests's own analysis of
-# item-2 ("candidate-file drift") -- confirmed empirically against the
-# then-shipped code, not just from reading glossary_batch_plan.py's
-# source -- proved the original two-part CONDITION 3 design (union
-# manifest_all.json across runs, intersect with a floor-1 planner call)
-# could NEVER catch a frozen name that was entirely REMOVED from a
-# regenerated name_candidates.json: glossary_batch_plan.py's own `rows`/
-# `candidate_names` are sourced from that file alone, so a name absent from
-# it can never resurface in the planner's own batches[].names, whatever the
-# floor.
-#
-# The fix: CONDITION 3 is now TWO parts, in this order:
-#
-#   3a -- STRUCTURAL COMPLETION (new, primary). For every run dir, every
-#   manifest_{index}.json (per-batch, written by resume_setup.py's
-#   write_glossary_manifests()) must have a matching out_{index}_attempt_0.json
-#   (the same fragment probe_resumed_batches() -- resume_setup.py -- itself
-#   polls for; existence only, no canon_validate.py --check-batch here).
-#   Any missing fragment means that batch was never adjudicated -> refuse,
-#   reason "glossary-run-incomplete", outstandingBatches = the number of
-#   missing fragments, outstandingCandidates = None, glossaryRunId = newest
-#   run id. Critically, 3a never reads name_candidates.json at all, so it
-#   closes the drift hole 3b's intersection alone could not.
-#
-#   3b -- the ORIGINAL union+intersect design (see the block above test 12),
-#   unchanged, reason "glossary-run-plan-outstanding". Evaluated only after
-#   3a passes for every run.
-#
-# 3a is evaluated FIRST. Every fixture elsewhere in this file that means to
-# exercise 3b (tests 12-14, 16) must therefore be structurally COMPLETE
-# (write_glossary_run_fragments(), not the bare write_glossary_manifest_all())
-# or 3a would refuse first and the test would pass for the wrong reason --
-# see write_glossary_run_fragments()'s own ORDERING TRAP docstring note.
-# ---------------------------------------------------------------------------
-
-def test_2a_incomplete_run_refuses_even_when_the_name_left_name_candidates(tmp_path):
-    """The scenario freeze-tests's analysis showed the ORIGINAL 3b-only
-    design could never reach: "Fiona" was frozen into ONE batch
-    (manifest_0.json), that batch was never adjudicated (no
-    out_0_attempt_0.json), and "Fiona" has since vanished entirely from a
-    regenerated name_candidates.json. 3a never consults
-    name_candidates.json, so it still catches this -- proving 3a, not 3b,
-    is what closes the drift hole."""
-    root = make_full_project(tmp_path)
-    run_dir = make_glossary_run(root, "R")
-    (run_dir / "manifest_0.json").write_text(json.dumps(["Fiona"]), encoding="utf-8")
-    (run_dir / "manifest_all.json").write_text(json.dumps(["Fiona"]), encoding="utf-8")
-    # Deliberately no out_0_attempt_0.json -- this batch was never adjudicated.
-    write_name_candidates(root, [])  # "Fiona" is gone from the regenerated file
-
-    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
-    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    payload = parse_stdout(proc)
-    assert_glossary_refusal(payload, "glossary-run-incomplete")
-    assert payload["glossaryRunId"] == "R", payload
-    assert payload["outstandingBatches"] == 1, payload
-    assert payload["outstandingCandidates"] is None, payload
-
-
-def test_2b_threshold_drift_on_an_unfinished_run_hits_3a_first(tmp_path):
-    """Same shape as test 12 (a raised live threshold hides a frozen
-    low-freq name from CONDITION 2) but structurally INCOMPLETE -- no
-    out_0_attempt_0.json. Pins the evaluation ORDER: 3a fires before 3b, so
-    the reason is "glossary-run-incomplete", never
-    "glossary-run-plan-outstanding", even though 3b's own predicate would
-    ALSO independently refuse here (test 12 proves that half)."""
-    root = make_full_project(
-        tmp_path, glossary_yaml=glossary_profile_yaml(min_candidate_freq=3)
-    )
-    write_name_candidates(root, [{"name": "Bob", "freq": 2, "likely_name": True}])
-    run_dir = make_glossary_run(root, "R")
-    (run_dir / "manifest_0.json").write_text(json.dumps(["Bob"]), encoding="utf-8")
-    (run_dir / "manifest_all.json").write_text(json.dumps(["Bob"]), encoding="utf-8")
-    # Deliberately no out_0_attempt_0.json.
-
-    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
-    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    payload = parse_stdout(proc)
-    assert_glossary_refusal(payload, "glossary-run-incomplete")
-    assert payload["outstandingBatches"] == 1, payload
-    assert payload["outstandingCandidates"] is None, payload
-
-
-def test_2c_a_structurally_complete_run_still_reaches_3b(tmp_path):
-    """Deliberately its OWN minimal fixture (own name/threshold, not a
-    literal copy of test 12's) so this "3b is reachable, not dead code once
-    3a passes" pin does not silently drift along with test 12's own bot-
-    reproduction numbers if those are ever adjusted for unrelated reasons.
-    Mechanically it is the same trick test 12 and 2b use (a raised live
-    threshold hides a frozen low-freq name from CONDITION 2) because that
-    is the only mechanism this whole predicate has for making CONDITION 2
-    admit while a frozen name remains genuinely outstanding -- see the
-    block above test 12 for why."""
-    root = make_full_project(
-        tmp_path, glossary_yaml=glossary_profile_yaml(min_candidate_freq=3)
-    )
-    write_name_candidates(root, [{"name": "Zelda", "freq": 2, "likely_name": True}])
-    run_dir = make_glossary_run(root, "R")
-    write_glossary_run_fragments(run_dir, {0: ["Zelda"]})  # structurally complete -> 3a passes
-
-    live_threshold_payload = _run_planner_directly(root, min_candidate_freq=3)
-    assert live_threshold_payload["no_new_candidates"] is True, live_threshold_payload
-
-    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
-    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    payload = parse_stdout(proc)
-    assert_glossary_refusal(payload, "glossary-run-plan-outstanding")
-    assert payload["outstandingCandidates"] == 1, payload
-    assert payload["outstandingBatches"] is None, payload
-
-
-# ---------------------------------------------------------------------------
-# 18. KNOWN LIMITATION, deliberately NOT closed (team-lead's own call, not a
-#     defect this file asserts should be fixed): a run whose batches ALL
-#     completed (3a passes), whose frozen names were NEVER merged into
-#     canon.json, AND whose names were then removed from a regenerated
-#     name_candidates.json. 3b's intersection can only ever contain names
-#     the CURRENT name_candidates.json still holds (glossary_batch_plan.py's
-#     own `rows`/`candidate_names` are sourced from that file alone), so a
-#     name that is BOTH unmerged AND gone from that file cannot resurface at
-#     3b either -- closing it needs canon-membership reasoning inside the
-#     gate itself, which the module's own "makes no accuracy/identity call
-#     of its own" iron rule forbids. Pinned here as documented, ACCEPTED
-#     current behaviour -- not a claim that it is safe, only that it is what
-#     ships, so any future change to it is a deliberate decision rather than
-#     a silent regression this suite would otherwise miss.
-# ---------------------------------------------------------------------------
-
-def test_18_known_limitation_unmerged_name_gone_from_candidates_still_admits(tmp_path):
-    root = make_full_project(tmp_path)
-    run_dir = make_glossary_run(root, "R")
-    write_glossary_run_fragments(run_dir, {0: ["Fiona"]})  # structurally complete
-    write_name_candidates(root, [])  # "Fiona" removed from the regenerated file
-    # "Fiona" never merged: canon.json stays empty (make_full_project's default).
-
-    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
-    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    payload = parse_stdout(proc)
-    assert_admitted_with_segs(payload)
-
-
-# ---------------------------------------------------------------------------
-# 2d/2e. FAIL CLOSED, never SKIP, on the two forms of "the frozen plan
-# itself could not be established" that 15a/15b (manifest_all.json missing/
-# malformed) don't cover: a run dir whose own contents cannot be
-# enumerated, and a manifest_{index}.json filename whose index does not
-# parse. Team-lead's ruling (after the "would this need a 4th reason"
-# question): reuse "glossary-run-plan-unreadable" for BOTH, do not add a
-# new one -- these are the SAME fact as 15a/15b ("we could not establish
-# what this run froze"), never "glossary-run-incomplete" (that reason is
-# for a plan that WAS read and is determinately unfinished, not one that
-# could not be read at all) and never "glossary-check-unavailable" (scoped
-# to the glossary_batch_plan.py SUBPROCESS; 3a's own discovery runs no
-# subprocess).
-#
-# PROVISIONAL: 3a has not landed as this is written (no "glossary-run-
-# incomplete"/`attempt_0` in select_segments.py yet), so the exact
-# discovery mechanism (does it glob broadly and then fail to parse an
-# index, or scope the pattern narrowly enough that a mis-shaped filename is
-# invisible to it and silently admits?) is unverified. These two tests
-# ENCODE team-lead's requirement ("must refuse rather than skip") as a
-# contract; if 3a's actual discovery narrows its glob so a file like
-# "manifest_abc.json" is never seen at all, test_2e will stay red for a
-# reason distinct from "3a hasn't landed yet" and that gap should be
-# reported, not silently accepted.
-# ---------------------------------------------------------------------------
-
-# ATTRIBUTION CONFIRMED (post-3a landing): the refusal now comes from 3a's
-# own `run_dir.iterdir()` call in check_glossary_run_structural_completion()
-# -- verified directly against the shipped payload's "error" text ("...
-# directory {run_dir} could not be enumerated ([Errno 13] Permission
-# denied...") -- not from 3b's manifest_all.json read, whose own message
-# reads differently ("could not read manifest_all.json at ..."). Before 3a
-# landed this test passed for the WRONG reason (3b's manifest_all.json read
-# also lives inside run_dir and hit the same PermissionError first); now
-# that 3a runs first and 3a's own message is what's on the wire, this test
-# genuinely pins 3a's enumeration failure.
-def test_2d_refuses_when_a_run_dir_cannot_be_enumerated(tmp_path):
-    root = make_full_project(tmp_path)
-    write_name_candidates(root, [])  # -> CONDITION 2 admits, reaching CONDITION 3
-    run_dir = make_glossary_run(root, "R")
-    (run_dir / "manifest_0.json").write_text(json.dumps(["Fiona"]), encoding="utf-8")
-    (run_dir / "out_0_attempt_0.json").write_text("{}", encoding="utf-8")
-    (run_dir / "manifest_all.json").write_text(json.dumps(["Fiona"]), encoding="utf-8")
-    os.chmod(run_dir, 0o000)  # blocks even the owner's own iterdir()/listdir()
-    try:
-        proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
-    finally:
-        os.chmod(run_dir, 0o755)  # restore so pytest's tmp_path cleanup can proceed
-
-    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    payload = parse_stdout(proc)
-    assert_glossary_refusal(payload, "glossary-run-plan-unreadable")
-    blob = json.dumps(payload)
-    assert str(run_dir) in blob, payload
-    # Pins the ATTRIBUTION, not just the reason string: 3a's own
-    # `run_dir.iterdir()` failure says "could not be enumerated"; 3b's
-    # manifest_all.json read failure -- which would ALSO trip over this
-    # same chmod, since manifest_all.json lives inside run_dir too -- says
-    # "could not read manifest_all.json" instead. Without this, 3b landing
-    # first (as it briefly did) or a future reordering could make this test
-    # pass again for the wrong reason, silently.
-    assert "could not be enumerated" in payload["error"], payload
-    assert "manifest_all.json" not in payload["error"], payload
-
-
-def test_2e_refuses_when_a_manifest_filenames_index_will_not_parse(tmp_path):
-    root = make_full_project(tmp_path)
-    write_name_candidates(root, [])  # -> CONDITION 2 admits, reaching CONDITION 3
-    run_dir = make_glossary_run(root, "R")
-    # "abc" is not an integer batch index -- a malformed manifest filename,
-    # never silently skipped.
-    manifest_path = run_dir / "manifest_abc.json"
-    manifest_path.write_text(json.dumps(["Zoe"]), encoding="utf-8")
-    (run_dir / "manifest_all.json").write_text(json.dumps(["Zoe"]), encoding="utf-8")
-
-    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
-    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    payload = parse_stdout(proc)
-    assert_glossary_refusal(payload, "glossary-run-plan-unreadable")
-    blob = json.dumps(payload)
-    assert str(manifest_path) in blob, payload
 
 
 if __name__ == "__main__":

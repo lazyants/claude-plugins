@@ -2726,7 +2726,7 @@ def test_the_disclosure_says_what_is_asserted_rather_than_proved(tmp_path):
 # `human_escalation` and therefore requires --only-segs naming the same ids.
 # It is not, and it does not. `status: in_progress` classifies as `recoverable`
 # (select_segments.py:1572), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES
-# (:1590), and D3 (:6012) enforces only the ONE direction
+# (:1590), and D3 (:5781) enforces only the ONE direction
 # `claim_requests ⊆ segs`. For --from-cap the subset direction forces
 # --only-segs as a side effect of its population being human_escalation;
 # --from-stalled's population is default-eligible, so nothing forces it.

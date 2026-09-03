@@ -83,28 +83,28 @@
    ],
    "claim": "The four surfaces above are about editing a SCHEMA or SCRIPT **file**. A distinct surface is editing `canon.json` **content**: `used_terms_hash` (15-field cache-key field #3, `cache_key.py:765-771`) hashes the **WHOLE referenced canon ENTRY object** (`{name: entries[name]}` for every name a segment references, via `canonical_json_bytes`). So **adding ANY field to a canon `entries{}` record re-translates every converged segment that references that `source_form`** — even a purely descriptive field the translator ignores; blast radius = exactly the referencing segments"
   },
-  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:2537-2543\", 0]": {
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:2668-2673\", 0]": {
    "anchors": [
     "def _stamp_write_verify(",
     "`run_merge_batches`, `run_init`, `run_restamp_derivation`"
    ],
    "claim": "The underlying trap is unchanged: the \"rerun W3/W3a then re-translate\" path is **not reachable via the glossary pass alone** for a fully-converged project (canon frozen, **zero unresolved glossary candidates**). The ONLY writer of `canon.json`'s `derivation_bundle_hash` was glossary **MERGE** mode (`_stamp_write_verify`, `canon_validate.py:2537-2543`; callers `run_merge` / `run_merge_batches` / `run_init` / `run_restamp_derivation`). The glossary pass **SKIPS entirely** when there are no candidates (`glossary_batch_plan.py:752-756`, a *tested* supported state, prints `{\"no_new_candidates\": true, \"batches\": []}`) → canon was never restamped → segpack rebuild copies the stale hash **verbatim, never recomputed** (`segpack.py:798-809`) → `select_segments` stayed `blocked_needs_regeneration`."
   },
-  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:2537-2564\", 0]": {
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:2668-2687\", 0]": {
    "anchors": [
     "def _stamp_write_verify(",
     "CONSERVE THE STAMP ON A NO-OP"
    ],
    "claim": "**Superseded workaround — do NOT cite this anymore.** The prior undocumented/unsanctioned trick (\"`run_merge_batches` restamps unconditionally → a `--merge-batches <empty-batch>` forces a restamp\", issue #193) is exactly what 1.15.0/#291 **removed**: `_stamp_write_verify` no longer restamps unconditionally (`canon_validate.py:2537-2564`, \"a merge that changes nothing no longer moves `generation_hashes`\"), and `derivation_gate_recovery_e2e.test.py` has a step asserting \"the pre-1.15.0 empty-merge bypass no longer works.\" Cite `--restamp-derivation` only."
   },
-  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:2705-2745\", 0]": {
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:2836-2876\", 0]": {
    "anchors": [
     "def run_restamp_derivation(",
     "force_restamp=True, plugin_root_str=plugin_root_str"
    ],
    "claim": "**The sanctioned escape: `canon_validate.py --restamp-derivation`, then rerun `segpack.py`.** `run_restamp_derivation` (`canon_validate.py:2705-2745`) re-records the CURRENT `particle_config_hash` / `derivation_bundle_hash` onto an existing `canon.json` **without touching its entries** (`force_restamp=True` into the shared `_stamp_write_verify`). `select_segments.py`'s own `blocked_needs_regeneration` hint already names it (`_w3_regen_step`, `select_segments.py:1110-1117`:"
   },
-  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:658-667\", 0]": {
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"canon_validate.py:688-690\", 0]": {
    "anchors": [
     "CANON_ENTRY_FIELDS = (",
     "\"is_proper_name\""

@@ -129,6 +129,7 @@ accidentally omit declaring the precondition):
 --merge-batches P1 P2 ... [--expect-source-forms-file M.json is NOT
 accepted here -- see --verify-merged] [--citations-reviewed
 --approval-records R1 R2 ... (required together, one record per fragment)]
+[--glossary-merge-marker PATH]
     ONE process, single canon.json load: validates ALL given fragments
     (Pass 1 + offline backstop + #505's live citation attestation) FIRST,
     before merging any of them, so a later fragment's failure never leaves
@@ -145,6 +146,14 @@ accepted here -- see --verify-merged] [--citations-reviewed
     genuinely from disk this time, with no masking fallback for a missing
     generation_hashes value, so a dropped-hash write corruption is
     actually caught rather than silently papered over.
+    #820: when --glossary-merge-marker PATH is given, ONLY once the above
+    disk-re-read has confirmed the merge landed, atomically writes a
+    durable `{"schema": "glossary-run-merged/1", "run_id", "merged_at",
+    "batches", "source": "merge"}` marker to PATH -- see
+    _write_glossary_merge_marker()'s own docstring. This is what lets
+    select_segments.py's W5 admission gate tell a genuinely merged
+    glossary run apart from one that only produced fragments. A marker
+    write failure is FATAL for the whole merge.
 
 --verify-merged --batch F1 [--batch F2 ...] [--expect-source-forms-file
 M.json]
@@ -246,6 +255,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlparse, urlsplit
@@ -369,6 +379,16 @@ def resolve_cache_key_script(plugin_root_str) -> Path:
 
 RESEARCH_MODES = ("live", "offline")
 
+# #820. Shared default reason for ModeSpec.glossary_merge_marker_refusal --
+# declared ahead of the class it defaults a field on (a NamedTuple field
+# default is evaluated at class-body time, so this cannot sit alongside its
+# siblings _READS_NO_FRAGMENT/_WRITES_NO_CANON_ROW/etc. below, which are only
+# needed once MODE_SPECS itself is built).
+_NOT_A_MERGE_THAT_ESTABLISHES_ANYTHING = (
+    "only --merge-batches performs the merge the W5 admission gate needs "
+    "recorded"
+)
+
 
 class ModeSpec(NamedTuple):
     """One selectable CLI mode, declared once.
@@ -405,6 +425,13 @@ class ModeSpec(NamedTuple):
                 rather than as a hand-typed set in main() for the same reason
                 every other cross-flag fact is: a mode added later inherits
                 the guard instead of having to be remembered by it.
+    glossary_merge_marker_refusal -- None when --glossary-merge-marker is
+                accepted with this mode; otherwise the REASON it is refused.
+                #820: only --merge-batches ever establishes a genuine merge
+                the W5 gate needs recorded, so every other row defaults to
+                a shared refusal reason (declared with a default so adding a
+                future mode need not restate it) and only --merge-batches
+                overrides it to None.
 
     That last field deliberately carries both the predicate and its
     explanation in one place. The earlier shape asked "does this mode read a
@@ -427,6 +454,7 @@ class ModeSpec(NamedTuple):
     fragment_bytes_flag_refusal: "str | None"
     citations_reviewed_refusal: "str | None"
     stamps_generation_hashes: bool
+    glossary_merge_marker_refusal: "str | None" = _NOT_A_MERGE_THAT_ESTABLISHES_ANYTHING
 
 
 # EVERY mode, declared exactly ONCE, carrying the per-mode facts main()'s
@@ -574,6 +602,7 @@ MODE_SPECS = (
         fragment_bytes_flag_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
         citations_reviewed_refusal=None,
         stamps_generation_hashes=True,
+        glossary_merge_marker_refusal=None,
     ),
     ModeSpec(
         "--verify-merged",
@@ -634,6 +663,7 @@ NON_MODE_DESTS = frozenset(
         "plugin_root",
         "allow_durable_sibling",
         "citations_reviewed",
+        "glossary_merge_marker",
     }
 )
 
@@ -665,6 +695,107 @@ CANON_ENTRY_FIELDS = (
     "note",
     "category",
 )
+
+# #820. The RUN_ID allowlist -- byte-identical to resume_setup.py's own
+# RUN_ID_RE/validate_run_id(), which OWNS this contract, per this project's
+# no-shared-util convention (duplicated, not imported; see
+# glossary_dispatch_driver.py's, segment_dispatch_driver.py's, select_
+# segments.py's and skeptic_setup.py's own copies). Used only by
+# --glossary-merge-marker below, to refuse splicing an unsafe id into the
+# marker's `run_id` field and into any path built from it.
+RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def validate_run_id(run_id):
+    """Return an error string if `run_id` is not a safe RUN_ID, else None."""
+    if not isinstance(run_id, str) or not run_id:
+        return "run id must be a non-empty string."
+    if not RUN_ID_RE.fullmatch(run_id):
+        return (
+            "run id must match [A-Za-z0-9][A-Za-z0-9._-]* (letters/digits/"
+            f"dot/underscore/hyphen only, no ':'); got {run_id!r}."
+        )
+    if run_id in (".", ".."):
+        return f"run id must not be '.' or '..'; got {run_id!r}."
+    if ".." in run_id:
+        return f"run id must not contain '..'; got {run_id!r}."
+    return None
+
+
+# #820. The glossary-run merge marker canon_validate.py --merge-batches
+# writes on a SUCCESSFUL merge -- select_segments.py's W5 admission gate
+# (check_glossary_runs_merged()) reads it back by this exact schema string,
+# so it is pinned here, not restated ad hoc at the one write site below.
+GLOSSARY_RUN_MERGED_SCHEMA = "glossary-run-merged/1"
+
+
+def _merge_marker_now_iso8601() -> str:
+    """Byte-for-byte the same format as ledger_update.py's/select_segments.
+    py's own now_iso8601() copies: seconds precision, 'Z' suffix."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _write_glossary_merge_marker(marker_path: Path, batch_paths: list) -> None:
+    """Atomically write the durable glossary-merge marker the W5 admission
+    gate reads to tell a genuinely MERGED glossary run apart from one that
+    only produced fragments (#820). Called ONLY from run_merge_batches,
+    ONLY after `_stamp_write_verify()` has already written canon.json AND
+    re-read it fresh from disk to confirm the merge landed -- so by the
+    time this runs the merge is genuinely established, not merely
+    attempted.
+
+    `run_id` is derived from `marker_path`'s PARENT DIRECTORY NAME, the
+    convention both entry points already use (glossary-pass-wf.template.js's
+    RUN_DIR + '/merged.json'), and validated against this file's own
+    validate_run_id() copy above -- an unsafe id refuses rather than
+    writing a marker under a path the reader would not trust anyway (its
+    own `run_id` field must match the directory name it is found in).
+
+    `batches` records the ASCENDING 0-based POSITION of each fragment in
+    `batch_paths`, i.e. the order --merge-batches was actually given on
+    this command line -- not a real glossary batch index re-derived from a
+    fragment's filename, which this script deliberately does not parse
+    (mergeBatchesCmd()'s own comment: teaching this script the template's
+    private filename convention is exactly what #734 avoided for the
+    approval-record pairing, for the same reason). The reader
+    (check_glossary_runs_merged()) does not consult this field at all --
+    it is provenance for a human reading the marker, not part of the
+    admission predicate.
+
+    A marker that fails to write is FATAL for the whole merge (raises
+    CanonValidationError, exactly like any other fatal failure in this
+    module) rather than a silently degraded success: a merge that
+    happened without its marker is precisely the state that makes the W5
+    gate wrong. Re-running --merge-batches costs nothing once canon.json
+    already reflects the fragments -- #291's _stamp_write_verify() treats
+    an all-already-merged re-submission as a content-free no-op (nothing
+    to re-merge, no restamp) -- so refusing here is a safe, retryable
+    failure, not a stuck one."""
+    run_id = marker_path.parent.name
+    problem = validate_run_id(run_id)
+    if problem is not None:
+        raise CanonValidationError(
+            f"cannot write glossary merge marker at {marker_path}: refused "
+            f"to derive run_id from its parent directory name -- {problem}"
+        )
+    marker = {
+        "schema": GLOSSARY_RUN_MERGED_SCHEMA,
+        "run_id": run_id,
+        "merged_at": _merge_marker_now_iso8601(),
+        "batches": list(range(len(batch_paths))),
+        "source": "merge",
+    }
+    try:
+        _atomic_write_json(marker_path, marker)
+    except OSError as e:
+        raise CanonValidationError(
+            f"merge succeeded but could not write its glossary merge marker "
+            f"at {marker_path} ({e}) -- refusing rather than leaving an "
+            "unrecorded merge the W5 gate cannot tell apart from one that "
+            "never ran. Re-run --merge-batches with the same fragments once "
+            "the path is writable; merging already-merged content is a "
+            "no-op."
+        )
 
 
 # Most problems worth listing in one failure. The per-message cap bounds each
@@ -3331,6 +3462,7 @@ def run_merge_batches(
     plugin_root_str=None,
     citations_reviewed: bool = False,
     approval_record_paths=None,
+    glossary_merge_marker_path=None,
 ) -> dict:
     """--merge-batches P1 P2 ...: single process, single canon.json load.
     Validates ALL given fragments (Pass 1 + offline backstop) FIRST, before
@@ -3350,7 +3482,12 @@ def run_merge_batches(
     each record must name the sha256 of the fragment it is paired with. Enforced
     in that same pre-merge loop, and over the bytes read HERE -- the raw copy
     _load_batch_bytes returns, never a re-read -- so the digest is taken of the
-    object that is about to be merged."""
+    object that is about to be merged.
+
+    `glossary_merge_marker_path` (#820) is --glossary-merge-marker: written
+    ONLY after `_stamp_write_verify()` below has already written canon.json
+    and re-read it fresh from disk, i.e. only once the merge is genuinely
+    established -- see `_write_glossary_merge_marker()`'s own docstring."""
     loaded = [_load_batch_bytes(p) for p in batch_paths]
     batches = [doc for _raw, doc in loaded]
     records = _paired_approval_records(batch_paths, approval_record_paths, citations_reviewed)
@@ -3368,6 +3505,12 @@ def run_merge_batches(
     on_disk, restamped = _stamp_write_verify(
         canon_path, acc, registry, plugin_root_str=plugin_root_str
     )
+
+    if glossary_merge_marker_path is not None:
+        # Only NOW: canon.json has been written AND re-read fresh from disk
+        # by _stamp_write_verify() above, so the merge this marker records
+        # is genuinely established, not merely attempted.
+        _write_glossary_merge_marker(Path(glossary_merge_marker_path), batch_paths)
 
     n_accepted = sum(1 for batch in batches for item in batch if item.get("disposition") == "accepted")
     n_queued = sum(1 for batch in batches for item in batch if item.get("disposition") == "review_queue")
@@ -3656,6 +3799,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--glossary-merge-marker",
+        metavar="PATH",
+        default=None,
+        help=(
+            "#820. Only with --merge-batches: on a SUCCESSFUL merge (after "
+            "canon.json has been written AND re-read fresh from disk to "
+            "confirm it landed), atomically write a durable "
+            "'glossary-run-merged/1' marker to PATH -- {run_id, merged_at, "
+            "batches, source:\"merge\"}. run_id is taken from PATH's own "
+            "parent directory name and refused if unsafe. This is what "
+            "lets select_segments.py's W5 admission gate tell a genuinely "
+            "MERGED glossary run apart from one that only produced "
+            "fragments, without re-deriving that fact from any mutable "
+            "project input. Refused in every other mode."
+        ),
+    )
+    parser.add_argument(
         "--verify-merged",
         action="store_true",
         help=(
@@ -3920,6 +4080,31 @@ def main(argv=None) -> int:
             "since #734 this script refuses to take that on trust -- the "
             "glossary pass writes the records with --record-approval-to"
         )
+    # #820 -- every mode that refuses --glossary-merge-marker, with its own
+    # reason. Same table-driven shape as --citations-reviewed above: a mode
+    # other than --merge-batches never performs the merge the W5 gate needs
+    # recorded, so honoring the flag there would silently accept a marker
+    # request nothing on this call path can satisfy.
+    glossary_merge_marker_refusers = [
+        spec for spec in selected_modes if spec.glossary_merge_marker_refusal is not None
+    ]
+    if args.glossary_merge_marker is not None:
+        if glossary_merge_marker_refusers:
+            parser.error(
+                "; ".join(
+                    f"{spec.flag} does not accept --glossary-merge-marker "
+                    f"({spec.glossary_merge_marker_refusal})"
+                    for spec in glossary_merge_marker_refusers
+                )
+            )
+        elif not selected_modes:
+            # VALIDATE-ONLY has no MODE_SPECS row, so the comprehension above
+            # never reaches it -- guarded by hand exactly like its siblings.
+            parser.error(
+                "validate-only (no mode flag) does not accept "
+                "--glossary-merge-marker -- it merges nothing, so there is "
+                "no merge for a marker to record. Pass --merge-batches."
+            )
     # #412 -- the trusted-sibling precondition. A mode that STAMPS
     # generation_hashes shells out to a sibling cache_key.py; left to
     # self-anchor, that sibling comes out of ${durable_root}/scripts/, which
@@ -4001,6 +4186,7 @@ def main(argv=None) -> int:
                 args.plugin_root,
                 args.citations_reviewed,
                 args.approval_records,
+                args.glossary_merge_marker,
             )
         elif args.verify_merged:
             result = run_verify_merged(
