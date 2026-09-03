@@ -41,7 +41,7 @@ than another sentence.
   alone, and already encodes every exclusion a hand-rolled check would get wrong — `entries{}`,
   `review_queue[]`, `corrections[]` dismissals, adjudicated homonym splits, the frequency floor, and
   the elision force-include.
-- **The planner is invoked root-bound, not self-anchored.** Its three data paths are passed
+- **The planner is invoked root-bound, not self-anchored.** Its 3 data paths are passed
   explicitly from the target durable root, because it derives its defaults from its own physical
   parent — with the script resolved from `--plugin-root`, every default would name the wrong project.
   The optional `canon_senses.json` sidecar is the one input that cannot simply be passed (a missing

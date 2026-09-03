@@ -399,6 +399,39 @@ def _local_dict_len(filename, funcname, varname):
 # template's own formula rather than restated here -- declaring it a second time
 # would make this file the third copy of one number, which is the shape #580 was
 # filed about.
+def _gate_durable_path_args():
+    """How many of the arguments the W5 gate hands `glossary_batch_plan.py` are
+    DATA PATHS taken from the target durable root -- the claim the 1.77.0 entry
+    makes when it says the planner is invoked root-bound rather than left to
+    self-anchor. Counted off the argv construction itself via `ast`, pairing each
+    `--flag` literal with the expression that supplies its value, because the
+    property under test is which values come from `durable_root` -- not how many
+    flags there are. `--min-candidate-freq` is a scalar and must NOT count; if a
+    later release passes it as a path, or drops one of the three, this goes red
+    instead of quietly agreeing with stale prose."""
+    src = (SCRIPTS / "select_segments.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "check_glossary_current")
+    pairs = []
+    for node in ast.walk(fn):
+        items = None
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.List):
+            items = node.value.elts
+        elif isinstance(node, ast.AugAssign) and isinstance(node.value, ast.List):
+            items = node.value.elts
+        if not items:
+            continue
+        for flag, value in zip(items, items[1:]):
+            if isinstance(flag, ast.Constant) and isinstance(flag.value, str) \
+                    and flag.value.startswith("--"):
+                pairs.append((flag.value, ast.unparse(value)))
+    from_durable = {f for f, v in pairs
+                    if "durable_root" in v or "senses_path_arg" in v}
+    assert pairs, "argv construction not found -- the derive, not the prose, is broken"
+    return len(from_durable)
+
+
 def _glossary_driver_deadline_default():
     """The glossary driver's own `--deadline-sec` default, read off its argument
     parser rather than regexed out of the source: the parser is what an
@@ -413,34 +446,29 @@ def _glossary_driver_deadline_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.76.1 (#809 -- a codex job that dies at launch no longer costs
-    # its batch the whole poll deadline). TWO rows, both the same quantity: the
-    # driver's default `--deadline-sec`, stated once in seconds and once in
-    # minutes. Both are read off the driver's own parser, since the release is
-    # about what happens INSIDE that wait, not about its length -- the entry
-    # says the deadline is unchanged, and these rows are what make that true.
+    # ROTATED TO 1.77.0 (#820 -- W5 refuses to dispatch over an unfinished W3
+    # glossary pass). ONE row: the number of data paths the gate passes to
+    # `glossary_batch_plan.py` off the target durable root, which is the entry's
+    # one claim about this tree that the tree can answer. It is derived from the
+    # argv construction rather than counted by hand, because the release's whole
+    # point is that those paths are bound to the project under test instead of
+    # self-anchoring to the planner's own parent.
     #
-    # The 1.76.0 rotation this replaces, kept as its own record: ONE row, the
-    # count of `style_bible.md` references in the glossary template, derived by
-    # counting the absolute form the release introduced.
+    # Everything else numeric in the entry is deliberately NOT a row. The
+    # 47-segment book, 9 of 11 batches, 47/47, 65 canon entries, 44 of 47, 155
+    # findings, 43 conflicts, 13 `basis: established`, and the 247/2/312 replay
+    # are field measurements from a live private volume this repository does not
+    # contain -- the same exclusion the 1.76.1 rotation records for its own
+    # "three seconds"/"11-batch"/"~135 minutes". The version, the issue number
+    # and the date are not measurements.
     #
-    # Its other numerals are not measurements in this file's sense: the version,
-    # the issue number (#809), and the release date. "three seconds",
-    # "11-batch", "3 batches" and "~135 minutes" are field measurements from the
-    # issue's own live run on a private volume this repository does not contain,
-    # so there is nothing in the tree to re-derive them against.
-    #
-    # The gate reads the NEWEST entry only, by design: a released entry's figures
-    # are frozen by the release rather than re-checked forever.
+    # The 1.76.1 rotation this replaces, kept as its own record: TWO rows, both
+    # the glossary driver's default `--deadline-sec`, stated once in seconds and
+    # once in minutes, read off the driver's own parser.
     Figure(
-        phrase="the whole 2700 s poll",
-        value=2700,
-        derive=_glossary_driver_deadline_default,
-    ),
-    Figure(
-        phrase="the full 45 minutes",
-        value=45,
-        derive=lambda: _glossary_driver_deadline_default() // 60,
+        phrase="Its 3 data paths",
+        value=3,
+        derive=_gate_durable_path_args,
     ),
 ]
 
@@ -448,7 +476,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.76.1"
+FIGURES_VERSION = "1.77.0"
 
 
 def _newest_entry():
