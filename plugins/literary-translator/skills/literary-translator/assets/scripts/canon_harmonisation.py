@@ -23,80 +23,160 @@ anchoring against canon.json's own entries{}, cardinality, duplication),
 never an accuracy/identity call. Acting on a proposal is the EXISTING,
 unrelated canon_validate.py --correct route, always operator-driven.
 
-TWO MUTUALLY EXCLUSIVE MODES (passing neither, or both, is a usage error:
-argparse prints to stderr and exits 2)
+THREE MUTUALLY EXCLUSIVE MODES (passing none, or more than one, is a usage
+error: argparse prints to stderr and exits 2)
 --------------------------------------------------------------------------
-  --check PATH [--approve-to DEST]
+  --build-corpus --candidates-source {bootstrap|disabled} [--durable-root DIR] [--out PATH]
+      Gathers the three corpora the harmonisation pass is shown, and writes
+      them to ONE per-attempt corpus file. This is a script and not session
+      prose because every step of it is mechanical -- read these files, keep
+      these rows, count the ones dropped -- and because the fail-closed rules
+      below are exactly the kind a session skips without noticing.
+
+        canon     -- every canon['entries'] record, source_form with its
+                     canonical_target_form.
+        draft     -- the names[] rows of every CONVERGED segment draft,
+                     gathered FAIL-CLOSED at three steps:
+                       1. ledger_merge.py::_read_fragments, never
+                          final_audit.py::load_converged_fragments -- the
+                          latter's is_dir() + glob() answer True/[] for a
+                          POPULATED directory at mode 0o000, so an unreadable
+                          runs/ledger.d would report itself empty. Any errno
+                          but ENOENT/ENOTDIR is fatal here, never an empty
+                          corpus. A fragment that is not an object, or whose
+                          status is unusable, is fatal for the same reason.
+                       2. status == "converged" is NOT sufficient: the
+                          fragment's reviewed_draft_sha1 must still match the
+                          draft's current draft_content_sha1, or the draft was
+                          edited after the review that approved it and carries
+                          names no reviewer saw. Excluded and counted.
+                       3. rows are read with final_audit.py::_name_entry_forms,
+                          which accepts both conventions draft.schema.json
+                          permits. A well-formed row matching neither is
+                          counted in draft_rows_skipped; a names[] that is
+                          missing or not an array is fatal.
+        candidate -- name_candidates.json rows, source form and freq only, and
+                     ONLY under --candidates-source bootstrap. Which W3 branch
+                     ran is not readable from disk: glossary.enabled:false
+                     skips the extractor and deletes nothing, so an older
+                     run's file looks identical to a fresh one. Under
+                     `disabled` the file is not opened at all and the corpus
+                     records an empty list with candidates_source "disabled",
+                     which is a different fact from a freshly built empty one.
+
+      A canon row and a converged draft row that DISAGREE about one source
+      form are two separate observations, never collapsed: that is the
+      cross-segment discrepancy this pass exists to surface.
+
+      The corpus file is per-attempt and is published CREATE-ONCE (os.link,
+      EEXIST fatal -- not exists()-then-replace, which has a window and whose
+      Path.exists() follows a dangling symlink), because the digest the
+      session keeps refers to THOSE bytes.
+
+      stdout on success, exactly one JSON line:
+        {"success": true, "mode": "build-corpus", "corpus_path": "<path>",
+         "corpus_sha256": "<hex>", "canon_sha256": "<hex>",
+         "candidates_source": "bootstrap"|"disabled",
+         "canon_observations": N, "draft_observations": N,
+         "candidate_observations": N, "converged_segments": N,
+         "drafts_excluded_stale_review": N, "draft_rows_skipped": N,
+         "should_dispatch": true|false}
+      The three drop counters are reported so that a corpus which GATHERED
+      nothing can never read like one that FOUND nothing. should_dispatch is
+      the W-step's no-op decision, computed here rather than re-derived by
+      the session: true when there is at least one canon observation to
+      anchor against, or at least two draft observations to disagree.
+
+  --check PATH --corpus PATH --expect-corpus-sha256 HEX [--approve-to DEST]
       Purely structural validation of the ATTEMPT file a dispatched pass
       just wrote (a per-attempt path, never the durable sidecar directly --
       see the SKILL.md W-step for why one dispatch needs a fresh path).
-      Self-anchored: reads canon.json and the schemas directory from THIS
-      script's own durable_root, never from a flag -- there is no
-      --durable-root/--canon-path/--schemas-dir override on --check, unlike
-      every other override-bearing mode in this plugin, because a pipeline
-      W-step always runs against its one true install layout and a typo'd
-      override here would silently check a proposal against the wrong
+      Self-anchored for canon.json and the schemas directory: it reads them
+      from THIS script's own durable_root, never from a flag, because a
+      pipeline W-step always runs against its one true install layout and a
+      typo'd override would silently check a proposal against the wrong
       canon.
 
+      --expect-corpus-sha256 is the TRUSTED CHANNEL and is required. The
+      corpus file lives in the durable root the dispatched pass can WRITE,
+      so a digest recomputed from that file and compared only against the
+      artifact's own field proves self-consistency and nothing else: the
+      pass could rewrite the corpus with fabricated observations and stamp
+      the matching digest into its artifact. This value is the digest the
+      SESSION computed before dispatching and holds in its own context.
+
       Enforces, in order:
-        a. PATH is schema-valid against canon-harmonisation.schema.json
-           (a blank note, an unknown kind, a missing field, or a stray key
-           is caught HERE, by the schema, not by procedural code below).
-        b. canon_sha256 equals the sha256 of canon.json's raw bytes on
-           disk -- refuses an artifact anchored to a different canon than
-           the one currently frozen.
-        c. every proposal has >= 2 members.
-        d. every members[].source_form is a BYTE-EXACT key of
-           canon['entries'] (never folded, casefolded, or NFC/NFD-
-           normalised -- a form matching a canon key only after
-           normalisation is refused, exactly like canon_link_groups.py's
-           own membership rule).
-        e. every members[].canonical_target_form equals
-           canon['entries'][source_form]['canonical_target_form'] byte-
-           exact -- the anti-fabrication check: an artifact that misquotes
-           the canon it was anchored to is refused.
-        f. within one proposal, source_forms are pairwise distinct, AND at
-           least 2 distinct canonical_target_form values appear among its
-           members -- a proposal whose members already agree has nothing
-           to harmonise.
-        g. no two proposals share both the same kind and the same set of
-           member source_forms.
+        a. the corpus file's current bytes hash to --expect-corpus-sha256,
+           and the corpus is schema-valid against
+           canon-harmonisation-corpus.schema.json. Checked FIRST: a corpus
+           that is not the one dispatched makes every membership check below
+           meaningless.
+        b. PATH is schema-valid against canon-harmonisation.schema.json (a
+           blank note, an unknown kind, a missing field, a stray key, or a
+           member whose shape contradicts its own corpus tag is caught HERE,
+           by the schema, not by procedural code below).
+        c. canon_sha256 equals the sha256 of canon.json's raw bytes on disk,
+           and corpus_sha256 equals --expect-corpus-sha256 -- so all three
+           views of the corpus agree before anything is published.
+        d. every member matches an observation in the CORPUS FILE, byte-exact
+           on the whole (corpus, source_form, canonical_target_form) triple
+           -- never folded, casefolded, or NFC/NFD-normalised. Matching the
+           triple rather than the source form alone is what makes a corpus
+           tag unforgeable: a row relabelled into another corpus is simply
+           not there. Membership is against the corpus and not against live
+           canon.json on purpose -- the corpus is what the pass was actually
+           shown.
+        e. every member's n_segments / freq equals the matched observation's.
+           --report never receives --corpus, so it renders these from the
+           artifact; an unverified count would be a number the pass chose.
+        f. within one proposal, member triples are pairwise distinct.
+        g. the per-kind rule for this proposal's kind (see KIND_RULES and
+           _check_kind_rule): >= 2 target-bearing members with >= 2 distinct
+           targets for the divergent kinds; >= 2 canon members sharing
+           exactly 1 target for shared_target; exactly 1 canon member with
+           >= 2 whitespace-normalised-distinct referents for multi_referent;
+           >= 1 canon member plus >= 1 candidate member, every candidate
+           ABSENT from live canon.json, for uncanonized_variant.
+        h. no two proposals share both the same kind and the same set of
+           member observations.
 
-      Exit 1 on any violation of (a)-(g). Failures under (c), (f) and (g)
-      name the offending proposal's INDEX; failures under (d)/(e) name the
-      offending proposal's index AND the source_form at fault. (a) and (b)
-      are whole-DOCUMENT failures -- they can fire with zero proposals
-      present at all -- and name the document, never an index. Exit 2 on
-      canon.json absent/unreadable/not a JSON object (or missing/malformed
-      entries{}), PATH absent/unreadable/not JSON, or the schemas directory
-      absent. On EVERY non-zero exit, stdout carries NO JSON at all --
-      every human-readable detail, including the offending index/form,
-      goes to stderr only (the review_artifact_check.py/skeptic_report.py
-      discipline: nothing on stdout can ever be mistaken for a schema-
-      conforming result).
+      Exit 1 on any violation. Failures under (d)-(h) name the offending
+      proposal's INDEX, and those about one member also name its source_form.
+      (a), (b) and (c) are whole-DOCUMENT failures -- they can fire with zero
+      proposals present at all -- and name the document, never an index. Exit
+      2 on canon.json absent/unreadable/not a JSON object (or missing/
+      malformed entries{}), PATH or the corpus file absent/unreadable/not
+      JSON, or the schemas directory absent. On EVERY non-zero exit, stdout
+      carries NO JSON at all -- every human-readable detail, including the
+      offending index/form, goes to stderr only (the
+      review_artifact_check.py/skeptic_report.py discipline: nothing on
+      stdout can ever be mistaken for a schema-conforming result).
 
-      --approve-to DEST is the ONLY write this script performs, and it
-      happens ONLY on a full PASS: the EXACT bytes read from PATH (never
-      re-serialised) are published atomically to DEST (write a temp file
-      in DEST's own directory, fsync it, then os.replace() over whatever
-      was there). On every exit-1 and exit-2 path DEST is left untouched --
-      not created if absent, byte-identical if already present. Unlike
-      canon_validate.py's create-once _write_approved_snapshot (a citation
-      reviewer's one-shot fragment approval, refused on a second, DIFFERENT
-      approval), this publish OVERWRITES: DEST is the durable sidecar
-      itself, and a later, re-approved artifact is meant to replace an
-      earlier one -- a project can run this pass more than once over its
+      --approve-to DEST is the ONLY write this mode performs, and it happens
+      ONLY on a full PASS: the EXACT bytes read from PATH (never
+      re-serialised) are published atomically to DEST (write a temp file in
+      DEST's own directory, fsync it, then os.replace() over whatever was
+      there). On every exit-1 and exit-2 path DEST is left untouched -- not
+      created if absent, byte-identical if already present. Unlike the
+      corpus file above, this publish OVERWRITES: DEST is the durable
+      sidecar itself, and a later, re-approved artifact is meant to replace
+      an earlier one -- a project can run this pass more than once over its
       life, and only the newest approved read should be what --report
       renders.
 
       stdout on success, exactly one JSON line:
         {"success": true, "mode": "check", "proposals_count": N,
          "entries_in_canon": M, "canon_sha256": "<hex>",
-         "approved_to": "<path>" | null}
+         "corpus_sha256": "<hex>", "observations_in_corpus": N,
+         "candidates_source": "bootstrap"|"disabled",
+         "converged_segments": N, "drafts_excluded_stale_review": N,
+         "draft_rows_skipped": N, "approved_to": "<path>" | null}
       entries_in_canon is always computed fresh from canon.json on disk,
       never read from the artifact -- a model-authored coverage count is
       not evidence of coverage (see the SKILL.md W-step's own reasoning for
-      why no entries_examined field exists in the artifact at all).
+      why no entries_examined field exists in the artifact at all). The
+      corpus counters are echoed from the corpus file so one line records
+      what was gathered and what was accepted.
 
   --report [--harmonisation PATH] [--durable-root DIR] [--canon-path P]
            [--schemas-dir D]
@@ -112,11 +192,23 @@ argparse prints to stderr and exits 2)
       source_form -> canonical_target_form read FRESH from canon.json
       (never from the artifact, which may have gone stale), the note, and
       a copy-pasteable canon_validate.py --correct skeleton naming the
-      member. A member whose source_form is no longer a key of entries{}
-      renders as "REMOVED (was: <the target stored in the artifact>)" --
-      --correct's own "remove" disposition deletes an entry outright, so
-      there is no fresh target left to read, and the row must neither
-      crash nor silently vanish. THE IRON RULE holds here too: the printed
+      member.
+
+      Every member's ROUTE is decided by LIVE canon-key membership, never
+      by its corpus tag: name_candidates.json carries the extractor's
+      complete list and only glossary_batch_plan.py later drops the forms
+      already resolved, so a `candidate` row's form may well be a canon
+      key, and a `canon` row's may have been removed since. A member that
+      IS a live key gets its --correct skeleton; one that is not gets a
+      line saying the route is a NEW entry through the ordinary glossary
+      merge, because --correct refuses a source_form it cannot find. A
+      `canon` member whose entry has since been removed renders as
+      "REMOVED (was: <the target stored in the artifact>)" -- --correct's
+      own "remove" disposition deletes an entry outright, so there is no
+      fresh target left to read, and the row must neither crash nor
+      silently vanish. A multi_referent proposal gets no skeleton at all:
+      its answer is a canon_senses.json split, and --correct retargets an
+      entry, which is a different operation. THE IRON RULE holds here too: the printed
       --correct skeleton never fills in which spelling should win -- that
       is exactly the identity call this script may never make -- its
       new_entry.canonical_target_form is printed as null, which
@@ -404,14 +496,14 @@ def _first_duplicate(items):
     return None
 
 
-def _load_sibling(module_name: str, scripts_dir: Path):
+def _load_sibling(module_name: str):
     """Loads a staged sibling script by EXACT PATH, never `import <name>`,
     for the same reason json_stdout.py is loaded that way above: a bare
     sibling import resolves through the global sys.modules cache regardless
     of which staged copy the caller intended. Raises
     CanonHarmonisationFatalError (exit 2) when the sibling is absent -- a
     missing staged script is a deployment fault, never a gate-fail."""
-    path = scripts_dir / f"{module_name}.py"
+    path = SCRIPTS_DIR / f"{module_name}.py"
     try:
         spec = _importlib_util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
@@ -444,7 +536,6 @@ def build_corpus(
     here is a corpus that GATHERED nothing reading like one that FOUND
     nothing."""
     durable_root = Path(durable_root_str) if durable_root_str else DURABLE_ROOT
-    scripts_dir = Path(__file__).absolute().parent
     canon_path = durable_root / "canon.json"
 
     canon_bytes, entries = _load_canon(canon_path)
@@ -469,8 +560,8 @@ def build_corpus(
     # Reading fragments rather than the materialized runs/ledger.json is
     # required on its own: the default driver writes only fragments and
     # leaves ledger.json at its pre-run state.
-    ledger_merge = _load_sibling("ledger_merge", scripts_dir)
-    final_audit = _load_sibling("final_audit", scripts_dir)
+    ledger_merge = _load_sibling("ledger_merge")
+    final_audit = _load_sibling("final_audit")
     ledger_d = durable_root / "runs" / "ledger.d"
     try:
         fragments = ledger_merge._read_fragments(ledger_d)
@@ -1000,7 +1091,7 @@ def _atomic_publish(dest: Path, raw: bytes, create_only: bool = False) -> None:
         replaced = True
     except OSError as exc:
         raise CanonHarmonisationFatalError(
-            f"--approve-to could not publish the validated snapshot at {dest}: {exc}"
+            f"could not publish at {dest}: {exc}"
         )
     finally:
         # os.link leaves the source name in place, so the temp is cleaned up on
@@ -1089,6 +1180,22 @@ def run_check(
 # --report: read-only render.
 # ---------------------------------------------------------------------------
 
+# The bidi OVERRIDE and ISOLATE controls, escaped alongside `Cc` and the two
+# Zl/Zp separators. Category `Cf` as a whole is deliberately NOT the rule
+# here, unlike everywhere else in this function: `Cf` also holds U+200E LEFT-
+# TO-RIGHT MARK and U+200F RIGHT-TO-LEFT MARK, which a Hebrew or Yiddish
+# target form mixing in Latin text legitimately carries for correct display,
+# and ZWJ/ZWNJ. Escaping those would mangle real canon content in the very
+# lines an operator reads to make an identity call. These nine cannot occur
+# inside a name and exist only to reorder what follows them, which is exactly
+# the "make the operator misread it" consequence the Cc escape closes for
+# terminal controls -- repr() saves the member lines, but a json.dumps of the
+# --correct skeleton does not.
+BIDI_OVERRIDES = frozenset(
+    chr(cp) for cp in list(range(0x202A, 0x202F)) + list(range(0x2066, 0x206A))
+)
+
+
 def _escape_terminal_controls(text: str, keep: "frozenset[str]" = frozenset()) -> str:
     """Neutralises every control character and Unicode line/paragraph
     separator model-authored text may carry, before it reaches
@@ -1141,7 +1248,11 @@ def _escape_terminal_controls(text: str, keep: "frozenset[str]" = frozenset()) -
     return "".join(
         f"\\u{ord(ch):04x}"
         if ch not in keep
-        and (unicodedata.category(ch) == "Cc" or ch in (chr(0x2028), chr(0x2029)))
+        and (
+            unicodedata.category(ch) == "Cc"
+            or ch in (chr(0x2028), chr(0x2029))
+            or ch in BIDI_OVERRIDES
+        )
         else ch
         for ch in text
     )

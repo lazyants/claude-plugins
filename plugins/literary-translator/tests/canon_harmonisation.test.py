@@ -633,15 +633,20 @@ def test_check_exit1_canon_sha256_mismatch(tmp_path):
 # ===========================================================================
 
 
-def test_check_exit1_unknown_source_form(tmp_path):
+def test_check_exit1_source_form_absent_from_the_corpus(tmp_path):
+    """The name and the fixture value both say CORPUS, not canon: membership
+    moved when the corpus file did, and a test still calling this
+    "not-a-canon-key" would read as though --check consulted canon.json's
+    entries{} for it. It does not -- the corpus is what the pass was shown."""
     root = make_durable_root(tmp_path / "durable_root")
     csha, entries, doc, corpus_path, corpus_sha = two_member_fixture(root)
-    doc["proposals"][0]["members"][1]["source_form"] = "not-a-canon-key-at-all"
+    doc["proposals"][0]["members"][1]["source_form"] = "not-in-the-corpus-at-all"
     attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert_no_stdout(proc)
     assert "proposals[0]" in proc.stderr
-    assert "not-a-canon-key-at-all" in proc.stderr
+    assert "not-in-the-corpus-at-all" in proc.stderr
+    assert "is not a byte-exact observation in the corpus" in proc.stderr
 
 
 def test_check_exit1_nfc_nfd_near_miss_must_refuse(tmp_path):
@@ -1912,3 +1917,73 @@ def test_candidate_member_against_a_disabled_corpus_is_refused(tmp_path):
     _attempt, proc = check_attempt(root, doc, corpus_path, corpus_sha)
     assert proc.returncode == 1, proc.stdout
     assert "is not a byte-exact observation in the corpus" in proc.stderr
+
+
+def test_report_bidi_override_in_canon_or_note_cannot_reorder_the_operators_line(tmp_path):
+    """#823 closing security pass, MINOR. `_escape_terminal_controls` closed
+    the whole Cc category plus U+2028/U+2029, but the bidi OVERRIDE and
+    ISOLATE controls are category Cf and were not in it. They reach operator
+    output by two routes: a `note` (and a multi_referent `referents` entry),
+    and -- the one repr() cannot save, exactly as in round 3 -- the
+    json.dumps of the --correct skeleton, which carries `source_form` and the
+    whole copied canon entry.
+
+    A bidi override cannot open a physical line at column zero, so it cannot
+    forge this script's own markers; what it does is reorder the glyphs of
+    the very line an operator reads while making the identity call THE IRON
+    RULE reserves for them.
+
+    Category Cf as a whole is deliberately NOT the rule: it also holds LRM
+    and RLM, which a Hebrew target form mixing in Latin text legitimately
+    carries, so this asserts the OVERRIDE/ISOLATE set is escaped AND that a
+    legitimate LRM survives untouched. Every character is built with chr()."""
+    root = make_durable_root(tmp_path / "durable_root")
+    rlo, lri, lrm = chr(0x202E), chr(0x2066), chr(0x200E)
+    hostile_source = "בָאבְרִינִצֶער" + rlo + "reversed"
+    legitimate_target = "Mordechai" + lrm + " Babrinitzer"
+    entries = [
+        canon_entry(hostile_source, legitimate_target),
+        canon_entry("Other", "Other Target"),
+    ]
+    raw = write_canon(root, entries)
+    csha = canon_sha256_of(raw)
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha, observations_for(entries)))
+    doc = harmonisation_doc(csha, [proposal(
+        "divergent_spelling",
+        [member(hostile_source, legitimate_target), member("Other", "Other Target")],
+        note="One byname" + lri + " isolated" + rlo + " and reversed.",
+    )])
+    _attempt, proc = check_attempt(
+        root, doc, corpus_path, corpus_sha,
+        "--approve-to", str(root / "canon_harmonisation.json"))
+    assert proc.returncode == 0, proc.stderr
+
+    report = run_harmonisation(root, "--report")
+    assert report.returncode == 0, report.stderr
+
+    offending = sorted({
+        ch for ch in report.stderr
+        if 0x202A <= ord(ch) <= 0x202E or 0x2066 <= ord(ch) <= 0x2069
+    })
+    assert not offending, (
+        f"raw bidi override/isolate character(s) reached stderr: "
+        f"{[hex(ord(ch)) for ch in offending]}\n{report.stderr}"
+    )
+    assert "\\u202e" in report.stderr
+    assert "\\u2066" in report.stderr
+    # ...and the legitimate mark survives where THIS function decides: the
+    # --correct skeleton, which is a json.dumps and is the one place a Cf-wide
+    # rule would have mangled a target form the operator is about to paste.
+    # The member lines above escape it too, but that is repr()'s own
+    # isprintable() rule, which predates this change and is not what is being
+    # asserted here.
+    skeleton = json.loads(_extract_first_correct_skeleton(report.stderr))
+    assert lrm in skeleton["old_entry"]["canonical_target_form"], (
+        "U+200E LEFT-TO-RIGHT MARK is legitimate inside a target form and must "
+        "reach the operator's paste-ready skeleton unescaped"
+    )
+    assert skeleton["source_form"] == hostile_source, (
+        "escaping the override must stay lossless: \\uXXXX inside a JSON string "
+        "parses back to the identical form"
+    )
