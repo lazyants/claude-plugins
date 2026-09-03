@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.77.1 — 2026-09-03
+
+**`SKILL.md`'s Canon bullet priced a canon correction as RE-TRANSLATION of every carrier (#825).**
+The class-sweep section, where a sweep decides which channel a ruling belongs in, told the reader
+that correcting a frozen `canon.json` entry re-translates each segment whose segpack lists that name.
+Three shipped sources said otherwise, and one of them is the code: `references/canon-and-glossary.md`
+records that since **1.25.0** every segment such a correction reaches is admissible for bounded
+RE-REVIEW, and says in as many words that the older prose called it re-translation because before
+that release the same edit stranded those units. `SKILL.md`'s own W5 section already carried "A claim
+never re-translates", and `select_segments.py` admits a canon-staled unit through the same
+`WAS_CONVERGED_STATUSES` set the claim profiles read.
+
+The consumer of that sentence is a model reading the skill mid-run to decide whether a correctness fix
+is affordable, and it read a price wrong by the most expensive factor in the pipeline. Its failure
+mode is silent: a green run over a deliverable whose known-wrong rendering was left in place because
+the fix looked unaffordable.
+
+- **One clause, rewritten about the DRAFT rather than about dispatch,** and that is deliberate in both
+  directions. An unqualified "never re-translation" would be false — `--allow-retranslate-converged`
+  authorizes exactly that for a canon-staled carrier, and `segment_dispatch_driver.test.py` pins it.
+  "Cannot reach translate" would be false too: `pipeline()` has no claim-aware branch, so its
+  translate stage dispatches a `codex_job.py` translate for a claimed id as well — and that job then
+  ADOPTS the claim-restamped draft or refuses it outright, costing one wasted dispatch and never the
+  draft. The bullet now says an *admissible* `--from-converged` claim authorizes bounded RE-REVIEW and
+  never re-translates the draft; "admissible" is load-bearing, because admission carries status,
+  sentinel, artifact and fresh-segpack preconditions that an unconditional phrasing would erase.
+- **The rewrite is line-count neutral, and that is a requirement rather than tidiness.** A live
+  citation in `tests/orchestration_hash_resume_gating.test.py` points at a `SKILL.md` line below this
+  bullet, with anchors declared in `tools/citation-anchors/literary-translator.json`, and
+  `tools/citation_audit.py` checks it repo-wide in CI. The rewritten block has the same number of
+  lines afterwards as before, and the diff is one hunk with as many lines added as removed, so no
+  line below the bullet moves and that citation still resolves.
+- **The retired wording is now pinned in both directions** by a new row in
+  `tests/retired_wording_pins.test.py`, on a new frozen `BASELINE_825` — the 1.77.0 release commit,
+  which is this branch's immediate parent and already on `origin/main`, so no merge method can move
+  it out of main's ancestry. The old sentence occurred exactly once in that tree and occurs zero times
+  now, the replacement is absent there and present here, and the two are bound to the same diff hunk.
+  Reusing an older baseline was measured and rejected: the needle also occurs at `BASELINE_PRE_1_63_0`
+  and `BASELINE_LT_368`, so either would satisfy presence-before — but the diff against them is
+  nineteen releases of unrelated history, and the row's provenance assertion would then prove only
+  that the sentence went away sometime. Verified non-vacuous by mutation: corrupting the needle turns
+  part of the row RED.
+- **No change to the correction route, to `used_terms_hash`, to `--from-converged`, or to any gate.**
+  This release adds no mechanism. The defect was a false statement about behaviour that already
+  works, and the fix is that statement.
+
+Both changelog-facing guards rotate with the entry, as they must: `changelog_figures.test.py` now
+declares an empty `FIGURES` at `FIGURES_VERSION` 1.77.1, because this entry states no figure the tree
+can re-derive, and `changelog_citations.test.py` keeps its empty `CITATION_ANCHORS` with its comment
+rotated — recording, rather than hiding, that the map sat unrotated across 1.75.0 through 1.77.0.
+
 ## 1.77.0 — 2026-09-02
 
 **W5 no longer dispatches while this project's W3 glossary pass is outstanding (#820).** The W5

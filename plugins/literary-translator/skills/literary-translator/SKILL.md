@@ -3586,12 +3586,12 @@ are five outcomes:
   `used_terms_hash` is a per-segment cache-key field, so exactly the segments
   whose segpack lists that name in `canon_names[]` OR `new_names[]` are
   affected — one segment for a walk-on, every segment for a protagonist — and
-  R4's rule is that each of them is RE-TRANSLATED, not merely re-reviewed.
-  **R4's `references/canon-and-glossary.md` owns the route and the two
-  obligations that come with it**: validate the edited file, and regenerate
-  those segments' segpacks before selection runs again. A name that is NOT
-  already frozen is not this channel and is never a hand edit either — R4's
-  glossary/adjudication route owns it.
+  an admissible `--from-converged` claim then authorizes bounded RE-REVIEW and
+  never re-translates the draft. **R4's `references/canon-and-glossary.md` owns
+  the route and the two obligations that come with it**: validate the edited
+  file, and regenerate those segments' segpacks before selection runs again. A
+  name that is NOT already frozen is not this channel and is never a hand edit
+  either — R4's glossary/adjudication route owns it.
 - **Homonym split** — the decision is that one source form carries two distinct
   senses. That goes through the `canon_senses.json` adjudication route and into
   regenerated segpacks, where it reaches the reviewer as `split_names`. It is

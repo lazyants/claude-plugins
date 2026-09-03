@@ -446,37 +446,43 @@ def _glossary_driver_deadline_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.77.0 (#820 -- W5 refuses to dispatch over an unfinished W3
-    # glossary pass). ONE row: the number of data paths the gate passes to
-    # `glossary_batch_plan.py` off the target durable root, which is the entry's
-    # one claim about this tree that the tree can answer. It is derived from the
-    # argv construction rather than counted by hand, because the release's whole
-    # point is that those paths are bound to the project under test instead of
-    # self-anchoring to the planner's own parent.
+    # ROTATED TO 1.77.1 (#825 -- the Canon bullet priced a canon correction as
+    # re-translation), and EMPTY ON PURPOSE. The entry's subjects are one clause
+    # of shipped prose, the retired-wording pin that now guards it, and the two
+    # changelog-facing rotations any new entry drags along, and it names all of
+    # them by FILE, CONSTANT and SECTION. It states no OTHERWISE-UNGUARDED count,
+    # which is the only kind a Figure row buys anything for. An earlier draft did
+    # state several -- how many assertions the new pin row enters, how many
+    # baselines carry the retired needle, how many lines the rewritten block
+    # spans -- and those sentences were rewritten to name the artifacts instead,
+    # because each was a number a later edit in this same release could move with
+    # nothing watching. The two counts the entry still states, that the retired
+    # sentence occurred exactly ONCE in the frozen baseline tree and occurs ZERO
+    # times now, are deliberately kept: they are not unguarded. They are the
+    # literal subject of two assertions in `tests/retired_wording_pins.test.py`,
+    # which re-derive them from git on every run and fail loudly rather than
+    # advisorily. A Figure row would be a second, weaker copy of a check that
+    # already exists.
     #
-    # Everything else numeric in the entry is deliberately NOT a row. The
-    # 47-segment book, 9 of 11 batches, 47/47, 65 canon entries, 44 of 47, 155
-    # findings, 43 conflicts, 13 `basis: established`, and the 247/2/312 replay
-    # are field measurements from a live private volume this repository does not
-    # contain -- the same exclusion the 1.76.1 rotation records for its own
-    # "three seconds"/"11-batch"/"~135 minutes". The version, the issue number
-    # and the date are not measurements.
+    # Deliberately NOT rows: the version, the issue number, and "nineteen
+    # releases" of history between the rejected older baseline and this one.
+    # That last one IS derivable from a file this test reads -- it is the count
+    # of version headings in `CHANGELOG.md` between 1.58.0 and this entry -- and
+    # it is excluded for the other reason the docstring gives: it measures
+    # FROZEN history, which no later edit in this release can move, and
+    # within-release drift is the only thing this file exists to catch.
     #
-    # The 1.76.1 rotation this replaces, kept as its own record: TWO rows, both
-    # the glossary driver's default `--deadline-sec`, stated once in seconds and
-    # once in minutes, read off the driver's own parser.
-    Figure(
-        phrase="Its 3 data paths",
-        value=3,
-        derive=_gate_durable_path_args,
-    ),
+    # The 1.77.0 rotation this replaces, kept as its own record: ONE row, the
+    # number of data paths the W5 glossary gate passes to
+    # `glossary_batch_plan.py` off the target durable root, derived from the
+    # argv construction rather than counted by hand.
 ]
 
 # The version FIGURES was last rotated to. An empty FIGURES makes the loop in
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.77.0"
+FIGURES_VERSION = "1.77.1"
 
 
 def _newest_entry():
