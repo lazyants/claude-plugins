@@ -34,8 +34,9 @@ nothing, and continues to W3a. Acting on a proposal is the existing `canon_valid
 route, unchanged — the script surfaces the pair and renders a correction skeleton, but leaves the
 canonical form itself as JSON `null`, which `canon-entry.schema.json` types as a string and therefore
 refuses: an unedited skeleton is rejected by `canon_validate.py --correct` fail-closed rather than
-freezing a placeholder as canon. The identity call stays the operator's, per the iron rule. An empty result is reported as "the pass returned no proposals", never as a
-certificate that the canon is consistent.
+freezing a placeholder as canon. The identity call stays the operator's, per the iron rule. An empty
+result is reported as "no proposals returned -- this is a model's answer, not a certificate that the
+canon is consistent", never as a clean canon.
 
 **Migration.** No re-translation: `canon_harmonisation.py` is in neither `PLUGIN_BUNDLE_MEMBERS` nor
 `DERIVATION_BUNDLE_MEMBERS`, `compute_schema_hash` covers only the draft/review/segpack schemas, and

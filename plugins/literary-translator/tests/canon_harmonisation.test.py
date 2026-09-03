@@ -746,6 +746,24 @@ def test_report_correct_skeleton_null_placeholder_refused_by_real_validator(tmp_
         "an UNTOUCHED --correct skeleton must be refused by the real validator, never "
         f"accepted as canon:\nSTDOUT:\n{proc_correct.stdout}\nSTDERR:\n{proc_correct.stderr}"
     )
+    # #823 code review round 2, finding 3 (NIT): returncode != 0 alone is
+    # satisfied by ANY unexpected exception in canon_validate.py (it turns
+    # every one into a non-zero exit, canon left untouched) -- a staging or
+    # dependency failure in this fixture would pass this assertion without
+    # ever proving the null was refused BY THE SCHEMA. Parse the validator's
+    # own stdout JSON (pinned against a live run of this exact fixture, not
+    # assumed) and require its error to name the specific offending path and
+    # the specific jsonschema type failure.
+    validate_summary = json.loads(proc_correct.stdout)
+    assert validate_summary["success"] is False
+    assert "new_entry/canonical_target_form" in validate_summary["error"], (
+        f"the refusal must name the offending path, not just fail for some other reason:\n"
+        f"{validate_summary['error']}"
+    )
+    assert "is not of type 'string'" in validate_summary["error"], (
+        f"the refusal must be the schema's type check on the null placeholder, not a "
+        f"staging or dependency failure:\n{validate_summary['error']}"
+    )
     assert (root / "canon.json").read_bytes() == canon_before, (
         "canon.json must be byte-identical after a refused --correct"
     )
@@ -807,19 +825,28 @@ def test_report_exit0_removed_member_renders_stored_value_marked_removed(tmp_pat
 
 
 def test_report_hostile_note_cannot_forge_report_structure(tmp_path):
-    """#823 code review, finding 1 (MAJOR): `note` is free LLM-authored
-    prose, schema-valid so long as it is non-blank -- INCLUDING a literal
-    newline, U+2028, U+0085, or a counterfeit --correct skeleton. Before
-    the fix, _render_report() interpolated `note` raw, so a note carrying
+    """#823 code review, finding 1 (MAJOR, round 1 + round 2): `note` is
+    free LLM-authored prose, schema-valid so long as it is non-blank --
+    INCLUDING a literal newline, U+2028, U+0085, a counterfeit --correct
+    skeleton, OR (round 2) a raw terminal control sequence -- ESC,
+    backspace, DEL, another C1 control -- that involves no
+    str.splitlines() boundary character at all. Before the round-1 fix,
+    _render_report() interpolated `note` raw, so a note carrying
     "\\n<fake --correct skeleton(s) marker>\\n<fake JSON block>" rendered
     as genuine-looking extra physical lines an operator could mistake for
-    this script's OWN output -- forging the very structure the report
-    exists to present trustworthily (THE IRON RULE: an identity call --
-    which target form wins -- made by the model through the note instead
-    of surfaced as a proposal for the operator).
+    this script's OWN output. The round-1 fix escaped only the ten
+    str.splitlines() boundary characters, which left every OTHER C0/C1
+    control (ESC, backspace, DEL, ...) passing through untouched -- an
+    operator's terminal still executes those, so a note built from them
+    can erase a report line or reposition the cursor to overwrite it,
+    forging content with no line-boundary character involved at all.
+    Either way it is the same identity call THE IRON RULE reserves for
+    the operator (which target form wins), made through the note text
+    instead of through this script.
 
-    Every invisible/boundary character below is built with chr(), never
-    pasted, per the unicode-boundary-text-authoring project skill."""
+    Every invisible/boundary/control character below is built with
+    chr(), never pasted, per the unicode-boundary-text-authoring project
+    skill."""
     root = make_durable_root(tmp_path / "durable_root")
     csha, entries, doc = two_member_fixture(root)
 
@@ -845,6 +872,14 @@ def test_report_hostile_note_cannot_forge_report_structure(tmp_path):
         + "text after a U+2028 LINE SEPARATOR"
         + chr(0x85)
         + "text after a U+0085 NEL"
+        # Round 2: no str.splitlines() boundary character involved -- a
+        # bare terminal control sequence, which a naive "escape the ten
+        # boundary chars" fix would pass straight through.
+        + chr(0x1b) + "[2K" + chr(0x1b) + "[1G"
+        + "ESC-driven line-erase-and-cursor-reset, then backspaces:"
+        + chr(0x08) + chr(0x08) + chr(0x08)
+        + "DEL:" + chr(0x7f)
+        + "C1 control (U+009B, CSI):" + chr(0x9b) + "[2K"
     )
     doc["proposals"][0]["note"] = hostile_note
     write_json(root / "canon_harmonisation.json", doc)
@@ -887,6 +922,26 @@ def test_report_hostile_note_cannot_forge_report_structure(tmp_path):
     assert "\\u0085" in note_lines[0]
     assert chr(0x2028) not in proc.stderr
     assert chr(0x85) not in proc.stderr
+
+    # Round 2: assert the RULE (every Unicode `Cc` control escaped), not a
+    # character list -- a list-based assertion has the same drift problem
+    # the round-1 fix itself had. The only `Cc` character the script may
+    # legitimately emit is '\n' (0x0a), the physical line separator
+    # between ITS OWN report lines (str.join("\n", lines) then print());
+    # every other Cc character anywhere in the whole rendered report --
+    # ESC, backspace, DEL, the C1 control -- must have been escaped to a
+    # visible \\uXXXX form, never reaching stderr raw.
+    offending = sorted(
+        {ch for ch in proc.stderr if unicodedata.category(ch) == "Cc" and ch != "\n"}
+    )
+    assert not offending, (
+        f"raw Cc control character(s) reached stderr unescaped: "
+        f"{[hex(ord(ch)) for ch in offending]}\n{proc.stderr}"
+    )
+    assert "\\u001b" in note_lines[0]
+    assert "\\u0008" in note_lines[0]
+    assert "\\u007f" in note_lines[0]
+    assert "\\u009b" in note_lines[0]
 
 
 def test_report_exit2_schema_invalid_artifact_no_stdout(tmp_path):

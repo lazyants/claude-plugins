@@ -115,6 +115,31 @@ _TOKEN = re.compile(r"\d+(?: \d{3})*(?:\.\d+)?")
 Figure = namedtuple("Figure", "phrase value derive")
 
 
+def _int_constant(filename, name):
+    """Value of a module-level `NAME = <int literal>` in a SHIPPED script, read
+    by AST rather than imported, for the same reason `_tuple_len` is: importing
+    would execute the module and bind this test to whatever else it does at
+    import time. The node must BE an int constant -- a name bound to something
+    merely int-like would let this row report a value it did not read."""
+    tree = ast.parse((SCRIPTS / filename).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            assert isinstance(node.value, ast.Constant) and isinstance(
+                node.value.value, int
+            ), (
+                f"{name} in {filename} is no longer an int literal, so it is "
+                f"not the number a changelog figure cites"
+            )
+            return node.value.value
+    raise AssertionError(
+        f"{name} is no longer a module-level assignment in {filename} -- the "
+        f"derivation behind a changelog figure has lost its subject"
+    )
+
+
 def _tuple_len(filename, name):
     """Length of a module-level tuple in a SHIPPED script, read by AST rather
     than imported. Importing would execute the module and bind this test to
@@ -446,36 +471,40 @@ def _glossary_driver_deadline_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.79.0 (#824 -- a canon correction no longer resets the whole
-    # book's review round budget). ONE row: how many selector payload fields the
-    # driver newly REQUIRES in order to name the units that have already
-    # converged once, read by AST off the tuple the parser iterates rather than
-    # counted by hand. It is the entry's one claim about this tree that the tree
-    # can answer, and it is otherwise unguarded -- nothing else fails if the
-    # entry says "2" while the parser reads three fields.
+    # ROTATED TO 1.80.0 (#823 -- the frozen canon gets one whole-canon read for
+    # divergent target forms). TWO rows, both numbers the entry asserts about
+    # THIS tree rather than about a book:
     #
-    # Deliberately NOT rows, because they describe the CONTRACT rather than
-    # measure the tree: "round 1", "label L", "max_fix_rounds=1", "at least
-    # once". Nor the version, the issue numbers, or the date.
+    #   - the glossary pass's batch size, which is the entry's whole argument
+    #     for why the defect is invisible to that pass (each batch is
+    #     adjudicated blind of the others, so two bearers of one byname land in
+    #     different batches). Read off `DEFAULT_BATCH_SIZE` rather than the
+    #     `--batch-size` help text, which merely interpolates it.
+    #   - the cache-key field count, which is what the migration paragraph's
+    #     "no re-translation" claim rests on: the sidecar sits outside all of
+    #     them. Read as the length of the shipped field-order tuple.
     #
-    # The 1.77.1 rotation this replaces, kept as its own record: EMPTY on
-    # purpose. That entry's subjects were named by FILE, CONSTANT and SECTION
-    # rather than counted, and the two counts it did state (the retired sentence
-    # occurring exactly ONCE in the frozen baseline tree and ZERO times now) are
-    # the literal subject of two assertions in
-    # `tests/retired_wording_pins.test.py`, which re-derive them from git on
-    # every run -- a Figure row would have been a second, weaker copy of a check
-    # that already exists.
+    # Everything else numeric in the entry is deliberately NOT a row, the same
+    # exclusion the 1.77.0 and 1.76.1 rotations record: the 47-segment volume,
+    # its 312 canon entries, the five post-freeze corrections, the 12 moved
+    # target forms, the `x4`, the "at least 4", and the 41 and 44 draft files
+    # are field measurements from a live private volume this repository does
+    # not contain. The version, the issue number and the date are not
+    # measurements.
     #
-    # The 1.77.0 rotation before it: ONE row, the number of data paths the W5
-    # glossary gate passes to `glossary_batch_plan.py` off the target durable
-    # root, derived from the argv construction rather than counted by hand.
+    # The 1.79.0 rotation this replaces, kept as its own record: ONE row, how
+    # many selector payload fields segment_dispatch_driver.py newly REQUIRES to
+    # name the units that have already converged once, read by AST off
+    # `EVER_CONVERGED_SELECTOR_FIELDS` rather than counted by hand.
     Figure(
-        phrase="requires 2 more selector payload",
-        value=2,
-        derive=lambda: _tuple_len(
-            "segment_dispatch_driver.py", "EVER_CONVERGED_SELECTOR_FIELDS"
-        ),
+        phrase="batches of 40",
+        value=40,
+        derive=lambda: _int_constant("glossary_batch_plan.py", "DEFAULT_BATCH_SIZE"),
+    ),
+    Figure(
+        phrase="all 15 cache-key fields",
+        value=15,
+        derive=lambda: _tuple_len("cache_key.py", "CACHE_KEY_FIELD_ORDER"),
     ),
 ]
 
@@ -483,7 +512,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.79.0"
+FIGURES_VERSION = "1.80.0"
 
 
 def _newest_entry():

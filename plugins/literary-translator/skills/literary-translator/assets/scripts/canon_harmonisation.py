@@ -157,6 +157,7 @@ import hashlib
 import json
 import os
 import sys
+import unicodedata
 from pathlib import Path
 
 try:
@@ -482,8 +483,16 @@ def _atomic_publish(dest: Path, raw: bytes) -> None:
     though DEST itself stays untouched and uncorrupted -- the "no orphan"
     property this function's own callers rely on was claimed and false.
     `replaced` tracks whether os.replace() actually ran to completion; the
-    unlink is best-effort (missing_ok=True) because the SUCCESS path has
-    already renamed tmp_path away by the time `finally` runs."""
+    unlink is best-effort in BOTH senses -- missing_ok=True (the SUCCESS
+    path has already renamed tmp_path away by the time `finally` runs, so
+    "already gone" is expected, not an error) AND a further OSError from
+    the unlink itself (e.g. a permission or filesystem error) is caught
+    and swallowed rather than propagated, so a failed cleanup can never
+    replace the CanonHarmonisationFatalError this function is already
+    raising for the primary failure -- main() only ever catches that
+    exception type (plus CanonHarmonisationRefusal), so anything else
+    reaching it would surface as an uncaught traceback instead of the
+    named fatal."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = dest.parent / f".{dest.name}.tmp.{os.getpid()}.{os.urandom(4).hex()}"
     replaced = False
@@ -501,7 +510,10 @@ def _atomic_publish(dest: Path, raw: bytes) -> None:
         )
     finally:
         if not replaced:
-            tmp_path.unlink(missing_ok=True)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def run_check(path_str: str, approve_to_str: "str | None") -> dict:
@@ -542,46 +554,50 @@ def run_check(path_str: str, approve_to_str: "str | None") -> dict:
 # --report: read-only render.
 # ---------------------------------------------------------------------------
 
-# The full str.splitlines() line-boundary codepoint set -- RESTATED from
-# json_stdout.py's own _SPLITLINES_BOUNDARY_CANDIDATES / skeptic_report.py's
-# _LINE_BREAK_CHARS / render_obsidian.py's _MENTIONS_LINE_BREAK_CHARS, not
-# imported: none of those three is otherwise a dependency of this script, and
-# pulling one in for a ten-member frozenset would wire an unrelated module
-# into a script that must keep working regardless of which report or output
-# adapter is installed. Built via chr() for U+2028/U+2029, never a pasted
-# glyph -- see the unicode-boundary-text-authoring project skill.
-_NOTE_LINE_BREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029))
-
-
 def _sanitize_note(note: str) -> str:
-    """Neutralises every str.splitlines() boundary character a model-
-    authored `note` may carry, before it reaches operator-facing report
-    text: _render_report's bare `note:` line, and the same note text
-    embedded in a --correct skeleton's own `reason` field. `note` is free
-    LLM-authored prose and the schema's only constraint on it is non-blank
-    (pattern "\\S") -- a newline, U+2028/U+2029/U+0085, or another
-    _NOTE_LINE_BREAK_CHARS member is schema-valid, and rendered raw would
-    let a model-authored note open a fresh physical line at column zero,
-    where this script's OWN report markers ("[idx] kind: ...", "--correct
-    skeleton(s)...") and --correct skeletons live -- forging either one and
+    """Neutralises every control character and Unicode line/paragraph
+    separator a model-authored `note` may carry, before it reaches
+    operator-facing report text: _render_report's bare `note:` line, and
+    the same note text embedded in a --correct skeleton's own `reason`
+    field. `note` is free LLM-authored prose and the schema's only
+    constraint on it is non-blank (pattern "\\S") -- so it may carry
+    anything from a plain str.splitlines() boundary (newline, U+0085, ...)
+    to a raw terminal control sequence (ESC, backspace, DEL, another C1
+    control) with no line-boundary character involved at all. Rendered
+    raw, a control sequence can erase or reposition the operator's
+    terminal cursor -- painting a counterfeit report line -- or a boundary
+    character can open a fresh physical line at column zero, where this
+    script's OWN report markers ("[idx] kind: ...", "--correct
+    skeleton(s)...") and --correct skeletons live. Forging either one and
     letting an operator mistake fabricated content for this script's own
     output is exactly the identity call THE IRON RULE reserves for the
     operator, made through the note text instead of through this script.
 
-    Escapes each boundary character to a visible \\uXXXX form (the same
+    THE RULE (a category, not a character list -- a list is what drifted
+    across the previous round): escape every character whose Unicode
+    general category is `Cc` (unicodedata.category(ch) == "Cc" -- this
+    covers the whole of C0 and C1, so ESC, backspace, DEL and every other
+    terminal control land here, along with the ten str.splitlines()
+    boundary characters that are C0/C1 controls), PLUS U+2028 LINE
+    SEPARATOR and U+2029 PARAGRAPH SEPARATOR, which are `Zl`/`Zp` rather
+    than `Cc` and so need their own check.
+
+    Escapes each such character to a visible \\uXXXX form (the same
     visible-escape convention json_stdout.dumps_line already uses for the
-    three of these ten codepoints json.dumps itself leaves raw) rather than
-    stripping it, so the note's own content stays fully legible -- just
-    structurally incapable of starting a new physical line, whether it
-    lands in the bare `note:` line (plain text, where json.dumps' own
-    escaping never applies) or inside a --correct skeleton's `reason` (a
-    JSON string, where json.dumps already escapes seven of these ten but
-    leaves U+0085/U+2028/U+2029 raw -- the same gap json_stdout.py exists
-    to close on stdout)."""
-    for ch in _NOTE_LINE_BREAK_CHARS:
-        if ch in note:
-            note = note.replace(ch, f"\\u{ord(ch):04x}")
-    return note
+    codepoints json.dumps itself leaves raw) rather than stripping it, so
+    the note's own content stays fully legible -- just structurally
+    incapable of controlling the operator's terminal or starting a new
+    physical line, whether it lands in the bare `note:` line (plain text,
+    where json.dumps' own escaping never applies) or inside a --correct
+    skeleton's `reason` (a JSON string, where json.dumps already escapes
+    most controls but leaves U+0085/U+2028/U+2029 raw -- the same gap
+    json_stdout.py exists to close on stdout)."""
+    return "".join(
+        f"\\u{ord(ch):04x}"
+        if unicodedata.category(ch) == "Cc" or ch in (chr(0x2028), chr(0x2029))
+        else ch
+        for ch in note
+    )
 
 
 def _render_report(doc: dict, entries: dict, canon_current: bool) -> None:
