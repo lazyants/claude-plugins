@@ -4105,8 +4105,18 @@ Runs at W7 over every converged segment:
   masking a drifted one beside it, and a body that renders the office correctly
   cannot mask a footnote that does not. Matching is by
   substring over NFC-normalized, casefolded text: pin the INVARIANT part of the
-  target form. Carriers the active policy passes through untranslated are never
-  compared (`preserve_source` footnotes, `skip` verses, a standalone verse's
+  target form. The source-side number a warning reports is therefore a SUBSTRING
+  count and not an occurrence count — it also counts inflected and prefixed
+  forms, and any other word the pin happens to sit inside — which is the
+  accepted price of checking the most common terms at all in a suffixing target
+  language. The one case an operator cannot see for themselves is reported
+  (#844): when one declared `source_form` folds to a substring of another —
+  which is what enumerating the spellings of a multiply-pointed term produces,
+  since matching does not fold combining marks — the shorter pin's count
+  silently contains the longer one's, so the run names both forms once. Advisory
+  and never a failure: a shorter pin meant to catch a family of forms is a
+  legitimate declaration. Carriers the active policy passes through untranslated
+  are never compared (`preserve_source` footnotes, `skip` verses, a standalone verse's
   placeholder-only block), and the run always prints how many terms it checked,
   so an absent list cannot read as a pass. The plugin ships no terms and
   hardcodes none. Prints every WARN as free text for human eyeballing — never

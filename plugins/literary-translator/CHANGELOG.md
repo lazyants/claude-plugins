@@ -1,5 +1,73 @@
 # Changelog
 
+## 1.84.0 — 2026-09-04
+
+**`validation.terms` silently double-counted when one declared `source_form` nested inside
+another (#844).**
+WARN 6 counts the source side with `folded_source.count(folded_form)` — a plain SUBSTRING count.
+So when one declared `source_form` folds to a substring of another, the shorter pin's count
+already contains every occurrence of the longer one, the drift comparison runs against a
+denominator that counts some carriers twice, and nothing reported it: `final_audit.py`'s
+`TERM CONSISTENCY:` line names how many terms were checked, never whether they overlap.
+
+The operator could not see it either. Both pins are correct spellings that genuinely occur, each
+count is plausible on its own, and the drift warning that results names real carriers — the only
+signal was arithmetic nobody performed. Nor could it be avoided by pinning less: matching does not
+fold combining marks, so an unpointed pin matches nothing in a pointed source and an operator
+pinning a multiply-pointed term has no choice but to enumerate its spellings. Enumerating spellings
+is exactly what nests. Both volumes measured when the issue was filed produced the shape
+independently (65 substring hits containing 63, and 49 containing 42), and neither operator caught
+it by reading the declared list — two long pointed strings differing only by a trailing mark is the
+comparison a bidi terminal makes hardest.
+
+`term_pin_overlaps()` now compares the declared list against itself once per run and emits one
+declaration-level advisory per nesting pair, naming both forms:
+
+```
+TERM PIN OVERLAP: source_form 'X' is a substring of 'Y'; every occurrence of 'Y' is also counted
+for 'X', so the source-side counts for these two overlap -- MANUAL
+```
+
+Three decisions inside that:
+
+- **WARN, never fail.** Two nesting pins can be DELIBERATE when the shorter one is meant to catch
+  a family of forms. What the operator cannot recover on their own is the arithmetic, so that is
+  all this reports.
+- **Compared on the FOLDED forms**, because folding is what the count runs on. Comparing the raw
+  declarations would miss a pair that nests only after NFC normalization or casefolding — which is
+  precisely the pair no reader spots by eye.
+- **Inside `warn_details`, not beside it.** The entry is declaration-level and carries no `[seg]`
+  prefix, exactly like WARN 5's own uncompilable-pattern warning, so it lands in the WARN block AND
+  in the summary JSON's `warnings` count. A warning-shaped line printed outside that accounting
+  would let the machine-readable completion signal still report `warnings: 0` on a profile that has
+  one. Unordered pairs with equality checked first: one line per pair, never a self-pair, never two
+  mirrored lines, and never an incoherent "X is a substring of X" for two declarations that fold to
+  the same text.
+
+Exit code, `final-audit-summary.schema.json`, the `TERM CONSISTENCY:` line and WARN 6's matching
+behaviour are unchanged; a fully converged project with overlapping pins still exits `0`.
+
+`SKILL.md` and `profile.schema.json` also now state the fact the counts depend on and neither
+carried: the source-side number a warning reports is a SUBSTRING count, not an occurrence count.
+Pinning a common title on the book #844 was filed from gave 133 substring hits against 61
+whole-token occurrences — the remainder a different word sharing the prefix, plus prefixed and
+plural forms. That is the accepted price of checking the most common terms at all in a suffixing
+target language, and it stays; what it was not is documented.
+
+Adding the check moved `final_audit.py`'s line numbers below the insertion point, so the one
+`file:NNN` citation reaching past it — `assemble.py`'s, into
+`count_stale_previously_converged()` — is renumbered here along with the anchor map. Everything
+ABOVE the insertion is line-count neutral on purpose, and the constraint is not cosmetic:
+`bootstrap_names.py`, `language_smoke_report.py` and `verbatim_census.py` all cite
+`final_audit.py`'s Hebrew mark fold by line, and `bootstrap_names.py` is a
+`DERIVATION_BUNDLE_MEMBERS` entry that `name_discovery.test.py`'s d28 byte guard forbids editing —
+touching it would re-stale every project's converged segments to renumber a comment. So the module
+docstring's own one-line summary of WARN 6 is left as it stands (the check is documented in the
+lane's comment block, `SKILL.md` and `profile.schema.json`), and the pair loop is written with
+`enumerate` rather than the `itertools.combinations` the house style would otherwise prefer, since
+one added import line above would have carried the same cost. No bundle hash moves. No
+re-translation, no re-review.
+
 ## 1.83.2 — 2026-09-04
 
 **`name_discovery.py --dispatch` could not start at all: the companion resolver was called
