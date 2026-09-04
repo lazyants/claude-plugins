@@ -78,8 +78,8 @@ window opened. Deciding whether a window is CURRENT is a separate question, and 
 `is_active` is deliberately not part of THAT one: it marks whichever pool is currently
 BINDING, and exactly one pool per account carries it, so treating it as "no current window" grey
 out five-hour figures that were entirely current -- along with the reset time beside them. A cell that gapped carries its diagnostic token in place of a figure.
-Candidate-level outcomes -- a profile with no cache, one with no subscription, an unreadable
-directory -- become one footnote line each, with their diagnostic token intact.
+Candidate-level outcomes -- a profile with no cache, one whose config will not parse, an
+unreadable directory -- become one footnote line each, with their diagnostic token intact.
 
 **Position means nothing, deliberately.** Ranking by consumption scattered one Codex home's
 pools down the page and printed the same directory name in four places, and a rank over a mix of

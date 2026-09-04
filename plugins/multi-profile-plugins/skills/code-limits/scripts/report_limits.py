@@ -60,7 +60,6 @@ DIAGNOSTICS = (
     "field-malformed",
     "candidate-unreadable",
     "no-usage-cache",
-    "no-subscription",
     "stale-after-reset",
     "internal-error",
 )
@@ -80,7 +79,7 @@ TERMINAL_STATES = frozenset({REPORTED, NO_CURRENT, GAP})
 PERCENT_MAX = float("inf")
 
 # Diagnostics that mean "there is no current value here", as opposed to "this was not examined".
-KNOWN_ABSENT = frozenset({"no-usage-cache", "no-subscription"})
+KNOWN_ABSENT = frozenset({"no-usage-cache"})
 
 # --- the three JSON-RPC messages, frozen whole ------------------------------------------------
 # Serialized at import and never rebuilt. The dict literals below are never bound to a name, so
@@ -741,19 +740,18 @@ def _claude_cached(profile: Path, now: datetime.datetime) -> list[Record]:
 
     cached = blob.get("cachedUsageUtilization")
     if cached is None:
-        # The flag is only ever the REASON a cache is absent -- never a reason to ignore one
-        # that is present. MEASURED: two accounts on this machine ship
-        # `hasAvailableSubscription: false` beside a full, freshly fetched `limits` array, one
-        # of them at 100% of its weekly pool. Read as "not subscribed", the flag suppressed
-        # exactly the account whose number mattered most, and did it under a diagnostic that
-        # exits 0, so nothing anywhere said a pool had gone unread.
+        # An absent cache is reported as an absent cache, and `hasAvailableSubscription` is not
+        # consulted -- not to suppress a profile, and not to WORD its absence either.
         #
-        # Key MEMBERSHIP, and _flag rather than `is False`: a vendor type change is schema drift
-        # and must gap, where `is False` fell through to no-usage-cache -- a KNOWN_ABSENT state
-        # that exits 0 -- and a `subscription is not None` guard did the same for null, which is
-        # a present key holding a non-boolean like any other.
-        if "hasAvailableSubscription" in blob and not _flag(blob["hasAvailableSubscription"]):
-            raise Malformed("no-subscription")
+        # MEASURED across every profile on this machine: the flag reads false on accounts that
+        # are demonstrably subscribed. Two ship it beside a full, freshly fetched `limits`
+        # array, one of them at 100% of its weekly pool; reading it as "not subscribed"
+        # suppressed exactly the account whose number mattered most, under a diagnostic that
+        # exits 0, so nothing anywhere said a pool had gone unread. The third ships it beside
+        # no cache at all, on the DEFAULT profile of a Claude Max 20x subscription whose pools
+        # the --live path reads without trouble -- and the report answered "where is this
+        # account" with `no-subscription`, a claim about billing this module never verified and
+        # has no way to verify. The flag's only surviving reading is "this says nothing".
         raise Malformed("no-usage-cache")
     cached = _obj(cached)
 

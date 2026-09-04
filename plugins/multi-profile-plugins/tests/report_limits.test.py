@@ -408,23 +408,23 @@ with tempfile.TemporaryDirectory() as tmp:
           len(row) == 1 and "ago" in row[0], str(row))
     check("6 the row carries its own cache age", "3d00h" in done.stdout, done.stdout)
 
-    # 7 / 8 / 9 -- absence states, and the precedence between them.
+    # 7 / 8 / 9 -- an absent cache is ONE state, whatever the subscription flag beside it says.
     empty = root / "states"
     empty.mkdir(exist_ok=True)
     clean_codex = make_codex_home(empty, ".codexClean")
-    make_claude(empty, ".claudeA", {})                                     # no cache key
-    make_claude(empty, ".claudeB", {"hasAvailableSubscription": False})    # no subscription
-    make_claude(empty, ".claudeC", {"hasAvailableSubscription": False})    # both conditions
+    make_claude(empty, ".claudeA", {})                                     # no flag at all
+    make_claude(empty, ".claudeB", {"hasAvailableSubscription": False})    # flag says no
+    make_claude(empty, ".claudeC", {"hasAvailableSubscription": True})     # flag says yes
     done, _, _ = run(["--claude-profile", str(empty / ".claudeA"),
                       "--claude-profile", str(empty / ".claudeB"),
                       "--claude-profile", str(empty / ".claudeC"),
                       "--codex-home", str(clean_codex)], root=empty)
     check("7 absent cache is no-usage-cache, not 0%", "[no-usage-cache]" in done.stdout, done.stdout)
-    check("8 no subscription is its own state", "[no-subscription]" in done.stdout, done.stdout)
-    check("9 the combined shape resolves to exactly one state",
-          done.stdout.count("[no-subscription]") == 2 and done.stdout.count("[no-usage-cache]") == 1,
-          done.stdout)
-    check("7/8 neither absence state gaps the run", done.returncode == 0,
+    check("8 the flag never renames the absence",
+          "[no-subscription]" not in done.stdout, done.stdout)
+    check("9 all three profiles land in that one state",
+          done.stdout.count("[no-usage-cache]") == 3, done.stdout)
+    check("7/8 the absence state does not gap the run", done.returncode == 0,
           f"rc={done.returncode}\n{done.stdout}")
     check("7/8 and no warning is emitted for them", "warnings" not in done.stdout, done.stdout)
 
@@ -824,29 +824,21 @@ with tempfile.TemporaryDirectory() as tmp:
     check("26 and it is the Claude profile the warning names",
           ".claudeM" in done.stdout.split("warnings")[-1], done.stdout)
 
-    # 27 -- a subscription flag of the WRONG TYPE is schema drift, not a clean absence. `is False`
-    # let a string fall through to no-usage-cache, which is KNOWN_ABSENT and exits 0.
-    # Every non-boolean, not one. `null` in particular is a PRESENT key holding a non-boolean,
-    # and a `subscription is not None` guard skipped exactly that back to the clean state.
-    for index, bad in enumerate(("false", 0, 1, None, [], {})):
+    # 27 -- the subscription flag is not a field this report reads, so NOTHING it can hold
+    # changes the answer to an absent cache. It used to: a boolean false renamed the absence
+    # `no-subscription` and every other type gapped the profile as schema drift -- two verdicts
+    # about billing, from a key measured false on live Max 20x accounts.
+    for index, junk in enumerate((False, True, "false", 0, 1, None, [], {})):
         drift = root / f"drift{index}"
-        make_claude(drift, ".claudeS", {"hasAvailableSubscription": bad})
+        make_claude(drift, ".claudeS", {"hasAvailableSubscription": junk})
         done, _, _ = run(["--claude-profile", str(drift / ".claudeS"),
                           "--codex-home", str(make_codex_home(drift, ".codexClean"))], root=drift)
-        check(f"27 subscription flag {bad!r} gaps", "[field-malformed]" in done.stdout,
+        check(f"27 flag {junk!r} still reads no-usage-cache", "[no-usage-cache]" in done.stdout,
               done.stdout)
-        check(f"27 flag {bad!r} is NOT recorded as a known absence",
-              "[no-usage-cache]" not in done.stdout and "[no-subscription]" not in done.stdout,
+        check(f"27 flag {junk!r} claims nothing about a subscription",
+              "[no-subscription]" not in done.stdout and "[field-malformed]" not in done.stdout,
               done.stdout)
-        check(f"27 flag {bad!r} exits 1", done.returncode == 1, f"rc={done.returncode}")
-    # ... and the one value that is NOT drift still takes the documented path.
-    okflag = root / "okflag"
-    make_claude(okflag, ".claudeS", {"hasAvailableSubscription": False})
-    done, _, _ = run(["--claude-profile", str(okflag / ".claudeS"),
-                      "--codex-home", str(make_codex_home(okflag, ".codexClean"))], root=okflag)
-    check("27 a literal false is still the no-subscription state, not a gap",
-          "[no-subscription]" in done.stdout and done.returncode == 0,
-          f"rc={done.returncode}\n{done.stdout}")
+        check(f"27 flag {junk!r} exits 0", done.returncode == 0, f"rc={done.returncode}")
 
     # 28 -- the coupon count is one of the things this report exists to print, so a response that
     # omits the container has not answered the question and must not print nothing and pass.
@@ -2253,13 +2245,17 @@ with tempfile.TemporaryDirectory() as tmp:
           "[no-subscription]" not in done.stdout, done.stdout)
     check("56 the run stays clean", done.returncode == 0, done.stdout)
 
-    # With NO cache the flag is still the better answer than "no cache": it says WHY there is
-    # none. That is the whole of what it is now allowed to decide.
+    # With NO cache the flag decides nothing either. MEASURED on the DEFAULT profile of that
+    # same Max 20x subscription: `hasAvailableSubscription: false` and no cache key at all,
+    # while --live reads its pools without trouble. Wording the absence off that flag printed
+    # `no-subscription` about a paid account -- a billing claim from a report that reads usage.
     bare = make_claude(root, ".claudeBare", {"hasAvailableSubscription": False})
     done, _, _ = run(["--claude-profile", str(bare),
                       "--codex-home", str(root / ".codexSpent")], root=root)
-    check("56 an absent cache under a false flag still reads no-subscription",
-          "[no-subscription]" in done.stdout and done.returncode == 0, done.stdout)
+    check("56 an absent cache under a false flag reads no-usage-cache",
+          "[no-usage-cache]" in done.stdout and done.returncode == 0, done.stdout)
+    check("56 and the report never claims the account is unsubscribed",
+          "[no-subscription]" not in done.stdout, done.stdout)
 
 # --- 57 -- the pool column carries the vendor's own name for the pool, not its internal id ------
 
