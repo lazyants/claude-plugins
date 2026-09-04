@@ -1565,13 +1565,9 @@ def _canon_composition(spans, target_to_entity, entries):
     never makes and a silent index shortfall (no person note, coverage counts
     still balanced, exit 0).
 
-    A canon entry with NO category composes with any tag, and that is
-    deliberate rather than lax: the shipped glossary pass never asks for
-    `category`, so on a typical project the field is empty everywhere, and
-    requiring a positive match would stop composition entirely -- every marked
-    name would mint a duplicate beside its own canon note, which is exactly
-    the "two indexes competing" this feature exists to avoid. Canon speaks
-    only where it has actually spoken."""
+    The compatibility test itself, and the reason a blank category composes
+    with any tag, live in `_category_compatible` -- restating them here would
+    be the second declaration site that helper exists to remove."""
     composed = {}
     for span in spans.values():
         tag, label = _entity_markup_identity(span)
@@ -1599,9 +1595,8 @@ def _category_compatible(category, tag):
     asks for `category`, so on a typical project the field is empty
     everywhere and a positive-match rule would make canon mute. Canon speaks
     only where it has actually spoken."""
-    return not (
-        isinstance(category, str) and category.strip() and category.strip() != tag
-    )
+    declared = category.strip() if isinstance(category, str) else ""
+    return not declared or declared == tag
 
 
 def _canon_collision_conflicts(spans, entries, collision_delink, primary_by_source_form=None):

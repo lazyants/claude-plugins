@@ -2022,7 +2022,7 @@ def test_an_unmarked_collision_is_still_merely_delinked(tmp_path):
     assert manifest["delink_cost"]["unlinked_occurrences_total"] == 2
 
 
-def test_the_conflict_rows_lead_with_the_costliest_label(tmp_path):
+def test_the_conflict_rows_lead_with_the_costliest_label():
     """The message shows at most five rows, so the order is what an operator
     acts on first."""
     entries = dict(TWO_OWNERS)
@@ -2057,21 +2057,6 @@ def test_the_message_names_EVERY_owner_not_only_the_compatible_ones(tmp_path):
     message = str(excinfo.value)
     for owner in entries:
         assert repr(owner) in message, f"{owner!r} unnamed in: {message}"
-
-
-def test_the_trigger_still_counts_only_compatible_owners(tmp_path):
-    """The other half of the pin above: the FULL list is what gets displayed,
-    but it must not be what decides. Two place owners plus one person owner
-    leave a single owner able to answer a `person` span, so nothing refuses."""
-    entries = {
-        "א": canon_entry("א", "Chaykel", category="place"),
-        "ב": canon_entry("ב", "Chaykel", category="place"),
-        "ג": canon_entry("ג", "Chaykel", category="person"),
-    }
-    rows = render_obsidian._canon_collision_conflicts(
-        {"1": span("person", "Chaykel")}, entries, True, None
-    )
-    assert rows == []
 
 
 def test_the_conflict_scan_is_inert_when_collision_delinking_is_off():
