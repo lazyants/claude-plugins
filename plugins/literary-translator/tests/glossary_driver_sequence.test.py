@@ -240,12 +240,15 @@ def bed(tmp_path):
             if "--approve-to" in argv:
                 dest = pathlib.Path(argv[argv.index("--approve-to") + 1])
                 raw = frag.read_bytes()
-                if dest.exists() and dest.read_bytes() != raw:
-                    print("--approve-to refuses to overwrite the approved snapshot "
-                          "already at " + str(dest) + ": its bytes differ from the "
-                          "fragment just validated", file=sys.stderr)
-                    sys.exit(1)
-                dest.write_bytes(raw)
+                if dest.exists():
+                    if dest.read_bytes() != raw:
+                        print("--approve-to refuses to overwrite the approved "
+                              "snapshot already at " + str(dest) + ": its bytes "
+                              "differ from the fragment just validated",
+                              file=sys.stderr)
+                        sys.exit(1)
+                else:
+                    dest.write_bytes(raw)
             if "--record-approval-to" in argv:
                 pathlib.Path(argv[argv.index("--record-approval-to") + 1]).write_text(
                     json.dumps({{"approved": True}}))
