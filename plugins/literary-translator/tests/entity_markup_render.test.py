@@ -1870,7 +1870,10 @@ def test_a_marked_span_over_a_delinked_collision_refuses_instead_of_merging(tmp_
     assert "'Reb Noson'" in message, message
     assert "2 span(s)" in message, message
     for owner in TWO_OWNERS:
-        assert repr(owner)[1:-1] in message or owner in message, message
+        # `repr()` INCLUDING its quote delimiters: the shorter key is a prefix of
+        # the longer one, so a bare substring test is satisfied by the longer form
+        # alone and a regression that named only one owner would stay green.
+        assert repr(owner) in message, f"{owner!r} unnamed in: {message}"
 
 
 def test_the_refusal_names_the_QUALIFIED_remedy_not_just_the_file(tmp_path):
@@ -2035,6 +2038,40 @@ def test_the_conflict_rows_lead_with_the_costliest_label(tmp_path):
         entries, True, None,
     )
     assert [(row["label"], row["spans"]) for row in rows] == [("Reb Noson", 3), ("Chaykel", 1)]
+
+
+def test_the_message_names_EVERY_owner_not_only_the_compatible_ones(tmp_path):
+    """The refusal tells the operator a link group must contain EVERY owner.
+    Naming only the two that matched the tag would describe a group that
+    cannot work: `_link_decision` reduces over all three, and the ungrouped
+    outsider de-links the target again."""
+    entries = {
+        "א": canon_entry("א", "Chaykel", category=""),
+        "ב": canon_entry("ב", "Chaykel", category="person"),
+        "ג": canon_entry("ג", "Chaykel", category="place"),
+    }
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Chaykel')} arrived.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(tmp_path, make_nodestream(nodes, spans={"1": span("person", "Chaykel")}),
+                    make_canon(entries), make_profile())
+    message = str(excinfo.value)
+    for owner in entries:
+        assert repr(owner) in message, f"{owner!r} unnamed in: {message}"
+
+
+def test_the_trigger_still_counts_only_compatible_owners(tmp_path):
+    """The other half of the pin above: the FULL list is what gets displayed,
+    but it must not be what decides. Two place owners plus one person owner
+    leave a single owner able to answer a `person` span, so nothing refuses."""
+    entries = {
+        "א": canon_entry("א", "Chaykel", category="place"),
+        "ב": canon_entry("ב", "Chaykel", category="place"),
+        "ג": canon_entry("ג", "Chaykel", category="person"),
+    }
+    rows = render_obsidian._canon_collision_conflicts(
+        {"1": span("person", "Chaykel")}, entries, True, None
+    )
+    assert rows == []
 
 
 def test_the_conflict_scan_is_inert_when_collision_delinking_is_off():

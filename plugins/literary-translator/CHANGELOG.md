@@ -17,8 +17,9 @@ coverage identity balanced and every gate green. It was a fall-through, not a
 branch anyone chose.
 
 `_entity_markup_canon_collision_preflight` now refuses that render with
-`RenderError("entity_markup_canon_collision")`, naming each offending label, the
-competing `source_form`s and the span count. It runs in the same pre-clean window
+`RenderError("entity_markup_canon_collision")`, naming up to five offending labels
+— the costliest first — with every competing `source_form` and the span count, plus
+the count of any it did not list. It runs in the same pre-clean window
 as `_validate_link_groups` and the structural markup preflight, and for the same
 reason: a refusal discovered after `_clean_vault_content` would leave the operator
 with neither the old vault nor a complete new one. It HALTS rather than warning
@@ -41,8 +42,10 @@ EVERY owner is a member and none is `sense_translated`, so a collision involving
 sense-translated owner can only be resolved by giving the spans a distinct `ref`.
 The adapter never picks between them; that identity call stays the operator's.
 
-Nothing else moves. An unmarked colliding name is still de-linked prose with a
-`delink_cost` WARN. A collision every owner of which sits in one link group still
+Nothing else moves. An unmarked colliding name is still de-linked prose, and still
+carries a `delink_cost` WARN wherever de-linking actually cost a link — an
+all-`sense_translated` collision costs none and is reported by neither, before or
+after this change. A collision every owner of which sits in one link group still
 composes onto the primary and mints nothing — which is what a project that has
 already done this adjudication looks like, and it is now the control the suite was
 missing. `render_obsidian.py` is not a `PLUGIN_BUNDLE_MEMBERS` entry, so no cache

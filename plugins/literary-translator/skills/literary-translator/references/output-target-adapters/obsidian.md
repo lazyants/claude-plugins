@@ -545,7 +545,10 @@ to assert. Measured on a delivered book: 11 labels, 894 spans, one of them
 standing for five canon entries.
 
 So `_entity_markup_canon_collision_preflight` refuses instead, with
-`RenderError("entity_markup_canon_collision")`, in the same pre-clean window as
+`RenderError("entity_markup_canon_collision")` — naming up to five offending
+labels, costliest first, each with EVERY competing `source_form` (not only the
+tag-compatible ones, since a link group has to contain them all) and its span
+count, plus the number it did not list — in the same pre-clean window as
 `_validate_link_groups` and the structural preflight — a refusal discovered after
 `_clean_vault_content` would leave the operator with neither the old vault nor a
 new one. It HALTS rather than warning because `_apply_entity_markup` has no
@@ -571,8 +574,11 @@ Three edges of the rule, each deliberate:
   between them — that identity call is the operator's, and recording it in
   `canon_link_groups.json` is what makes it reviewable.
 
-An unmarked colliding name is untouched by all of this: it stays de-linked prose
-with a `delink_cost` WARN, exactly as before.
+An unmarked colliding name is untouched by all of this: it stays de-linked prose,
+and still carries a `delink_cost` WARN wherever the de-link actually cost a link —
+an all-`sense_translated` collision costs none, so it appears in neither the WARN
+nor `delinked_owners_by_target`, exactly as before. The refusal above is the one
+place that shape IS reported, and only when its label is marked.
 
 **Every marked span becomes a wikilink — every occurrence, every node kind,
 headings included.** This is not a stylistic choice, it is what keeps the two

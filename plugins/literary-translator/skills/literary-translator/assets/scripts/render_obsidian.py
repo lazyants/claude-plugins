@@ -1636,7 +1636,9 @@ def _canon_collision_conflicts(spans, entries, collision_delink, primary_by_sour
       With fewer than two compatible owners nothing can be merged, because
       minted records stay keyed by `(tag, label)`.
 
-    Returns `[{"label", "tag", "owners", "spans"}, ...]`, ordered by span
+    Returns `[{"label", "tag", "owners", "compatible", "spans"}, ...]` --
+    `owners` every owner of the dropped target, `compatible` the subset that
+    could answer for this tag and therefore triggered the row -- ordered by span
     count descending then label, so the caller's message leads with the
     costliest conflict. Empty (the normal case) when no marked label meets
     a dropped multi-owner target -- including on a book whose collisions are
@@ -1663,7 +1665,19 @@ def _canon_collision_conflicts(spans, entries, collision_delink, primary_by_sour
         )
         if len(compatible) < 2:
             continue
-        rows.append({"label": label, "tag": tag, "owners": compatible, "spans": count})
+        # `owners` is the FULL list, not the compatible subset that triggered
+        # the row. The message tells the operator a link group must contain
+        # EVERY owner, so showing only some of them describes a group that
+        # cannot work: `_link_decision` reduces over all of them, and one
+        # ungrouped outsider de-links the target again. The subset decides
+        # WHETHER to refuse; the full list is what the refusal has to name.
+        rows.append({
+            "label": label,
+            "tag": tag,
+            "owners": sorted(source_form for source_form, _basis in owners),
+            "compatible": compatible,
+            "spans": count,
+        })
     rows.sort(key=lambda row: (-row["spans"], row["label"]))
     return rows
 
@@ -1707,7 +1721,11 @@ def _entity_markup_canon_collision_preflight(
         f"{', '.join(repr(owner) for owner in row['owners'])})"
         for row in conflicts[:5]
     )
-    more = "" if len(conflicts) <= 5 else f" (+{len(conflicts) - 5} more)"
+    more = (
+        ""
+        if len(conflicts) <= 5
+        else f" (+{len(conflicts) - 5} more, not listed -- fix these and re-run to see them)"
+    )
     raise RenderError(
         "entity_markup_canon_collision",
         f"{len(conflicts)} marked entity label(s) covering {total_spans} span(s) name a "
