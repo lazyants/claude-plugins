@@ -2011,17 +2011,32 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
 
     # 4. APPROVE -- pin the attempt's bytes. Everything downstream reads the
     #    snapshot, never the still-mutable attempt path.
-    code, _out, err = run_template_cmd(built["approve"], timeout=600)
+    #
+    #    #851: the failure reason is read off the stream that actually CARRIES it,
+    #    and from the end of that stream that keeps it. Every script this driver
+    #    runs -- canon_validate.py and fetch_citation.py alike -- reports a VERDICT
+    #    on STDOUT, as one JSON line, and never on stderr. Stderr carries only what
+    #    is NOT a verdict: an import-time dependency guard, argparse misuse, an
+    #    uncaught traceback. So logging `err` alone logged a bare empty reason on
+    #    exactly the refusals worth reading, and `err` still comes first because in
+    #    those non-verdict cases it is the stream with the message -- run_template_cmd
+    #    synthesises it for a timeout and an OSError too. The ENDS differ because the
+    #    shapes do: a traceback puts its message LAST, while the JSON line puts
+    #    "error" FIRST and a redundant "offending" array last, so a tail-slice of
+    #    stdout drops exactly the field worth reading.
+    code, out, err = run_template_cmd(built["approve"], timeout=600)
     if code != 0:
-        log(f"batch {idx}: could not snapshot attempt {attempt}: {err[-400:]}")
+        log(f"batch {idx}: could not snapshot attempt {attempt}: "
+            f"{err[-400:] if err else out[:400]}")
         return {"state": "evidence_failed", "batchIndex": idx, "attempt": attempt,
                 "reason": "approve-failed"}
 
     # 5. FETCH -- the one network step, and the only one. This process launches it
     #    and never reads what it retrieved (see read_outcome_pairs).
-    code, _out, err = run_template_cmd(built["fetch"], timeout=1800)
+    code, out, err = run_template_cmd(built["fetch"], timeout=1800)
     if code != 0:
-        log(f"batch {idx}: citation fetch failed for attempt {attempt}: {err[-400:]}")
+        log(f"batch {idx}: citation fetch failed for attempt {attempt}: "
+            f"{err[-400:] if err else out[:400]}")
         return {"state": "evidence_failed", "batchIndex": idx, "attempt": attempt,
                 "reason": "fetch-failed"}
 
@@ -2543,7 +2558,7 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path, state: dict) -> dict:
             {"key": "cmd", "fn": "recordApprovalCmd", "args": [batch_i, attempt]},
             {"key": "path", "fn": "approvalRecordPath", "args": [batch_i, attempt]},
         ])
-        code, _out, err = run_template_cmd(rec["cmd"], timeout=600)
+        code, out, err = run_template_cmd(rec["cmd"], timeout=600)
         record_path = rec["path"]
         if code != 0:
             # The review DID approve; the bookkeeping write failed. The batch is
@@ -2552,7 +2567,7 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path, state: dict) -> dict:
             _clear_awaiting(st)
             st.update(status="failed", attempt=attempt,
                       reason="approval-record-write-failed",
-                      detail=(err or "")[-300:])
+                      detail=(err[-300:] if err else out[:300]))
             admitted.append({"batch": batch_i, "attempt": attempt,
                              "approved": True, "approvalRecorded": False})
             continue

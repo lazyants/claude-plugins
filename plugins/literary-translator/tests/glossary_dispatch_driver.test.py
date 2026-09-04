@@ -285,5 +285,160 @@ def test_run_id_is_allowlisted_not_denylisted(mod):
         assert mod.validate_run_id(bad) is not None, f"{bad!r} must be refused"
 
 
+# ---------------------------------------------------------------------------
+# The failure REASON of a template command (#851)
+#
+# Every script this driver runs reports its verdict on STDOUT as one JSON line and
+# never on stderr, which carries only what is not a verdict (an import guard,
+# argparse misuse, a traceback). The driver logged `err` alone, so a real refusal
+# -- canon_validate.py exiting 1 because --approve-to would overwrite a differing
+# snapshot -- reached the operator as a bare colon with nothing after it. These
+# are outcome tests: they read the line the operator actually sees.
+# ---------------------------------------------------------------------------
+
+STDOUT_REFUSAL = (
+    '{"success": false, "error": "SENTINEL-REASON: --approve-to refuses to '
+    'overwrite the approved snapshot already at /x: its bytes differ from the '
+    'fragment just validated"}'
+)
+
+
+class _StubCtx:
+    """Only what prepare_and_hand_back reads before it reaches a failure branch."""
+
+    def __init__(self, tmp_path):
+        self._paths = tmp_path
+
+    def build(self, calls):
+        out = {}
+        for call in calls:
+            key = call["key"]
+            if key in ("approve", "fetch"):
+                out[key] = f"{key}-command"
+            else:
+                out[key] = str(self._paths / key)
+        return out
+
+
+def _drive_approve(mod, tmp_path, monkeypatch, results):
+    """Runs prepare_and_hand_back with run_template_cmd replaced by `results`,
+    a list of (code, out, err) consumed in call order."""
+    calls = iter(results)
+    monkeypatch.setattr(mod, "run_template_cmd",
+                        lambda cmd, *, timeout: next(calls))
+    return mod.prepare_and_hand_back(
+        _StubCtx(tmp_path), dict(BATCH), 0, tmp_path / "fragment.json")
+
+
+def test_a_snapshot_failure_logs_the_reason_the_script_actually_printed(
+        mod, tmp_path, monkeypatch, capsys):
+    """THE #851 REGRESSION. canon_validate.py exits 1 with its reason on stdout and
+    stderr empty; before the fix this logged an empty string after the colon."""
+    result = _drive_approve(mod, tmp_path, monkeypatch,
+                            [(1, STDOUT_REFUSAL, "")])
+    assert result["reason"] == "approve-failed"
+    logged = capsys.readouterr().err
+    assert "could not snapshot attempt 0" in logged
+    assert "SENTINEL-REASON" in logged, (
+        "the reason reached the operator as an empty line: " + repr(logged))
+
+
+def test_a_citation_fetch_failure_logs_the_reason_too(
+        mod, tmp_path, monkeypatch, capsys):
+    """fetch_citation.py has the same shape -- zero stderr writes, verdict on
+    stdout -- so the fetch branch had the identical defect."""
+    result = _drive_approve(mod, tmp_path, monkeypatch,
+                            [(0, "", ""), (1, STDOUT_REFUSAL, "")])
+    assert result["reason"] == "fetch-failed"
+    logged = capsys.readouterr().err
+    assert "citation fetch failed for attempt 0" in logged
+    assert "SENTINEL-REASON" in logged
+
+
+def test_stderr_still_wins_when_the_command_actually_wrote_some(
+        mod, tmp_path, monkeypatch, capsys):
+    """NO REGRESSION on the path that already worked. run_template_cmd synthesises
+    stderr for a timeout and an OSError, and argparse misuse writes it; stdout is
+    a FALLBACK, never a replacement."""
+    _drive_approve(mod, tmp_path, monkeypatch,
+                   [(124, "ignored-stdout", "timed out after 600s")])
+    logged = capsys.readouterr().err
+    assert "timed out after 600s" in logged
+    assert "ignored-stdout" not in logged
+
+
+def test_a_long_stdout_verdict_is_truncated_at_the_end_that_keeps_the_reason(
+        mod, tmp_path, monkeypatch, capsys):
+    """A tail-slice of stdout drops exactly the field worth reading. The JSON line
+    puts "error" FIRST and a redundant "offending" array last, and a real
+    multi-row schema failure runs to thousands of bytes -- so `(err or out)[-400:]`
+    would log the tail of `offending` and no reason at all."""
+    payload = ('{"success": false, "error": "SENTINEL-REASON", "offending": ['
+               + ", ".join('"filler row %d"' % i for i in range(200)) + ']}')
+    assert len(payload) > 2000, "the fixture must exceed the truncation window"
+    _drive_approve(mod, tmp_path, monkeypatch, [(1, payload, "")])
+    logged = capsys.readouterr().err
+    assert "SENTINEL-REASON" in logged
+    assert "filler row 199" not in logged, "the line was sliced from the wrong end"
+
+
+def test_the_approval_record_failure_persists_the_reason_into_the_state_record(
+        mod, tmp_path, monkeypatch):
+    """The THIRD site, and the only one whose reason is PERSISTED rather than
+    logged: when the review approved but the bookkeeping write failed, `detail`
+    got the same empty string, so the state record an operator reads afterwards
+    said the batch failed and would not say why.
+
+    Driven through record_verdicts' real control flow -- the nonce, the re-hashed
+    snapshot digest and the sentinel read all have to pass before the approval
+    record is even attempted, so an assertion here cannot be reached by accident."""
+    vdir = tmp_path / "verdicts"
+    vdir.mkdir()
+    snapshot = tmp_path / "approved_0_attempt_0.json"
+    snapshot.write_text("[]")
+
+    class _Ctx:
+        verdict_dir = vdir
+
+        def build(self, calls):
+            out = {}
+            for call in calls:
+                fn = call["fn"]
+                if fn == "approvedPath":
+                    out[call["key"]] = str(snapshot)
+                elif fn == "rejectedAnywhere":
+                    out[call["key"]] = False       # no containment guard tripped
+                elif fn == "sentinelVerdict":
+                    out[call["key"]] = True        # the judge APPROVED
+                elif fn == "rejectionDetail":
+                    out[call["key"]] = ""
+                elif fn == "recordApprovalCmd":
+                    out[call["key"]] = "record-approval-command"
+                else:
+                    out[call["key"]] = str(tmp_path / call["key"])
+            return out
+
+    state = {"batches": {"0": {
+        "status": "awaiting_judge", "attempt": 0,
+        "pending": {"nonce": "NONCE", "snapshot_sha256": mod._sha256_file(snapshot),
+                    "ok_sentinel": "CITATIONS_OK 0 ATTEMPT 0",
+                    "fail_sentinel": "CITATIONS_REJECTED 0 ATTEMPT 0"}}}}
+    verdicts = vdir / "verdicts.json"
+    verdicts.write_text(json.dumps(
+        [{"batch": 0, "attempt": 0, "nonce": "NONCE",
+          "reply": "CITATIONS_OK 0 ATTEMPT 0"}]))
+
+    monkeypatch.setattr(mod, "run_template_cmd",
+                        lambda cmd, *, timeout: (1, STDOUT_REFUSAL, ""))
+    result = mod.record_verdicts(_Ctx(), verdicts, state)
+
+    st = state["batches"]["0"]
+    assert st["status"] == "failed"
+    assert st["reason"] == "approval-record-write-failed"
+    assert "SENTINEL-REASON" in st["detail"], (
+        "the persisted reason was empty: " + repr(st.get("detail")))
+    assert result["recorded"][0]["approvalRecorded"] is False
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
