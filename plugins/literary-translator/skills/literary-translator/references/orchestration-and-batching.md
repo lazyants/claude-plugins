@@ -106,6 +106,34 @@ is the orchestration-level summary of what each stage hands to the next):
   SKILL.md for the exact command and
   `canon-and-glossary.md`/`canon_adjudication_audit.py` for the
   evidence-verification mechanics.
+- **Canon target-harmonisation read (always runs, advisory)** — after the
+  mandatory gate above: the session first builds a **corpus file** —
+  canon `entries{}`, every CONVERGED segment's fail-closed `names[]`
+  observations, and (on the two `glossary.enabled` branches)
+  `name_candidates.json` rows, each with its own reported count — writes
+  it to `${durable_root}/harmonisation/corpus_<UTC timestamp>_<8
+  hex>.json`, and keeps its sha256 in the session's own context. It
+  dispatches only when that corpus holds at least one canon observation
+  or at least two draft observations; otherwise it no-ops, printing the
+  per-corpus counts plus `candidates_source`. On a dispatch: ONE
+  schema-less `codex:codex-rescue` dispatch, handed the corpus file, asks
+  FOUR questions — which target forms denote one referent under two
+  spellings, where transliteration policy diverges, which target form is
+  frozen for more than one referent, and which source form is used for
+  more than one referent — a bounded WAIT, then
+  `scripts/canon_harmonisation.py --check <attempt path> --corpus <corpus
+  path> --expect-corpus-sha256 <digest> --approve-to
+  ${durable_root}/canon_harmonisation.json` as the sole acceptance
+  authority (`--expect-corpus-sha256` is the trusted channel: the corpus
+  file itself lives in the writable durable root, so only the digest the
+  session held before dispatching — never recomputed from disk — can
+  catch a rewritten corpus), then — only on that pass —
+  `scripts/canon_harmonisation.py --report`. A WAIT timeout or a failed
+  check suppresses the report and continues forward — to the skeptic pass
+  when enabled, otherwise straight to W3a — never back to the gate above.
+  See SKILL.md and `canon-and-glossary.md` for the full contract,
+  including the five proposal kinds and why applying a correction can
+  invalidate `canon_link_groups.json`.
 - **W3a Segpack generation** — `segpack.py` over every candidate segment in
   `manifest.json`'s `segments[]`, body and translate-decision `FRONTBACK:{id}`
   elements alike, now that canon exists; a missing/invalid segpack for any

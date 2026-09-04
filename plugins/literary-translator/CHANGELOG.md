@@ -1,5 +1,96 @@
 # Changelog
 
+## 1.81.0 — 2026-09-03
+
+**The frozen canon now gets one whole-canon read for divergent target forms (#823).** Nothing in the
+pipeline compared `canonical_target_form` ACROSS canon entries. `_merge_batch` refuses a collision
+only when two batch items claim different resolutions for the same `source_form`, and
+`final_audit.py`'s GLOSSARY-DIFF groups by `source_form` too — so a canon could freeze with one
+referent under two different target spellings and every shipped gate reported success. The glossary
+pass cannot see it either: candidates are chunked into batches of 40 in frequency order and each
+batch is adjudicated by its own agent with no sight of the others, so two bearers of one byname
+routinely land in different batches.
+
+Measured on a live 47-segment he→en volume (canon 312 entries): the canon was hand-corrected five
+times after freeze, moving 12 target forms — `Kiblitcher`→`of Kiblitch` ×4, `Puks`→`Fuchs`,
+`Bobrinitzer`→`Babrinitzer`, `Tulchiner`→`of Tulchin`, `of Częstochowa`→`Tshenstchover` and more. At
+least 4 had both conflicting forms already sitting in `entries{}` at freeze time, before a single
+word was translated. Each correction re-staled its carriers and bought a cross-segment sweep; the two
+name-harmonisation commits touched 41 and 44 draft files, and one name was harmonised the wrong way
+first and reversed a round later.
+
+A new W-step, unconditional on every project with at least two canon entries, runs immediately after
+the mandatory homonym-split evidence gate and before the skeptic pass and W3a. The orchestrating
+session serialises the WHOLE of `entries{}` into a single codex dispatch together with the sha256 of
+`canon.json`'s bytes, asks which target forms denote one referent spelled two ways and where the
+transliteration POLICY diverges, then validates the returned artifact itself with the new
+`canon_harmonisation.py --check` before publishing it as `canon_harmonisation.json` and rendering it
+with `--report`. Deliberately NOT a deterministic prefilter: `Puks`/`Fuchs` and
+`of Częstochowa`/`Tshenstchover` share almost nothing at the string level, and a matcher's failure
+mode here is a silent zero that reads as a clean canon.
+
+It is advisory and it never halts. A WAIT timeout or a failed check suppresses the report, publishes
+nothing, and continues to W3a. Acting on a proposal is the existing `canon_validate.py --correct`
+route, unchanged — the script surfaces the pair and renders a correction skeleton, but leaves the
+canonical form itself as JSON `null`, which `canon-entry.schema.json` types as a string and therefore
+refuses: an unedited skeleton is rejected by `canon_validate.py --correct` fail-closed rather than
+freezing a placeholder as canon. The identity call stays the operator's, per the iron rule. An empty
+result is reported as "no proposals returned -- this is a model's answer, not a certificate that the
+canon is consistent", never as a clean canon.
+
+**Migration.** No re-translation: `canon_harmonisation.py` is in neither `PLUGIN_BUNDLE_MEMBERS` nor
+`DERIVATION_BUNDLE_MEMBERS`, `compute_schema_hash` covers only the draft/review/segpack schemas, and
+the new sidecar sits outside all 15 cache-key fields, so no converged segment goes stale. The one
+real cost is the RESUME digest: the new `canon-harmonisation.schema.json` moves
+`resume_setup.py`'s `_schemas_dir_hash` — which globs every `schemas/*.schema.json` — and
+`skeptic_setup.py`'s separate duplicate of it. So the first Step 0a refresh after this release is a
+one-time resume-identity reset. Converged segments stay reusable; what redoes is every segment
+holding a draft without having converged — the `recoverable` AND `human_escalation` populations,
+which lose reviewed text plus any hand-applied fix rounds. Enumerate those two populations before
+upgrading a book that is mid-flight.
+
+**The pass covers both directions and three corpora, not a merge over `canon.json` alone.** Run
+read-only over four finished volumes, the merge-only shape described in #823 misses and mis-handles
+measurable fractions of the class it is aimed at, so the shipped step is wider than that issue's
+own first description.
+
+- **It splits as well as merges.** One target string frozen for two different people is the more
+  damaging direction — one vault page credited to two men — and `shared_target` reports it. Its
+  sibling, one source form covering several bearers, is `multi_referent`; nothing in the pipeline
+  DISCOVERED that shape before, because the mandatory homonym-split gate enumerates only splits
+  already authored in `canon_senses.json` and states `NOT ENUMERATED` otherwise. It validates an
+  answer; it does not find the question. `multi_referent` proposes, the operator records the split
+  in `canon_senses.json`, and that gate then demands its evidence exactly as before.
+- **It reads a union, not `entries{}` alone.** Canon entries, the `names[]` rows of CONVERGED
+  segment drafts, and `name_candidates.json` rows. A form that never reached canon is an
+  `uncanonized_variant` whose route is a NEW entry through the ordinary glossary merge, never
+  `--correct`, which refuses a `source_form` it cannot find. A divergence living wholly in the
+  draft corpus is reportable on its own: requiring a canon anchor would make exactly the class
+  that never reaches canon unreportable.
+- **A retarget invalidates `canon_link_groups.json`.** Consolidating two spellings onto one target
+  is precisely the operation that makes two previously distinct fold keys one, so a correction can
+  CREATE a collision no group covers. An uncovered collision withholds that group's `## Mentions`
+  occurrences while `validate_backlinks.py` reports `warnings: 0` — coverage measured over a
+  universe those forms were just removed from. Re-check the ruling after applying anything here.
+
+**What the pass is checked against is written down, not re-derived.** The session serialises the
+three corpora into one per-attempt corpus file and passes it to `--check` with
+`--expect-corpus-sha256`, the digest it computed BEFORE dispatching and keeps in its own context.
+The corpus file lives in the durable root the dispatched pass can write, so a digest recomputed
+from disk would prove only that the artifact agrees with whatever the pass last wrote there;
+expected, on-disk and artifact must all three agree before anything is published. Members are
+matched byte-exactly on the whole `(corpus, source_form, target_form)` triple, so a canon row and a
+converged draft row that disagree about the same name are two members of one proposal rather than
+one erasing the other.
+
+`--build-corpus` gathers the corpora fail-closed: `ledger_merge.py`'s `_read_fragments` rather than
+`final_audit.py`'s `load_converged_fragments`, whose `is_dir()` + `glob()` report a populated but
+unreadable `runs/ledger.d` as empty; a converged fragment contributes names only while its
+`reviewed_draft_sha1` still matches the draft on disk, so a draft hand-edited after its review
+feeds nothing into a canon proposal; and every drop is counted in the output, because a corpus that
+gathered nothing must never read like one that found nothing.
+
+
 ## 1.80.0 — 2026-09-03
 
 **An uncased source can now derive its `name_inventory` with an LLM, inside the plugin (#286).**

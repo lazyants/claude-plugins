@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "canon-harmonisation.schema.json",
+  "title": "Canon Target-Form Harmonisation Proposals",
+  "description": "The advisory sidecar canon_harmonisation.py writes, sibling of canon.json (default path {durable_root}/canon_harmonisation.json). Nothing anywhere else in this plugin compares canonical_target_form ACROSS canon entries -- glossary batches are adjudicated blind of one another, and every existing cross-entry check (suspicion_scan.py's merge_participant/near_merge, final_audit.py's WARN glossary-diff) groups by source_form, never by target -- so a frozen canon can carry one referent under two spellings (a divergent_spelling proposal) or two policy-legitimate renderings of the same underlying name, such as an English exonym beside a transliterated byname (a divergent_policy proposal), with every shipped gate reporting success (#823). This file records ONE whole-canon LLM pass's proposals over that question, after the merge and after the mandatory homonym-split gate. THE IRON RULE applies at full force: the pass that authors this file may SURFACE a proposal, but neither it nor canon_harmonisation.py itself ever decides that two forms denote the same referent -- that call belongs to the operator, exercised through the existing, unrelated canon_validate.py --correct route. This file's own schema therefore enforces STRUCTURE only (well-formed proposals, non-blank provenance); canon_harmonisation.py --check layers the PROCEDURAL checks this schema cannot express -- the three-way corpus digest comparison, byte-exact membership of the whole (corpus, source_form, canonical_target_form) triple against the corpus file the session dispatched, the per-kind cardinality and target rules, and duplicate-proposal detection -- see that script's own module docstring for the full contract. Advisory only: nothing downstream of the pipeline's merge step ever reads this file except canon_harmonisation.py --report, itself a report that always exits 0 regardless of content. Cache-safe by construction, the same way canon_link_groups.json and canon_senses.json are: this file lives entirely OUTSIDE canon['entries'], so cache_key.compute_used_terms_hash (which hashes the referenced ENTRY objects, not any sidecar) never moves and adopting or ignoring a proposal costs zero re-translation on its own -- only an operator-applied canon_validate.py --correct, which changes canon.json's own bytes, has a migration cost, and that cost is unrelated to this file's existence. Strict at every level (additionalProperties:false plus a full required[]) so an authoring bug in the dispatched pass fails LOUD at --check time rather than silently publishing a malformed or half-reasoned proposal.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "canon_sha256",
+    "corpus_sha256",
+    "proposals"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Format version of this sidecar's own shape, independent of canon.json's format. Bumped only if this schema's structure changes in a way a reader must branch on."
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "UTC timestamp (datetime.now(timezone.utc).isoformat()) at which the dispatched harmonisation pass produced this document -- when this file is written directly, or when the attempt file it was --approve-to'd from was written. Free-form string, not format-asserted: every sibling stamp in this plugin (canon.json's own generation_hashes, canon_link_groups.json has none) follows the same convention of trusting the one producer rather than adding a runtime format check nothing consumes."
+    },
+    "canon_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "The sha256 hex digest of the EXACT canon.json bytes on disk that the harmonisation pass was handed, computed by the orchestrating session (never by the pass itself, which never opens canon.json at all) and copied back verbatim into this field. This is what makes the field an ANCHOR rather than a claim: canon_harmonisation.py --check independently recomputes canon.json's current sha256 and refuses the artifact outright when the two differ, so a proposal can never be silently checked against, or --report'd against, a canon that changed under it -- a concurrent --correct, say. The anchor does NOT constrain the pass itself: the pass holds write access to the same durable_root, so one that edited canon.json and re-stamped the new digest would satisfy --check. That is why SKILL.md's W-step has the session compare this field against the digest IT computed before dispatching, which is the only comparison the pass cannot author both sides of. canon_harmonisation.py --report recomputes the same digest to report canon_current, but never refuses on a mismatch -- a stale anchor is a report-time fact for the operator to weigh, not a gate."
+    },
+    "corpus_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 of the EXACT bytes of the corpus file the session serialised into this pass's prompt (canon-harmonisation-corpus.schema.json). canon_harmonisation.py --check compares three values -- this field, that file's current bytes, and --expect-corpus-sha256, which carries the digest the session computed BEFORE dispatching and holds in its own context -- and all three must agree before anything is published. The expected value is what makes this an anchor rather than a claim: the corpus file lives in the durable root the dispatched pass can write, so a digest recomputed from disk alone would prove only that the artifact agrees with whatever the pass last wrote there."
+    },
+    "proposals": {
+      "type": "array",
+      "description": "Zero or more harmonisation proposals. An EMPTY array is schema-valid and meaningful -- it is exactly what a whole-canon pass that found nothing to harmonise writes, and canon_harmonisation.py --report renders it as an explicit 'no proposals returned' statement, never as silent success: a model's absence of findings is not a certificate that every canonical_target_form in canon.json is actually consistent. Order is immaterial.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "members",
+          "note"
+        ],
+        "description": "ONE harmonisation proposal: a claim that two or more canon entries, each already carrying its own canonical_target_form, denote one referent under diverging renderings and should be reconciled by an operator-applied canon_validate.py --correct. Never applied automatically -- see this file's own top-level description for THE IRON RULE boundary.",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "divergent_spelling",
+              "divergent_policy",
+              "shared_target",
+              "multi_referent",
+              "uncanonized_variant"
+            ],
+            "description": "Which class this proposal belongs to. The dispatch asks FOUR questions and this enum has FIVE values: uncanonized_variant is not a question of its own but the shape a divergence takes when one of its members never reached canon at all. divergent_spelling: the members are different transliterations/vocalisations/orthographic variants of what is proposed as the SAME underlying name. divergent_policy: the members already look like unrelated strings, but the renderings are proposed to diverge on a RULE decision -- typically an English exonym beside a transliterated byname -- rather than on spelling. shared_target: the INVERSE and the more damaging direction -- two or more canon entries frozen under ONE target string, which gives two different people one vault page. multi_referent: one canon entry whose single source form covers more than one referent; the answer is recorded in canon_senses.json, not by --correct, and the mandatory homonym-split gate then demands its evidence. uncanonized_variant: a form that never reached canon at all is proposed as a variant of one that did; the route is a new canon entry through the ordinary glossary merge. canon_harmonisation.py --check branches on this value to pick the cardinality and distinct-target rule it enforces, and --report to pick what it renders; neither ever decides whether the claim is TRUE."
+          },
+          "members": {
+            "type": "array",
+            "description": "The OBSERVATIONS this proposal is about, each named by the corpus it was read from together with its source and target forms, exactly as canon_harmonisation.py --check re-verifies them against the corpus file (byte-exact on all three of corpus, source_form and canonical_target_form together, never folded or normalised). Matching on the triple rather than on source_form alone is what lets `canon: X -> A` and a converged `draft: X -> B` be two members of one proposal, which is the cross-segment discrepancy shape that would otherwise be unreportable. Per-kind cardinality, the distinct-target rules, canon-absence for uncanonized_variant and pairwise-distinctness of the triple are all PROCEDURAL checks in --check, not enforced here -- each must name the offending proposal's INDEX, which a schema error path cannot do uniformly.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "corpus",
+                "source_form",
+                "canonical_target_form"
+              ],
+              "properties": {
+                "corpus": {
+                  "type": "string",
+                  "enum": [
+                    "canon",
+                    "draft",
+                    "candidate"
+                  ],
+                  "description": "Which corpus the observation was read from, matching the corpus file's own `corpus` field. It records WHERE the row was read, never what canon holds now: name_candidates.json carries the extractor's complete list and only glossary_batch_plan.py later drops forms already resolved in canon, so a `candidate` member's source_form may well be a live canon key. --check tests uncanonized_variant's absence rule, and --report picks every member's route, from live canon-key membership rather than from this field."
+                },
+                "source_form": {
+                  "type": "string",
+                  "pattern": "\\S",
+                  "description": "Must equal, BYTE-EXACT, the source_form of an OBSERVATION in the corpus file the session dispatched -- never folded, casefolded, or NFC/NFD-normalised, and never checked against canon.json's entries{} directly. Membership is against the corpus because the corpus is what the pass was actually shown; a check against live canon could refuse a correct proposal (the canon moved) or accept a fabricated one (a row the pass invented that happens to exist now). The whole (corpus, source_form, canonical_target_form) triple must match together, which is what makes the corpus tag unforgeable: a row relabelled into another corpus is simply not in the corpus. Whether this form is ALSO a live canon key is a separate question, asked only by uncanonized_variant's absence rule and by --report's routing."
+                },
+                "canonical_target_form": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "\\S",
+                  "description": "The target form the observation carried -- compared byte-exactly against the corpus file observation's `target_form`. A string for a `canon` or `draft` member; null for a `candidate` member, which carries no target because assigning one is exactly what canon has not done for it. For a `canon` member this is also the anti-fabrication check: an artifact that misquotes the canon it claims to be anchored to is refused rather than trusted."
+                },
+                "n_segments": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Carried through from the matched `draft` observation and verified against it by --check. Required on a `draft` member and forbidden elsewhere. It lives here because --report never receives --corpus and must render the count from the artifact alone."
+                },
+                "freq": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Carried through from the matched `candidate` observation and verified against it by --check. Required on a `candidate` member and forbidden elsewhere, for the same reason n_segments is."
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "corpus": {
+                        "const": "draft"
+                      }
+                    },
+                    "required": [
+                      "corpus"
+                    ]
+                  },
+                  "then": {
+                    "required": [
+                      "n_segments"
+                    ],
+                    "properties": {
+                      "canonical_target_form": {
+                        "type": "string"
+                      },
+                      "freq": false
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "corpus": {
+                        "const": "candidate"
+                      }
+                    },
+                    "required": [
+                      "corpus"
+                    ]
+                  },
+                  "then": {
+                    "required": [
+                      "freq"
+                    ],
+                    "properties": {
+                      "canonical_target_form": {
+                        "type": "null"
+                      },
+                      "n_segments": false
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "corpus": {
+                        "const": "canon"
+                      }
+                    },
+                    "required": [
+                      "corpus"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "canonical_target_form": {
+                        "type": "string"
+                      },
+                      "n_segments": false,
+                      "freq": false
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "note": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "Why these members are believed to denote one referent, in the pass's own words -- the provenance of an identity call no script is allowed to make (THE IRON RULE), exactly the same rule and the same non-blank pattern canon-link-groups.schema.json's own 'note' field states. Required and non-blank on purpose: a proposal with no stated reason is indistinguishable from a mistake, and putting non-blankness in the schema itself (rather than in canon_harmonisation.py's procedural code) keeps ONE error contract -- a blank note is a schema failure, caught identically whether the artifact reaches --check or only ever reaches --report."
+          },
+          "referents": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "string",
+              "pattern": "\\S"
+            },
+            "description": "REQUIRED on a multi_referent proposal and forbidden on every other kind: short labels for the two or more people the one source form is claimed to cover. A multi_referent proposal names a single member, so without this it would be a content-free assertion -- 'this entry covers several people' with nothing to check. canon_harmonisation.py --check measures the COUNT and their distinctness AFTER trimming and collapsing internal whitespace runs, so 'Reb Noson' and 'Reb  Noson' are ONE referent rather than two; it never judges whether the labels name real distinct people, which is the identity call THE IRON RULE reserves for the operator, recorded in canon_senses.json."
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "multi_referent"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "required": [
+                "referents"
+              ]
+            },
+            "else": {
+              "properties": {
+                "referents": false
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

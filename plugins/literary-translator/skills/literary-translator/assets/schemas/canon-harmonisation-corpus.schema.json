@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "canon-harmonisation-corpus.schema.json",
+  "title": "Canon Target-Form Harmonisation Corpus",
+  "description": "The per-attempt record of EXACTLY what the orchestrating session serialised into one harmonisation dispatch (default path {durable_root}/harmonisation/corpus_<UTC timestamp>_<8 hex>.json). It exists because the state a proposal must be checked against is a fact about the SESSION -- which W3 branch ran, which segments had converged, and what bytes actually went into the prompt -- and a checker reading live files can never learn any of that: name_candidates.json left behind by an earlier run looks identical to a freshly built one, and a draft that converged after runs/ledger.json was last materialised is invisible to it. Writing the corpus down turns every one of those into a byte comparison. canon_harmonisation.py --check takes this file via --corpus together with --expect-corpus-sha256, the digest the session computed BEFORE dispatching and holds in its own context; the expected digest, this file's current bytes and the artifact's own corpus_sha256 must all three agree before anything is published. THE IRON RULE applies here too: this file records OBSERVATIONS -- what each corpus said -- and never an identity claim. Read-only for every consumer; nothing in the pipeline writes it except the session that dispatched the pass.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "canon_sha256",
+    "candidates_source",
+    "converged_segments",
+    "drafts_excluded_stale_review",
+    "draft_rows_skipped",
+    "observations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Format version of this file's own shape. Bumped only if its structure changes in a way a reader must branch on."
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "UTC timestamp (datetime.now(timezone.utc).isoformat()) at which the session built this corpus. Free-form string, not format-asserted -- the same convention every sibling stamp in this plugin follows."
+    },
+    "canon_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 of canon.json's exact bytes as the session read them while building this corpus. The same digest the dispatched pass copies into its artifact's own canon_sha256, so a canon that moved between gathering and acceptance is refused by canon_harmonisation.py --check."
+    },
+    "candidates_source": {
+      "type": "string",
+      "enum": [
+        "bootstrap",
+        "disabled"
+      ],
+      "description": "WHY the candidate observations are what they are, recorded rather than inferred. `bootstrap`: one of the two glossary.enabled branches ran, where bootstrap_names.py writes name_candidates.json immediately before the batch planner and therefore before the SKIP decision, so the rows are fresh. `disabled`: the glossary.enabled:false branch, which skips the bootstrap entirely and deletes nothing -- a stale name_candidates.json from an earlier run can sit there looking present. On that branch the session writes ZERO candidate observations and never opens the file, so a stale corpus cannot be mistaken for a fresh one and no nullable state is needed anywhere. An empty candidate list under `bootstrap` means the extractor genuinely found nothing, which is a different fact and is told apart here."
+    },
+    "converged_segments": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many converged ledger fragments contributed draft observations. Reported so that a corpus which GATHERED nothing can never read like one that FOUND nothing -- see drafts_excluded_stale_review and draft_rows_skipped for the two ways rows are dropped on the way here."
+    },
+    "drafts_excluded_stale_review": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many converged fragments were EXCLUDED because their reviewed_draft_sha1 did not match the draft's current draft_content_sha1 -- the same comparison final_audit.py::hard_check_stale_review makes. A draft edited after its review carries names no reviewer ever saw, so status == 'converged' alone is not sufficient to let it feed a canon proposal."
+    },
+    "draft_rows_skipped": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many names[] rows inside contributing drafts yielded no (source_form, target_form) pair from final_audit.py::_name_entry_forms, which already accepts both field conventions draft.schema.json permits. Counted rather than silently dropped: a reader that matched nothing would otherwise print exactly what a working one prints."
+    },
+    "observations": {
+      "type": "array",
+      "description": "Every row the session put in the prompt, flattened into one list. A proposal's member names an observation here and canon_harmonisation.py --check matches it BYTE-EXACTLY on corpus, source_form and target_form together -- which is why the same source_form may legitimately appear more than once: `canon: X -> A` beside a converged `draft: X -> B` is the cross-segment discrepancy shape final_audit.py's WARN glossary-diff already reports, and collapsing it here would erase the very finding this pass exists to surface. Order is immaterial. An EMPTY array is valid and meaningful: it is what a project with no canon, no converged drafts and no candidates produces, and the W-step's own no-op condition -- at least one canon observation, or at least two draft observations -- is read off this list rather than recomputed from live files.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "corpus",
+          "source_form",
+          "target_form"
+        ],
+        "description": "ONE row as ONE corpus reported it. Never an identity claim, never a proposal -- only what was read, and from where.",
+        "properties": {
+          "corpus": {
+            "type": "string",
+            "enum": [
+              "canon",
+              "draft",
+              "candidate"
+            ],
+            "description": "Which corpus this row was read from. `canon`: a canon.json entries{} record. `draft`: a names[] row in a converged segment's draft that passed the reviewed-draft SHA check. `candidate`: a name_candidates.json row, which is a SOURCE form the extractor found and nothing more. The tag records WHERE the row was read, never what canon holds now -- name_candidates.json carries the extractor's complete list and only glossary_batch_plan.py later drops the forms already resolved in canon, so a candidate observation's source_form may well be a live canon key. canon_harmonisation.py decides an uncanonized_variant proposal's validity, and every member's report routing, from live canon-key membership rather than from this field."
+          },
+          "source_form": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "The source-language form, byte-exact as its corpus held it -- never folded, casefolded, or NFC/NFD-normalised, the same membership rule canon_link_groups.py applies to its own sidecar."
+          },
+          "target_form": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The target form this corpus assigned: canon.json's canonical_target_form for a `canon` row, the draft names[] row's target for a `draft` row, and null for a `candidate` row, which carries no target at all because assigning one is precisely what canon has not yet done for it. Non-blank when a string; the corpus-directed if/then below enforces which of the two shapes each corpus may take.",
+            "pattern": "\\S"
+          },
+          "n_segments": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "How many converged segments this draft row was seen in. Required on a `draft` observation and forbidden elsewhere. It is carried into a proposal's member and verified there by --check, because --report never receives --corpus and must render the count from the artifact alone."
+          },
+          "freq": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The extractor's own frequency count for this candidate row, passed through verbatim from name_candidates.json. Required on a `candidate` observation and forbidden elsewhere; carried into a member and verified by --check for the same reason n_segments is."
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "corpus": {
+                  "const": "draft"
+                }
+              },
+              "required": [
+                "corpus"
+              ]
+            },
+            "then": {
+              "required": [
+                "n_segments"
+              ],
+              "properties": {
+                "target_form": {
+                  "type": "string"
+                },
+                "freq": false
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "corpus": {
+                  "const": "candidate"
+                }
+              },
+              "required": [
+                "corpus"
+              ]
+            },
+            "then": {
+              "required": [
+                "freq"
+              ],
+              "properties": {
+                "target_form": {
+                  "type": "null"
+                },
+                "n_segments": false
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "corpus": {
+                  "const": "canon"
+                }
+              },
+              "required": [
+                "corpus"
+              ]
+            },
+            "then": {
+              "properties": {
+                "target_form": {
+                  "type": "string"
+                },
+                "n_segments": false,
+                "freq": false
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

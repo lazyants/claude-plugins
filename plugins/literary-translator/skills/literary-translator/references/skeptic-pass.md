@@ -12,7 +12,7 @@ clause below is the text that lived there, so a project that turns the pass on l
 **Skeptic pass (RFC #215 Phase 2, opt-in + advisory)** — if
 `glossary.enabled` is not false AND `glossary.skeptic_pass.enabled` is true
 in `profile.yml`, run the structural-risk triage + adverse-only skeptic
-pass immediately after the mandatory homonym-split gate (`SKILL.md`, W3) and before
+pass immediately after the canon target-harmonisation W-step (`SKILL.md`, W3) and before
 W3a. The parent switch is not a formality: Step 0 fatally refuses the
 contradictory combination — `glossary.enabled: false` with
 `glossary.skeptic_pass.enabled: true` — outright, naming both fields, so
@@ -395,7 +395,7 @@ restoring + re-freezing/re-validating the trusted `canon.json`/
 non-advisory outcome of the opt-in pass; every skeptic *finding* stays
 advisory.)
 **The cat-5 audit command (`canon_adjudication_audit.py --check`,
-immediately above) is UNCHANGED by any of this** — it never reads
+earlier in W3, immediately before the harmonisation W-step) is UNCHANGED by any of this** — it never reads
 `skeptic_triage.json` / `suspicion_worklist.json`, and its own summary +
 exit code are byte-identical whether or not this opt-in pass ever ran;
 `skeptic_report.py` is a wholly separate, advisory command a human runs to
