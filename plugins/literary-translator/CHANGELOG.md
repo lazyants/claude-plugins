@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.83.0 — 2026-09-04
+
+**The visual-order advisory now counts the detached-combining-mark class, and says which screen its
+sample came from (#845).**
+`validate_extraction.py`'s `WARN visual_order_scan` has always printed one figure — tokens whose
+first character is terminal punctuation immediately followed by an RTL letter — and one instruction:
+"Adjudicate the sampled units against the source before translating." On a PDF-sourced Hebrew book
+there is a second corruption class that predicate cannot see, and it is larger: combining vowel marks
+detached from their base letters. Measured independently on two volumes of one series, ~45% of body
+lines carry a detached mark against ~17% reached by the punctuation screen, and **38.7% / 38.6% of
+the affected lines are reachable only through the second class**. An operator who did exactly what
+the advisory said saw displaced commas, concluded "punctuation only, cosmetic", and never met the
+class that damages words.
+
+The same WARN now carries that class as its own figure — combining marks with no LETTER behind them,
+walking back across a whole vowel cluster — and states that the printed sample is the punctuation
+screen's evidence alone, so "adjudicate the sample" can no longer be read as "adjudicate the class".
+The figure prints unconditionally inside a fired advisory, zero included: an omitted line would read
+as "no such class", which is the absence-vs-failure trap this file already refuses elsewhere.
+
+What deliberately did NOT change. **Extraction is not at fault and is untouched** — both volumes'
+raw PyMuPDF spans were censused against the reconstructed text (2809 against 2793, and 3918 against
+3908), so the reconstruction removes a handful at span boundaries and adds none; the mangling is
+upstream and byte-faithfulness is correct. The advisory's FIRING condition is also unchanged: it
+still fires on the punctuation signature alone, because the population of books carrying detached
+marks and zero punctuation hits is unmeasured, and a test now pins that negatively so an
+implementation firing on either signature turns red.
+
+The predicate is one left-to-right pass carrying a `base_seen` flag, not a backward walk restarted at
+every mark. `manifest.schema.json` puts no `maxLength` on `blocks[*].plain_text`, and a backward walk
+is O(k^2) in the length of a mark run: a 20 000-mark token measured 11.5s against 0.0009s for the
+single pass, inside an advisory whose per-scan exception boundary can catch a raising loop but not a
+slow one. Exhaustive and random probes found the two forms agree on every input, and a wall-clock
+regression test now separates them.
+
+Two classes are named rather than coded around, in `false-green-gate.md`'s stated-limitations list: a
+mark displaced onto a WRONG base letter is invisible to both predicates, since it IS adjacent to a
+letter (1538 marks over 1256 lines on one volume; 9262 over 4186 lines, 71.5% of the book, on the
+other); and the detached count's base must be a letter, so a Unicode keycap sequence adds 2 — a class
+whose population in a PDF-extracted RTL book is zero, and whose obvious widening would lose real hits.
+
+`gotchas.md` §15's paste-ready E-traps clause gains a binding bullet: a mark's position is not
+evidence about spelling, so a turn must not read a detached or misplaced mark as a spelling signal
+(for Hebrew, a dagesh on alef, het, ayin or resh, which never take one). `SKILL.md`'s adjudication
+step now describes two screens and one sample.
+
+`canon-and-glossary.md` and `style_bible.template.md` record a consequence for `validation.terms`
+that the same two volumes surfaced: **on a source that raises this advisory, prefer a single-word
+pin.** A multi-word pin is systematically blind to exactly the occurrences the corruption damaged —
+every occurrence a compound scan missed (21/295 and 23/235) was the compound with a terminal
+punctuation mark displaced into the gap between its two words. And a coverage figure quoted for a pin
+measures the PATTERN, not the book, until its misses have been read: one volume first reported 81%
+because the denominator was its own matcher's count rather than the term's. That is the same trap
+W6's "Enumerate the population from the SOURCE, not from your own matcher" already states for class
+sweeps, now stated where pins are authored.
+
 ## 1.82.1 — 2026-09-04
 
 **The price of a canon correction is stated conditionally in every shipped site except

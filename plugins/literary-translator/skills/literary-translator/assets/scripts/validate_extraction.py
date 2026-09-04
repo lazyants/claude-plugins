@@ -951,6 +951,22 @@ def _advisory_text_units(manifest: dict):
             yield f"verse:{entry.get('vid')}", entry.get("plain_text")
 
 
+def _rtl_text_units(manifest: dict):
+    """The ``_advisory_text_units`` entries that carry at least one RTL letter.
+
+    Factored out (codex round 1, NIT, ADMITTED) so ``scan_visual_order`` and
+    ``scan_detached_marks`` consume ONE filter instead of two copies of it that
+    could silently drift apart -- the two scans' denominators have to be the
+    same population BY CONSTRUCTION, not by two hand-kept copies agreeing
+    today."""
+    for label, text in _advisory_text_units(manifest):
+        if not isinstance(text, str) or not text:
+            continue
+        if not any(_is_rtl_letter(ch) for ch in text):
+            continue
+        yield label, text
+
+
 def scan_visual_order(manifest: dict):
     """Returns ``(n_hits, n_units_with_hits, n_rtl_units, histogram, samples)``.
 
@@ -960,11 +976,7 @@ def scan_visual_order(manifest: dict):
     rtl_units = 0
     histogram = {}
     samples = []
-    for label, text in _advisory_text_units(manifest):
-        if not isinstance(text, str) or not text:
-            continue
-        if not any(_is_rtl_letter(ch) for ch in text):
-            continue
+    for label, text in _rtl_text_units(manifest):
         rtl_units += 1
         hits = _leading_terminal_punct_hits(text)
         if not hits:
@@ -977,6 +989,92 @@ def scan_visual_order(manifest: dict):
         if len(samples) < _ADVISORY_SAMPLE_CAP:
             samples.append((label, hits[0]))
     return n_hits, n_units_with_hits, rtl_units, histogram, samples
+
+
+# Two volumes of one series, measured independently: ~45% / 45% of body lines
+# carry a DETACHED mark against ~17% / 17% reached by the punctuation screen
+# above, and 38.7% / 38.6% of the affected lines are reachable ONLY through
+# this class -- an operator who adjudicates the punctuation sample and stops
+# leaves that fraction unexamined. Dagesh is 70% of the detached marks on both
+# volumes, which is why gotchas.md calls out the Hebrew dagesh-on-a-consonant
+# case by name.
+#
+# The naive predicate -- "the previous character is not a base letter" -- is
+# wrong: a pointed letter is a CLUSTER (base + patah + dagesh), so it flags the
+# SECOND mark of every legitimately pointed letter in the source. Walking back
+# across the WHOLE preceding run of marks (and ``Cf`` bidi controls) before
+# asking whether a letter sits behind it is what tells a detached mark apart
+# from the tail of a real cluster.
+#
+# That walk is done as ONE left-to-right pass carrying a ``base_seen`` flag,
+# never a backward walk restarted at every mark: restarting is O(k^2) in the
+# length of a mark run, and ``manifest.schema.json`` puts no ``maxLength`` on
+# ``blocks[*].plain_text``. Measured: a 20 000-mark token takes 11.5s walking
+# backward against 0.0009s for this single pass -- and exhaustive and random
+# probes (up to length 5 over a 9-symbol alphabet, and 20 000 random strings up
+# to length 40) found the two AGREE on every case, so the single pass is not a
+# trade against the walk it replaces.
+def _detached_mark_hits(text):
+    """Tokens carrying a combining mark (Unicode category ``M*``) with NO
+    LETTER behind it, as ``[(token, n_detached_in_token), ...]``.
+
+    "Behind it" walks back across any run of preceding combining marks and
+    bidi format controls (``Cf``) -- RLM/LRM are exactly what a bidi-aware
+    converter emits between a letter and its mark, the same reason the
+    punctuation screen above treats them as transparent.
+
+    One known false-positive class, named rather than coded around: the base
+    must be a LETTER, so a mark sitting on a digit or symbol counts as
+    detached too. The real instance is a Unicode keycap sequence (``1`` +
+    U+FE0F + U+20E3 -- verified ``Nd`` + ``Mn`` + ``Me``), which would add 2 to
+    this figure. Exempting it would mean teaching this predicate UTS #51 for a
+    class whose population in a PDF-extracted RTL book is zero; and widening
+    the base class to ``N``/``S`` would lose real hits, because a vowel
+    displaced onto a digit IS the corruption this predicate exists to count."""
+    hits = []
+    for token in (text or "").split():
+        n = 0
+        base_seen = False
+        for ch in token:
+            category = unicodedata.category(ch)
+            if category.startswith("M"):
+                if not base_seen:
+                    n += 1
+            elif category == "Cf":
+                continue
+            else:
+                # Both halves matter, and the CLEARING one is the subtle half:
+                # any non-mark that is not a letter -- a stop, a digit, a
+                # bracket -- puts the flag back to False, so a mark stranded on
+                # the far side of a DISPLACED terminal stop still counts as
+                # detached. A flag that only ever latched True would read the
+                # token's first letter and silently attach every later mark to
+                # it. See test_a_non_letter_RESETS_the_base_after_a_letter_
+                # earlier_in_the_token.
+                base_seen = category.startswith("L")
+        if n:
+            hits.append((token, n))
+    return hits
+
+
+def scan_detached_marks(manifest: dict):
+    """Returns ``(n_marks, n_units_with_marks)``.
+
+    No denominator of its own: the printed denominator is ``n_rtl_units``,
+    returned by ``scan_visual_order`` alone -- both scans share
+    ``_rtl_text_units``, so re-deriving the same count here would be a second
+    copy of a number that must never disagree with the first.
+
+    Pure: reads the manifest, decides nothing, writes nothing."""
+    n_marks = 0
+    n_units_with_marks = 0
+    for _label, text in _rtl_text_units(manifest):
+        hits = _detached_mark_hits(text)
+        if not hits:
+            continue
+        n_units_with_marks += 1
+        n_marks += sum(count for _token, count in hits)
+    return n_marks, n_units_with_marks
 
 
 def _escape_char(ch: str) -> str:
@@ -1180,6 +1278,10 @@ def _visual_order_advisory(manifest: dict):
     results = []
     n_hits, n_units_with_hits, n_rtl_units, histogram, samples = scan_visual_order(manifest)
     if n_hits:
+        # Computed unconditionally, zero included: an omitted line reads as "no
+        # such class", which is the absence-vs-failure trap this file already
+        # names elsewhere (see _advisories_unavailable_detail).
+        n_marks, n_units_with_marks = scan_detached_marks(manifest)
         marks = ", ".join(
             f"{key}x{count}" for key, count in sorted(histogram.items())
         )
@@ -1197,12 +1299,21 @@ def _visual_order_advisory(manifest: dict):
             f"RTL letter. In logical order that cannot happen, so this source is "
             f"probably in VISUAL order (a PDF-to-EPUB conversion artifact). "
             f"leading marks: {marks}. sample (escaped -- never judge RTL text by "
-            f"looking at it): {evidence}. This is a SCREEN, not a verdict: it "
-            f"detects visual-order handling, not word reordering, and it neither "
-            f"passes nor fails this gate. Adjudicate the sampled units against "
-            f"the source before translating, and if positive, record the "
-            f"condition in style_bible.md's E-traps section (see SKILL.md, "
-            f"'Visual-order source')."
+            f"looking at it): {evidence}. "
+            f"THE SAMPLE ABOVE IS THE PUNCTUATION SCREEN'S OWN, AND NOTHING HERE "
+            f"SAMPLES THE SECOND CLASS: {n_marks} combining mark(s) in "
+            f"{n_units_with_marks} of {n_rtl_units} RTL-bearing text unit(s) have "
+            f"NO letter behind them (walking back across a whole vowel cluster) -- "
+            f"a vowel or dagesh detached from its base letter. A sampled token "
+            f"may happen to carry one, and such an overlap adjudicates none of "
+            f"the figure. This is a "
+            f"SCREEN, not a verdict: it detects "
+            f"visual-order handling, not word reordering, and it neither passes "
+            f"nor fails this gate. Adjudicate the sampled units AND the "
+            f"detached-mark class against the source before translating -- "
+            f"adjudicating the sample settles the punctuation class only. If "
+            f"positive, record the condition in style_bible.md's E-traps section "
+            f"(see SKILL.md, 'Visual-order source')."
         )
         results.append((VISUAL_ORDER_SCAN_NAME, detail))
     return results

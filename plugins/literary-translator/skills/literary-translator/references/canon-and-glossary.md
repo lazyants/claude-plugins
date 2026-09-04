@@ -462,6 +462,23 @@ invisible to every gate — `final_audit.py`'s cross-segment glossary-diff keys 
 `canon.entries` and each draft's own `names[]`, both proper-name channels — and
 a single volume shipped one court office under two target words.
 
+**On a source that raises the visual-order advisory** (see
+`references/false-green-gate.md`'s "The visual-order advisory" section),
+prefer a **single-word pin** over a multi-word one, and pick a word
+distinctive enough to stand alone. A multi-word pin is systematically blind
+to exactly the occurrences the corruption damaged: on both measured volumes,
+every occurrence a compound scan missed (21/295 and 23/235) was the compound
+with a terminal punctuation mark displaced into the gap between its two
+words.
+
+**A coverage figure quoted for a `validation.terms` pin measures the
+PATTERN, not the book**, until its misses have been read — one volume first
+reported 81% coverage because the denominator was its own matcher's count
+rather than the term's true occurrence count in the source. This is the same
+trap SKILL.md's W6 guidance states for a class sweep ("Enumerate the
+population from the SOURCE, not from your own matcher"), applying here to
+`validation.terms` authoring rather than a consistency-pass finding.
+
 ### `canon-batch.schema.json` — one fragment's real content contract
 
 ```

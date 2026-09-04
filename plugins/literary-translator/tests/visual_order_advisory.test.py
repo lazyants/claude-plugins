@@ -1,5 +1,5 @@
 """Tests for the visual-order advisory scan in ``scripts/validate_extraction.py``
-(issue #489).
+(issues #489, #845).
 
 A source EPUB converted from a PDF can carry RTL text in VISUAL order. The
 extraction is byte-faithful and every deterministic gate passes it, because none
@@ -21,7 +21,11 @@ ship green:
     so the payload is asserted ASCII-only as a whole;
   * an embedded verse being missed. Its text is lifted OUT of its carrier block
     and replaced by a placeholder, so a blocks-only scan cannot see it;
-  * a standalone verse being counted TWICE (it is already a blocks[] entry).
+  * a standalone verse being counted TWICE (it is already a blocks[] entry);
+  * the detached-mark figure (#845) going missing from a fired advisory, or the
+    firing condition widening to fire on it -- the advisory still fires on the
+    punctuation signature ALONE, and a book carrying only detached marks stays
+    silent.
 
 **Every RTL string here is built from ``\\uXXXX`` escapes on purpose.** Pasting
 the literal characters is how an invisible control or a reordered anchor silently
@@ -30,6 +34,7 @@ say what it contains is worthless.
 """
 
 import importlib.util
+import time
 from pathlib import Path
 
 
@@ -255,6 +260,208 @@ def test_a_non_ascii_block_id_cannot_reach_the_payload_raw():
     (_, detail), = ve.run_advisory_scans(m)
     assert detail.isascii(), "a non-ASCII block id reached the advisory payload raw"
     assert "\\u05E9" in detail, "the label should appear, escaped rather than dropped"
+
+
+# ---------------------------------------------------------------------------
+# Detached combining marks (#845): a SECOND class the punctuation screen
+# above cannot reach -- a vowel or dagesh with no letter behind it.
+# ---------------------------------------------------------------------------
+
+
+SHEVA = "\u05B0"    # HEBREW POINT SHEVA (Mn) -- a mark with nothing else needed to detach it
+PATAH = "\u05B7"    # HEBREW POINT PATAH (Mn)
+DAGESH = "\u05BC"   # HEBREW POINT DAGESH OR MAPIQ (Mn)
+SEGOL = "\u05B6"    # HEBREW POINT SEGOL (Mn)
+QAMATS = "\u05B8"   # HEBREW POINT QAMATS (Mn)
+HE = "\u05D4"       # HEBREW LETTER HE
+AYIN = "\u05E2"     # HEBREW LETTER AYIN
+DALET = "\u05D3"    # HEBREW LETTER DALET
+SHIN_LETTER = "\u05E9"  # HEBREW LETTER SHIN, bare (SHALOM above already opens with shin+lamed+vav+mem)
+YOD = "\u05D9"      # HEBREW LETTER YOD
+ALEF = "\u05D0"     # HEBREW LETTER ALEF
+RESH = "\u05E8"     # HEBREW LETTER RESH
+
+
+def test_mark_after_space_hits():
+    # A mark that opens the SECOND token of the text: nothing but whitespace
+    # is behind it, which is detached under any reading.
+    token = f"{SHEVA}{TOV}"
+    assert ve._detached_mark_hits(f"{SHALOM} {token}") == [(token, 1)]
+
+
+def test_mark_at_token_index_zero_hits():
+    # The same case with no preceding token at all -- token[0] is the very
+    # first character of the text.
+    token = f"{SHEVA}{TOV}"
+    assert ve._detached_mark_hits(token) == [(token, 1)]
+
+
+def test_mark_after_terminal_punctuation_hits():
+    token = f".{SHEVA}{TOV}"
+    assert ve._detached_mark_hits(token) == [(token, 1)]
+
+
+def test_pointed_cluster_second_and_third_marks_both_attach_to_base():
+    # he + patah + dagesh (transliterated "haC" with a dot, cited in
+    # _leading_terminal_punct_hits's own comment above) is a LEGITIMATE
+    # pointed letter, not two detached marks.
+    # Asserted incrementally: the second character (patah) attaching to the
+    # base is the easy case a naive one-char-back lookback also gets right;
+    # the third character (dagesh) is the case that predicate gets WRONG,
+    # because ITS immediate predecessor is the patah, not the letter -- only
+    # walking back across the whole mark run finds the base behind it too.
+    assert ve._detached_mark_hits(HE + PATAH) == []
+    assert ve._detached_mark_hits(HE + PATAH + DAGESH) == []
+
+
+def test_a_non_letter_RESETS_the_base_after_a_letter_earlier_in_the_token():
+    # The flag the pass carries is "the last significant character was a
+    # LETTER", not "a letter appeared somewhere in this token". An
+    # implementation that never resets it -- the plausible wrong one -- reads
+    # the alef at the front and then attaches every later mark to it, however
+    # much punctuation stands in between, and silently under-counts exactly
+    # the visual-order shape this class exists to find: a mark stranded on the
+    # far side of a displaced stop.
+    token = ALEF + "." + SHEVA + TOV
+    assert ve._detached_mark_hits(token) == [(token, 1)]
+
+
+def test_the_documented_keycap_false_positive_is_pinned_at_two():
+    # NOT a wish: _detached_mark_hits's docstring, false-green-gate.md's
+    # stated-limitations list and this release's CHANGELOG all tell an
+    # operator that a keycap sequence adds 2 to the figure. Documented
+    # behaviour with no test is documentation that can go false in silence --
+    # and the fix here would be to change the docs, never to special-case
+    # UTS #51 in a predicate whose target corpus contains no emoji at all.
+    keycap = "1\uFE0F\u20E3"  # DIGIT ONE + VS16 (Mn) + COMBINING KEYCAP (Me)
+    assert ve._detached_mark_hits(keycap) == [(keycap, 2)]
+
+
+def test_letter_rlm_mark_yields_zero():
+    # RLM (Cf) between a letter and its mark is exactly what a bidi-aware
+    # converter emits there -- transparent, not a base-letter reset.
+    assert ve._detached_mark_hits(HE + RLM + PATAH) == []
+
+
+def test_unpointed_rtl_unit_yields_zero_marks():
+    m = _manifest_with(blocks={"PARA:seg01:0001": {"plain_text": f"{SHALOM} {TOV}"}})
+    assert ve.scan_detached_marks(m) == (0, 0)
+
+
+def test_latin_unit_is_never_scanned_for_marks():
+    # A combining mark with no base is detached by the predicate's OWN logic
+    # (asserted directly, first) -- but scan_detached_marks only ever sees
+    # RTL-bearing units, via the shared _rtl_text_units filter, so a Latin
+    # unit carrying the identical construction is never handed to it at all.
+    detached_latin_token = "\u0301hello"  # combining acute at token start
+    assert ve._detached_mark_hits(detached_latin_token) == [(detached_latin_token, 1)]
+    m = _manifest_with(blocks={"PARA:seg01:0001": {"plain_text": detached_latin_token}})
+    assert ve.scan_detached_marks(m) == (0, 0)
+
+
+def test_two_marks_in_one_unit_counts_two_marks_one_unit():
+    m = _manifest_with(
+        blocks={"PARA:seg01:0001": {"plain_text": f"{SHEVA}{TOV} {SHEVA}{SHALOM}"}}
+    )
+    assert ve.scan_detached_marks(m) == (2, 1)
+
+
+def test_embedded_and_standalone_verses_are_in_the_detached_population():
+    # scan_detached_marks must walk the SAME population as scan_visual_order,
+    # not blocks[] alone. An embedded verse's text is lifted OUT of its
+    # carrier block and replaced by a placeholder, so a blocks-only numerator
+    # would drop it while the printed denominator -- n_rtl_units, which comes
+    # from scan_visual_order -- still counts it: a figure wrong in the
+    # direction that under-reports the class this release exists to surface.
+    # A standalone verse (mount == "block") is already a blocks[] entry and
+    # must not be counted twice.
+    m = _manifest_with(
+        blocks={
+            "PARA:seg01:0001": {"plain_text": f"{SHEVA}{TOV}"},
+            "PARA:seg01:0002": {"plain_text": f"{SHEVA}{SHALOM}"},
+        },
+        verse_store=[
+            {"vid": "v1", "mount": "embedded", "plain_text": f"{SHEVA}{TOV}"},
+            {"vid": "v2", "mount": "block", "plain_text": f"{SHEVA}{SHALOM}"},
+        ],
+    )
+    # 3 marks over 3 units: two blocks plus the embedded verse. The standalone
+    # verse contributes nothing of its own -- it IS PARA:seg01:0002 already.
+    assert ve.scan_detached_marks(m) == (3, 3)
+    _, _, n_rtl_units, _, _ = ve.scan_visual_order(m)
+    assert n_rtl_units == 3, "numerator and denominator must share one population"
+
+
+def test_detached_marks_alone_do_not_fire_the_advisory():
+    # Pins the accepted non-goal (frozen in the plan): the firing condition
+    # stays `if n_hits:` only. A book with detached marks and zero
+    # punctuation hits stays silent. An implementation that fires on
+    # `n_hits or n_marks` passes every other test in this file while
+    # breaking this one.
+    m = _manifest_with(
+        blocks={"PARA:seg01:0001": {"plain_text": f"{SHEVA}{TOV} {SHALOM}"}}
+    )
+    n_hits, _, _, _, _ = ve.scan_visual_order(m)
+    n_marks, _ = ve.scan_detached_marks(m)
+    assert n_hits == 0
+    assert n_marks > 0, "fixture must actually carry a detached mark"
+    assert ve.run_advisory_scans(m) == []
+
+
+def test_fired_advisory_prints_detached_figure_including_zero():
+    m = _manifest_with(blocks={"PARA:seg01:0001": {"plain_text": f".{SHALOM} ,{TOV}"}})
+    assert ve.scan_detached_marks(m) == (0, 0), "fixture must carry zero detached marks"
+    (_, detail), = ve.run_advisory_scans(m)
+    assert "0 combining mark(s) in 0 of" in detail, (
+        "the detached figure must print even when it is zero -- an omitted "
+        "line reads as 'no such class'"
+    )
+
+
+def test_fired_advisory_prints_nonzero_detached_figure():
+    m = _manifest_with(
+        blocks={"PARA:seg01:0001": {"plain_text": f".{SHALOM} {SHEVA}{TOV}"}}
+    )
+    n_marks, n_units_with_marks = ve.scan_detached_marks(m)
+    assert n_marks == 1
+    (_, detail), = ve.run_advisory_scans(m)
+    assert f"{n_marks} combining mark(s) in {n_units_with_marks} of" in detail
+
+
+def test_advisory_payload_stays_ascii_with_detached_text():
+    m = _manifest_with(
+        blocks={"PARA:seg01:0001": {"plain_text": f"{SOF_PASUQ}{RLM}{TOV} {SHEVA}{SHALOM}"}}
+    )
+    (_, detail), = ve.run_advisory_scans(m)
+    assert detail.isascii()
+    assert "NOTHING HERE SAMPLES THE SECOND CLASS" in detail
+    assert "adjudicating the sample settles the punctuation class only" in detail
+
+
+def test_long_mark_run_scans_in_linear_time():
+    # Guards the O(n) single pass against a regression to the O(k^2) backward
+    # walk it replaced -- measured 11.5s at 20 000 marks for the walk against
+    # 0.0009s for this pass. A wall-clock bound is the only assertion that
+    # can tell the two implementations apart; a correctness assertion alone
+    # passes either.
+    token = SHEVA * 20000
+    started = time.perf_counter()
+    hits = ve._detached_mark_hits(token)
+    elapsed = time.perf_counter() - started
+    assert hits == [(token, 20000)]
+    assert elapsed < 1.0, f"took {elapsed:.3f}s -- looks quadratic, not linear"
+
+
+def test_issue_worked_case_segol_floated_to_block_start_is_a_hit():
+    # The issue's own worked example: the segol that belongs to the shin
+    # (forming the conjunction "she-") has been floated by the converter to
+    # the START of the block, ahead of the first word entirely -- nothing
+    # precedes it but the top of the block, which is detached under any
+    # reading.
+    ad = AYIN + PATAH + DALET                       # transliterated "ad" (until)
+    yair = YOD + QAMATS + ALEF + YOD + RESH          # transliterated "yair", a legitimately pointed cluster
+    block_text = f"{SEGOL}{ad} {SHIN_LETTER} {yair}"
+    assert ve._detached_mark_hits(block_text) == [(f"{SEGOL}{ad}", 1)]
 
 
 # ---------------------------------------------------------------------------

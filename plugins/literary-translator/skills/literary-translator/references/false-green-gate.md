@@ -381,11 +381,37 @@ order cannot produce that, because a stop or comma is stored AFTER the word it
 ends. It therefore detects visual-order *handling*, **not** word *reordering*,
 even though reordering is what actually tears tokens.
 
-Three false-negative classes, stated rather than implied away:
+The same WARN also counts a second, independent class: a combining mark
+(Unicode category `M*`) with no LETTER behind it, walking back across any
+preceding combining marks and bidi format controls — a vowel or dagesh
+detached from its base letter. This is a COUNT ONLY. It prints no sample of
+its own; the WARN's single printed sample belongs to the punctuation screen
+above. The two populations are not disjoint — a punctuation-led token can
+carry a detached mark, and on a mangled source many do — but an overlap is
+incidental, never selected: reading the sample adjudicates the punctuation
+class and no part of the detached figure.
+
+False-negative classes, stated rather than implied away:
 
 - an **unpunctuated** reversed run, which carries no signature at all;
 - word **reordering** generally, for the same reason;
-- any mangling whose punctuation is **not adjacent** to an RTL letter.
+- any mangling whose punctuation is **not adjacent** to an RTL letter;
+- the advisory still FIRES on the punctuation signature alone, so a book
+  carrying detached marks and zero punctuation hits stays silent — the
+  population for the detached-mark case on its own is unmeasured, which is
+  why the firing condition did not move;
+- a mark displaced onto a WRONG base letter is invisible to BOTH predicates,
+  since it IS adjacent to a letter — measured on two volumes: 1538 such marks
+  over 1256 lines, and 9262 over 4186 lines, 71.5% of that book.
+
+One false-POSITIVE class of the detached-mark count, stated for the same
+reason: its base must be a LETTER, so a mark carried by a digit or a symbol
+counts as detached. The real instance is a Unicode keycap sequence (`1` +
+U+FE0F + U+20E3), which adds 2. Exempting it would mean teaching this
+predicate UTS #51 for a class whose population in a PDF-extracted RTL book is
+zero, and widening the base to numbers and symbols would lose real hits — a
+vowel displaced onto a digit IS the corruption being counted. So it is named
+here rather than coded around.
 
 **Scan population.** `blocks[*].plain_text` **plus** `verse.store[*].plain_text`
 where `mount == "embedded"`. An embedded verse's text is lifted OUT of its
