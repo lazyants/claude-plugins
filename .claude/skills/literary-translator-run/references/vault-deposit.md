@@ -1,6 +1,10 @@
 # Depositing a converged translation into the genealogy-skills vault
 
-Only when saving a run's output into the genealogy-skills Obsidian book-vault. Once W5 is driven by hand, the plugin's W9 assemble is moot — assemble the vault notes yourself from the verified artifacts.
+Only when saving a run's output into the genealogy-skills Obsidian book-vault.
+
+**Driving W5 by hand does NOT rule out W9 assemble.** `assert_project_complete()` gates on the ledger — every `manifest.segments[]` unit converged — and takes no dispatch-provenance input at all, so it cannot tell a hand-driven W5 from a driver-dispatched one. All four SSK volumes shipped to the vault through W9 + the `render_obsidian` adapter, `vol2` among them, whose W5 was hand-driven: `vol2/run/out/.literary-translator-vault.json` carries the adapter's own `{"managed_by": "literary-translator", "target": "obsidian"}` marker.
+
+Hand-assemble from the verified artifacts only when the project is genuinely NOT complete — a partial sample, or a book with unconverged units — since that is the one thing the gate does refuse. Everything below applies to a hand-assembled note.
 
 ## Placement
 
