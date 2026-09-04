@@ -1146,6 +1146,23 @@ def run_check(
         raise CanonHarmonisationRefusal(schema_failure)
 
     _check_anchor(doc, canon_sha256, path)
+    # The CORPUS's own canon anchor, against the same live canon. Without it
+    # the two anchors are checked separately and never against each other, so
+    # an ordinary concurrent --correct between step 1 and step 4 goes
+    # undetected: the corpus observations come from the OLD canon, the pass
+    # stamps the NEW digest into its artifact, _check_anchor is satisfied
+    # because the artifact matches disk, the corpus digest is satisfied
+    # because the file is untouched -- and a proposal validated against a
+    # canon that no longer exists is published as validated. Not a hostile
+    # case; a second terminal running canon_validate.py --correct is enough.
+    corpus_canon_sha256 = corpus["doc"]["canon_sha256"]
+    if corpus_canon_sha256 != canon_sha256:
+        raise CanonHarmonisationRefusal(
+            f"the corpus was gathered against canon.json at {corpus_canon_sha256}, "
+            f"but canon.json now hashes to {canon_sha256} -- it changed after this "
+            "pass was dispatched, so its observations no longer describe the frozen "
+            "canon. Re-run --build-corpus and dispatch again."
+        )
     if doc["corpus_sha256"] != expect_corpus_sha256:
         raise CanonHarmonisationRefusal(
             f"{path} claims corpus_sha256 {doc['corpus_sha256']}, but the session "

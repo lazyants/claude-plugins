@@ -2348,16 +2348,25 @@ below reads from — steps 2-5 run only when that decision says dispatch:
    cannot reach), the corpus file's current bytes, and the attempt
    artifact's own `corpus_sha256` field — all three must agree.
 
-   Compare the `canon_sha256` in the check's own stdout summary against
-   the digest computed in step 1, and treat a mismatch exactly like a
-   failed check. `--check` can only confirm that the artifact's anchor
-   matches canon.json AS IT IS ON DISK NOW; the dispatched pass holds
-   write access to the same `durable_root`, so a pass that edited
-   canon.json and re-stamped the new digest would satisfy the script and
-   only this comparison catches it. This is the same shape
-   `--expect-corpus-sha256` now applies to the corpus, moved inside the
-   checker because a session-side comparison made after the fact happens
-   too late to prevent publication.
+   `--check` binds all THREE canon views before it publishes anything: the
+   artifact's `canon_sha256` against canon.json on disk, the CORPUS file's
+   own `canon_sha256` against the same, and the corpus bytes against
+   `--expect-corpus-sha256`. The middle one is what catches an ordinary
+   `canon_validate.py --correct` landing between step 1 and here — the
+   observations would be from the old canon while the artifact anchors to
+   the new one, and both other checks would pass. A session-side
+   comparison cannot do that job: it happens after `--approve-to` has
+   already published.
+
+   What remains outside the checker is the adversarial case, and it is
+   OUT OF SCOPE by the same reasoning the rest of this step accepts: the
+   dispatched pass holds write access to this `durable_root`, so a pass
+   that edited canon.json and re-stamped every digest could also replace
+   `canon_harmonisation.py` itself. Step 0a stages every script here, so
+   that is a property of the install layout, not of this step, and no
+   digest argument closes it. The sidecar is advisory in any case —
+   nothing downstream reads it except `--report`, which re-reads
+   canon.json fresh.
 5. **Only after step 4 exits 0**, render the report:
 
    ```

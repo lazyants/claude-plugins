@@ -1987,3 +1987,53 @@ def test_report_bidi_override_in_canon_or_note_cannot_reorder_the_operators_line
         "escaping the override must stay lossless: \\uXXXX inside a JSON string "
         "parses back to the identical form"
     )
+
+
+def test_a_canon_correction_between_build_and_check_is_refused(tmp_path):
+    """#832 review: the corpus file carries its OWN canon_sha256, and nothing
+    compared it to anything. The artifact's anchor is checked against live
+    canon and the corpus's digest against what the session dispatched, but
+    the two anchors were never checked against EACH OTHER -- so an ordinary
+    concurrent `canon_validate.py --correct` between step 1 and step 4 went
+    undetected: the observations come from the old canon, the pass stamps the
+    new digest into its artifact, both existing checks pass, and a proposal
+    validated against a canon that no longer exists is published as
+    validated.
+
+    Not a hostile case. A second terminal correcting one name is enough,
+    which is exactly the situation the report's freshness wording assumes
+    cannot reach acceptance."""
+    root = make_durable_root(tmp_path / "durable_root")
+    entries = [canon_entry("Alpha", "Target A"), canon_entry("Beta", "Target B")]
+    raw = write_canon(root, entries)
+    csha_at_build = canon_sha256_of(raw)
+    corpus_path, corpus_sha = write_corpus(
+        root, corpus_doc(csha_at_build, observations_for(entries)))
+
+    # canon.json moves AFTER the corpus was gathered -- a third entry, as an
+    # ordinary merge or correction would add.
+    moved = entries + [canon_entry("Gamma", "Target C")]
+    raw_after = write_canon(root, moved)
+    csha_now = canon_sha256_of(raw_after)
+    assert csha_now != csha_at_build, "fixture sanity: canon.json must have moved"
+
+    # The pass anchors its artifact to the CURRENT canon, so the artifact's
+    # own anchor is satisfied; the corpus file is untouched, so its digest is
+    # satisfied too. Only comparing the two anchors catches this.
+    doc = harmonisation_doc(csha_now, [proposal("divergent_spelling", [
+        member("Alpha", "Target A"),
+        member("Beta", "Target B"),
+    ])], corpus_sha256=corpus_sha)
+
+    dest = root / "canon_harmonisation.json"
+    _attempt, proc = check_attempt(
+        root, doc, corpus_path, corpus_sha, "--approve-to", str(dest), stamp=False)
+    assert proc.returncode == 1, proc.stdout
+    assert_no_stdout(proc)
+    assert not dest.exists(), (
+        "a proposal checked against a stale corpus must not reach the sidecar"
+    )
+    assert csha_at_build in proc.stderr and csha_now in proc.stderr, (
+        f"the refusal must name both digests so the operator can see what "
+        f"moved:\n{proc.stderr}"
+    )
