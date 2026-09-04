@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.84.1 — 2026-09-04
+
+**Every snapshot failure in the glossary dispatch driver logged an empty reason (#851).**
+`glossary_dispatch_driver.py` logged `err[-400:]` when a template command exited non-zero, but the
+scripts it runs report a VERDICT only on stdout, as one JSON line, and never on stderr. Stderr
+carries only what is not a verdict — `canon_validate.py`'s missing-`jsonschema` guard, which fires
+at import time before argparse; argparse misuse; an uncaught traceback. So for every refusal the
+operator actually needed to read, stderr was empty and the reason sat unread on stdout, and the
+failure reached them as a bare colon with nothing after it, on every attempt:
+
+```
+batch 4: could not snapshot attempt 0:
+batch 4: could not snapshot attempt 1:
+batch 4: could not snapshot attempt 2:
+```
+
+The batch then ended as `citation-review-exhausted` with `lastRejection: "approve-failed"`, which
+reads as a citation problem when the payload had in fact validated cleanly. Diagnosing it meant
+reading the driver source and re-running `canon_validate.py` by hand.
+
+Three call sites now read the stream that actually carries the reason — approve, citation fetch,
+and the approval-record write, the last of which put the same empty string into the state record's
+`detail`. `err` still comes first, because in those non-verdict cases it IS the stream carrying the
+message: `run_template_cmd` synthesises it for a timeout and an OSError, and argparse, the import
+guard and any traceback write it. Stdout is a fallback and never a replacement.
+
+The two streams are truncated at opposite ends, because their shapes are opposite. A traceback puts
+its message LAST; the JSON line puts `"error"` FIRST and a redundant `"offending"` array last, and a
+multi-row schema failure runs to thousands of bytes. Tail-slicing stdout would therefore have
+dropped the `error` field entirely and logged filler — non-empty, still undiagnosable.
+
+`mergeBatchesCmd` and `verifyMergedCmd` already read `(err or out or "")` and are unchanged. All
+three fixed sites are pinned by outcome rather than by shape — the two logged ones through the
+driver's real prepare path, and the persisted one through `record_verdicts`, whose nonce, re-hashed
+snapshot digest and sentinel read all have to pass before the approval record is attempted. Each
+was watched failing against the pre-fix expression. Nothing about `canon_validate.py`'s or
+`fetch_citation.py`'s output contract changed.
+
 ## 1.84.0 — 2026-09-04
 
 **`validation.terms` silently double-counted when one declared `source_form` nested inside

@@ -490,9 +490,28 @@ def _name_discovery_passes_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.84.0 (#844 -- `validation.terms` silently double-counted when
-    # one declared `source_form` nested inside another), per the maintenance
-    # contract above.
+    # ROTATED TO 1.84.1 (#851 -- the glossary driver logged `err` for a command
+    # whose reason only ever reaches stdout), per the maintenance contract above.
+    #
+    # ZERO rows, and for the reason this file's own economics section prefers:
+    # the entry was WORDED to keep its claims re-derivable-free rather than
+    # quoting a count and then buying a derivation for it. The one measurement
+    # the work produced -- the byte size of a multi-row `canon_validate.py`
+    # refusal payload, which is what makes tail-slicing stdout lose the `error`
+    # field -- would have been re-derivable only by shelling out to the shipped
+    # script with a pinned fragment, machinery heavier than every row this file
+    # has ever carried. The entry says "runs to thousands of bytes" instead, and
+    # the fact it is standing on is pinned where it belongs: as an executable
+    # assertion in `glossary_dispatch_driver.test.py`, whose truncation test
+    # builds an over-2 000-byte payload and fails if the slice is taken from the
+    # wrong end. The remaining numerals are identifiers or code literals: the
+    # version numbers, the release date, the issue number (#851), the batch and
+    # attempt indices in the quoted log block, and the `400` of `err[-400:]`,
+    # which is a literal in the source rather than a measurement.
+    #
+    # The 1.84.0 rotation this replaces, kept as its own record (#844 --
+    # `validation.terms` silently double-counted when one declared
+    # `source_form` nested inside another), per the maintenance contract above.
     #
     # ZERO rows, and the reason is the one most rotations before it give: every
     # measurement the entry quotes was taken on DELIVERED BOOKS IN ANOTHER
@@ -542,7 +561,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.84.0"
+FIGURES_VERSION = "1.84.1"
 
 
 def _newest_entry():
