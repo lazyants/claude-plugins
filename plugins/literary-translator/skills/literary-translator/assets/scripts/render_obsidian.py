@@ -1565,13 +1565,9 @@ def _canon_composition(spans, target_to_entity, entries):
     never makes and a silent index shortfall (no person note, coverage counts
     still balanced, exit 0).
 
-    A canon entry with NO category composes with any tag, and that is
-    deliberate rather than lax: the shipped glossary pass never asks for
-    `category`, so on a typical project the field is empty everywhere, and
-    requiring a positive match would stop composition entirely -- every marked
-    name would mint a duplicate beside its own canon note, which is exactly
-    the "two indexes competing" this feature exists to avoid. Canon speaks
-    only where it has actually spoken."""
+    The compatibility test itself, and the reason a blank category composes
+    with any tag, live in `_category_compatible` -- restating them here would
+    be the second declaration site that helper exists to remove."""
     composed = {}
     for span in spans.values():
         tag, label = _entity_markup_identity(span)
@@ -1580,11 +1576,162 @@ def _canon_composition(spans, target_to_entity, entries):
         resolved = target_to_entity.get(label)
         if resolved is None:
             continue
-        category = (entries.get(resolved[1]) or {}).get("category")
-        if isinstance(category, str) and category.strip() and category.strip() != tag:
+        if not _category_compatible((entries.get(resolved[1]) or {}).get("category"), tag):
             continue
         composed[(tag, label)] = resolved
     return composed
+
+
+def _category_compatible(category, tag):
+    """Does a canon entry's `category` permit it to answer for a span marked
+    `tag`? The ONE place this test lives, shared by `_canon_composition`
+    (which composes only on a compatible entry) and
+    `_canon_collision_conflicts` (which counts only compatible owners), so
+    the two can never disagree about which canon entries a marked identity
+    is even talking about.
+
+    Blank, absent and non-string categories are compatible with ANY tag, and
+    that is deliberate rather than lax -- the shipped glossary pass never
+    asks for `category`, so on a typical project the field is empty
+    everywhere and a positive-match rule would make canon mute. Canon speaks
+    only where it has actually spoken."""
+    declared = category.strip() if isinstance(category, str) else ""
+    return not declared or declared == tag
+
+
+def _canon_collision_conflicts(spans, entries, collision_delink, primary_by_source_form=None):
+    """Rows for every marked identity whose label names a canon target that
+    collision de-linking DROPS while >=2 of that target's owners could have
+    answered for the span's own tag -- the shape that silently merges canon
+    entries into one minted note (#837).
+
+    The mechanism it closes: `build_entity_index` removes a >=2-owner target
+    from `target_to_entity` so no reader is sent to the wrong entity's note
+    (#207/#588). `_canon_composition` then reads that already-reduced map,
+    finds nothing, and concludes canon does not own the name -- so
+    `_markup_note_records` mints ONE note for the shared label and every
+    marked occurrence links to it. The de-link is not overridden; it is
+    walked around, and the result asserts the very identity de-linking
+    refused to assert. Measured on a delivered book: 11 labels, 894 spans,
+    one of them merging five canon owners.
+
+    Two things make the test the right width, both learned from review:
+
+    - It keys on `_link_decision`'s WINNER being None, never on its
+      `delinked` cost flag. A collision whose owners are ALL
+      `sense_translated` returns `(None, False)`, so the cost flag says
+      nothing was lost -- yet `build_entity_index` still drops the target
+      and markup still mints over it. Keying on the cost would leave that
+      merge shipping.
+    - It counts only owners `_category_compatible` with the span's tag. Two
+      canon PLACE owners of `Jordan` do not make `<person>Jordan</person>` a
+      merge: the tag is part of the identity, that person note is correct,
+      and halting it would both break a working book and push the operator
+      toward a link group asserting unrelated entities are one referent.
+      With fewer than two compatible owners nothing can be merged, because
+      minted records stay keyed by `(tag, label)`.
+
+    Returns `[{"label", "tag", "owners", "compatible", "spans"}, ...]` --
+    `owners` every owner of the dropped target, `compatible` the subset that
+    could answer for this tag and therefore triggered the row -- ordered by span
+    count descending then label, so the caller's message leads with the
+    costliest conflict. Empty (the normal case) when no marked label meets
+    a dropped multi-owner target -- including on a book whose collisions are
+    all resolved by `canon_link_groups.json`, which is what a project that
+    has done this adjudication looks like."""
+    if not collision_delink or not spans:
+        return []
+    owners_by_target = _owners_by_target(entries)
+    span_counts = Counter(
+        _entity_markup_identity(span) for span in spans.values()
+    )
+    rows = []
+    for (tag, label), count in span_counts.items():
+        owners = owners_by_target.get(label)
+        if not owners or len(owners) < 2:
+            continue
+        winner, _delinked = _link_decision(owners, collision_delink, primary_by_source_form)
+        if winner is not None:
+            continue  # a link group resolved it -- composes onto the primary, mints nothing
+        compatible = sorted(
+            source_form
+            for source_form, _basis in owners
+            if _category_compatible((entries.get(source_form) or {}).get("category"), tag)
+        )
+        if len(compatible) < 2:
+            continue
+        # `owners` is the FULL list, not the compatible subset that triggered
+        # the row. The message tells the operator a link group must contain
+        # EVERY owner, so showing only some of them describes a group that
+        # cannot work: `_link_decision` reduces over all of them, and one
+        # ungrouped outsider de-links the target again. The subset decides
+        # WHETHER to refuse; the full list is what the refusal has to name.
+        rows.append({
+            "label": label,
+            "tag": tag,
+            "owners": sorted(source_form for source_form, _basis in owners),
+            "compatible": compatible,
+            "spans": count,
+        })
+    rows.sort(key=lambda row: (-row["spans"], row["label"]))
+    return rows
+
+
+def _entity_markup_canon_collision_preflight(
+    spans, entries, collision_delink, primary_by_source_form=None
+):
+    """Refuse the render when `_canon_collision_conflicts` finds anything.
+
+    Called BEFORE `_clean_vault_content`, for the reason `_validate_link_groups`
+    and `_entity_markup_preflight` are: the clean is irreversible, and a
+    refusal discovered after it would leave the operator with neither the old
+    vault nor a new one. Runs AFTER the structural preflight, because it reads
+    `tag`/`ref`/`payload` off span records that only that preflight has proved
+    well-typed.
+
+    It HALTS rather than warning, unlike `_warn_delink_cost` next door, and the
+    difference is not stylistic: `_apply_entity_markup` has no bare-text branch,
+    so every span MUST emit a link. A warning here would print a line and then
+    ship the merged note anyway at exit 0 -- the same "a name linked to somebody
+    else, exit 0, counts balanced" outcome `_entity_markup_preflight` already
+    refuses for a stale span table. There is no third option in which the note
+    is not minted and the render still succeeds.
+
+    The remedy is stated in full because a half-stated one cannot be followed: a
+    `canon_link_groups.json` group re-links a target only when EVERY owner is a
+    member and NONE is `sense_translated`, so for a collision involving a
+    sense-translated owner the only escape is a distinct `ref` value -- which
+    makes the span a different identity and legitimately mints its own note.
+    This function never decides which it should be; that identity call is the
+    operator's, and recording it in `canon_link_groups.json` is what makes it
+    reviewable."""
+    conflicts = _canon_collision_conflicts(
+        spans, entries, collision_delink, primary_by_source_form
+    )
+    if not conflicts:
+        return
+    total_spans = sum(row["spans"] for row in conflicts)
+    detail = "; ".join(
+        f"{row['label']!r} (<{row['tag']}>, {row['spans']} span(s), owners: "
+        f"{', '.join(repr(owner) for owner in row['owners'])})"
+        for row in conflicts[:5]
+    )
+    more = (
+        ""
+        if len(conflicts) <= 5
+        else f" (+{len(conflicts) - 5} more, not listed -- fix these and re-run to see them)"
+    )
+    raise RenderError(
+        "entity_markup_canon_collision",
+        f"{len(conflicts)} marked entity label(s) covering {total_spans} span(s) name a "
+        "canon target that collision de-linking removed for having two or more owners, "
+        "so this render would mint ONE note for each and link every marked occurrence to "
+        f"it -- merging canon entries the de-link exists to keep apart: {detail}{more}. "
+        "Record the identity call instead: add a canon_link_groups.json group (which "
+        "re-links a target only when EVERY owner is a member and none is "
+        "sense_translated), or give the spans a distinct ref attribute so they mint a "
+        "note under their own identity. See references/output-target-adapters/obsidian.md.",
+    )
 
 
 def _markup_note_records(spans, canon_composition):
@@ -2964,6 +3111,17 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # not just the strings the pre-pass rewrites.
     if entity_markup_active:
         _entity_markup_preflight(nodestream, entity_spans, canon)
+        # #837, and here rather than beside `_canon_composition` for the same
+        # reason as everything else in this window: by the time composition
+        # runs, the clean has already emptied the vault this refusal is meant
+        # to preserve. It runs AFTER the structural preflight above because it
+        # reads span fields only that preflight has proved well-typed, and it
+        # is handed the SAME `collision_delink` the index and the de-linked
+        # owner list read, so the four can never disagree about whether this
+        # is a real obsidian render.
+        _entity_markup_canon_collision_preflight(
+            entity_spans, entries, collision_delink, primary_by_source_form
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     _clean_vault_content(out_dir)  # marker-gated; raises RenderError if unmanaged -- review round 1+2

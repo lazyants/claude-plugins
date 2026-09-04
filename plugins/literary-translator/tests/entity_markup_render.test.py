@@ -1841,5 +1841,243 @@ def test_an_absent_ref_key_is_still_fine(tmp_path):
     assert entity_note_relpaths(manifest) == ["People/Ivan.md"]
 
 
+# ===========================================================================
+# 28. A canon target with >=2 owners is REMOVED from the link map (#207/#588)
+#     so no reader is sent to the wrong entity's note. Markup used to walk
+#     around that: composition read the already-reduced map, found nothing,
+#     and minted ONE note for the shared label -- asserting the very identity
+#     the de-link refused to assert (#837). Nothing exercised the two paths
+#     together, which is why it shipped.
+# ===========================================================================
+
+TWO_OWNERS = {
+    "מֹוהַרְנַ\"ת": canon_entry("מֹוהַרְנַ\"ת", "Reb Noson", category=""),
+    "מֹוהַרְנַ\"תְ": canon_entry("מֹוהַרְנַ\"תְ", "Reb Noson", category=""),
+}
+
+
+def test_a_marked_span_over_a_delinked_collision_refuses_instead_of_merging(tmp_path):
+    """The defect itself. Two canon forms share the printed name, so the
+    target is de-linked; every marked occurrence used to land on one minted
+    note standing for both entries, exit 0, counts balanced."""
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Reb Noson')} wrote, and {ent(2, 'Reb Noson')} left.")]
+    spans = {"1": span("person", "Reb Noson"), "2": span("person", "Reb Noson")}
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(tmp_path, make_nodestream(nodes, spans=spans),
+                    make_canon(TWO_OWNERS), make_profile())
+    assert excinfo.value.reason == "entity_markup_canon_collision", excinfo.value.reason
+    message = str(excinfo.value)
+    assert "'Reb Noson'" in message, message
+    assert "2 span(s)" in message, message
+    for owner in TWO_OWNERS:
+        # `repr()` INCLUDING its quote delimiters: the shorter key is a prefix of
+        # the longer one, so a bare substring test is satisfied by the longer form
+        # alone and a regression that named only one owner would stay green.
+        assert repr(owner) in message, f"{owner!r} unnamed in: {message}"
+
+
+def test_the_refusal_names_the_QUALIFIED_remedy_not_just_the_file(tmp_path):
+    """A group re-links a target only when EVERY owner is a member and none
+    is `sense_translated`. An unqualified "add a link group" sends an
+    operator to do something that cannot work for a mixed-sense collision;
+    the `ref` escape is the one that always can."""
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Reb Noson')} wrote.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(tmp_path, make_nodestream(nodes, spans={"1": span("person", "Reb Noson")}),
+                    make_canon(TWO_OWNERS), make_profile())
+    message = str(excinfo.value)
+    assert "canon_link_groups.json" in message, message
+    assert "EVERY owner is a member" in message, message
+    assert "sense_translated" in message, message
+    assert "ref attribute" in message, message
+
+
+def test_the_refusal_happens_BEFORE_the_vault_is_cleaned(tmp_path):
+    """The whole reason this lives in the pre-clean window. Left where
+    composition runs, the same refusal would fire after
+    `_clean_vault_content` had already emptied the managed vault, leaving
+    the operator with neither the old book nor a new one."""
+    out_dir = make_managed_vault(tmp_path)
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Reb Noson')} wrote.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(tmp_path, make_nodestream(nodes, spans={"1": span("person", "Reb Noson")}),
+                    make_canon(TWO_OWNERS), make_profile(), out_dir=out_dir)
+    assert excinfo.value.reason == "entity_markup_canon_collision", excinfo.value.reason
+    assert (out_dir / "SURVIVOR.md").is_file(), "the refusal must not cost the existing vault"
+
+
+def test_a_fully_grouped_collision_composes_onto_the_primary_and_mints_nothing(tmp_path):
+    """The shape of a project that has DONE the adjudication: every owner in
+    one `canon_link_groups.json` group, so `_link_decision` re-links the
+    target to the primary and there is nothing for markup to mint. This is
+    the control -- without it, "the check fires" and "the check fires on
+    everything" look identical."""
+    primary = "מֹוהַרְנַ\"ת"
+    groups = {source_form: primary for source_form in TWO_OWNERS}
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Reb Noson')} wrote.")]
+    _out_dir, manifest = render_into(
+        tmp_path,
+        make_nodestream(nodes, spans={"1": span("person", "Reb Noson")},
+                        extra={"link_groups": groups}),
+        make_canon(TWO_OWNERS), make_profile(),
+    )
+    assert manifest["entity_markup"]["notes"] == 0, "canon owns this name -- mint nothing"
+    assert manifest["entity_markup"]["links"] == 1
+
+
+def test_an_all_sense_translated_collision_still_refuses(tmp_path):
+    """`_link_decision` returns `(None, False)` when every owner is
+    `sense_translated`: the cost flag says nothing was lost, because the
+    target was never auto-linkable. But `build_entity_index` drops it just
+    the same, so markup still minted one note over two canon entries. Keying
+    this check on the COST flag rather than on the winner would have left
+    exactly this merge shipping."""
+    entries = {
+        "אֹור": canon_entry("אֹור", "the Light", category="", basis="sense_translated"),
+        "אֹורָה": canon_entry("אֹורָה", "the Light", category="", basis="sense_translated"),
+    }
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'the Light')} shone.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(tmp_path, make_nodestream(nodes, spans={"1": span("person", "the Light")}),
+                    make_canon(entries), make_profile())
+    assert excinfo.value.reason == "entity_markup_canon_collision", excinfo.value.reason
+
+
+def test_a_collision_among_owners_of_ANOTHER_category_does_not_halt(tmp_path):
+    """The tag is part of the identity. Two canon PLACE owners of "Jordan"
+    de-link the place target, but `<person>Jordan</person>` is a different
+    entity and its own note is correct -- section 19 already pins that.
+    Halting it would break a working book and push the operator toward a
+    link group asserting two unrelated entities are one referent."""
+    entries = {
+        "יַרְדֵן": canon_entry("יַרְדֵן", "Jordan", category="place"),
+        "הַיַרְדֵן": canon_entry("הַיַרְדֵן", "Jordan", category="place"),
+    }
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Jordan')} spoke.")]
+    _out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans={"1": span("person", "Jordan")}),
+        make_canon(entries), make_profile(),
+    )
+    assert "People/Jordan.md" in entity_note_relpaths(manifest), (
+        "a person marked beside two canon PLACES is not a merge"
+    )
+    assert manifest["entity_markup"]["notes"] == 1, "its own person note, minted"
+
+
+def test_one_compatible_owner_beside_an_incompatible_one_does_not_halt(tmp_path):
+    """The boundary of the rule above. With only ONE owner able to answer for
+    this tag there is nothing two-sided to merge -- no canon entries can be
+    combined into the minted note, which is the defect #837 closes.
+
+    A KNOWN RESIDUAL, pinned here rather than left to be rediscovered: the
+    sole compatible owner still has its own canon note, and the marked span
+    still mints a second one beside it, so this one name has two notes and
+    the canon note takes no inbound link. That is a competing INDEX, not a
+    merged identity, and it is byte-for-byte what shipped before this change
+    -- composing onto a target collision de-linking deliberately dropped
+    would be a change to the #588 rule this release exists to defend, and it
+    is not one to make from inside a fix for a different defect. Measured on
+    both markup volumes of the corpus that motivated #837: zero occurrences."""
+    entries = {
+        "יַרְדֵן": canon_entry("יַרְדֵן", "Jordan", category="place"),
+        "יַרְדֵנִי": canon_entry("יַרְדֵנִי", "Jordan", category="person"),
+    }
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Jordan')} spoke.")]
+    _out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans={"1": span("person", "Jordan")}),
+        make_canon(entries), make_profile(),
+    )
+    assert "People/Jordan.md" in entity_note_relpaths(manifest)
+    assert manifest["entity_markup"]["notes"] == 1
+
+
+def test_a_distinct_ref_takes_the_span_out_of_the_collision(tmp_path):
+    """The escape that always works, including for a mixed-sense collision a
+    link group can never re-link: `ref` IS the identity, so the span stops
+    naming the contested target at all."""
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Reb Noson')} wrote.")]
+    spans = {"1": span("person", "Reb Noson", ref="Reb Noson Sternhartz")}
+    _out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans=spans),
+        make_canon(TWO_OWNERS), make_profile(),
+    )
+    assert "People/Reb Noson Sternhartz.md" in entity_note_relpaths(manifest)
+    assert manifest["entity_markup"]["notes"] == 1
+
+
+def test_a_single_owner_target_is_untouched(tmp_path):
+    """Vacuity guard on the >=2 condition: one owner composes exactly as it
+    did before, so a check that halted on every canon target would be caught
+    here rather than in a real book."""
+    entries = {"מֹוהַרְנַ\"ת": canon_entry("מֹוהַרְנַ\"ת", "Reb Noson", category="")}
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Reb Noson')} wrote.")]
+    _out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans={"1": span("person", "Reb Noson")}),
+        make_canon(entries), make_profile(),
+    )
+    assert manifest["entity_markup"]["notes"] == 0, "composes onto the canon note"
+
+
+def test_an_unmarked_collision_is_still_merely_delinked(tmp_path):
+    """The check is about MARKED spans only. A book whose colliding name is
+    never marked keeps 1.74.0's behaviour exactly -- de-linked prose, a
+    WARN, and a successful render."""
+    nodes = [make_node("p1", "seg01", "Reb Noson wrote, and Reb Noson left.")]
+    _out_dir, manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans={}),
+        make_canon(TWO_OWNERS), make_profile(),
+    )
+    assert manifest["entity_markup"] == {"spans": 0, "notes": 0, "links": 0,
+                                         "brackets_escaped": 0}
+    assert manifest["delink_cost"]["unlinked_occurrences_total"] == 2
+
+
+def test_the_conflict_rows_lead_with_the_costliest_label():
+    """The message shows at most five rows, so the order is what an operator
+    acts on first."""
+    entries = dict(TWO_OWNERS)
+    entries.update({
+        "א": canon_entry("א", "Chaykel", category=""),
+        "ב": canon_entry("ב", "Chaykel", category=""),
+    })
+    rows = render_obsidian._canon_collision_conflicts(
+        {"1": span("person", "Chaykel"),
+         "2": span("person", "Reb Noson"),
+         "3": span("person", "Reb Noson"),
+         "4": span("person", "Reb Noson")},
+        entries, True, None,
+    )
+    assert [(row["label"], row["spans"]) for row in rows] == [("Reb Noson", 3), ("Chaykel", 1)]
+
+
+def test_the_message_names_EVERY_owner_not_only_the_compatible_ones(tmp_path):
+    """The refusal tells the operator a link group must contain EVERY owner.
+    Naming only the two that matched the tag would describe a group that
+    cannot work: `_link_decision` reduces over all three, and the ungrouped
+    outsider de-links the target again."""
+    entries = {
+        "א": canon_entry("א", "Chaykel", category=""),
+        "ב": canon_entry("ב", "Chaykel", category="person"),
+        "ג": canon_entry("ג", "Chaykel", category="place"),
+    }
+    nodes = [make_node("p1", "seg01", f"{ent(1, 'Chaykel')} arrived.")]
+    with pytest.raises(render_obsidian.RenderError) as excinfo:
+        render_into(tmp_path, make_nodestream(nodes, spans={"1": span("person", "Chaykel")}),
+                    make_canon(entries), make_profile())
+    message = str(excinfo.value)
+    for owner in entries:
+        assert repr(owner) in message, f"{owner!r} unnamed in: {message}"
+
+
+def test_the_conflict_scan_is_inert_when_collision_delinking_is_off():
+    """`collision_delink=False` cannot be reached through `render()` with
+    markup active -- `index` mode requires `output.target: obsidian` and so
+    does de-linking -- so the flag is pinned on the helper directly rather
+    than through a render that cannot exist."""
+    assert render_obsidian._canon_collision_conflicts(
+        {"1": span("person", "Reb Noson")}, TWO_OWNERS, False, None
+    ) == []
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
