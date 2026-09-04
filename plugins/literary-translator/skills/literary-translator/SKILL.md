@@ -764,10 +764,10 @@ here, follow the linked doc:
   (**#653**), never an `entries{}` exclusion;
   `canon_adjudication_audit.py` never writes a verdict, it blocks. Neither
   route can repair a frozen row itself — that is `canon_validate.py
-  --correct`'s job (**#495**), an explicit out-of-band correction that costs
-  bounded re-review of the segments referencing that form, never
-  re-translation — which is why an accuracy decision, a
-  citation included, is reviewed BEFORE the merge
+  --correct`'s job (**#495**), an out-of-band correction that re-stales the
+  segments referencing that form; an admissible `--from-converged` claim then
+  authorizes bounded re-review and never re-translates the draft — which is why
+  an accuracy decision, a citation included, is reviewed BEFORE the merge
   (`references/canon-and-glossary.md`, "Pre-merge citation review").
 - **R7 — Workflow-script schema requirement**, mixed mechanism by path:
   - **W5 translate/review (1.4.7):** codex stays the sole translate/review
@@ -1676,10 +1676,10 @@ source occurrences needs, and the only repair
 document is appended verbatim to `canon.json`'s `corrections[]`, so the change
 is recorded rather than arriving as an unexplained diff. Never hand-edit
 `canon.json` instead: that is a change to the artifact every gate downstream
-trusts, made outside every validation this plugin owns. A correction re-stales
-exactly the segments whose segpack references that form — bounded re-review via
-`--from-converged`, never re-translation — but it does change `canon.json`'s
-bytes, which the skeptic pass holds as a frozen input, so run it BETWEEN passes.
+trusts, made outside every validation this plugin owns. A correction re-stales the
+segments whose segpack references that form — bounded re-review via an admissible
+`--from-converged` claim, which never re-translates the draft. The correction does
+change `canon.json`'s bytes, a frozen input of the skeptic pass: run it BETWEEN passes.
 Full contract: `references/canon-and-glossary.md`, "`--correct PATH`".
 
 **#653 — dismissing a `review_queue[]` candidate that is simply NOT
@@ -2399,9 +2399,9 @@ never stops the pipeline.
 
 Acting on a proposal is the existing `canon_validate.py --correct` route
 (`#495` above), unchanged; do this BEFORE the skeptic pass, since a
-`--correct` changes `canon.json`'s bytes and the skeptic pass holds them
-as a frozen input. A correction costs bounded re-review of the segments
-referencing that form, never re-translation.
+`--correct` changes `canon.json`'s bytes and the skeptic pass holds them as a frozen
+input. A correction re-stales the carriers of that form; an admissible
+`--from-converged` claim then authorizes bounded re-review and never re-translates the draft.
 
 **Skeptic pass (RFC #215 Phase 2, opt-in + advisory)** — an adversarial re-read of the
 frozen canon by a file-capable agent, gated on `glossary.skeptic_pass.enabled`, which

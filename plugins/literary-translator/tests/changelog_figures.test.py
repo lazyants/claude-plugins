@@ -490,37 +490,34 @@ def _name_discovery_passes_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.82.0 (#837 -- index_from: markup no longer mints a note over
-    # a de-linked collision), per the maintenance contract above.
+    # ROTATED TO 1.82.1 (#826 -- the price of a canon correction is stated
+    # conditionally in every shipped site except `canon_validate.py`), per the
+    # maintenance contract above.
     #
     # ZERO rows, and the reason is specific rather than an empty rotation left
-    # to be read as an omission. The entry's numerals are of two kinds, neither
-    # of them derivable here:
+    # to be read as an omission. What the entry asserts is WORDING: which
+    # sentences the release rewrote, and that `canon_validate.py` keeps its own.
+    # Those are claims about a DIFF, which this file cannot reach -- it
+    # re-derives a figure by calling an authoritative implementation in the
+    # current tree, and the retired phrasings are precisely what the tree no
+    # longer contains. The entry is worded to keep it that way: every mention of
+    # the deferred site, the headline included, names the FILE, and
+    # `plugin_bundle_hash` is given as a `CACHE_KEY_FIELD_ORDER` MEMBER rather
+    # than by quoting that tuple's length. The remaining numerals are
+    # identifiers: the version numbers, the release date, the stage label
+    # (Step 0a) and the issue numbers (#826, #825, #840).
     #
-    #   - the CORPUS measurements that motivated the fix (11 labels, 894 spans,
-    #     five canon owners of one name) were taken on a delivered book in
-    #     ANOTHER repository. This file re-derives a figure by calling the
-    #     authoritative implementation in THIS tree; there is no honest
-    #     derivation for a live-book count, and the two dishonest options --
-    #     hard-coding the claimed answer, or importing corpus data as a
-    #     permanent fixture -- are both worse than not declaring it. The entry
-    #     therefore states them as what they are, a measurement on a named
-    #     external corpus. `changelog_citations.test.py` records the same limit.
-    #   - the rest are identifiers, never measurements: the version numbers, the
-    #     release date, the issue numbers (#837, #795, #588, #207), and the
-    #     section number the new tests occupy.
-    #
-    # The 1.81.1 rotation this replaces, kept as its own record: also ZERO rows,
-    # because that entry's corrected values were already re-derived at the prose
-    # site by the two tests it added to `w5_default_launcher.test.py`, and a row
-    # here would have given the same derivation a second declaration site.
+    # The 1.82.0 rotation this replaces, kept as its own record: also ZERO rows,
+    # because that entry's corpus measurements (11 labels, 894 spans, five canon
+    # owners of one name) were taken on a delivered book in ANOTHER repository,
+    # which this file has no honest derivation for.
 ]
 
 # The version FIGURES was last rotated to. An empty FIGURES makes the loop in
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.82.0"
+FIGURES_VERSION = "1.82.1"
 
 
 def _newest_entry():

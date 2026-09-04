@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.82.1 — 2026-09-04
+
+**The price of a canon correction is stated conditionally in every shipped site except
+`canon_validate.py` (#826).**
+`canon-and-glossary.md` priced a `canon_validate.py --correct` in formulations that were each
+absolute in a direction the code does not support: re-review "cannot reach translate", a correction
+"costs bounded re-review, never re-translation", and adding a field to a canon entry "re-translates
+every converged segment". #825 had already established, against the code rather than against the
+prose, that the first is false at the DISPATCH level — `mass-translate-wf.template.js` runs
+`pipeline(SEGS, translateStage, reviewFixLoop)` unconditionally, so a claimed id does reach a
+translate-kind dispatch, and `codex_job.py` then adopts the claim-restamped draft without launching
+codex or refuses the translate outright. What is true on that path AND on the default
+`segment_dispatch_driver.py` one, where a claimed id's translate is undispatchable, is a claim about
+the DRAFT — and `SKILL.md` already carried the phrasing for it.
+
+Every shipped site except `canon_validate.py` now uses one construction: a correction RE-STALES the
+carriers of that form, and
+an ADMISSIBLE `--from-converged` claim then authorizes bounded re-review and never re-translates the
+draft. Admissibility is not automatic — `select_segments.py` runs shared and profile-specific
+admission checks, and `--from-converged` additionally requires a converged/stale status, a sentinel
+and a `reviewed_draft_sha1` — and re-translating those segments stays reachable as the separate
+decision `--allow-retranslate-converged` names. The sites are in `canon-and-glossary.md`,
+`SKILL.md`, `pre-merge-citation-review.md` and `canon_link_groups.py`, whose module docstring was
+the verbatim source of one of them: a prose-only fix would have left the shipped CODE saying the
+retired thing. Statements about a CLAIM keep those words legitimately — `select_segments.py`'s "a
+claim authorizes RE-REVIEW, never re-translation" is the true invariant, not a missed site; what was
+retired is the same absolute asserted of a CORRECTION, or of what dispatch can reach.
+
+The `canon_validate.py` site is deliberately NOT fixed, and the reason is the same class of cost the
+entry is about. Its docstring still says a correction "never reaches translate", because
+`canon_validate.py` is a `cache_key.PLUGIN_BUNDLE_MEMBERS` entry: the bundle hashes its members' raw
+BYTES and `plugin_bundle_hash` is itself a `CACHE_KEY_FIELD_ORDER` member, so editing a comment
+there flips that hash and stales every converged segment of every live book at the next Step 0a
+refresh. `pipeline_version` does not absorb it either — that field is read verbatim from
+`profile.yml`, so no plugin release moves it and the invalidation would be this change's alone.
+Paying a whole-corpus re-stale to correct one comment is the trade this plugin's own rules refuse.
+It is deferred to the next release that already changes a `PLUGIN_BUNDLE_MEMBERS` file for its own
+reasons, so the edit costs nothing beyond what that release already pays, and it is parked as #840.
+
+Dropped in the one sentence already being rewritten: a pointer to `hash-migration-impact.md`, a
+document that ships nowhere under `plugins/` — the only copy is in an internal ops skill an
+installed user never receives. The file's other pointers to it are untouched, being pre-existing and
+in sentences this change does not open.
+
 ## 1.82.0 — 2026-09-04
 
 **`index_from: markup` no longer mints a note over a de-linked collision (#837).**

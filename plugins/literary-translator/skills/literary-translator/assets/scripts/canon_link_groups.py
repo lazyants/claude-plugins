@@ -54,10 +54,12 @@ deliberately does NOT do:
 ## Why a sidecar and not a canon field
 
 ``cache_key.compute_used_terms_hash`` hashes the WHOLE referenced canon
-ENTRY object, so adding any field to ``canon['entries'][name]`` re-translates
-every converged segment that references that name. Putting the grouping in a
-sibling file instead keeps it outside all 15 cache-key fields, so a finished
-book can adopt a group for ZERO re-translation -- which is the whole point:
+ENTRY object, so adding any field to ``canon['entries'][name]`` RE-STALES
+every converged segment that references that name -- which then costs bounded
+re-review under an admissible ``--from-converged`` claim, or an outright
+re-translation under ``--allow-retranslate-converged``. Putting the grouping
+in a sibling file instead keeps it outside all 15 cache-key fields, so a finished
+book can adopt a group with NOTHING re-staled at all -- which is the whole point:
 it is what makes the cheap fix actually cheap. (The code change that READS
 the sidecar is a separate matter; see the CHANGELOG's own migration note for
 what re-renders.)

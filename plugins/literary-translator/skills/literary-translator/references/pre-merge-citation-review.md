@@ -557,9 +557,10 @@ What remains is `--correct` (**#495**) — an explicit, recorded, out-of-band
 correction, one entry at a time, stating the old value. It is a real option for
 a human and it is exactly the one this stage exists to avoid needing: see
 **Retroactive canon edits invalidate precisely** in [`canon-and-glossary.md`](./canon-and-glossary.md) for what it costs. Every
-segment whose `used_terms_hash` covers that term goes stale — bounded re-review
-via `--from-converged`, since **1.25.0**, rather than the re-translation it
-would have cost before that. Before #495 the only move here was a hand edit
+segment whose `used_terms_hash` covers that term goes stale — since **1.25.0** an
+admissible `--from-converged` claim authorizes bounded re-review and never
+re-translates the draft, rather than the re-translation the same edit would have
+cost before that. Before #495 the only move here was a hand edit
 outside every shipped tool, which cost the same invalidation and recorded
 nothing.
 
