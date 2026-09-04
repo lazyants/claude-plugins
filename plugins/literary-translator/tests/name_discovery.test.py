@@ -1705,7 +1705,7 @@ def shim(bed, tmp_path):
         encoding="utf-8")
     resolver.chmod(0o755)
     record = tmp_path / "shim-record.jsonl"
-    return {"node": str(path), "record": record}
+    return {"node": str(path), "record": record, "companion": companion}
 
 
 def _shim_env(shim, forms, mangle=""):
@@ -1729,6 +1729,99 @@ def _alive(pid):
     except PermissionError:
         return True
     return True
+
+
+# ---------------------------------------------------------------------------
+# The DELEGATING resolver (#843). The `shim` fixture's resolver above answers ANY
+# argv, and that is exactly how #843 shipped: name_discovery.py called the real
+# script without the `--durable-root` it declares `required=True`, so argparse
+# exited 2 before the resolver ran a line and every `--dispatch` failed at the
+# preflight -- with no test able to see it, the defect being entirely in the
+# argument vector. This resolver stages the REAL shipped script outside the bed
+# and hands it the driver's own argv, so that script's OWN parser decides whether
+# the call site is admissible, and the pin holds if either side's flags move.
+#
+# The `--search-glob` override is appended for the reason the resolver's own
+# main() documents: the suite must never read the operator's real `~/.claude*`
+# store. `glob.escape()` is not decoration -- enumerate_companions() hands the
+# pattern to glob.glob(), which interprets metacharacters anywhere in the path,
+# including in an ancestor of pytest's tmp_path.
+# ---------------------------------------------------------------------------
+
+DELEGATING_RESOLVER = r'''#!/usr/bin/env python3
+"""Records the caller's argv, then delegates to the REAL shipped resolver."""
+import glob
+import importlib.util
+import json
+import pathlib
+import sys
+
+argv = sys.argv[1:]
+# Written before any exit path, so the argv assertion can read it either way.
+pathlib.Path(%(record)r).write_text(json.dumps(argv), encoding="utf-8")
+
+spec = importlib.util.spec_from_file_location("real_resolve_codex_companion", %(real)r)
+real = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(real)
+
+# A missing required flag raises SystemExit(2) from argparse in here, before any
+# resolution happens; a genuine resolution failure returns 1. Both propagate
+# unchanged -- nothing is canned, and no failure is turned into a success.
+sys.exit(real.main(argv + ["--search-glob", glob.escape(%(companion)r)]))
+'''
+
+
+@pytest.fixture
+def delegating_shim(bed, tmp_path, shim):
+    """`shim`, with its canned resolver replaced by one that delegates to the real
+    shipped resolve_codex_companion.py."""
+    companion = shim["companion"]
+    real = tmp_path / "real_resolve_codex_companion.py"
+    # A COPY, not a load straight from SCRIPTS_SRC, and the reason is not the
+    # bed's staging census (though the copy stays out of it too). The resolver is
+    # location-independent by design and test-pinned to be, so loading the shipped
+    # file directly would behave identically -- except that `exec_module()` writes
+    # a `__pycache__/` beside the source it loads, which would put one inside the
+    # shipped assets tree on every run of this test. Copying keeps the write in
+    # tmp_path, where it belongs.
+    shutil.copy2(SCRIPTS_SRC / "resolve_codex_companion.py", real)
+    record = tmp_path / "resolver-argv.json"
+    (bed / "scripts" / "resolve_codex_companion.py").write_text(
+        DELEGATING_RESOLVER % {"record": str(record), "real": str(real),
+                               "companion": str(companion)},
+        encoding="utf-8")
+    return dict(shim, argv_record=record)
+
+
+def test_b30_the_dispatch_resolver_call_satisfies_the_real_resolver_cli(bed, delegating_shim):
+    """#843. The resolver behind this dispatch is the REAL shipped one, so the run
+    only reaches its passes if resolve_companion()'s argv parses there. Dropping
+    `--durable-root` again turns this red at the preflight with argparse's own
+    wording; renaming a flag on either side turns it red too."""
+    rc, out, err = run(bed, "--dispatch", "--run-id", "argv1",
+                       "--particle-config", "he.local.json",
+                       "--passes", "1", "--max-parallel", "1",
+                       "--node", delegating_shim["node"],
+                       env=_shim_env(delegating_shim, REPLY_FORMS))
+
+    # The argv assertions run FIRST, and the run is deliberately NOT asserted to
+    # have exited 0 before them: the stub records its argv before it delegates,
+    # so a dispatch that died at the preflight can still say WHICH flag was
+    # missing. Asserting the exit code first would report only that the run
+    # failed, which is the attribution this test exists to give.
+    argv = json.loads(delegating_shim["argv_record"].read_text(encoding="utf-8"))
+    assert "--durable-root" in argv, (
+        f"the dispatch resolver call omits --durable-root, which "
+        f"resolve_codex_companion.py declares required=True: {argv}\n{err}")
+    assert argv[argv.index("--durable-root") + 1] == str(bed)
+    assert argv[argv.index("--node") + 1] == delegating_shim["node"]
+
+    # Then the run itself: the REAL resolver accepted that argv, returned the
+    # staged companion, and the dispatch fanned out over the whole run.
+    assert rc == 0, err
+    assert out["failed"] == 0
+    assert out["dispatched"] == out["units"] * out["passes"], (
+        f"dispatch did not fan out over the whole run: {out}")
 
 
 def test_b18_dispatch_writes_a_bound_harvest_and_leaves_no_broker(bed, shim):

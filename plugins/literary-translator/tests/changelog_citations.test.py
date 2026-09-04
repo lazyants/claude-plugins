@@ -152,7 +152,36 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.81.1 (#834 -- SKILL.md's copied-artifact counts are
+    # ROTATED TO 1.83.2 (#843 -- name_discovery.py --dispatch passes the resolver
+    # its required --durable-root), and EMPTY ON PURPOSE. That entry names its
+    # subjects by FILE, FUNCTION and CONSTANT rather than by line --
+    # `resolve_companion()`, `cmd_dispatch()`, `resolve_codex_companion.py`,
+    # `glossary_dispatch_driver.py`, `default_glob_tiers()`,
+    # `PLUGIN_BUNDLE_MEMBERS`, `ORCHESTRATION_BUNDLE_MEMBERS`,
+    # `DERIVATION_BUNDLE_MEMBERS`, `delegating_shim`, `test_b30` -- and states no
+    # `file.ext:NNN` citation at all, which is the shape this guard reads.
+    # Measured against the entry rather than asserted: a scan of its slice for
+    # that pattern returns zero matches.
+    #
+    # It is also the right shape for this particular release. The entry's whole
+    # subject is one argv line moving inside `resolve_companion()`, so a line
+    # citation into that function would have been minted by the same change that
+    # invalidates it.
+    #
+    # UNLIKE `changelog_figures.test.py`, this file carries NO version pin, so
+    # skipping this rotation would NOT have turned CI red -- the test reds only
+    # when the newest entry's actual `file.ext:NNN` citation set differs from
+    # this dict. The rotation is therefore a convention this comment records, and
+    # the record is the only evidence that the 1.83.2 entry was examined at all.
+    #
+    # The record below jumps back to 1.81.1, and that gap is real rather than a
+    # lost entry: 1.82.0, 1.82.1, 1.83.0 and 1.83.1 each shipped without touching
+    # this file at all -- measured off its own git history, not inferred. Exactly
+    # the silent skip the paragraph above describes: the test stayed green through
+    # all four because every map involved was empty.
+    #
+    # The last recorded rotation, kept as its own record.
+    # 1.81.1 (#834 -- SKILL.md's copied-artifact counts are
     # re-derived and guarded), and EMPTY ON PURPOSE. That entry cites its
     # subjects by FILE, FUNCTION and CONSTANT rather than by line --
     # `fix_scope_audit.compared_pairs()`, `scaffold_setup.py --verify`,

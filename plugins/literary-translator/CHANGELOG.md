@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.83.2 — 2026-09-04
+
+**`name_discovery.py --dispatch` could not start at all: the companion resolver was called
+without the flag it declares required (#843).**
+`resolve_companion()` built its subprocess argv as
+`[sys.executable, resolve_codex_companion.py, "--node", node_bin]`, and
+`resolve_codex_companion.py` declares `--durable-root` with `required=True`. So argparse exited 2
+before the resolver ran a line, `resolve_companion()` read that non-zero return and took its own
+fatal branch, and the operator saw "could not resolve codex-companion.mjs -- codex is the required
+engine for discovery and there is no deterministic fallback by design" over a resolver that had
+never looked for anything. The call site is unconditional — `cmd_dispatch()` resolves the companion
+once the run manifest is admitted, with no branch, no config and no environment dependence — so
+every `--dispatch` failed, on every project, at the preflight. `--fold`, `--resume-plan` and
+`--verify-inventory` never resolve the companion and were unaffected.
+
+The population is not marginal. On an uncased-script source (Hebrew, Yiddish, Arabic)
+`bootstrap_names.py`'s candidate path is a structural zero, so `name_inventory` is the only route to
+any candidate at all, and `SKILL.md` has made this chain the supported way to fill it since 1.80.0.
+`resolve_companion()`'s own docstring says there is no non-LLM discovery path by design, so there was
+nothing to degrade to.
+
+The fix forwards the flag, exactly as the two sibling call sites already do —
+`glossary_dispatch_driver.py` and `segment_dispatch_driver.py` both pass `--durable-root`, and the
+glossary driver's docstring already spelled out this precise failure mode. `DURABLE_ROOT` is the
+script's own self-anchored constant, so nothing about the value is project-specific. It is also the
+same companion every other call site gets, and not because the root expressions match — this script
+uses `Path(__file__).resolve().parents[1]` where the glossary driver uses
+`Path(__file__).absolute().parent`. Selection completes *before* `durable_root` is read at all:
+the candidate comes from `default_glob_tiers()`, keyed on the running Claude config profile and `~`,
+and `durable_root` is then consumed only as the `--cwd` of the `node <companion> status --all
+--json` runnability probe, whose failure aborts rather than falling through to another candidate.
+
+`name_discovery.py` is a member of none of the three bundle tuples — the 21 members of
+`cache_key.PLUGIN_BUNDLE_MEMBERS`, the 6 of `scaffold_setup.ORCHESTRATION_BUNDLE_MEMBERS`
+and the 2 of `cache_key.DERIVATION_BUNDLE_MEMBERS` all exclude it — so this release moves no
+cache-key field and re-stales no converged segment on any live book.
+
+**Why no test caught it, and what now does.** `tests/name_discovery.test.py`'s `shim` fixture
+overwrites the staged `resolve_codex_companion.py` with a two-line stub that ignores `sys.argv`
+entirely and prints a canned `companion_path`, so every dispatch test exercised a resolver that
+accepts any argv; a test that merely mocked the subprocess call would have had the same blind spot,
+the defect being entirely in the argument vector. The new `delegating_shim` fixture stages the REAL
+shipped resolver outside the bed and hands it the driver's own argv, so that script's own parser
+decides whether the call site is admissible — a missing required flag raises `SystemExit(2)` there
+before any resolution, and a genuine resolution failure still returns 1 rather than being turned
+into a success. `test_b30` runs a dispatch through it and asserts the recorded argv carries
+`--durable-root` with the run's durable root, so the pin holds if either side's flags move again.
+The four existing shim-backed tests keep the canned resolver: they verify harvest binding, reuse,
+failed slots and over-bound replies, and routing them through the real resolver would make them go
+red for reasons they do not test.
+
 ## 1.83.1 — 2026-09-04
 
 **`resume_setup.py`'s required `glossary_rule` says what it must hold (#846).**

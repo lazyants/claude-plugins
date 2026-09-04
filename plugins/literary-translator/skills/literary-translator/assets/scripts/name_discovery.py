@@ -1093,13 +1093,21 @@ class DispatchSandbox:
 def resolve_companion(node_bin):
     """The installed codex-companion.mjs path, via the shipped resolver. Codex is
     the required engine (R1) and there is no non-LLM discovery path by design, so
-    an unresolvable companion is fatal rather than a degraded run."""
+    an unresolvable companion is fatal rather than a degraded run.
+
+    BOTH arguments are part of the resolver's shipped CLI contract, not optional
+    politeness: `--durable-root` is `required=True` there, so omitting it makes the
+    resolver exit on its own argparse error and every dispatch fail before it starts
+    (#843). `--node` decides which node binary the resolver probes the candidate
+    companion with, so passing this driver's own `--node` keeps the probe and the
+    later launch talking about the same runtime."""
     if not RESOLVE_COMPANION_SCRIPT.is_file():
         fatal(f"resolve_codex_companion.py not found at {RESOLVE_COMPANION_SCRIPT} -- "
               f"Step 0a's copy pass places it there", offending="companion_resolver")
     try:
         proc = subprocess.run(
-            [sys.executable, str(RESOLVE_COMPANION_SCRIPT), "--node", node_bin],
+            [sys.executable, str(RESOLVE_COMPANION_SCRIPT),
+             "--durable-root", str(DURABLE_ROOT), "--node", node_bin],
             capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
         fatal(f"could not run the codex-companion resolver: {exc!r}",

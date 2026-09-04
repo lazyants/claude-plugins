@@ -490,8 +490,44 @@ def _name_discovery_passes_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.83.1 (#846 -- resume_setup.py's required glossary_rule says
-    # what it must hold), per the maintenance contract above.
+    # ROTATED TO 1.83.2 (#843 -- name_discovery.py --dispatch passes the resolver
+    # its required --durable-root), per the maintenance contract above. This
+    # rotation inherited the EMPTY 1.83.1 map and declares three rows of its own.
+    #
+    # THREE rows, all of them the same kind: the entry prices the fix by naming
+    # the size of each cache-key bundle tuple that does NOT list
+    # `name_discovery.py`, and each of those sizes is a module-level tuple this
+    # tree owns. They are exactly the figures that rot when a later release adds
+    # a member -- #446 and #369 each moved the plugin tuple, and the entries
+    # stating the old sizes are the historical records the newest-entry boundary
+    # leaves alone.
+    #
+    # The entry's remaining numerals are not measurements in this file's sense:
+    # the version numbers, the release date, the issue number (#843), the
+    # release this chain has been supported since (1.80.0), argparse's own exit
+    # code and the resolver's return codes, and the new test's identifier
+    # (`test_b30`). None is derived from this tree, so there is nothing here to
+    # re-derive them against. The counts of call sites and of pre-existing
+    # shim-backed tests are spelled as words and so invisible to the tokenizer
+    # anyway.
+    Figure(
+        phrase="the 21 members of",
+        value=21,
+        derive=lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
+    ),
+    Figure(
+        phrase="the 6 of",
+        value=6,
+        derive=lambda: _tuple_len("scaffold_setup.py", "ORCHESTRATION_BUNDLE_MEMBERS"),
+    ),
+    Figure(
+        phrase="the 2 of",
+        value=2,
+        derive=lambda: _tuple_len("cache_key.py", "DERIVATION_BUNDLE_MEMBERS"),
+    ),
+    #
+    # The 1.83.1 rotation this replaces, kept as its own record (#846 --
+    # resume_setup.py's required glossary_rule says what it must hold).
     #
     # ZERO rows, and the reason is specific rather than an empty rotation left to
     # be read as an omission. The entry asserts a DOCUMENTATION state: that no
@@ -512,7 +548,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.83.1"
+FIGURES_VERSION = "1.83.2"
 
 
 def _newest_entry():
