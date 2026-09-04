@@ -2,6 +2,22 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.3.2] — 2026-09-04
+
+### Fixed
+
+- **`code-limits` no longer reports a paid account as `no-subscription`.** A profile whose
+  `.claude.json` carries no `cachedUsageUtilization` had its footnote worded off
+  `hasAvailableSubscription`, so a false flag printed `[no-subscription]` — a claim about billing
+  the report never verified and has no way to verify. Measured across every Claude profile on the
+  authoring machine, that flag reads `false` on accounts that are demonstrably subscribed: two
+  ship it beside a full, freshly fetched `limits` array (one at 100% of its weekly pool), and the
+  DEFAULT profile of a Claude Max 20x subscription ships it beside no cache at all, while `--live`
+  reads that account's pools without trouble. The flag is now read nowhere: an absent cache is
+  reported as `no-usage-cache` whatever sits beside it, and the `no-subscription` token is gone
+  from the diagnostic enum. A non-boolean in that key no longer gaps the profile either — it is
+  not a field this report reads.
+
 ## [cc-usage-coach 1.0.1] — 2026-09-01
 
 Five commits landed on `main` on 2026-06-18, immediately after 1.0.0 was published, and never

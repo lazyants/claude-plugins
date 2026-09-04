@@ -78,8 +78,8 @@ window opened. Deciding whether a window is CURRENT is a separate question, and 
 `is_active` is deliberately not part of THAT one: it marks whichever pool is currently
 BINDING, and exactly one pool per account carries it, so treating it as "no current window" grey
 out five-hour figures that were entirely current -- along with the reset time beside them. A cell that gapped carries its diagnostic token in place of a figure.
-Candidate-level outcomes -- a profile with no cache, one with no subscription, an unreadable
-directory -- become one footnote line each, with their diagnostic token intact.
+Candidate-level outcomes -- a profile with no cache, one whose config will not parse, an
+unreadable directory -- become one footnote line each, with their diagnostic token intact.
 
 **Position means nothing, deliberately.** Ranking by consumption scattered one Codex home's
 pools down the page and printed the same directory name in four places, and a rank over a mix of
@@ -115,10 +115,12 @@ profile is the one where the config dir falls back to `$HOME`. `~/.claude` is it
 and a `~/.claude/.claude.json` left there by an older release is not the live config -- reading
 it reports `no-usage-cache` for an account whose pools are perfectly readable one level up.
 
-`hasAvailableSubscription: false` is read only as the REASON a cache is absent, never as a reason
-to skip one that is present. Accounts ship that flag beside a full, freshly fetched `limits`
-array -- including at 100% of a weekly pool -- so treating it as "not subscribed" suppressed
-exactly the numbers worth reading, under a diagnostic that exits 0.
+`hasAvailableSubscription` is not read at all. Accounts ship that flag as `false` beside a full,
+freshly fetched `limits` array -- including at 100% of a weekly pool -- and the default profile of
+a paid Max 20x subscription ships it beside no cache whatever, while `--live` reads that account's
+pools without trouble. Reading it as "not subscribed" first suppressed exactly the numbers worth
+reading, then, once demoted to merely WORDING an absent cache, still announced a paid account as
+unsubscribed. An absent cache is reported as an absent cache.
 
 **Codex is a live, read-only RPC.** `codex app-server` speaks JSON-RPC 2.0 over stdio; the report
 sends it the handshake needed to call `account/rateLimits/read` and reads the reply. There is no
