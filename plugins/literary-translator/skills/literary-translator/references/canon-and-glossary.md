@@ -1060,13 +1060,14 @@ case.
 
 **What a correction costs.** `compute_used_terms_hash` hashes only the entries a
 segment actually references, so correcting one entry re-stales exactly the
-segments carrying that form and no others. Those units are admissible for
-bounded re-review via `--from-converged` (since **1.25.0**), and re-review cannot
-reach translate — so a correction costs bounded re-review, never
-re-translation. It does change `canon.json`'s BYTES, which is a frozen input of
-the skeptic pass (`canon_sha256`) and of `suspicion_scan.py`'s worklist
-freshness gate: run a correction BETWEEN passes, not into a live one. (That was
-equally true of the hand-edit it replaces.)
+segments carrying that form and no others. Where a `--from-converged` claim is
+admissible (since **1.25.0**), it authorizes bounded re-review of those units and
+never re-translates the draft — but admission is not automatic, and
+re-translating them instead is a separate decision, reached only by passing
+`--allow-retranslate-converged`. A correction does change `canon.json`'s BYTES,
+which is a frozen input of the skeptic pass (`canon_sha256`) and of `suspicion_scan.py`'s
+worklist freshness gate: run a correction BETWEEN passes, not into a live one.
+(That was equally true of the hand-edit it replaces.)
 
 Because those bytes move, a correction also moves the carriers' `used_terms_hash`
 and therefore `input_digest`, so the next W5 invocation mints a fresh `RUN_ID`
@@ -1368,8 +1369,8 @@ conflicting re-resolution, `--retry` cannot reinstate a resolved entry, and
 the verdict — so a correction remains out-of-band and explicitly adjudicated,
 never something a batch can reach. What this section describes is the COST of
 correcting a frozen decision: the invalidation is precise, and since **1.25.0**
-every segment it reaches is admissible for bounded RE-REVIEW via
-`--from-converged`, which cannot reach translate. Before that release the same
+an admissible `--from-converged` claim over the segments it reaches authorizes
+bounded RE-REVIEW and never re-translates the draft. Before that release the same
 edit stranded those units, which is why the older prose here called it
 re-translation. It is still a real cost, and still why an accuracy decision is
 reviewed BEFORE it is merged rather than after.
@@ -1461,10 +1462,12 @@ fold key and never touches a form outside a collision.
 
 **Why this is a sidecar and not a canon field.** `cache_key.compute_used_terms_hash`
 hashes the WHOLE referenced canon ENTRY object, so adding any field to
-`canon['entries'][name]` re-translates every converged segment that
-references that name (see `hash-migration-impact.md`'s sidecar rule). A
-sibling file stays outside all 15 cache-key fields, so a finished book can
-adopt a group for **zero re-translation** — which is the entire point.
+`canon['entries'][name]` **re-stales** every converged segment that
+references that name — which then costs bounded re-review under an admissible
+`--from-converged` claim, or an outright re-translation under
+`--allow-retranslate-converged`. A sibling file stays outside all 15
+cache-key fields, so a finished book can adopt a group with **nothing
+re-staled at all** — which is the entire point.
 
 **The iron rule applies unchanged.** No script decides membership. `note` is
 REQUIRED and non-blank precisely because the file records a call it does not
