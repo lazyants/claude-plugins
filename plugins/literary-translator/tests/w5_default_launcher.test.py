@@ -35,12 +35,86 @@ heading), so a phrase elsewhere in this ~130 KB document cannot satisfy one,
 and against whitespace-collapsed text, because this document hard-wraps at
 ~75 columns and a pin that breaks on a rewrap is a pin nobody keeps.
 """
+import importlib.util
 import re
+import sys
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SKILL_MD = PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md"
 assert SKILL_MD.is_file(), f"SKILL.md not found at {SKILL_MD}"
+SCRIPTS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
+
+
+def _load(stem: str):
+    """Load a SHIPPED script by file identity, under a name that cannot collide
+    with a real module. `scaffold_setup` imports its sibling `cache_key`, so the
+    scripts directory has to be importable while it executes -- the scripts are
+    self-anchored and do nothing else at import time."""
+    path = SCRIPTS_DIR / f"{stem}.py"
+    assert path.is_file(), f"shipped script not found at {path}"
+    spec = importlib.util.spec_from_file_location(f"{stem}_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    inserted = str(SCRIPTS_DIR)
+    # `scaffold_setup` imports `cache_key` as a bare sibling, which lands in
+    # sys.modules under that plain name and OUTLIVES this call. Left there, a
+    # later test in the same worker that loads a fixture copy through its own
+    # bare sibling import would bind the SHIPPED module instead of its fixture.
+    # The whole sys.modules delta is undone, absence included.
+    before = dict(sys.modules)
+    sys.path.insert(0, inserted)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if sys.path and sys.path[0] == inserted:
+            sys.path.pop(0)
+        for name in set(sys.modules) - set(before):
+            del sys.modules[name]
+        for name, was in before.items():
+            if sys.modules.get(name) is not was:
+                sys.modules[name] = was
+    return module
+
+
+def _figure_missing(w5: str, before: str, number: int, after: str) -> bool:
+    """True when W5 does not state exactly `number` between `before` and `after`.
+
+    A bare substring needle is not enough and the gap is not theoretical: a
+    review of this file simulated `52 scripts` becoming `152 scripts` and
+    `87 artifacts` becoming `187 artifacts`, and a plain `f"{n} scripts"`
+    needle stayed GREEN through both -- the wrong figure CONTAINS the right
+    one. So the number is matched between digit boundaries."""
+    pattern = (
+        re.escape(before) + r"(?<!\d)" + str(number) + r"(?!\d)" + re.escape(after)
+    )
+    return re.search(pattern, w5) is None
+
+
+def _copied_destinations(fix_scope_audit=None) -> set:
+    """Every durable-relative path the Step 0a copy pass creates, taken from the
+    AUTHORITATIVE implementation -- `fix_scope_audit.compared_pairs()` is the
+    audit's own manifest, and re-deriving it here from a directory listing is
+    exactly the mistake #834 was filed about: the prose is a claim about what is
+    COPIED and COMPARED, which is not the question `ls` answers.
+
+    A caller that also needs the module's own constants passes it in, so the
+    script is executed once per test rather than once per quantity read off it."""
+    if fix_scope_audit is None:
+        fix_scope_audit = _load("fix_scope_audit")
+    return {dest for _plugin_path, dest in fix_scope_audit.compared_pairs()}
+
+
+def _verified_member_names() -> set:
+    """The member NAMES `scaffold_setup.py --verify` byte-compares: the union of
+    the two shipped bundle tuples, deduped by name because a member registered in
+    both bundles is one file, not two. `run_verify()` builds the same union
+    inline; the set union of two literal tuples is a fact about their contents
+    rather than an algorithm, and the dedup itself already has its own negative
+    control in tests/scaffold_setup.test.py."""
+    scaffold = _load("scaffold_setup")
+    return set(scaffold.cache_key.PLUGIN_BUNDLE_MEMBERS) | set(
+        scaffold.ORCHESTRATION_BUNDLE_MEMBERS
+    )
 
 
 def _w5_section() -> str:
@@ -164,3 +238,126 @@ def test_the_retired_designations_are_gone():
             "the section now says both that the driver is the default and "
             "that it is not"
         )
+
+
+def test_the_copied_artifact_figures_are_re_derived_from_the_tree():
+    """#834. The figures in item (1) are DERIVED here, never transcribed.
+
+    This paragraph shipped "48 scripts ... 24 schemas ... 81 artifacts" and
+    "58 copied artifacts have no byte comparison" -- four self-consistent
+    numbers that had gone stale by up to seven scripts. Nothing reads them: the
+    consumer is a model or an operator deciding, at the point the launcher is
+    chosen, how much of the durable root the default path leaves unchecked. The
+    comment in test_w5_discloses_what_the_default_path_does_not_carry above
+    already calls that count "the load-bearing half", and until now this file
+    pinned every SENTENCE of the paragraph and none of its numbers.
+
+    Why a derivation and not a second copy of the digits: this file's own
+    docstring refuses to hand-copy a measurement, because nothing can check that
+    two hand-copied sets of digits still agree. A derivation is not a copy --
+    each row below calls the shipped implementation that OWNS the quantity and
+    compares its result against the prose.
+
+    What this does NOT cover, stated so a later reader cannot mistake it for
+    completeness: only the figures asserted below. An undeclared numeral
+    elsewhere in SKILL.md is unchecked, and a derivation that hardcoded its own
+    answer would pass every assertion here. Each one was watched RED by mutating
+    the TREE (adding a schema file), never by mutating the assertion.
+    """
+    w5 = _w5_section()
+    fix_scope_audit = _load("fix_scope_audit")
+    copied = _copied_destinations(fix_scope_audit)
+
+    # Bucketed the way the prose enumerates. The three workflow templates land
+    # in scripts/ keeping their basenames, so they are separated by NAME rather
+    # than by destination -- the same split compared_pairs() makes plugin-side.
+    template_names = set(fix_scope_audit.WORKFLOW_TEMPLATES)
+    scripts = {
+        d for d in copied if d.parts[0] == "scripts" and d.name not in template_names
+    }
+    templates = {d for d in copied if d.name in template_names}
+    schemas = {d for d in copied if d.parts[0] == "schemas"}
+    languages = {d for d in copied if d.parts[0] == "languages"}
+
+    # The classes must exhaust the total, or a class added to the copy pass
+    # would move `artifacts` alone and leave the enumeration silently short.
+    assert len(scripts) + len(templates) + len(schemas) + len(languages) == len(
+        copied
+    ), "the copy pass now writes a destination class W5 does not enumerate"
+
+    for before, number, after in (
+        ("bytes it came from — ", len(scripts), " scripts, the three"),
+        ("workflow templates, ", len(schemas), " schemas"),
+        ("schemas and the ", len(languages), " language files"),
+        ("language files, ", len(copied), " artifacts"),
+    ):
+        assert not _figure_missing(w5, before, number, after), (
+            "SKILL.md's copied-artifact figures no longer match the Step 0a "
+            f"copy pass ({len(scripts)} scripts, {len(templates)} templates, "
+            f"{len(schemas)} schemas, {len(languages)} language files, "
+            f"{len(copied)} artifacts) -- W5 does not say "
+            f"{before!r} {number} {after!r}"
+        )
+
+    # "the three workflow templates" is spelled as a WORD, so it carries no
+    # numeral to compare against. The count is asserted directly rather than
+    # rewording the sentence to suit this guard.
+    assert len(templates) == 3, (
+        f"Step 0a now copies {len(templates)} workflow templates, so W5's "
+        "'the three workflow templates' is wrong"
+    )
+    assert "the three workflow templates" in w5
+
+
+def test_the_uncompared_count_is_a_set_difference_not_a_subtraction():
+    """#834. `--verify`'s bundle figures, and the count of copied artifacts it
+    leaves without a byte comparison.
+
+    Derived as a SET DIFFERENCE over destination paths, deliberately, never as
+    `len(copied) - len(verified)`: a bundle member that is NOT a copied artifact
+    would shrink that subtraction while comparing none of the copied set, and the
+    arithmetic would bless a second wrong figure exactly the way #834's did. So
+    the containment the prose implies is asserted here rather than assumed.
+    """
+    w5 = _w5_section()
+    copied = _copied_destinations()
+    verified_names = _verified_member_names()
+    # Every bundle member is copied into the durable root's scripts/ -- the two
+    # workflow templates among them keep their basenames there.
+    verified = {Path("scripts") / name for name in verified_names}
+
+    assert verified <= copied, (
+        "a `scaffold_setup.py --verify` bundle member is not one of the files "
+        "Step 0a copies, so W5's count of copied artifacts with no byte "
+        "comparison can no longer be their difference: "
+        f"{sorted(str(p) for p in verified - copied)}"
+    )
+
+    verified_scripts = {name for name in verified_names if name.endswith(".py")}
+    uncompared = copied - verified
+
+    for before, number, after in (
+        ("the two BUNDLES — ", len(verified_scripts), " scripts plus"),
+        ("`glossary-pass-wf.template.js`, ", len(verified_names), " members."),
+        ("members. So ", len(uncompared), " copied artifacts have no byte comparison"),
+    ):
+        assert not _figure_missing(w5, before, number, after), (
+            "W5's `--verify` figures no longer match the shipped bundle tuples "
+            f"({len(verified_scripts)} scripts, {len(verified_names)} members, "
+            f"{len(uncompared)} uncompared) -- W5 does not say "
+            f"{before!r} {number} {after!r}"
+        )
+
+    # The sentence enumerates what that count includes. A count that stopped
+    # covering them would leave the sentence refuting itself.
+    for name in ("skeptic-pass-wf.template.js", "final_audit.py", "assemble.py"):
+        assert Path("scripts") / name in uncompared, (
+            f"W5 names {name} among the copied artifacts with no byte "
+            "comparison, but it is now compared (or no longer copied)"
+        )
+    assert any(
+        d.parts[0] == "schemas" for d in uncompared
+    ), "W5 says every durable schema is uncompared on this path"
+    assert any(
+        d.parts[0] == "languages" for d in uncompared
+    ), "W5 says every language preset is uncompared on this path"

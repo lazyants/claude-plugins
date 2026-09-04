@@ -152,7 +152,26 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.77.1 (#825 -- the Canon bullet priced a canon correction as
+    # ROTATED TO 1.81.1 (#834 -- SKILL.md's copied-artifact counts are
+    # re-derived and guarded), and EMPTY ON PURPOSE. That entry cites its
+    # subjects by FILE, FUNCTION and CONSTANT rather than by line --
+    # `fix_scope_audit.compared_pairs()`, `scaffold_setup.py --verify`,
+    # `PLUGIN_BUNDLE_MEMBERS`, `ORCHESTRATION_BUNDLE_MEMBERS`,
+    # `w5_default_launcher.test.py` -- and states no line citation at all,
+    # which is the shape this guard reads. Deliberate rather than convenient:
+    # the whole point of the change is that a `SKILL.md:NNN` citation below the
+    # edited block must not move, so pinning one from the entry that edits it
+    # would be the opposite of what the release asserts.
+    #
+    # UNLIKE `changelog_figures.test.py`, this file carries NO version pin, so
+    # skipping this rotation would NOT have turned CI red -- the test reds only
+    # when the newest entry's actual `file.ext:NNN` citation set differs from
+    # this dict. Measured at this cut rather than assumed. The rotation is
+    # therefore a convention this comment records, and the record is the only
+    # evidence that the 1.81.1 entry was examined at all.
+    #
+    # The rotation this replaces, kept as its own record.
+    # 1.77.1 (#825 -- the Canon bullet priced a canon correction as
     # re-translation), and EMPTY ON PURPOSE. That entry cites its subjects by
     # FILE, SECTION and CONSTANT rather than by line -- `SKILL.md`'s Canon
     # bullet, `references/canon-and-glossary.md`, `--from-converged`,

@@ -490,53 +490,43 @@ def _name_discovery_passes_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.81.0 (#823 -- the frozen canon's whole-canon read now covers
-    # the SPLIT direction and the union input, per the issue's scope correction).
-    # divergent target forms). TWO rows, both numbers the entry asserts about
-    # THIS tree rather than about a book:
+    # ROTATED TO 1.81.1 (#834 -- SKILL.md's copied-artifact counts are
+    # re-derived and guarded), per the maintenance contract above.
     #
-    #   - the glossary pass's batch size, which is the entry's whole argument
-    #     for why the defect is invisible to that pass (each batch is
-    #     adjudicated blind of the others, so two bearers of one byname land in
-    #     different batches). Read off `DEFAULT_BATCH_SIZE` rather than the
-    #     `--batch-size` help text, which merely interpolates it.
-    #   - the cache-key field count, which is what the migration paragraph's
-    #     "no re-translation" claim rests on: the sidecar sits outside all of
-    #     them. Read as the length of the shipped field-order tuple.
+    # ZERO rows, and the reason is specific rather than an empty rotation left
+    # to be read as an omission. The entry's numerals are of three kinds:
     #
-    # Everything else numeric in the entry is deliberately NOT a row, the same
-    # exclusion the 1.77.0 and 1.76.1 rotations record: the 47-segment volume,
-    # its 312 canon entries, the five post-freeze corrections, the 12 moved
-    # target forms, the `x4`, the "at least 4", and the 41 and 44 draft files
-    # are field measurements from a live private volume this repository does
-    # not contain. The version, the issue number and the date are not
-    # measurements.
+    #   - the STALE values it quotes (48, 24, 81, 58) are the text that
+    #     shipped. They are a historical fact about what the document said, not
+    #     a live measurement, and re-deriving them would assert the defect.
+    #   - the CORRECTED values (52, 26, 87, 63, and the six language files) are
+    #     live tree measurements, and every one of them is already re-derived
+    #     from the tree by the two tests this release adds to
+    #     `w5_default_launcher.test.py`. That is the exact failure this file
+    #     exists to close -- a figure true when written and false at merge --
+    #     and for these figures it is closed at the prose site itself, which is
+    #     where the entry quotes them from. A row here would need this file to
+    #     grow its own loader for `fix_scope_audit.compared_pairs()`, giving
+    #     the same derivation a second declaration site; the first edit to
+    #     reach only one of them is the drift this guard is meant to prevent.
+    #   - the rest are identifiers, never measurements: the version numbers,
+    #     the release date, the issue numbers (#834, #286), the pipeline stage
+    #     label (W5, Step 0a), and "at least seven scripts" / "by one", which
+    #     are spelled as words or attached to a git-range claim this file
+    #     cannot reach.
     #
-    # The 1.79.0 rotation this replaces, kept as its own record: ONE row, how
-    # many selector payload fields segment_dispatch_driver.py newly REQUIRES to
-    # name the units that have already converged once, read by AST off
-    # `EVER_CONVERGED_SELECTOR_FIELDS` rather than counted by hand.
-    #
-    # The 1.80.0 rotation this replaces, kept as its own record: ONE row, the
-    # `--passes` default of the LLM name-discovery driver (#286), read off its
-    # own argument parser rather than counted by hand.
-    Figure(
-        phrase="batches of 40",
-        value=40,
-        derive=lambda: _int_constant("glossary_batch_plan.py", "DEFAULT_BATCH_SIZE"),
-    ),
-    Figure(
-        phrase="all 15 cache-key fields",
-        value=15,
-        derive=lambda: _tuple_len("cache_key.py", "CACHE_KEY_FIELD_ORDER"),
-    ),
+    # The 1.81.0 rotation this replaces, kept as its own record: TWO rows -- the
+    # glossary pass's `DEFAULT_BATCH_SIZE` (40), which carried that entry's whole
+    # argument for why the defect was invisible to that pass, and the length of
+    # `CACHE_KEY_FIELD_ORDER` (15), which its "no re-translation" migration
+    # claim rested on. Both retired here with the entry they described.
 ]
 
 # The version FIGURES was last rotated to. An empty FIGURES makes the loop in
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.81.0"
+FIGURES_VERSION = "1.81.1"
 
 
 def _newest_entry():
