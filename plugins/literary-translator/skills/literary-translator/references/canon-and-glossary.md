@@ -128,10 +128,13 @@ Canon population is not "paste the whole book into context and ask for a glossar
    out of proportion to this defect. The preflight axis buys the same halt for
    nothing.
 
-   **Copying the bullets does not reach a glossary run that is already in flight.**
-   `glossary_TASK.md`'s bytes are not one of the resume digest's inputs (those are
+   **Copying the bullets does not reach a glossary run that is already in flight —
+   unless this project's `glossary_rule` carries the task file's hash (#846).** The
+   file's own bytes are not one of the resume digest's inputs (those are
    listed in `references/orchestration-and-batching.md` under **The resume-integrity
-   gate and its digest inputs**), so a matching resume keeps each batch's
+   gate and its digest inputs**), so with a `glossary_rule` that does not depend on
+   them — a constant, or anything predating SKILL.md's W3 guidance — a matching
+   resume keeps each batch's
    `out_{i}_attempt_0.json`, `resume_setup.py`'s probe resume-skips it, and the merge takes what
    the OLD prompt already marked `accepted`. Recover with the stale-cached-result
    procedure in that same section — not restated here — plus the one step it does not
@@ -140,7 +143,11 @@ Canon population is not "paste the whole book into context and ask for a glossar
    exactly `${durable_root}/glossary/runs/${RUN_ID}/out_{i}_attempt_0.json`, and only
    those — leave `manifest_*`, `approved_*`, `evidence_*`, the run directory itself and
    `canon.json` alone. A fresh run is the blunt alternative: correct, but it forfeits
-   every batch's resume saving.
+   every batch's resume saving. **With the `glossary_rule` value SKILL.md's W3 now
+   recommends** — an object carrying a sha1 of `glossary_TASK.md` — none of this
+   paragraph applies: recomputing it after the edit moves the digest on its own, so
+   `resume_setup.py` mints a fresh `RUN_ID` and there are no attempt-0 fragments to
+   delete. Do not run the deletion step against a run that already refused to resume.
 3. **Merge** with dedup + collision checks into the canonical `entries{}` map, plus
    a `review_queue` for low-confidence/disputed cases. Routing is driven by each
    batch item's own `disposition` field (`"accepted"` vs `"review_queue"`) — never
