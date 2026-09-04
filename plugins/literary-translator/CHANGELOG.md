@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.82.0 — 2026-09-04
+
+**`index_from: markup` no longer mints a note over a de-linked collision (#837).**
+Collision de-linking removes a `canonical_target_form` owned by two or more canon
+entries from the inline-link map, so that no reader is sent to the wrong entity's
+note (#207/#588); `build_entity_index`'s own docstring calls the rule absolute,
+because "a misattributed inline link actively misleads … strictly worse than a
+missing one". Under `output.entity_markup.index_from: markup` (#795) that decision
+was walked around rather than overridden. `_canon_composition` resolves a marked
+span's label against the ALREADY-REDUCED map, so a de-linked target looked like a
+name canon does not own — and `_markup_note_records` minted one note for the shared
+label and routed every marked occurrence to it. The minted note then asserted
+exactly the identity de-linking had refused to assert, at exit 0, with the span
+coverage identity balanced and every gate green. It was a fall-through, not a
+branch anyone chose.
+
+`_entity_markup_canon_collision_preflight` now refuses that render with
+`RenderError("entity_markup_canon_collision")`, naming each offending label, the
+competing `source_form`s and the span count. It runs in the same pre-clean window
+as `_validate_link_groups` and the structural markup preflight, and for the same
+reason: a refusal discovered after `_clean_vault_content` would leave the operator
+with neither the old vault nor a complete new one. It HALTS rather than warning
+because `_apply_entity_markup` has no bare-text branch — every span must emit a
+link, so a warning would print a line and ship the merged note anyway.
+
+Three edges of the rule, each of which a review round moved. It keys on the
+de-link DECISION (`_link_decision`'s winner being `None` for a multi-owner target),
+never on the `delink_cost` figure: a collision whose owners are all
+`sense_translated` costs nothing, because that string was never auto-linkable, yet
+the target is dropped just the same and markup would still mint over it. It counts
+only owners whose `category` is compatible with the span's tag, by the predicate
+composition already used, now factored into `_category_compatible` so the two can
+never disagree — two canon PLACE owners of `Jordan` do not make
+`<person>Jordan</person>` a merge, and halting it would break a correct book and
+push the operator toward a link group asserting unrelated entities are one
+referent. And the printed remedy is qualified, because the unqualified one cannot
+always be followed: a `canon_link_groups.json` group re-links a target only when
+EVERY owner is a member and none is `sense_translated`, so a collision involving a
+sense-translated owner can only be resolved by giving the spans a distinct `ref`.
+The adapter never picks between them; that identity call stays the operator's.
+
+Nothing else moves. An unmarked colliding name is still de-linked prose with a
+`delink_cost` WARN. A collision every owner of which sits in one link group still
+composes onto the primary and mints nothing — which is what a project that has
+already done this adjudication looks like, and it is now the control the suite was
+missing. `render_obsidian.py` is not a `PLUGIN_BUNDLE_MEMBERS` entry, so no cache
+key, bundle hash or resume digest moves and no converged segment is invalidated;
+it IS in `diff_rendered_output._RENDER_VERSION_FILES`, so an existing frozen render
+baseline reports `stale_baseline` until re-accepted with `--accept-baseline
+--force-accept-baseline`.
+
+The gap was also a test gap, and that is why it shipped:
+`tests/entity_markup_render.test.py` built no canon where two `source_form`s share
+a `canonical_target_form`, and `tests/render_obsidian_link_groups.test.py` writes
+no `entity_markup` block — the markup path and the collision path had never been
+exercised together. Section 28 now does, including the pin that the refusal leaves
+an existing managed vault intact.
+
 ## 1.81.1 — 2026-09-04
 
 **SKILL.md's copied-artifact counts are re-derived, and now have a guard (#834).** The W5 paragraph

@@ -490,43 +490,37 @@ def _name_discovery_passes_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.81.1 (#834 -- SKILL.md's copied-artifact counts are
-    # re-derived and guarded), per the maintenance contract above.
+    # ROTATED TO 1.82.0 (#837 -- index_from: markup no longer mints a note over
+    # a de-linked collision), per the maintenance contract above.
     #
     # ZERO rows, and the reason is specific rather than an empty rotation left
-    # to be read as an omission. The entry's numerals are of three kinds:
+    # to be read as an omission. The entry's numerals are of two kinds, neither
+    # of them derivable here:
     #
-    #   - the STALE values it quotes (48, 24, 81, 58) are the text that
-    #     shipped. They are a historical fact about what the document said, not
-    #     a live measurement, and re-deriving them would assert the defect.
-    #   - the CORRECTED values (52, 26, 87, 63, and the six language files) are
-    #     live tree measurements, and every one of them is already re-derived
-    #     from the tree by the two tests this release adds to
-    #     `w5_default_launcher.test.py`. That is the exact failure this file
-    #     exists to close -- a figure true when written and false at merge --
-    #     and for these figures it is closed at the prose site itself, which is
-    #     where the entry quotes them from. A row here would need this file to
-    #     grow its own loader for `fix_scope_audit.compared_pairs()`, giving
-    #     the same derivation a second declaration site; the first edit to
-    #     reach only one of them is the drift this guard is meant to prevent.
-    #   - the rest are identifiers, never measurements: the version numbers,
-    #     the release date, the issue numbers (#834, #286), the pipeline stage
-    #     label (W5, Step 0a), and "at least seven scripts" / "by one", which
-    #     are spelled as words or attached to a git-range claim this file
-    #     cannot reach.
+    #   - the CORPUS measurements that motivated the fix (11 labels, 894 spans,
+    #     five canon owners of one name) were taken on a delivered book in
+    #     ANOTHER repository. This file re-derives a figure by calling the
+    #     authoritative implementation in THIS tree; there is no honest
+    #     derivation for a live-book count, and the two dishonest options --
+    #     hard-coding the claimed answer, or importing corpus data as a
+    #     permanent fixture -- are both worse than not declaring it. The entry
+    #     therefore states them as what they are, a measurement on a named
+    #     external corpus. `changelog_citations.test.py` records the same limit.
+    #   - the rest are identifiers, never measurements: the version numbers, the
+    #     release date, the issue numbers (#837, #795, #588, #207), and the
+    #     section number the new tests occupy.
     #
-    # The 1.81.0 rotation this replaces, kept as its own record: TWO rows -- the
-    # glossary pass's `DEFAULT_BATCH_SIZE` (40), which carried that entry's whole
-    # argument for why the defect was invisible to that pass, and the length of
-    # `CACHE_KEY_FIELD_ORDER` (15), which its "no re-translation" migration
-    # claim rested on. Both retired here with the entry they described.
+    # The 1.81.1 rotation this replaces, kept as its own record: also ZERO rows,
+    # because that entry's corrected values were already re-derived at the prose
+    # site by the two tests it added to `w5_default_launcher.test.py`, and a row
+    # here would have given the same derivation a second declaration site.
 ]
 
 # The version FIGURES was last rotated to. An empty FIGURES makes the loop in
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.81.1"
+FIGURES_VERSION = "1.82.0"
 
 
 def _newest_entry():

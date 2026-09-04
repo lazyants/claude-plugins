@@ -532,6 +532,48 @@ re-derivation still matches; markup notes are deduped against the same
 `used_paths` set afterwards and can never take or overwrite a canon note's
 path.
 
+**A label canon de-linked for AMBIGUITY refuses the render — it never mints
+over it (#837).** "Linkable" above is load-bearing, and the word alone used to
+decide the wrong thing. Collision de-linking removes a `canonical_target_form`
+owned by two or more canon entries from the link map, so that no reader is sent
+to the wrong entity's note (#207/#588, and see "Collision de-linking" above).
+That target is then not linkable — so composition found nothing, concluded canon
+did not own the name, and minted ONE markup note for the shared label with every
+marked occurrence pointing at it. The de-link was not overridden; it was walked
+around, and the minted note asserted exactly the identity de-linking had refused
+to assert. Measured on a delivered book: 11 labels, 894 spans, one of them
+standing for five canon entries.
+
+So `_entity_markup_canon_collision_preflight` refuses instead, with
+`RenderError("entity_markup_canon_collision")`, in the same pre-clean window as
+`_validate_link_groups` and the structural preflight — a refusal discovered after
+`_clean_vault_content` would leave the operator with neither the old vault nor a
+new one. It HALTS rather than warning because `_apply_entity_markup` has no
+bare-text branch: every span must emit a link, so a warning would print a line
+and ship the merged note anyway at exit 0.
+
+Three edges of the rule, each deliberate:
+
+- It keys on the de-link DECISION (`_link_decision`'s winner being `None` for a
+  multi-owner target), not on the `delink_cost` figure. A collision whose owners
+  are all `sense_translated` costs nothing — that string was never auto-linkable —
+  yet the target is dropped just the same and markup would still mint over it.
+- It counts only owners whose `category` is compatible with the span's tag, by
+  the same test composition uses. Two canon PLACE owners of `Jordan` do not make
+  `<person>Jordan</person>` a merge: the tag is part of the identity, that person
+  note is correct, and halting it would push the operator toward a link group
+  asserting two unrelated entities are one referent.
+- The remedy it prints is qualified, because the unqualified one cannot always be
+  followed: a `canon_link_groups.json` group re-links a target only when EVERY
+  owner is a member and none is `sense_translated`. For a collision involving a
+  sense-translated owner the only escape is a distinct `ref`, which makes the
+  span a different identity and mints a note under it. The adapter never picks
+  between them — that identity call is the operator's, and recording it in
+  `canon_link_groups.json` is what makes it reviewable.
+
+An unmarked colliding name is untouched by all of this: it stays de-linked prose
+with a `delink_cost` WARN, exactly as before.
+
 **Every marked span becomes a wikilink — every occurrence, every node kind,
 headings included.** This is not a stylistic choice, it is what keeps the two
 indexes from interfering. An emitted `[[…]]` is a protected span, so the
