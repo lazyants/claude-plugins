@@ -3245,6 +3245,203 @@ def test_term_warnings_never_gate_a_complete_project(tmp_path):
     assert proc.returncode == 0, proc.stderr
 
 
+# ---------------------------------------------------------------------------
+# 9b. WARN 6 at the DECLARATION level -- one pinned `source_form` nesting
+# inside another (#844).
+#
+# WHY THE LANE NEEDS THIS AT ALL. The source side is counted with
+# `folded_source.count(folded_form)`, a plain SUBSTRING count, so when one
+# declared form folds to a substring of another the shorter pin's count already
+# contains every occurrence of the longer one. Both counts stay plausible, the
+# drift comparison then runs against a doubled denominator, and the operator's
+# only signal is arithmetic nobody performs. The condition is forced by the
+# feature rather than by carelessness: matching does not fold combining marks,
+# so a pointed source cannot be pinned with one unpointed form and the operator
+# must enumerate spellings -- which is exactly what nests.
+#
+# EVERY fixture below is fully converged with NO padding segment, and its one
+# segment carries NONE of the declared terms. Two consequences, both load-
+# bearing: a clean run of the same project exits 0, so an advisory that wrongly
+# reached `hard_failures` or `project_complete` turns these red (a PAD_SEG
+# fixture already exits 3 and can prove nothing there -- the same reasoning
+# WARN 5's own no-padding control states); and the ONLY warning a run can
+# produce is this declaration-level one, so `summary["warnings"]` is an exact
+# count rather than a lower bound.
+# ---------------------------------------------------------------------------
+
+# #844's own measured shape, from a Hebrew book: a term of art printed with
+# several pointings, pinned once per spelling. The longer form is BUILT from
+# the shorter plus one combining mark rather than typed as a second literal --
+# an editor or a copy-paste that normalized this file would otherwise make the
+# two identical and every assertion below would pass while asserting nothing.
+POINTED_SHORT = "מֹוהַרְנַ\"ּת"
+POINTED_LONG = POINTED_SHORT + "ְ"   # + HEBREW POINT SHEVA
+
+
+def _pin(source_form):
+    """A minimal declaration. Overlap is decided on `source_form` alone, so the
+    target is irrelevant here -- but profile.schema.json requires one, and it
+    must be a form the fixture's draft does not carry, so a stray TERM-DRIFT
+    warning can never pad the counts asserted below."""
+    return {"source_form": source_form, "target_form": CHAIRMAN_RU}
+
+
+def _names_both(line, inner, outer):
+    """Both declared forms are named, asserted on their REPRs.
+
+    A bare `inner in line` cannot see the difference here: every pair below
+    nests, so the shorter form is a substring of the longer one and a line
+    printing ONLY the longer form would satisfy it. The repr's closing quote is
+    what separates them -- `'...\u05ea'` is not inside `'...\u05ea\u05b0'` --
+    and the emitted line formats both forms with `!r`, so this is the same
+    text, not a re-derivation of it."""
+    assert repr(inner) in line, (repr(inner), line)
+    assert repr(outer) in line, (repr(outer), line)
+
+
+def _overlap_lines(proc):
+    """The declaration-level lines, read out of the WARN BLOCK rather than off
+    raw stderr -- that is what proves they are inside the reported accounting
+    and not printed beside it."""
+    return [ln for ln in _warn_block_lines(proc) if "TERM PIN OVERLAP" in ln]
+
+
+def _overlap_root(tmp_path, terms):
+    root = make_durable_root(tmp_path, seg_ids=("seg01",), terms=terms)
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    return root
+
+
+def _run_overlap(tmp_path, terms):
+    proc = run_final_audit(_overlap_root(tmp_path, terms))
+    assert "Traceback" not in proc.stderr, proc.stderr
+    _term_count_line(proc)   # the lane reached the end of the warning pass
+    return proc
+
+
+def test_nesting_source_forms_are_reported_once_naming_both(tmp_path):
+    """The case the issue was filed for, and the wiring test for the whole
+    section: deleting the `term_pin_overlaps(...)` extend from main() turns it
+    red, as does making the function return [] unconditionally."""
+    proc = _run_overlap(tmp_path, [_pin(POINTED_SHORT), _pin(POINTED_LONG)])
+    lines = _overlap_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    _names_both(lines[0], POINTED_SHORT, POINTED_LONG)
+    assert "is a substring of" in lines[0], lines[0]
+    # Inside the accounting, not beside it: a warning-shaped line that left
+    # `warnings` at 0 would be invisible to every machine-readable consumer.
+    summary = parse_summary(proc)
+    assert_schema_valid(summary)
+    assert summary["warnings"] == 1, proc.stderr
+    assert len(_warn_block_lines(proc)) == 1, proc.stderr
+
+
+def test_the_containing_form_may_be_declared_first(tmp_path):
+    """`validation.terms` is an ordered list and the schema constrains nothing
+    about which spelling an operator writes first, so the pair must be found
+    from either direction. Every other positive case here declares the SHORT
+    form first -- without this one, deleting the reverse-containment branch
+    leaves the whole section green while a reversed declaration goes unreported.
+
+    The line reads identically either way: the shorter form is named as the
+    substring, because that is the pin whose count is inflated."""
+    proc = _run_overlap(tmp_path, [_pin(POINTED_LONG), _pin(POINTED_SHORT)])
+    lines = _overlap_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    _names_both(lines[0], POINTED_SHORT, POINTED_LONG)
+    assert lines[0].index(repr(POINTED_SHORT)) < lines[0].index(repr(POINTED_LONG)), lines[0]
+    assert "is a substring of" in lines[0], lines[0]
+
+
+def test_source_forms_that_do_not_nest_report_nothing(tmp_path):
+    """The negative case. Asserted on the warning COUNT as well as the lines,
+    so a lane that reported every pair would fail here rather than pass by
+    producing output nobody grepped for."""
+    proc = _run_overlap(tmp_path, [_pin("chien"), _pin("chat")])
+    assert _overlap_lines(proc) == [], proc.stderr
+    assert parse_summary(proc)["warnings"] == 0, proc.stderr
+
+
+def test_two_forms_folding_to_the_same_text_report_one_line_not_two(tmp_path):
+    """Two declarations that fold EQUAL are the degenerate nesting case, and a
+    containment test alone would print both mirrored directions -- 'X is a
+    substring of Y' and 'Y is a substring of X' -- for one operator mistake.
+    Equality is therefore checked first and names the condition for what it is.
+
+    Built through unicodedata rather than typed as two literals, for the reason
+    the NFC test in section 9 states."""
+    proc = _run_overlap(
+        tmp_path,
+        [_pin(PRESIDENT_FR.capitalize()), _pin(PRESIDENT_FR_NFD)],
+    )
+    lines = _overlap_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    _names_both(lines[0], PRESIDENT_FR.capitalize(), PRESIDENT_FR_NFD)
+    assert "are the same text" in lines[0], lines[0]
+    assert "is a substring of" not in lines[0], lines[0]
+    assert parse_summary(proc)["warnings"] == 1, proc.stderr
+
+
+def test_containment_that_exists_only_after_nfc_normalisation(tmp_path):
+    """The pair is NOT nested on the raw strings -- the longer one is typed
+    decomposed -- and is nested after `_fold_term_text()`'s NFC half. An
+    implementation comparing the declared forms as written passes every other
+    case in this section and fails this one."""
+    outer = "vice-" + PRESIDENT_FR_NFD
+    assert PRESIDENT_FR not in outer, "fixture no longer isolates the NFC half"
+    proc = _run_overlap(tmp_path, [_pin(PRESIDENT_FR), _pin(outer)])
+    lines = _overlap_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "is a substring of" in lines[0], lines[0]
+
+
+def test_containment_that_exists_only_after_casefold(tmp_path):
+    """`casefold()`, not `lower()`, and this is the only case in the file that
+    tells them apart: `Straße`.lower() is `straße`, which does not contain
+    `rass`, while its casefold is `strasse`, which does. Every other case
+    variant in this suite (`Président`/`président`) passes under either."""
+    outer = "Straße"
+    assert "rass" not in outer.lower(), "fixture no longer isolates casefold"
+    proc = _run_overlap(tmp_path, [_pin("rass"), _pin(outer)])
+    lines = _overlap_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "'rass' is a substring of" in lines[0], lines[0]
+
+
+def test_three_mutually_nesting_pins_report_every_pair_exactly_once(tmp_path):
+    """Guards the loop bounds from both directions: C(3,2)=3 lines means no
+    self-pair (which would give 6) and no mirrored duplicate (which would give
+    6 as well), and a pair loop that never runs would give 0 -- printing
+    exactly what a passing negative case prints."""
+    proc = _run_overlap(
+        tmp_path, [_pin("ab"), _pin("abc"), _pin("abcd")]
+    )
+    lines = _overlap_lines(proc)
+    assert len(lines) == 3, proc.stderr
+    assert len(set(lines)) == 3, lines
+    assert parse_summary(proc)["warnings"] == 3, proc.stderr
+
+
+def test_an_overlapping_declaration_never_gates_a_complete_project(tmp_path):
+    """The advisory contract, on the only fixture that can prove it: the SAME
+    project with non-overlapping pins exits 0, so any mutation letting this
+    lane reach `hard_failures` or `project_complete` shows up as a changed exit
+    code rather than as a warning count nobody compared."""
+    clean = _run_overlap(tmp_path / "clean", [_pin("chien"), _pin("chat")])
+    assert clean.returncode == 0, clean.stderr
+    assert parse_summary(clean)["project_complete"] is True, clean.stderr
+
+    overlapping = _run_overlap(
+        tmp_path / "overlapping", [_pin(POINTED_SHORT), _pin(POINTED_LONG)]
+    )
+    summary = parse_summary(overlapping)
+    assert_schema_valid(summary)
+    assert _overlap_lines(overlapping), overlapping.stderr
+    assert summary["hard_failures"] == 0, overlapping.stderr
+    assert summary["project_complete"] is True, overlapping.stderr
+    assert overlapping.returncode == 0, (overlapping.returncode, overlapping.stderr)
+
+
 def test_an_unreadable_manifest_never_makes_the_term_lane_raise(tmp_path):
     """The verse source is the one input this lane cannot get anywhere else,
     and it comes from a file the lane does not own.

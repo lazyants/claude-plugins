@@ -1125,6 +1125,17 @@ def warn_forbidden_patterns(seg, compiled):
 # way. A carrier whose occurrence is legitimately omitted or rendered
 # pronominally still warns; the line names the carrier so that costs one glance.
 #
+# THE SOURCE-SIDE NUMBER IN A WARNING IS A SUBSTRING COUNT, NOT AN OCCURRENCE
+# COUNT (#844), and the operator has no way to see that from the line itself.
+# Substring matching over-reports on inflected and prefixed forms -- a pinned
+# title measured 133 substring hits against 61 whole-token occurrences on the
+# book #844 was filed from, the remainder being a different word sharing the
+# prefix plus prefixed and plural forms. That is the accepted trade: whole-token
+# matching would mean no drift check at all on the most common terms in a
+# suffixing target language. What is NOT accepted is the same effect between two
+# DECLARATIONS, where the operator cannot even see it -- see
+# `term_pin_overlaps()`, which reports it once per run.
+#
 # Advisory only. A hit never changes the exit code -- see this module's
 # docstring on the WARN/hard split.
 # ---------------------------------------------------------------------------
@@ -1202,6 +1213,99 @@ def declared_terms(profile):
              _fold_term_text(source_form), _fold_term_text(target_form))
         )
     return terms
+
+
+def term_pin_overlaps(terms):
+    """One advisory line per declared pair whose FOLDED `source_form`s nest
+    (#844), or `[]` when none do.
+
+    WHY THIS EXISTS. `warn_term_drift()` below counts the source side with
+    `folded_source.count(folded_form)` -- a plain SUBSTRING count. So when one
+    declared `source_form` folds to a substring of another, the shorter pin's
+    count already contains every occurrence of the longer one, and the drift
+    comparison then runs against a denominator that counts some carriers twice.
+    Nothing about that is visible to the operator: both pins are correct
+    spellings that genuinely occur, each count is plausible on its own, and the
+    only signal is arithmetic nobody performs.
+
+    THE CONDITION IS FORCED BY THE FEATURE, which is why this is a check and
+    not a note about operator discipline. Matching does not fold combining
+    marks, so an unpointed pin matches nothing in a pointed source: an operator
+    pinning a multiply-pointed term has no choice but to enumerate its
+    spellings, and enumerating spellings is exactly what nests. Both volumes
+    measured when #844 was filed produced this shape independently, and neither
+    operator caught it by reading the declared list -- two long pointed strings
+    differing only by a trailing mark is the comparison a bidi terminal makes
+    hardest.
+
+    WARN, NEVER FAIL, and that is a decision rather than caution: two nesting
+    pins can be DELIBERATE when the shorter one is meant to catch a family of
+    forms. What the operator cannot recover on their own is the arithmetic, so
+    that is all this reports.
+
+    COMPARED ON THE FOLDED FORMS, because folding is what `warn_term_drift()`
+    actually counts on -- comparing the raw declarations would miss a pair that
+    nests only after NFC normalization or casefolding, which is precisely the
+    pair a reader cannot spot by eye.
+
+    Unordered pairs -- each later pin against each earlier one -- EQUALITY
+    CHECKED FIRST: one line per pair, never a self-pair, never two mirrored
+    lines, and never the incoherent 'X is a substring of X' that a containment
+    test alone would print for two declarations that fold to the same text.
+    Equality cannot be reordered after containment: `folded_i in folded_j` is
+    True when the two are equal.
+
+    NOT `itertools.combinations`, which is how `canon_adjudication_audit.py`
+    and `suspicion_scan.py` spell the same job and would read better here: this
+    file's line numbers are cited from `bootstrap_names.py`, a
+    DERIVATION_BUNDLE_MEMBERS file that `name_discovery.test.py`'s d28 byte
+    guard forbids editing, so one added import line above would have to be paid
+    for by re-staling every project's converged segments.
+
+    NO `_norm_ws()` last step, unlike its siblings, and that is deliberate.
+    Every operator-controlled fragment here reaches the line through `!r`, and
+    `repr()` escapes every whitespace character that could break a line --
+    measured over \n, \r, \t, \v, \f, NEL, U+2028, U+2029 -- so the line is
+    single-physical-line by construction and there is nothing left to
+    normalize. What normalizing WOULD still do is collapse a run of ASCII
+    spaces INSIDE a declared form, printing 'a b' for a pin declared 'a  b' --
+    misquoting the pin in the one warning whose whole job is to name both pins
+    verbatim.
+
+    O(n^2) over an operator-authored, deliberately un-capped list -- the same
+    trust footing profile.schema.json already states for `forbidden_patterns`.
+    Each `in` runs over strings the schema caps at 200 characters."""
+    # Only the SOURCE side takes part, stated here rather than argued in prose.
+    pins = [(source_form, folded) for source_form, _target, folded, _pin in terms]
+    overlaps = []
+    for i, (source_i, folded_i) in enumerate(pins):
+        for source_j, folded_j in pins[i + 1:]:
+            if folded_i == folded_j:
+                detail = (
+                    f"source_form {source_i!r} and {source_j!r} are the same "
+                    f"text once NFC-normalized and casefolded, so every "
+                    f"occurrence is counted twice"
+                )
+            elif folded_i in folded_j:
+                detail = _nesting_detail(source_i, source_j)
+            elif folded_j in folded_i:
+                detail = _nesting_detail(source_j, source_i)
+            else:
+                continue
+            overlaps.append(f"TERM PIN OVERLAP: {detail} -- MANUAL")
+    return overlaps
+
+
+def _nesting_detail(inner, outer):
+    """The containment half of the line above, with the CONTAINED form first.
+
+    Not "the shorter one": containment is decided on the folded text while the
+    line prints the raw declarations, and casefolding can lengthen a form."""
+    return (
+        f"source_form {inner!r} is a substring of {outer!r}; every occurrence "
+        f"of {outer!r} is also counted for {inner!r}, so the source-side "
+        f"counts for these two overlap"
+    )
 
 
 def verse_source_index(manifest):
@@ -2272,6 +2376,14 @@ def main():
     # reads and why the two policy fields come from vd.ProfileConfig rather
     # than being re-derived here.
     term_check = build_term_check(operator_profile)
+    # #844, extended here rather than inside the per-segment loop below: an
+    # overlapping pin set is a property of the DECLARATION, resolved once, and
+    # repeating it per segment would report one operator mistake N times. This
+    # is the same position and the same accounting as `pattern_decl_warns`
+    # above -- a declaration-level advisory carries no `[seg]` prefix and is
+    # counted in `warnings_count`, which is what makes it visible to the
+    # summary JSON rather than only to a human reading stderr.
+    warn_details.extend(term_pin_overlaps(term_check.terms))
 
     for seg in sorted(converged):
         warn_details.extend(warn_link_graph(seg))
