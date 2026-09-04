@@ -786,6 +786,61 @@ def test_a_reset_republishes_at_attempt_zero_instead_of_burning_the_ladder(bed):
     # exactly the vacuity this file's other assertions are written to avoid.
 
 
+def test_a_reset_batch_stops_counting_as_resumed_so_rung_zero_is_re_dispatched(bed):
+    """#852 follow-up: the resume-skip must not survive a reset.
+
+    `--resumed-batch-indices` is decided once, before the run touches anything,
+    and it means "resume_setup.py checked this batch's attempt-0 fragment and it
+    is good" -- which is what lets advance_batch() skip the attempt-0 dispatch
+    (`if not (resumed and attempt == 0)`). Reconciliation invalidates that: the
+    batch HAS been driven since, and when its status is dropped from a rung above
+    0, attempt 0's fragment holds bytes a judge already REJECTED. Honouring the
+    skip re-approves known-bad content and spends rung 0 reproducing a rejection
+    the run has already had -- so the reset's promise, a genuine re-drive, is not
+    kept even once the approved slots are released.
+
+    Same shape as the sibling test above, with the resumed flag switched on for
+    the reset invocation. Nothing else about the scenario changes, which is the
+    point: the flag alone must not decide whether the batch recovers."""
+    plant_fragment(bed)
+    out, _ = run_driver(bed, "--resumed-batch-indices", "[0]")
+    entry = out["needs_judge"][0]
+    assert entry["attempt"] == 0
+    assert "out_0_attempt_0.json" not in _logged(bed, "companion"), (
+        "attempt 0 must have been resume-skipped, or this test is not exercising "
+        "the skip at all")
+
+    verdicts = bed["session"] / "v.json"
+    verdicts.write_text(json.dumps([{
+        "batch": 0, "attempt": 0, "nonce": entry["nonce"],
+        "reply": "source 1 does not attest the form.\nCITATIONS_REJECTED 0 ATTEMPT 0"}]))
+    out2, _ = run_driver(bed, "--resumed-batch-indices", "[0]",
+                         "--record-verdicts", str(verdicts))
+    entry1 = out2["needs_judge"][0]
+    assert entry1["attempt"] == 1
+
+    (bed["run_dir"] / "approved_0_attempt_1.json").write_text(
+        json.dumps([{"source_form": "Alpha", "basis": "transliterated",
+                     "disposition": "accepted"}]))
+    redecided = _default_rows(bases=("transliterated", "transliterated"))
+    bed["planted"].write_text(json.dumps({"out_0_attempt_0.json": redecided}))
+
+    verdicts.write_text(json.dumps([{
+        "batch": 0, "attempt": 1, "nonce": entry1["nonce"],
+        "reply": "ok\nCITATIONS_OK 0 ATTEMPT 1"}]))
+    out3, _ = run_driver(bed, "--resumed-batch-indices", "[0]",
+                         "--record-verdicts", str(verdicts), expect=1)
+
+    assert out3["reset"] and out3["reset"][0]["was"] == "awaiting_judge"
+    assert out3["needs_judge"][0]["attempt"] == 0
+    assert json.loads(
+        (bed["run_dir"] / "approved_0_attempt_0.json").read_text()) == redecided, (
+        "THE assertion. Still counted as resumed, the reset batch skips its "
+        "attempt-0 dispatch and re-approves the fragment the judge already "
+        "rejected -- rung 0 spent reproducing a known rejection, and the bytes "
+        "the reset was supposed to mint never dispatched at all")
+
+
 def test_a_ready_status_outliving_its_merge_fragment_is_reset_not_merged(bed):
     """The other half of the same condition: the record survived, the bytes it
     approves did not."""

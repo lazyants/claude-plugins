@@ -20,6 +20,14 @@ eleven, each carrying a payload `canon_validate --check-batch` accepted on its o
 meant deleting those batches' files by hand — the driver has no targeted recovery flag, and
 `resume_setup.py`'s sweep discards every already-approved batch in the run.
 
+A reset batch also stops counting as resumed for the rest of the invocation. `--resumed-batch-indices`
+is decided before the run touches anything and means "this batch's attempt-0 fragment was checked and
+is good", which is what lets the driver skip the attempt-0 dispatch. A reset invalidates that: the
+batch has been driven since, and when its status is dropped from a rung above 0, attempt 0's fragment
+holds bytes a judge already rejected — so the skip would re-approve known-bad content and spend rung 0
+reproducing a rejection the run has already had. A reset therefore costs one dispatch, which is the
+price of the promise rather than an optimisation lost.
+
 The reset now releases that batch's approved slots, every rung the ladder can re-enter rather than
 only the one the state document happens to name — earlier rungs are recorded nowhere, so the file
 that blocks a re-drive is usually one no field mentions. The paths are built from the template's

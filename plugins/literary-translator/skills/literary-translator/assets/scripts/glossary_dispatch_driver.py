@@ -2322,8 +2322,12 @@ def reconcile_state(ctx: Ctx, batches: list, state: dict) -> "list[dict]":
     So the check is on the ARTIFACT, never on a resume flag: whatever removed the
     file, a promise about a file that is gone is not a status. A reset sends the
     batch back through the ordinary attempt-0 path, where PREPARE mints a fresh
-    snapshot, evidence, nonce and record -- the same path a resumed batch already
-    takes, so a surviving out_{i}_attempt_0.json is still honoured.
+    snapshot, evidence, nonce and record.
+
+    That path DISPATCHES: main() drops every batch named here from the resume-skip
+    set, so a reset batch re-decides its attempt-0 fragment rather than reusing
+    the one resume_setup.py validated before the run began. See the comment at
+    that call for why the skip's premise does not survive a reset.
 
     A reset also RELEASES that batch's approved slots, because the snapshot is
     published create-once: a status this function has just declared untrusted must
@@ -2839,6 +2843,26 @@ def main(argv=None) -> int:
         # rather than as a snapshot fault, and the batch must be re-driven in the
         # same invocation instead of waiting for one that never comes.
         reset_batches = reconcile_state(ctx, batches, state)
+        # A RESET BATCH IS NO LONGER A RESUMED ONE. `resumed` is decided once,
+        # before this run touches anything, and it means "resume_setup.py checked
+        # this batch's attempt-0 fragment and it is good" -- which is what
+        # authorises advance_batch() to skip the attempt-0 dispatch entirely.
+        # Reconciliation invalidates both halves of that. The batch HAS been
+        # driven since: a status was dropped, and if it was dropped from a rung
+        # above 0 then attempt 0's fragment is bytes a judge already REJECTED, so
+        # honouring the skip re-approves known-bad content and spends rung 0
+        # reproducing a rejection. The fragment may also be gone by now -- the
+        # writer that rewrote a snapshot is not bound to have left it alone --
+        # and then the skip runs APPROVE against a file that is not there.
+        # Either way the reset's promise, a genuine re-drive from attempt 0, is
+        # not kept. So a reset costs one dispatch here, which is the price of the
+        # promise rather than an optimisation lost.
+        #
+        # `subst` is NOT rewritten to match: it carries what resume_setup.py
+        # found, which is still true, and the template reads it only to size a
+        # job-count CEILING that a re-dispatching batch stays under. What this
+        # run actually did is reported by `reset[]`.
+        resumed -= {entry["batch"] for entry in reset_batches}
         recorded = {"recorded": [], "refused": []}
         if args.record_verdicts:
             recorded = record_verdicts(ctx, Path(args.record_verdicts), state)
