@@ -2226,7 +2226,7 @@ with tempfile.TemporaryDirectory() as tmp:
                       "--codex-home", str(root / ".codexHome")], root=root)
     check("55 a named profile still reads the file inside it", "61%" in done.stdout, done.stdout)
 
-# --- 56 -- the subscription flag explains an absent cache; it never hides a present one ---------
+# --- 56 -- the subscription flag explains nothing: it neither hides a cache nor names an absence --
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
@@ -2668,7 +2668,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 548
+MIN_CHECKS = 554
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
