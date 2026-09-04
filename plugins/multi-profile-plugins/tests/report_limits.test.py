@@ -1559,6 +1559,11 @@ with tempfile.TemporaryDirectory() as tmp:
           len(RENDERED_TOKENS) >= 8, str(sorted(RENDERED_TOKENS)))
     check("24 the enum has a total fallback so nothing must invent a message",
           "internal-error" in R.DIAGNOSTIC_SET)
+    # The stdout searches for this token elsewhere cannot fail on their own: an unmapped code
+    # renders as internal-error, so re-adding the raise without the enum member prints nothing.
+    # The enum IS the load-bearing pin -- the report has no business naming a billing state.
+    check("24 the retired billing token is not back in the enum",
+          "no-subscription" not in R.DIAGNOSTIC_SET, str(sorted(R.DIAGNOSTIC_SET)))
 
     # 25 -- the fragment oracle itself: three truncation shapes must each be caught.
     for label, mutated in (
@@ -2668,7 +2673,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 554
+MIN_CHECKS = 555
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
