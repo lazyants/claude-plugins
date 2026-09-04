@@ -1126,14 +1126,15 @@ live book it reached a converged draft a full review round had already called
 clean. `references/false-green-gate.md`'s "The visual-order advisory" section
 carries why no deterministic gate can catch this class.
 
-**The scan is a SCREEN, not a verdict.** It detects visual-order *handling* (a
-terminal punctuation mark leading an RTL token, which logical order cannot
-produce), not the word *reordering* that actually tears tokens. Adjudicate it:
+**The scan is a SCREEN, not a verdict**, and it is TWO screens — terminal
+punctuation leading an RTL token, and a combining mark with no letter behind
+it. Neither is the word *reordering* that tears tokens. Adjudicate BOTH:
 
-1. Read the sampled units the WARN names, in the manifest, against the source.
-   The sample is printed as `\uXXXX` escapes on purpose — **never judge RTL text
-   by looking at it**, because a bidi terminal renders a corrupted token
-   identically to an intact one. Settle it on the codepoints.
+1. Only the punctuation screen prints a sample, as `\uXXXX` escapes — **never
+   judge RTL text by looking at it**, because a bidi terminal renders a
+   corrupted token identically to an intact one. Reading it settles THAT class
+   alone; the detached-mark class is a FIGURE only, adjudicated by searching
+   the manifest for a combining mark with no letter behind it.
 2. **Negative** — the signature fired on something benign: record that in the
    project's notes and carry on. Nothing else to do.
 3. **Positive** — paste the clause from `references/gotchas.md` §15 into the
@@ -1154,10 +1155,9 @@ adjudication, never an instruction to any turn. A book whose source is in
 ordinary logical order must never receive it: telling that project's reviewer to
 discount torn-token findings would suppress real defects.
 
-The clause itself — a fenced `#### E-traps: visual-order source` block, ready
-to paste unaltered — is `references/gotchas.md` §15. Open that file ONLY on a
-positive adjudication: a book in ordinary logical order must never receive
-the clause, and reading it is not the same as being entitled to paste it.
+The clause itself — a fenced `#### E-traps: visual-order source` block, ready to
+paste unaltered — is `references/gotchas.md` §15. Open it ONLY on a positive
+adjudication: reading it is not the same as being entitled to paste it.
 
 ### An empty content unit is refused at W2 (#397)
 

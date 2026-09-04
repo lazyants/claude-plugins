@@ -599,7 +599,17 @@ consult, so reconstruction is the only recovery. Binding on every turn:
 3. **Never judge an RTL token by how it looks.** A bidi terminal renders a
    corrupted token identically to an intact one. Settle any such question on the
    codepoints.
+4. **A vowel or dagesh may sit apart from the letter it belongs to, or on a
+   letter that cannot take it** (for Hebrew, a dagesh on alef, het, ayin or
+   resh, which never take one). A mark's position is not evidence about
+   spelling — do not read a detached or misplaced mark as a spelling signal,
+   and do not file a finding on one.
 ```
+
+Three classes of mark corruption exist here: punctuation displaced to a
+word's left edge, a mark detached from its base, and a mark landed on a
+wrong base letter. The gate counts the first two; it cannot see the third,
+so its figures are a floor.
 
 ## See also
 
