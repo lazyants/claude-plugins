@@ -1,5 +1,5 @@
 """Tests for the visual-order advisory scan in ``scripts/validate_extraction.py``
-(issue #489).
+(issues #489, #845).
 
 A source EPUB converted from a PDF can carry RTL text in VISUAL order. The
 extraction is byte-faithful and every deterministic gate passes it, because none
@@ -21,7 +21,11 @@ ship green:
     so the payload is asserted ASCII-only as a whole;
   * an embedded verse being missed. Its text is lifted OUT of its carrier block
     and replaced by a placeholder, so a blocks-only scan cannot see it;
-  * a standalone verse being counted TWICE (it is already a blocks[] entry).
+  * a standalone verse being counted TWICE (it is already a blocks[] entry);
+  * the detached-mark figure (#845) going missing from a fired advisory, or the
+    firing condition widening to fire on it -- the advisory still fires on the
+    punctuation signature ALONE, and a book carrying only detached marks stays
+    silent.
 
 **Every RTL string here is built from ``\\uXXXX`` escapes on purpose.** Pasting
 the literal characters is how an invisible control or a reordered anchor silently
@@ -30,6 +34,7 @@ say what it contains is worthless.
 """
 
 import importlib.util
+import time
 from pathlib import Path
 
 
@@ -262,7 +267,6 @@ def test_a_non_ascii_block_id_cannot_reach_the_payload_raw():
 # above cannot reach -- a vowel or dagesh with no letter behind it.
 # ---------------------------------------------------------------------------
 
-import time
 
 SHEVA = "\u05B0"    # HEBREW POINT SHEVA (Mn) -- a mark with nothing else needed to detach it
 PATAH = "\u05B7"    # HEBREW POINT PATAH (Mn)

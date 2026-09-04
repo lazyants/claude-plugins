@@ -1043,6 +1043,14 @@ def _detached_mark_hits(text):
             elif category == "Cf":
                 continue
             else:
+                # Both halves matter, and the CLEARING one is the subtle half:
+                # any non-mark that is not a letter -- a stop, a digit, a
+                # bracket -- puts the flag back to False, so a mark stranded on
+                # the far side of a DISPLACED terminal stop still counts as
+                # detached. A flag that only ever latched True would read the
+                # token's first letter and silently attach every later mark to
+                # it. See test_a_non_letter_RESETS_the_base_after_a_letter_
+                # earlier_in_the_token.
                 base_seen = category.startswith("L")
         if n:
             hits.append((token, n))
@@ -1053,9 +1061,9 @@ def scan_detached_marks(manifest: dict):
     """Returns ``(n_marks, n_units_with_marks)``.
 
     No denominator of its own: the printed denominator is ``n_rtl_units``,
-    returned by ``scan_visual_order`` alone -- both scans share ``_rtl_text_
-    units`` so re-deriving the same count here would be a second copy of a
-    number that must never disagree with the first.
+    returned by ``scan_visual_order`` alone -- both scans share
+    ``_rtl_text_units``, so re-deriving the same count here would be a second
+    copy of a number that must never disagree with the first.
 
     Pure: reads the manifest, decides nothing, writes nothing."""
     n_marks = 0
@@ -1296,9 +1304,9 @@ def _visual_order_advisory(manifest: dict):
             f"SAMPLES THE SECOND CLASS: {n_marks} combining mark(s) in "
             f"{n_units_with_marks} of {n_rtl_units} RTL-bearing text unit(s) have "
             f"NO letter behind them (walking back across a whole vowel cluster) -- "
-            f"a vowel or dagesh detached from its base letter. The punctuation "
-            f"screen cannot FIND that class; a sampled token may happen to carry "
-            f"one, and such an overlap adjudicates none of the figure. This is a "
+            f"a vowel or dagesh detached from its base letter. A sampled token "
+            f"may happen to carry one, and such an overlap adjudicates none of "
+            f"the figure. This is a "
             f"SCREEN, not a verdict: it detects "
             f"visual-order handling, not word reordering, and it neither passes "
             f"nor fails this gate. Adjudicate the sampled units AND the "
