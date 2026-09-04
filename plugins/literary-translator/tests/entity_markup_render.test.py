@@ -1965,9 +1965,19 @@ def test_a_collision_among_owners_of_ANOTHER_category_does_not_halt(tmp_path):
 
 
 def test_one_compatible_owner_beside_an_incompatible_one_does_not_halt(tmp_path):
-    """The boundary of the rule above. With only ONE owner able to answer
-    for this tag there is nothing two-sided to merge, and minted records
-    stay keyed by `(tag, label)` regardless."""
+    """The boundary of the rule above. With only ONE owner able to answer for
+    this tag there is nothing two-sided to merge -- no canon entries can be
+    combined into the minted note, which is the defect #837 closes.
+
+    A KNOWN RESIDUAL, pinned here rather than left to be rediscovered: the
+    sole compatible owner still has its own canon note, and the marked span
+    still mints a second one beside it, so this one name has two notes and
+    the canon note takes no inbound link. That is a competing INDEX, not a
+    merged identity, and it is byte-for-byte what shipped before this change
+    -- composing onto a target collision de-linking deliberately dropped
+    would be a change to the #588 rule this release exists to defend, and it
+    is not one to make from inside a fix for a different defect. Measured on
+    both markup volumes of the corpus that motivated #837: zero occurrences."""
     entries = {
         "יַרְדֵן": canon_entry("יַרְדֵן", "Jordan", category="place"),
         "יַרְדֵנִי": canon_entry("יַרְדֵנִי", "Jordan", category="person"),
