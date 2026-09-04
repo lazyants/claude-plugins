@@ -751,8 +751,7 @@ def test_a_reset_republishes_at_attempt_zero_instead_of_burning_the_ladder(bed):
     # nothing binds a fresh codex turn to the bytes an earlier one produced. That
     # is what makes rung 0's surviving snapshot a refusal rather than a no-op.
     redecided = _default_rows(bases=("transliterated", "transliterated"))
-    (bed["tmp"] / "planted.json").write_text(
-        json.dumps({"out_0_attempt_0.json": redecided}))
+    bed["planted"].write_text(json.dumps({"out_0_attempt_0.json": redecided}))
 
     verdicts.write_text(json.dumps([{
         "batch": 0, "attempt": 1, "nonce": entry1["nonce"],
@@ -780,9 +779,11 @@ def test_a_reset_republishes_at_attempt_zero_instead_of_burning_the_ladder(bed):
         (bed["run_dir"] / "approved_0_attempt_0.json").read_text()) == redecided, (
         "rung 0 must hold the RE-DECIDED bytes -- an old snapshot merely surviving "
         "would satisfy an existence check while proving no republication happened")
-    assert (bed["run_dir"] / "out_0_attempt_0.json").exists(), (
-        "the validated fragment is not part of the release set: resume_setup.py "
-        "keeps it on purpose and nothing refuses to overwrite it")
+    # The fragment out_0_attempt_0.json is deliberately outside the release set,
+    # and that is NOT asserted here: run_driver passes no --resumed-batch-indices,
+    # so this invocation re-dispatches rung 0 and republishes the fragment whether
+    # or not the reset had removed it. An existence check would pass either way --
+    # exactly the vacuity this file's other assertions are written to avoid.
 
 
 def test_a_ready_status_outliving_its_merge_fragment_is_reset_not_merged(bed):

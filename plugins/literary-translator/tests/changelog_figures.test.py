@@ -504,8 +504,9 @@ FIGURES = [
     # `DERIVATION_BUNDLE_MEMBERS` rather than quoting their sizes, which is
     # precisely the figure the 1.83.2 rotation below had to declare three rows
     # for. The remaining numerals are identifiers: the version numbers, the
-    # release date, the issue number (#852), and `attempt 0` / `out_{i}_attempt_0.json`,
-    # which name a rung and a filename rather than counting anything.
+    # release date, the issue number (#852), `attempt 0` / `out_{i}_attempt_0.json`,
+    # which name a rung and a filename, and `W3` / `W3a` in the migration
+    # paragraph, which name workflow steps. None of them counts anything.
     #
     # The 1.84.1 rotation this replaces, kept as its own record (#851 -- the
     # glossary driver logged `err` for a command whose reason only ever reaches

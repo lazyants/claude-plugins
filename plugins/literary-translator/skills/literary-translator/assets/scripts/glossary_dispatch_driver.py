@@ -2286,8 +2286,17 @@ def _release_approved_slots(ctx: Ctx, idx: int) -> "list[str]":
     Deliberately NOT released: out_{i}_attempt_0.json, a validated fragment
     resume_setup.py preserves on purpose and that publication overwrites anyway;
     and the approval record, whose writer replaces rather than refuses, so it can
-    block nothing and is worth keeping as evidence. Returns the paths that could
-    not be removed."""
+    block nothing and is worth keeping as evidence.
+
+    This REOPENS a create-once slot mid-run, where canon_validate.py's own scope
+    note names only resume_setup.py's run-start wipe as doing so. It is safe for
+    the reason that wipe is: one run directory has one driver. The state document
+    is the run's single writer -- it is loaded, reconciled, advanced and saved by
+    one process per invocation, and a second driver on the same verdict directory
+    would already be racing that document long before it reached this function.
+    Nothing here adds a lock, and this is not one.
+
+    Returns the paths that could not be removed."""
     built = ctx.build([{"key": str(rung), "fn": "approvedPath", "args": [idx, rung]}
                        for rung in range(ctx.max_citation_retries + 1)])
     undeleted = []
