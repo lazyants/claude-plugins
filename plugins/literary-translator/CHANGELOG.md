@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.81.1 — 2026-09-04
+
+**SKILL.md's copied-artifact counts are re-derived, and now have a guard (#834).** The W5 paragraph
+that tells a reader what the default launcher does NOT carry described `fix_scope_audit.py`'s
+copy-fidelity comparison as covering "48 scripts, the three workflow templates, 24 schemas and the 6
+language files, 81 artifacts", and derived "58 copied artifacts have no byte comparison on this
+path" from it. The four numbers were self-consistent and stale. Measured over the history rather than
+argued: 48 copied scripts was CORRECT when that wording landed, the count had reached 50 by the
+commit before #286, #286's `name_discovery.py` took it to 51, and 1.81.0 to 52. So the drift
+predates #286 and #286 is why it was noticed, not what caused it — the issue's own "at least seven
+scripts" was itself a miscount, and re-deriving it is how that was found.
+
+The corrected figures are 52 scripts, the three workflow templates, 26 schemas and the 6 language
+files, 87 artifacts, of which 63 have no byte comparison on the driver path. They are NOT taken from
+a directory listing, and the issue is explicit about why: the prose is a claim about what Step 0a
+COPIES and what the audit then COMPARES, which is a different question from what the directories
+hold. The language row proves it — `assets/languages/` holds five presets and a `README.md`, and the
+copy pass takes all six, so the one figure a listing would have "corrected" was already right.
+Every number comes from `fix_scope_audit.compared_pairs()`, the audit's own manifest, and from the
+name-deduped union of `PLUGIN_BUNDLE_MEMBERS` and `ORCHESTRATION_BUNDLE_MEMBERS` that
+`scaffold_setup.py --verify` byte-compares.
+
+The guard is two tests added to `w5_default_launcher.test.py`, which already owned this paragraph
+and already pinned every sentence in it while pinning none of its numbers — its own comment calls
+the uncompared count "the load-bearing half". A separate file was drafted and cut: the paragraph has
+an owner, and that file's `_w5_section()` already collapses whitespace, so a phrase may span the
+hard wrap. So was a refactor of `scaffold_setup.py` to expose its dedup as a helper — shipped code
+changed only to serve a test, where the union of two literal tuples is a fact about their contents
+and the dedup already has its own negative control in `scaffold_setup.test.py`.
+
+The count of uncompared artifacts is derived as a SET DIFFERENCE over destination paths, never as
+one length minus another. A future bundle member that is not a copied artifact would shrink that
+subtraction while comparing none of the copied set, and the arithmetic would bless a second wrong
+figure the same way this one's did; the containment the prose implies is asserted rather than
+assumed, and turns red when it stops holding. Both tests were watched failing by mutating the TREE —
+an added schema, an added script, a bundle member placed outside the copied set — never by mutating
+an assertion. A review round then found the first version of them green through `52` becoming `152`:
+a bare substring needle matches the wrong figure because the wrong figure CONTAINS the right one.
+Every figure is now matched between digit boundaries, and each of the four leading-digit mutations
+was watched red.
+
+Impact is prose-only: nothing reads these numbers, and the paragraph's argument is unaffected in
+direction by the exact totals. The consumer is a model or an operator deciding, where the launcher
+is chosen, how much of the durable root the default path leaves unchecked. The six numerals, across
+five lines, were replaced in place and every corrected value has the same digit width as the stale
+one, so the block keeps its exact line count and no `SKILL.md:NNN` citation below it moves. This release adds no
+mechanism and changes no shipped script, so no cache key, bundle hash or resume digest moves.
+
 ## 1.81.0 — 2026-09-03
 
 **The frozen canon now gets one whole-canon read for divergent target forms (#823).** Nothing in the

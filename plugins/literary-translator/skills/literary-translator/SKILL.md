@@ -2812,13 +2812,13 @@ rendered prompt out as `needs_fix` and truncates the template before every
 top-level preflight, so no audit call site exists on this route. Say what
 that check actually is, because "the fix turn is unaudited" understates it:
 it is a COPY-FIDELITY comparison of every file Step 0a copied into the
-durable root against the plugin bytes it came from — 48 scripts, the three
-workflow templates, 24 schemas and the 6 language files, 81 artifacts — run
+durable root against the plugin bytes it came from — 52 scripts, the three
+workflow templates, 26 schemas and the 6 language files, 87 artifacts — run
 after every dispatched fix call on the fallback. What the default path has
 in its place is the #396 rule below: `scaffold_setup.py --verify` before
-each driver launch, which compares the two BUNDLES — 21 scripts plus
-`mass-translate-wf.template.js` and `glossary-pass-wf.template.js`, 23
-members. So 58 copied artifacts have no byte comparison on this path,
+each driver launch, which compares the two BUNDLES — 22 scripts plus
+`mass-translate-wf.template.js` and `glossary-pass-wf.template.js`, 24
+members. So 63 copied artifacts have no byte comparison on this path,
 including every durable schema, every language preset,
 `skeptic-pass-wf.template.js`, and the W7/W8 entry points `final_audit.py`
 and `assemble.py` — and `final_audit.py` is in NO bundle hash by design (see
