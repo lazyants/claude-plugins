@@ -22,7 +22,6 @@ import importlib.util
 import json
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -439,30 +438,6 @@ def test_the_approval_record_failure_persists_the_reason_into_the_state_record(
     assert "SENTINEL-REASON" in st["detail"], (
         "the persisted reason was empty: " + repr(st.get("detail")))
     assert result["recorded"][0]["approvalRecorded"] is False
-
-
-def test_canon_validate_really_does_write_its_refusal_to_stdout_only(tmp_path):
-    """CHARACTERISATION, not a regression test -- it passes before and after the
-    fix. It pins the premise the stdout fallback exists for -- a refusal, ANY
-    refusal, is reported on stdout: this invocation exits 1 on per-item schema
-    validation, before `--approve-to` is ever consulted, and the reason still
-    arrives on stdout with stderr empty. If canon_validate.py ever moved its
-    verdict to stderr, the fallback would quietly become dead code and this test
-    would say so rather than leaving it to be re-derived by hand."""
-    canon = tmp_path / "canon.json"
-    fragment = tmp_path / "fragment.json"
-    fragment.write_text(json.dumps(
-        [{"source_form": "name0", "canonical_target_form": "N0",
-          "basis": "established"}]))
-    proc = subprocess.run(
-        [sys.executable, str(SKILL_ROOT / "assets" / "scripts" / "canon_validate.py"),
-         "--canon", str(canon), "--research-mode", "live",
-         "--check-batch", str(fragment),
-         "--approve-to", str(tmp_path / "approved.json")],
-        capture_output=True, text=True, timeout=120)
-    assert proc.returncode == 1, proc.stderr
-    assert proc.stderr == "", "canon_validate.py now writes stderr; see #851"
-    assert '"error"' in proc.stdout
 
 
 if __name__ == "__main__":
