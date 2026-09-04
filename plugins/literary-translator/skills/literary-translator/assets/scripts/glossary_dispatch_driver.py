@@ -2260,7 +2260,46 @@ def _stale_status_reason(st: dict) -> "str | None":
     return None
 
 
-def reconcile_state(batches: list, state: dict) -> "list[dict]":
+def _release_approved_slots(ctx: Ctx, idx: int) -> "list[str]":
+    """Unlinks every approved-snapshot slot a reset batch's ladder can re-enter.
+
+    canon_validate.py publishes the approved snapshot CREATE-ONCE (os.link) and
+    REFUSES a different fragment into a path that already holds one. A reset sends
+    the batch back to attempt 0 with every snapshot its earlier rungs left behind
+    still in place, so each of those refuses the rung that would republish it --
+    one rung spent per refusal, until the ladder is gone and the batch settles as
+    citation-review-exhausted, which the all-or-nothing merge turns into the loss
+    of the whole pass (#852). Releasing the slots is what makes the reset's own
+    promise -- re-drive from attempt 0 -- performable at all.
+
+    EVERY rung, not only the one the dropped status named. The state document
+    banks just the CURRENT attempt's snapshotPath, while the reset re-enters at 0
+    and can climb back through all of them, so the file that blocks a re-drive is
+    usually one no field in that document mentions.
+
+    The paths are BUILT from approvedPath() -- the same template function PREPARE
+    approves into -- never globbed and never taken from the state document, whose
+    stored strings are checked only for run identity and the shape of its batches
+    map. Nothing outside this run's canonical slots for this batch is reachable
+    from here.
+
+    Deliberately NOT released: out_{i}_attempt_0.json, a validated fragment
+    resume_setup.py preserves on purpose and that publication overwrites anyway;
+    and the approval record, whose writer replaces rather than refuses, so it can
+    block nothing and is worth keeping as evidence. Returns the paths that could
+    not be removed."""
+    built = ctx.build([{"key": str(rung), "fn": "approvedPath", "args": [idx, rung]}
+                       for rung in range(ctx.max_citation_retries + 1)])
+    undeleted = []
+    for path in built.values():
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError as exc:
+            undeleted.append(f"{path}: {exc}")
+    return undeleted
+
+
+def reconcile_state(ctx: Ctx, batches: list, state: dict) -> "list[dict]":
     """Resets any batch whose skipped status outlives the artifacts it promises.
 
     A resume reuses the SAME run_id, so a state document written before the
@@ -2275,7 +2314,12 @@ def reconcile_state(batches: list, state: dict) -> "list[dict]":
     file, a promise about a file that is gone is not a status. A reset sends the
     batch back through the ordinary attempt-0 path, where PREPARE mints a fresh
     snapshot, evidence, nonce and record -- the same path a resumed batch already
-    takes, so a surviving out_{i}_attempt_0.json is still honoured."""
+    takes, so a surviving out_{i}_attempt_0.json is still honoured.
+
+    A reset also RELEASES that batch's approved slots, because the snapshot is
+    published create-once: a status this function has just declared untrusted must
+    not leave a file behind that refuses its own replacement. See
+    _release_approved_slots()."""
     reset = []
     for batch in batches:
         idx = batch["index"]
@@ -2287,10 +2331,19 @@ def reconcile_state(batches: list, state: dict) -> "list[dict]":
             continue
         log(f"batch {idx}: dropping its {st.get('status')!r} status -- {reason}; "
             f"re-driving it from attempt 0")
+        undeleted = _release_approved_slots(ctx, idx)
         state["batches"][str(idx)] = {"attempt": 0, "status": "pending",
                                       "rejection_reason": None}
-        reset.append({"batch": idx, "was": st.get("status"),
-                      "attempt": st.get("attempt"), "reason": reason})
+        entry = {"batch": idx, "was": st.get("status"),
+                 "attempt": st.get("attempt"), "reason": reason}
+        if undeleted:
+            # Not fatal: an unremovable file is an environment fault, and the rung
+            # it blocks reports it itself as approve-failed. Failing the whole
+            # invocation here would take down the batches that are fine.
+            entry["undeleted"] = undeleted
+            log(f"batch {idx}: could not release {len(undeleted)} approved slot(s); "
+                f"the re-drive may be refused at approve time: {undeleted}")
+        reset.append(entry)
     return reset
 
 
@@ -2776,7 +2829,7 @@ def main(argv=None) -> int:
         # whose snapshot no longer exists must be refused as "not awaiting a judge"
         # rather than as a snapshot fault, and the batch must be re-driven in the
         # same invocation instead of waiting for one that never comes.
-        reset_batches = reconcile_state(batches, state)
+        reset_batches = reconcile_state(ctx, batches, state)
         recorded = {"recorded": [], "refused": []}
         if args.record_verdicts:
             recorded = record_verdicts(ctx, Path(args.record_verdicts), state)

@@ -490,8 +490,26 @@ def _name_discovery_passes_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.84.1 (#851 -- the glossary driver logged `err` for a command
-    # whose reason only ever reaches stdout), per the maintenance contract above.
+    # ROTATED TO 1.84.2 (#852 -- a reconciliation reset left behind the very
+    # snapshots that refuse its re-drive), per the maintenance contract above.
+    #
+    # ZERO rows. The entry quotes exactly one measurement, "three batches of
+    # eleven", and it is a fact about ONE LIVE RUN OF A BOOK IN ANOTHER
+    # REPOSITORY: how many batches of that pass ended `approve-failed`. This file
+    # re-derives a figure by calling an authoritative implementation in THIS
+    # tree, and no implementation here can see that run -- it is not even a
+    # property of a delivered artifact, only of a run that has since been
+    # recovered by hand. The rest of the entry is deliberately worded without a
+    # tree-owned count: the migration paragraph names `PLUGIN_BUNDLE_MEMBERS` and
+    # `DERIVATION_BUNDLE_MEMBERS` rather than quoting their sizes, which is
+    # precisely the figure the 1.83.2 rotation below had to declare three rows
+    # for. The remaining numerals are identifiers: the version numbers, the
+    # release date, the issue number (#852), and `attempt 0` / `out_{i}_attempt_0.json`,
+    # which name a rung and a filename rather than counting anything.
+    #
+    # The 1.84.1 rotation this replaces, kept as its own record (#851 -- the
+    # glossary driver logged `err` for a command whose reason only ever reaches
+    # stdout):
     #
     # ZERO rows, and for the reason this file's own economics section prefers:
     # the entry was WORDED to keep its claims re-derivable-free rather than
@@ -509,23 +527,19 @@ FIGURES = [
     # attempt indices in the quoted log block, and the `400` of `err[-400:]`,
     # which is a literal in the source rather than a measurement.
     #
-    # The 1.84.0 rotation this replaces, kept as its own record (#844 --
-    # `validation.terms` silently double-counted when one declared
-    # `source_form` nested inside another), per the maintenance contract above.
-    #
-    # ZERO rows, and the reason is the one most rotations before it give: every
-    # measurement the entry quotes was taken on DELIVERED BOOKS IN ANOTHER
+    # The 1.84.0 rotation before that one, kept as its own record (#844 --
+    # `validation.terms` silently double-counted when one declared `source_form`
+    # nested inside another): also ZERO rows, and for the same reason. Every
+    # measurement that entry quotes was taken on DELIVERED BOOKS IN ANOTHER
     # REPOSITORY -- the two volumes' nesting pin counts (65 containing 63, 49
     # containing 42) and the substring-vs-token count of a pinned title (133
-    # against 61). This file re-derives a figure by calling an authoritative
-    # implementation in THIS tree, and no implementation here can see those
-    # books. The entry is worded to keep the rest re-derivable-free: the new
-    # behaviour is described by NAMING `term_pin_overlaps()`, `warn_details` and
-    # `DERIVATION_BUNDLE_MEMBERS` rather than by quoting a count of anything the
-    # tree owns -- deliberately, since the rotation this replaces shows what
-    # quoting one costs. The remaining numerals are identifiers: the version
-    # numbers, the release date, the issue number (#844), and the exit code `0`,
-    # which is a literal in the contract rather than a measurement.
+    # against 61). Its new behaviour is described by NAMING `term_pin_overlaps()`,
+    # `warn_details` and `DERIVATION_BUNDLE_MEMBERS` rather than by quoting a
+    # count of anything the tree owns -- deliberately, since the rotation IT
+    # replaced shows what quoting one costs. Its remaining numerals are
+    # identifiers: the version numbers, the release date, the issue number
+    # (#844), and the exit code `0`, a literal in the contract rather than a
+    # measurement.
     #
     # The 1.83.2 rotation this replaces, kept as its own record (#843 --
     # name_discovery.py --dispatch passes the resolver its required
@@ -535,20 +549,7 @@ FIGURES = [
     # module-level tuples this tree owns, and exactly the figures that rot when
     # a later release adds a member.
     #
-    # ZERO rows, and the reason is the one the rotations before it give: every
-    # measurement the entry quotes was taken on DELIVERED BOOKS IN ANOTHER
-    # REPOSITORY -- the two volumes' nesting pin counts (65 containing 63, 49
-    # containing 42) and the substring-vs-token count of a pinned title (133
-    # against 61). This file re-derives a figure by calling an authoritative
-    # implementation in THIS tree, and no implementation here can see those
-    # books. The entry is worded to keep the rest re-derivable-free: the new
-    # behaviour is described by naming `term_pin_overlaps()`, `warn_details` and
-    # `DERIVATION_BUNDLE_MEMBERS` rather than by quoting a count of anything the
-    # tree owns. The remaining numerals are identifiers: the version numbers, the
-    # release date, the issue number (#844), and the exit code `0`, which is a
-    # literal in the contract rather than a measurement.
-    #
-    # The 1.83.1 rotation this replaces, kept as its own record: also ZERO rows,
+    # The 1.83.1 rotation, kept as its own record: also ZERO rows,
     # because that entry asserted a DOCUMENTATION state -- that no shipped
     # document said what `glossary_rule` must hold, and that nothing executable
     # changed. Its closest candidate figure, "how many places mentioned the field
@@ -561,7 +562,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.84.1"
+FIGURES_VERSION = "1.84.2"
 
 
 def _newest_entry():
