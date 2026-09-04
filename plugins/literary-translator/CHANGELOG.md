@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.83.1 — 2026-09-04
+
+**`resume_setup.py`'s required `glossary_rule` says what it must hold (#846).**
+A `kind="glossary"` payload is refused without a `glossary_rule` field, that field is hashed
+into `input_digest` beside `canon_hash`, and it is read by nothing else — but no shipped
+document said what value it should carry. Its only mentions were the script's own
+`<any JSON value>` docstring line and the field NAME inside
+`orchestration-and-batching.md`'s digest pseudocode, neither of which says what it is a rule
+ABOUT. Since 1.75.0 the hand-driven W3 path is the DEFAULT and `glossary_dispatch_driver.py`
+does not call `resume_setup.py` for the operator the way `segment_dispatch_driver.py` does
+for the mass path, so the operator writes that payload themselves and had to invent a value.
+
+Both easy inventions fail SILENTLY, in opposite directions: a constant makes the field inert,
+so a run resumes across a change that should have invalidated it, and anything incidentally
+per-run makes every invocation mint a fresh `RUN_ID`, so the resume path is dead and reads as
+"resume does not work" rather than as a payload mistake. Neither produces an error.
+
+SKILL.md's W3 now states the question the field answers — which project-level adjudication
+rule this canon decision was taken under — and names a value that answers it: an object over
+this project's `style_contract_hash` and a sha1 of its durable `glossary_TASK.md`. Those are
+the two shipped artifacts a canon adjudication rests on that no other digest component
+covers; `canon_hash` already covers the resolved entries and `version` covers the
+bundle-member scripts and workflow templates plus the durable schemas. `glossary_TASK.md` in particular is in NO cache-key
+field by design and is never auto-overwritten. Plenty of things look at it — every
+dispatched job reads it, `glossary_preflight.py` checks its marker and specific content,
+`scaffold_validate.py` scans it for unfilled placeholders — but none of them puts its whole
+bytes into anything a resume consults, so an edit preserving those literals changes no
+digest. The passage states the value's known
+weakness in the same breath: `style_contract_hash` moves on any edit inside the hashed span,
+including sections a canon decision does not rest on, so it over-refuses — the safe
+direction, but not a self-explaining one. `orchestration-and-batching.md` now points at that
+passage instead of leaving the field name a dead end, and `canon-and-glossary.md`'s
+in-flight recovery procedure — written when nothing in the digest depended on
+`glossary_TASK.md` — is now scoped to a `glossary_rule` that does not carry its hash, so an
+operator following the recommended value is no longer told to delete attempt-0 fragments a
+refused resume never kept.
+
+The contract itself is unchanged and stays `<any JSON value>`: what invalidates an
+adjudication is a project-level judgement, and a shipped default would be the inert-constant
+failure shipped. Nothing executable changed — deliberately including `resume_setup.py`'s own
+docstring, which would have been the natural second home for the sentence but is a
+`PLUGIN_BUNDLE_MEMBERS` entry hashed over raw bytes, so a comment-only edit there would move
+`plugin_bundle_hash` and stale every converged segment of every live project.
+
 ## 1.83.0 — 2026-09-04
 
 **The visual-order advisory now counts the detached-combining-mark class, and says which screen its

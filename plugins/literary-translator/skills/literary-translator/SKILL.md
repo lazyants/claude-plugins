@@ -1817,6 +1817,57 @@ the stale-attempt wipe and after the manifests exist, because those are what
 make the answer a fact; copy it into `{{RESUMED_BATCH_INDICES}}` when you
 instantiate the template (see above).
 
+**What `glossary_rule` must hold (#846).** That payload's `glossary_rule` is
+REQUIRED for `kind="glossary"`, is hashed into `input_digest` beside
+`canon_hash`, and is read by nothing else — so it is the answer to exactly one
+question: *which project-level adjudication rule was this canon decision taken
+under, such that changing it should stop a run from resuming?* `canon_hash`
+already covers the resolved entries themselves, and `version` covers the
+bundle-member scripts and workflow templates (`cache_key.py`'s and
+`scaffold_setup.py`'s own tuples, not every shipped file) plus the durable
+schemas. What none of them covers is the project's own contract those entries
+were adjudicated AGAINST, and two shipped artifacts carry it — so commit to
+both:
+
+```json
+{"style_contract_hash": "<sha1>", "glossary_task_sha1": "<sha1>"}
+```
+
+```
+python3 "{{PLUGIN_ROOT}}/assets/scripts/cache_key.py" --field style_contract_hash --durable-root "${durable_root}"
+python3 -c 'import hashlib,sys;print(hashlib.sha1(open(sys.argv[1],"rb").read()).hexdigest())' "${durable_root}/glossary_TASK.md"
+```
+
+Take `cache_key.py` from `{{PLUGIN_ROOT}}`, never `${durable_root}/scripts/`,
+for the #412 reason every `--plugin-root` substitution above exists: the
+durable copy is one the codex processes this pipeline launches hold `--write`
+over, so it is not a trusted source for a value that gates resume.
+
+`style_bible.md`'s hashed `STYLE_CONTRACT_BEGIN`/`END` span holds section C's
+naming rule and section C-translit's fixed transcription rule — the two rules a
+`basis:"transliterated"` or `basis:"sense_translated"` decision rests on — so a
+contract edit genuinely changes what an `accepted` entry means.
+`glossary_TASK.md` carries the rest: disposition, `basis` precedence, nickname
+handling. It is deliberately in NO cache-key field (`glossary_preflight.py`
+says exactly that in its own refusal text), and no gate that does read it —
+that preflight's marker-and-content check, `scaffold_validate.py`'s W1
+placeholder scan — puts its WHOLE bytes anywhere a resume consults. Hashing it
+here is what closes that.
+
+**Known weakness, said here so it is not a mystery later:**
+`style_contract_hash` moves on ANY edit inside the span, including sections a
+canon decision does not rest on, so this value OVER-refuses. That is the safe
+direction, but a resume refused right after an unrelated style edit has exactly
+this as its cause and no error will say so.
+
+**The two easy wrong values both fail SILENTLY, in opposite directions.** A
+constant (`"glossary"`, `1`, `null`) makes the field inert: it can never
+contribute to the digest changing, so a run resumes across a change that should
+have invalidated it. Anything incidentally per-run (a timestamp, a uuid) makes
+every invocation mint a fresh `RUN_ID`, so the resume path is dead and reads as
+"resume does not work" rather than as a payload mistake. Neither produces an
+error, which is why the field is worth this many words.
+
 **Dispatch path — `glossary_dispatch_driver.py` is the DEFAULT since 1.75.0
 (#800); the `pipeline()` template path below is the retained FALLBACK.** A
 Workflow script cannot run bash, so every deterministic step of this pass —

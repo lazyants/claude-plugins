@@ -849,6 +849,12 @@ input_digest = sha256(canonical_json({
 }))
 ```
 
+**`glossary_rule` is a field NAME above, not a value (#846).** What it must
+HOLD is stated in SKILL.md's W3 glossary pass, at the `resume_setup.py`
+(kind `glossary`) step. It is deliberately `<any JSON value>`: what
+invalidates an adjudication is a project-level judgement, so the contract
+stays open and SKILL.md names a sound default.
+
 **LT-409, `args` for `kind="mass"`:** pinned to the literal empty object
 `{}`, not the invocation's own CLI-scoping args (`select_segments.py`'s
 `--only-segs`/`--allow-retranslate-converged`/`--allow-empty`). Those
