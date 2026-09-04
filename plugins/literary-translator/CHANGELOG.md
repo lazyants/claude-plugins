@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.84.2 — 2026-09-04
+
+**A reconciliation reset left behind the very snapshots that refuse its re-drive (#852).**
+`reconcile_state()` drops a batch's `awaiting_judge` or `ready` status when the artifact that
+status promises no longer holds — an approved snapshot rewritten from outside the run, a merge
+fragment or approval record that is gone — and sends the batch back through attempt 0, where
+PREPARE mints a fresh snapshot. But `canon_validate.py` publishes the approved snapshot
+CREATE-ONCE: a slot that already holds DIFFERENT bytes is refused, never overwritten. The reset
+left every earlier rung's snapshot in place, so each one refused the fragment that would replace
+it.
+
+Nothing about that is visible while it happens. One refusal does not wedge the batch — it spends a
+rung and moves to the next — so a reset that promised to start the batch over silently restarts it
+part-way up its own ladder, and when the occupied slots cover the rungs that remain the batch
+settles as `citation-review-exhausted`. The merge admits only an exact full-membership ready set,
+so a single such batch costs the whole pass its merge. Observed on a live run: three batches of
+eleven, each carrying a payload `canon_validate --check-batch` accepted on its own, and recovery
+meant deleting those batches' files by hand — the driver has no targeted recovery flag, and
+`resume_setup.py`'s sweep discards every already-approved batch in the run.
+
+A reset batch also stops counting as resumed for the rest of the invocation. `--resumed-batch-indices`
+is decided before the run touches anything and means "this batch's attempt-0 fragment was checked and
+is good", which is what lets the driver skip the attempt-0 dispatch. A reset invalidates that: the
+batch has been driven since, and when its status is dropped from a rung above 0, attempt 0's fragment
+holds bytes a judge already rejected — so the skip would re-approve known-bad content and spend rung 0
+reproducing a rejection the run has already had. A reset therefore costs one dispatch, which is the
+price of the promise rather than an optimisation lost.
+
+The reset now releases that batch's approved slots, every rung the ladder can re-enter rather than
+only the one the state document happens to name — earlier rungs are recorded nowhere, so the file
+that blocks a re-drive is usually one no field mentions. The paths are built from the template's
+own `approvedPath()`, never globbed and never taken from the state document. The validated
+`out_{i}_attempt_0.json` fragment is deliberately kept, as `resume_setup.py` keeps it; so is the
+approval record, whose writer replaces rather than refuses and which is worth keeping as evidence.
+
+**Migration.** `glossary_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this release
+moves `plugin_bundle_hash`. Every converged segment of a book in progress goes `stale` and
+re-translates. It is not a `DERIVATION_BUNDLE_MEMBERS` entry, so no W3/W3a regeneration is forced.
+The cost most likely to bite the operator this fix is for: that hash is also folded into the
+glossary resume identity, so an UNFINISHED glossary pass mints a fresh `RUN_ID` and restarts
+instead of resuming once the refreshed plugin is picked up. Any fix to this defect pays all three —
+it lives in a bundle member.
 ## 1.84.1 — 2026-09-04
 
 **Every snapshot failure in the glossary dispatch driver logged an empty reason (#851).**

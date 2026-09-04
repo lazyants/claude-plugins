@@ -215,10 +215,20 @@ def bed(tmp_path):
     ''')
 
     # canon_validate stub: --check-batch succeeds once the fragment exists;
-    # --approve-to copies it; --record-approval-to writes a record; merge/verify
-    # succeed. Argument ORDER is asserted, not merely accepted.
+    # --approve-to publishes CREATE-ONCE; --record-approval-to writes a record;
+    # merge/verify succeed. Argument ORDER is asserted, not merely accepted.
+    #
+    # The --approve-to branch mirrors the real _write_approved_snapshot()'s three
+    # outcomes rather than copying unconditionally: absent -> published, present
+    # with IDENTICAL bytes -> silent no-op, present with DIFFERENT bytes ->
+    # REFUSED with the original left untouched. A stub that overwrote instead
+    # would hide every collision the driver can actually hit against the shipped
+    # script, which is how #852 stayed invisible to this suite. It is
+    # check-then-write rather than the real os.link() claim: sufficient for this
+    # bed, whose driver invocations are strictly sequential, and deliberately not
+    # a model of the concurrent-writer race os.link() exists to close.
     _write(scripts / "canon_validate.py", f'''
-        import json, shutil, sys, pathlib
+        import json, sys, pathlib
         argv = sys.argv[1:]
         open({str(calls)!r}, "a").write("canon " + " ".join(argv) + "\\n")
         if "--check-batch" in argv:
@@ -228,7 +238,17 @@ def bed(tmp_path):
             if not frag.exists():
                 print(json.dumps({{"success": False}})); sys.exit(1)
             if "--approve-to" in argv:
-                shutil.copy2(frag, argv[argv.index("--approve-to") + 1])
+                dest = pathlib.Path(argv[argv.index("--approve-to") + 1])
+                raw = frag.read_bytes()
+                if dest.exists():
+                    if dest.read_bytes() != raw:
+                        print("--approve-to refuses to overwrite the approved "
+                              "snapshot already at " + str(dest) + ": its bytes "
+                              "differ from the fragment just validated",
+                              file=sys.stderr)
+                        sys.exit(1)
+                else:
+                    dest.write_bytes(raw)
             if "--record-approval-to" in argv:
                 pathlib.Path(argv[argv.index("--record-approval-to") + 1]).write_text(
                     json.dumps({{"approved": True}}))
@@ -495,6 +515,10 @@ def test_a_verdict_for_bytes_that_changed_is_refused(bed):
     assert out2["refused"]
     assert not (bed["run_dir"] / "approval_0_attempt_0.json").exists(), (
         "no approval record may be written for a snapshot whose bytes moved")
+    assert out2["needs_judge"][0]["attempt"] == 0, (
+        "the reset returns the batch to attempt 0, so the fresh hand-back must "
+        "come from rung 0 -- a hand-back from a HIGHER rung means the changed "
+        "snapshot refused its own replacement and the reset silently spent rungs")
     assert out2["merged"] is False
 
 
@@ -675,6 +699,146 @@ def test_a_ready_status_outliving_its_approval_record_is_reset_not_merged(bed):
         "#723's record is what admits a batch to the merge; without it nobody can "
         "reconstruct what was approved")
     assert out["needs_judge"], "the reset batch is re-driven from attempt 0"
+    assert out["needs_judge"][0]["attempt"] == 0, (
+        "'re-driven from attempt 0' has to be true of the rung the hand-back "
+        "actually comes from. The planted snapshot here is Python-spaced JSON and "
+        "differs bytewise from what the dispatch writes, so a driver that leaves "
+        "it in place is refused at rung 0 and hands back from rung 1 instead -- "
+        "which the non-empty check alone cannot tell apart")
+
+
+def test_a_reset_republishes_at_attempt_zero_instead_of_burning_the_ladder(bed):
+    """#852: a reset must release the approved slots it sends the batch back over.
+
+    canon_validate.py publishes the approved snapshot CREATE-ONCE, so a slot that
+    already holds DIFFERENT bytes refuses the fragment that would replace it. The
+    reset always returns to attempt 0, and the state document names only the
+    CURRENT rung's snapshot -- so the file that blocks the re-drive is usually one
+    the reset never mentions, left behind by a rung the batch drove earlier.
+
+    Each refusal costs one rung rather than wedging the batch outright (the
+    evidence_failed branch advances), which is why this is asserted on the RUNG the
+    hand-back arrives from and not on its existence: a batch that silently restarts
+    two thirds of the way up its ladder is the shape that exhausts, settles as
+    citation-review-exhausted, and takes the whole all-or-nothing merge with it.
+
+    The scenario has to originate ABOVE rung 0 -- that is what puts an unnamed
+    earlier snapshot in the way."""
+    out, _ = run_driver(bed)
+    entry = out["needs_judge"][0]
+    assert entry["attempt"] == 0
+    assert (bed["run_dir"] / "approved_0_attempt_0.json").exists()
+
+    # A CONTENT rejection, so the batch climbs to rung 1 the ordinary way and
+    # leaves rung 0's approved snapshot behind exactly as a real run does.
+    verdicts = bed["session"] / "v.json"
+    verdicts.write_text(json.dumps([{
+        "batch": 0, "attempt": 0, "nonce": entry["nonce"],
+        "reply": "source 1 does not attest the form.\nCITATIONS_REJECTED 0 ATTEMPT 0"}]))
+    out2, _ = run_driver(bed, "--record-verdicts", str(verdicts))
+    entry1 = out2["needs_judge"][0]
+    assert entry1["attempt"] == 1
+    assert (bed["run_dir"] / "approved_0_attempt_1.json").exists()
+
+    # The #852 trigger: rung 1's snapshot is REWRITTEN in place by something
+    # outside this process. The file is PRESENT, so this is the byte-change
+    # branch, not the gone-snapshot one the test above covers.
+    (bed["run_dir"] / "approved_0_attempt_1.json").write_text(
+        json.dumps([{"source_form": "Alpha", "basis": "transliterated",
+                     "disposition": "accepted"}]))
+
+    # The re-dispatch decides the batch differently, which is the ordinary case --
+    # nothing binds a fresh codex turn to the bytes an earlier one produced. That
+    # is what makes rung 0's surviving snapshot a refusal rather than a no-op.
+    redecided = _default_rows(bases=("transliterated", "transliterated"))
+    bed["planted"].write_text(json.dumps({"out_0_attempt_0.json": redecided}))
+
+    verdicts.write_text(json.dumps([{
+        "batch": 0, "attempt": 1, "nonce": entry1["nonce"],
+        "reply": "ok\nCITATIONS_OK 0 ATTEMPT 1"}]))
+    # expect=1: the reset makes the batch non-awaiting before the verdict is read,
+    # so that verdict is refused, and any refusal exits 1.
+    out3, _ = run_driver(bed, "--record-verdicts", str(verdicts), expect=1)
+
+    assert out3["reset"], "the changed snapshot must drop the awaiting status"
+    assert out3["reset"][0]["was"] == "awaiting_judge"
+    assert out3["reset"][0]["attempt"] == 1
+    assert "bytes changed" in out3["reset"][0]["reason"], (
+        f"the byte-change branch, not the gone-file one: {out3['reset'][0]}")
+    assert "undeleted" not in out3["reset"][0], (
+        f"every approved slot must have been released: {out3['reset'][0]}")
+    assert out3["refused"], "a verdict for a hand-back that no longer stands"
+
+    assert out3["needs_judge"], "the batch must be re-prepared in this invocation"
+    assert out3["needs_judge"][0]["attempt"] == 0, (
+        "THE assertion. Unreleased, rung 0 is refused by its own surviving "
+        "snapshot and rung 1 by the corrupted one, so the batch hands back from "
+        "rung 2 having silently spent its whole ladder on a reset that promised "
+        "to start it over")
+    assert json.loads(
+        (bed["run_dir"] / "approved_0_attempt_0.json").read_text()) == redecided, (
+        "rung 0 must hold the RE-DECIDED bytes -- an old snapshot merely surviving "
+        "would satisfy an existence check while proving no republication happened")
+    # The fragment out_0_attempt_0.json is deliberately outside the release set,
+    # and that is NOT asserted here: run_driver passes no --resumed-batch-indices,
+    # so this invocation re-dispatches rung 0 and republishes the fragment whether
+    # or not the reset had removed it. An existence check would pass either way --
+    # exactly the vacuity this file's other assertions are written to avoid.
+
+
+def test_a_reset_batch_stops_counting_as_resumed_so_rung_zero_is_re_dispatched(bed):
+    """#852 follow-up: the resume-skip must not survive a reset.
+
+    `--resumed-batch-indices` is decided once, before the run touches anything,
+    and it means "resume_setup.py checked this batch's attempt-0 fragment and it
+    is good" -- which is what lets advance_batch() skip the attempt-0 dispatch
+    (`if not (resumed and attempt == 0)`). Reconciliation invalidates that: the
+    batch HAS been driven since, and when its status is dropped from a rung above
+    0, attempt 0's fragment holds bytes a judge already REJECTED. Honouring the
+    skip re-approves known-bad content and spends rung 0 reproducing a rejection
+    the run has already had -- so the reset's promise, a genuine re-drive, is not
+    kept even once the approved slots are released.
+
+    Same shape as the sibling test above, with the resumed flag switched on for
+    the reset invocation. Nothing else about the scenario changes, which is the
+    point: the flag alone must not decide whether the batch recovers."""
+    plant_fragment(bed)
+    out, _ = run_driver(bed, "--resumed-batch-indices", "[0]")
+    entry = out["needs_judge"][0]
+    assert entry["attempt"] == 0
+    assert "out_0_attempt_0.json" not in _logged(bed, "companion"), (
+        "attempt 0 must have been resume-skipped, or this test is not exercising "
+        "the skip at all")
+
+    verdicts = bed["session"] / "v.json"
+    verdicts.write_text(json.dumps([{
+        "batch": 0, "attempt": 0, "nonce": entry["nonce"],
+        "reply": "source 1 does not attest the form.\nCITATIONS_REJECTED 0 ATTEMPT 0"}]))
+    out2, _ = run_driver(bed, "--resumed-batch-indices", "[0]",
+                         "--record-verdicts", str(verdicts))
+    entry1 = out2["needs_judge"][0]
+    assert entry1["attempt"] == 1
+
+    (bed["run_dir"] / "approved_0_attempt_1.json").write_text(
+        json.dumps([{"source_form": "Alpha", "basis": "transliterated",
+                     "disposition": "accepted"}]))
+    redecided = _default_rows(bases=("transliterated", "transliterated"))
+    bed["planted"].write_text(json.dumps({"out_0_attempt_0.json": redecided}))
+
+    verdicts.write_text(json.dumps([{
+        "batch": 0, "attempt": 1, "nonce": entry1["nonce"],
+        "reply": "ok\nCITATIONS_OK 0 ATTEMPT 1"}]))
+    out3, _ = run_driver(bed, "--resumed-batch-indices", "[0]",
+                         "--record-verdicts", str(verdicts), expect=1)
+
+    assert out3["reset"] and out3["reset"][0]["was"] == "awaiting_judge"
+    assert out3["needs_judge"][0]["attempt"] == 0
+    assert json.loads(
+        (bed["run_dir"] / "approved_0_attempt_0.json").read_text()) == redecided, (
+        "THE assertion. Still counted as resumed, the reset batch skips its "
+        "attempt-0 dispatch and re-approves the fragment the judge already "
+        "rejected -- rung 0 spent reproducing a known rejection, and the bytes "
+        "the reset was supposed to mint never dispatched at all")
 
 
 def test_a_ready_status_outliving_its_merge_fragment_is_reset_not_merged(bed):

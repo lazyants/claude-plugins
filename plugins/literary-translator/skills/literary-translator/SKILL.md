@@ -1950,7 +1950,18 @@ outright, as is one that is not owned by you and private.
    awaiting a judge, or ready to merge, over files that no longer exist. Such a
    batch is re-prepared rather than left in a status nothing can transition out
    of. It costs one more judge call; a verdict you already collected for it is
-   refused, so send the fresh `judgePrompt` instead of the old reply.
+   refused, so send the fresh `judgePrompt` instead of the old reply. The same
+   condition arises without a resume, whenever an approved snapshot is rewritten
+   from outside the run. A reset therefore also DELETES that batch's approved
+   snapshots — every rung, since the snapshot is published create-once and any
+   one left in place would refuse the re-drive that replaces it. A reset batch
+   also stops counting as resumed, so its attempt 0 is re-dispatched rather than
+   re-approving the fragment `resume_setup.py` validated before the run began:
+   for a batch reset from a higher rung those are bytes a judge already rejected.
+   The `out_{i}_attempt_0.json` fragment itself and the approval record are kept. If a
+   snapshot cannot be deleted, the reset entry carries `undeleted[]` naming it:
+   the batch is still re-driven, but the rung that path belongs to will fail at
+   approve time until the file is removed by hand.
 
 Do NOT edit a verdict's `nonce`, reuse one twice, or answer a batch/attempt the
 driver did not ask about — each is refused, and the refusal is what keeps a
