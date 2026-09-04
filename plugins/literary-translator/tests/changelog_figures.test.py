@@ -490,34 +490,38 @@ def _name_discovery_passes_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.82.1 (#826 -- the price of a canon correction is stated
-    # conditionally in every shipped site except `canon_validate.py`), per the
-    # maintenance contract above.
+    # ROTATED TO 1.83.0 (#845 -- the visual-order advisory counts the
+    # detached-combining-mark class), per the maintenance contract above.
     #
-    # ZERO rows, and the reason is specific rather than an empty rotation left
-    # to be read as an omission. What the entry asserts is WORDING: which
-    # sentences the release rewrote, and that `canon_validate.py` keeps its own.
-    # Those are claims about a DIFF, which this file cannot reach -- it
-    # re-derives a figure by calling an authoritative implementation in the
-    # current tree, and the retired phrasings are precisely what the tree no
-    # longer contains. The entry is worded to keep it that way: every mention of
-    # the deferred site, the headline included, names the FILE, and
-    # `plugin_bundle_hash` is given as a `CACHE_KEY_FIELD_ORDER` MEMBER rather
-    # than by quoting that tuple's length. The remaining numerals are
-    # identifiers: the version numbers, the release date, the stage label
-    # (Step 0a) and the issue numbers (#826, #825, #840).
+    # ZERO rows, and, as with the two rotations before it, the reason is
+    # specific rather than an empty rotation left to be read as an omission.
+    # Every measured figure in this entry was taken on TWO DELIVERED HEBREW
+    # VOLUMES that live in another repository: the ~45%/~17% line coverages,
+    # the 38.7%/38.6% reachable-only fractions, the raw-versus-reconstructed
+    # span censuses (2809/2793 and 3918/3908), the wrong-base counts (1538 over
+    # 1256 lines; 9262 over 4186, 71.5%) and the compound-pin misses (21/295 and
+    # 23/235). This file re-derives a figure by calling an authoritative
+    # implementation in THIS tree, and no implementation here can see those
+    # books -- a derivation would be a re-measurement of a corpus that is not
+    # present, which is the "lookalike" the contract above refuses.
     #
-    # The 1.82.0 rotation this replaces, kept as its own record: also ZERO rows,
-    # because that entry's corpus measurements (11 labels, 894 spans, five canon
-    # owners of one name) were taken on a delivered book in ANOTHER repository,
-    # which this file has no honest derivation for.
+    # The one figure that is about this tree -- 20 000 marks scanning in 0.0009s
+    # against 11.5s for the backward walk the release replaced -- is a WALL
+    # CLOCK on the machine that measured it, not a property of the code. It is
+    # already guarded where a guard can hold: `visual_order_advisory.test.py`'s
+    # `test_long_mark_run_scans_in_linear_time` asserts a bound, deliberately
+    # loose, rather than either number. Declaring it here would put a load-
+    # sensitive timing into a gate whose whole purpose is to be stable.
+    #
+    # The remaining numerals in the entry are identifiers: the version numbers,
+    # the release date, and the issue number (#845).
 ]
 
 # The version FIGURES was last rotated to. An empty FIGURES makes the loop in
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.82.1"
+FIGURES_VERSION = "1.83.0"
 
 
 def _newest_entry():
