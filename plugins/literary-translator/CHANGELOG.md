@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.96.0 — 2026-09-05
+
+**Step 0d asks what the vault index should be built from, and the example profile had nowhere
+to write the answer (#873).** `output.entity_markup` is a real field — `profile.schema.json`
+declares it, `assemble.py` and `render_obsidian.py` both read it, and SKILL.md's Step 0d puts
+the question to the user in as many words ("do you want an index, and of what?", asked *here*,
+not later, because the `tags` vocabulary is what this project's `style_contract` then has to
+tell the translator to mark). It appeared nowhere in `assets/profile.example.yml`, in any form.
+
+Step 0 copies that file verbatim into a project that has no `profile.yml` yet, and that copy is
+the file an operator actually edits. So the answer to a question the skill insists on asking had
+no slot in the only artifact that carries it forward. The file is not silent about entity notes
+either — it describes the canon-derived index three times, under `target`, under
+`adapter_config.obsidian.folders`, and under `mentions_section` — and never mentions that the
+index has a second possible source. Every volume of one live Hebrew→English series that reached
+Step 0d hand-authored the block, at the same slot, each one retyping a ruling the series had
+already made, including the user's own reversal on which tags to mark.
+
+The example now ships the block **commented out**, between `name_display:` and
+`adapter_config:` — where `profile.schema.json` orders the key, and where every other key under
+`output:` in this file already sits. The hand-authored copies all put it above `name_display:`
+instead; that is evidence of the burden being removed, not evidence about where the shipped
+block belongs, and agreeing with the schema costs nothing. It names the three fields, states that `index_from: markup` requires `output.target: obsidian`
+(`assemble.py` refuses with `entity_markup_index_unsupported_target` rather than degrading to
+strip and handing back an index that was asked for and not delivered), says that a malformed use
+of a declared tag is a hard refusal and not a passthrough, points at
+`references/output-target-adapters/obsidian.md`, and records that this is an R10 series decision
+a later volume writes down rather than re-gathers.
+
+**Commented, and with no `CHOOSE_` sentinel, on purpose.** Absence is the valid "no" SKILL.md
+documents — an absent block runs none of it — so a live block would have enabled markup
+stripping for every freshly scaffolded book. And Step 0d rules the sentinel out explicitly: the
+question is only meaningful under `v1_scope: assembled_book` with an `obsidian` target, and a
+plain translate+gloss job must not be made to answer an assembly question it will never read. A
+sentinel would additionally have required a matching `KNOB_QUESTIONS` entry in
+`profile_validate.py`, held equal by that script's own two-way drift guard. This is the shape
+`glossary.name_discovery` already ships in the same file.
+
+The parsed document is therefore **identical** to the previous release's: comments only, no key
+added, no schema change, no script touched. `profile.example.yml` is in neither
+`PLUGIN_BUNDLE_MEMBERS` nor `ORCHESTRATION_BUNDLE_MEMBERS`, so no hash moves, nothing
+re-translates and nothing re-resumes.
+
+`tests/entity_markup_example_slot.test.py` pins all four halves — the block is present, every
+line of it is commented and sentinel-free, it is absent from the *parsed* document (the
+assertion a substring scan cannot make, since a live block and a commented one both contain the
+string), and it sits under `output:` in schema order (the half neither check sees). Both the
+field names and that ordering are read off `profile.schema.json` rather than restated, so the
+comment cannot drift from the schema silently, and a future reordering of the schema reports
+itself instead of leaving the test pinning a slot the contract has moved away from.
+
+**#873's other half — `glossary.name_discovery` — was investigated and closed rather than
+shipped.** That block is already in the example, with a rationale stating its commented,
+sentinel-free form is deliberate, and it has been there since the release that shipped
+`name_discovery.py` itself. What the issue reported as a missing slot is not missing.
+
 ## 1.95.0 — 2026-09-05
 
 **The shipped example profile handed every project a Russian politeness-register instruction,
