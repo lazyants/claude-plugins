@@ -174,7 +174,8 @@ CITATION_ANCHORS = {
     # maintained by hand because the guard only compares the newest entry's
     # actual citation set against this map.
     #
-    # The 1.94.0 rotation this replaces, kept as its own record (#871 -- nothing warned that editing
+    # The 1.94.0 rotation this replaces, kept as its own record (#871 --
+    # nothing warned that editing
     # `canonical_target_form` to merge two notes makes the canon misstate the
     # source), and EMPTY ON PURPOSE, for the same reason the 1.83.2 record
     # below states: the entry names its subjects by FILE and FUNCTION rather

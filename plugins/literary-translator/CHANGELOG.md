@@ -7,8 +7,9 @@ whatever its target language, and Step 0 passed it silently (#874).**
 `profile.example.yml`'s `target.language.register_notes` shipped a Russian T–V note. Step 0 copies
 that file verbatim into a project that has no `profile.yml` yet, so the value — and the comment
 under it — was inherited unchanged by every book scaffolded from it. This is the same defect #862
-fixed for `untranslated_sentinel`, in the field two blocks away, and it was not covered by that
-fix.
+fixed for `untranslated_sentinel`, and it was not covered by that fix — the two fields sit in
+different top-level blocks of the one file, four blocks and some three hundred lines apart, which
+is why a reader who fixed one had no particular reason to look at the other.
 
 It survived for the reason its sibling did: nothing points at it. The field is not one of the
 `CHOOSE_` sentinels the whole-profile placeholder scan halts on, and it was not one of the literal
@@ -46,8 +47,10 @@ all-ASCII value naming one particular language's forms passes it untouched. Judg
 register note is specific to one language is a reading task, not a codepoint test, and #874
 deliberately did not commission a checker for it — the halt is what puts the field in front of a
 person. What the screen does cover is the shape the defect actually shipped in, and it is checked
-by Unicode script name rather than by codepoint range, so a legitimate accented Latin word passes
-where a bare "outside Basic Latin" test would have red. The same reasoning retired this plugin's
+by Unicode character NAME as a proxy for script — the stdlib exposes no script property — so a
+legitimate accented Latin word passes where a bare "outside Basic Latin" test would have red. The
+proxy is imperfect in the safe direction only: a handful of Latin-script letters carry names that
+do not start with LATIN, so it can red a value it should not, never pass one it should not. The same reasoning retired this plugin's
 Cyrillic glossary exemplars from a language-pair-AGNOSTIC template in 1.55.0: a pair-agnostic asset
 must not seed one script's forms as everyone's default.
 

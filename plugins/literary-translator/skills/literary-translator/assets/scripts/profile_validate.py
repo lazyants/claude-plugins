@@ -1046,9 +1046,9 @@ def main(argv=None):
         print(
             f"Created a starter profile at {profile_path} from "
             f"assets/profile.example.yml. Its placeholders ARE the intake "
-            f"questions (every literal placeholder that file ships, and "
-            f"every CHOOSE_-prefixed field); once "
-            f"the dependency preflight below succeeds they are listed in "
+            "questions (every literal placeholder that file ships, and every "
+            "CHOOSE_-prefixed field); once the dependency preflight below "
+            f"succeeds they are listed in "
             f"full. Relay them to the user and fill in their answers -- "
             f"never answer them from this file's own inline comments.",
             file=sys.stderr,

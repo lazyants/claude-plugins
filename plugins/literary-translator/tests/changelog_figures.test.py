@@ -527,7 +527,8 @@ FIGURES = [
     # numeral here going stale either. That is the reason to write the count
     # as a name and not to quote one at all.
     #
-    # The 1.94.0 rotation this replaces, kept as its own record (#871 -- nothing warned that editing
+    # The 1.94.0 rotation this replaces, kept as its own record (#871 --
+    # nothing warned that editing
     # `canonical_target_form` to merge two notes makes the canon misstate the
     # source), per the maintenance contract above.
     #

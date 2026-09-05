@@ -89,6 +89,12 @@ assert EXAMPLE_PROFILE_PATH.is_file(), f"profile.example.yml not found at {EXAMP
 # Every literal placeholder profile.example.yml ships, transcribed from
 # profile_validate.py's own PLACEHOLDER_SUBSTRINGS constant -- see that
 # script's own constant if this list ever needs re-deriving.
+# Unlike the CHOOSE_ sentinels below, a hand-typed tuple is safe HERE, and
+# for a reason worth stating since the #727 note beneath argues the opposite
+# for its own case: make_real_values_profile() drives the REAL
+# profile_validate.py as a subprocess and must reach a clean exit 0, so an
+# entry added to that constant and forgotten here fails LOUDLY on the
+# validator's own refusal -- not silently, which is what #727 was about.
 PLACEHOLDER_SUBSTRINGS = (
     "YOUR BOOK TITLE HERE",
     "/ABS/PATH/TO/YOUR_PROJECT",

@@ -701,22 +701,24 @@ def test_change_cost_paragraphs_still_carry_their_load_bearing_claims():
 
 
 # ---------------------------------------------------------------------------
-# #874: target.language.register_notes must stay language-NEUTRAL.
+# #874. THE INVARIANT: the shipped target.language.register_notes must be a
+# value Step 0 refuses, and it must not be written in a non-Latin script.
 #
 # The example is copied VERBATIM into a project that has no profile.yml (the
 # byte-identity assertion above pins that), so whatever this field holds is
-# inherited by every book scaffolded from it, whatever its target language.
-# It shipped a Russian T-V note for eleven releases because nothing pointed
-# at it: not a CHOOSE_ sentinel, not a PLACEHOLDER_SUBSTRINGS hit, and --
-# unlike untranslated_sentinel, which #862 fixed two blocks away -- consumed
-# on the NORMAL path, as part of the target-language config handed to the
-# translator. On a target with no such axis the instruction is not inert; it
-# describes a distinction the translator is asked to preserve and cannot.
+# inherited by every book scaffolded from it whatever its target language --
+# which is why a plausible-looking filled-in value here is worse than an
+# obviously missing one. Why that mattered, and why this field halts while
+# its untranslated_sentinel sibling deliberately does not: the 1.95.0
+# CHANGELOG entry.
 # ---------------------------------------------------------------------------
 
-def _shipped_register_notes():
-    profile = yaml.safe_load(EXAMPLE_PATH.read_text(encoding="utf-8"))
-    return profile["target"]["language"]["register_notes"]
+def _shipped_example():
+    return yaml.safe_load(EXAMPLE_PATH.read_text(encoding="utf-8"))
+
+
+def _shipped_register_notes(profile=None):
+    return (profile or _shipped_example())["target"]["language"]["register_notes"]
 
 
 def test_shipped_register_notes_is_refused_by_the_placeholder_scan(pv):
@@ -734,17 +736,16 @@ def test_shipped_register_notes_is_refused_by_the_placeholder_scan(pv):
         "the example must still ship this required field as a non-empty string"
     )
 
+    # The one property the enumerating tests above do NOT cover. They iterate
+    # PLACEHOLDER_SUBSTRINGS and assert each member is named, which stays green
+    # if this field's VALUE is edited to something no member matches; this
+    # asserts the coverage in the other direction, from the value back to the
+    # tuple. The dotted-path attribution is already pinned by both of them.
     hits = [p for p in pv.PLACEHOLDER_SUBSTRINGS if p in value]
     assert hits, (
-        f"the shipped register_notes {value!r} is not a PLACEHOLDER_SUBSTRINGS "
-        f"hit, so Step 0 passes it silently and every scaffolded project "
+        f"the shipped register_notes {value!r} matches no PLACEHOLDER_SUBSTRINGS "
+        f"entry, so Step 0 passes it silently and every scaffolded project "
         f"inherits it -- exactly the #874 defect"
-    )
-
-    errors = pv.scan_placeholders(yaml.safe_load(EXAMPLE_PATH.read_text(encoding="utf-8")))
-    assert any(e.startswith("target.language.register_notes:") for e in errors), (
-        f"the refusal must be attributed to this field by dotted path; got:\n"
-        + "\n".join(errors)
     )
 
 
@@ -761,12 +762,16 @@ def test_shipped_register_notes_ships_no_non_latin_script(pv):
     deliberately did not commission a checker for it -- the halt above is what
     puts the field in front of a person. Do not grow this into that check.
 
-    Checked over LETTERS by Unicode script name, not by codepoint range: the
-    value legitimately carries ASCII punctuation, and a bare `ord(c) > 0x7F`
-    test would red on a legitimate accented Latin word while still passing
-    "tu/vous". The same reasoning retired this plugin's Cyrillic glossary
-    exemplars from a language-pair-AGNOSTIC template: a pair-agnostic asset
-    must not seed one script's forms as everyone's default."""
+    Checked over LETTERS by Unicode character NAME, as a proxy for script --
+    the stdlib exposes no script property at all. The proxy is imperfect in
+    the safe direction only: `\N{FEMININE ORDINAL INDICATOR}` and
+    `\N{MICRO SIGN}` are Latin-script letters this would report, so it can
+    red a value it should not, never pass one it should not. It is still the
+    better test than a codepoint range, which would red every accented Latin
+    word while still passing "tu/vous". The same reasoning retired this
+    plugin's Cyrillic glossary exemplars from a language-pair-AGNOSTIC
+    template: a pair-agnostic asset must not seed one script's forms as
+    everyone's default."""
     value = _shipped_register_notes()
     foreign = sorted({
         c for c in value
