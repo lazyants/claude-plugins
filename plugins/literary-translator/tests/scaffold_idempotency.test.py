@@ -89,10 +89,17 @@ assert EXAMPLE_PROFILE_PATH.is_file(), f"profile.example.yml not found at {EXAMP
 # Every literal placeholder profile.example.yml ships, transcribed from
 # profile_validate.py's own PLACEHOLDER_SUBSTRINGS constant -- see that
 # script's own constant if this list ever needs re-deriving.
+# Unlike the CHOOSE_ sentinels below, a hand-typed tuple is safe HERE, and
+# for a reason worth stating since the #727 note beneath argues the opposite
+# for its own case: make_real_values_profile() drives the REAL
+# profile_validate.py as a subprocess and must reach a clean exit 0, so an
+# entry added to that constant and forgotten here fails LOUDLY on the
+# validator's own refusal -- not silently, which is what #727 was about.
 PLACEHOLDER_SUBSTRINGS = (
     "YOUR BOOK TITLE HERE",
     "/ABS/PATH/TO/YOUR_PROJECT",
     "/ABS/PATH/TO/YOUR_SOURCE",
+    "[TODO: target-language register]",
 )
 # #727: the shipped example ships several CHOOSE_-prefixed sentinels, and
 # the set keeps growing (#730 added verse_policy.mode) -- a hand-typed tuple
@@ -170,6 +177,14 @@ def make_real_values_profile(tmp_path):
     # Replaces BOTH occurrences (project.durable_root itself, and the
     # output.destination value that carries the same prefix) in one shot.
     text = text.replace("/ABS/PATH/TO/YOUR_PROJECT", str(durable_root))
+    # #874. Not a CHOOSE_ sentinel: the shipped register note is a literal
+    # placeholder, so the generic CHOOSE_ survivor guard below cannot see it
+    # and the real profile_validate.py subprocess -- which this fixture must
+    # drive to a clean exit 0 -- rejects it like any other placeholder.
+    text = text.replace(
+        "[TODO: target-language register]",
+        "informal/formal second-person distinction",
+    )
     text = text.replace("CHOOSE_none_confirmed_or_regex", "none_confirmed")
     text = text.replace(
         "CHOOSE_none_confirmed_or_markdown_ref_or_custom_regex", "none_confirmed"
