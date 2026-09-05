@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.85.0 — 2026-09-05
+
+**`canon_adjudication_audit.py`'s stderr detail lists had no way past their first 20 items
+(#856).**
+`_print_item_list`, `_print_evidence_failures`, and the inline `collapsed_split` block in
+`print_human_report` — including the `canon_absent_with_senses` early-return branch, which prints
+the same three list calls and the same evidence-failures call before the gate blocks
+unconditionally — each hard-capped their stderr detail list at 20 items, with a header that read a
+bare `(first 20)` regardless of how many items actually existed. On a real volume this is not an
+edge case: one book's `review_queue_unresolved` category reached 161 required items and
+`existing_merge` reached 22, both past the cap. An operator who needed every item to write a
+verdict had no CLI path to the rest of them — only importing the module and calling
+`compute_cat2_items` / `compute_cat4_items` directly reached them.
+
+A new `--limit N` flag (default 20, matching the previous cap; `0` prints every item) now governs
+those three capped list sites through one shared header helper. (A fourth truncation in this
+script, `_orphan_warning`'s first-10 elision of orphaned records, stays as it is — those are
+informational and non-blocking, and it already states its full count.) The header states the true
+total instead of the old bare count — `-- review_queue items with no risk-acceptance (first 20 of
+161; re-run with --limit 0 for the full list) --` — and drops the truncation clause entirely once
+every item fits on one run. `--limit` is display only: `totals`, `blocking_count`, `gate_passed`,
+every exit code, and the `--check` stdout JSON are unchanged by it, and a negative value is
+rejected at parse time (exit 2, no stdout) by the same `_nonneg_int` validator `--pair-review-cap`
+already uses.
+
 ## 1.84.2 — 2026-09-04
 
 **A reconciliation reset left behind the very snapshots that refuse its re-drive (#852).**

@@ -2188,7 +2188,11 @@ schema-validated codex workflow's. Run before Deliver (W7/W8):
 exit `0` = every required item has a matching `confirmed_ok` (or a valid
 risk-acceptance / the queue is drained), `1` = blocking findings, `2` =
 fatal. Add `--advisory` to report without blocking (preserves the plugin's
-WARN-first name policy). **Status: categories 2-4 — and category 1's
+WARN-first name policy). Its stderr detail lists print the first 20 items of
+each category and say how many were withheld; pass `--limit 0` to list every
+item the gate is blocking on (or `--limit N` for any other cap) rather than
+working from a prefix. `--limit` is display-only — it never moves a count, a
+verdict or the exit code. **Status: categories 2-4 — and category 1's
 identical-surface shape — remain an OPT-IN gate** a project enables for
 this Deliver-time invocation; the script defaults to hard-blocking (exit 1)
 so a project that wires it in gets the full gate. Category 5 (the

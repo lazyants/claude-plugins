@@ -78,6 +78,8 @@ directly rather than needing the script to print a hash anywhere.
  19. Key collision resistance: no naive delimiter-join collision.
  20. Determinism / cwd-independence.
  21. map-key != entry.source_form field: warned, not crashed.
+ 22. --limit: the stderr detail lists are capped at 20 by default, print
+     every item under --limit 0, and the cap never moves a count (#856).
 
 Plus a dedicated schema-validation test for a hand-built
 canon_adjudications.json sample against canon-adjudications.schema.json, and
@@ -92,6 +94,7 @@ above those tests for details.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -3169,3 +3172,130 @@ def test_scope_warning_no_longer_denies_the_identical_surface_shape(tmp_path):
     summary = parse_stdout(proc)
     warning = next(w for w in summary["warnings"] if "duplicate_source_form" in w)
     _assert_warning_states_both_postures(warning)
+
+
+# ===========================================================================
+# 22 (#856). --limit: the stderr detail lists must be able to emit EVERY
+# required item.
+#
+# The gate demands a verdict for every required item, but its own report used
+# to print an unconditional first 20 with no flag to obtain the rest -- on one
+# real volume, 20 of 161 review_queue_unresolved items and 20 of 22
+# existing_merge items -- so operators imported the module and called its
+# private enumerators instead. These lock the display knob AND, just as
+# importantly, that it stays a display knob: every `totals` figure, the
+# blocking count and the exit code must read the same at every --limit.
+#
+# Detail lines are counted by the CONTRACTUAL key shape ("{kind}::{sha256}"),
+# never by prose, per this file's stated assertion convention. `!r` renders
+# every display field, so no field value can inject a literal newline and
+# inflate the count.
+# ===========================================================================
+
+QUEUE_DETAIL_LINE = re.compile(r"^ +review_queue_unresolved::[0-9a-f]{64}\b", re.MULTILINE)
+BIG_QUEUE_N = 25
+
+
+def _big_queue_root(tmp_path):
+    """A canon whose category 4 is comfortably over the 20-item default, so a
+    truncated list and a full one are distinguishable."""
+    root = make_durable_root(tmp_path)
+    write_canon(root, [], review_queue=[queued(f"Queued Name {i:02d}") for i in range(BIG_QUEUE_N)])
+    return root
+
+
+def _detail_lines(proc):
+    return QUEUE_DETAIL_LINE.findall(proc.stderr)
+
+
+def _assert_unmoved(proc):
+    """The blocking run shape, plus the figures that must NOT move with --limit.
+    Asserted in every case below: a display cap silently becoming a data cap is
+    the whole risk. Returns the parsed summary so a caller can assert more."""
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    summary = parse_stdout(proc)
+    assert_summary_schema_valid(summary)
+    assert summary["totals"]["review_queue_items"] == BIG_QUEUE_N
+    assert summary["totals"]["review_queue_unaccepted"] == BIG_QUEUE_N
+    assert summary["totals"]["by_kind"]["review_queue_unresolved"] == BIG_QUEUE_N
+    assert summary["blocking_count"] == BIG_QUEUE_N
+    assert summary["gate_passed"] is False
+    return summary
+
+
+def test_limit_defaults_to_twenty_and_states_the_total(tmp_path):
+    root = _big_queue_root(tmp_path)
+    proc = run_audit(root, "--check")
+    _assert_unmoved(proc)
+    assert len(_detail_lines(proc)) == 20, (
+        f"the default must still print a 20-item preview\n{proc.stderr}"
+    )
+    assert f"of {BIG_QUEUE_N}" in proc.stderr, (
+        "a truncated list must state the total -- an operator who cannot see it "
+        f"has no way to know the list was a prefix\n{proc.stderr}"
+    )
+    assert "--limit 0" in proc.stderr, (
+        "a truncated list must name the flag that lifts the cap"
+    )
+
+
+def test_limit_zero_prints_every_item_and_moves_no_count(tmp_path):
+    root = _big_queue_root(tmp_path)
+    default_proc = run_audit(root, "--check")
+    proc = run_audit(root, "--check", "--limit", "0")
+    summary = _assert_unmoved(proc)
+    assert len(_detail_lines(proc)) == BIG_QUEUE_N, (
+        f"--limit 0 must print every required item\n{proc.stderr}"
+    )
+    default_summary = _assert_unmoved(default_proc)
+    assert summary["totals"] == default_summary["totals"], (
+        "--limit is display-only: totals must be byte-identical to the default run"
+    )
+
+
+def test_limit_n_prints_n(tmp_path):
+    root = _big_queue_root(tmp_path)
+    proc = run_audit(root, "--check", "--limit", "3")
+    _assert_unmoved(proc)
+    assert len(_detail_lines(proc)) == 3, proc.stderr
+    assert f"of {BIG_QUEUE_N}" in proc.stderr, proc.stderr
+
+
+def test_limit_above_the_total_prints_all_without_a_truncation_clause(tmp_path):
+    root = _big_queue_root(tmp_path)
+    proc = run_audit(root, "--check", "--limit", "100")
+    _assert_unmoved(proc)
+    assert len(_detail_lines(proc)) == BIG_QUEUE_N, proc.stderr
+    header = next(
+        ln for ln in proc.stderr.splitlines()
+        if ln.startswith("-- review_queue items with no risk-acceptance")
+    )
+    assert "first" not in header and "--limit 0" not in header, (
+        f"a list that withheld nothing must not read as truncated: {header!r}"
+    )
+    assert f"({BIG_QUEUE_N})" in header, header
+
+
+def test_negative_limit_is_a_parse_error(tmp_path):
+    """Same _nonneg_int contract as --pair-review-cap: argparse rejects it at
+    parse time, exit 2, no stdout JSON line.
+
+    The message is asserted, not just the exit code: a parser that does not
+    KNOW --limit rejects it as an unrecognized argument with the identical
+    exit 2 and empty stdout, so a bare assert_fatal() here would pass against
+    a build that never grew the flag at all."""
+    root = _big_queue_root(tmp_path)
+    proc = run_audit(root, "--check", "--limit", "-1")
+    assert_fatal(proc)
+    assert "must be a non-negative integer" in proc.stderr, (
+        f"--limit must be rejected by _nonneg_int, not as an unknown flag:\n{proc.stderr}"
+    )
+
+
+def test_non_integer_limit_is_a_parse_error(tmp_path):
+    root = _big_queue_root(tmp_path)
+    proc = run_audit(root, "--check", "--limit", "all")
+    assert_fatal(proc)
+    assert "invalid integer value" in proc.stderr, (
+        f"--limit must be rejected by _nonneg_int, not as an unknown flag:\n{proc.stderr}"
+    )

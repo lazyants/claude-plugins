@@ -1534,7 +1534,7 @@ structurally closed, for four independent reasons:
    (`glossary_batch_plan.py:302-318`), and `canon_adjudication_audit.py`'s
    category 4 counts every queued row as BLOCKING until drained or
    risk-accepted (`canon_adjudication_audit.py:989-1007`, `:1275-1282`,
-   `:1725-1731`) — landing a proposal there would make it a Deliver-time
+   `:1791-1797`) — landing a proposal there would make it a Deliver-time
    blocker on any project that enabled that gate, the opposite of what an
    advisory read is for.
 

@@ -1510,7 +1510,7 @@
       ],
       "claim": "category 4 counts every queued row as BLOCKING until drained or risk-accepted (`canon_adjudication_audit.py:989-1007`, `:1275-1282`, `:1725-1731`) — landing a p"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_adjudication_audit.py:1725-1731\", 0, \"continuation\"]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_adjudication_audit.py:1791-1797\", 0, \"continuation\"]": {
       "anchors": [
         "blocking_count = (",
         "len(unaccepted_items)",
@@ -1526,7 +1526,7 @@
       ],
       "claim": "`canon_link_groups.json` above is a sidecar and not a key: `_content_view` (`canon_validate.py:2596-2627`) treats any non-`generation_hashes` key as CONTENT, so"
     },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4183-4189\", 0]": {
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4187-4193\", 0]": {
       "anchors": [
         "Excluded from every bundle hash",
         "nor of `orchestration_bundle_hash`",

@@ -490,8 +490,37 @@ def _name_discovery_passes_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.84.2 (#852 -- a reconciliation reset left behind the very
-    # snapshots that refuse its re-drive), per the maintenance contract above.
+    # ROTATED TO 1.85.0 (#856 -- canon_adjudication_audit.py's stderr detail
+    # lists had no way past their first 20 items), per the maintenance contract
+    # above.
+    #
+    # ONE row. The entry's `20` is the new `--limit` default, and it is a
+    # TREE-OWNED constant -- `DEFAULT_ITEM_PRINT_LIMIT` in the shipped script --
+    # so it is exactly the kind of figure that rots silently if a later release
+    # retunes the default and leaves this prose behind. Read by AST rather than
+    # off the argument parser: `_int_constant` does not execute the module, and
+    # the parser default is that same constant by construction.
+    #
+    # The entry's other numerals are NOT rows. `161` and `22` are the required-item
+    # counts measured on one book in ANOTHER repository -- no implementation here
+    # can see that canon, the same reason the 1.84.2 and 1.84.0 rotations below
+    # declared zero rows for their own field measurements. The `10` of
+    # `_orphan_warning`'s "first-10 elision" is a source literal in a slice
+    # expression, an identifier of behaviour rather than a measurement, like the
+    # `400` of `err[-400:]` the 1.84.1 rotation names below. The remainder are
+    # identifiers: the version numbers, the release date, the issue number (#856),
+    # the `0` of `--limit 0` and of `` `0` prints every item `` (a flag ARGUMENT,
+    # a literal the prose is defining rather than counting), and the exit code
+    # `2`, a literal in the contract.
+    Figure(
+        "default 20, matching the previous cap",
+        20,
+        lambda: _int_constant("canon_adjudication_audit.py", "DEFAULT_ITEM_PRINT_LIMIT"),
+    ),
+    #
+    # The 1.84.2 rotation this replaces, kept as its own record (#852 -- a
+    # reconciliation reset left behind the very snapshots that refuse its
+    # re-drive):
     #
     # ZERO rows. The entry quotes exactly one measurement, "three batches of
     # eleven", and it is a fact about ONE LIVE RUN OF A BOOK IN ANOTHER
@@ -563,7 +592,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.84.2"
+FIGURES_VERSION = "1.85.0"
 
 
 def _newest_entry():
