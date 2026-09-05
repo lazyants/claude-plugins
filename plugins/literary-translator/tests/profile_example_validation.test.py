@@ -54,6 +54,7 @@ below still separately exercises as the actual mechanism responsible for the
 guarantee).
 """
 import importlib.util
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -747,22 +748,34 @@ def test_shipped_register_notes_is_refused_by_the_placeholder_scan(pv):
     )
 
 
-def test_shipped_register_notes_names_no_particular_language(pv):
-    """The generalizing half, and the only part of #874 that catches the NEXT
-    one: the value must carry no letter outside Basic Latin. That is what
-    would have caught the shipped Cyrillic at authoring time.
+def test_shipped_register_notes_ships_no_non_latin_script(pv):
+    """A mechanical SCRIPT screen, and it is deliberately named for what it
+    measures rather than for what #874 is about. It catches the shape the
+    defect actually shipped in -- a value written in a non-Latin script --
+    and nothing more.
 
-    Checked over LETTERS, not over the whole string: the value legitimately
-    carries ASCII punctuation, and a codepoint-range check over everything
-    would fail on a future em dash while saying nothing about language. The
-    same reasoning that removed this plugin's Cyrillic glossary exemplars
-    from a language-pair-AGNOSTIC template applies to a pair-agnostic
-    example: it must not seed one language's forms as the default."""
+    ITS BLIND SPOT, stated rather than implied: an all-ASCII value that names
+    one particular language's forms ("preserve the tu/vous distinction")
+    passes this screen untouched. Judging whether a register note is specific
+    to one language is a reading task, not a codepoint test, and #874
+    deliberately did not commission a checker for it -- the halt above is what
+    puts the field in front of a person. Do not grow this into that check.
+
+    Checked over LETTERS by Unicode script name, not by codepoint range: the
+    value legitimately carries ASCII punctuation, and a bare `ord(c) > 0x7F`
+    test would red on a legitimate accented Latin word while still passing
+    "tu/vous". The same reasoning retired this plugin's Cyrillic glossary
+    exemplars from a language-pair-AGNOSTIC template: a pair-agnostic asset
+    must not seed one script's forms as everyone's default."""
     value = _shipped_register_notes()
-    foreign = sorted({c for c in value if c.isalpha() and ord(c) > 0x7F})
+    foreign = sorted({
+        c for c in value
+        if c.isalpha()
+        and not unicodedata.name(c, "UNNAMED").startswith("LATIN")
+    })
     assert not foreign, (
-        f"target.language.register_notes ships non-Basic-Latin letters "
+        f"target.language.register_notes ships non-Latin-script letters "
         f"{foreign!r} in {value!r} -- this field is inherited verbatim by "
         f"every project whatever its target language, so a value written in "
-        f"one particular language is wrong for all the others"
+        f"one particular script is wrong for all the others"
     )

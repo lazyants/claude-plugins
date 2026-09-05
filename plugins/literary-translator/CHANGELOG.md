@@ -38,14 +38,18 @@ Two inventories that enumerated the placeholders by name now describe them gener
 profile is created. Both were already one release from being false, and neither has to be revisited
 when the tuple next grows.
 
-The regression the new tests hold is the general property, not this one line: the shipped
-`register_notes` must be refused by the placeholder scan, and it must carry no letter outside Basic
-Latin. The second half is what would have caught the Cyrillic at authoring time, and it is the only
-part of this release that catches the NEXT language-specific default in that field. It checks
-LETTERS rather than codepoints, so the value keeps its ASCII punctuation and a future em dash says
-nothing about language. The same reasoning retired this plugin's Cyrillic glossary exemplars from a
-language-pair-AGNOSTIC template in 1.55.0: a pair-agnostic asset must not seed one language's forms
-as everyone's default.
+Two regression tests hold the shipped value: it must be refused by the placeholder scan and
+attributed to `target.language.register_notes` by dotted path, and it must carry no letter written
+in a non-Latin script. The second is a mechanical SCRIPT screen and is named for that rather than
+for what this release is about, because its blind spot decides how far it can be trusted: an
+all-ASCII value naming one particular language's forms passes it untouched. Judging whether a
+register note is specific to one language is a reading task, not a codepoint test, and #874
+deliberately did not commission a checker for it — the halt is what puts the field in front of a
+person. What the screen does cover is the shape the defect actually shipped in, and it is checked
+by Unicode script name rather than by codepoint range, so a legitimate accented Latin word passes
+where a bare "outside Basic Latin" test would have red. The same reasoning retired this plugin's
+Cyrillic glossary exemplars from a language-pair-AGNOSTIC template in 1.55.0: a pair-agnostic asset
+must not seed one script's forms as everyone's default.
 
 **Migration: none, and nothing re-keys.** `profile_validate.py` is in none of the three hashed
 tuples and `profile.example.yml` is an asset rather than a script, so no converged segment goes

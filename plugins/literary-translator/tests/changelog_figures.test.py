@@ -520,11 +520,12 @@ FIGURES = [
     # tree: the entries in `PLACEHOLDER_SUBSTRINGS` after the addition, and
     # the two inventories rewritten to stop enumerating them. Both are
     # written as NAMES rather than numerals ("two inventories"), which is
-    # this guard's documented way of keeping a fact out of it. The tuple's
-    # own length is pinned where it belongs -- by
-    # `profile_example_validation.test.py`, which asserts every one of its
-    # members is named by the scan against the verbatim shipped example --
-    # rather than by a numeral in prose.
+    # this guard's documented way of keeping a fact out of it. What
+    # `profile_example_validation.test.py` gives is COVERAGE of the declared
+    # substrings -- it iterates the tuple and asserts the scan names each
+    # member against the verbatim shipped example -- so it would not notice a
+    # numeral here going stale either. That is the reason to write the count
+    # as a name and not to quote one at all.
     #
     # The 1.94.0 rotation this replaces, kept as its own record (#871 -- nothing warned that editing
     # `canonical_target_form` to merge two notes makes the canon misstate the
