@@ -1112,6 +1112,23 @@ def _consumer_warning(seg: str, durable_root: Path) -> "tuple[str | None, str | 
     ledger_path = None
     try:
         ledger_path = durable_root / "runs" / "ledger.json"
+        # O_NOFOLLOW on the LEAF, and the reason is not hygiene. fstat() answers
+        # about whatever was opened, so a symlink planted at this path passes
+        # S_ISREG on its TARGET: any readable project-shaped ledger elsewhere on
+        # the host is then read, and its `segments[seg].reason` is copied
+        # verbatim into this command's success envelope. That both spoofs the
+        # advisory and reads outside the durable root every other read here stays
+        # inside. ledger_merge.py publishes a regular file (its own
+        # _atomic_write_json), so a symlink is not a state any legitimate writer
+        # produces. ELOOP arrives as an OSError and becomes a problem string like
+        # any other unreadable ledger -- it never gates.
+        #
+        # The RESIDUAL, stated rather than implied: this pins the leaf, not the
+        # `runs/` directory above it. An actor who can replace that directory can
+        # still redirect the read. Closing that needs a no-follow directory
+        # descriptor, which is a larger change than the demonstrated defect
+        # warrants for an advisory string; the leaf is where the reproduction was.
+        #
         # O_NONBLOCK, then fstat the DESCRIPTOR -- never stat the pathname and
         # then open it. classify_file() answers about a NAME, and the answer is
         # stale the instant it returns: a ledger.json replaced by a FIFO between
@@ -1123,7 +1140,10 @@ def _consumer_warning(seg: str, durable_root: Path) -> "tuple[str | None, str | 
         # return (or raise ENXIO) instead of waiting, and S_ISREG on the fstat
         # rejects whatever was actually opened rather than whatever the name
         # pointed at a moment ago.
-        fd = os.open(ledger_path, os.O_RDONLY | _O_NONBLOCK | _O_CLOEXEC)
+        fd = os.open(
+            ledger_path,
+            os.O_RDONLY | _O_NONBLOCK | _O_CLOEXEC | _O_NOFOLLOW,
+        )
         try:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):

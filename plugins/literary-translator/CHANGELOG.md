@@ -63,6 +63,15 @@ resulting DESCRIPTOR, which closes the window instead of narrowing it. The read 
 the interpolated `reason` character-bounded for the same reason: both are content this script does
 not own, read while a lock is held.
 
+**The leaf is opened `O_NOFOLLOW`, and that is not hygiene either.** `fstat()` answers about whatever
+was opened, so a symlink planted at this path passes `S_ISREG` on its TARGET: any readable
+project-shaped ledger elsewhere on the host is then read and its `segments[seg].reason` copied
+verbatim into this command's success envelope — spoofing the advisory and reading outside the durable
+root that every other read here stays inside. `ledger_merge.py` publishes a regular file, so a
+symlink is not a state any legitimate writer produces, and `ELOOP` degrades to a problem string like
+any other unreadable ledger. The residual is stated rather than implied: this pins the leaf, not the
+`runs/` directory above it.
+
 The regression cases include the two an implementation catching only `(OSError, JSONDecodeError)`
 would pass: a directory raises `IsADirectoryError`, an `OSError` subclass, while a ledger written as
 invalid UTF-8 raises `UnicodeDecodeError` and is caught only by a genuinely broad boundary.

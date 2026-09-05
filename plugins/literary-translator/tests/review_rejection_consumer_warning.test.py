@@ -444,6 +444,27 @@ def _setup_ledger_json_is_a_fifo(root, seg):
     os.mkfifo(root / "runs" / "ledger.json")
 
 
+def _setup_ledger_json_is_a_symlink_to_a_foreign_ledger(root, seg):
+    """A symlink whose TARGET is a perfectly valid, project-shaped ledger saying
+    this segment is capped. Without O_NOFOLLOW on the leaf, fstat() answers about
+    the TARGET, S_ISREG passes, and that foreign ledger's own `reason` is copied
+    verbatim into this command's success envelope -- reading outside the durable
+    root and spoofing the advisory at once. The target is deliberately VALID and
+    deliberately outside the root: a malformed one would be refused by the shape
+    checks and prove nothing about following the link."""
+    foreign = root.parent / "foreign_project" / "runs"
+    foreign.mkdir(parents=True, exist_ok=True)
+    foreign_ledger = foreign / "ledger.json"
+    foreign_ledger.write_text(
+        json.dumps({"segments": {seg: ledger_record("non_converged",
+                                                    reason="FOREIGN-LEDGER-REASON")}}),
+        encoding="utf-8",
+    )
+    ledger_path = root / "runs" / "ledger.json"
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.symlink_to(foreign_ledger)
+
+
 _NEVER_GATES_CASES = [
     ("no_runs_directory", _setup_no_runs_directory),
     ("ledger_json_absent", _setup_ledger_json_absent),
@@ -455,6 +476,7 @@ _NEVER_GATES_CASES = [
     ("no_entry_for_this_seg", _setup_no_entry_for_this_seg),
     ("ledger_json_is_a_directory", _setup_ledger_json_is_a_directory),
     ("ledger_json_is_a_fifo", _setup_ledger_json_is_a_fifo),
+    ("ledger_json_is_a_symlink", _setup_ledger_json_is_a_symlink_to_a_foreign_ledger),
 ]
 
 
