@@ -264,14 +264,35 @@ def bed(tmp_path):
 
     # fetch_citation stub: writes an index.json whose outcomes a test controls
     # through a sidecar file, so one bed drives the fetched / 404 / budget cases.
+    #
+    # #853: fetch_until_stable() may run this stub more than once for a single
+    # attempt, retrying a transient transport failure over the same snapshot.
+    # The sidecar therefore accepts a SECOND shape: a flat list of strings still
+    # means "every pass sees these outcomes", exactly as before #853, so no
+    # existing test's fixture changes meaning. A list of LISTS means pass 0
+    # sees the first inner list, pass 1 the second, and any further pass reuses
+    # the last one -- so a test can plant "transient, then clean" without
+    # having to know in advance how many passes fetch_until_stable will run.
+    # The pass number is this invocation's ordinal among every "fetch " line
+    # already in the shared call log, which is exact for the tests that use
+    # this shape: each drives a single attempt's worth of retries, so a
+    # counter that does not reset per attempt is indistinguishable from one
+    # that does.
     outcomes = tmp_path / "outcomes.json"
     outcomes.write_text(json.dumps(["fetched", "fetched"]))
     _write(scripts / "fetch_citation.py", f'''
         import json, sys, pathlib
         argv = sys.argv[1:]
-        open({str(calls)!r}, "a").write("fetch " + " ".join(argv) + "\\n")
+        calls_path = pathlib.Path({str(calls)!r})
+        prior_lines = calls_path.read_text().splitlines() if calls_path.exists() else []
+        pass_index = sum(1 for line in prior_lines if line.startswith("fetch "))
+        calls_path.open("a").write("fetch " + " ".join(argv) + "\\n")
         out = pathlib.Path(argv[argv.index("--out-dir") + 1]); out.mkdir(parents=True, exist_ok=True)
-        planned = json.loads(pathlib.Path({str(outcomes)!r}).read_text())
+        raw = json.loads(pathlib.Path({str(outcomes)!r}).read_text())
+        if raw and isinstance(raw[0], list):
+            planned = raw[min(pass_index, len(raw) - 1)]
+        else:
+            planned = raw
         entries = [{{"item_index": i, "outcome": o, "source": "https://x.test/" + str(i),
                      "source_form": "F" + str(i), "final_origin": "https://x.test",
                      "chain": [], "content_type": "text/html", "bytes": 10,
@@ -587,6 +608,50 @@ def test_a_retrieval_failure_repairs_before_any_judge_runs(bed):
         "the splice must preserve the snapshot's row order and full coverage")
     assert spliced[0]["basis"] == "transliterated", "the repaired row landed"
     assert spliced[1]["source"] == "https://x.test/1", "an untouched row is untouched"
+
+
+# ---------------------------------------------------------------------------
+# #853 -- a transient transport failure is retried, not repaired
+# ---------------------------------------------------------------------------
+
+def test_a_transient_fetch_failure_retries_and_spends_no_rung(bed):
+    """THE ACCEPTANCE TEST FOR #853. A batch whose first fetch pass reports a
+    transient transport fault on an established row, and whose second pass is
+    clean, must recover inside fetch_until_stable's retry ladder rather than
+    being handed to the repair gate: no rung spent, no repair codex job
+    launched. The unit tests over fetch_until_stable in isolation already cover
+    the loop's own arithmetic; this is the one place that proves the driver's
+    REAL fetch, codex and canon_validate stubs actually reach that loop end to
+    end, through the same prepare_and_hand_back() sequence every other test in
+    this file drives.
+
+    The shipped retry ladder sleeps 15s then 60s; waiting that out for real
+    would make this the slowest test in the file for no reason it is testing,
+    so only the BED'S OWN COPY of the driver (never the shipped file at
+    DRIVER) has its _FETCH_RETRY_DELAYS_SEC patched to zero, the same
+    string-replace pattern test_a_refused_final_gate_exits_non_zero already
+    uses on canon_validate.py's stub."""
+    driver_copy = bed["scripts"] / "glossary_dispatch_driver.py"
+    driver_copy.write_text(driver_copy.read_text().replace(
+        "_FETCH_RETRY_DELAYS_SEC = (15.0, 60.0)",
+        "_FETCH_RETRY_DELAYS_SEC = (0.0, 0.0)"), encoding="utf-8")
+    bed["outcomes"].write_text(json.dumps([
+        ["refused:connect-timeout", "fetched"],
+        ["fetched", "fetched"],
+    ]))
+    out, _ = run_driver(bed)
+
+    assert out["needs_judge"], "the batch must reach a judge once the retry recovers"
+    entry = out["needs_judge"][0]
+    assert entry["attempt"] == 0, "a transport retry must not spend a rung"
+    fetches = [l for l in bed["calls"].read_text().splitlines() if l.startswith("fetch ")]
+    assert len(fetches) == 2, (
+        f"expected exactly two fetch passes -- one transient, one clean -- got "
+        f"{len(fetches)}")
+    assert companion_targets(bed) == ["out_0_attempt_0.json"], (
+        "a recovered transient failure must launch no repair job: the ordinary "
+        "dispatch is the only companion target ever written, never a repair_ "
+        "fragment")
 
 
 def test_the_ladder_bound_comes_from_the_template(bed):

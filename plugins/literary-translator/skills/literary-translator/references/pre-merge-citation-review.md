@@ -41,7 +41,15 @@ snapshot — and reads only the one line of locally generated JSON each of them
 prints; it never opens the snapshot or an evidence file, so nothing it
 ingests was authored outside this project, and an agent that reads no
 attacker text cannot be talked out of anything. If the snapshot command fails
-it stops there rather than fetching, and no judge call is spent. The JUDGE
+it stops there rather than fetching, and no judge call is spent. Since 1.86.0
+the DRIVER — the default path — may run the SECOND of those two commands up to
+three times for one attempt, when the outcomes it recorded describe the link
+rather than the citation: the same command over the same pinned snapshot, no
+rung spent and no repair dispatched (#853). What this section rests on is
+untouched, because the actor re-running it reads `item_index` and `outcome` and
+never an evidence body. The retained `pipeline()` fallback's prepare agent still
+runs it exactly once, and is still told to — it could reach the network another
+way and could open a retrieved body, so it is given no discretion at all. The JUDGE
 reads local files only — the snapshot, the evidence `index.json`, and exactly
 the bodies that index names as an `evidence_file` — and needs no network at
 all; it is handed no fragment path, not even inside prose forbidding a read

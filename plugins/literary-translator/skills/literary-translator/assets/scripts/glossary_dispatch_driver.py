@@ -126,6 +126,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -220,6 +221,92 @@ _SHARED_BUDGET_OUTCOMES = frozenset({
     "refused:batch-deadline",
     "refused:batch-byte-budget",
 })
+
+# Failures that are about THE LINK rather than about the citation, and the ONE
+# question that decides every member: DID THE PEER DELIVER A COMPLETE,
+# WELL-FORMED ANSWER THAT WE THEN DECLINED? A cut, truncated or unresolvable
+# exchange is a fact about this machine's network at this minute; an answer we
+# received and refused on its merits is a fact about the citation.
+#
+# WHY THE DISTINCTION IS WORTH A SET (#853). A retrieval failure that is not in
+# this set is repaired -- the resolver is asked for a DIFFERENT source. Measured
+# on two live volumes: one batch's attempt-0 index failed all 19 entries from
+# fetch position 0 and the same batch retrieved cleanly on its next attempt;
+# every failing host answered in ~20 ms when probed directly; three batches
+# already at `citation-review-exhausted` retrieved IN FULL after a manual reset.
+# The ladder answered a network outage by re-picking sources -- 0 honest
+# downgrades in ~30 repair opportunities, a fresh `established` URL every rung --
+# and the merge being all-or-nothing, one such batch cost the whole pass.
+#
+# NOT the shared-budget set above, and the sets are asserted disjoint by
+# tests/glossary_transient_fetch_retry.test.py. That one
+# is about a budget one row's server can spend on ANOTHER row's behalf, which is
+# why those two are never repaired. They never TRIGGER a retry either -- but a
+# pass is re-run whole, so a shared-budget row IS re-fetched whenever some other
+# established row in the same pass is transient, and the routing that matters is
+# the LAST pass's. That is the intended reading: a fresh pass gets a fresh batch
+# deadline and byte budget, so a row starved by an earlier row's slow server can
+# legitimately come back `fetched`.
+_TRANSIENT_FETCH_OUTCOMES = frozenset({
+    "refused:connect-timeout",
+    "refused:read-timeout",
+    "refused:total-timeout",
+})
+
+# Families, because `fetch_citation.py` appends a stdlib TYPE NAME or an errno to
+# each of these and the tail is not a closed vocabulary.
+#   network-error:*        -- the OSError family: reset, refused, unreachable.
+#                             `RemoteDisconnected` lands here too, being an
+#                             OSError as well as an HTTPException.
+#   http-protocol-error:*  -- every `http.client.HTTPException` subtype names a
+#                             BROKEN EXCHANGE (a truncated chunked body is
+#                             `IncompleteRead`, a socket closed before the status
+#                             line is `BadStatusLine`), never a refusal on the
+#                             merits. The whole family is transient.
+_TRANSIENT_FETCH_PREFIXES = (
+    "refused:network-error:",
+    "refused:http-protocol-error:",
+)
+
+# Two families that are transient EXCEPT for one member each.
+#
+# tls-error:* carries the ssl exception's type name, not only certificate faults:
+# a connection closed mid-handshake is `SSLEOFError`. A failed CERTIFICATE
+# VERIFICATION is the one member that is an answer about the host rather than a
+# cut link, so it is the one exclusion and stays repairable.
+_PERMANENT_TLS_ERROR = "refused:tls-error:SSLCertVerificationError"
+
+# dns-failure:<errno> carries `socket.gaierror.errno`, which is the PLATFORM's
+# own EAI value and NOT portable: measured, EAI_AGAIN is 2 on Darwin and -3 on
+# glibc, EAI_NONAME 8 and -2. So the one permanent member is COMPUTED from the
+# stdlib here rather than written as a literal -- a hard-coded number would read
+# as correct on the machine it was written on and silently retry nothing, or
+# retry everything, on the other. EAI_NONAME means the name does not exist,
+# which is a fact about the URL; every other resolver failure is retried.
+# `refused:dns-empty` stays out on its own: getaddrinfo answered, with nothing.
+_PERMANENT_DNS_FAILURE = f"refused:dns-failure:{socket.EAI_NONAME}"
+
+
+def is_transient_fetch_outcome(outcome: str) -> bool:
+    """True when the outcome describes the LINK and a plain re-run could fix it."""
+    if outcome in _TRANSIENT_FETCH_OUTCOMES:
+        return True
+    if outcome.startswith(_TRANSIENT_FETCH_PREFIXES):
+        return True
+    if outcome.startswith("refused:tls-error:"):
+        return outcome != _PERMANENT_TLS_ERROR
+    if outcome.startswith("refused:dns-failure:"):
+        return outcome != _PERMANENT_DNS_FAILURE
+    return False
+
+
+# The delays before the SECOND and THIRD fetch of one attempt -- so three passes
+# at most, and the tuple's length IS the retry count. Sized against the measured
+# outage rather than against a feeling: one pass over 19 items at the fetcher's
+# 10 s connect ceiling is ~190 s, so these spread the three passes over several
+# minutes instead of re-trying inside the same blip. Each pass is a fresh
+# `fetch_citation.py` invocation with its own batch deadline and byte budget.
+_FETCH_RETRY_DELAYS_SEC = (15.0, 60.0)
 
 DEFAULT_POLL_SEC = 15
 DEFAULT_DEADLINE_SEC = 2700
@@ -1687,6 +1774,73 @@ def classify_outcomes(pairs: "list[dict]", established_indices: "set[int]") -> d
     return {"budget_failed": sorted(budget), "repairable": sorted(failed)}
 
 
+def transient_indices(pairs: "list[dict]", established_indices: "set[int]") -> "list[int]":
+    """The established rows whose failure is about the link, not the citation.
+
+    Computed here rather than as a third key on `classify_outcomes`: that
+    function's two-key return is consumed by the repair gate and is asserted
+    exhaustive, and a transient row is not a fourth destination -- it is a row
+    that has not been asked its final question yet."""
+    return sorted(pair["item_index"] for pair in pairs
+                  if pair["item_index"] in established_indices
+                  and is_transient_fetch_outcome(pair["outcome"]))
+
+
+def fetch_until_stable(run_fetch, read_pairs, established_indices,
+                       *, sleep=time.sleep, on_retry=None) -> dict:
+    """Runs the citation fetch until no established row is failing at the
+    TRANSPORT layer, or until the retry ladder is spent. Returns
+    `{"ok": bool, "passes": int, "classified": {...}}` -- `classified` absent
+    when a pass exited non-zero, which the caller reports as it always has.
+
+    A RETRY, NOT A RUNG (#853). This spends no attempt, launches no codex job and
+    changes no URL: it re-runs the SAME command over the SAME pinned snapshot.
+    The rung ladder is the answer to "this citation is wrong"; it was never an
+    answer to "the network was down for 190 seconds", and before this the two
+    shared one path -- a batch would climb every rung re-picking sources that
+    were never at fault and then exhaust, taking the all-or-nothing merge with it.
+
+    WHY THE DRIVER MAY DO WHAT `citationPreparePrompt` FORBIDS ITS AGENT. That
+    prompt tells the retained `pipeline()` fallback's prepare agent to run the
+    fetch as "a single invocation, not a loop" and that "there is no circumstance
+    in which a second retrieval is the right answer here". The prohibition is
+    about that ACTOR, not about the command: a general-purpose model could reach
+    the network another way and could open a retrieved body, so it is given no
+    discretion at all. This process can do neither -- it re-runs the one
+    sanctioned command and reads two locally generated fields per entry, never an
+    evidence body (see `read_outcome_pairs`). The two paths therefore diverge in
+    FETCH COUNT while still issuing byte-identical commands.
+
+    THE ONE THING THIS CAN COST, stated rather than guarded. `index.json` is
+    rewritten wholesale by every pass and it is the JUDGE's input, so the driver
+    cannot union two passes without authoring the file the judge reads. A row
+    fetched on pass 1 that fails on pass 2 is therefore repaired, where the old
+    code would have kept it. That needs an outage to START between two passes,
+    and it costs one repaired row -- the same cost the old code paid for EVERY
+    transiently failed row, on every rung, plus the exhaustion it paid at the top.
+
+    Injected `run_fetch` / `read_pairs` / `sleep` so the ladder is testable
+    without a process, a network or a wall clock."""
+    passes = 0
+    classified = None
+    for delay in (None,) + _FETCH_RETRY_DELAYS_SEC:
+        if delay is not None:
+            sleep(delay)
+        # Incremented BEFORE the call so `passes` has ONE meaning on both exits:
+        # the number of the pass that ran, failed or not.
+        passes += 1
+        if not run_fetch():
+            return {"ok": False, "passes": passes}
+        pairs = read_pairs()
+        classified = classify_outcomes(pairs, established_indices)
+        transient = transient_indices(pairs, established_indices)
+        if not transient:
+            break
+        if on_retry is not None and passes <= len(_FETCH_RETRY_DELAYS_SEC):
+            on_retry(len(transient), passes)
+    return {"ok": True, "passes": passes, "classified": classified}
+
+
 # ---------------------------------------------------------------------------
 # THE SPLICE -- the only place this driver writes a canon fragment.
 # ---------------------------------------------------------------------------
@@ -2032,17 +2186,44 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
                 "reason": "approve-failed"}
 
     # 5. FETCH -- the one network step, and the only one. This process launches it
-    #    and never reads what it retrieved (see read_outcome_pairs).
-    code, out, err = run_template_cmd(built["fetch"], timeout=1800)
-    if code != 0:
-        log(f"batch {idx}: citation fetch failed for attempt {attempt}: "
-            f"{err[-400:] if err else out[:400]}")
+    #    and never reads what it retrieved (see read_outcome_pairs). It may launch
+    #    it up to three times for ONE attempt: see fetch_until_stable for why a
+    #    transport failure is retried here instead of climbing a rung.
+    #
+    #    The snapshot is read BEFORE the fetch now, because the retry ladder needs
+    #    to know which rows carry a citation claim in order to decide whether a
+    #    failure is worth re-running. Reading it earlier is free: step 4 already
+    #    published it and canon_validate.py publishes it CREATE-ONCE, so its bytes
+    #    cannot change under this function.
+    established = established_indices(load_rows(approved_path))
+    index_path = Path(built["index"])
+    total_passes = 1 + len(_FETCH_RETRY_DELAYS_SEC)
+
+    def _run_fetch() -> bool:
+        # Same two-stream truncation as the snapshot log above, and for the same
+        # reason: the verdict is on stdout and only non-verdict noise is on stderr.
+        code, out, err = run_template_cmd(built["fetch"], timeout=1800)
+        if code != 0:
+            log(f"batch {idx}: citation fetch failed for attempt {attempt}: "
+                f"{err[-400:] if err else out[:400]}")
+        return code == 0
+
+    def _on_retry(n_transient: int, done: int) -> None:
+        log(f"batch {idx}: {n_transient} citation(s) failed at the transport layer "
+            f"on fetch pass {done} of {total_passes}; re-running the same fetch "
+            f"over the same snapshot -- no rung spent, no source changed")
+
+    fetch_state = fetch_until_stable(_run_fetch, lambda: read_outcome_pairs(index_path),
+                                     established, on_retry=_on_retry)
+    if not fetch_state["ok"]:
         return {"state": "evidence_failed", "batchIndex": idx, "attempt": attempt,
                 "reason": "fetch-failed"}
-
-    pairs = read_outcome_pairs(Path(built["index"]))
-    snapshot_rows = load_rows(approved_path)
-    classified = classify_outcomes(pairs, established_indices(snapshot_rows))
+    if fetch_state["passes"] > 1:
+        # Neutral wording on purpose: this line also prints on the exhausted
+        # path, one line above the repair dispatch, so it must not claim the
+        # ladder settled anything.
+        log(f"batch {idx}: citation fetch ran {fetch_state['passes']} passes")
+    classified = fetch_state["classified"]
 
     # 6a. Shared-budget failure -- an environment fault, not a citation fault. NO
     #     judge is spent: fetch_citation.py exits 0 on these, so without this
