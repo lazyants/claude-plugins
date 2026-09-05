@@ -1,5 +1,74 @@
 # Changelog
 
+## 1.87.0 — 2026-09-05
+
+**`assemble.py --help` wrote the output vault instead of printing usage (#861).** W9 is this
+plugin's one WRITING deterministic step, and it parsed no arguments at all: no `argparse` import,
+no `sys.argv` read, a bare `main()` behind the `__main__` guard. So the universal way to ask a CLI
+how it is used ran a full book assembly — on the reporting operator's Hebrew→English project, 31
+chapters and 665 entity notes written to `out/` as the side effect of asking for help. That
+project happened to be ready to assemble and the result was correct, but that was luck rather
+than design: `--help` bought whatever a real run would have produced. W9's completeness and
+live-input gates still run first, so a project with an unconverged segment refuses rather than
+shipping a partial book — what an accidental invocation can produce is a full, unasked-for vault
+from a project that happens to pass those gates, over whatever the drafts say at that moment. The
+other half of the same absence:
+`assemble.py --dry-run` was not refused either, it was ignored, and the book assembled.
+
+Every other convention here is careful about exactly this distinction — `canon_harmonisation.py`
+refuses more than one of its mutually exclusive modes, `canon_adjudication_audit.py`
+separates `--init` from `--check`, `select_segments.py` has `--classify-only` precisely so a
+caller can look without acting. Measured across `assets/scripts/`, `assemble.py` was the only
+script both lacking `argparse` and carrying a filesystem write. Its siblings without `argparse`
+that have a `__main__` guard — `draft_sha1.py`, `output_resolve.py`, `scaffold_validate.py`,
+`validate_assembled.py` — write on no execution path. `output_resolve.py` is argument-blind in
+exactly the way `assemble.py` was, down to a `del argv` in its own `main()`; it is left alone
+because it writes nothing, which is the whole of what made this a bug rather than an untidiness.
+
+A zero-argument `argparse.ArgumentParser`, called from the `__main__` guard before `main()`, is
+the whole fix. W9 genuinely takes no options — every input is read from `profile.yml` through
+`validate_draft.py`'s own loader — so the parser declares none, which is what makes `--help` print
+usage and exit 0, and any unrecognised flag or stray positional exit 2 naming the token, both
+before anything is read or written. The parse sits in the guard rather than in `main()` on
+purpose: parsing argv is the CLI shell's job, and `main()` stays importable and callable with no
+argv of its own. `argparse` is imported inside the new helper rather than at module scope, the
+convention `claim_record`, `bootstrap_names`, `canon_senses`, `occurrence_targets` and
+`canon_link_groups` already follow in this file — a module-scope import would have moved every
+line number the repo's citation registry declares into it.
+
+An argparse usage error exits 2, the code `assemble.py` already uses for a precondition. Nothing
+distinguishes them and nothing needs to: no workflow template invokes assembly at all, and the
+step's own instruction in `references/assembly-and-output.md` runs `scripts/assemble.py` with no
+arguments, so the usage-error path is unreachable from either.
+
+**`canon_link_groups.py` now says it is a loader, not a script.** Run directly it used to exit 0
+printing nothing — for `--help` and for no arguments alike — and that silence reads as "this
+script takes no arguments" rather than "this script is not a script". It now prints one line
+naming `assemble.py` as its importer and exits 2, on **stderr**: this is not a verdict, and
+nothing must be able to parse it as this plugin's one-JSON-line stdout contract.
+
+Its equally silent siblings — `canon_senses.py`, `claim_record.py`, `evidence_verify.py`,
+`json_stdout.py`, `occurrence_targets.py`, `skeptic_constants.py` — are deliberately left as they
+are. `canon_senses.py`, `claim_record.py` and `json_stdout.py` are `PLUGIN_BUNDLE_MEMBERS`, so
+giving all of them the same guard would move `plugin_bundle_hash` and reclassify every converged
+segment of every project. That is the machinery-only carve-out and nothing would re-translate, but
+it is still a real cost to charge for a usage line, and it is refused as disproportionate rather
+than paid quietly.
+
+**Nothing re-translates and no operator action is required.** Both changed scripts are in none of
+the hashed tuples — `PLUGIN_BUNDLE_MEMBERS` and `DERIVATION_BUNDLE_MEMBERS` (`cache_key.py`),
+`ORCHESTRATION_BUNDLE_MEMBERS` (`scaffold_setup.py`), `_RENDER_VERSION_FILES`
+(`diff_rendered_output.py`) — so no cache-key field moves, no resume digest moves, no render
+baseline resets, and no converged segment is reclassified.
+
+`tests/assemble_cli_args.test.py` pins all of it against a durable_root that genuinely assembles.
+That matters more than it sounds: the cheap bed — a root with no `profile.yml` — halts on a
+precondition before any write, so "nothing was written" would be true there even for an
+implementation that parsed argv *after* running `main()`. The suite therefore opens with a
+mandatory control asserting a bare run of the fixture really does exit 0 and produce the vault,
+and each argv case compares a full recursive listing of its own root taken before and after. The
+ordering mutant was executed against the shipped fixture, and every argv case goes red.
+
 ## 1.85.0 — 2026-09-05
 
 **`canon_adjudication_audit.py`'s stderr detail lists had no way past their first 20 items

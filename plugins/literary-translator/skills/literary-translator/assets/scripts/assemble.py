@@ -3658,5 +3658,44 @@ def main() -> int:
     return 0
 
 
+def _parse_cli_args() -> None:
+    """Reject argv BEFORE main() writes anything (#861).
+
+    W9 takes NO options: every input is read from profile.yml through
+    validate_draft.py's own loader. But a script that parses nothing also
+    ANSWERS nothing -- ``assemble.py --help``, the universal way to ask a CLI
+    how it is used, used to run a full assembly and write the output vault to
+    ``profile.output.destination``, and ``--dry-run`` assembled too. A
+    zero-argument parser is the whole fix: it prints usage and exits 0 on
+    ``--help``, and exits 2 naming the offending token on anything else, both
+    before main() is called.
+
+    ``argparse`` is imported here rather than at module scope on purpose. This
+    file is cited by line number from prose, docstrings and the anchor registry
+    ``tools/citation_audit.py`` enforces, and a new module-scope import would
+    move every one of those numbers. A function-local import is already this
+    module's convention -- ``claim_record``, ``bootstrap_names``,
+    ``canon_senses``, ``occurrence_targets`` and ``canon_link_groups`` are all
+    imported this way.
+
+    Called from the ``__main__`` guard, never from main(): parsing argv is the
+    CLI shell's job, and main() stays importable and callable with no argv of
+    its own.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "W9 Assemble -- reconstruct the whole book from manifest.json, the "
+            "converged segment drafts and runs/ledger.json, then render it "
+            "through the adapter output.target resolves to. Takes NO options: "
+            "every input comes from profile.yml. WRITES to "
+            "profile.output.destination. See this file's own module docstring."
+        ),
+    )
+    parser.parse_args()
+
+
 if __name__ == "__main__":
+    _parse_cli_args()
     sys.exit(main())

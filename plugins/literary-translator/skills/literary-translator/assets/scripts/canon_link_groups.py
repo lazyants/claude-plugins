@@ -308,3 +308,21 @@ def load_link_groups(path, entries, allow_absent=True, schema_path=None):
                 )
             primary_by_source_form[member] = primary
     return primary_by_source_form
+
+
+if __name__ == "__main__":
+    # #861. NOT a CLI: this module is an import-only loader, and assemble.py
+    # is its only importer in shipped code (the test suite imports it too).
+    # Run directly it used to exit 0 printing nothing,
+    # which reads as "this script takes no arguments" rather than "this script
+    # is not a script" -- the same silence for `--help` as for no arguments at
+    # all. Say which it is. stderr and exit 2, never stdout: this is not a
+    # verdict, and nothing must be able to parse it as this plugin's one-JSON-
+    # line stdout contract.
+    print(
+        "canon_link_groups.py is an import-only loader for "
+        "canon_link_groups.json, not a command-line tool -- assemble.py "
+        "imports it. Nothing to run here.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
