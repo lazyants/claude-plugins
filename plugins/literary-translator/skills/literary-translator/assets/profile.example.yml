@@ -453,10 +453,11 @@ validation:
     # from this file, whatever the target language, and a marker in some OTHER language than yours is
     # exactly what you cannot recognise in the one output you are scanning for problems (#862).
     # Bracketed rather than a bare phrase because the scan is a case-sensitive SUBSTRING match over
-    # translated prose: "NO TRANSLATION" flags a legitimate all-caps heading, "[TODO-UNTRANSLATED]"
-    # cannot occur by accident. Set your own if you prefer -- but set it at Step 0, because the field
-    # is hashed into every segment's cache key, so changing it after a volume converges re-stales
-    # the whole book.
+    # translated prose: "NO TRANSLATION" flags a legitimate all-caps heading, while a bracketed token
+    # is not something ordinary prose writes. That is a narrower target, not an impossible one -- any
+    # value is scanned the same way, so a draft that legitimately QUOTES this marker is still refused.
+    # Set your own if you prefer -- but set it at Step 0, because this field is hashed into
+    # `profile_semantics_hash`, so changing it later restales every healthy converged segment.
   forbidden_patterns: []
     # OPT-IN, default absent (#520). Your project's OWN deterministic style bans -- the plugin
     # ships none and hardcodes none, because a style contract lives in YOUR style_bible.md and

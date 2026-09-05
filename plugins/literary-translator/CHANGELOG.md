@@ -22,8 +22,10 @@ The default is now `"[TODO-UNTRANSLATED]"`, the form this plugin's own fixtures 
 value is deliberately bracketed rather than a bare English phrase: `validate_draft.py` scans
 translated prose for it as a case-sensitive SUBSTRING, so `"NO TRANSLATION"` — the obvious neutral
 wording, and the one operators reached for by hand — flags a legitimate all-caps heading as
-untranslated. A bracket-delimited token cannot occur in prose by accident, which is the property
-the check needs and a phrase cannot give it.
+untranslated. A bracket-delimited token is not something ordinary prose writes, which is the
+property the check needs and a phrase cannot give it. It is a narrower target rather than an
+impossible one: the scan does not know what the value means, so a draft that legitimately QUOTES
+its own sentinel is refused whatever the value is — a property of the check, not of this default.
 
 Nothing migrates. `cache_key.py` hashes each project's OWN `profile.yml`, never the shipped
 example, so no existing book re-stales and no converged segment moves. The change reaches new
