@@ -74,9 +74,8 @@ Order of operations (numbered to match SKILL.md's Step 0 list exactly):
   5. Whole-profile placeholder-substring scan, run BEFORE schema validation
      (#727): every string value anywhere in the parsed document, not a named
      subset of fields, is checked against every literal placeholder
-     ``assets/profile.example.yml`` ships (the book-title placeholder, the
-     two ``/ABS/PATH/TO/...`` path placeholders, and every ``CHOOSE_*``-
-     prefixed enum sentinel) -- FATAL if any survive, HALTING right here.
+     ``assets/profile.example.yml`` ships (PLACEHOLDER_SUBSTRINGS below) and
+     every ``CHOOSE_*``-prefixed sentinel -- FATAL, halting right here.
      Running this before jsonschema (not after, as it used to) matters: a
      ``CHOOSE_*`` sentinel left in an inactive adapter sub-block (e.g.
      ``plain_text.verse_detection`` while ``source.format: gutenberg_epub``
@@ -255,13 +254,14 @@ RESERVED_KEY_PREFIX = "x_"
 
 # Every literal placeholder string assets/profile.example.yml ships,
 # transcribed verbatim from that file (read it directly, don't re-derive).
-# Substring match -- e.g. "/ABS/PATH/TO/YOUR_SOURCE.epub" still contains
-# "/ABS/PATH/TO/YOUR_SOURCE", and "/ABS/PATH/TO/YOUR_PROJECT/out/" still
-# contains "/ABS/PATH/TO/YOUR_PROJECT".
+# Substring match -- "/ABS/PATH/TO/YOUR_SOURCE.epub" still contains
+# "/ABS/PATH/TO/YOUR_SOURCE" -- which is also why #874's register token is
+# bracketed: no register note a project writes can contain it by accident.
 PLACEHOLDER_SUBSTRINGS = (
     "YOUR BOOK TITLE HERE",
     "/ABS/PATH/TO/YOUR_PROJECT",
     "/ABS/PATH/TO/YOUR_SOURCE",
+    "[TODO: target-language register]",
 )
 # The example ships several separate CHOOSE_-prefixed sentinels. Read WHICH,
 # and how many, off assets/profile.example.yml itself (or off KNOB_QUESTIONS
@@ -1046,8 +1046,8 @@ def main(argv=None):
         print(
             f"Created a starter profile at {profile_path} from "
             f"assets/profile.example.yml. Its placeholders ARE the intake "
-            f"questions (YOUR BOOK TITLE HERE, /ABS/PATH/TO/YOUR_PROJECT, "
-            f"/ABS/PATH/TO/YOUR_SOURCE, every CHOOSE_-prefixed field); once "
+            f"questions (every literal placeholder that file ships, and "
+            f"every CHOOSE_-prefixed field); once "
             f"the dependency preflight below succeeds they are listed in "
             f"full. Relay them to the user and fill in their answers -- "
             f"never answer them from this file's own inline comments.",

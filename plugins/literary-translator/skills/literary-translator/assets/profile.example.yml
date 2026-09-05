@@ -126,9 +126,13 @@ source:
 target:
   language:
     code: ru                             # ISO-639-1, target language
-    register_notes: "ты/вы politeness distinction — see style_bible.md section B"
-    # target languages without an analogous register axis (e.g. English) leave this
-    # informational; style_bible.md section B says "if not applicable, delete this section"
+    register_notes: "[TODO: target-language register] -- see style_bible.md section B"
+    # REQUIRED FILL (#874). Replace the bracketed token with what THIS target language's
+    # register axis actually is: which second-person or honorific forms it distinguishes,
+    # or an explicit statement that it has none. Step 0's placeholder scan refuses the
+    # shipped token, so this is an intake QUESTION for the user -- never a value answered
+    # from this file. A target with no such axis says so here, and style_bible.md
+    # section B then says "if not applicable, delete this section".
 
 verse_policy:
   mode: CHOOSE_full_rhymed_plus_literal_or_full_rhymed_only_or_rhythmic_approximation_or_mixed_by_length_or_literal_only_or_skip

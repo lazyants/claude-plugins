@@ -180,7 +180,12 @@ def _build_filled_profile(durable_root: Path, source_path: Path) -> dict:
         "target": {
             "language": {
                 "code": "ru",
-                "register_notes": "ty/vy politeness distinction -- see style_bible.md section B",
+                # #874: a REAL filled-in answer, not a transliteration of what
+                # the example used to ship. The example's own value is now a
+                # PLACEHOLDER_SUBSTRINGS hit, so copying it here would make
+                # this builder's "every placeholder replaced" claim false --
+                # and would red the exit-0 pass this fixture exists to drive.
+                "register_notes": "informal/formal second-person distinction -- see style_bible.md section B",
             },
         },
         "verse_policy": {
@@ -384,6 +389,9 @@ def test_verbatim_shipped_example_is_fatally_rejected_by_cli(pv, tmp_path, capsy
         "output.v1_scope",
         "output.target",
         "verse_policy.mode",
+        # #874: not a CHOOSE_ sentinel -- a PLACEHOLDER_SUBSTRINGS hit, so it
+        # reaches the operator through the other half of the same scan.
+        "target.language.register_notes",
     ):
         assert field in err, f"expected field {field!r} named in ONE run; got:\n{err}"
 
@@ -423,6 +431,7 @@ def test_verbatim_shipped_example_scan_placeholders_names_every_placeholder(pv):
         "output.target",
         "verse_policy.mode",
         "output.destination",
+        "target.language.register_notes",  # #874
     ):
         assert any(err.startswith(f"{field}:") for err in errors), (
             f"expected an error attributed to {field!r}; got:\n{joined}"
@@ -687,4 +696,73 @@ def test_change_cost_paragraphs_still_carry_their_load_bearing_claims():
         "LOWERED tier costs exactly what raising costs is the whole reason this "
         "disclosure exists, and without it the paragraph reads as if only raising is "
         "expensive"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #874: target.language.register_notes must stay language-NEUTRAL.
+#
+# The example is copied VERBATIM into a project that has no profile.yml (the
+# byte-identity assertion above pins that), so whatever this field holds is
+# inherited by every book scaffolded from it, whatever its target language.
+# It shipped a Russian T-V note for eleven releases because nothing pointed
+# at it: not a CHOOSE_ sentinel, not a PLACEHOLDER_SUBSTRINGS hit, and --
+# unlike untranslated_sentinel, which #862 fixed two blocks away -- consumed
+# on the NORMAL path, as part of the target-language config handed to the
+# translator. On a target with no such axis the instruction is not inert; it
+# describes a distinction the translator is asked to preserve and cannot.
+# ---------------------------------------------------------------------------
+
+def _shipped_register_notes():
+    profile = yaml.safe_load(EXAMPLE_PATH.read_text(encoding="utf-8"))
+    return profile["target"]["language"]["register_notes"]
+
+
+def test_shipped_register_notes_is_refused_by_the_placeholder_scan(pv):
+    """The stronger half of #874's fix: a neutral default alone would only
+    downgrade a wrong instruction to an empty one that still reaches the
+    translator, so Step 0 HALTS on the shipped value and names the field.
+
+    Deliberately unlike untranslated_sentinel, whose neutral "[TODO-
+    UNTRANSLATED]" is a genuinely working value in any target language and is
+    therefore NOT a halting placeholder -- forcing every project to edit it
+    would be churn. No default string can be a correct register note for an
+    unknown language, which is what earns this field the halt."""
+    value = _shipped_register_notes()
+    assert isinstance(value, str) and value.strip(), (
+        "the example must still ship this required field as a non-empty string"
+    )
+
+    hits = [p for p in pv.PLACEHOLDER_SUBSTRINGS if p in value]
+    assert hits, (
+        f"the shipped register_notes {value!r} is not a PLACEHOLDER_SUBSTRINGS "
+        f"hit, so Step 0 passes it silently and every scaffolded project "
+        f"inherits it -- exactly the #874 defect"
+    )
+
+    errors = pv.scan_placeholders(yaml.safe_load(EXAMPLE_PATH.read_text(encoding="utf-8")))
+    assert any(e.startswith("target.language.register_notes:") for e in errors), (
+        f"the refusal must be attributed to this field by dotted path; got:\n"
+        + "\n".join(errors)
+    )
+
+
+def test_shipped_register_notes_names_no_particular_language(pv):
+    """The generalizing half, and the only part of #874 that catches the NEXT
+    one: the value must carry no letter outside Basic Latin. That is what
+    would have caught the shipped Cyrillic at authoring time.
+
+    Checked over LETTERS, not over the whole string: the value legitimately
+    carries ASCII punctuation, and a codepoint-range check over everything
+    would fail on a future em dash while saying nothing about language. The
+    same reasoning that removed this plugin's Cyrillic glossary exemplars
+    from a language-pair-AGNOSTIC template applies to a pair-agnostic
+    example: it must not seed one language's forms as the default."""
+    value = _shipped_register_notes()
+    foreign = sorted({c for c in value if c.isalpha() and ord(c) > 0x7F})
+    assert not foreign, (
+        f"target.language.register_notes ships non-Basic-Latin letters "
+        f"{foreign!r} in {value!r} -- this field is inherited verbatim by "
+        f"every project whatever its target language, so a value written in "
+        f"one particular language is wrong for all the others"
     )

@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.95.0 — 2026-09-05
+
+**The shipped example profile handed every project a Russian politeness-register instruction,
+whatever its target language, and Step 0 passed it silently (#874).**
+`profile.example.yml`'s `target.language.register_notes` shipped a Russian T–V note. Step 0 copies
+that file verbatim into a project that has no `profile.yml` yet, so the value — and the comment
+under it — was inherited unchanged by every book scaffolded from it. This is the same defect #862
+fixed for `untranslated_sentinel`, in the field two blocks away, and it was not covered by that
+fix.
+
+It survived for the reason its sibling did: nothing points at it. The field is not one of the
+`CHOOSE_` sentinels the whole-profile placeholder scan halts on, and it was not one of the literal
+`PLACEHOLDER_SUBSTRINGS` either, so it reads as a filled-in value because it is one. What makes it
+worse than the sentinel is where it is consumed. `untranslated_sentinel` only surfaces when a
+translation fails, so a project where it never fires never learns it is wrong; `register_notes` is
+part of the target-language config handed to the translator on the ORDINARY path. On a target
+language with no analogous register axis the instruction is not merely inert — it describes a
+distinction the translator is being asked to preserve and cannot.
+
+The default is now `"[TODO: target-language register] -- see style_bible.md section B"`, and
+**this one HALTS.** The bracketed token is a `PLACEHOLDER_SUBSTRINGS` entry, so Step 0 refuses the
+verbatim example and names `target.language.register_notes` by dotted path, in the same run as
+every surviving `CHOOSE_` sentinel. That is a deliberate difference from #862, which left
+`"[TODO-UNTRANSLATED]"` non-halting, and the difference is in the field rather than in how much
+protection each deserves: a bracketed marker is a genuinely working value in any target language,
+so forcing every project to edit it would be churn, while no default string can be a correct
+register note for a language nobody has named yet. A neutral default alone would have downgraded a
+wrong instruction to an empty one that still reaches the translator.
+
+The bracketing is also what makes the entry safe to match. `PLACEHOLDER_SUBSTRINGS` is scanned as
+a SUBSTRING against every string value anywhere in the document, so an unbracketed neutral wording
+would risk flagging a legitimate value — the same constraint that decided #862's own literal.
+
+Two inventories that enumerated the placeholders by name now describe them generically instead:
+`profile_validate.py`'s module docstring and the operator-facing notice printed when a starter
+profile is created. Both were already one release from being false, and neither has to be revisited
+when the tuple next grows.
+
+The regression the new tests hold is the general property, not this one line: the shipped
+`register_notes` must be refused by the placeholder scan, and it must carry no letter outside Basic
+Latin. The second half is what would have caught the Cyrillic at authoring time, and it is the only
+part of this release that catches the NEXT language-specific default in that field. It checks
+LETTERS rather than codepoints, so the value keeps its ASCII punctuation and a future em dash says
+nothing about language. The same reasoning retired this plugin's Cyrillic glossary exemplars from a
+language-pair-AGNOSTIC template in 1.55.0: a pair-agnostic asset must not seed one language's forms
+as everyone's default.
+
+**Migration: none, and nothing re-keys.** `profile_validate.py` is in none of the three hashed
+tuples and `profile.example.yml` is an asset rather than a script, so no converged segment goes
+stale and no resume identity moves. A project that already has a `profile.yml` is untouched — Step
+0 only copies the example when none exists — so a hand-corrected register note keeps working
+exactly as it did. Only a project scaffolded from this release forward meets the halt, and the
+answer it asks for is one line.
+
+Closes #874.
+
 ## 1.94.0 — 2026-09-05
 
 **Nothing warned an operator that editing `canonical_target_form` to merge two notes makes the

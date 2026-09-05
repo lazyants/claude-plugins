@@ -504,7 +504,29 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.94.0 (#871 -- nothing warned that editing
+    # ROTATED TO 1.95.0 (#874 -- the shipped example profile handed every
+    # project a Russian politeness-register instruction), per the maintenance
+    # contract above.
+    #
+    # ZERO rows. The entry quotes no digit-written measurement at all: the
+    # population behind #874 (how many volumes of one live series needed the
+    # line repaired by hand) is a fact about book projects in ANOTHER
+    # REPOSITORY, so no implementation in THIS tree can re-derive it -- the
+    # same class the 1.94.0, 1.91.0 and 1.90.0 rotations below name for
+    # theirs -- and it is deliberately left out of the entry rather than
+    # written as a numeral nothing here can check.
+    #
+    # The counts this release COULD have quoted are counts of things in this
+    # tree: the entries in `PLACEHOLDER_SUBSTRINGS` after the addition, and
+    # the two inventories rewritten to stop enumerating them. Both are
+    # written as NAMES rather than numerals ("two inventories"), which is
+    # this guard's documented way of keeping a fact out of it. The tuple's
+    # own length is pinned where it belongs -- by
+    # `profile_example_validation.test.py`, which asserts every one of its
+    # members is named by the scan against the verbatim shipped example --
+    # rather than by a numeral in prose.
+    #
+    # The 1.94.0 rotation this replaces, kept as its own record (#871 -- nothing warned that editing
     # `canonical_target_form` to merge two notes makes the canon misstate the
     # source), per the maintenance contract above.
     #
@@ -773,7 +795,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.94.0"
+FIGURES_VERSION = "1.95.0"
 
 
 def _newest_entry():

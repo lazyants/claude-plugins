@@ -152,7 +152,29 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.94.0 (#871 -- nothing warned that editing
+    # ROTATED TO 1.95.0 (#874 -- the shipped example profile handed every
+    # project a Russian politeness-register instruction), and EMPTY ON
+    # PURPOSE, for the same reason the records below state: the entry names
+    # its subjects by FILE and SYMBOL rather than by line --
+    # `profile.example.yml`, `target.language.register_notes`,
+    # `PLACEHOLDER_SUBSTRINGS`, `untranslated_sentinel`, `profile_validate.py`
+    # -- and states no `file.ext:NNN` citation at all, which is the shape this
+    # guard reads. Measured against the entry rather than asserted: a scan of
+    # its slice for that pattern returns zero matches.
+    #
+    # It is also the right shape for this particular release, and for a reason
+    # specific to it. `profile_validate.py` is CITED BY LINE from
+    # `select_segments.py`, and that citation's anchor window is exact, so this
+    # release was written to be line-count NEUTRAL above it -- a citation minted
+    # here into the same file would add a second such constraint on every future
+    # edit to it, for no gain over naming the constant.
+    #
+    # Unlike `changelog_figures.test.py`, this file carries no version pin, so
+    # skipping this rotation would not have turned CI red; the record is
+    # maintained by hand because the guard only compares the newest entry's
+    # actual citation set against this map.
+    #
+    # The 1.94.0 rotation this replaces, kept as its own record (#871 -- nothing warned that editing
     # `canonical_target_form` to merge two notes makes the canon misstate the
     # source), and EMPTY ON PURPOSE, for the same reason the 1.83.2 record
     # below states: the entry names its subjects by FILE and FUNCTION rather
