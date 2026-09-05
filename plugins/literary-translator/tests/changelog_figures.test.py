@@ -489,9 +489,55 @@ def _name_discovery_passes_default():
     return module.build_arg_parser().get_default("passes")
 
 
+def _fetch_retry_delay(position):
+    """The glossary driver's own `_FETCH_RETRY_DELAYS_SEC[position]`, read off
+    the module rather than regexed out of the source: the tuple IS the retry
+    ladder -- its length is the retry count and its members are the waits -- so
+    a release that retunes either moves this figure, which is exactly what the
+    1.86.0 entry quotes."""
+    path = SCRIPTS / "glossary_dispatch_driver.py"
+    spec = importlib.util.spec_from_file_location(
+        f"gdd_retry_figures_{abs(hash(str(path)))}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module._FETCH_RETRY_DELAYS_SEC[position]
+
+
 FIGURES = [
-    # ROTATED TO 1.89.0 (#860 -- the generic third-language clause defers to the
-    # project's own convention), per the maintenance contract above.
+    # ROTATED TO 1.90.0 (#853 -- a transient network fault is retried, not
+    # charged to the citation), per the maintenance contract above.
+    #
+    # TWO rows, both members of `_FETCH_RETRY_DELAYS_SEC`. That tuple is the
+    # retry ladder itself -- its length is how many extra passes a transport
+    # failure buys and its members are the waits between them -- so it is a
+    # figure this tree owns and one a later retune moves silently, which is the
+    # shape this file exists for.
+    Figure(
+        phrase="15 s",
+        value=15,
+        derive=lambda: _fetch_retry_delay(0),
+    ),
+    Figure(
+        phrase="60 s",
+        value=60,
+        derive=lambda: _fetch_retry_delay(1),
+    ),
+    #
+    # NOT declared, and each for its own reason. The entry's live-run
+    # measurements -- 19 entries failing from fetch position 0, 5 of 12 batches
+    # exhausted, 20 repair rungs spent, 0 honest downgrades in ~30 repair
+    # opportunities, hosts answering in ~20 ms -- are facts about runs of a book
+    # in ANOTHER REPOSITORY, which nothing here can reach, exactly as the 1.84.2
+    # rotation below records for its own. The EAI numbers (2 on Darwin, -3 on
+    # glibc) are the running platform's libc constants, not this tree's: one of
+    # the two is unreachable from whichever machine reads it, and a row that
+    # could only ever check the local half would assert less than it looks like.
+    # "up to three passes" is spelled as a word and so is invisible to the
+    # tokenizer these rows are read with -- and it is the same tuple's LENGTH,
+    # which the two rows above already pin the contents of.
+    #
+    # The 1.89.0 rotation this replaces, kept as its own record (#860 -- the
+    # generic third-language clause defers to the project's own convention):
     #
     # ZERO rows. Every measurement this entry quotes was taken on a Hebrew->English
     # SERIES IN ANOTHER REPOSITORY: one volume's first-round finding counts and
@@ -662,7 +708,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.89.0"
+FIGURES_VERSION = "1.90.0"
 
 
 def _newest_entry():

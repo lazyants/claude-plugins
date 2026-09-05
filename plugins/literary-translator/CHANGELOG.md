@@ -1,5 +1,82 @@
 # Changelog
 
+## 1.90.0 — 2026-09-05
+
+**A network outage was charged to the citation, and the repair ladder answered it by re-picking
+sources (#853).** `glossary_dispatch_driver.py` split a fetch outcome two ways: the two
+shared-budget refusals, and everything else, which it called repairable. `refused:connect-timeout`
+fell in "everything else", so a batch whose URLs were never REACHED was handed to a codex repair
+job that replaced those URLs — the one remedy that cannot help — then re-approved, re-fetched, and
+climbed to the next rung to do it again. Burning `MAX_CITATION_RETRIES + 1` rungs settles the batch
+at `citation-review-exhausted`, and `merge_and_verify` admits only an exact full-membership ready
+set, so one such batch merged nothing for the whole pass.
+
+The failures are transient and time-correlated, not host-correlated, and that is what decides the
+fix. Measured on two volumes of one series, on separate runs: one batch's attempt-0 evidence index
+failed **all 19 entries, from fetch position 0**, and the same batch retrieved cleanly on its next
+attempt and passed its judge; another failed 4 of 4. The same hosts succeeded in a neighbouring
+batch in the same run, and every host in a surviving failure — `en.wiktionary.org`,
+`www.encyclopedia.com`, `torah.org`, `mechon-mamre.org` — connected from that machine in ~20 ms on
+every address `getaddrinfo` returned when probed directly. Three batches already at
+`citation-review-exhausted` retrieved IN FULL after a manual reset and re-drive, two of them then
+passing a judge with no content finding at all. One run spent 20 repair rungs and drove 5 of 12
+batches to exhaustion, so nine correctly approved batches merged nothing until the five were
+recovered by hand. The ladder cannot self-heal out of this either: `batchRepairPrompt` already
+tells the model that an honest downgrade to `transliterated` is the correct outcome for an
+unverifiable citation, and it took that option **0 times in ~30 repair opportunities** — the
+`basis:"established"` count was identical across every rung, each failing row coming back with a
+fresh `established` URL on a different host.
+
+**The fetch is now re-run, not the resolver.** A retrieval failure that describes the LINK rather
+than the citation is retried in place: the same command, over the same pinned snapshot, up to three
+passes, with 15 s and 60 s between them. No rung is spent, no codex job is launched and no URL
+changes. Rows still failing after the last pass keep their existing routing — a fault that did not
+clear inside the retry window is one a different source may well fix, and that is what repair is
+for.
+
+The one question that decides membership is whether the peer delivered a complete, well-formed
+answer that we then declined. A cut, truncated or unresolvable exchange is retried:
+`connect-timeout`, `read-timeout` and `total-timeout` (three of the four reasons the judge prompt
+itself already names as facts about the run rather than about the citation), the whole
+`network-error:*` OSError family, and the whole `http-protocol-error:*` family — every
+`http.client.HTTPException` subtype names a broken exchange, a body cut partway through a chunked
+response being `IncompleteRead`. Two families are retried except for one member each:
+`tls-error:*` carries the ssl exception's type name rather than only certificate faults, so a
+handshake closed under the outage arrives as `SSLEOFError` and is retried while
+`SSLCertVerificationError` — an answer about the host — is not; and `dns-failure:<errno>` is
+retried except for EAI_NONAME, the one value that says the name does not exist. That errno is
+`socket.gaierror`'s own and is NOT portable — EAI_AGAIN is 2 on Darwin and -3 on glibc — so the
+excluded value is computed from the stdlib at import rather than written as a literal, which would
+have read as correct on the machine it was written on and asserted nothing on the other. Refusals
+about the URL's shape or address, `dns-empty`, every `http_error:<status>`, and the two
+shared-budget outcomes are unchanged: neither ever triggers a retry, and both keep the branch they
+already had. A pass is re-run whole, though, so a shared-budget row is re-fetched when some other
+row in the same pass is transient, and it is the LAST pass that routes — a fresh pass carries a
+fresh batch deadline and byte budget, so a row starved by an earlier row's slow server can come
+back `fetched`.
+
+**What this can cost, stated rather than guarded.** `index.json` is rewritten wholesale by every
+pass and it is the judge's input, so the driver cannot union two passes without authoring the file
+the judge reads. A row fetched on pass 1 that fails on pass 2 is therefore repaired, where the old
+code would have kept it. That needs an outage to START between two passes, and it costs one
+repaired row — against the cost the old code paid for EVERY transiently failed row, on every rung,
+plus the exhaustion at the top of the ladder.
+
+**Why the driver may re-run a command the fallback tells its agent not to re-run.**
+`citationPreparePrompt` requires "a single invocation, not a loop" and says there is no
+circumstance in which a second retrieval is right. That prohibition is about the ACTOR: the
+retained `pipeline()` path's prepare agent is a general-purpose model that could reach the network
+another way and could open a retrieved body, so it is given no discretion at all. This process can
+do neither — it re-runs the one sanctioned command and reads exactly `item_index` and `outcome` per
+entry, never an evidence body. The two paths now diverge in fetch COUNT while still issuing
+byte-identical commands.
+
+**Migration.** `glossary_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this release
+moves `plugin_bundle_hash`. Every converged segment of a book in progress goes `stale` and
+re-translates. It is not a `DERIVATION_BUNDLE_MEMBERS` entry, so no W3/W3a regeneration is forced.
+The hash is also folded into the glossary resume identity, so an UNFINISHED glossary pass mints a
+fresh `RUN_ID` and restarts instead of resuming once the refreshed plugin is picked up.
+
 ## 1.89.0 — 2026-09-05
 
 **The generic "always gloss embedded third-language text in-text" rule overrode the project's own
