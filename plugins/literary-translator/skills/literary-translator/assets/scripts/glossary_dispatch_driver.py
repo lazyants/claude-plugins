@@ -188,6 +188,7 @@ TEMPLATE_EXPORTED_FUNCTIONS = (
     "citationJudgePrompt",
     "mergeBatchesCmd", "verifyMergedCmd",
     "rejectionDetail", "sentinelVerdict", "rejectedAnywhere",
+    "unusableSourcePositions",
 )
 
 # The routing token `batchDispatchPrompt` and `batchRepairPrompt` emit as their
@@ -2274,7 +2275,7 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
 
 
 def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]",
-               snapshot_path: Path) -> dict:
+               snapshot_path: Path, cause: str = "unretrievable") -> dict:
     """Repairs the failed rows into the RESERVED rung attempt+1.
 
     RUNG ACCOUNTING, stated because "consumes a rung" is ambiguous at both ends.
@@ -2282,7 +2283,15 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
     At the terminal rung there is no attempt+1 to reserve, so the caller must not
     reach here at all -- it exhausts instead. A repair that fails validation
     regenerates into that SAME reserved rung, never attempt+2, so a malformed
-    repair costs the batch nothing beyond the rung it already reserved."""
+    repair costs the batch nothing beyond the rung it already reserved.
+
+    `cause` (#857) is forwarded to batchRepairPrompt() verbatim and decides which
+    of its two "why this row is here" paragraphs the repair agent reads: the
+    default "unretrievable" for a row classify_outcomes() found never fetched at
+    all, or "unusable-source" for a row an independent judge rejected because the
+    body it fetched was not the cited document. This function does not itself
+    decide which is true -- the caller names it, because the caller is the one
+    that knows which of the two callers reached this function."""
     idx = batch["index"]
     snapshot_rows = load_rows(snapshot_path)
     failed_rows = [snapshot_rows[p] for p in failed_positions]
@@ -2308,7 +2317,7 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
         repair_path = sandbox.artifact(Path(built["repairpath"]).name)
         repair = ctx.build([
             {"key": "prompt", "fn": "batchRepairPrompt",
-             "args": [batch, attempt, failed_rows, str(repair_path)]},
+             "args": [batch, attempt, failed_rows, str(repair_path), cause]},
         ])
         job_id = launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
                               prompt=strip_routing_line(repair["prompt"]),
@@ -2590,12 +2599,76 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
     # whole feature and not an optimisation.
     prepared_fragment: "Path | None" = None
 
+    # #857: a judge rejection whose EVERY offending item was an unusable
+    # source -- retrieved, but not the cited document -- persists its
+    # positions on `st` at admission time (record_verdicts()) instead of
+    # escaping to a caller. Popped HERE, once, before the loop even starts --
+    # not inside any branch below -- so the key cannot survive ANY exit from
+    # this function: an exhaust, a repair-job failure, or a clean ready all
+    # fall through a pop that already happened.
+    #
+    # `snapshotPath`/`unusableSnapshotSha256` are consumed alongside it and
+    # RE-VERIFIED rather than trusted: resume_setup.py deletes every approved
+    # snapshot on a resume, and a process that died between admission and this
+    # drive would otherwise hand run_repair() a snapshot that is already gone
+    # -- a NEW way to block the pass this change would introduce if left
+    # unchecked (round-1 MAJOR 1, admitted). Unreadable, missing, or a changed
+    # digest drops the signal and takes today's path instead: the rung this
+    # admission already reserved (by NOT incrementing attempt -- see
+    # record_verdicts()) is spent on an ordinary whole-fragment regeneration,
+    # exactly as an admission that never saw an unusable-source signal would
+    # spend it, with the judge's original detail intact.
+    #
+    # `unusableSourcePositions` is popped UNCONDITIONALLY, on every drive of
+    # every batch, because this feature OWNS that key: popping it before the
+    # loop even starts is what guarantees it cannot survive any exit path
+    # (exhaust, repair-job failure, ready). `snapshotPath` is a DIFFERENT
+    # matter -- it predates #857 (the awaiting_judge branch below sets it, and
+    # _stale_status_reason() reads it), so popping it unconditionally would
+    # strip a pre-existing key on every ordinary drive, including one that
+    # never carried an unusable-source signal at all -- a gratuitous change on
+    # exactly the path acceptance criterion 2 requires to stay byte-identical
+    # to today. `snapshotPath`/`unusableSnapshotSha256` are therefore only
+    # touched at all once `unusableSourcePositions` has come back non-None,
+    # i.e. once this drive is actually the one consuming this feature's own
+    # signal.
+    pending_unusable = st.pop("unusableSourcePositions", None)
+    pending_snapshot = None
+    pending_digest = None
+    if pending_unusable is not None:
+        pending_snapshot = st.pop("snapshotPath", None)
+        pending_digest = st.pop("unusableSnapshotSha256", None)
+        try:
+            if pending_snapshot is None or pending_digest is None or \
+                    _sha256_file(Path(pending_snapshot)) != pending_digest:
+                pending_unusable = None
+        except OSError:
+            pending_unusable = None
+        if pending_unusable is None:
+            log(f"batch {idx}: the unusable-source repair signal recorded at "
+                f"attempt {attempt} names a snapshot that is now unreadable or "
+                f"has changed (a resume between admission and this drive "
+                f"deletes it); dropping the signal and regenerating the whole "
+                f"fragment at rung {attempt + 1} instead")
+            attempt += 1
+            st["attempt"] = attempt
+
     while True:
         if attempt > ctx.max_citation_retries:
             return _exhaust(st, attempt, rejection_reason,
                             attempts_used=ctx.max_citation_retries + 1)
 
-        if prepared_fragment is not None:
+        if pending_unusable is not None:
+            # Reuses the EXISTING needs_repair branch verbatim below -- same
+            # terminal-rung exhaust, same reserved-rung accounting, same
+            # repair_invalid fallback to whole-fragment regeneration, same
+            # re-enter-at-APPROVE path a retrieval-failure repair takes. No new
+            # state machine; only the source of this one result differs.
+            result = {"state": "needs_repair", "batchIndex": idx,
+                     "attempt": attempt, "failedPositions": pending_unusable,
+                     "snapshotPath": pending_snapshot, "cause": "unusable-source"}
+            pending_unusable = None
+        elif prepared_fragment is not None:
             result = prepare_and_hand_back(ctx, batch, attempt, prepared_fragment)
             prepared_fragment = None
         else:
@@ -2637,7 +2710,8 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
                     + repr(result["failedPositions"]),
                     attempts_used=attempt + 1)
             repaired = run_repair(ctx, batch, attempt, result["failedPositions"],
-                                  Path(result["snapshotPath"]))
+                                  Path(result["snapshotPath"]),
+                                  cause=result.get("cause", "unretrievable"))
             if repaired["state"] == "failed":
                 # A job codex-companion recorded failed/cancelled during repair
                 # settles the batch at its CURRENT rung -- the one whose repair
@@ -2654,10 +2728,25 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
             attempt += 1
             st["attempt"] = attempt
             if repaired["state"] == "repair_invalid":
-                rejection_reason = (
-                    "the previous attempt's citations could not be retrieved and a "
-                    "per-item repair could not be applied (" +
-                    str(repaired.get("reason")) + ")")
+                if result.get("cause") == "unusable-source":
+                    # #857 round-1 MAJOR 2 (admitted): retrieval SUCCEEDED on
+                    # this path -- the judge's own finding named an unusable
+                    # body, not a fetch failure -- so replacing rejection_reason
+                    # with the retrieval-failure sentence below would be
+                    # factually false, and it would DISCARD the judge's finding
+                    # (including which URL, which host) for the terminal
+                    # regeneration that is about to read it. Compose instead of
+                    # replace: the admitted judge detail survives, followed by
+                    # why the per-item repair itself could not be applied.
+                    rejection_reason = (
+                        str(rejection_reason) +
+                        " (a per-item repair for this could not be applied: " +
+                        str(repaired.get("reason")) + ")")
+                else:
+                    rejection_reason = (
+                        "the previous attempt's citations could not be retrieved and a "
+                        "per-item repair could not be applied (" +
+                        str(repaired.get("reason")) + ")")
             else:
                 # Repaired in place. The reserved rung ALREADY holds the spliced
                 # fragment, so this rung re-enters at APPROVE -- re-approve and
@@ -2794,6 +2883,8 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path, state: dict) -> dict:
              "args": [reply, entry["ok_sentinel"], entry["fail_sentinel"]]},
             {"key": "detail", "fn": "rejectionDetail",
              "args": [reply, entry["ok_sentinel"], entry["fail_sentinel"]]},
+            {"key": "unusable", "fn": "unusableSourcePositions",
+             "args": [reply, entry["ok_sentinel"], entry["fail_sentinel"]]},
         ])
 
         if read["contained"] or not read["verdict"]:
@@ -2805,8 +2896,57 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path, state: dict) -> dict:
                 # exhausted. Exhaust here instead, at the rung actually rejected.
                 _exhaust(st, attempt, read["detail"], attempts_used=attempt + 1)
             else:
-                st.update(status="pending", attempt=attempt + 1,
-                          rejection_reason=read["detail"])
+                # #857: a rejection whose every offending item the judge named
+                # as an unusable source (a body that fetched but names none of
+                # the cited content) is routed to the same per-item repair
+                # rung a retrieval failure already uses (classify_outcomes()'s
+                # "repairable" branch -> needs_repair in
+                # advance_until_blocked()), instead of the whole-fragment
+                # regeneration an ordinary content rejection takes below.
+                #
+                # NOT TRUSTED FROM THE REPLY ALONE. unusableSourcePositions()
+                # already refuses an ambiguous or malformed line, but a
+                # position naming a row this snapshot never had would mean the
+                # reply is not describing THIS snapshot -- so every parsed
+                # position must be a member of
+                # established_indices(load_rows(snapshot)), the very snapshot
+                # whose digest was just re-verified above. Requiring EQUALITY
+                # (not just a subset) with the parsed list, rather than
+                # silently dropping the out-of-range ones, is deliberate: a
+                # partially-valid list is exactly the shape a reply describing
+                # a different snapshot would produce, and repairing only the
+                # valid-looking subset of it would still be repairing against
+                # the wrong basis. Any failure here falls back to today's
+                # whole-batch regeneration, unchanged.
+                unusable = read["unusable"]
+                valid_positions = None
+                if unusable:
+                    try:
+                        established = established_indices(load_rows(snapshot))
+                    except DriverError:
+                        established = set()
+                    validated = sorted(p for p in unusable if p in established)
+                    if validated and validated == sorted(unusable):
+                        valid_positions = validated
+                if valid_positions is not None:
+                    # `attempt` is NOT incremented here: run_repair() reserves
+                    # attempt+1 itself, exactly as the classify_outcomes()
+                    # -originated needs_repair branch already does. The
+                    # snapshot path and its digest are persisted alongside the
+                    # positions so the NEXT drive (which may be a different
+                    # process) can re-verify both are still the ones this
+                    # admission actually saw before spending the reserved rung
+                    # on them (round-1 MAJOR 1, admitted -- see
+                    # advance_until_blocked()'s consumption of these three
+                    # keys).
+                    st.update(status="pending", attempt=attempt,
+                              rejection_reason=read["detail"],
+                              unusableSourcePositions=valid_positions,
+                              snapshotPath=str(snapshot),
+                              unusableSnapshotSha256=current_digest)
+                else:
+                    st.update(status="pending", attempt=attempt + 1,
+                              rejection_reason=read["detail"])
             admitted.append({"batch": batch_i, "attempt": attempt,
                              "approved": False, "rejection": read["detail"]})
             continue
