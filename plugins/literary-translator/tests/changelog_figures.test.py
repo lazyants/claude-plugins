@@ -504,8 +504,35 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.96.0 (#876 -- the glossary run's merge marker says its
-    # dispatch model is unrecorded), per the maintenance contract above.
+    # ROTATED TO 1.97.0 (#873 -- Step 0d asks what the vault index should be
+    # built from and the example profile had nowhere to write the answer), per
+    # the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # digit-run in it is an IDENTIFIER, not a measurement: the version (1.97.0),
+    # the date, the issue number (#873), the step names (`Step 0`, `Step 0d`),
+    # the hard-rule name (`R10`), and the field name (`v1_scope`). There is no
+    # measurement for a row to check.
+    #
+    # The population behind #873 -- how many volumes of one live series
+    # hand-authored the block before it had a slot -- is a fact about book
+    # projects in ANOTHER REPOSITORY, so no implementation in THIS tree can
+    # re-derive it. It is deliberately written as WORDS ("Every volume of one
+    # live Hebrew-English series that reached Step 0d"), which is this guard's
+    # documented way of keeping such a fact out of it, and the same class the
+    # 1.95.0, 1.94.0, 1.91.0 and 1.90.0 rotations below name for theirs.
+    #
+    # The counts this release COULD have quoted are counts of things in this
+    # tree: how many times the example describes the canon-derived index before
+    # this release, and how many fields the block declares. Both are written as
+    # names or spelled words ("three times", "the three fields"), and
+    # `_TOKEN` matches digits only, so neither is a row candidate. Note that
+    # `entity_markup_example_slot.test.py` DOES check the field names -- it
+    # reads them off `profile.schema.json` rather than restating them -- so the
+    # schema-agreement half is covered by a test, not by a figure row.
+    #
+    # The 1.96.0 rotation this replaces, kept as its own record (#876 -- the
+    # glossary run's merge marker says its dispatch model is unrecorded):
     #
     # ZERO rows. The entry quotes no digit-written measurement at all. Every
     # numeral in it is an identifier rather than a fact: the two version
@@ -816,7 +843,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.96.0"
+FIGURES_VERSION = "1.97.0"
 
 
 def _newest_entry():

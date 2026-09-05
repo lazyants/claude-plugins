@@ -584,6 +584,51 @@ output:
       # never | first_occurrence -- whether a name's original-script form is shown parenthetically alongside
       # its target-language rendering the first time it occurs. Only consulted by the obsidian adapter at
       # render time, i.e. only under v1_scope: assembled_book; inert under the default segment_drafts_and_audit.
+  # entity_markup -- the translator marks entities INLINE as it goes, and the vault index is
+  # built from those marks instead of from canon.json alone. This is the block that answers
+  # SKILL.md Step 0d's question "do you want an index, and of what?".
+  # Commented out DELIBERATELY, and with no CHOOSE_ sentinel, for the reason Step 0d states:
+  # the question is only meaningful under v1_scope: assembled_book with target: obsidian, and
+  # a plain translate+gloss job must not be made to answer an assembly question it never reads.
+  # ABSENT IS A VALID "NO" and is the default every project inherits: assembly does not scan
+  # for markup at all and the book is byte-identical to one produced without this block. What
+  # you get instead is the canon-derived index `target` above describes -- one cross-linked
+  # entity note per canon.json entry. Say nothing here to keep it.
+  #
+  # ANSWER "YES" WHEN this book's cast is NOT knowable in advance from a name list, so it
+  # cannot be seeded into canon.json before translation starts. Ask it at Step 0d, never
+  # later: the `tags` vocabulary is what this project's style_contract then has to tell the
+  # translator to mark, and a convention invented mid-book reaches the reader as raw markup.
+  #
+  # COST, before you switch it on: index_from: markup REQUIRES output.target: obsidian -- no
+  # other shipped adapter consumes the recorded spans, so assemble.py refuses outright
+  # (reason entity_markup_index_unsupported_target) rather than degrading to strip and handing
+  # you an index you asked for and did not get. A declared element that is MALFORMED
+  # (<person/>, <person class="x">, an unterminated <person) is a hard refusal too, never a
+  # passthrough. Full grammar, refusal list and note composition:
+  # references/output-target-adapters/obsidian.md and references/assembly-and-output.md.
+  #
+  # SERIES DECISION (R10): this is a decision a series makes once and carries. Volume N>1
+  # writes the value its series decisions ledger already holds, with that provenance attached
+  # -- it is not re-gathered cold, and it is not re-derived from the previous volume's tree.
+  #
+  # entity_markup:
+  #   tags: [person, place]    # REQUIRED, non-empty, unique. The element names the translator
+  #                            # is told to mark with. The tag is part of the entity IDENTITY,
+  #                            # not a folder hint: <person>Jordan</person> and
+  #                            # <place>Jordan</place> stay two separate notes. Put the same
+  #                            # vocabulary in this project's style_contract.
+  #   ref_attribute: ref       # OPTIONAL. Attribute carrying a stable identity, so two
+  #                            # spellings of one person converge on one note
+  #                            # (<person ref="reb-noson">Reb Noson</person>). Naming a
+  #                            # DIFFERENT attribute makes ref="..." ordinary text, and a
+  #                            # <person ref="x"> under it is then a malformed use -- refused.
+  #   index_from: markup       # canon | markup. `canon` (the resolved default) is STRIP mode:
+  #                            # the elements are removed, their text kept, nothing recorded,
+  #                            # index unchanged. `markup` is INDEX mode: each span is
+  #                            # recorded and the obsidian adapter mints and links a note per
+  #                            # marked identity. Declaring the block with `canon` is how you
+  #                            # strip markup WITHOUT building an index from it.
   adapter_config:
     # Per-target settings for the assembler -- only the sub-block matching `target` above is meaningful;
     # the others sit inert. Field-level shape validation is real for obsidian/custom (see below); epub
