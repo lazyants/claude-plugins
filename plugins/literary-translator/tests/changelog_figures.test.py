@@ -490,9 +490,38 @@ def _name_discovery_passes_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.85.0 (#856 -- canon_adjudication_audit.py's stderr detail
-    # lists had no way past their first 20 items), per the maintenance contract
-    # above.
+    # ROTATED TO 1.87.0 (#861 -- assemble.py had no argument parsing, so --help
+    # wrote the whole output vault instead of printing usage), per the
+    # maintenance contract above.
+    #
+    # ZERO rows. The entry's only measurements are facts about ONE LIVE RUN OF A
+    # BOOK IN ANOTHER REPOSITORY -- the 31 chapters and 665 entity notes that
+    # `--help` wrote on the reporting operator's project -- and no
+    # implementation in this tree can see that run. Everything the tree DOES own
+    # that a later release could MOVE is stated by NAMING rather than counting:
+    # the sibling scripts without `argparse` are listed (`draft_sha1.py`,
+    # `output_resolve.py`, `scaffold_validate.py`, `validate_assembled.py`)
+    # instead of counted, the untouched loaders are listed instead of counted,
+    # and the migration paragraph names
+    # `PLUGIN_BUNDLE_MEMBERS`, `DERIVATION_BUNDLE_MEMBERS`,
+    # `ORCHESTRATION_BUNDLE_MEMBERS` and `_RENDER_VERSION_FILES` rather than
+    # quoting their sizes or their number -- the 1.83.2 rotation below is what
+    # quoting one costs. The remaining numerals are identifiers and exit codes:
+    # the version numbers, the release date, the issue number (#861), and the
+    # `0`/`2` of the CLI contract, which are literals in the source rather than
+    # measurements. The entry does carry a few small counts that are NOT rows
+    # here and the distinction is worth stating: "one WRITING deterministic
+    # step", "the only script", "Both changed scripts" and "more than one"
+    # mutually exclusive mode describe THIS RELEASE and its subject, and are
+    # fixed by what the entry is about rather than by a tuple a later release
+    # can grow -- a release that adds a second writing step does not make this
+    # entry's sentence about #861 false. "zero-argument", "one line" and
+    # "one-JSON-line" name contracts, not quantities measured off the tree.
+    #
+
+    # The 1.85.0 rotation this replaces, kept as its own record (#856 --
+    # canon_adjudication_audit.py's stderr detail lists had no way past their
+    # first 20 items):
     #
     # ONE row. The entry's `20` is the new `--limit` default, and it is a
     # TREE-OWNED constant -- `DEFAULT_ITEM_PRINT_LIMIT` in the shipped script --
@@ -512,12 +541,8 @@ FIGURES = [
     # the `0` of `--limit 0` and of `` `0` prints every item `` (a flag ARGUMENT,
     # a literal the prose is defining rather than counting), and the exit code
     # `2`, a literal in the contract.
-    Figure(
-        "default 20, matching the previous cap",
-        20,
-        lambda: _int_constant("canon_adjudication_audit.py", "DEFAULT_ITEM_PRINT_LIMIT"),
-    ),
     #
+
     # The 1.84.2 rotation this replaces, kept as its own record (#852 -- a
     # reconciliation reset left behind the very snapshots that refuse its
     # re-drive):
@@ -592,7 +617,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.85.0"
+FIGURES_VERSION = "1.87.0"
 
 
 def _newest_entry():
