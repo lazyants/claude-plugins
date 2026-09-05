@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.94.0 — 2026-09-05
+
+**Nothing warned an operator that editing `canonical_target_form` to merge two notes makes the
+canon misstate the source, and the sidecar that looks like the tool for it silently does not
+apply (#871).** A glossary pass can freeze `X` and `X ז"ל` as two entries with two targets, and
+one note per canon entry then gives one man two notes. `canon_link_groups.json` cannot reach that
+shape: its routing effect needs a target COLLISION — `_owners_by_target` keys on the NFC
+`canonical_target_form` and `_link_decision` consults the group map only inside the de-link branch
+— so two distinct targets are two single-owner targets and a group over them moves nothing there.
+Its `#497` fold-credit effect is not a way around it for this pair either, and for a reason worth
+stating separately: that effect tests fold-key closure and membership rather than target equality,
+so it CAN credit occurrences across differing targets — but `fold_match_key` keeps the honorific's
+letters, so the honorific-bearing form folds to strictly more match units than its bare twin and
+the two never share a key.
+
+The lever that does reach it is the target itself, and it is the wrong one. `canonical_target_form`
+is the note's heading and the string the inline matcher looks for, and through the segpack's
+`canon_map` it prescribes how the translator renders that source form: equalizing two targets to
+collapse a man's two headings instructs the translator to drop a formula the source prints. Applied
+to 31 entries on one live volume and reverted the same day, after the next review round correctly
+raised the missing memorial blessing as omitted source content. Nothing about the price warns you
+off — under an admissible `--from-converged` claim the correction buys a re-review, not a
+re-translation — and it does not even remove a note, since the note filename comes from the
+`source_form` via `_entity_note_relpath`.
+
+The warning now stands where an operator stands, rather than in one caveat section.
+`canon-and-glossary.md` gains the full explanation under `canon_link_groups.json` (including what to
+do instead — leave the two notes; in the vault where this was measured they were orphans with zero
+inbound links), a "cheap price is not a licence" note in "What a correction costs", and a bullet on
+the harmonisation proposal kinds, since `divergent_spelling` and `divergent_policy` both route to
+`--correct` and either can carry such a pair (`KIND_RULES` maps both to `"divergent"`, and the kind
+is the dispatched pass's to assign). `SKILL.md` gains one cross-referencing sentence at each of its
+two correction sites — the harmonisation step's "acting on a proposal" paragraph and the `#495`
+section — because both independently state the route and quote the cheap price.
+
+Deliberately NOT built: `canon_link_groups.json` widened to consolidate inline routing for distinct
+single-owner targets. The loader already ADMITS such members — the schema constrains source-form
+membership, not target equality — so what is missing is the routing, not the record. The
+duplicate notes are orphans, the widening reverses invariants documented across the schema, the
+loader and the renderer, and would have to move note resolution, the fold-credit route,
+`validate_backlinks.py` and `delink_cost` plus every delivered book's render baseline. The
+residual stands and is now disclosed: one referent frozen under two targets still gets two notes.
+
+**Migration.** None. Documentation only — no script, schema or template bytes move, so no hash
+moves, nothing re-stales, and no render baseline shifts.
+
 ## 1.93.0 — 2026-09-05
 
 **`reject_review.py` reported success for a segment the driver had stopped reading, so an operator

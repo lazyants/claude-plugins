@@ -504,8 +504,33 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.93.0 (#859 -- reject_review.py reported success for a segment
-    # the driver had stopped reading), per the maintenance contract above.
+    # ROTATED TO 1.94.0 (#871 -- nothing warned that editing
+    # `canonical_target_form` to merge two notes makes the canon misstate the
+    # source), per the maintenance contract above.
+    #
+    # ZERO rows. The entry's one DIGIT-WRITTEN measurement -- 31 entries
+    # corrected on one volume and reverted the same day -- is a fact about a
+    # live book in ANOTHER REPOSITORY, so no implementation in THIS tree can
+    # re-derive it, the same class the 1.91.0 and 1.90.0 rotations below name
+    # for their own.
+    #
+    # The counts this release could have quoted are counts of prose in this
+    # tree -- how many passages carry the warning, how many documents record
+    # the invariant it declines to reverse. Both are written as NAMES rather
+    # than numerals, and no implementation here counts warning paragraphs, so
+    # neither was a row candidate.
+    #
+    # Walking the entry completely, the remaining numerals are identifiers, not
+    # measurements: the version number (1.94.0), the release date, and the
+    # issue numbers (#871, #497, #495). The worked example's own quantities --
+    # "one referent", "two entries", "two targets", "two notes" -- are spelled
+    # as WORDS and so are invisible to `_TOKEN`, which matches digits only;
+    # they describe the example the warning is about, not anything this tree
+    # owns, so none is a row candidate even in principle.
+    #
+    # The 1.93.0 rotation this replaces, kept as its own record (#859 --
+    # reject_review.py reported success for a segment the driver had stopped
+    # reading):
     #
     # ZERO rows, and the reason is specific rather than an empty rotation left to
     # be read as an omission. The entry quotes exactly one measurement, "one live
@@ -748,7 +773,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.93.0"
+FIGURES_VERSION = "1.94.0"
 
 
 def _newest_entry():

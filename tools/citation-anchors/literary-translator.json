@@ -1610,7 +1610,7 @@
       ],
       "claim": "The read mode's envelope keeps exactly its documented seven keys, re-asserted here as well as at tests/review_rejection.test.py:1352."
     },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4249-4255\", 0]": {
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4258-4264\", 0]": {
       "anchors": [
         "Excluded from every bundle hash",
         "nor of `orchestration_bundle_hash`",
