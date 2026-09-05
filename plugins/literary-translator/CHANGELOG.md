@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.89.0 — 2026-09-05
+
+**The generic "always gloss embedded third-language text in-text" rule overrode the project's own
+convention, because only the style bible had a slot for that convention and nothing deferred to it
+(#860).**
+Since 1.11.0 (#203) `style_bible.template.md` has carried a required `embedded-third-language-convention`
+fill block: the project states, once, whether an embedded third language is romanized, translated
+outright, glossed in some fixed form, or barred from the target text entirely. Four other places went
+on stating the generic default as an unconditional rule, and none of them mentioned that block. A
+project whose convention is "no source script reaches the target text, anywhere, ever" therefore
+shipped two contradictory instructions, and the unconditional one sat inside the prompt the
+translator actually follows.
+
+The translator was not getting it wrong; it was following the prompt, and its own note said so:
+*"The dispatch requires embedded third-language text to be retained with an in-text gloss, while the
+style bible prohibits non-Latin script in English."* On a Hebrew→English series, volume 5's first
+mass round produced 97 findings over 30 segments, **62 of them (64%) this single class** — a
+romanization trailed by a parenthetical gloss, an em-dash aside carrying a translation, or source
+script simply left standing in the English. Rewriting the clause to state the project's override was
+then measured on the 20 of those segments a second round also covers, which is a different and
+smaller population than the 30 above: across those 20, **findings fell 57 → 20 and medium severity
+44 → 5, and this class reached 0**, while every other finding class held at ~1.1 per segment. It
+also reached
+delivered books: counting non-Latin runs in the visible English of the assembled output, **volume 1
+carries 234 across 60 of its 79 chapters and volume 2 carries 755 across all 42**.
+
+**Four carriers, not the two the report named.** The fix is deference in every one of them, so the
+project's block is the single governing answer:
+
+- `translate_TASK.template.md` — the translator's own read.
+- `style_bible.template.md` — the bullet sat directly above the very block meant to override it.
+- `mass-translate-wf.template.js` — **the one a fill block could never have reached.** This sentence
+  is spliced verbatim into every per-segment dispatch prompt and is not project-customizable at all,
+  so any fix confined to the scaffolded documents would have left the generic rule in the prompt.
+- `references/engine-loop.md` — a mandatory pre-read, held by the session that applies the R8
+  hand-driven fix turn. Left unqualified it restores by hand the gloss the convention removed.
+
+What did NOT change is the half that is not the project's to override: a translation living only in
+`notes[]` is still a defect in all four, because that array never reaches the reader.
+
+**What was deliberately not built.** The report's own "smallest fix" — a required-fill block in
+`translate_TASK.template.md` — is refused and the refusal is pinned by a test. That file is absent
+from `scaffold_validate.py`'s `MARKER_SCAN_FILES`, so nothing would reject an unfilled one and
+`LT_PLACEHOLDER_UNFILLED` would reach a live dispatch prompt with every W1 gate green — strictly
+worse than the defect. It would also have the project state one convention in two files, which is
+the drift this issue is about, one file later. No `profile.yml` key and no new workflow token
+either: the dispatch prompt already tells the translator to read `style_bible.md` in full, so the
+answer is in front of it and only the ranking was missing.
+
+**Migration: none.** `mass-translate-wf.template.js` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this
+release moves `plugin_bundle_hash` as any release touching a bundle member does; already-converged
+segments stay converged on their `.ever_converged.<seg>` sentinels. An in-flight project picks the
+new wording up the next time a run is scaffolded, and a project already carrying the unpatched
+clause in its own `translate_TASK.md` can paste the new bullet in without re-scaffolding.
+
+Closes #860.
+
 ## 1.88.1 — 2026-09-05
 
 **The shipped example profile handed every project a Russian `untranslated_sentinel`, whatever its
