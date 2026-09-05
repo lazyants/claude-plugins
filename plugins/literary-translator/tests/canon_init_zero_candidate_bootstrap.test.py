@@ -37,6 +37,7 @@ subprocesses against an isolated durable_root (see
      leaves the documented path silently dead-ending is not a fix.
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -253,4 +254,157 @@ def test_skill_md_skip_branch_names_the_bootstrap_command():
     assert INIT_COMMAND_FRAGMENT in branch[:init_offset], (
         "SKILL.md mentions --init on the SKIP branch without naming the script "
         "it belongs to"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 5. SKILL.md wiring, #858 -- the ORDINARY path must name it too
+# ---------------------------------------------------------------------------
+
+# The region is bounded by two anchors that BOTH predate #858, and it excludes
+# every earlier `--init` in W3 on purpose. Two already sit above it -- the
+# `glossary.enabled: false` branch's own bootstrap and the `no_new_candidates`
+# SKIP branch's -- so a region that merely started at W3 would find `--init`
+# on the UNFIXED file and pass while the ordinary path stayed silent. This one
+# starts where the SKIP/`--correct` discussion ends and stops at the
+# `resume_setup.py` pre-workflow step, which is the deadline the bootstrap has
+# to beat: verified to hold NO `--init` at all on the pre-fix SKILL.md.
+ORDINARY_PATH_REGION_START = 'the `disposition: "dismiss"` bullet.'
+ORDINARY_PATH_REGION_END = "deterministic pre-workflow step invokes"
+# The COMMAND, not the name: the bootstrap paragraph names the preflight in
+# its own prose ("before `glossary_preflight.py`"), which sits earlier than
+# the fenced init command and would make an ordering check compare a
+# sentence against a command.
+PREFLIGHT_COMMAND_FRAGMENT = "assets/scripts/glossary_preflight.py"
+
+
+_FENCED_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
+
+
+def _fenced_blocks(region: str) -> list:
+    """Every ``` fenced block in the region, body only -- the same shape
+    `skill_prose_present.test.py` reads commands with. A command assertion has to
+    land on the FENCE: a plan-review round demonstrated that
+    `"--init" in region` still passed after the flag was deleted from the fenced
+    command, because the surrounding prose names `--init` too."""
+    return _FENCED_BLOCK_RE.findall(region)
+
+
+def _bootstrap_fence_offset(region: str) -> int:
+    """Where the fenced bootstrap COMMAND starts, or -1. An ordering check must
+    use this rather than `region.find("--init")`: the paragraph introducing the
+    step names `--init` in prose several lines ABOVE its own fence, so a
+    find()-based offset would still land before the preflight even if the
+    command itself were moved below it -- the review-bot finding on this file."""
+    for match in _FENCED_BLOCK_RE.finditer(region):
+        body = match.group(1)
+        if INIT_COMMAND_FRAGMENT in body and "--init" in body:
+            return match.start()
+    return -1
+
+
+def _paragraphs(region: str) -> list:
+    """Blank-line-separated paragraphs. Split on a blank line that may carry
+    whitespace: a stray space would otherwise merge two paragraphs into one, and
+    a merged paragraph can satisfy the read-back check with tokens borrowed from
+    both halves -- which is the exact binding this helper exists to enforce. The
+    read-back assertions have to land on ONE paragraph: a code-review round
+    showed that checking for HALT and the two key names anywhere in the region
+    passed after the whole read-back paragraph was replaced, because the
+    staleness preflight says HALTS a few paragraphs down."""
+    return re.split(r"\n\s*\n", region)
+
+
+def _ordinary_glossary_path_region() -> str:
+    text = SKILL_MD.read_text(encoding="utf-8")
+    start = text.find(ORDINARY_PATH_REGION_START)
+    assert start != -1, (
+        "SKILL.md no longer ends its W3 --correct discussion where this test "
+        "bounds the ordinary glossary path"
+    )
+    end = text.find(ORDINARY_PATH_REGION_END, start)
+    assert end != -1, (
+        "SKILL.md no longer describes the resume_setup.py pre-workflow step "
+        "after the ordinary glossary path"
+    )
+    return text[start:end]
+
+
+def test_skill_md_ordinary_path_bootstraps_the_canon_before_dispatch():
+    """#858: a project's FIRST glossary run reaches the dispatch with no
+    canon.json -- the merge that creates it runs after every batch has been
+    dispatched -- and the dispatch prompt tells each codex job to read that
+    file in full. Measured on a live volume, 2 of 12 such dispatches answered
+    with a question about the missing file and wrote no fragment. The SKIP
+    branch's bootstrap does not cover this path, so the ordinary path has to
+    name the command itself."""
+    region = _ordinary_glossary_path_region()
+
+    bootstrap_fences = [
+        fence for fence in _fenced_blocks(region)
+        if INIT_COMMAND_FRAGMENT in fence and "--init" in fence
+    ]
+    assert bootstrap_fences, (
+        "SKILL.md's ordinary (non-empty-candidates) W3 path carries no fenced "
+        "`canon_validate.py --init` command, so a project's first glossary run "
+        "still dispatches every batch against a canon.json that does not exist "
+        "(#858). Prose mentioning --init is not the instruction; the command is"
+    )
+    assert any("--plugin-root" in fence for fence in bootstrap_fences), (
+        "the ordinary path's bootstrap command omits --plugin-root, which "
+        "every generation_hashes-stamping mode refuses to run without (#412)"
+    )
+
+
+def test_skill_md_ordinary_path_bootstrap_precedes_every_later_gate():
+    """The bootstrap is only correct BEFORE resume_setup.py: that step's
+    glossary input_digest folds in the literal `no-canon` for an absent file
+    (resume_setup.py's _canon_hash), so a first run bootstrapped after it would
+    hash `no-canon` while every resume attempt hashed the empty canon -- the
+    digests would never match and the run could never resume. The region's own
+    END anchor IS the resume_setup.py step, so containment proves that half;
+    this also pins it ahead of the preflight, which halts the pass. Both offsets
+    are COMMAND offsets -- the fenced bootstrap against the fenced preflight
+    invocation -- never a prose mention of either."""
+    region = _ordinary_glossary_path_region()
+
+    init_offset = _bootstrap_fence_offset(region)
+    assert init_offset != -1, (
+        "the ordinary path no longer carries a fenced bootstrap command"
+    )
+    preflight_offset = region.find(PREFLIGHT_COMMAND_FRAGMENT)
+    assert preflight_offset != -1, (
+        "the ordinary path no longer names the glossary staleness preflight"
+    )
+    assert init_offset < preflight_offset, (
+        "SKILL.md orders the canon bootstrap AFTER glossary_preflight.py on "
+        "the ordinary path -- the bootstrap has to precede every step that can "
+        "halt or hash, resume_setup.py above all (#858)"
+    )
+
+
+def test_skill_md_ordinary_path_reads_the_bootstrap_back():
+    """`${durable_root}/scripts/` is a Step-0a copy the dispatched codex jobs
+    hold --write over, so the durable canon_validate.py's own success line is a
+    claim about its postcondition, not proof of it. The documented path has to
+    confirm the file itself and halt otherwise -- a plan-review MAJOR, admitted."""
+    region = _ordinary_glossary_path_region()
+
+    # All four tokens must sit in ONE paragraph. Region-wide, each of them
+    # occurs somewhere anyway -- the staleness preflight says HALTS, and
+    # entries/review_queue are ordinary canon vocabulary -- so a region-wide
+    # check passes with the read-back paragraph deleted outright, which a
+    # plan-review round demonstrated by mutation.
+    required = ("canon.json", "HALT", "entries", "review_queue")
+    read_back = [
+        para for para in _paragraphs(region)
+        if all(token in para for token in required)
+    ]
+    assert read_back, (
+        "no single paragraph of SKILL.md's ordinary glossary path tells the "
+        "session to confirm canon.json itself -- naming `entries` and "
+        "`review_queue` -- and to HALT otherwise. ${durable_root}/scripts/ is "
+        "writable by the dispatched codex jobs, so the durable "
+        "canon_validate.py's own success line is a claim about its "
+        "postcondition, not proof of it (#858)"
     )

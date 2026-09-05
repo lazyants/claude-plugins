@@ -1706,6 +1706,55 @@ lifts a queued exclusion, and neither retry forces a name past ordinary
 candidate curation. Full contract: `references/canon-and-glossary.md`,
 "`--correct PATH`", the `disposition: "dismiss"` bullet.
 
+**#858 — bootstrap the canon on THIS branch too, before anything dispatches.** The SKIP
+branch above is not the only W3 path that starts without a `canon.json`. On a project's
+FIRST glossary run the file does not exist here either, and the merge that would create it
+runs only after every batch has already been dispatched. Meanwhile every dispatched job is
+told to read `${durable_root}/canon.json` in full (`batchDispatchPrompt` and
+`batchRepairPrompt` in `glossary-pass-wf.template.js` both open with it), and a job handed a
+path that is not there answers NONDETERMINISTICALLY: measured on one live volume, 2 of the
+12 dispatches made while the file was absent replied with a question about it and wrote no
+fragment at all. Each of those costs a full codex dispatch, the driver's whole wait, and a
+hand reset — the ladder does not retry a `glossary-pass-null`, and the recorded reason names
+the empty artifact rather than the missing file. So run the SAME create-only bootstrap here,
+before `glossary_preflight.py`, before `resume_setup.py`, and before any dispatch:
+
+```
+python3 ${durable_root}/scripts/canon_validate.py \
+  --research-mode <profile's glossary.research_mode> --init \
+  --plugin-root {{PLUGIN_ROOT}}
+```
+
+Then CONFIRM THE FILE ITSELF, and do not accept the command's own `"created"` line as proof
+that it is there. `${durable_root}/scripts/` is a Step-0a copy the dispatched codex processes
+hold `--write` over, so the script reporting success is not a trusted witness to its own
+postcondition. Take the VERDICT, not the bytes — on an established project `canon.json` is
+full of prior codex output and this check needs none of it:
+`python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(isinstance(d,dict) and "entries" in d and "review_queue" in d)' ${durable_root}/canon.json`
+printing `True` is the whole answer. HALT if it does not, rather than dispatching against a
+file whose presence was only claimed. What this establishes is PRESENCE and shape, never
+provenance: that the `generation_hashes` it carries are the real ones rests on
+`--plugin-root` above (**#412** — it is what keeps the stamping `cache_key.py` resolving from
+the plugin tree rather than from the writable durable copy) and on the bundle-marker
+verification the **#396** rule below requires. This bootstrap redirects a bundle member's
+resolution to the live install, so it is one of the operations that rule covers — verify the
+markers before running it, exactly as the template instantiation below does.
+
+**The ORDER is the reason this step sits here rather than beside the Workflow launch.**
+`resume_setup.py`'s glossary `input_digest` hashes `canon.json`, folding in the literal
+`no-canon` when the file is absent — so bootstrapping AFTER that step would make the first
+invocation record a `no-canon` digest and the next one, with the canon now on disk, compute a
+different digest: the resume gate would refuse that run, mint a fresh RUN_ID and re-dispatch
+every batch. It self-corrects from there (the fresh run's own digest is stable, so the attempt
+after that resumes normally), so the cost is ONE abandoned run's fragments — but they are the
+fragments of exactly the first pass, which is the expensive one. Bootstrapping before the
+digest, on every run, means it never happens at all. `--init` is create-only and
+exits `0` on a project that already has a canon — it does not even read the file — so
+running it unconditionally on every W3 is safe. The one-time cost of adopting this order is
+that a run interrupted mid-glossary under the OLD procedure, before its merge, does not
+resume afterwards: its recorded digest holds `no-canon`, so it re-dispatches its batches
+once.
+
 Otherwise run the codex-glossary-pass,
 instantiating `glossary-pass-wf.template.js` fresh from the plugin's current
 copy every time — batched over `${durable_root}/glossary_TASK.md`, feeding the
