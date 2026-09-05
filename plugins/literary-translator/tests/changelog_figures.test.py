@@ -504,24 +504,31 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.90.0 (#853 -- a transient network fault is retried, not
-    # charged to the citation), per the maintenance contract above.
+    # ROTATED TO 1.91.0 (#858 -- a project's first glossary run dispatched every
+    # batch against a canon.json that did not exist), per the maintenance
+    # contract above.
+    #
+    # ZERO rows. The entry quotes exactly two measurements -- "of 12 dispatches
+    # made while the file was absent, 2 answered with a question" -- and both are
+    # facts about ONE LIVE RUN OF A BOOK IN ANOTHER REPOSITORY: how many codex
+    # dispatches that pass made before its canon existed, and how many of them
+    # came back with a question instead of a fragment. This file re-derives a
+    # figure by calling an authoritative implementation in THIS tree, and no
+    # implementation here can see that run. The migration paragraph deliberately
+    # NAMES `PLUGIN_BUNDLE_MEMBERS` rather than quoting its size, which is
+    # exactly the figure a row would otherwise have to be bought for. The
+    # remaining numerals are identifiers: the version numbers, the release date,
+    # the issue numbers (#858, #290), and `W3` / `Step 0a`, which name workflow
+    # steps. None of them counts anything.
+    #
+    # The 1.90.0 rotation this replaces, kept as its own record
+    # (#853 -- a transient network fault is retried, not charged to the citation):
     #
     # TWO rows, both members of `_FETCH_RETRY_DELAYS_SEC`. That tuple is the
     # retry ladder itself -- its length is how many extra passes a transport
     # failure buys and its members are the waits between them -- so it is a
     # figure this tree owns and one a later retune moves silently, which is the
     # shape this file exists for.
-    Figure(
-        phrase="15 s",
-        value=15,
-        derive=lambda: _fetch_retry_delay(0),
-    ),
-    Figure(
-        phrase="60 s",
-        value=60,
-        derive=lambda: _fetch_retry_delay(1),
-    ),
     #
     # NOT declared, and each for its own reason. The entry's live-run
     # measurements -- 19 entries failing from fetch position 0, 5 of 12 batches
@@ -708,7 +715,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.90.0"
+FIGURES_VERSION = "1.91.0"
 
 
 def _newest_entry():

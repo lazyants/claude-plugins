@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.91.0 — 2026-09-05
+
+**A project's first glossary run dispatched every batch against a `canon.json` that did not exist
+(#858).** W3's dispatch prompt tells each codex job to read `${durable_root}/glossary_TASK.md` and
+`${durable_root}/canon.json` in full, "the entries already frozen there" — with no clause for the
+file being absent. On a first run it is absent: nothing on the ordinary path creates it, and the
+merge that does runs only after every batch has already been dispatched. `SKILL.md` documented the
+`canon_validate.py --init` bootstrap on two of W3's three branches — the `glossary.enabled: false`
+branch and the `no_new_candidates` SKIP branch — and the ordinary path, the one every project takes
+on its first volume, was the branch without it.
+
+A job handed a path that is not there decides for itself what to do, and jobs decide differently.
+Measured on one live volume: of 12 dispatches made while the file was absent, 2 answered with a
+question about the missing canon and wrote no fragment. The driver records that batch as
+`glossary-pass-null` — accurate, and silent about the cause, since the reason names the empty
+artifact rather than the absent input. Each occurrence costs a full codex dispatch, the driver's
+whole wait, and a hand reset: the ladder does not retry a null.
+
+W3 now runs the same create-only bootstrap on the ordinary path too, before `glossary_preflight.py`,
+before `resume_setup.py`, and before any dispatch — and then READS THE FILE BACK.
+`${durable_root}/scripts/` is a Step-0a copy the dispatched codex processes hold `--write` over, so
+the durable `canon_validate.py`'s own success line is a claim about its postcondition rather than
+proof of it; the session confirms `canon.json` exists and parses as an object carrying `entries` and
+`review_queue`, and halts otherwise.
+
+**Placement is the whole of it, and it is load-bearing.** `resume_setup.py`'s glossary
+`input_digest` hashes `canon.json`, folding in the literal `no-canon` while the file is absent. A
+bootstrap placed after that step would make the first invocation record a `no-canon` digest and
+the next one, with the canon now on disk, compute a different one: the resume gate refuses that
+run, mints a fresh `RUN_ID` and re-dispatches every batch. It self-corrects from there — the fresh
+run's digest is stable and the attempt after that resumes normally — so the cost is ONE abandoned
+run, and it is the first pass, the expensive one. Placed before the digest, on every run, it never
+happens. The one-time cost of adopting the new order is that same single loss, once: a run
+interrupted mid-glossary under the OLD procedure, before its merge, recorded a `no-canon` digest,
+so the first invocation under the new order does not resume it and re-dispatches its batches. Every
+run after that resumes as before.
+
+**No script and no template byte moves in this release, deliberately.** The obvious code fix — have
+`resume_setup.py` bootstrap the canon, or have `glossary_dispatch_driver.py` refuse without one —
+was reviewed and cut: `resume_setup.py`, `glossary_dispatch_driver.py` and
+`glossary-pass-wf.template.js` are all `PLUGIN_BUNDLE_MEMBERS` entries, so any of them moves
+`plugin_bundle_hash` and stales every converged segment in every ESTABLISHED project at its next
+Step 0a refresh. #858 can only bite a project whose first glossary run has not happened yet. Making
+every established book pay a re-translation to fix a first-run-only defect is the wrong trade, and
+`SKILL.md` sits in no hash bundle, so this release re-stales nothing. Sibling issue #290 closed the
+same missing-`canon.json` class on the SKIP branch the same way.
+
+**Residual, stated rather than closed.** This is an orchestration contract, not an enforced gate. A
+hand-driven `glossary_dispatch_driver.py` invocation validates only the RUN_ID's SYNTAX, and the
+retained `pipeline()` fallback consumes a substituted RUN_ID without establishing where it came
+from, so a session that skips the documented pre-workflow steps can still dispatch against an absent
+canon. Closing that costs a bundle-member edit on every route — the cost this release exists to
+avoid — and it is the ordinary "a documented step was skipped" class the same procedure already
+carries for `glossary_preflight.py` and `resume_setup.py` themselves.
+
 ## 1.90.0 — 2026-09-05
 
 **A network outage was charged to the citation, and the repair ladder answered it by re-picking
