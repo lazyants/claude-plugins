@@ -204,7 +204,7 @@ def _build_filled_profile(durable_root: Path, source_path: Path) -> dict:
         # release cost this builder no edit -- which is the point.)
         "glossary": {"enabled": True, "research_mode": "offline"},
         "validation": {
-            "untranslated_sentinel": "нет перевода",
+            "untranslated_sentinel": "[TODO-UNTRANSLATED]",
             # #533. Carried here because this helper's own docstring claims
             # structural identity with the shipped example, and the example
             # now ships this key explicitly at its default. Leaving it out
