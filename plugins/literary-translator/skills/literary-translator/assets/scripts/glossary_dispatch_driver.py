@@ -1786,7 +1786,7 @@ def transient_indices(pairs: "list[dict]", established_indices: "set[int]") -> "
                   and is_transient_fetch_outcome(pair["outcome"]))
 
 
-def fetch_until_stable(run_fetch, read_pairs, established_indices,
+def fetch_until_stable(run_fetch, read_pairs, load_established,
                        *, sleep=time.sleep, on_retry=None) -> dict:
     """Runs the citation fetch until no established row is failing at the
     TRANSPORT layer, or until the retry ladder is spent. Returns
@@ -1819,10 +1819,18 @@ def fetch_until_stable(run_fetch, read_pairs, established_indices,
     and it costs one repaired row -- the same cost the old code paid for EVERY
     transiently failed row, on every rung, plus the exhaustion it paid at the top.
 
+    `load_established` is a CALLABLE, and it is called after the first fetch
+    RETURNS rather than before the loop: the approved snapshot is read to decide
+    which rows carry a citation claim, and a fetch command that exits non-zero
+    must still be reported as `fetch-failed` -- not as a failure to read a
+    snapshot the caller never got as far as needing. Called once and cached; the
+    snapshot is create-once, so a later pass cannot see different rows.
+
     Injected `run_fetch` / `read_pairs` / `sleep` so the ladder is testable
     without a process, a network or a wall clock."""
     passes = 0
     classified = None
+    established = None
     for delay in (None,) + _FETCH_RETRY_DELAYS_SEC:
         if delay is not None:
             sleep(delay)
@@ -1831,9 +1839,11 @@ def fetch_until_stable(run_fetch, read_pairs, established_indices,
         passes += 1
         if not run_fetch():
             return {"ok": False, "passes": passes}
+        if established is None:
+            established = load_established()
         pairs = read_pairs()
-        classified = classify_outcomes(pairs, established_indices)
-        transient = transient_indices(pairs, established_indices)
+        classified = classify_outcomes(pairs, established)
+        transient = transient_indices(pairs, established)
         if not transient:
             break
         if on_retry is not None and passes <= len(_FETCH_RETRY_DELAYS_SEC):
@@ -2190,12 +2200,11 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
     #    it up to three times for ONE attempt: see fetch_until_stable for why a
     #    transport failure is retried here instead of climbing a rung.
     #
-    #    The snapshot is read BEFORE the fetch now, because the retry ladder needs
-    #    to know which rows carry a citation claim in order to decide whether a
-    #    failure is worth re-running. Reading it earlier is free: step 4 already
-    #    published it and canon_validate.py publishes it CREATE-ONCE, so its bytes
-    #    cannot change under this function.
-    established = established_indices(load_rows(approved_path))
+    #    The retry ladder needs to know which rows carry a citation claim before
+    #    it can decide whether a failure is worth re-running, so the snapshot read
+    #    is handed to it as a callable -- it runs after the first fetch RETURNS,
+    #    keeping a failed fetch command reported as `fetch-failed` exactly as
+    #    before, and never sooner.
     index_path = Path(built["index"])
     total_passes = 1 + len(_FETCH_RETRY_DELAYS_SEC)
 
@@ -2213,8 +2222,9 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
             f"on fetch pass {done} of {total_passes}; re-running the same fetch "
             f"over the same snapshot -- no rung spent, no source changed")
 
-    fetch_state = fetch_until_stable(_run_fetch, lambda: read_outcome_pairs(index_path),
-                                     established, on_retry=_on_retry)
+    fetch_state = fetch_until_stable(
+        _run_fetch, lambda: read_outcome_pairs(index_path),
+        lambda: established_indices(load_rows(approved_path)), on_retry=_on_retry)
     if not fetch_state["ok"]:
         return {"state": "evidence_failed", "batchIndex": idx, "attempt": attempt,
                 "reason": "fetch-failed"}

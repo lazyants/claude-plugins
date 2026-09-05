@@ -94,7 +94,7 @@ def test_clean_first_pass_calls_run_fetch_exactly_once(mod):
     run_fetch, read_pairs, calls = _scripted([
         [{"item_index": 0, "outcome": "fetched"}],
     ])
-    result = mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep([]))
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep([]))
     assert calls["run_fetch"] == 1
     assert result["ok"] is True
     assert result["passes"] == 1
@@ -107,7 +107,7 @@ def test_transient_failure_retries_and_stops_as_soon_as_a_pass_is_clean(mod):
         [{"item_index": 0, "outcome": "fetched"}],
     ])
     delays = []
-    result = mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep(delays))
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep(delays))
     assert calls["run_fetch"] == 2, "a loop that ran zero times must not pass"
     assert result["passes"] == 2
     assert result["classified"] == {"budget_failed": [], "repairable": []}
@@ -120,7 +120,7 @@ def test_persistent_transient_failure_uses_exactly_three_passes(mod):
         [{"item_index": 0, "outcome": "refused:read-timeout"}],
         [{"item_index": 0, "outcome": "refused:read-timeout"}],
     ])
-    result = mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep([]))
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep([]))
     assert calls["run_fetch"] == 3
     assert result["passes"] == 3
     assert result["classified"] == {"budget_failed": [], "repairable": [0]}
@@ -135,14 +135,14 @@ def test_non_transient_refusals_do_not_retry(mod, outcome):
     """An answer we received and refused on its merits is a fact about the
     citation, not the link -- it must reach `repairable` on the first pass."""
     run_fetch, read_pairs, calls = _scripted([[{"item_index": 0, "outcome": outcome}]])
-    result = mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep([]))
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep([]))
     assert calls["run_fetch"] == 1
     assert result["classified"] == {"budget_failed": [], "repairable": [0]}
 
 
 def test_shared_budget_outcome_alone_does_not_retry_and_stays_budget_failed(mod):
     run_fetch, read_pairs, calls = _scripted([[{"item_index": 0, "outcome": "refused:batch-deadline"}]])
-    result = mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep([]))
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep([]))
     assert calls["run_fetch"] == 1
     assert result["classified"] == {"budget_failed": [0], "repairable": []}
 
@@ -162,7 +162,7 @@ def test_dns_again_retries(mod):
         [{"item_index": 0, "outcome": outcome}],
         [{"item_index": 0, "outcome": "fetched"}],
     ])
-    result = mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep([]))
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep([]))
     assert calls["run_fetch"] == 2
     assert result["classified"] == {"budget_failed": [], "repairable": []}
 
@@ -173,7 +173,7 @@ def test_dns_again_retries(mod):
 ])
 def test_dns_nonname_and_empty_do_not_retry(mod, outcome):
     run_fetch, read_pairs, calls = _scripted([[{"item_index": 0, "outcome": outcome}]])
-    result = mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep([]))
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep([]))
     assert calls["run_fetch"] == 1
     assert result["classified"] == {"budget_failed": [], "repairable": [0]}
 
@@ -191,7 +191,7 @@ def test_tls_eof_and_http_protocol_error_retry(mod, outcome):
         [{"item_index": 0, "outcome": outcome}],
         [{"item_index": 0, "outcome": "fetched"}],
     ])
-    result = mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep([]))
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep([]))
     assert calls["run_fetch"] == 2, outcome
 
 
@@ -201,7 +201,7 @@ def test_tls_cert_verification_failure_does_not_retry(mod):
     run_fetch, read_pairs, calls = _scripted([
         [{"item_index": 0, "outcome": "refused:tls-error:SSLCertVerificationError"}],
     ])
-    result = mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep([]))
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep([]))
     assert calls["run_fetch"] == 1
     assert result["classified"] == {"budget_failed": [], "repairable": [0]}
 
@@ -214,7 +214,7 @@ def test_transient_outcome_on_a_non_established_row_does_not_retry(mod):
     run_fetch, read_pairs, calls = _scripted([
         [{"item_index": 1, "outcome": "refused:connect-timeout"}],
     ])
-    result = mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep([]))
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep([]))
     assert calls["run_fetch"] == 1
     assert result["classified"] == {"budget_failed": [], "repairable": []}
 
@@ -226,7 +226,7 @@ def test_sleep_delays_match_the_retry_ladder_in_order(mod):
         [{"item_index": 0, "outcome": "refused:read-timeout"}],
     ])
     delays = []
-    mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep(delays))
+    mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep(delays))
     assert delays == list(mod._FETCH_RETRY_DELAYS_SEC)
 
 
@@ -249,10 +249,42 @@ def test_a_failed_fetch_command_short_circuits(mod):
         calls["read_pairs"] += 1
         raise AssertionError("read_pairs must not be called after a failed fetch")
 
-    result = mod.fetch_until_stable(run_fetch, read_pairs, {0}, sleep=_fake_sleep([]))
+    def load_established():
+        raise AssertionError(
+            "the approved snapshot must not be read when the fetch command "
+            "itself failed: that call reports `fetch-failed`, and reading a "
+            "snapshot the caller never got as far as needing turns it into a "
+            "DriverError about the wrong thing")
+
+    result = mod.fetch_until_stable(run_fetch, read_pairs, load_established,
+                                    sleep=_fake_sleep([]))
     assert result == {"ok": False, "passes": 1}
     assert calls["run_fetch"] == 1
     assert calls["read_pairs"] == 0
+
+
+def test_the_snapshot_is_read_once_however_many_passes_run(mod):
+    """`load_established` is called AFTER the first fetch returns and never
+    again. Once, because the approved snapshot is create-once and a later pass
+    cannot see different rows; after the fetch, because a fetch command that
+    exits non-zero must still be reported as `fetch-failed`."""
+    run_fetch, read_pairs, calls = _scripted([
+        [{"item_index": 0, "outcome": "refused:connect-timeout"}],
+        [{"item_index": 0, "outcome": "refused:connect-timeout"}],
+        [{"item_index": 0, "outcome": "fetched"}],
+    ])
+    loads = {"n": 0, "before_first_fetch": False}
+
+    def load_established():
+        loads["n"] += 1
+        loads["before_first_fetch"] = calls["run_fetch"] == 0
+        return {0}
+
+    mod.fetch_until_stable(run_fetch, read_pairs, load_established,
+                           sleep=_fake_sleep([]))
+    assert calls["run_fetch"] == 3
+    assert loads["n"] == 1, "the snapshot must be read exactly once"
+    assert not loads["before_first_fetch"], "never before the first fetch returns"
 
 
 if __name__ == "__main__":
