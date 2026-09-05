@@ -140,7 +140,7 @@
       "claim": "#488 added `canon_senses.senses_for`, which computes exactly this, and this function was DELIBERATELY not re-pointed at it. The lookup here is normalized through THIS module's own `normalize_form` binding, and `tests/canon_validate_recollapse.test.py:289-301` pins the indexed fast path by monkeypatching that binding and asserting exactly one call; delegating would move the call inside canon_senses, silently reduce that count to zero, and force a passing performance test to be rewritten for a refactor #488 does not need. The shared comparator is",
       "target": "plugins/literary-translator/tests/canon_validate_recollapse.test.py"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5772\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5773\", 0]": {
       "anchors": [
         "run_id_problem = validate_run_id(run_id)"
       ],
@@ -788,7 +788,7 @@
       ],
       "claim": "def _parse_obsidian_frontmatter_enum(): \"\"\"obsidian.md:58 -- the entity-note frontmatter's `basis:` pipe-enum line inside the fenced YAML example block.\"\"\" text = OBSIDIAN_SPEC.read_text(encoding=\"utf-8\") m = re.search(r\"^basis:\\s*([a-z_ |]+)$\", text, re.MULTILINE) assert m, \"no 'basis: a | b | c' frontmatter line found in obsidian.md\""
     },
-    "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:4155-4195\", 0]": {
+    "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:4178-4218\", 0]": {
       "anchors": [
         "elif args.restamp_derivation:",
         "elif args.batch is not None:"
@@ -855,7 +855,7 @@
       ],
       "claim": "\"in_progress\"})` (mass-translate-wf.template.js:2413) completes BEFORE `agent(translateDrivePrompt(seg))` (:2416) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of"
     },
-    "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5772\", 0]": {
+    "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5773\", 0]": {
       "anchors": [
         "run_id_problem = validate_run_id(run_id)"
       ],
@@ -873,7 +873,7 @@
       ],
       "claim": "# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1559), and D3 (:5009) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces"
     },
-    "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5781\", 0, \"continuation\"]": {
+    "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5782\", 0, \"continuation\"]": {
       "anchors": [
         "D3: the authorization must be a SUBSET"
       ],
@@ -1465,20 +1465,20 @@
       ],
       "claim": "# 9d-i (real filesystem, a dangling symlink): os.lstat() on the durable sidecar SUCCEEDS -- genuinely \"present\" at resolve_glossary_senses_arg()'s own definitive-stat layer (select_segments.py:4411-4502, branch 2: \"Present (of any kind lstat can see) -> pass --senses-path explicitly\")."
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2516-2521\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2539-2544\", 0]": {
       "anchors": [
         "elif disposition == \"review_queue\":",
         "if source_form in entries:"
       ],
-      "claim": "keys `entries{}`, with no error at all: `if source_form in entries: continue` (`canon_validate.py:2516-2521`). 2. **Refused by the whole-file invariant (#102).*"
+      "claim": "keys `entries{}`, with no error at all: `if source_form in entries: continue` (`canon_validate.py:2539-2544`). 2. **Refused by the whole-file invariant (#102).*"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2552-2578\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2575-2601\", 0]": {
       "anchors": [
         "def _assert_no_entries_review_queue_overlap",
         "no source_form may be both a key",
         "entries_forms & queued_forms"
       ],
-      "claim": "2. **Refused by the whole-file invariant (#102).** `_assert_no_entries_review_queue_overlap` (`canon_validate.py:2552-2578`) raises on any `source_form` present"
+      "claim": "2. **Refused by the whole-file invariant (#102).** `_assert_no_entries_review_queue_overlap` (`canon_validate.py:2575-2601`) raises on any `source_form` present"
     },
     "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon-batch.schema.json:66-86\", 0]": {
       "anchors": [
@@ -1518,13 +1518,13 @@
       ],
       "claim": "risk-accepted (`canon_adjudication_audit.py:989-1007`, `:1275-1282`, `:1725-1731`) — landing a proposal there would make it a Deliver-time blocker on any projec"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2596-2627\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2619-2650\", 0]": {
       "anchors": [
         "def _content_view",
         "everything except the stamp itself",
         "if k != \"generation_hashes\""
       ],
-      "claim": "`canon_link_groups.json` above is a sidecar and not a key: `_content_view` (`canon_validate.py:2596-2627`) treats any non-`generation_hashes` key as CONTENT, so"
+      "claim": "`canon_link_groups.json` above is a sidecar and not a key: `_content_view` (`canon_validate.py:2619-2650`) treats any non-`generation_hashes` key as CONTENT, so"
     },
     "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"orchestration-and-batching.md:252\", 0]": {
       "anchors": [
@@ -1558,7 +1558,7 @@
       ],
       "claim": "names[] rows are read with final_audit's own _name_entry_forms, which already accepts both field conventions draft.schema.json permits, rather than a reimplementation in the harmonisation step."
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:3131-3137\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:3154-3160\", 0]": {
       "anchors": [
         "if source_form not in entries:",
         "ordinary glossary-pass merge"
@@ -1610,7 +1610,7 @@
       ],
       "claim": "The read mode's envelope keeps exactly its documented seven keys, re-asserted here as well as at tests/review_rejection.test.py:1352."
     },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4258-4264\", 0]": {
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4261-4267\", 0]": {
       "anchors": [
         "Excluded from every bundle hash",
         "nor of `orchestration_bundle_hash`",

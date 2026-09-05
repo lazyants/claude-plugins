@@ -152,9 +152,33 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.95.0 (#874 -- the shipped example profile handed every
-    # project a Russian politeness-register instruction), and EMPTY ON
-    # PURPOSE, for the same reason the records below state: the entry names
+    # ROTATED TO 1.96.0 (#876 -- the glossary run's merge marker says its
+    # dispatch model is unrecorded), and EMPTY ON PURPOSE, for the same
+    # reason the records below state: the entry names its subjects by FILE
+    # and SYMBOL rather than by line -- `merged.json`, `dispatch_model`,
+    # `canon_validate.py --merge-batches`, `backfill_glossary_merge_ack.py
+    # --apply`, `PLUGIN_BUNDLE_MEMBERS`, `glossary_preflight.py` -- and
+    # states no `file.ext:NNN` citation at all, which is the shape this
+    # guard reads. Measured against the entry rather than asserted: a scan
+    # of its 40-line slice for that pattern returns zero matches.
+    #
+    # It is also the right shape for this particular release, and the reason
+    # is the one this release paid for directly. `canon_validate.py` is cited
+    # BY LINE from five places, and the +23 lines this change inserts above
+    # their anchors drifted twelve citations that all had to be renumbered --
+    # in the citing prose, in the anchor-map JSON keys, and in one bare
+    # `(:NNNN)` continuation. Minting a NEW citation into that same file from
+    # a changelog entry would add a thirteenth such obligation to every future
+    # edit of it, for no gain over naming the constant.
+    #
+    # Unlike `changelog_figures.test.py`, this file carries no version pin, so
+    # skipping this rotation would not have turned CI red; it was the
+    # `lazy-ants-reviewer` bot that caught the omission, on the push that
+    # fixed the figures rotation.
+    #
+    # The 1.95.0 rotation this replaces, kept as its own record (#874 -- the
+    # shipped example profile handed every project a Russian
+    # politeness-register instruction), and EMPTY ON PURPOSE, for the same reason the records below state: the entry names
     # its subjects by FILE and SYMBOL rather than by line --
     # `profile.example.yml`, `target.language.register_notes`,
     # `PLACEHOLDER_SUBSTRINGS`, `untranslated_sentinel`, `profile_validate.py`

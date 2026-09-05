@@ -11,7 +11,7 @@ invisible to any re-derivation. The fix is to STOP inferring and START
 recording: `canon_validate.py --glossary-merge-marker PATH`, given
 alongside `--merge-batches`, atomically writes
 `{"schema": "glossary-run-merged/1", "run_id", "merged_at", "batches",
-"source": "merge"}` to PATH -- ONLY once the merge has actually landed on
+"source": "merge", "dispatch_model"}` to PATH -- ONLY once the merge has landed on
 disk (after `_stamp_write_verify()`'s own write + fresh re-read) -- and the
 gate reads it back with no re-derivation at all.
 
@@ -19,7 +19,8 @@ gate reads it back with no re-derivation at all.
 
 This file owns:
   1. The marker's exact pinned shape on a successful merge (schema/run_id/
-     merged_at format/batches/source), across one and several fragments.
+     merged_at format/batches/source/dispatch_model), across one and
+     several fragments.
   2. No `--glossary-merge-marker` flag given -> no marker written, ordinary
      merge success otherwise unaffected.
   3. An unwritable marker path -> the WHOLE merge call reports failure
@@ -49,6 +50,7 @@ test drives the REAL, shipped `canon_validate.py` (cases 1-6) or the REAL
 isolated fixture root, via `tests/_senses_fixture.py`'s sanctioned
 `stage_consumer()` -- never a hand-built stand-in for either script.
 """
+import importlib.util
 import json
 import re
 import shutil
@@ -86,6 +88,33 @@ assert SCHEMAS_SRC_DIR.is_dir(), f"schemas dir not found at {SCHEMAS_SRC_DIR}"
 MERGED_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 GLOSSARY_RUN_MERGED_SCHEMA = "glossary-run-merged/1"
+
+
+def _load_module(name: str, path: Path, extra_sys_path: Path):
+    """Mirrors tests/canon_validate_recollapse.test.py's own loader exactly
+    -- canon_validate.py's `from canon_senses import ...` only resolves via
+    sys.path[0] under a real `python3 canon_validate.py` invocation, so its
+    own scripts/ directory must be inserted onto sys.path around the
+    in-process load."""
+    sys.path.insert(0, str(extra_sys_path))
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None, f"could not load spec for {path}"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(extra_sys_path))
+
+
+# #876: loaded in-process (not subprocessed) solely to read the frozen
+# GLOSSARY_DISPATCH_MODEL_UNRECORDED constant off the REAL module, so this
+# suite's pinned-shape assertion can never silently drift from what
+# canon_validate.py actually ships.
+_CANON_VALIDATE_MODULE = _load_module(
+    "canon_validate_glossary_merge_marker_under_test", CANON_VALIDATE_SRC, SCRIPTS_SRC_DIR
+)
+GLOSSARY_DISPATCH_MODEL_UNRECORDED = _CANON_VALIDATE_MODULE.GLOSSARY_DISPATCH_MODEL_UNRECORDED
 
 
 # ---------------------------------------------------------------------------
@@ -273,12 +302,38 @@ def test_1_marker_written_with_pinned_shape_on_successful_merge(tmp_path):
 
     assert marker_path.is_file(), "expected a marker at the given --glossary-merge-marker path"
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    assert set(marker.keys()) == {"schema", "run_id", "merged_at", "batches", "source"}, marker
+    assert set(marker.keys()) == {
+        "schema", "run_id", "merged_at", "batches", "source", "dispatch_model",
+    }, marker
     assert marker["schema"] == GLOSSARY_RUN_MERGED_SCHEMA
     assert marker["run_id"] == "R1", "run_id must be derived from the marker path's own parent directory name"
     assert MERGED_AT_RE.match(marker["merged_at"]), marker["merged_at"]
     assert marker["batches"] == [0]
     assert marker["source"] == "merge"
+    # #876: pinned against canon_validate.py's own constant, loaded
+    # in-process at :117; test_1b below pins the sentence itself.
+    assert marker["dispatch_model"] == GLOSSARY_DISPATCH_MODEL_UNRECORDED
+
+
+# ===========================================================================
+# 1b. #876: the LITERAL statement the marker makes. Every other assertion in
+#     this file compares the emitted object against the production constant,
+#     so a SYNCHRONISED edit to both copies of it passes all of them -- and
+#     the whole point of this key is the sentence it carries. This one pins
+#     that sentence itself, so weakening it has to be a deliberate act with
+#     a changelog entry, not a quiet edit two assertions agree with.
+# ===========================================================================
+
+
+def test_1b_dispatch_model_is_the_shipped_statement():
+    assert GLOSSARY_DISPATCH_MODEL_UNRECORDED == {
+        "recorded": False,
+        "reason": (
+            "this pipeline dispatches the glossary pass with no model argument and "
+            "records no model anywhere in the run, so the model that produced these "
+            "rows is not recorded here -- absent by design, not merely missing"
+        ),
+    }
 
 
 # ===========================================================================

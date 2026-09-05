@@ -314,6 +314,22 @@ def read_existing_marker(path: Path):
     return ("present", doc)
 
 
+# #876, restated from canon_validate.py's own GLOSSARY_DISPATCH_MODEL_
+# UNRECORDED -- that file OWNS this constant; duplicated here per the same
+# "no shared lib between self-contained scripts" convention _RUN_ID_RE
+# follows above. tests/backfill_glossary_merge_ack.test.py pins this copy
+# equal to canon_validate.py's by import, a drift check, not a second
+# source of truth.
+_GLOSSARY_DISPATCH_MODEL_UNRECORDED = {
+    "recorded": False,
+    "reason": (
+        "this pipeline dispatches the glossary pass with no model argument and "
+        "records no model anywhere in the run, so the model that produced these "
+        "rows is not recorded here -- absent by design, not merely missing"
+    ),
+}
+
+
 def build_ack_body(run_id: str, batches: "list[int]") -> dict:
     return {
         "schema": "glossary-run-merged/1",
@@ -327,6 +343,7 @@ def build_ack_body(run_id: str, batches: "list[int]") -> dict:
             "completeness (every manifest_<index>.json has a matching "
             "out_<index>_attempt_0.json fragment) was checked."
         ),
+        "dispatch_model": dict(_GLOSSARY_DISPATCH_MODEL_UNRECORDED),
     }
 
 

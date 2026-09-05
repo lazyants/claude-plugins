@@ -4519,8 +4519,9 @@ def check_glossary_runs_merged(
     `canon_validate.py --merge-batches` now WRITES, on successful merge, a
     marker at `{run_dir}/merged.json`
     (`{"schema": "glossary-run-merged/1", "run_id", "merged_at", "batches",
-    "source"}`); `backfill_glossary_merge_ack.py` writes the same file,
-    with `"source": "backfill-ack"`, for runs that predate this gate. This
+    "source", "dispatch_model"}`); `backfill_glossary_merge_ack.py` writes
+    the same file, with `"source": "backfill-ack"`, for runs that predate
+    this gate. This
     condition simply requires every run directory `scan_glossary_run_ids()`
     found to carry one -- no re-derivation, no subprocess, no reasoning
     about candidate frequency or canon membership at all.

@@ -33,6 +33,7 @@ passed explicitly in most tests (matching `tests/backfill_resume_gate_ack
 flags at all to prove the self-anchored default still resolves correctly.
 """
 
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -49,9 +50,40 @@ BACKFILL_SRC = SCRIPTS_SRC_DIR / "backfill_glossary_merge_ack.py"
 JSON_STDOUT_SRC = SCRIPTS_SRC_DIR / "json_stdout.py"
 GLOSSARY_DRIVER_SRC = SCRIPTS_SRC_DIR / "glossary_dispatch_driver.py"
 RESUME_SETUP_SRC = SCRIPTS_SRC_DIR / "resume_setup.py"
+CANON_VALIDATE_SRC = SCRIPTS_SRC_DIR / "canon_validate.py"
 
-for _src in (BACKFILL_SRC, JSON_STDOUT_SRC, GLOSSARY_DRIVER_SRC, RESUME_SETUP_SRC):
+for _src in (BACKFILL_SRC, JSON_STDOUT_SRC, GLOSSARY_DRIVER_SRC, RESUME_SETUP_SRC, CANON_VALIDATE_SRC):
     assert _src.is_file(), f"expected script not found: {_src}"
+
+
+def _load_module(name: str, path: Path, extra_sys_path: Path):
+    """Mirrors tests/canon_validate_recollapse.test.py's own loader --
+    `canon_validate.py`'s `from canon_senses import ...` only resolves via
+    sys.path[0] under a real `python3 canon_validate.py` invocation, so its
+    own scripts/ directory must be inserted onto sys.path around the
+    in-process load. Both loads pass it: the insert/remove pair is
+    symmetric, and it is what the scripts see when they really run."""
+    sys.path.insert(0, str(extra_sys_path))
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None, f"could not load spec for {path}"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(extra_sys_path))
+
+
+# #876: both loaded in-process (not subprocessed) solely to read each
+# module's own GLOSSARY_DISPATCH_MODEL_UNRECORDED copy, so the anti-drift
+# pin below can never silently drift from what either module actually ships.
+_CANON_VALIDATE_MODULE = _load_module(
+    "canon_validate_backfill_glossary_merge_ack_under_test", CANON_VALIDATE_SRC, SCRIPTS_SRC_DIR
+)
+_BACKFILL_MODULE = _load_module(
+    "backfill_glossary_merge_ack_under_test", BACKFILL_SRC, SCRIPTS_SRC_DIR
+)
+GLOSSARY_DISPATCH_MODEL_UNRECORDED = _CANON_VALIDATE_MODULE.GLOSSARY_DISPATCH_MODEL_UNRECORDED
 
 
 # ---------------------------------------------------------------------------
@@ -204,13 +236,27 @@ def test_apply_writes_the_exact_pinned_marker_shape(tmp_path):
     assert payload["created"] == ["OLDRUN"]
     marker = run_dir(root, "OLDRUN") / "merged.json"
     body = json.loads(marker.read_text(encoding="utf-8"))
-    assert set(body.keys()) == {"schema", "run_id", "merged_at", "batches", "source", "note"}
+    assert set(body.keys()) == {
+        "schema", "run_id", "merged_at", "batches", "source", "note", "dispatch_model",
+    }
     assert body["schema"] == "glossary-run-merged/1"
     assert body["run_id"] == "OLDRUN"
     assert body["merged_at"].endswith("Z")
     assert body["batches"] == [0, 2, 5], "batches must be the ascending int indices acknowledged"
     assert body["source"] == "backfill-ack"
     assert isinstance(body["note"], str) and body["note"]
+    # #876: identical on both writers -- see test_dispatch_model_constant_
+    # matches_canon_validates_own_copy below for the anti-drift pin.
+    assert body["dispatch_model"] == GLOSSARY_DISPATCH_MODEL_UNRECORDED
+
+
+def test_dispatch_model_constant_matches_canon_validates_own_copy():
+    """#876: a restatement with no drift check is exactly the defect class
+    this issue is about -- two copies of a claim that silently disagree --
+    so this loads BOTH real modules in-process and pins them equal. Why
+    the copy exists at all: backfill_glossary_merge_ack.py's own comment
+    above its `_GLOSSARY_DISPATCH_MODEL_UNRECORDED`."""
+    assert _BACKFILL_MODULE._GLOSSARY_DISPATCH_MODEL_UNRECORDED == GLOSSARY_DISPATCH_MODEL_UNRECORDED
 
 
 def test_apply_is_idempotent_and_never_rewrites(tmp_path):
