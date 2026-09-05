@@ -1376,7 +1376,41 @@ def empty_totals() -> dict:
     }
 
 
-def _print_item_list(label: str, items: list, file) -> None:
+DEFAULT_ITEM_PRINT_LIMIT = 20
+# Deliberately defined HERE, beside the printers it governs, rather than up in the
+# constants block near DEFAULT_PAIR_REVIEW_CAP: canon_senses.py cites this file at
+# :396 and :687-696, and canon_senses.py is a cache_key.py BUNDLE MEMBER, so
+# re-anchoring those two citations would re-hash every cached segment. An insertion
+# below them costs nothing. A display-only knob (#856) is not worth a re-translation.
+
+
+def _apply_print_limit(items: list, limit: int) -> list:
+    """`--limit 0` prints every item; any other value caps the list at that many.
+
+    DISPLAY-only, and that is the whole contract: the limit reaches no count, no
+    blocking decision, and no key of the stdout summary. `totals` must read the
+    same under `--limit 0` as under the default (#856)."""
+    return items if limit == 0 else items[:limit]
+
+
+def _list_header(label: str, shown: int, total: int) -> str:
+    """The ONE spelling of a detail list's header, shared by every capped list so
+    the three printers cannot drift into three wordings.
+
+    States the TOTAL whenever it withheld anything, and names the flag that lifts
+    the cap. The pre-#856 header said a bare "(first 20)" for every list, however
+    short: an operator who greps the output, writes 20 verdicts and re-runs the
+    gate saw it still blocking with nothing to say the list had been a prefix, and
+    reached into the module's private enumerators to get the rest."""
+    if shown == total:
+        return f"\n-- {label} ({total}) --"
+    return (
+        f"\n-- {label} (first {shown} of {total}; re-run with --limit 0 for the "
+        f"full list) --"
+    )
+
+
+def _print_item_list(label: str, items: list, file, limit: int) -> None:
     """Prints each item's own DISPLAY fields (whatever build_item() was handed
     as `**display`) next to its `{kind}::{sha256}` key -- the contract requires
     a named party to record a `reason` per item, and nobody can examine a
@@ -1395,16 +1429,31 @@ def _print_item_list(label: str, items: list, file) -> None:
     point, including a bidi override or line separator carried in from an
     unvalidated LLM-authored review_queue note, which would otherwise scramble
     or split the very line being signed off."""
-    print(f"\n-- {label} (first 20) --", file=file)
-    for it in items[:20]:
+    shown = _apply_print_limit(items, limit)
+    print(_list_header(label, len(shown), len(items)), file=file)
+    for it in shown:
         display = "  ".join(f"{k}={v!r}" for k, v in it.items() if k not in ("key", "kind"))
         print(f"  {it['key']}  [{it['kind']}]  {display}".rstrip(), file=file)
 
 
-def _print_evidence_failures(label: str, failures: list, file) -> None:
-    print(f"\n-- {label} (first 20) --", file=file)
-    for f in failures[:20]:
+def _print_evidence_failures(label: str, failures: list, file, limit: int) -> None:
+    shown = _apply_print_limit(failures, limit)
+    print(_list_header(label, len(shown), len(failures)), file=file)
+    for f in shown:
         print(f"  {f.source_form!r} sense {f.sense_id!r} block {f.block!r}: {f.reason}", file=file)
+
+
+def _print_collapsed_splits(label: str, findings: list, file, limit: int) -> None:
+    """collapsed_split's own printer. Its rows are reconciliation findings rather
+    than build_item() items, so it cannot share _print_item_list -- but it shares
+    the cap and the header, which is the part that must not drift."""
+    shown = _apply_print_limit(findings, limit)
+    print(_list_header(label, len(shown), len(findings)), file=file)
+    for finding in shown:
+        print(
+            f"  entries[{finding['map_key']!r}] source_form={finding['source_form']!r}",
+            file=file,
+        )
 
 
 def _not_enumerated_split_row(senses_path: Path) -> str:
@@ -1425,7 +1474,8 @@ def print_human_report(canon_path: Path, adjudications_path: Path, totals: dict,
                         buckets: dict, unaccepted_items: list, collapsed_split_findings: list,
                         evidence_failures: list, blocking_count: int,
                         gate_passed: bool, advisory: bool, warnings: list,
-                        senses_path: Path, senses_enumerated: bool) -> None:
+                        senses_path: Path, senses_enumerated: bool, *,
+                        item_print_limit: int) -> None:
     print("=" * 70, file=sys.stderr)
     print("canon_adjudication_audit.py -- --check summary", file=sys.stderr)
     print("=" * 70, file=sys.stderr)
@@ -1493,21 +1543,31 @@ def print_human_report(canon_path: Path, adjudications_path: Path, totals: dict,
     print(f"BLOCKING findings: {blocking_count}  gate_passed={gate_passed}{tail}", file=sys.stderr)
 
     if buckets["missing_verdict"]:
-        _print_item_list("missing verdict", buckets["missing_verdict"], sys.stderr)
+        _print_item_list("missing verdict", buckets["missing_verdict"], sys.stderr, item_print_limit)
     if buckets["adverse"]:
-        _print_item_list("adverse (BLOCKING, canon.json must be corrected)", buckets["adverse"], sys.stderr)
+        _print_item_list(
+            "adverse (BLOCKING, canon.json must be corrected)",
+            buckets["adverse"], sys.stderr, item_print_limit,
+        )
     if buckets["invalid_verdict_class"]:
-        _print_item_list("invalid verdict_class / empty reviewed_by or reason", buckets["invalid_verdict_class"], sys.stderr)
+        _print_item_list(
+            "invalid verdict_class / empty reviewed_by or reason",
+            buckets["invalid_verdict_class"], sys.stderr, item_print_limit,
+        )
     if unaccepted_items:
-        _print_item_list("review_queue items with no risk-acceptance", unaccepted_items, sys.stderr)
+        _print_item_list(
+            "review_queue items with no risk-acceptance",
+            unaccepted_items, sys.stderr, item_print_limit,
+        )
     if collapsed_split_findings:
-        print("\n-- collapsed_split (BLOCKING, canon.json must be corrected; first 20) --", file=sys.stderr)
-        for finding in collapsed_split_findings[:20]:
-            print(f"  entries[{finding['map_key']!r}] source_form={finding['source_form']!r}", file=sys.stderr)
+        _print_collapsed_splits(
+            "collapsed_split (BLOCKING, canon.json must be corrected)",
+            collapsed_split_findings, sys.stderr, item_print_limit,
+        )
     if evidence_failures:
         _print_evidence_failures(
             "evidence_unverified (BLOCKING, canon_senses.json evidence must be corrected)",
-            evidence_failures, sys.stderr,
+            evidence_failures, sys.stderr, item_print_limit,
         )
 
     if warnings:
@@ -1536,7 +1596,7 @@ def _orphan_warning(records: dict, current_keys: set, record_label: str,
 def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
               allow_absent_senses: bool, manifest_path: Path,
               particle_config_filename: Optional[str], pair_review_cap: int,
-              advisory: bool, mode: str) -> tuple:
+              advisory: bool, mode: str, *, item_print_limit: int) -> tuple:
     """Returns (summary, exit_code). Prints the human-readable report to
     stderr as a side effect; the caller prints the returned summary as the
     one stdout JSON line."""
@@ -1626,17 +1686,23 @@ def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
             file=sys.stderr,
         )
         if cat5_buckets["missing_verdict"]:
-            _print_item_list("missing verdict", cat5_buckets["missing_verdict"], sys.stderr)
+            _print_item_list(
+                "missing verdict", cat5_buckets["missing_verdict"], sys.stderr, item_print_limit,
+            )
         if cat5_buckets["adverse"]:
-            _print_item_list("adverse (BLOCKING, canon.json must be corrected)", cat5_buckets["adverse"], sys.stderr)
+            _print_item_list(
+                "adverse (BLOCKING, canon.json must be corrected)",
+                cat5_buckets["adverse"], sys.stderr, item_print_limit,
+            )
         if cat5_buckets["invalid_verdict_class"]:
             _print_item_list(
-                "invalid verdict_class / empty reviewed_by or reason", cat5_buckets["invalid_verdict_class"], sys.stderr,
+                "invalid verdict_class / empty reviewed_by or reason",
+                cat5_buckets["invalid_verdict_class"], sys.stderr, item_print_limit,
             )
         if evidence_failures:
             _print_evidence_failures(
                 "evidence_unverified (BLOCKING, canon_senses.json evidence must be corrected)",
-                evidence_failures, sys.stderr,
+                evidence_failures, sys.stderr, item_print_limit,
             )
         totals = empty_totals()
         totals["canon_absent_with_senses"] = 1
@@ -1788,7 +1854,7 @@ def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
         canon_path, adjudications_path, totals, buckets, unaccepted_items,
         collapsed_split_findings, evidence_failures,
         blocking_count, gate_passed, advisory, warnings,
-        senses_path, senses_enumerated,
+        senses_path, senses_enumerated, item_print_limit=item_print_limit,
     )
 
     return summary, exit_code
@@ -1883,6 +1949,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
              f"instead of per-pair review (default: {DEFAULT_PAIR_REVIEW_CAP}).",
     )
     parser.add_argument(
+        "--limit", type=_nonneg_int, metavar="N", default=DEFAULT_ITEM_PRINT_LIMIT,
+        help=f"Maximum items printed per stderr detail list (default: "
+             f"{DEFAULT_ITEM_PRINT_LIMIT}; 0 = print EVERY item). The gate demands a "
+             f"verdict for every required item, so on a real canon the default is a "
+             f"preview -- pass --limit 0 to obtain the full list the gate is blocking "
+             f"on. Display only: never changes what is enumerated, counted, or "
+             f"blocked, nor any key of the stdout summary.",
+    )
+    parser.add_argument(
         "--advisory", action="store_true",
         help="Report every finding but never exit 1 for a categories-2-4 "
              "blocking finding, or a category-1 identical-surface one "
@@ -1934,6 +2009,7 @@ def main(argv=None) -> int:
         summary, exit_code = run_check(
             canon_path, adjudications_path, senses_path, allow_absent_senses,
             manifest_path, args.particle_config, args.pair_review_cap, args.advisory, mode,
+            item_print_limit=args.limit,
         )
         print(dumps_line(summary))
         return exit_code
