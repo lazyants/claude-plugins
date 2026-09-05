@@ -492,10 +492,22 @@ whether the label and the content word `guéridon` still co-occur there.
 ## Foreign-language insertions
 
 Foreign-language insertions (Latin, Old French, or any embedded third language)
-get an **in-text gloss, never a notes-only translation**. The source project hit
-this as a real reviewer-caught defect (translation hidden only in `notes[]`,
-never visible to the reader). Kept as a hard rule, generalized to "any embedded
-third-language text," not just Latin/Old French.
+get an **in-text gloss** by default. The source project hit this as a real
+reviewer-caught defect (translation hidden only in `notes[]`, never visible to
+the reader), generalized to "any embedded third-language text," not just
+Latin/Old French.
+
+The hard rule is the **never a notes-only translation** half, and only that
+half: whatever the project decides, a translation that exists only in `notes[]`
+is a defect, because that array never reaches the reader. **The in-text gloss
+itself is a DEFAULT that the project overrides.** `style_bible.template.md`
+section E ships an `embedded-third-language-convention` required-fill block for
+exactly this decision -- romanize without a gloss, translate outright, keep the
+original set off in some particular way, or forbid source-script text in the
+target entirely. A live book's `style_bible.md` therefore ANSWERS this, and its
+answer governs: never apply the default above to a draft, a review finding or a
+fix turn without reading that block first, and never restore a gloss the
+project's convention removed.
 
 ## Non-convergence is a status, not a silent failure
 

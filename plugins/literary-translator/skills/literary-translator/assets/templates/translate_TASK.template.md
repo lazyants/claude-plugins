@@ -78,13 +78,24 @@ match the source block.
        domain it was a song refrain, so a translator on the modern sense
        alone silently mistranslates every occurrence. -->
 - **Embedded third-language text** (e.g. Latin, an older stage of the
-  source language, or a similar aside) -- ALWAYS gloss it in-text: keep
-  the original AND give the target-language translation immediately
+  source language, or a similar aside) -- by DEFAULT, gloss it in-text:
+  keep the original AND give the target-language translation immediately
   alongside it, inside the same string you are already writing -- the
   block, the verse rendering, or the source footnote's own translated
-  text. Do NOT add a `footnotes` entry of your own. Never bury the gloss
-  only in `notes` -- that array never reaches the assembled book, so
-  burying it there is a reviewable defect, not a stylistic choice.
+  text. Do NOT add a `footnotes` entry of your own.
+  **The style bible governs this, not this bullet.** `style_bible.md`
+  section E carries an `embedded-third-language-convention` block stating
+  THIS project's own fixed convention -- romanize without a gloss,
+  translate outright, keep the original in some particular form, or
+  something else again. Read that block and apply it exactly. Where it
+  says anything other than the default above, that block is the rule and
+  this bullet is not -- including where it forbids source-script text
+  from standing in the target at all, in which case you do NOT keep the
+  original. Only where the project has left the convention at the
+  default does the paragraph above apply as written.
+  Whatever the convention, the translation is never buried only in
+  `notes` -- that array never reaches the assembled book, so burying it
+  there is a reviewable defect, not a stylistic choice.
 
 ## Output -- EXACTLY this JSON (no markdown fencing)
 

@@ -146,9 +146,13 @@ carries the term. Section E's embedded-third-language span refers back to the fo
   length, ...) is `profile.yml`'s `verse_policy.mode`, resolved fresh into every dispatch prompt (see
   `references/verse-policy.md`) -- never hardcoded here or in `translate_TASK.md`/`review_TASK.md`.
 - **Embedded third-language text** (a language other than both the source and target -- e.g. a classical
-  language, an older stage of the source language, or a foreign-to-both aside) -- ALWAYS glossed in-text:
-  keep the original AND give the target-language translation immediately alongside it. Never bury the
-  gloss only in a translator's internal notes.
+  language, an older stage of the source language, or a foreign-to-both aside) -- glossed in-text BY
+  DEFAULT: keep the original AND give the target-language translation immediately alongside it. This is
+  the default only: the `embedded-third-language-convention` block immediately below states this
+  project's own convention, and where the two differ THAT BLOCK GOVERNS and this bullet does not --
+  including where it forbids source-script text in the target text at all, which withdraws the "keep the
+  original" half entirely. What survives either way: the translation is never buried only in a
+  translator's internal notes.
 
 <!-- LT_REQUIRED_FILL_BEGIN: embedded-third-language-convention -->
 LT_PLACEHOLDER_UNFILLED -- state this project's own fixed convention for embedded third-language text (a

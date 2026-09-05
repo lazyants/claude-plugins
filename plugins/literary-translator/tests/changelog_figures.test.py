@@ -490,8 +490,37 @@ def _name_discovery_passes_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.88.1 (#862 -- the shipped example profile handed every project
-    # a Russian `untranslated_sentinel`), per the maintenance contract above.
+    # ROTATED TO 1.89.0 (#860 -- the generic third-language clause defers to the
+    # project's own convention), per the maintenance contract above.
+    #
+    # ZERO rows. Every measurement this entry quotes was taken on a Hebrew->English
+    # SERIES IN ANOTHER REPOSITORY: one volume's first-round finding counts and
+    # their class share (97 over 30 segments, 62 of them), the round-over-round
+    # comparison on the 20 segments both rounds cover (57 to 20, medium 44 to 5,
+    # ~1.1 per segment for every other class), and the non-Latin run counts in two
+    # delivered books (234 across 60 of 79 chapters, 755 across all 42). No
+    # implementation in THIS tree can see a delivered book, so none of them is
+    # re-derivable here by the only method this file accepts -- calling the
+    # authoritative implementation.
+    #
+    # The one quantity the tree DOES own -- how many documents carry the rule --
+    # is deliberately not written as a numeral to be declared. The entry
+    # ENUMERATES the four carriers by name in its own list, which is the shape
+    # the 1.83.1 rotation below settled on for exactly this case: naming the
+    # places beats counting them, because the name survives a later edit that
+    # would leave a count stale. `tests/third_language_defers_to_style_bible.test.py`
+    # is where that set is asserted, against its own `EXPECTED_CARRIER_COUNT`.
+    #
+    # The remaining numerals are identifiers, not measurements: the version
+    # numbers (including `1.11.0`, naming the release that added the fill block),
+    # the release date, the issue numbers (#860, #203), `notes[]` and `W1`, which
+    # name a draft field and a workflow step, and `R8`, which names an
+    # engine-loop rule.
+    #
+    #
+    #
+    # The 1.88.1 rotation this replaces, kept as its own record (#862), with
+    # its own banner rewritten as this demotion header:
     #
     # ZERO rows. The entry's only quantities are a count of volumes in a live
     # series translated in ANOTHER REPOSITORY -- two corrected by hand, a third
@@ -633,7 +662,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.88.1"
+FIGURES_VERSION = "1.89.0"
 
 
 def _newest_entry():
