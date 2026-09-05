@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.96.0 — 2026-09-05
+## 1.97.0 — 2026-09-05
 
 **Step 0d asks what the vault index should be built from, and the example profile had nowhere
 to write the answer (#873).** `output.entity_markup` is a real field — `profile.schema.json`

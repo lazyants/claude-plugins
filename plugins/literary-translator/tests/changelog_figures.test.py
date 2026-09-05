@@ -504,12 +504,12 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.96.0 (#873 -- Step 0d asks what the vault index should be
+    # ROTATED TO 1.97.0 (#873 -- Step 0d asks what the vault index should be
     # built from and the example profile had nowhere to write the answer), per
     # the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed. Every
-    # digit-run in it is an IDENTIFIER, not a measurement: the version (1.96.0),
+    # digit-run in it is an IDENTIFIER, not a measurement: the version (1.97.0),
     # the date, the issue number (#873), the step names (`Step 0`, `Step 0d`),
     # the hard-rule name (`R10`), and the field name (`v1_scope`). There is no
     # measurement for a row to check.
@@ -824,7 +824,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.96.0"
+FIGURES_VERSION = "1.97.0"
 
 
 def _newest_entry():
