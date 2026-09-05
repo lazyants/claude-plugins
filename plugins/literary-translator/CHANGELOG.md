@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.96.0 — 2026-09-05
+
+**A frozen canon row's deciding model is unrecorded, and nothing distinguished "unrecorded" from
+"unrecordable" (#876).** The glossary pass freezes rows in `canon.json`, and a frozen row cannot be
+re-decided. Neither W3a dispatch path passes the batch a model argument, and no artifact of the run
+names one — so an operator staring at a frozen row months later has no way to tell whether the model
+was simply never written down or whether this pipeline has no mechanism to write it down at all.
+Those are different facts with different remedies, and the run gave back the same silence for both.
+
+`{run_dir}/merged.json` — the `glossary-run-merged/1` marker `canon_validate.py --merge-batches`
+writes on a successful merge, and `backfill_glossary_merge_ack.py --apply` writes for runs
+predating the #820 gate — now gains one key at both writers:
+
+```json
+"dispatch_model": {
+  "recorded": false,
+  "reason": "this pipeline dispatches the glossary pass with no model argument and records no model anywhere in the run, so the model that produced these rows is not recorded here -- absent by design, not merely missing"
+}
+```
+
+The schema string is unchanged, there is no new flag, and nothing about what the glossary pass
+decides changes — the marker states a fact about the run's own provenance, and nothing else moves.
+
+What this deliberately does not build: a `{{MODEL}}` token, an `engine.model` knob for the glossary
+pass, or folding a model id into the glossary digest. `profile.example.yml` and `resume_setup.py`
+already carry a shipped, reasoned decision that `engine.model` must not reach that digest, and
+threading a model argument through W3a dispatch to satisfy this issue would reverse it for no
+reason this issue asked for. Also rejected: reading the ambient codex configuration and reporting
+its value as the dispatch model. A value that is not an attestation of what actually answered is
+worse beside a frozen canon row than an explicit unknown — it invites the next reader to trust a
+guess that the run itself never checked.
+
+**Operator cost: `canon_validate.py` is a hashed `PLUGIN_BUNDLE_MEMBERS` entry**, so this edit
+stales every converged mass segment at the next Step-0a refresh, and `glossary_preflight.py`'s
+Step 6d byte-comparison means every existing durable root must re-run Step 0a's copy pass before
+its next glossary pass. This is the standing consequence of any edit to that file, not new
+machinery introduced by this change.
+
+Closes #876.
+
 ## 1.95.0 — 2026-09-05
 
 **The shipped example profile handed every project a Russian politeness-register instruction,

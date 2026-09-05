@@ -194,7 +194,8 @@ engine:
   #   compute_agent_config_hash, so every converged segment goes stale. It is deliberately NOT in
   #   DIGEST_SUBST_FIELDS (the glossary pass has no model knob, so folding it into that SHARED digest would be
   #   a false dependency), but on the MASS path it still moves input_digest through each segment's own
-  #   cache_key, so cost (2) reaches it there too.
+  #   cache_key, so cost (2) reaches it there too. Since 1.96.0 the glossary pass's own merge marker
+  #   records that its dispatch model is unrecorded by design (#876) -- see canon-and-glossary.md.
   max_fix_rounds: 4                       # cap before escalating to non_converged / blocked
     # Change cost: identical to engine.effort's above -- this knob sits in BOTH compute_agent_config_hash and
     # DIGEST_SUBST_FIELDS, so costs (1) and (2) there apply to it unchanged.

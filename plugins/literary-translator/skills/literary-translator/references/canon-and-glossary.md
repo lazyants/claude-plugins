@@ -1283,7 +1283,13 @@ something a script silently probes (and potentially gets wrong).
   `agent()` `effort` option, always from this one value (see
   `references/ledger-and-resumability.md`'s dual-injection rule). There is
   no `{{MODEL}}` token here — a codex model id does not thread to the
-  glossary pass (see `assets/profile.example.yml`).
+  glossary pass (see `assets/profile.example.yml`). The dispatch model is
+  therefore whatever the ambient codex configuration resolves at run time,
+  and this pipeline neither sets nor records it. Since 1.96.0 the run's own
+  merge marker says so explicitly, in a `dispatch_model` key that names the
+  gap rather than leaving it silently absent (the marker itself is
+  `${durable_root}/glossary/runs/<run_id>/merged.json`, described in
+  SKILL.md's W5 preflight bullet).
 
 ### Pre-merge citation review
 
@@ -1563,9 +1569,9 @@ structurally closed, for four independent reasons:
    two already-frozen `canonical_target_form` values — and `_merge_batch`'s
    `review_queue` branch drops any submission whose `source_form` already
    keys `entries{}`, with no error at all: `if source_form in entries:
-   continue` (`canon_validate.py:2516-2521`).
+   continue` (`canon_validate.py:2539-2544`).
 2. **Refused by the whole-file invariant (#102).** `_assert_no_entries_review_queue_overlap`
-   (`canon_validate.py:2552-2578`) raises on any `source_form` present in
+   (`canon_validate.py:2575-2601`) raises on any `source_form` present in
    both `entries{}` and `review_queue[]`, and Pass 2 runs it on every write
    path — so even a proposal that somehow reached the queue would fail the
    very next validation.
@@ -1587,7 +1593,7 @@ structurally closed, for four independent reasons:
 
 A new top-level key in `canon.json` itself is rejected for the same reason
 `canon_link_groups.json` above is a sidecar and not a key: `_content_view`
-(`canon_validate.py:2596-2627`) treats any non-`generation_hashes` key as
+(`canon_validate.py:2619-2650`) treats any non-`generation_hashes` key as
 CONTENT, so adding one would force a `generation_hashes` re-stamp with
 nothing actually regenerated — the #291 hole this function's own docstring
 names.
@@ -1678,7 +1684,7 @@ three of `corpus`, `source_form` and `target_form` — not, as before, a
   draft observations — the class that was invisible before this corpus
   existed, because it never reached `canon.json` at all. Their route is
   NOT `--correct`, which refuses a `source_form` absent from canon
-  (`canon_validate.py:3131-3137`) and sends it to the ordinary glossary merge
+  (`canon_validate.py:3154-3160`) and sends it to the ordinary glossary merge
   instead — see `--report` below.
 - `multi_referent` is **exactly one member, total** — not one canon member
   plus whatever else, which counting only canon members would have

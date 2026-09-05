@@ -2735,7 +2735,10 @@ called. It:
   via `--glossary-merge-marker`, which the template's `mergeBatchesCmd()`
   passes unconditionally — so BOTH W3 launch paths record it, the driver
   because it builds its merge command from that builder, and a hand-driven
-  merge because it runs the same command. Two earlier designs tried to infer
+  merge because it runs the same command. Since 1.96.0 the marker also carries
+  an explicit `dispatch_model` provenance statement, so a frozen canon row's
+  deciding model reads as recorded-absent rather than merely missing (#876).
+  Two earlier designs tried to infer
   merge state from durable artifacts and both were wrong in the same way: every
   readable signal is either MUTABLE (the live `profile.yml` threshold, the
   current `name_candidates.json`, both of which can retire a name a run already

@@ -182,14 +182,14 @@ again.**
 The underlying trap is unchanged: the "rerun W3/W3a then re-translate" path is **not reachable via the
 glossary pass alone** for a fully-converged project (canon frozen, **zero unresolved glossary
 candidates**). The ONLY writer of `canon.json`'s `derivation_bundle_hash` was glossary **MERGE** mode
-(`_stamp_write_verify`, `canon_validate.py:2668-2673`; callers `run_merge` / `run_merge_batches` /
+(`_stamp_write_verify`, `canon_validate.py:2691-2696`; callers `run_merge` / `run_merge_batches` /
 `run_init` / `run_restamp_derivation`). The glossary pass **SKIPS entirely** when there are no candidates
 (`glossary_batch_plan.py:752-756`, a *tested* supported state, prints `{"no_new_candidates": true,
 "batches": []}`) → canon was never restamped → segpack rebuild copies the stale hash **verbatim, never
 recomputed** (`segpack.py:798-809`) → `select_segments` stayed `blocked_needs_regeneration`.
 
 **The sanctioned escape: `canon_validate.py --restamp-derivation`, then rerun `segpack.py`.**
-`run_restamp_derivation` (`canon_validate.py:2836-2876`) re-records the CURRENT `particle_config_hash` /
+`run_restamp_derivation` (`canon_validate.py:2859-2899`) re-records the CURRENT `particle_config_hash` /
 `derivation_bundle_hash` onto an existing `canon.json` **without touching its entries**
 (`force_restamp=True` into the shared `_stamp_write_verify`). `select_segments.py`'s own
 `blocked_needs_regeneration` hint already names it (`_w3_regen_step`, `select_segments.py:1140-1147`:
@@ -206,7 +206,7 @@ documents.
 **Superseded workaround — do NOT cite this anymore.** The prior undocumented/unsanctioned trick
 ("`run_merge_batches` restamps unconditionally → a `--merge-batches <empty-batch>` forces a restamp",
 issue #193) is exactly what 1.15.0/#291 **removed**: `_stamp_write_verify` no longer restamps
-unconditionally (`canon_validate.py:2668-2687`, "a merge that changes nothing no longer moves
+unconditionally (`canon_validate.py:2691-2710`, "a merge that changes nothing no longer moves
 `generation_hashes`"), and `derivation_gate_recovery_e2e.test.py` has a step asserting "the pre-1.15.0
 empty-merge bypass no longer works." Cite `--restamp-derivation` only.
 

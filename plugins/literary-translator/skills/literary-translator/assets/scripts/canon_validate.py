@@ -149,7 +149,7 @@ accepted here -- see --verify-merged] [--citations-reviewed
     #820: when --glossary-merge-marker PATH is given, ONLY once the above
     disk-re-read has confirmed the merge landed, atomically writes a
     durable `{"schema": "glossary-run-merged/1", "run_id", "merged_at",
-    "batches", "source": "merge"}` marker to PATH -- see
+    "batches", "source": "merge", "dispatch_model"}` marker to PATH -- see
     _write_glossary_merge_marker()'s own docstring. This is what lets
     select_segments.py's W5 admission gate tell a genuinely merged
     glossary run apart from one that only produced fragments. A marker
@@ -728,6 +728,24 @@ def validate_run_id(run_id):
 # so it is pinned here, not restated ad hoc at the one write site below.
 GLOSSARY_RUN_MERGED_SCHEMA = "glossary-run-merged/1"
 
+# #876: this pipeline dispatches the W3/W3a glossary pass with no model
+# argument anywhere on its command line, and nothing in a run's own output
+# records which model produced its adjudications. A frozen canon.json row
+# cannot be re-decided, so once this marker is written there is no later
+# point at which that fact could still be recovered -- it is unrecorded now
+# and unrecordable forever after. Restated byte-for-byte in
+# backfill_glossary_merge_ack.py (that file's own convention: restate rather
+# than import a sibling script), which tests/glossary_merge_marker.test.py
+# and tests/backfill_glossary_merge_ack.test.py both pin equal to this copy.
+GLOSSARY_DISPATCH_MODEL_UNRECORDED = {
+    "recorded": False,
+    "reason": (
+        "this pipeline dispatches the glossary pass with no model argument and "
+        "records no model anywhere in the run, so the model that produced these "
+        "rows is not recorded here -- absent by design, not merely missing"
+    ),
+}
+
 
 def _merge_marker_now_iso8601() -> str:
     """Byte-for-byte the same format as ledger_update.py's/select_segments.
@@ -770,7 +788,11 @@ def _write_glossary_merge_marker(marker_path: Path, batch_paths: list) -> None:
     already reflects the fragments -- #291's _stamp_write_verify() treats
     an all-already-merged re-submission as a content-free no-op (nothing
     to re-merge, no restamp) -- so refusing here is a safe, retryable
-    failure, not a stuck one."""
+    failure, not a stuck one.
+
+    `dispatch_model` (#876) is always `GLOSSARY_DISPATCH_MODEL_UNRECORDED`
+    -- see that constant's own comment. Not a per-run computed value: there
+    is nothing in this run to compute it FROM."""
     run_id = marker_path.parent.name
     problem = validate_run_id(run_id)
     if problem is not None:
@@ -784,6 +806,7 @@ def _write_glossary_merge_marker(marker_path: Path, batch_paths: list) -> None:
         "merged_at": _merge_marker_now_iso8601(),
         "batches": list(range(len(batch_paths))),
         "source": "merge",
+        "dispatch_model": dict(GLOSSARY_DISPATCH_MODEL_UNRECORDED),
     }
     try:
         _atomic_write_json(marker_path, marker)
@@ -3807,12 +3830,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "canon.json has been written AND re-read fresh from disk to "
             "confirm it landed), atomically write a durable "
             "'glossary-run-merged/1' marker to PATH -- {run_id, merged_at, "
-            "batches, source:\"merge\"}. run_id is taken from PATH's own "
-            "parent directory name and refused if unsafe. This is what "
-            "lets select_segments.py's W5 admission gate tell a genuinely "
-            "MERGED glossary run apart from one that only produced "
-            "fragments, without re-deriving that fact from any mutable "
-            "project input. Refused in every other mode."
+            "batches, source:\"merge\", dispatch_model}. run_id is taken "
+            "from PATH's own parent directory name and refused if unsafe. "
+            "This is what lets select_segments.py's W5 admission gate tell "
+            "a genuinely MERGED glossary run apart from one that only "
+            "produced fragments, without re-deriving that fact from any "
+            "mutable project input. Refused in every other mode."
         ),
     )
     parser.add_argument(

@@ -49,6 +49,7 @@ test drives the REAL, shipped `canon_validate.py` (cases 1-6) or the REAL
 isolated fixture root, via `tests/_senses_fixture.py`'s sanctioned
 `stage_consumer()` -- never a hand-built stand-in for either script.
 """
+import importlib.util
 import json
 import re
 import shutil
@@ -86,6 +87,33 @@ assert SCHEMAS_SRC_DIR.is_dir(), f"schemas dir not found at {SCHEMAS_SRC_DIR}"
 MERGED_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 GLOSSARY_RUN_MERGED_SCHEMA = "glossary-run-merged/1"
+
+
+def _load_module(name: str, path: Path, extra_sys_path: Path):
+    """Mirrors tests/canon_validate_recollapse.test.py's own loader exactly
+    -- canon_validate.py's `from canon_senses import ...` only resolves via
+    sys.path[0] under a real `python3 canon_validate.py` invocation, so its
+    own scripts/ directory must be inserted onto sys.path around the
+    in-process load."""
+    sys.path.insert(0, str(extra_sys_path))
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None, f"could not load spec for {path}"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(extra_sys_path))
+
+
+# #876: loaded in-process (not subprocessed) solely to read the frozen
+# GLOSSARY_DISPATCH_MODEL_UNRECORDED constant off the REAL module, so this
+# suite's pinned-shape assertion can never silently drift from what
+# canon_validate.py actually ships.
+_CANON_VALIDATE_MODULE = _load_module(
+    "canon_validate_glossary_merge_marker_under_test", CANON_VALIDATE_SRC, SCRIPTS_SRC_DIR
+)
+GLOSSARY_DISPATCH_MODEL_UNRECORDED = _CANON_VALIDATE_MODULE.GLOSSARY_DISPATCH_MODEL_UNRECORDED
 
 
 # ---------------------------------------------------------------------------
@@ -273,12 +301,19 @@ def test_1_marker_written_with_pinned_shape_on_successful_merge(tmp_path):
 
     assert marker_path.is_file(), "expected a marker at the given --glossary-merge-marker path"
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    assert set(marker.keys()) == {"schema", "run_id", "merged_at", "batches", "source"}, marker
+    assert set(marker.keys()) == {
+        "schema", "run_id", "merged_at", "batches", "source", "dispatch_model",
+    }, marker
     assert marker["schema"] == GLOSSARY_RUN_MERGED_SCHEMA
     assert marker["run_id"] == "R1", "run_id must be derived from the marker path's own parent directory name"
     assert MERGED_AT_RE.match(marker["merged_at"]), marker["merged_at"]
     assert marker["batches"] == [0]
     assert marker["source"] == "merge"
+    # #876: no dispatch path passes a model argument and nothing in the run
+    # records one, so the marker says exactly that -- absent by design, not
+    # merely missing. Pinned byte-for-byte against GLOSSARY_DISPATCH_MODEL_
+    # UNRECORDED (see below, loaded in-process from the real module).
+    assert marker["dispatch_model"] == GLOSSARY_DISPATCH_MODEL_UNRECORDED
 
 
 # ===========================================================================
