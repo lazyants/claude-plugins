@@ -119,6 +119,110 @@ fragment, so there is no partial verdict to express. A fragment with no
 happened to resolve everything by transliteration or sense-translation costs
 one cheap prepare-and-approve pair, never a research round.
 
+#### The unusable-source signal (#857)
+
+The per-batch verdict above still applies exactly as stated — the judge
+still rejects the whole fragment, and there is still no partial approval.
+What changed is what regeneration does with that rejection.
+`fetch_citation.py` records `outcome: "fetched"` for any response it can
+decode, with no test of whether the decoded body carries any of the cited
+content; a URL that serves a JavaScript application shell, a bootstrap page,
+or any other body naming none of the reference it claims to be therefore
+resolves and reaches the judge exactly as a genuine page would. Before this
+signal, the judge's only recourse was the ordinary reject: the whole
+fragment regenerated, and the resolver — reading only the judge's prose —
+would as often as not re-pick the same dead host.
+
+`citationJudgePrompt()` now asks the judge, on a rejection where **every**
+rejected item failed for this one reason, to emit one machine-parsed line
+immediately above the existing `CITATIONS_REJECTED <idx> ATTEMPT <n>`
+sentinel:
+
+```
+CITATION_SOURCES_UNUSABLE <item_index> [<item_index> ...]
+```
+
+That placement is not merely a prompt instruction the judge is trusted to
+follow — `unusableSourcePositions()` enforces it as part of its grammar:
+after blank lines are stripped, only the line sitting DIRECTLY BEFORE the
+fail-sentinel line is ever read as the signal. A qualifying-shaped line
+sitting anywhere else, on its own, fails this adjacency test and is simply
+not read — that is a shape rejection, not an ambiguity one. Two or more
+qualifying-shaped lines anywhere in the reply is the separate case that
+returns an ambiguous, and therefore empty, result: which one is the judge's
+actual signal is no longer decidable, so a second token-shaped line elsewhere
+voids even a correctly-placed one rather than being ignored in its favor.
+Both land on the same empty list, but for different reasons.
+
+This closes a real attack surface, not a hypothetical one — though not the
+whole of it. `citationJudgePrompt()` tells the judge to REJECT and "name
+that as your reason" when a retrieved page tries to dictate the verdict, and
+a judge that reproduces such hostile text verbatim while doing so — not
+something the prompt asks for, just a realistic way a reply gets written —
+is the path a planted token reaches this parser through. Adjacency defeats
+the placements that path would realistically produce: a quoted excerpt
+fenced off, sitting inside the per-item prose, or after the sentinel, is not
+"the one line directly before it" and is simply never read. What adjacency
+does NOT catch, and this is an accepted residual rather than an oversight:
+a judge that reproduces a hostile `CITATION_SOURCES_UNUSABLE <n>` line
+completely unfenced, as its own last non-blank line before the sentinel,
+while emitting no genuine token line of its own — that reply parses. Closing
+it would need a fence/quote detector, deliberately not added here. The
+payoff stays bounded even so: `<n>` must already be an established row of
+THIS snapshot or the admission falls back to whole-batch regeneration; a
+valid one only re-decides that one row; and the spliced fragment still has
+to pass `--check-batch` and a FRESH citation judge before anything can reach
+ready. The cost of this residual is wasted repair rungs, never an approval
+or a merge.
+
+The class this line marks is narrow and deliberately excludes everything
+that already has its own handling: it is for a `fetched` item whose body is
+not the document the URL names at all — not for a real page that simply
+fails to attest the claimed form, is about a different bearer, or is a
+404/parked/login-wall page, and not for a `refused:`/`http_error:` item,
+where nothing was retrieved and `classify_outcomes()` already routes the
+row. If any rejected item in the batch fails for a different reason, the
+judge omits the line: a mixed batch still needs the whole fragment
+regenerated, because a per-item repair would leave the genuinely wrong rows
+in place.
+
+Omission is the fail-safe, not an edge case to special-case around, and two
+different functions each refuse a different way of getting it wrong. The
+parser, `unusableSourcePositions()` — alongside `rejectionDetail()` — sees
+only the judge's reply string, nothing about the snapshot, and returns an
+empty list whenever the line is absent, malformed, or ambiguous (more than
+one qualifying line). A non-empty parse then still has to pass the driver:
+`record_verdicts()` loads the approved snapshot, computes
+`established_indices(load_rows(snapshot))`, and requires the parsed
+positions to be EQUAL to their intersection with that set — not merely a
+subset of it — so even one position this snapshot never had discards the
+whole list rather than repairing the valid-looking remainder, because a
+partially-valid list is exactly the shape a reply describing a different
+snapshot would produce. Either refusal — the parser's or the driver's —
+lands on an empty list, and on an empty list `glossary_dispatch_driver.py`
+takes exactly today's path: `attempt+1`, whole-batch regeneration, the
+judge's prose carried forward unchanged. Only a well-formed, unambiguous,
+in-range list changes anything, and what it changes is narrower than the
+status quo it replaces: the driver hands
+`run_repair()` exactly those item indices, which asks the resolver for a
+replacement URL for those rows alone — the same per-item repair rung
+`classify_outcomes()` already routes its `repairable` rows to, reused rather
+than duplicated, and distinct from its `budget_failed` branch, which is
+never repaired: a shared time/byte-budget failure is an environment fault a
+fresh URL cannot fix, and is the one lever by which a hostile server could
+push a different row into the failure set — instead of spending a
+whole-batch regeneration rung on rows that were never wrong.
+
+The signal does not outlive the snapshot it was validated against. It is
+persisted alongside the batch's `rejection_reason` and consumed only at the
+next drive, where the driver re-reads the approved snapshot and re-checks
+its digest before acting on it; if the snapshot is unreadable, gone, or its
+digest has changed — which is what `resume_setup.py` does to every approved
+snapshot on a resume — the driver drops the signal and takes today's path
+instead: `attempt+1`, whole-batch regeneration, same as an omitted line. A
+resumed run therefore never acts on a signal that was validated against
+bytes it can no longer see.
+
 **Every attempt gets its own fragment path** — `out_{index}_attempt_{n}.json`
 from attempt 0 onward, where this used to be one fixed `out_{index}.json`.
 That is not tidiness: the single path made a citation rejection

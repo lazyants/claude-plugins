@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.92.0 — 2026-09-05
+
+**A source that fetches successfully but serves none of the cited document made the glossary pass
+regenerate the whole batch instead of converging (#857).** `fetch_citation.py` records
+`outcome: "fetched"` for any response that decodes, with no test of whether the decoded body
+carries any of the reference it claims to be — so a JavaScript application shell, a bootstrap page,
+or any other body naming none of the cited content resolves and reaches the citation judge exactly
+as a genuine page would. The judge correctly rejects it, but the only channel back to the resolver
+was free prose folded into the next attempt's regeneration prompt: the whole fragment regenerated,
+the resolver read the same prose it had already failed to act on, and picked the same dead host
+again — spending the batch's retry ladder on a source that could never resolve differently. Observed
+on two independent volumes and hosts.
+
+The judge — the actor that already reads the retrieved body — now emits one machine-parsed line,
+`CITATION_SOURCES_UNUSABLE <item_index> [...]`, immediately above its existing rejection sentinel,
+but only when EVERY rejected item in the batch failed for this one reason: a `fetched` item whose
+body is not the document the URL names at all. A mixed rejection — one unusable source alongside a
+genuinely wrong resolution — still regenerates the whole fragment, because a per-item repair would
+leave the wrong rows in place. Omission is the fail-safe: an absent, malformed, ambiguous, or
+out-of-range line changes nothing, and the batch takes exactly today's whole-batch-regeneration
+path. A well-formed signal instead routes those item indices to the existing per-item repair rung
+`classify_outcomes()` already uses for its `budget_failed`/`repairable` split — the resolver is asked
+for a replacement URL for exactly the unusable rows, not for the whole batch. The signal is dropped,
+and the batch falls back to today's path, if the approved snapshot it was validated against is
+unreadable or its digest has changed by the next drive — which is what a resume already does to
+every approved snapshot, so a process that dies between admission and the next drive cannot reach a
+stale signal.
+
+**Migration.** `glossary-pass-wf.template.js` and `glossary_dispatch_driver.py` are both
+`cache_key.py` `PLUGIN_BUNDLE_MEMBERS` entries, so this release moves `plugin_bundle_hash`. Every
+converged mass segment of a book in progress goes stale at the next Step-0a refresh and re-translates.
+That hash is also folded into the glossary resume identity, so an unfinished glossary pass mints a
+fresh `RUN_ID` and restarts instead of resuming once the refreshed plugin is picked up — the same
+cost every release touching this layer pays.
+
+
 ## 1.91.0 — 2026-09-05
 
 **A project's first glossary run dispatched every batch against a `canon.json` that did not exist
@@ -54,6 +90,7 @@ from, so a session that skips the documented pre-workflow steps can still dispat
 canon. Closing that costs a bundle-member edit on every route — the cost this release exists to
 avoid — and it is the ordinary "a documented step was skipped" class the same procedure already
 carries for `glossary_preflight.py` and `resume_setup.py` themselves.
+
 
 ## 1.90.0 — 2026-09-05
 
@@ -221,6 +258,7 @@ example, so no existing book re-stales and no converged segment moves. The chang
 scaffolds only. A project that wants a localised marker still sets one — but at Step 0, because the
 field IS hashed per project, so editing it after a volume converges re-stales that book. The
 example's comment now says so at the field, where the decision is made.
+
 
 ## 1.87.0 — 2026-09-05
 
