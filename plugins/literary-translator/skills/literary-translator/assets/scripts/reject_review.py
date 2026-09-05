@@ -1125,11 +1125,12 @@ def _consumer_warning(seg: str, durable_root: Path) -> "tuple[str | None, str | 
         # produces. ELOOP arrives as an OSError and becomes a problem string like
         # any other unreadable ledger -- it never gates.
         #
-        # The RESIDUAL, stated rather than implied: this pins the leaf, not the
-        # `runs/` directory above it. An actor who can replace that directory can
-        # still redirect the read. Closing that needs a no-follow directory
-        # descriptor, which is a larger change than the demonstrated defect
-        # warrants for an advisory string; the leaf is where the reproduction was.
+        # The leaf alone is NOT enough, which is why the directory open below
+        # exists: O_NOFOLLOW pins only the final component, so the identical
+        # crossing is reachable one component higher by pointing `runs/` at a
+        # foreign directory. Both are pinned, and both have their own regression
+        # case -- they are closed by different mechanisms, and a fix for one
+        # leaves the other live.
         #
         # O_NONBLOCK, then fstat the DESCRIPTOR -- never stat the pathname and
         # then open it. classify_file() answers about a NAME, and the answer is
