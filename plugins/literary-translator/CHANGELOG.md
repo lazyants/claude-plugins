@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.98.0 — 2026-09-05
+
+**Running the glossary driver from the plugin tree silently retargets the durable root, and nothing
+stops the run from buying the rest of its batches (#877).** `glossary_dispatch_driver.py`
+is self-anchored: `SCRIPTS_DIR` is the directory the running file sits in, `DURABLE_ROOT` is that
+directory's parent, and both are resolved from the file's own location rather than from cwd —
+there is deliberately no `--durable-root` flag to correct either with. That design keeps a
+deployed copy honest, and it also means the path you invoke IS the durable-root selector. Invoke
+the plugin tree's copy instead of the one at `${durable_root}/scripts/` and the plugin's own
+`assets/` directory becomes the durable root, because it too has a `scripts/` under it.
+
+Nothing refuses it. The driver validates `--run-id`, the shape of `--batches-file` and
+`--resumed-batch-indices`, and `--verdict-dir` including its temp-root refusal, but nothing
+establishes that the resolved durable root is the project's. Nor does anything stop the spend: a
+batch's failure is detected only after that batch's codex job has been launched, and a failed
+batch does not stop the ones behind it — the driver logs each one and goes straight on to the
+next, so the run announces inputs it cannot find one batch at a time while continuing to buy the
+rest. Measured on one live volume: 12 codex jobs, on a mistake whose only symptom was a run that
+looked broken.
+
+W3a's dispatch section now says which copy to run, why the invocation path is the selector rather
+than a preference, and what the mistake costs — and it names the check that actually catches it:
+confirm the SCRIPT PATH in the command you are about to run, not that `${durable_root}` looks
+populated. A correctly populated durable root lists identically while the command still names the
+plugin tree's driver, so the reassuring check is the useless one.
+
+**`SKILL.md` only — no script or template byte moves.** `glossary_dispatch_driver.py` is itself a
+`PLUGIN_BUNDLE_MEMBERS` entry, so a runtime guard against this would move `plugin_bundle_hash` and
+stale every converged segment in every established project, to close a defect that costs one
+operator error per project. `SKILL.md` is in no hash bundle, so this release re-stales nothing —
+the same trade #858 settled on the canon bootstrap and #290 before it on the SKIP branch.
+
 ## 1.97.0 — 2026-09-05
 
 **Step 0d asks what the vault index should be built from, and the example profile had nowhere

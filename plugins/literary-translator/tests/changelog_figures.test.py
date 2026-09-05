@@ -504,9 +504,29 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.97.0 (#873 -- Step 0d asks what the vault index should be
-    # built from and the example profile had nowhere to write the answer), per
-    # the maintenance contract above.
+    # ROTATED TO 1.98.0 (#877 -- running the glossary driver from the plugin
+    # tree silently retargets the durable root), per the maintenance contract
+    # above.
+    #
+    # ZERO rows. The entry's one DIGIT-WRITTEN measurement -- 12 codex jobs
+    # spent on a single wrong-copy invocation -- is a fact about a live book in
+    # ANOTHER REPOSITORY, so no implementation in THIS tree can re-derive it,
+    # the same class the 1.94.0, 1.91.0 and 1.90.0 rotations below name for
+    # theirs.
+    #
+    # The counts this release COULD have quoted are counts of things in this
+    # tree: how many arguments the driver validates before its first dispatch,
+    # and how many citations the inserted paragraph drifted. Both are written
+    # as NAMES rather than numerals -- the arguments are listed by flag, and
+    # the citation is named as "the one live citation aimed below it" in the
+    # guard record next door -- which is this guard's documented way of keeping
+    # a fact out of the entry. Writing either as a digit would be a figure
+    # nothing red would catch going stale: a new argument or a new citation
+    # moves the true count while every test that owns those facts still passes.
+    #
+    # The 1.97.0 rotation this replaces, kept as its own record (#873 -- Step
+    # 0d asks what the vault index should be built from and the example profile
+    # had nowhere to write the answer), per the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed. Every
     # digit-run in it is an IDENTIFIER, not a measurement: the version (1.97.0),
@@ -843,7 +863,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.97.0"
+FIGURES_VERSION = "1.98.0"
 
 
 def _newest_entry():

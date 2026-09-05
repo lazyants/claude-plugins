@@ -152,7 +152,28 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.96.0 (#876 -- the glossary run's merge marker says its
+    # ROTATED TO 1.98.0 (#877 -- running the glossary driver from the plugin
+    # tree silently retargets the durable root), and EMPTY ON PURPOSE, for the
+    # same reason the records below state: the entry names its subjects by FILE
+    # and SYMBOL rather than by line -- `glossary_dispatch_driver.py`,
+    # `SCRIPTS_DIR`, `DURABLE_ROOT`, `--durable-root`, `--verdict-dir`,
+    # `PLUGIN_BUNDLE_MEMBERS`, `SKILL.md` -- and states no `file.ext:NNN`
+    # citation at all, which is the shape this guard reads. Measured against
+    # the entry rather than asserted: a scan of its slice for that pattern
+    # returns zero matches.
+    #
+    # Deliberate, and for this release the reason is the change itself. The
+    # release inserts a paragraph into `SKILL.md`, which drifted the one live
+    # citation aimed below the insertion point -- the range
+    # `orchestration_hash_resume_gating.test.py` cites, repointed by the length
+    # of the inserted paragraph in both the citing tuple and the anchor-map key.
+    # Minting a changelog citation into the same file would add a second such
+    # obligation to every future edit of it, for no gain over naming the
+    # constants. Naming those two coordinates HERE would add a third: this file
+    # is itself walked by the audit, so a record that quotes a line number
+    # acquires the very upkeep it is arguing against.
+    #
+    # The 1.96.0 rotation this replaces, kept as its own record (#876 -- the glossary run's merge marker says its
     # dispatch model is unrecorded), and EMPTY ON PURPOSE, for the same
     # reason the records below state: the entry names its subjects by FILE
     # and SYMBOL rather than by line -- `merged.json`, `dispatch_model`,

@@ -1960,6 +1960,28 @@ and cwd = the durable root, and a durable copy can be stale as easily as hostile
 a merge into an immutable canon; a path inside `${durable_root}` is refused
 outright, as is one that is not owned by you and private.
 
+**Run the copy at `${durable_root}/scripts/`, never the plugin tree's own — the
+path you invoke IS the durable-root selector.** This driver anchors itself:
+`SCRIPTS_DIR` is the directory the running file sits in and `DURABLE_ROOT` is
+that directory's parent, both resolved from the file's own location rather than
+from cwd, and there is deliberately no `--durable-root` flag to correct either
+with. Invoke the plugin tree's copy and the plugin's own `assets/` directory
+silently becomes the durable root, because it too has a `scripts/` under it.
+Nothing refuses that: the driver checks `--run-id`, the shape of
+`--batches-file` and `--resumed-batch-indices`, and `--verdict-dir` including
+its temp-root refusal, but nothing establishes that the resolved durable root is
+this project's. The mistake is paid for before anything stops it — a batch's
+failure is detected only AFTER that batch's codex job has been launched, and a
+failed batch does not stop the ones behind it: the driver logs each one and goes
+straight on to the next. So the run announces inputs it cannot find one batch at
+a time while continuing to buy the rest, and the JSON verdict that names the
+whole failure arrives once they are all spent. Measured on one live volume:
+12 codex jobs. So check the SCRIPT PATH in the command you are
+about to run — `${durable_root}/scripts/glossary_dispatch_driver.py`, one
+directory below the run's own `canon.json` — rather than checking that
+`${durable_root}` itself looks populated, which it will, identically, while the
+command still names the plugin tree's driver.
+
 **The loop the session drives.** Read the driver's one JSON line.
 
 1. `needs_judge[]` non-empty → dispatch ONE agent per entry, **in parallel**,
