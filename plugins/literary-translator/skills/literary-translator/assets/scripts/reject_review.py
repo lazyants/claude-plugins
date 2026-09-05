@@ -328,6 +328,22 @@ _SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 # sources are Hebrew and Arabic.
 _ROUND_LABEL_RE = re.compile(r"final|[0-9]+")
 
+# Mirrors select_segments.py's HUMAN_ESCALATION_STATUSES (select_segments.py:1172),
+# duplicated per this project's no-shared-lib-between-self-contained-scripts
+# convention (see REJECTION_RECORD_KEYS above): a segment materializing either
+# status classifies human_escalation and falls outside DEFAULT_ELIGIBLE_CATEGORIES,
+# so no ordinary driver invocation will ever read the record this script is about
+# to write. #859's consumer_warning advisory fires on exactly these two.
+_CONSUMER_WARNING_STATUSES = frozenset({"blocked", "non_converged"})
+
+# Bounds for the #859 advisory's read of a file this script does not own. The
+# ledger for a large book is a few hundred KiB, so the read cap sits two orders
+# of magnitude above any real one; the reason cap keeps a ledger-supplied string
+# from dominating an envelope field nobody asked for. Both degrade to a problem
+# string or a truncation, never to a refusal.
+_LEDGER_READ_LIMIT_BYTES = 8388608  # 8 MiB
+_REASON_CLAUSE_LIMIT_CHARS = 200
+
 _FILE_PRESENT = "present"
 _FILE_ABSENT = "absent"
 _FILE_AMBIGUOUS = "ambiguous"
@@ -597,6 +613,7 @@ def _import_claim_record(scripts_dir: Path):
 
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 REJECTION_LOCK_TIMEOUT_S = 10.0
@@ -1038,6 +1055,215 @@ def _print_verdict_digest(seg: str, dirs: dict) -> NoReturn:
     })
 
 
+def _consumer_warning(seg: str, durable_root: Path) -> "tuple[str | None, str | None]":
+    """`(consumer_warning, consumer_warning_problem)` -- #859: an advisory on
+    the rejection-path success envelope for the operator who just wrote a
+    record for a segment the driver has stopped dispatching, so five
+    `{"success": true}` runs in a row do not read as five effective ones.
+    At most one of the two is ever non-None: a status outside
+    _CONSUMER_WARNING_STATUSES reports `(None, None)`; one inside it reports
+    `(warning, None)`; a status that could not be established reports
+    `(None, problem)` -- never silently `(None, None)`, which would make an
+    unreadable ledger indistinguishable from a dispatch-eligible unit, the
+    "absence and failure print identically" shape this file refuses
+    elsewhere.
+
+    READS ${durable_root}/runs/ledger.json ONLY, and never invokes
+    ledger_merge.py -- that WRITES the file (ledger_merge.py:937), and an
+    authorization tool must not mutate the tree to produce an advisory. So
+    this reports what the LAST materialization says and can lag in both
+    directions: a cap written since the last merge is not yet visible, and a
+    segment already reopened by a rejection-driven in_progress fragment can
+    still read capped in a ledger nobody has re-merged since. Accepted, per
+    this project's convention that a leaf script does not reconstruct driver
+    state -- reproducing derive_next_action()'s own eligibility reasoning
+    here would be a second copy of it, guaranteed to drift from the first.
+
+    NEVER GATES, and never blocks. It opens with O_NONBLOCK and validates the
+    resulting DESCRIPTOR with fstat -- deliberately NOT classify_file(), which
+    answers about a pathname and whose answer is stale the moment it returns.
+    A ledger.json swapped for a FIFO between a name check and the open would
+    hang this call inside the rejection flock (acquire_rejection_lock() is
+    already held by the time main() reaches here), and a concurrent invocation
+    would then sit until that lock's timeout and refuse -- a hang no `except`
+    can catch, because a blocking open() raises nothing. Asking the descriptor
+    closes that window instead of narrowing it. The read is byte-bounded for
+    the same reason the interpolated `reason` is character-bounded: both are
+    content this script does not own, read while a lock is held. Every shape is
+    validated positively rather than trusted into a `.get()` chain --
+    `segments` a dict, the per-segment record a dict, `status` a string -- so a
+    parseable-but-malformed ledger cannot raise AttributeError or TypeError.
+    ONE `except Exception` surrounds the WHOLE computation -- the path
+    arithmetic, the open, the read, the decode, the shape checks and the
+    message building alike, so that nothing which can raise sits outside it;
+    the single statement before the boundary binds a constant, which cannot
+    fail, and exists only so a handler can never reach for an unbound name. The
+    handler's own message carries just `type(exc).__name__`, because formatting
+    the exception itself can raise and a handler that can raise is not a
+    handler. This advisory must NEVER become a second gate on top of the six
+    load_rejectable_review() already enforces."""
+    # ONE try, around EVERYTHING -- the path arithmetic, the open, the read, the
+    # decode, the shape checks and the message building alike. A boundary that
+    # starts after the first filesystem call is not a boundary: whatever it
+    # leaves outside reaches the module backstop below and exits 1, which is the
+    # one thing this advisory must never do.
+    # Bound BEFORE the boundary so a handler can never raise NameError reaching
+    # for it. Binding a constant is the one statement that cannot itself fail,
+    # which is why it is the only thing outside the try.
+    ledger_path = None
+    try:
+        ledger_path = durable_root / "runs" / "ledger.json"
+        runs_dir = durable_root / "runs"
+        # O_NOFOLLOW on the LEAF, and the reason is not hygiene. fstat() answers
+        # about whatever was opened, so a symlink planted at this path passes
+        # S_ISREG on its TARGET: any readable project-shaped ledger elsewhere on
+        # the host is then read, and its `segments[seg].reason` is copied
+        # verbatim into this command's success envelope. That both spoofs the
+        # advisory and reads outside the durable root every other read here stays
+        # inside. ledger_merge.py publishes a regular file (its own
+        # _atomic_write_json), so a symlink is not a state any legitimate writer
+        # produces. ELOOP arrives as an OSError and becomes a problem string like
+        # any other unreadable ledger -- it never gates.
+        #
+        # The leaf alone is NOT enough, which is why the directory open below
+        # exists: O_NOFOLLOW pins only the final component, so the identical
+        # crossing is reachable one component higher by pointing `runs/` at a
+        # foreign directory. Both are pinned, and both have their own regression
+        # case -- they are closed by different mechanisms, and a fix for one
+        # leaves the other live.
+        #
+        # O_NONBLOCK, then fstat the DESCRIPTOR -- never stat the pathname and
+        # then open it. classify_file() answers about a NAME, and the answer is
+        # stale the instant it returns: a ledger.json replaced by a FIFO between
+        # the two calls would block this open() forever while the rejection
+        # flock is held (acquire_rejection_lock() is already taken by the time
+        # main() reaches here), and a concurrent invocation would then sit until
+        # that lock's timeout and refuse. Opening first and asking the fd closes
+        # the window rather than narrowing it: O_NONBLOCK makes a FIFO open
+        # return (or raise ENXIO) instead of waiting, and S_ISREG on the fstat
+        # rejects whatever was actually opened rather than whatever the name
+        # pointed at a moment ago.
+        # TWO no-follow opens, not one. O_NOFOLLOW pins only the FINAL
+        # component, so pinning the leaf alone leaves the identical cross-root
+        # read reachable one path component higher: point `runs/` itself at a
+        # foreign directory holding a project-shaped ledger and its
+        # `segments[seg].reason` is copied into this envelope again. So the
+        # DIRECTORY is opened O_DIRECTORY|O_NOFOLLOW first and the leaf is
+        # resolved relative to that already-open fd -- scaffold_setup.py's own
+        # pattern, and stated there in the same terms: a check on the pathname
+        # only rejects a symlinked directory at CHECK time, while every
+        # operation resolved against a pinned fd cannot be redirected by a
+        # directory swapped in afterwards. Neither open can gate: both raise
+        # OSError into the boundary below and become a problem string.
+        dir_fd = os.open(
+            runs_dir, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
+        )
+        try:
+            fd = os.open(
+                "ledger.json",
+                os.O_RDONLY | _O_NONBLOCK | _O_CLOEXEC | _O_NOFOLLOW,
+                dir_fd=dir_fd,
+            )
+        finally:
+            os.close(dir_fd)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return None, f"{ledger_path} exists but is not a regular file"
+            # BOUNDED read: a ledger is a few hundred KiB of JSON for a large
+            # book, so a cap two orders of magnitude above that costs nothing
+            # real and keeps an arbitrarily large file from being loaded whole
+            # while the flock is held. Over the cap the decode fails and the
+            # operator gets a problem string, which is the correct degradation
+            # for an advisory.
+            #
+            # A LOOP, not one os.read() -- byte-for-byte the convention
+            # backfill_ever_converged.py's own bounded read states, and for the
+            # reason it states: a single read on a regular file normally returns
+            # the whole request but is not guaranteed to, and a short count here
+            # would hand truncated bytes to json.loads and report a healthy
+            # ledger as one whose status could not be established. Bounded by
+            # the cap, so it terminates on EOF or at the cap and never on the
+            # file's own size.
+            chunks = []
+            remaining = _LEDGER_READ_LIMIT_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+        finally:
+            os.close(fd)
+        if len(raw) > _LEDGER_READ_LIMIT_BYTES:
+            return None, (
+                f"{ledger_path} is larger than {_LEDGER_READ_LIMIT_BYTES} bytes -- "
+                f"not read, so this segment's dispatch status is unknown"
+            )
+        ledger = json.loads(raw.decode("utf-8"))
+        if not isinstance(ledger, dict):
+            return None, f"{ledger_path} does not hold a JSON object"
+        segments = ledger.get("segments")
+        if not isinstance(segments, dict):
+            return None, f'{ledger_path}: "segments" is not an object'
+        record = segments.get(seg)
+        if not isinstance(record, dict):
+            return None, f"{ledger_path}: no object-valued record for segment {seg!r}"
+        status = record.get("status")
+        if not isinstance(status, str):
+            return None, f"{ledger_path}: segment {seg!r}'s \"status\" is not a string"
+        if status not in _CONSUMER_WARNING_STATUSES:
+            return None, None
+        reason = record.get("reason")
+        # BOUNDED interpolation, the same discipline refuse_finding.py applies to
+        # its own stored `reason`: the value is ledger content this script does
+        # not own, and an unbounded one would put a megabyte of it on stdout in a
+        # field nobody asked for.
+        if isinstance(reason, str) and reason:
+            reason_clause = f" with reason {reason[:_REASON_CLAUSE_LIMIT_CHARS]!r}"
+        else:
+            reason_clause = ""
+        # FACTUAL, not prescriptive -- naming a command here would send the
+        # operator into one of the three gates the plan for #859 documents
+        # (previously-converged, foreign-draft, volume-cap), which is the exact
+        # defect class this advisory exists to head off. So it states the
+        # classification and lets the runbook own the routes.
+        warning = (
+            f"segment {seg!r} materializes as {status!r}{reason_clause} in the ledger, "
+            f"which classifies human_escalation and sits outside the DEFAULT dispatch "
+            f"set -- no ordinary driver invocation reads this record as things stand. "
+            f"Naming {seg!r} in --only-segs overrides SELECTION only: the "
+            f"previously-converged, foreign-draft and volume-cap refusals still apply, "
+            f"each in its own words. See the runbook's \"Claiming a segment for "
+            f"re-review\" section for the routes back"
+        )
+        if status == "blocked":
+            # No claim profile admits a blocked status (select_segments.py:2805,
+            # :2855-2859, :2906-2913) -- say so instead of naming a remedy that
+            # does not exist.
+            warning += (
+                "; no claim profile admits a blocked segment, so that section's "
+                "routes do not reach this one"
+            )
+        return warning, None
+    except (FileNotFoundError, NotADirectoryError):
+        # The two mean the same thing here and carry the same message -- ENOENT,
+        # and a non-directory component in the path -- so they are one arm rather
+        # than two identical ones, which would leave a branch no case reaches.
+        return None, f"{ledger_path} does not exist -- no ledger has been materialized"
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad, see this function's docstring
+        # type(exc).__name__ ONLY. Formatting the exception itself can raise --
+        # a __str__ that fails is rare but it is exactly the shape that would
+        # escape a handler written to describe it -- and a handler that can
+        # raise is not a handler. The class name is an attribute of a class and
+        # cannot fail.
+        return None, (
+            f"could not establish {seg!r}'s dispatch status from {ledger_path}: "
+            f"{type(exc).__name__}"
+        )
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         description=(
@@ -1317,6 +1543,12 @@ def main():
             if _rejection_outlives_review(
                 rej_path, review_path(seg, dirs["segments_dir"])
             ):
+                # #859: computed on this no-op branch too, and asserted to say
+                # the SAME thing it would on a fresh write -- this is the
+                # branch five idempotent re-runs actually take, so a warning
+                # that only appeared on the write path would preserve the
+                # defect for exactly the operator who hit it.
+                warning, warning_problem = _consumer_warning(seg, dirs["durable_root"])
                 _accept({
                     "success": True,
                     "path": str(rej_path),
@@ -1333,6 +1565,8 @@ def main():
                     # with these two beyond `success` and is a different
                     # command with a different answer; see that function.
                     "renewed": False,
+                    "consumer_warning": warning,
+                    "consumer_warning_problem": warning_problem,
                     **existing,
                 })
             renewed = True
@@ -1461,6 +1695,12 @@ def main():
             f"once the clock is past that timestamp"
         )
 
+    # #859: covers BOTH shapes this call returns -- a fresh write (renewed is
+    # False) and a renewal (renewed is True, gate 6's other branch above) --
+    # since both fall through to this one _accept(). Computed AFTER the write
+    # is durable, not before: the ledger read is independent of it either way,
+    # and there is no reason to pay for it on a path that might still refuse.
+    warning, warning_problem = _consumer_warning(seg, dirs["durable_root"])
     _accept({
         "success": True,
         "path": str(rej_path),
@@ -1470,6 +1710,8 @@ def main():
         # previous record was spent and has been replaced" -- the two look
         # alike from outside and mean opposite things about what happens next.
         "renewed": renewed,
+        "consumer_warning": warning,
+        "consumer_warning_problem": warning_problem,
         **payload,
     })
 

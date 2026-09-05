@@ -1,5 +1,129 @@
 # Changelog
 
+## 1.93.0 — 2026-09-05
+
+**`reject_review.py` reported success for a segment the driver had stopped reading, so an operator
+wrote five authorizations nobody would ever consume (#859).** The sequence is ordinary. A draft is
+byte-identical to the one its reviewer read and the findings were adjudicated and refused on
+measurements, so `derive_next_action()` cannot tell "unchanged because the fix was already correct"
+from "unchanged because nothing was attempted" and returns `needs_fix` forever — precisely the case
+this script's own docstring says it exists for. The operator rejects, the verdict advances a round,
+the reviewer re-raises the same claim, and at `max_fix_rounds` the unit caps. It then materializes
+`non_converged`/`reason=cap`, `classify_segment()` calls that `human_escalation`, and
+`DEFAULT_ELIGIBLE_CATEGORIES` does not contain it — so no further driver invocation emits the
+segment, `derive_next_action()` is never reached for it, and the record is read by nobody. Every
+further `reject_review.py` call still wrote the file and still printed `{"success": true}`. Measured
+on one live volume of 39 segments: one segment reached the cap and five rejections were written into
+the void, each reporting success.
+
+The script could not have known. The string `ledger` appears in it only in comments and a shared
+path convention, and all of its refusals are about the VERDICT — token, digest, round label,
+clean-ness, reason, a conflicting record — rather than about whether anyone is still listening.
+
+**The success envelope now carries `consumer_warning` and `consumer_warning_problem`**, both present
+on both rejection-path shapes and `null` when they do not apply, exactly as
+`--print-verdict-digest` already does for `round_label`/`round_label_problem`: a caller that has to
+branch on which keys exist is a caller that will get it wrong once. The warning fires when the
+materialized ledger reports the segment `blocked` or `non_converged`. The problem string exists so
+that a ledger which cannot be read is distinguishable from one reporting a dispatch-eligible unit —
+absence and failure printing identically is the shape this file refuses everywhere else.
+
+**Both keys are on the ENVELOPE only.** The record on disk keeps exactly its pinned seven fields, so
+the consumer's key-set refusal is untouched, and `--print-verdict-digest` keeps exactly its
+documented seven — that command decides nothing and its envelope is its own.
+
+### The warning names no command, and that is the finding
+
+The obvious text — "use `--from-cap`" — is wrong, and review caught it. `--only-segs` alone already
+force-includes a `human_escalation` id (`select_only_segs()` records it in `overrides`), so a claim
+is not required to get the record read. What IS required is surviving three further gates that
+`--only-segs` does not clear: the previously-converged refusal for a unit carrying the
+`.ever_converged` sentinel, the foreign-draft gate — exempt only for `stale`, so a
+`human_escalation` unit is covered — and the volume cap, which charges the ordinary unclaimed
+estimate even for a rejection that would converge while spending no job. And every claim profile
+requires the stored review's `coverage_ok` to be `true`, which a numbered-round rejection does not:
+sending an incomplete-coverage verdict to `--from-cap` sends it into a refusal. So the advisory
+states the classification and the exclusion and hands the routes to the runbook. For a `blocked`
+status it says no claim profile admits that status at all, rather than naming a remedy that does
+not exist.
+
+### It is an advisory and can never become a gate
+
+That is mechanical, not an intention. One exception boundary surrounds the WHOLE computation —
+including the open, so nothing filesystem-shaped sits outside it — and its message carries only the
+exception's class name, because formatting the exception itself can raise and a handler that can
+raise is not a handler. Every shape is validated positively rather than trusted into a `.get()`
+chain: `segments` a dict, the per-segment record a dict, `status` a string.
+
+**The path is never stat-ed and then opened.** A name check answers about a pathname and is stale
+the instant it returns, so a `ledger.json` swapped for a FIFO in that window would hang the call
+inside the rejection flock — and a blocking `open()` raises nothing for any `except` to catch, so
+the boundary above would not help. The advisory therefore opens with `O_NONBLOCK` and asks the
+resulting DESCRIPTOR, which closes the window instead of narrowing it. The read is byte-bounded and
+the interpolated `reason` character-bounded for the same reason: both are content this script does
+not own, read while a lock is held.
+
+**Both path components are pinned, and that is not hygiene either.** `fstat()` answers about whatever
+was opened, so a symlink planted at this path passes `S_ISREG` on its TARGET: any readable
+project-shaped ledger elsewhere on the host is then read and its `segments[seg].reason` copied
+verbatim into this command's success envelope — spoofing the advisory and reading outside the durable
+root that every other read here stays inside. `O_NOFOLLOW` on the leaf alone is not enough, because
+it pins only the FINAL component and the identical crossing is reachable one component higher by
+pointing `runs/` at a foreign directory. So `runs/` is opened `O_DIRECTORY|O_NOFOLLOW` and the leaf
+is resolved against that already-open descriptor — `scaffold_setup.py`'s own pattern, for the reason
+it states there: a check on a pathname rejects a symlinked directory only at CHECK time, while an
+operation resolved against a pinned fd cannot be redirected by a directory swapped in afterwards.
+`ledger_merge.py` publishes a regular file into a real directory, so neither symlink is a state any
+legitimate writer produces, and `ELOOP` degrades to a problem string like any other unreadable
+ledger. Both crossings are pinned as regression cases, each watched failing with only its own fix
+reverted.
+
+The regression cases include the two an implementation catching only `(OSError, JSONDecodeError)`
+would pass: a directory raises `IsADirectoryError`, an `OSError` subclass, while a ledger written as
+invalid UTF-8 raises `UnicodeDecodeError` and is caught only by a genuinely broad boundary.
+
+The read is `${durable_root}/runs/ledger.json` and nothing else. `ledger_merge.py` is never invoked,
+because materializing WRITES that file and an authorization tool must not mutate the tree to produce
+an advisory — so the field reports what the LAST materialization says and can lag in both
+directions. A cap written since the last merge is not yet visible; a segment already reopened by a
+rejection-driven `in_progress` fragment can still read capped in a ledger nobody has re-merged.
+Reproducing `derive_next_action()`'s own eligibility reasoning here would be a second copy of it,
+guaranteed to drift.
+
+### The two documents
+
+`SKILL.md`'s rejection recipe gains a third condition after its numbered-round and `final`-round
+bullets, which both presuppose the segment is still in the dispatch set. `references/engine-loop.md`
+gains the same bound at the rejection ladder — and its own re-entry recipe, which since long before
+the claim profiles has called `select_segments.py --only-segs` "the one, explicit, auditable path
+back in", is qualified in the same edit: that force is SELECTION only.
+
+### What it costs
+
+`reject_review.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this release moves `plugin_bundle_hash`,
+and at a refreshed root the currently-converged population reclassifies `stale`. A recapped record
+is already `human_escalation` and does not reclassify.
+
+**That stale is the cheap kind, PROVIDED all drift since convergence is machinery-only.**
+`plugin_bundle_hash` is in `SAFE_STALE_CARVEOUT_FIELDS`, but the carve-out also requires the unit's
+`stale_reason` to be exactly `["cache_key_mismatch"]`, its `mismatched_fields` to be a non-empty
+list every member of which is safe, and its sentinel state to be anything but absent. Under those
+conditions nothing re-translates, an otherwise complete root still passes the completeness gate, and
+`--from-converged` refuses a re-review as unnecessary. A root that ALSO carries content drift — an
+edited prompt, say — blocks completeness and can authorize a re-review; that is not this release's
+doing, but it is what makes the carve-out conditional rather than automatic.
+
+**The unconditional cost is resume identity.** `resume_setup.py` folds `runs/.plugin_bundle_hash`
+into its `input_digest`, so the refresh invalidates every old resume digest: an unpinned invocation
+that reaches resolution mints a fresh RUN_ID when no candidate matches, one that pins an old run
+refuses on the mismatch, and an allowed-empty selection returns before resolution is reached at all.
+Segments holding a draft without having converged then meet the foreign-draft gate, which refuses
+before dispatch rather than silently re-translating — a refusal an operator clears.
+
+Nothing else moves: no schema file, no `schema_hash`, no `orchestration_bundle_hash` (this script is
+not one of its members), no `render_version`, no `prompt_hash` (which reads only the durable
+`translate_TASK.md` and `review_TASK.md`). `SKILL.md` and `references/*.md` are hashed by nothing.
+
 ## 1.92.0 — 2026-09-05
 
 **A source that fetches successfully but serves none of the cited document made the glossary pass

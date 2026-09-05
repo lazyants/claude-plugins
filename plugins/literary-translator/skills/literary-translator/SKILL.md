@@ -3372,6 +3372,19 @@ depends on the round:
   and that verdict's own `coverage_ok` is `true`. If the draft moved, or
   coverage was reported incomplete, you get the fresh `final` review
   instead — that is the fall-through, not a failure.
+- **At a capped or blocked unit** neither bullet above applies:
+  `human_escalation` sits outside the default dispatch set, so there is no
+  next driver invocation for it and the record simply waits.
+  `reject_review.py` still prints `{"success": true}`, and now also a
+  `consumer_warning` saying so. Getting back is selection plus the gates,
+  never one flag alone: `--only-segs` names the id, and the
+  previously-converged, draft-ownership and volume-cap refusals still
+  apply on top of it. For a CAPPED unit only, the claim run just below
+  (`--from-cap`) is the route when the draft was hand-edited —
+  `--run-id` and `--run-resume` together, and the verdict's own
+  `coverage_ok: true` besides, which is what keeps the two routes from
+  substituting for each other. A `blocked` unit has no claim route at
+  all: none of the three profiles admits that status.
 
 The `final` behaviour changed because the old one could not work: it bought
 exactly one re-review, and a reviewer re-reading the SAME unchanged input

@@ -538,8 +538,12 @@ select_segments.py --only-segs <id,...>
 naming the resolved segment. This forces the named segment into `SEGS`
 regardless of its `human_escalation` classification, and its re-dispatch through
 the normal `in_progress` call site naturally overwrites its stale terminal
-fragment — no separate reset/clear script is needed. See
-`references/ledger-and-resumability.md` for the full ledger mechanics.
+fragment — no separate reset/clear script is needed. That force is
+SELECTION only, though: the previously-converged, draft-ownership and
+volume-cap refusals still apply on top of it, and a capped unit whose draft
+was hand-edited belongs to `--from-cap` instead — `SKILL.md`'s claim
+recipe. See `references/ledger-and-resumability.md` for the full ledger
+mechanics.
 
 **v1 delivery must refuse to mark the audit package
 (`output.v1_scope: segment_drafts_and_audit`) complete while ANY item remains
@@ -581,6 +585,15 @@ label, and at the mandatory `final` round a record carrying the draft its verdic
 was written against, over a reviewer-asserted `coverage_ok`, terminates the unit
 as converged on the operator's own `reason` (#527). `reject_review.py` is the
 sole writer and `derive_next_action()` only ever reads it.
+
+That release still needs an audience, though: `derive_next_action()` only
+ever runs for a segment the driver actually dispatches, and a capped or
+blocked unit is `human_escalation`, outside `DEFAULT_ELIGIBLE_CATEGORIES`.
+So the record `reject_review.py` just wrote has no effect on any further
+DEFAULT invocation: it sits read by nobody until the id is explicitly
+named back in and survives the admission gates above. Since 1.93.0 the
+`consumer_warning` on that script's own success envelope says so at the
+moment the record is written.
 
 **A per-finding refusal now has a durable record too, and it RELEASES NOTHING
 (#764).** Keep the two apart, because the second one looks like the first and

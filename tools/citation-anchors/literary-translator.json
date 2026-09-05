@@ -1526,15 +1526,6 @@
       ],
       "claim": "`canon_link_groups.json` above is a sidecar and not a key: `_content_view` (`canon_validate.py:2596-2627`) treats any non-`generation_hashes` key as CONTENT, so"
     },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4236-4242\", 0]": {
-      "anchors": [
-        "Excluded from every bundle hash",
-        "nor of `orchestration_bundle_hash`",
-        "final_audit.py` is not one of",
-        "never flips a cache key or the resume-integrity digest via either bundle"
-      ],
-      "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
-    },
     "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"orchestration-and-batching.md:252\", 0]": {
       "anchors": [
         "orchestration_bundle_hash` is non-gating for convergence — never part of"
@@ -1580,6 +1571,53 @@
         "survivors.append(row)"
       ],
       "claim": "name_candidates.json holds the extractor's COMPLETE list; the forms already resolved in canon are dropped later, here in glossary_batch_plan's select_included. So a candidate observation's source_form may well be a live canon key, and neither uncanonized_variant's absence rule nor --report's routing may read the corpus tag as proof of absence."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/reject_review.py\", \"select_segments.py:1172\", 0]": {
+      "anchors": [
+        "HUMAN_ESCALATION_STATUSES = frozenset({\"blocked\", \"non_converged\"})"
+      ],
+      "claim": "Mirrors select_segments.py's HUMAN_ESCALATION_STATUSES (select_segments.py:1172), duplicated per this project's no-shared-lib-between-self-contained-scripts convention: a segment materializing either status classifies human_escalation and falls outside DEFAULT_ELIGIBLE_CATEGORIES."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/reject_review.py\", \"ledger_merge.py:937\", 0]": {
+      "anchors": [
+        "_atomic_write_json(dirs[\"ledger_json_path\"], ledger_doc)"
+      ],
+      "claim": "READS ${durable_root}/runs/ledger.json ONLY, and never invokes ledger_merge.py -- that WRITES the file (ledger_merge.py:937), and an authorization tool must not mutate the tree to produce an advisory."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/reject_review.py\", \"select_segments.py:2805\", 0]": {
+      "anchors": [
+        "if not (status == \"non_converged\" and reason == \"cap\"):"
+      ],
+      "claim": "No claim profile admits a blocked status (select_segments.py:2805, :2855-2859, :2906-2913) -- say so instead of naming a remedy that does not exist."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/reject_review.py\", \"select_segments.py:2855-2859\", 0, \"continuation\"]": {
+      "anchors": [
+        "if status not in WAS_CONVERGED_STATUSES:",
+        "not one of {sorted(WAS_CONVERGED_STATUSES)}"
+      ],
+      "claim": "No claim profile admits a blocked status (select_segments.py:2805, :2855-2859, :2906-2913) -- say so instead of naming a remedy that does not exist."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/reject_review.py\", \"select_segments.py:2906-2913\", 0, \"continuation\"]": {
+      "anchors": [
+        "if status != \"in_progress\":",
+        "a non_converged/reason=cap unit belongs to --from-cap"
+      ],
+      "claim": "No claim profile admits a blocked status (select_segments.py:2805, :2855-2859, :2906-2913) -- say so instead of naming a remedy that does not exist."
+    },
+    "[\"plugins/literary-translator/tests/review_rejection_consumer_warning.test.py\", \"tests/review_rejection.test.py:1352\", 0]": {
+      "anchors": [
+        "def test_the_read_mode_envelope_is_its_own_and_carries_no_rejection_path_fields"
+      ],
+      "claim": "The read mode's envelope keeps exactly its documented seven keys, re-asserted here as well as at tests/review_rejection.test.py:1352."
+    },
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4249-4255\", 0]": {
+      "anchors": [
+        "Excluded from every bundle hash",
+        "nor of `orchestration_bundle_hash`",
+        "final_audit.py` is not one of",
+        "never flips a cache key or the resume-integrity digest via either bundle"
+      ],
+      "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
     }
   },
   "exemptions": {

@@ -504,26 +504,39 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.92.0 (#857 -- a source that fetches successfully but serves
-    # none of the cited document made the glossary pass regenerate the whole
-    # batch instead of converging), per the maintenance contract above.
+    # ROTATED TO 1.93.0 (#859 -- reject_review.py reported success for a segment
+    # the driver had stopped reading), per the maintenance contract above.
     #
-    # ZERO rows. The entry's one real measurement -- "Observed on two
-    # independent volumes and hosts" -- is spelled as a WORD, and `_TOKEN`
-    # matches digits only, so it is invisible to this file's own tokenizer and
-    # cannot be a row candidate at all, the same class the 1.67.0 and 1.65.0
-    # rotations below name for their own spelled-out quantities. Everything
-    # else this release changed is described by NAMING rather than counting:
-    # the new judge sentinel `CITATION_SOURCES_UNUSABLE <item_index> [...]`,
-    # the existing `classify_outcomes()` repair rung it is routed into, and the
-    # migration paragraph's two `cache_key.py` `PLUGIN_BUNDLE_MEMBERS` entries
-    # (`glossary-pass-wf.template.js`, `glossary_dispatch_driver.py`), named
-    # rather than counted -- the 1.83.2 rotation below is what quoting a bundle
-    # tuple's size costs. Walking the entry completely, the remaining numerals
-    # are all identifiers: the version number (1.92.0), the release date, the
-    # issue number (#857), and the `0` of `Step-0a` in the migration
-    # paragraph, a pipeline stage label rather than a count -- the same class
-    # `W3`/`W3a` are named as in the 1.84.2 rotation below.
+    # ZERO rows, and the reason is specific rather than an empty rotation left to
+    # be read as an omission. The entry quotes exactly one measurement, "one live
+    # volume of 39 segments", and it is a fact about A BOOK IN ANOTHER REPOSITORY:
+    # how many segments that volume has, and how many rejections its operator
+    # wrote into the void before looking at the classifier rather than at the
+    # script's own output. This file re-derives a figure by calling an
+    # authoritative implementation in THIS tree, and no implementation here can
+    # see that volume -- the same reason the rotations below declared zero rows
+    # for their own field measurements.
+    #
+    # The entry is deliberately worded without a tree-owned count. An earlier
+    # draft said "Eleven regression cases cover it", which IS derivable -- the
+    # parametrized never-gates cases plus the UnicodeDecodeError case -- and was
+    # cut rather than declared, because `_TOKEN` matches digits and cannot see a
+    # spelled-out figure: a number this file is structurally unable to check does
+    # not belong in an entry whose whole point is that its figures are checked.
+    # The migration paragraph likewise NAMES `PLUGIN_BUNDLE_MEMBERS` and
+    # `SAFE_STALE_CARVEOUT_FIELDS` rather than quoting their sizes. The two byte
+    # bounds the release adds are tree-owned constants, and they are pinned where
+    # a pin can hold -- `review_rejection_consumer_warning.test.py` reads both by
+    # AST and asserts the shipped value is the one applied -- rather than quoted
+    # in prose, so the entry names neither.
+    #
+    # The remaining numerals are identifiers: the version numbers, the release
+    # date, the issue number (#859), and the `8` of `UTF-8`, which names an
+    # encoding.
+    #
+    # The 1.92.0 rotation this replaces is preserved in this file's history; the
+    # rows below are the older records the maintenance contract keeps.
+    #
     # The 1.91.0 rotation this replaces, kept as its own record (#858 -- a
     # project's first glossary run dispatched every batch against a canon.json
     # that did not exist):
@@ -735,7 +748,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.92.0"
+FIGURES_VERSION = "1.93.0"
 
 
 def _newest_entry():
