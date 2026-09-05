@@ -731,12 +731,12 @@ GLOSSARY_RUN_MERGED_SCHEMA = "glossary-run-merged/1"
 # #876: this pipeline dispatches the W3/W3a glossary pass with no model
 # argument anywhere on its command line, and nothing in a run's own output
 # records which model produced its adjudications. A frozen canon.json row
-# cannot be re-decided, so once this marker is written there is no later
-# point at which that fact could still be recovered -- it is unrecorded now
-# and unrecordable forever after. Restated byte-for-byte in
+# cannot be re-decided, and this marker is the last artifact the run writes
+# about itself -- so it states that the deciding model is not recorded in
+# this run's artifacts, which is a fact about THEM and deliberately not a
+# claim that no other means could recover it. Restated byte-for-byte in
 # backfill_glossary_merge_ack.py (that file's own convention: restate rather
-# than import a sibling script), which tests/glossary_merge_marker.test.py
-# and tests/backfill_glossary_merge_ack.test.py both pin equal to this copy.
+# than import a sibling script); tests pin the two copies equal to each other.
 GLOSSARY_DISPATCH_MODEL_UNRECORDED = {
     "recorded": False,
     "reason": (

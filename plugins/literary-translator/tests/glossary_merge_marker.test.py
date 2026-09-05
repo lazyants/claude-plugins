@@ -11,7 +11,7 @@ invisible to any re-derivation. The fix is to STOP inferring and START
 recording: `canon_validate.py --glossary-merge-marker PATH`, given
 alongside `--merge-batches`, atomically writes
 `{"schema": "glossary-run-merged/1", "run_id", "merged_at", "batches",
-"source": "merge"}` to PATH -- ONLY once the merge has actually landed on
+"source": "merge", "dispatch_model"}` to PATH -- ONLY once the merge has landed on
 disk (after `_stamp_write_verify()`'s own write + fresh re-read) -- and the
 gate reads it back with no re-derivation at all.
 
@@ -19,7 +19,8 @@ gate reads it back with no re-derivation at all.
 
 This file owns:
   1. The marker's exact pinned shape on a successful merge (schema/run_id/
-     merged_at format/batches/source), across one and several fragments.
+     merged_at format/batches/source/dispatch_model), across one and
+     several fragments.
   2. No `--glossary-merge-marker` flag given -> no marker written, ordinary
      merge success otherwise unaffected.
   3. An unwritable marker path -> the WHOLE merge call reports failure
@@ -314,6 +315,27 @@ def test_1_marker_written_with_pinned_shape_on_successful_merge(tmp_path):
     # merely missing. Pinned byte-for-byte against GLOSSARY_DISPATCH_MODEL_
     # UNRECORDED (see below, loaded in-process from the real module).
     assert marker["dispatch_model"] == GLOSSARY_DISPATCH_MODEL_UNRECORDED
+
+
+# ===========================================================================
+# 1b. #876: the LITERAL statement the marker makes. Every other assertion in
+#     this file compares the emitted object against the production constant,
+#     so a SYNCHRONISED edit to both copies of it passes all of them -- and
+#     the whole point of this key is the sentence it carries. This one pins
+#     that sentence itself, so weakening it has to be a deliberate act with
+#     a changelog entry, not a quiet edit two assertions agree with.
+# ===========================================================================
+
+
+def test_1b_dispatch_model_is_the_shipped_statement():
+    assert GLOSSARY_DISPATCH_MODEL_UNRECORDED == {
+        "recorded": False,
+        "reason": (
+            "this pipeline dispatches the glossary pass with no model argument and "
+            "records no model anywhere in the run, so the model that produced these "
+            "rows is not recorded here -- absent by design, not merely missing"
+        ),
+    }
 
 
 # ===========================================================================

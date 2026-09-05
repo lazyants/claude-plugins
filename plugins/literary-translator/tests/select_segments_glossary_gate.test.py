@@ -1138,7 +1138,8 @@ def test_11_driver_forwards_the_flag_and_gets_past_the_selector_gate(tmp_path):
 # layer: canon_validate.py --merge-batches now WRITES the fact directly, a
 # `{run_dir}/merged.json` marker stamped on successful merge
 # (`{"schema": "glossary-run-merged/1", "run_id", "merged_at", "batches",
-# "source": "merge"}`); backfill_glossary_merge_ack.py writes the SAME
+# "source": "merge", "dispatch_model"}`); backfill_glossary_merge_ack.py
+# writes the SAME
 # marker shape (`"source": "backfill-ack"`, plus a `"note"` field) for runs
 # that predate this gate -- an acknowledged run admits exactly like a
 # merged one. CONDITION 3 (`check_glossary_runs_merged()`) now just reads
@@ -1185,11 +1186,14 @@ def test_12_admits_with_a_valid_merge_marker(tmp_path):
 
 # ---------------------------------------------------------------------------
 # 12b. #876: a marker that ALSO carries "dispatch_model" -> admits exactly
-#      like one without it. Both readers of this marker
-#      (check_glossary_runs_merged() here, and
-#      backfill_glossary_merge_ack.py's own read_existing_marker()) check
-#      only "schema" and "run_id" -- this is the regression proving that
-#      stays true once canon_validate.py starts stamping the new key.
+#      like one without it. Neither reader of this marker rejects an
+#      unknown key, though they tolerate it for DIFFERENT reasons:
+#      check_glossary_runs_merged() here validates "schema" and "run_id"
+#      and looks at nothing else, while backfill_glossary_merge_ack.py's
+#      read_existing_marker() validates neither -- any readable JSON object
+#      counts as a marker already present, and is preserved untouched.
+#      This is the regression proving both stay true once canon_validate.py
+#      starts stamping the new key.
 # ---------------------------------------------------------------------------
 
 def test_12b_admits_with_a_marker_that_also_carries_dispatch_model(tmp_path):
