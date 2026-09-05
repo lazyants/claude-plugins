@@ -613,6 +613,7 @@ def _import_claim_record(scripts_dir: Path):
 
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 REJECTION_LOCK_TIMEOUT_S = 10.0
@@ -1112,6 +1113,7 @@ def _consumer_warning(seg: str, durable_root: Path) -> "tuple[str | None, str | 
     ledger_path = None
     try:
         ledger_path = durable_root / "runs" / "ledger.json"
+        runs_dir = durable_root / "runs"
         # O_NOFOLLOW on the LEAF, and the reason is not hygiene. fstat() answers
         # about whatever was opened, so a symlink planted at this path passes
         # S_ISREG on its TARGET: any readable project-shaped ledger elsewhere on
@@ -1140,10 +1142,29 @@ def _consumer_warning(seg: str, durable_root: Path) -> "tuple[str | None, str | 
         # return (or raise ENXIO) instead of waiting, and S_ISREG on the fstat
         # rejects whatever was actually opened rather than whatever the name
         # pointed at a moment ago.
-        fd = os.open(
-            ledger_path,
-            os.O_RDONLY | _O_NONBLOCK | _O_CLOEXEC | _O_NOFOLLOW,
+        # TWO no-follow opens, not one. O_NOFOLLOW pins only the FINAL
+        # component, so pinning the leaf alone leaves the identical cross-root
+        # read reachable one path component higher: point `runs/` itself at a
+        # foreign directory holding a project-shaped ledger and its
+        # `segments[seg].reason` is copied into this envelope again. So the
+        # DIRECTORY is opened O_DIRECTORY|O_NOFOLLOW first and the leaf is
+        # resolved relative to that already-open fd -- scaffold_setup.py's own
+        # pattern, and stated there in the same terms: a check on the pathname
+        # only rejects a symlinked directory at CHECK time, while every
+        # operation resolved against a pinned fd cannot be redirected by a
+        # directory swapped in afterwards. Neither open can gate: both raise
+        # OSError into the boundary below and become a problem string.
+        dir_fd = os.open(
+            runs_dir, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
         )
+        try:
+            fd = os.open(
+                "ledger.json",
+                os.O_RDONLY | _O_NONBLOCK | _O_CLOEXEC | _O_NOFOLLOW,
+                dir_fd=dir_fd,
+            )
+        finally:
+            os.close(dir_fd)
         try:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):

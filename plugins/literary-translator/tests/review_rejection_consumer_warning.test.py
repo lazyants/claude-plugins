@@ -465,6 +465,23 @@ def _setup_ledger_json_is_a_symlink_to_a_foreign_ledger(root, seg):
     ledger_path.symlink_to(foreign_ledger)
 
 
+def _setup_runs_directory_is_a_symlink_to_a_foreign_project(root, seg):
+    """The same cross-root read one path component HIGHER. O_NOFOLLOW on the
+    leaf pins only the final name, so pointing `runs/` itself at a foreign
+    directory holding a valid project-shaped ledger reaches the identical
+    boundary crossing. Pinned separately from the leaf case because the two are
+    closed by different mechanisms and a single fix for one leaves the other
+    live -- which is exactly how this one was found."""
+    foreign = root.parent / "foreign_runs_dir"
+    foreign.mkdir(parents=True, exist_ok=True)
+    (foreign / "ledger.json").write_text(
+        json.dumps({"segments": {seg: ledger_record("non_converged",
+                                                    reason="FOREIGN-RUNS-DIR-REASON")}}),
+        encoding="utf-8",
+    )
+    (root / "runs").symlink_to(foreign, target_is_directory=True)
+
+
 _NEVER_GATES_CASES = [
     ("no_runs_directory", _setup_no_runs_directory),
     ("ledger_json_absent", _setup_ledger_json_absent),
@@ -477,6 +494,7 @@ _NEVER_GATES_CASES = [
     ("ledger_json_is_a_directory", _setup_ledger_json_is_a_directory),
     ("ledger_json_is_a_fifo", _setup_ledger_json_is_a_fifo),
     ("ledger_json_is_a_symlink", _setup_ledger_json_is_a_symlink_to_a_foreign_ledger),
+    ("runs_directory_is_a_symlink", _setup_runs_directory_is_a_symlink_to_a_foreign_project),
 ]
 
 

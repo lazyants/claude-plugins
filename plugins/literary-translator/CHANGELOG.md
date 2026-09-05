@@ -63,14 +63,20 @@ resulting DESCRIPTOR, which closes the window instead of narrowing it. The read 
 the interpolated `reason` character-bounded for the same reason: both are content this script does
 not own, read while a lock is held.
 
-**The leaf is opened `O_NOFOLLOW`, and that is not hygiene either.** `fstat()` answers about whatever
+**Both path components are pinned, and that is not hygiene either.** `fstat()` answers about whatever
 was opened, so a symlink planted at this path passes `S_ISREG` on its TARGET: any readable
 project-shaped ledger elsewhere on the host is then read and its `segments[seg].reason` copied
 verbatim into this command's success envelope — spoofing the advisory and reading outside the durable
-root that every other read here stays inside. `ledger_merge.py` publishes a regular file, so a
-symlink is not a state any legitimate writer produces, and `ELOOP` degrades to a problem string like
-any other unreadable ledger. The residual is stated rather than implied: this pins the leaf, not the
-`runs/` directory above it.
+root that every other read here stays inside. `O_NOFOLLOW` on the leaf alone is not enough, because
+it pins only the FINAL component and the identical crossing is reachable one component higher by
+pointing `runs/` at a foreign directory. So `runs/` is opened `O_DIRECTORY|O_NOFOLLOW` and the leaf
+is resolved against that already-open descriptor — `scaffold_setup.py`'s own pattern, for the reason
+it states there: a check on a pathname rejects a symlinked directory only at CHECK time, while an
+operation resolved against a pinned fd cannot be redirected by a directory swapped in afterwards.
+`ledger_merge.py` publishes a regular file into a real directory, so neither symlink is a state any
+legitimate writer produces, and `ELOOP` degrades to a problem string like any other unreadable
+ledger. Both crossings are pinned as regression cases, each watched failing with only its own fix
+reverted.
 
 The regression cases include the two an implementation catching only `(OSError, JSONDecodeError)`
 would pass: a directory raises `IsADirectoryError`, an `OSError` subclass, while a ledger written as
@@ -117,31 +123,6 @@ before dispatch rather than silently re-translating — a refusal an operator cl
 Nothing else moves: no schema file, no `schema_hash`, no `orchestration_bundle_hash` (this script is
 not one of its members), no `render_version`, no `prompt_hash` (which reads only the durable
 `translate_TASK.md` and `review_TASK.md`). `SKILL.md` and `references/*.md` are hashed by nothing.
-
-## 1.85.0 — 2026-09-05
-
-**`canon_adjudication_audit.py`'s stderr detail lists had no way past their first 20 items
-(#856).**
-`_print_item_list`, `_print_evidence_failures`, and the inline `collapsed_split` block in
-`print_human_report` — including the `canon_absent_with_senses` early-return branch, which prints
-the same three list calls and the same evidence-failures call before the gate blocks
-unconditionally — each hard-capped their stderr detail list at 20 items, with a header that read a
-bare `(first 20)` regardless of how many items actually existed. On a real volume this is not an
-edge case: one book's `review_queue_unresolved` category reached 161 required items and
-`existing_merge` reached 22, both past the cap. An operator who needed every item to write a
-verdict had no CLI path to the rest of them — only importing the module and calling
-`compute_cat2_items` / `compute_cat4_items` directly reached them.
-
-A new `--limit N` flag (default 20, matching the previous cap; `0` prints every item) now governs
-those three capped list sites through one shared header helper. (A fourth truncation in this
-script, `_orphan_warning`'s first-10 elision of orphaned records, stays as it is — those are
-informational and non-blocking, and it already states its full count.) The header states the true
-total instead of the old bare count — `-- review_queue items with no risk-acceptance (first 20 of
-161; re-run with --limit 0 for the full list) --` — and drops the truncation clause entirely once
-every item fits on one run. `--limit` is display only: `totals`, `blocking_count`, `gate_passed`,
-every exit code, and the `--check` stdout JSON are unchanged by it, and a negative value is
-rejected at parse time (exit 2, no stdout) by the same `_nonneg_int` validator `--pair-review-cap`
-already uses.
 
 ## 1.92.0 — 2026-09-05
 
