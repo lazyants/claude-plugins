@@ -152,7 +152,28 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.83.2 (#843 -- name_discovery.py --dispatch passes the resolver
+    # ROTATED TO 1.94.0 (#871 -- nothing warned that editing
+    # `canonical_target_form` to merge two notes makes the canon misstate the
+    # source), and EMPTY ON PURPOSE, for the same reason the 1.83.2 record
+    # below states: the entry names its subjects by FILE and FUNCTION rather
+    # than by line -- `_owners_by_target()`, `_link_decision()`,
+    # `fold_match_key()`, `_entity_note_relpath()`, `KIND_RULES`,
+    # `canon_link_groups.json`, `canon-and-glossary.md`, `SKILL.md`,
+    # `validate_backlinks.py` -- and states no `file.ext:NNN` citation at all,
+    # which is the shape this guard reads. Measured against the entry rather
+    # than asserted: a scan of its slice for that pattern returns zero matches.
+    #
+    # It is also the right shape for this particular release. The release ADDS
+    # prose to `canon-and-glossary.md` and `SKILL.md`, which moves every line
+    # below each insertion point. A citation CAN still be written against the
+    # final tree -- this release re-points an existing range in
+    # `orchestration_hash_resume_gating.test.py` for exactly that reason -- but
+    # every insertion then obliges the author to refresh the citations already
+    # pointing into those files. Naming the symbol instead is what keeps this
+    # entry out of that maintenance.
+    #
+    # The 1.83.2 rotation this replaces, kept as its own record (#843 --
+    # name_discovery.py --dispatch passes the resolver
     # its required --durable-root), and EMPTY ON PURPOSE. That entry names its
     # subjects by FILE, FUNCTION and CONSTANT rather than by line --
     # `resolve_companion()`, `cmd_dispatch()`, `resolve_codex_companion.py`,

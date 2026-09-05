@@ -1680,7 +1680,12 @@ trusts, made outside every validation this plugin owns. A correction re-stales t
 segments whose segpack references that form — bounded re-review via an admissible
 `--from-converged` claim, which never re-translates the draft. The correction does
 change `canon.json`'s bytes, a frozen input of the skeptic pass: run it BETWEEN passes.
-Full contract: `references/canon-and-glossary.md`, "`--correct PATH`".
+That price is not a licence to retarget an entry so two spellings of one referent stop
+being two notes (#871): `canonical_target_form` also prescribes how the translator renders
+that source form, so equalizing the targets instructs it to drop what the longer form
+carried. It does not remove a note anyway.
+Full contract: `references/canon-and-glossary.md`, "`--correct PATH`" and "What a group
+CANNOT do".
 
 **#653 — dismissing a `review_queue[]` candidate that is simply NOT
 canon-worthy.** `correct`/`remove` adjudicate `entries{}`; nothing adjudicated
@@ -2517,6 +2522,10 @@ Acting on a proposal is the existing `canon_validate.py --correct` route
 `--correct` changes `canon.json`'s bytes and the skeptic pass holds them as a frozen
 input. A correction re-stales the carriers of that form; an admissible
 `--from-converged` claim then authorizes bounded re-review and never re-translates the draft.
+**Not every divergence is one to harmonise (#871):** where the two targets differ by a
+memorial or honorific formula the SOURCE prints, correcting one to the other makes the canon
+instruct the translator to drop it. Do not correct a target to merge two notes —
+`references/canon-and-glossary.md`, "What a group CANNOT do", has the shape and the remedy.
 
 **Skeptic pass (RFC #215 Phase 2, opt-in + advisory)** — an adversarial re-read of the
 frozen canon by a file-capable agent, gated on `glossary.skeptic_pass.enabled`, which

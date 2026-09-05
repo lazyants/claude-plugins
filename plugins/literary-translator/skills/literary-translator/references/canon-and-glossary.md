@@ -1105,6 +1105,13 @@ in-flight draft tokens and still meets #742's foreign-draft refusal, whose
 documented re-stamp remains the route through it — see
 `references/ledger-and-resumability.md`.
 
+**A cheap price is not a licence (#871).** One correction this price must not
+buy: retargeting an entry so that two spellings of one referent share a target
+and stop being two notes. That is not a spelling harmonisation — it makes the
+canon misstate the source, and this cost model is exactly why it looks safe.
+See "What a group CANNOT do" under `canon_link_groups.json` below for the shape
+and for what to do instead.
+
 **Sizing a canon change BEFORE you apply it.** `compute_used_terms_hash` reads
 `canon.json` from whatever root it is handed, so the segments a *pending*
 change would re-stale are computable with no new tooling and nothing written.
@@ -1503,6 +1510,46 @@ never folded, never NFC-normalized, and a member that is not a key is a hard
 load error rather than a tolerated no-op, because a silent no-op is exactly
 the failure that would leave an operator believing their pass was applied.
 
+**What a group CANNOT do: merge two entries whose targets differ (#871).** A
+glossary pass can freeze `X` and `X ז"ל` as two entries with two targets —
+`R. Getzil` and `R. Getzil, of blessed memory` — and one note per canon entry
+then gives one man two notes. A group does not reach that shape. Its routing
+effect needs a target COLLISION: `_owners_by_target` keys on the NFC
+`canonical_target_form` and `_link_decision` consults the group map only inside
+the de-link branch, so two distinct targets are two single-owner targets, each
+keeps its own inline link, and the group moves nothing. `obsidian.md` states
+the same limit from the renderer's side. Note that the LOADER still accepts
+such a group — the schema constrains source-form membership, not target
+equality — so this is a no-op it cannot refuse for you: it is the
+renderer that declines to act on it, and nothing will say so at load time.
+
+The #497 effect does not rescue it either, though for a different reason worth
+knowing: that one tests fold-key closure and membership, never target equality,
+so a group CAN credit occurrences across differing targets when its members
+share a `#238/#241` fold key. This pair does not share one — `fold_match_key`
+keeps the honorific's letters, so `X ז"ל` folds to strictly more match units
+than `X`.
+
+**Do not reach for the target instead.** Making the two targets equal so they
+collide, and grouping them, does work on the headings — and it is the wrong
+lever, because `canonical_target_form` is not only a routing key. It is the
+note's `# ` heading, it is the string the inline matcher looks for in
+translated prose, and through the segpack's `canon_map` it PRESCRIBES how the
+translator renders that source form. Strip a memorial honorific from the target
+and the canon now instructs the translator to drop a formula the source prints;
+the next review round correctly raises the missing blessing as omitted source
+content. Measured: applied to 31 entries on one volume and reverted the same
+day. Note what it does NOT buy, either — the note FILENAME comes from the
+`source_form` (`_entity_note_relpath`), so both notes still exist afterwards.
+
+**What to do instead: nothing — leave the two notes.** In the vault where this
+was measured they were orphans, with zero inbound links: only one of the two
+forms carries the inline links, and the operator's own series-level index had
+already folded the rows. A note nothing points at costs a reader nothing. And the price
+will not warn you off — see "What a correction costs" above: under an
+admissible `--from-converged` claim this correction buys a re-review, not a
+re-translation, so it reads as cheap right up until the next review's findings.
+
 ## `canon_harmonisation.json` — one whole-canon read for divergent `canonical_target_form`s (#823)
 
 A fourth optional sidecar beside `canon_senses.json`, `canon_adjudications.json`
@@ -1618,6 +1665,15 @@ three of `corpus`, `source_form` and `target_form` — not, as before, a
   canon property, and no draft or candidate row can establish that two
   referents share one vault page — the more damaging direction, since one
   page for two people is worse than two pages for one.
+- **Neither divergent kind is a licence to merge two notes (#871).** Both route
+  to `--correct`, and a `X` / `X <honorific>` pair can be proposed under either
+  of them — the two kinds share one structural rule (`KIND_RULES` maps both to
+  `"divergent"`) and the kind is the dispatched pass's to assign. Where the
+  divergence is a memorial or honorific formula the SOURCE itself prints, the
+  two targets are not a spelling inconsistency to harmonise: correcting one to
+  the other makes the canon misstate the source. See "What a group CANNOT do"
+  under `canon_link_groups.json` above. A genuine spelling divergence — one
+  rendering frozen two ways — is what these kinds are for.
 - `divergent_spelling` and `divergent_policy` may be satisfied entirely by
   draft observations — the class that was invisible before this corpus
   existed, because it never reached `canon.json` at all. Their route is
