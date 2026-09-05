@@ -310,10 +310,8 @@ def test_1_marker_written_with_pinned_shape_on_successful_merge(tmp_path):
     assert MERGED_AT_RE.match(marker["merged_at"]), marker["merged_at"]
     assert marker["batches"] == [0]
     assert marker["source"] == "merge"
-    # #876: no dispatch path passes a model argument and nothing in the run
-    # records one, so the marker says exactly that -- absent by design, not
-    # merely missing. Pinned byte-for-byte against GLOSSARY_DISPATCH_MODEL_
-    # UNRECORDED (see below, loaded in-process from the real module).
+    # #876: pinned against canon_validate.py's own constant, loaded
+    # in-process at :117; test_1b below pins the sentence itself.
     assert marker["dispatch_model"] == GLOSSARY_DISPATCH_MODEL_UNRECORDED
 
 
