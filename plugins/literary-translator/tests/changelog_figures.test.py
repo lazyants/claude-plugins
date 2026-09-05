@@ -531,6 +531,25 @@ FIGURES = [
     # reads them off `profile.schema.json` rather than restating them -- so the
     # schema-agreement half is covered by a test, not by a figure row.
     #
+    # The 1.96.0 rotation this replaces, kept as its own record (#876 -- the
+    # glossary run's merge marker says its dispatch model is unrecorded):
+    #
+    # ZERO rows. The entry quotes no digit-written measurement at all. Every
+    # numeral in it is an identifier rather than a fact: the two version
+    # numbers, the release date, the issue numbers (#876 and the #820 gate
+    # whose marker this extends), and `Step 6d`, the name of a preflight
+    # axis.
+    #
+    # The counts it COULD have quoted are counts of things in this tree --
+    # how many writers stamp the marker, how many readers tolerate an
+    # unknown key on it -- and both are written as NAMES ("both writers",
+    # "both readers") rather than numerals, which is this guard's documented
+    # way of keeping a fact out of it. Writing either as a digit would also
+    # have been a figure nothing red would catch going stale: the tests that
+    # own those facts assert the behaviour AT each site (an emit per writer,
+    # an admission per reader), so adding a third writer or reader moves the
+    # true count while every one of them still passes.
+    #
     # The 1.95.0 rotation this replaces, kept as its own record (#874 -- the
     # shipped example profile handed every project a Russian
     # politeness-register instruction), per the maintenance contract above.

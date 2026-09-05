@@ -255,6 +255,7 @@ def write_glossary_run_merged_marker(
     source="merge",
     merged_at="2026-01-01T00:00:00Z",
     batches=(0,),
+    extra_fields=None,
 ) -> None:
     """Writes {run_dir}/merged.json in exactly the shape
     canon_validate.py --merge-batches / backfill_glossary_merge_ack.py
@@ -262,18 +263,25 @@ def write_glossary_run_merged_marker(
     matching the caller's own run directory -- the dedicated mismatch test
     (see the #820 follow-up block below test 11) passes a DIFFERENT value
     explicitly to prove the gate catches a marker that does not belong to
-    the run it sits under."""
+    the run it sits under.
+
+    Every existing call site here omits `extra_fields`, so every test above
+    already exercises a marker WITHOUT `dispatch_model` -- a pre-1.96.0
+    marker already on disk, #876's own admission requirement. `extra_fields`
+    exists so ONE test (test_12b below) can additionally pin the marker WITH
+    `dispatch_model` present, proving both shapes admit identically -- the
+    gate reads only `schema`/`run_id`, so any unknown key must be inert."""
+    marker = {
+        "schema": "glossary-run-merged/1",
+        "run_id": run_id,
+        "merged_at": merged_at,
+        "batches": list(batches),
+        "source": source,
+    }
+    if extra_fields:
+        marker.update(extra_fields)
     (run_dir / "merged.json").write_text(
-        json.dumps(
-            {
-                "schema": "glossary-run-merged/1",
-                "run_id": run_id,
-                "merged_at": merged_at,
-                "batches": list(batches),
-                "source": source,
-            },
-            ensure_ascii=False,
-        ),
+        json.dumps(marker, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -1130,7 +1138,8 @@ def test_11_driver_forwards_the_flag_and_gets_past_the_selector_gate(tmp_path):
 # layer: canon_validate.py --merge-batches now WRITES the fact directly, a
 # `{run_dir}/merged.json` marker stamped on successful merge
 # (`{"schema": "glossary-run-merged/1", "run_id", "merged_at", "batches",
-# "source": "merge"}`); backfill_glossary_merge_ack.py writes the SAME
+# "source": "merge", "dispatch_model"}`); backfill_glossary_merge_ack.py
+# writes the SAME
 # marker shape (`"source": "backfill-ack"`, plus a `"note"` field) for runs
 # that predate this gate -- an acknowledged run admits exactly like a
 # merged one. CONDITION 3 (`check_glossary_runs_merged()`) now just reads
@@ -1168,6 +1177,33 @@ def test_12_admits_with_a_valid_merge_marker(tmp_path):
     write_name_candidates(root, [])  # -> CONDITION 2 admits, reaching CONDITION 3
     run_dir = make_glossary_run(root, "R")
     write_glossary_run_merged_marker(run_dir, "R", source="merge")
+
+    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert_admitted_with_segs(payload)
+
+
+# ---------------------------------------------------------------------------
+# 12b. #876: a marker that ALSO carries "dispatch_model" -> admits exactly
+#      like one without it. Neither reader of this marker rejects an
+#      unknown key, though they tolerate it for DIFFERENT reasons:
+#      check_glossary_runs_merged() here validates "schema" and "run_id"
+#      and looks at nothing else, while backfill_glossary_merge_ack.py's
+#      read_existing_marker() validates neither -- any readable JSON object
+#      counts as a marker already present, and is preserved untouched.
+#      This is the regression proving both stay true once canon_validate.py
+#      starts stamping the new key.
+# ---------------------------------------------------------------------------
+
+def test_12b_admits_with_a_marker_that_also_carries_dispatch_model(tmp_path):
+    root = make_full_project(tmp_path)
+    write_name_candidates(root, [])
+    run_dir = make_glossary_run(root, "R")
+    write_glossary_run_merged_marker(
+        run_dir, "R", source="merge",
+        extra_fields={"dispatch_model": {"recorded": False, "reason": "unrecorded by design"}},
+    )
 
     proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
