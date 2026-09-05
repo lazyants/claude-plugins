@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.88.1 — 2026-09-05
+
+**The shipped example profile handed every project a Russian `untranslated_sentinel`, whatever its
+target language (#862).**
+`profile.example.yml` carried `untranslated_sentinel: "нет перевода"`. Step 0 copies that file
+verbatim when a project has no `profile.yml`, so the value was inherited unchanged by every book
+scaffolded from it. The sentinel's whole job is to be recognisable to the operator reading a draft
+— it is addressed to whoever is scanning the output for problems, not to the book's reader — and a
+marker written in a language that project is not translating into is exactly the one thing that
+cannot do that job.
+
+It survived because nothing points at it. The field is not one of the `CHOOSE_` sentinels Step 0's
+placeholder scan halts on, so no intake question ever raised it; it reads as a filled-in value
+because it is one. And it only becomes visible when the translator fails to render something, so a
+project where it never fires never learns it is wrong — the good case and the bad case are
+indistinguishable until the moment the marker is needed. On one live Hebrew→English series, two
+volumes had been corrected to an English marker by hand and a third still carried the Russian one.
+
+The default is now `"[TODO-UNTRANSLATED]"`, the form this plugin's own fixtures already use. The
+value is deliberately bracketed rather than a bare English phrase: `validate_draft.py` scans
+translated prose for it as a case-sensitive SUBSTRING, so `"NO TRANSLATION"` — the obvious neutral
+wording, and the one operators reached for by hand — flags a legitimate all-caps heading as
+untranslated. A bracket-delimited token cannot occur in prose by accident, which is the property
+the check needs and a phrase cannot give it.
+
+Nothing migrates. `cache_key.py` hashes each project's OWN `profile.yml`, never the shipped
+example, so no existing book re-stales and no converged segment moves. The change reaches new
+scaffolds only. A project that wants a localised marker still sets one — but at Step 0, because the
+field IS hashed per project, so editing it after a volume converges re-stales that book. The
+example's comment now says so at the field, where the decision is made.
+
 ## 1.87.0 — 2026-09-05
 
 **`assemble.py --help` wrote the output vault instead of printing usage (#861).** W9 is this
@@ -69,6 +100,7 @@ mandatory control asserting a bare run of the fixture really does exit 0 and pro
 and each argv case compares a full recursive listing of its own root taken before and after. The
 ordering mutant was executed against the shipped fixture, and every argv case goes red.
 
+
 ## 1.85.0 — 2026-09-05
 
 **`canon_adjudication_audit.py`'s stderr detail lists had no way past their first 20 items
@@ -93,6 +125,7 @@ every item fits on one run. `--limit` is display only: `totals`, `blocking_count
 every exit code, and the `--check` stdout JSON are unchanged by it, and a negative value is
 rejected at parse time (exit 2, no stdout) by the same `_nonneg_int` validator `--pair-review-cap`
 already uses.
+
 
 ## 1.84.2 — 2026-09-04
 

@@ -490,9 +490,25 @@ def _name_discovery_passes_default():
 
 
 FIGURES = [
-    # ROTATED TO 1.87.0 (#861 -- assemble.py had no argument parsing, so --help
-    # wrote the whole output vault instead of printing usage), per the
-    # maintenance contract above.
+    # ROTATED TO 1.88.1 (#862 -- the shipped example profile handed every project
+    # a Russian `untranslated_sentinel`), per the maintenance contract above.
+    #
+    # ZERO rows. The entry's only quantities are a count of volumes in a live
+    # series translated in ANOTHER REPOSITORY -- two corrected by hand, a third
+    # still carrying the inherited value -- which no implementation in this tree
+    # can reach. Every claim about THIS tree is worded by naming the thing rather
+    # than counting it: `profile.example.yml`, `validate_draft.py`'s substring
+    # scan, `cache_key.py` hashing the project's own profile, and the fact that
+    # the field is not a `CHOOSE_` sentinel. The count that was available and
+    # deliberately not quoted is how many `CHOOSE_` sentinels the example ships;
+    # the entry says the field is not one of them, which is the property it is
+    # actually standing on and which does not rot when a later release adds
+    # another. The remaining numerals are identifiers: the version numbers, the
+    # release date and the issue number (#862).
+    #
+    # The 1.87.0 rotation this replaces, kept as its own record (#861 --
+    # assemble.py had no argument parsing, so --help wrote the whole output
+    # vault instead of printing usage):
     #
     # ZERO rows. The entry's only measurements are facts about ONE LIVE RUN OF A
     # BOOK IN ANOTHER REPOSITORY -- the 31 chapters and 665 entity notes that
@@ -617,7 +633,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.87.0"
+FIGURES_VERSION = "1.88.1"
 
 
 def _newest_entry():
