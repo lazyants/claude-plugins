@@ -504,9 +504,37 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.98.0 (#881 -- running the glossary driver from the plugin
-    # tree silently retargets the durable root), per the maintenance contract
-    # above.
+    # ROTATED TO 1.99.0 (#883 -- the ready batches of a glossary run one
+    # sibling exhausted are merged by hand, and SKILL.md now says how), per
+    # the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed.
+    # Every digit-run in it is an IDENTIFIER, not a measurement: the version
+    # (1.99.0), the date, the issue numbers (#883, and the #820, #881, #858
+    # and #290 gates and releases the entry names), the release whose trade
+    # this one repeats (1.16.0), and `W3`/`W5`, the two passes the entry
+    # describes. There is no other measurement for a row to check.
+    #
+    # The entry's own measured figures -- how many of twelve and of thirteen
+    # batches exhausted on the two live volumes, and how many accepted and
+    # review-queue entries each run would have discarded -- are facts about
+    # book projects in ANOTHER REPOSITORY, so no implementation in THIS tree
+    # can re-derive them, the same class the 1.98.0, 1.94.0, 1.91.0 and
+    # 1.90.0 rotations below name for theirs. They are written as WORDS for
+    # exactly that reason ("four of twelve", "one hundred and forty-seven"),
+    # which is this guard's documented way of keeping such a fact out of it.
+    #
+    # The counts this release COULD have quoted are counts of things in this
+    # tree: how many flags the new merge command carries, and how many tests
+    # `tests/skill_prose_present.test.py` adds to guard it. Both are
+    # deliberately left unstated as digits -- the flags are listed by name in
+    # the entry and the test count is not mentioned at all -- for the same
+    # reason the 1.98.0 rotation below gives for its driver-argument count: a
+    # digit here is a figure nothing red would catch going stale.
+    #
+    # The 1.98.0 rotation this replaces, kept as its own record (#881 --
+    # running the glossary driver from the plugin tree silently retargets
+    # the durable root), per the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed. Its
     # one DIGIT-WRITTEN measurement -- 12 codex jobs spent on a single
@@ -868,7 +896,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.98.0"
+FIGURES_VERSION = "1.99.0"
 
 
 def _newest_entry():
