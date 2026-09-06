@@ -27,7 +27,9 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 - **Footers print only in the mode they describe.** "`--live` fetches current Claude numbers"
   printed under `--live` itself, and the app-server disclosure printed when no Codex home had been
   read at all (`--codex-home` naming a missing directory). The first now prints in default mode
-  only, the second only when a Codex home's app-server was actually started. The stale-window
+  only, the second only when the report went to read a Codex home -- that is, when the home's
+  directory was there to open and its reading was attempted, whether or not the app-server then
+  answered. The stale-window
   legend says "the reading predates its reset" rather than "the cache": a live Codex window
   renders through the same row.
 

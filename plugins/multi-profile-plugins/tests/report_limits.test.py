@@ -1208,6 +1208,30 @@ with tempfile.TemporaryDirectory() as tmp:
     check("21e and the run gaps", done.returncode == 1, f"rc={done.returncode}")
     assert_no_secret("21e unparsable credential file", done.stdout, done.stderr)
 
+    # 21g -- subprocess, OFFLINE: the same absent-login file as 21f (a present file whose
+    # accessToken is empty) falls to a Keychain payload whose OWN token is EXPIRED. The file's
+    # own token-absent verdict must stand, not the Keychain's token-expired -- the one
+    # distinction 21c cannot make, since there both sides read the same code. Neither verdict
+    # ever reaches the network, so this stays safely offline.
+    absent_root = root / "keyabsentexpired"
+    profile_g = make_claude(absent_root, ".claudeAbsent", cached(entries=[entry(percent=33)]))
+    (profile_g / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": "", "expiresAt": now_ms(24)}
+    }), encoding="utf-8")
+    keychain_expired_g = json.dumps({
+        "claudeAiOauth": {"accessToken": SENTINEL_KEYCHAIN, "expiresAt": now_ms(-1)}
+    })
+    done, _, _ = run(["--live", "--claude-profile", str(profile_g),
+                      "--codex-home", str(make_codex_home(absent_root, ".codexClean"))],
+                     root=absent_root, extra_env={"STUB_SECURITY_PAYLOAD": keychain_expired_g})
+    check("21g an absent file token behind an EXPIRED keychain still reads token-absent",
+          "[token-absent]" in done.stdout and "[token-expired]" not in done.stdout, done.stdout)
+    absent_marker = absent_root / "security-called.txt"
+    check("21g the keychain was consulted", absent_marker.exists(), "no marker written")
+    check("21g it does NOT fall back to the cache either", "33%" not in done.stdout, done.stdout)
+    check("21g and the run gaps", done.returncode == 1, f"rc={done.returncode}")
+    assert_no_secret("21g absent file token, expired keychain", done.stdout, done.stderr)
+
 
 # --- 22 / 23: transport safety. These import the module, deliberately, because reaching an HTTPS
 # stub from a subprocess would need a production origin override -- the very defect they prevent.
@@ -1580,6 +1604,42 @@ with tempfile.TemporaryDirectory() as tmp:
     check("21d and never the expired file's token",
           all(SENTINEL_TOKEN not in header.get("Authorization", "")
               for header in KVRecording.headers), str(len(KVRecording.headers)))
+
+    # 21f -- IN-PROCESS: a present file whose accessToken is EMPTY (token-absent, not merely a
+    # missing file) falls to a Keychain payload holding a VALID token, the same shape 21d
+    # exercises for an expired file. Modelled on 21d.
+    f_root = root / "keyabsentvalid"
+    bindir_f = install_stub(f_root)
+    profile_f = f_root / ".claudeAV"
+    profile_f.mkdir(parents=True, exist_ok=True)
+    (profile_f / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": "", "expiresAt": now_ms(24)}
+    }), encoding="utf-8")
+    stored_f = json.dumps({
+        "claudeAiOauth": {"accessToken": SENTINEL_KEYCHAIN, "expiresAt": now_ms(24)},
+    })
+    marker_f = f_root / "security-called.txt"
+    saved_env_f = {k: os.environ.get(k) for k in
+                   ("PATH", "STUB_SECURITY_MARKER", "STUB_SECURITY_PAYLOAD")}
+    token_f = None
+    try:
+        os.environ["PATH"] = f"{bindir_f}{os.pathsep}{saved_env_f['PATH']}"
+        os.environ["STUB_SECURITY_MARKER"] = str(marker_f)
+        os.environ["STUB_SECURITY_PAYLOAD"] = stored_f
+        token_f = R._claude_token(profile_f)
+    finally:
+        for name, value in saved_env_f.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    check("21f _claude_token returns the KEYCHAIN token for an empty file token",
+          token_f == SENTINEL_KEYCHAIN,
+          "matched" if token_f == SENTINEL_KEYCHAIN else "a different value came back")
+    check("21f the marker shows the keychain was actually asked",
+          marker_f.exists() and "find-generic-password" in marker_f.read_text("utf-8"),
+          marker_f.read_text("utf-8") if marker_f.exists() else "no marker written")
 
     # 38 -- an explicitly named profile is made ABSOLUTE before anything hashes it. The
     # Keychain service is the hash of the profile's absolute path, so a relative
@@ -2791,7 +2851,13 @@ check("65 an unopened window reads as neither of the other two quiet states",
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
-    foot_claude = make_claude(root, ".claudeFoot", cached(entries=[entry(percent=10)]))
+    # token=False: the default-mode run below reads the cache and needs no credential at all,
+    # and the --live run gaps on the (denying-by-default) Keychain stub -- which is exactly as
+    # good for a footer-PRESENCE assertion as a real answer, and offline. An unexpired token
+    # here would let the --live run's subprocess authenticate for real and reach
+    # api.anthropic.com, which is not something a footer-text test may ever do.
+    foot_claude = make_claude(root, ".claudeFoot", cached(entries=[entry(percent=10)]),
+                              token=False)
     foot_codex = make_codex_home(root, ".codexFoot")
 
     # 66 -- the on-disk-cache hint is default-mode-only: under --live there is no cache being
