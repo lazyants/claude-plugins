@@ -65,6 +65,23 @@ DIAGNOSTICS = (
 )
 DIAGNOSTIC_SET = frozenset(DIAGNOSTICS)
 
+# A short next step for a diagnostic that has one. Not every code needs a hint -- most describe
+# a condition there is nothing to DO about from here -- so this stays a lookup, not a rewrite of
+# DIAGNOSTICS itself.
+HINTS = {
+    "token-expired": "open Claude Code in that profile once -- only a running session refreshes"
+                      " its login",
+}
+# A key outside the closed vocabulary would look wired up and never fire -- DIAGNOSTIC_SET is
+# the only thing `_with_hint` ever looks a code up against.
+assert set(HINTS) <= DIAGNOSTIC_SET, sorted(set(HINTS) - DIAGNOSTIC_SET)
+
+
+def _with_hint(code: str) -> str:
+    """`code`, plus ` -- {hint}` when one exists for it. Never invents a diagnostic token."""
+    hint = HINTS.get(code)
+    return f"{code} -- {hint}" if hint else code
+
 # Terminal states. Every candidate and every record ends in exactly one of these three, and
 # nothing else is ever assigned to Record.state -- an earlier "info" constant was, which made
 # this comment false about the line directly under it.
@@ -799,6 +816,12 @@ def _keychain_blob(profile: Path) -> dict:
         )
     except (OSError, subprocess.SubprocessError):
         raise Malformed("keychain-denied") from None
+    except UnicodeError:
+        # `text=True` decodes stdout as it is captured; undecodable bytes raise here, past the
+        # `except` above. This must still come out Malformed -- a bare exception cannot be
+        # caught by `_claude_token`'s file-first fallback, which would then answer
+        # `internal-error` instead of letting the file's own diagnostic stand.
+        raise Malformed("response-malformed") from None
     if done.returncode != 0:  # stderr is deliberately captured and never rendered
         raise Malformed("keychain-denied")
     payload = done.stdout.strip()
@@ -814,9 +837,10 @@ def _keychain_blob(profile: Path) -> dict:
 def _bearer(blob) -> str:
     """The access token out of a Claude Code credential object, whatever it was read from.
 
-    ONE extractor, because the file on disk and the Keychain item hold the same object. Two
-    readers is how they drifted: the file's parsed it and validated the expiry, the Keychain's
-    returned raw stdout and checked neither.
+    ONE extractor, so a file-sourced blob and a Keychain-sourced blob are judged by the same
+    rule. They are not always the SAME object: the file is the CLI's fallback store, written
+    only when a Keychain write is rejected, and nothing ever deletes it afterwards -- so it can
+    sit on disk holding a login the Keychain has since replaced.
     """
     oauth = blob.get("claudeAiOauth") if isinstance(blob, dict) else None
     if not isinstance(oauth, dict):
@@ -832,7 +856,16 @@ def _bearer(blob) -> str:
 
 
 def _claude_token(profile: Path) -> str:
-    """Return the profile's bearer. Never rendered, never logged, never placed in an argv."""
+    """Return the profile's bearer. Never rendered, never logged, never placed in an argv.
+
+    The file is the CLI's fallback store: a login normally goes to the Keychain, and the CLI
+    writes this file only when that write is rejected (Keychain locked in an SSH session, its
+    password out of sync). Nothing removes the file once the Keychain accepts writes again, so
+    a profile can carry a stale, expired file beside a Keychain item a later session refreshed.
+    A file that parses but reads as absent or expired therefore falls back to the Keychain
+    before this function gives up on the profile; a file that does not parse, or is not there
+    to read at all, is judged exactly as before.
+    """
     try:
         handle = open(profile / ".credentials.json", encoding="utf-8")
     except FileNotFoundError:
@@ -852,7 +885,19 @@ def _claude_token(profile: Path) -> str:
             blob = json.load(handle)
         except (OSError, ValueError):
             raise Malformed("response-malformed") from None
-    return _bearer(blob)
+    try:
+        return _bearer(blob)
+    except Malformed as file_error:
+        if file_error.code not in ("token-absent", "token-expired"):
+            raise
+        # The file's own verdict stands unless the Keychain actually has something better to
+        # say. Any Keychain failure re-raises the FILE's diagnostic, never the Keychain's --
+        # a profile whose file exists must not report `keychain-denied` for a store it never
+        # needed.
+        try:
+            return _bearer(_keychain_blob(profile))
+        except Malformed:
+            raise file_error from None
 
 
 def _claude_live(profile: Path) -> list[Record]:
@@ -1398,9 +1443,6 @@ class Pool:
         self.family = family
         self.cells: dict[str, Record] = {}
 
-    def current(self) -> list[Record]:
-        return [record for record in self.cells.values() if record.kind() == "current"]
-
     def freshness(self) -> str:
         """The row's provenance. Every cell on a row comes from ONE read of ONE candidate, so
         the first non-empty answer is the row's; the loop is there so an empty one cannot win."""
@@ -1561,7 +1603,7 @@ def _pool_table(pools: list[Pool], now: datetime.datetime, paint: Paint) -> None
 
 
 def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
-            now: datetime.datetime, paint: Paint) -> None:
+            now: datetime.datetime, paint: Paint, *, live: bool, codex_examined: bool) -> None:
     """The whole report: a voucher band, then one table -- one line per allowance."""
     buckets: dict[str, list[Row]] = {"pool": [], "voucher": [], "info": []}
     for group, ident, where, records in groups:
@@ -1580,14 +1622,17 @@ def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
         # Printed only when such a cell is on the page. The cell already says `... ago`;
         # what it cannot say is why a report would show a window that is over, or how to get the
         # current one -- and a legend for a row nobody is looking at is just noise.
-        notes = notes + ["a cell reading `... ago` is the PREVIOUS window -- the cache"
+        notes = notes + ["a cell reading `... ago` is the PREVIOUS window -- the reading"
                          " predates its reset  [stale-after-reset]"]
     for note in notes:
         print(paint(f"  {note}", DIM))
-    print(paint("  --live fetches current Claude numbers instead of the on-disk cache", DIM))
-    print(paint("  reading Codex starts its app-server, which migrates that home's own state"
-                " databases", DIM))
-    print(paint("  exactly as any codex invocation does. Nothing here is ever redeemed.", DIM))
+    if not live:
+        print(paint("  --live fetches current Claude numbers instead of the on-disk cache", DIM))
+    if codex_examined:
+        print(paint("  reading Codex starts its app-server, which migrates that home's own"
+                    " state databases", DIM))
+        print(paint("  exactly as any codex invocation does. Nothing here is ever redeemed.",
+                    DIM))
 
 
 def _refreshed(live: tuple[str, list[Record], str], cached: tuple[str, list[Record], str]):
@@ -1678,7 +1723,7 @@ def main(argv: list[str] | None = None) -> int:
                 # default mode promised to read a cache and it read one.
                 live_state, live_records, live_code = _examine(candidate, _claude_live)
                 if not live_records:
-                    detail = live_code or "the backend returned nothing to read"
+                    detail = _with_hint(live_code) or "the backend returned nothing to read"
                     notes.append(f"{where}: the cache describes a window that is over, and the"
                                  f" live retry did not answer -- {detail}")
                 state, records, code = _refreshed((live_state, live_records, live_code),
@@ -1689,11 +1734,12 @@ def main(argv: list[str] | None = None) -> int:
                 notes.append(f"{where} [{code}]")
             groups.append((group, str(candidate.path), where, records))
             if state == GAP:
-                detail = code or ", ".join(f"{r.name} [{r.diagnostic}]"
-                                           for r in records if r.state == GAP)
+                detail = _with_hint(code) or ", ".join(f"{r.name} [{r.diagnostic}]"
+                                                        for r in records if r.state == GAP)
                 warnings.append(f"{group} {where}: NOT checked -- {detail}")
 
-    _render(groups, notes, now, paint)
+    codex_examined = any(candidate.gap == "" for candidate in codex)
+    _render(groups, notes, now, paint, live=args.live, codex_examined=codex_examined)
 
     if warnings:
         print(paint("\nwarnings", RED))
