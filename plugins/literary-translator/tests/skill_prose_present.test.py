@@ -1296,7 +1296,7 @@ def test_w3_partial_merge_route_after_exhausted_batch_present():
     assert _whole_arg_present(
         merge, "--glossary-merge-marker", "--citations-reviewed", "--approval-records"
     ), f"partial-merge command missing a required flag: {merge!r}"
-    assert re.search(r"(?<!\S)--research-mode live(?=\s|$)", merge), (
+    assert _whole_arg_present(merge, "--research-mode live"), (
         f"partial-merge command must carry --research-mode live; got: {merge!r}"
     )
     assert PLUGIN_ROOT_ARG_RE.search(merge), (
