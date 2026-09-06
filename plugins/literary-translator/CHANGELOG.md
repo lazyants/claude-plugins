@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.98.1 — 2026-09-06
+
+**A driver killed mid-loop persists nothing, and the documented relaunch re-dispatches every
+batch it had already settled (#882).** `save_state()` had three conditional call sites, all inside
+`main()`, after `drive_all()` had already returned — so an initial drive killed while advancing its
+batches left no state document behind. SKILL.md's own documented recovery for this driver is that
+the same command re-run resumes where it stopped; after such a kill that sentence was false: the
+next invocation's `load_state()` found nothing, every batch read `pending`, and the run
+re-dispatched all of them from attempt 0.
+
+Measured on one live project: two kills by macOS memory pressure on 2026-09-05. Its `runs/`
+directory holds two sibling run directories carrying one identical input digest — the shape an
+unoffered resume candidate produces, a compatible explanation rather than a demonstrated cause,
+since the payload the session actually sent that day is not itself on disk.
+
+The corrected premise, established against current source: the resume machinery was never blind to
+a missing state document, because it never reads one. `resolve_run()` decides whether a restart
+resumes by comparing the freshly computed input digest only against `runs/<candidate>/input.digest`,
+for the candidates the payload names under `resume_from_run_ids` (or the deprecated singular
+`resume_from_run_id`) — never against anything `drive_all()` or `main()` writes. No candidate
+offered, or none whose recorded digest matches, mints a fresh RUN_ID regardless of what the driver
+had saved. The glossary path's own instructions never told the session to offer one; the mass
+driver builds that candidate list itself, which is why only the glossary path had this gap.
+
+`drive_all()` now calls `save_state()` after every batch it drives, so a kill mid-loop leaves the
+document holding every batch already settled or awaiting a judge. A reconciliation reset now
+stamps the dropped batch's entry with `resumeSkipDropped`, and `main()` derives which indices lose
+their resume-skip from that marker in the document rather than from the current invocation's own
+reset list — so a second kill before a reset batch's re-drive publishes cannot let a later
+invocation resume-skip attempt-0 bytes a judge may already have rejected. The `DispatchSandbox`
+refusal text no longer says nothing about the run has been recorded; it says progress saved so far
+is kept, and that re-running the same command after fixing `TMPDIR` continues from the last saved
+batch state. SKILL.md's driver-loop item states the relaunch contract this now honours, and its
+glossary-payload paragraph documents `resume_from_run_ids` as the field that decides a restart's
+resume.
+
+Left as it stood: `write_pending()` stays deliberately non-atomic, through a pinned directory
+descriptor rather than a rename, so a kill that lands inside a write can still leave the document
+unreadable — the next run exits naming the fault, and deleting the document discards the driver's
+state only; the fragments on disk and `--resumed-batch-indices` keep their meaning and the drive
+starts over from them, today's behaviour. A batch that was in flight at the
+kill keeps its approved slots un-released, same as any other relaunch: a status the driver has not
+yet declared cannot be reset without risking a slot a second driver on the same run still holds.
+
+**Migration.** `glossary_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this release
+moves `plugin_bundle_hash`; every converged segment of a book in progress goes `stale` and
+re-translates. It is not a `DERIVATION_BUNDLE_MEMBERS` entry, so no W3/W3a regeneration is forced.
+That hash is also folded into the glossary resume identity, so once Step 0a refreshes the durable
+`scripts/` and markers an UNFINISHED glossary pass mints a fresh `RUN_ID` and restarts instead of
+resuming — and a live project gets this fix only then, because the driver a run executes is the
+durable copy, never the plugin tree.
+
 ## 1.98.0 — 2026-09-05
 
 **Running the glossary driver from the plugin tree silently retargets the durable root, and nothing

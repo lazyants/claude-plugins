@@ -1864,7 +1864,13 @@ calling `pipeline()`, a deterministic pre-workflow step invokes
 resume-integrity digest gate, creates `glossary/runs/<RUN_ID>/`, and
 atomically writes each batch's `manifest_{index}.json` plus the aggregate
 `manifest_all.json`, aborting before any dispatch if any of that fails (see
-`references/orchestration-and-batching.md`). **#724:** it then reports
+`references/orchestration-and-batching.md`). That gate's candidates come from
+the payload's `resume_from_run_ids` — the RUN_ID(s) of this project's prior
+glossary passes, most recent first; the singular `resume_from_run_id` is
+deprecated — and a candidate resumes only when its OWN recorded digest
+matches, compared against those offered candidates alone, never against the
+driver's state document. The mass driver builds this list itself; on this
+path the session writes it. **#724:** it then reports
 `resumed_batch_indices` — the batches whose attempt-0 fragment it re-checked
 with `canon_validate.py --check-batch` and found valid. That happens LAST, after
 the stale-attempt wipe and after the manifests exist, because those are what
@@ -2016,9 +2022,10 @@ the plugin tree's driver.
    keeps `repair-never-written` and its whole-fragment fallback. A status the
    companion cannot answer is unknown, never a failure — the fragment stays
    authoritative. A sandbox that cannot be confined
-   is NOT among them: that is an environment fault, so the driver exits 2 having
-   written no state at all, and the same command re-run after fixing `TMPDIR`
-   resumes where it stopped.
+   is NOT among them: that is an environment fault, and the refusal records no
+   terminal failure for the batch — progress saved so far is kept, and the same
+   command re-run after fixing `TMPDIR` continues from the last saved batch
+   state.
 4. `reset[]` names any batch the driver put back to attempt 0 because the
    artifact its status promised is gone. A resume reuses the RUN_ID, and
    `resume_setup.py` deletes that run's approved snapshots, approval records and
@@ -2038,6 +2045,34 @@ the plugin tree's driver.
    snapshot cannot be deleted, the reset entry carries `undeleted[]` naming it:
    the batch is still re-driven, but the rung that path belongs to will fail at
    approve time until the file is removed by hand.
+5. The state document is written after every batch the driver drives, so an
+   invocation that dies — killed by memory pressure, a crash — is recovered by
+   re-running the SAME command with the same `--run-id`, `--verdict-dir`,
+   `--batches-file` and `--resumed-batch-indices`. Batches saved as awaiting
+   come back in `needs_judge[]` with their original nonce and prompt; batches
+   saved as ready or failed keep that status and are reported in `ready[]` /
+   `not_ready[]`; the batch that was in flight and every other UNSETTLED batch
+   are driven. A reset the earlier invocation decided is kept: that batch is
+   dispatched, never resume-skipped, however many relaunches follow. The batch
+   that was in flight re-enters at attempt 0 (an initial drive) or at the rung
+   the last save recorded — progress inside its ladder since that save is lost;
+   the approved snapshot is create-once, so a regenerated fragment with
+   DIFFERENT bytes is refused at every rung the interrupted ladder had already
+   approved — identical bytes pass — and each refusal spends a rung, so a kill
+   mid-ladder can cost that batch several rungs, up to exhaustion. Do NOT
+   recover by restarting the pass at `resume_setup.py`: (i) on this path it
+   mints a fresh RUN_ID unless the payload offers the run under
+   `resume_from_run_ids` AND that run's recorded digest matches — the old run's
+   fragments are not deleted, but nothing in the new run reads them; two
+   sibling run dirs under one project carrying the same digest is what an
+   unoffered candidate produces; (ii) even when it resumes, its run-start wipe
+   deletes the snapshots, and item 4's reset then turns every batch the state
+   document holds as awaiting into a full re-dispatch. A kill that lands inside
+   a state write CAN leave the document unreadable; if it does, the next run
+   exits 2 saying so, and deleting the document discards the driver's state
+   only — the fragments on disk and the `--resumed-batch-indices` value keep
+   their meaning, and the drive starts over from them, which is today's
+   behaviour.
 
 Do NOT edit a verdict's `nonce`, reuse one twice, or answer a batch/attempt the
 driver did not ask about — each is refused, and the refusal is what keeps a

@@ -504,9 +504,38 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.98.0 (#881 -- running the glossary driver from the plugin
-    # tree silently retargets the durable root), per the maintenance contract
-    # above.
+    # ROTATED TO 1.98.1 (#882 -- the glossary driver saves its state document
+    # only from main(), after drive_all() returns, so a kill mid-loop persists
+    # nothing and the documented relaunch re-dispatches every settled batch),
+    # per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. It
+    # names things the fix touches rather than counting anything the tree
+    # owns: `save_state()`, `drive_all()`, `main()`, `resolve_run()`,
+    # `resumeSkipDropped`, `resume_from_run_ids` (and the deprecated singular
+    # `resume_from_run_id`), `write_pending()` and `DispatchSandbox`. The one
+    # measurement it quotes -- two kills by macOS memory pressure on one
+    # project, whose `runs/` directory holds two sibling run directories
+    # sharing one input digest -- is a fact about a live project in ANOTHER
+    # REPOSITORY, so no implementation in THIS tree can re-derive it, the same
+    # class the 1.94.0, 1.91.0 and 1.90.0 rotations below name for theirs; it
+    # is also spelled as a WORD ("two kills", "two sibling run directories"),
+    # which `_TOKEN` cannot see regardless. The remaining numerals are
+    # identifiers, not measurements: the version numbers, the release date,
+    # the issue number (#882), and `attempt 0` / `attempt-0`, which name a
+    # rung rather than count one.
+    #
+    # The count this release could have quoted -- how many conditional call
+    # sites `save_state()` had before this fix -- is written as a NAME rather
+    # than a numeral ("three conditional call sites, all inside main()"),
+    # which is this guard's documented way of keeping a fact out of the entry:
+    # a fourth site added later would move the true count while the sentence
+    # describing where the OLD sites lived stays true about the release it
+    # describes.
+    #
+    # The 1.98.0 rotation this replaces, kept as its own record (#881 --
+    # running the glossary driver from the plugin tree silently retargets the
+    # durable root), per the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed. Its
     # one DIGIT-WRITTEN measurement -- 12 codex jobs spent on a single
@@ -868,7 +897,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.98.0"
+FIGURES_VERSION = "1.98.1"
 
 
 def _newest_entry():
