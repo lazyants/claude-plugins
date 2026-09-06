@@ -1491,8 +1491,9 @@ class DispatchSandbox:
                 "root by walking up from --cwd to the enclosing git top level, so "
                 "a sandbox inside a working tree would hand the job write access "
                 "to that whole repository. Set TMPDIR to a directory outside every "
-                "git working tree and re-run -- nothing about this run has been "
-                "recorded, so the re-run resumes exactly where this one stopped.",
+                "git working tree and re-run the same command -- this refusal "
+                "records no terminal failure for the batch, progress saved so far "
+                "is kept, and the re-run continues from the last saved batch state.",
                 exit_code=2, label=self.label, sandbox_probe=outcome)
         log(f"{self.label}: codex write root confined to {self.path} (probe={outcome})")
         return self
@@ -2545,8 +2546,20 @@ def reconcile_state(ctx: Ctx, batches: list, state: dict) -> "list[dict]":
         log(f"batch {idx}: dropping its {st.get('status')!r} status -- {reason}; "
             f"re-driving it from attempt 0")
         undeleted = _release_approved_slots(ctx, idx)
+        # `resumeSkipDropped` is the reset's obligation, PERSISTED: a reset batch
+        # must be dispatched at attempt 0, never resume-skipped, and main() reads
+        # that off the document rather than off this invocation's reset list.
+        # Since #882 the document is saved after every driven batch, so a kill
+        # between this reset and the batch's own publication leaves it on disk
+        # as an ordinary `pending` entry -- and a relaunch that took the CLI's
+        # --resumed-batch-indices at its word would skip straight to APPROVE on
+        # attempt-0 bytes a judge may already have rejected, spending the rung
+        # this reset promised to re-drive. The key stays on the entry for the
+        # rest of the batch's life: the skip only ever applies at attempt 0, and
+        # by the time anything else reads the entry that attempt has been driven.
         state["batches"][str(idx)] = {"attempt": 0, "status": "pending",
-                                      "rejection_reason": None}
+                                      "rejection_reason": None,
+                                      "resumeSkipDropped": True}
         entry = {"batch": idx, "was": st.get("status"),
                  "attempt": st.get("attempt"), "reason": reason}
         if undeleted:
@@ -2777,7 +2790,22 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
 
 def drive_all(ctx: Ctx, batches: list, state: dict,
               resumed_indices: "set[int]") -> None:
-    """Advances every batch not already settled or awaiting a judge."""
+    """Advances every batch not already settled or awaiting a judge.
+
+    The state document is written after EVERY batch this loop drives, not once
+    when the loop is done (#882). A batch takes minutes of codex time to settle
+    and the loop runs for a dozen of them; a driver killed part-way -- macOS
+    memory pressure, measured twice on one project in one night -- had persisted
+    nothing, so the documented same-command relaunch read an empty document and
+    dispatched every batch again, including the ones whose hand-back was already
+    prepared. Saving here means a relaunch re-emits the settled batches with the
+    nonce and prompt they were handed back with, and drives only what is left.
+
+    The write is the pinned-channel whole-file rewrite write_pending() has always
+    been, deliberately not rename-atomic; a kill that lands inside one leaves an
+    unreadable document that the next invocation refuses with exit 2, and deleting
+    it puts the operator back where every kill used to put them. That window is a
+    write of a few kilobytes against a batch of minutes, and it is accepted."""
     for batch in batches:
         st = batch_state(state, batch["index"])
         if st["status"] in ("ready", "failed", "awaiting_judge"):
@@ -2786,6 +2814,7 @@ def drive_all(ctx: Ctx, batches: list, state: dict,
             advance_until_blocked(ctx, batch, state, resumed_indices)
         except DriverError as exc:
             st.update(status="failed", reason=str(exc), **exc.extra)
+        save_state(ctx.verdict_dir, state)
 
 
 # ---------------------------------------------------------------------------
@@ -3193,7 +3222,14 @@ def main(argv=None) -> int:
         # found, which is still true, and the template reads it only to size a
         # job-count CEILING that a re-dispatching batch stays under. What this
         # run actually did is reported by `reset[]`.
-        resumed -= {entry["batch"] for entry in reset_batches}
+        #
+        # The drop is read off the DOCUMENT, not off `reset_batches`: a reset made
+        # by an earlier invocation that was then killed is on disk as a `pending`
+        # entry carrying `resumeSkipDropped`, and it is no less a reset for having
+        # been made earlier (#882). This invocation's own resets are included too
+        # -- reconcile_state() has just written the marker for each of them.
+        resumed -= {int(index) for index, st in state["batches"].items()
+                    if st.get("resumeSkipDropped")}
         recorded = {"recorded": [], "refused": []}
         if args.record_verdicts:
             recorded = record_verdicts(ctx, Path(args.record_verdicts), state)
