@@ -1139,27 +1139,74 @@ with tempfile.TemporaryDirectory() as tmp:
           "/security" not in source_34, "an absolute path to a security binary appears")
 
 
-# --- 21b: the token expiry comparison, which nothing else in this file holds --------------------
+# --- 21b - 21e: the file's own diagnostic stands unless the Keychain has something BETTER to say,
+# not merely something DIFFERENT -- a denying or equally expired Keychain must not overwrite it,
+# and a file that never parsed gets no fallback attempt at all. -------------------------------
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
-    expired_root = root / "expired"
-    profile = make_claude(expired_root, ".claudeE", cached(entries=[entry(percent=88)]))
+
+    # 21b -- an expired file falls to the Keychain, which DENIES (no payload, the stub's default
+    # rc 1). The Keychain was genuinely asked -- proved by the marker -- but its failure must not
+    # rename the FILE's own diagnostic to `keychain-denied`, and there is still no cache fallback.
+    fail_root = root / "keyfail"
+    profile = make_claude(fail_root, ".claudeE", cached(entries=[entry(percent=88)]))
     (profile / ".credentials.json").write_text(json.dumps({
         "claudeAiOauth": {"accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(-1)}
     }), encoding="utf-8")
     done, _, _ = run(["--live", "--claude-profile", str(profile),
-                      "--codex-home", str(make_codex_home(expired_root, ".codexClean"))],
-                     root=expired_root)
-    check("21b an expired bearer is named as expired rather than sent",
-          "[token-expired]" in done.stdout, done.stdout)
-    check("21b the keychain is not consulted as a fallback for it",
-          not (expired_root / "security-called.txt").exists(),
-          (expired_root / "security-called.txt").read_text(encoding="utf-8")
-          if (expired_root / "security-called.txt").exists() else "")
-    check("21b it does NOT fall back to the cache either", "88%" not in done.stdout, done.stdout)
+                      "--codex-home", str(make_codex_home(fail_root, ".codexClean"))],
+                     root=fail_root)
+    check("21b an expired file behind a DENYING keychain still reads token-expired",
+          "[token-expired]" in done.stdout and "[keychain-denied]" not in done.stdout, done.stdout)
+    fail_marker = fail_root / "security-called.txt"
+    check("21b the keychain WAS consulted -- proved by the fixture marker",
+          fail_marker.exists(), "no marker written")
+    check("21b it still does NOT fall back to the cache", "88%" not in done.stdout, done.stdout)
     check("21b and the run gaps", done.returncode == 1, f"rc={done.returncode}")
-    assert_no_secret("21b expired token", done.stdout, done.stderr)
+    check("21b the warning carries the sign-in-again hint",
+          "open Claude Code in that profile once" in done.stdout.split("warnings")[-1],
+          done.stdout)
+    assert_no_secret("21b expired file, denying keychain", done.stdout, done.stderr)
+
+    # 21c -- an expired file falls to a Keychain item that answers, but its OWN token is also
+    # expired. The file's diagnostic still stands: a Keychain "success" that hands back nothing
+    # usable is not the "something better to say" that would earn the override.
+    both_root = root / "keybothexpired"
+    profile_c = make_claude(both_root, ".claudeE2", cached(entries=[entry(percent=77)]))
+    (profile_c / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(-1)}
+    }), encoding="utf-8")
+    keychain_both_expired = json.dumps({
+        "claudeAiOauth": {"accessToken": SENTINEL_KEYCHAIN, "expiresAt": now_ms(-1)}
+    })
+    done, _, _ = run(["--live", "--claude-profile", str(profile_c),
+                      "--codex-home", str(make_codex_home(both_root, ".codexClean"))],
+                     root=both_root, extra_env={"STUB_SECURITY_PAYLOAD": keychain_both_expired})
+    check("21c a file AND its keychain fallback both expired -> token-expired",
+          "[token-expired]" in done.stdout, done.stdout)
+    both_marker = both_root / "security-called.txt"
+    check("21c the keychain was consulted", both_marker.exists(), "no marker written")
+    check("21c and the run gaps", done.returncode == 1, f"rc={done.returncode}")
+    assert_no_secret("21c both file and keychain expired", done.stdout, done.stderr)
+
+    # 21e -- a file that never PARSES gets no fallback at all: response-malformed is not one of
+    # the two codes (`token-absent`, `token-expired`) that consult the Keychain.
+    bad_root = root / "keyunparsable"
+    profile_e = make_claude(bad_root, ".claudeBadJSON", cached(entries=[entry(percent=55)]))
+    (profile_e / ".credentials.json").write_text("not json", encoding="utf-8")
+    done, _, _ = run(["--live", "--claude-profile", str(profile_e),
+                      "--codex-home", str(make_codex_home(bad_root, ".codexClean"))],
+                     root=bad_root)
+    check("21e an unparsable credential file is response-malformed",
+          "[response-malformed]" in done.stdout, done.stdout)
+    bad_marker = bad_root / "security-called.txt"
+    check("21e and there is no keychain fallback for a corrupt file",
+          not bad_marker.exists(),
+          bad_marker.read_text(encoding="utf-8") if bad_marker.exists() else "")
+    check("21e it does not fall back to the cache either", "55%" not in done.stdout, done.stdout)
+    check("21e and the run gaps", done.returncode == 1, f"rc={done.returncode}")
+    assert_no_secret("21e unparsable credential file", done.stdout, done.stderr)
 
 
 # --- 22 / 23: transport safety. These import the module, deliberately, because reaching an HTTPS
@@ -1292,7 +1339,8 @@ with tempfile.TemporaryDirectory() as tmp:
             # Drive the REAL renderer, not a per-record helper: the oracle below asks whether a
             # secret can reach stdout, and only what actually prints can answer that.
             R._render([("Claude Code", "/tmp/read/.claudeRead", ".claudeRead", produced)], [],
-                      datetime.datetime.now(datetime.timezone.utc), R.Paint(False))
+                      datetime.datetime.now(datetime.timezone.utc), R.Paint(False),
+                      live=True, codex_examined=False)
     finally:
         R.HTTPSConnection = original
 
@@ -1457,6 +1505,81 @@ with tempfile.TemporaryDirectory() as tmp:
                 os.environ["STUB_SECURITY_PAYLOAD"] = saved_payload
         check(f"37 a stored payload that is {label} -> {expect}", got == expect, got)
         assert_no_secret(f"37 {label}", out37.getvalue(), err37.getvalue(), got)
+
+    # 21d -- IN-PROCESS: an expired file whose Keychain fallback holds a token that is still
+    # VALID authenticates with the KEYCHAIN token, never the expired file's. Modelled on case 35
+    # above, which drives the same success path from a Keychain-only profile with no file at all;
+    # this one adds the file back in, expired, to prove the fallback picks the better of the two
+    # rather than merely the Keychain whenever one exists.
+    d_root = root / "keyvalid"
+    bindir_d = install_stub(d_root)
+    profile_d = d_root / ".claudeKV"
+    profile_d.mkdir(parents=True, exist_ok=True)
+    (profile_d / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(-1)}
+    }), encoding="utf-8")
+    stored_d = json.dumps({
+        "claudeAiOauth": {"accessToken": SENTINEL_KEYCHAIN, "expiresAt": now_ms(24)},
+    })
+    marker_d = d_root / "security-called.txt"
+    saved_env_d = {k: os.environ.get(k) for k in
+                   ("PATH", "STUB_SECURITY_MARKER", "STUB_SECURITY_PAYLOAD")}
+
+    class KVRecording:
+        headers: list = []
+
+        def __init__(self, host, timeout=None):
+            self.host = host
+
+        def request(self, method, path, headers=None):
+            KVRecording.headers.append(dict(headers or {}))
+
+        def getresponse(self):
+            payload = json.dumps({"limits": [
+                {"kind": "weekly_all", "percent": 9, "is_active": True, "resets_at": iso(48)}]})
+
+            class Response:
+                status = 200
+
+                def read(self):
+                    return payload.encode("utf-8")
+            return Response()
+
+        def close(self):
+            pass
+
+    original_d = R.HTTPSConnection
+    token_d = None
+    try:
+        os.environ["PATH"] = f"{bindir_d}{os.pathsep}{saved_env_d['PATH']}"
+        os.environ["STUB_SECURITY_MARKER"] = str(marker_d)
+        os.environ["STUB_SECURITY_PAYLOAD"] = stored_d
+        token_d = R._claude_token(profile_d)
+        R.HTTPSConnection = KVRecording
+        R._claude_live(profile_d)
+    finally:
+        R.HTTPSConnection = original_d
+        for name, value in saved_env_d.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    check("21d _claude_token returns the KEYCHAIN token, not the expired file's",
+          token_d == SENTINEL_KEYCHAIN,
+          "matched" if token_d == SENTINEL_KEYCHAIN else "a different value came back")
+    check("21d the marker shows the keychain was actually asked",
+          marker_d.exists() and "find-generic-password" in marker_d.read_text("utf-8"),
+          marker_d.read_text("utf-8") if marker_d.exists() else "no marker written")
+    check("21d exactly one request was issued",
+          len(KVRecording.headers) == 1, str(len(KVRecording.headers)))
+    check("21d the request carries the KEYCHAIN token in Authorization",
+          bool(KVRecording.headers)
+          and KVRecording.headers[-1].get("Authorization") == f"Bearer {SENTINEL_KEYCHAIN}",
+          str(len(KVRecording.headers)))
+    check("21d and never the expired file's token",
+          all(SENTINEL_TOKEN not in header.get("Authorization", "")
+              for header in KVRecording.headers), str(len(KVRecording.headers)))
 
     # 38 -- an explicitly named profile is made ABSOLUTE before anything hashes it. The
     # Keychain service is the hash of the profile's absolute path, so a relative
@@ -1897,7 +2020,8 @@ with tempfile.TemporaryDirectory() as tmp:
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         R._render([(R.CLAUDE_GROUP, "/tmp/dup/.dup", ".dup", [live_row])], [],
-                  datetime.datetime.now(datetime.timezone.utc), R.Paint(False))
+                  datetime.datetime.now(datetime.timezone.utc), R.Paint(False),
+                  live=False, codex_examined=False)
     check("48 and the renderer prints it, so the vendor is recoverable from the row",
           " api" in out.getvalue(), out.getvalue())
 
@@ -2662,6 +2786,78 @@ check("65 an unopened window reads as neither of the other two quiet states",
           R.RESET_LABELS["inactive, no reset time reported"],
           R.RESET_LABELS["no reset time reported by the backend"]),
       str(sorted(R.RESET_LABELS.values())))
+
+# --- 66 - 69: the footer lines are conditional, and the token-expired hint reaches both sites ---
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    foot_claude = make_claude(root, ".claudeFoot", cached(entries=[entry(percent=10)]))
+    foot_codex = make_codex_home(root, ".codexFoot")
+
+    # 66 -- the on-disk-cache hint is default-mode-only: under --live there is no cache being
+    # read instead of, so the line has nothing true left to say.
+    done_default, _, _ = run(["--claude-profile", str(foot_claude),
+                              "--codex-home", str(foot_codex)], root=root)
+    check("66 default mode prints the --live footer hint",
+          "--live fetches current Claude numbers" in done_default.stdout, done_default.stdout)
+    done_live, _, _ = run(["--live", "--claude-profile", str(foot_claude),
+                           "--codex-home", str(foot_codex)], root=root)
+    check("66 --live mode does not print the --live footer hint",
+          "--live fetches current Claude numbers" not in done_live.stdout, done_live.stdout)
+
+    # 67 -- the two Codex app-server lines are true only once a Codex candidate's producer has
+    # actually run. A candidate that never got that far -- gapped as candidate-unreadable before
+    # any app-server was spoken to -- must not carry a claim about what reading it just did.
+    done_missing, _, _ = run(["--claude-profile", str(foot_claude),
+                              "--codex-home", str(root / "no-such-codex-home")], root=root)
+    check("67 a codex home that cannot be read is candidate-unreadable",
+          "[candidate-unreadable]" in done_missing.stdout, done_missing.stdout)
+    check("67 and its producer never ran, so no app-server footer line prints",
+          "reading Codex starts its app-server" not in done_missing.stdout, done_missing.stdout)
+    check("67 the second app-server line is likewise absent",
+          "Nothing here is ever redeemed" not in done_missing.stdout, done_missing.stdout)
+    check("67 a codex home whose producer ran prints the app-server footer",
+          "reading Codex starts its app-server" in done_default.stdout, done_default.stdout)
+    check("67 and its second line prints too",
+          "Nothing here is ever redeemed" in done_default.stdout, done_default.stdout)
+
+    # 68 -- the stale legend's own wording, pinned so a future edit cannot silently retire the
+    # `reading` phrasing back to `cache` without a test noticing.
+    stale_root = root / "stalewording"
+    make_claude(stale_root, ".claudeStale",
+                cached(entries=[entry(resets=iso(-5), percent=67)], fetched_ms=now_ms(-72)),
+                token=False)
+    done_stale, _, _ = run(["--claude-profile", str(stale_root / ".claudeStale"),
+                            "--codex-home", str(stale_root / ".nope")])
+    check("68 the stale legend uses the current `reading` wording",
+          "the reading predates its reset" in done_stale.stdout, done_stale.stdout)
+    check("68 and not the retired `cache` wording",
+          "the cache predates its reset" not in done_stale.stdout, done_stale.stdout)
+
+    # 69 -- the DEFAULT-mode retry hint: a cached window past its reset triggers a live retry:
+    # here that retry fails behind an expired credential file with a denying Keychain beside it,
+    # which is exactly the shape the hint exists for. The run still exits clean -- a failed retry
+    # is a note, not a warning -- and the stale row renders beside the note that explains it.
+    retry_root = root / "retryhint"
+    retry_profile = make_claude(retry_root, ".claudeRetry",
+                                cached(entries=[entry(resets=iso(-5), percent=67)],
+                                       fetched_ms=now_ms(-72)))
+    (retry_profile / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(-1)}}),
+        encoding="utf-8")
+    done_retry, _, _ = run(["--claude-profile", str(retry_profile),
+                            "--codex-home", str(make_codex_home(retry_root, ".codexClean"))],
+                           root=retry_root)
+    check("69 a stale window whose failing retry sits behind an expired credential exits clean",
+          done_retry.returncode == 0, f"rc={done_retry.returncode}\n{done_retry.stdout}")
+    check("69 the stale cell still renders",
+          "67%" in done_retry.stdout and "stale-after-reset" in done_retry.stdout,
+          done_retry.stdout)
+    check("69 the retry note names token-expired with the sign-in-again hint",
+          "live retry did not answer" in done_retry.stdout
+          and "open Claude Code in that profile once" in done_retry.stdout,
+          done_retry.stdout)
+    assert_no_secret("69 default-mode retry hint", done_retry.stdout, done_retry.stderr)
 
 print(f"ran {checks} checks")
 if failures:

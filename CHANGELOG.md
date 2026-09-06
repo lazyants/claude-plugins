@@ -2,6 +2,39 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.3.3] — 2026-09-06
+
+### Fixed
+
+- **`code-limits` no longer stops at an expired `.credentials.json` when the Keychain item beside
+  it holds a live login (#884).** `_claude_token` consulted the Keychain only when the file was
+  absent, on the premise that both stores hold the same object. They do not: on macOS the CLI
+  writes `<profile>/.credentials.json` only when the Keychain rejects the write — locked in an SSH
+  session, say — and nothing removes it afterwards, so later sessions refresh the Keychain item and
+  leave the file behind, its login eight hours from that last write. Measured on the authoring
+  machine: the default profile's file was two days stale while its Keychain item had been
+  refreshed that morning, and the report answered `token-expired` for a login that was valid —
+  the previous window with a note in default mode, `NOT checked` with exit 1 under `--live`. A
+  file whose login is absent or expired now hands over to the Keychain item; the file's own
+  verdict stands only when the Keychain holds no usable login either, so a profile with no
+  Keychain item reads exactly as before, and an unreadable or unparsable file still never falls
+  through. The suite's case that pinned "the Keychain is not consulted for an expired file"
+  pinned the premise this release refutes, and is replaced by cases for each outcome.
+- **`token-expired` says what to do.** A Claude access token lives eight hours and only a running
+  session refreshes it, so any profile idle for a day reads `token-expired` under `--live` and
+  after the stale-window retry, with nothing on the page saying that opening Claude Code in that
+  profile once is the whole cure. The note and the warning now say so.
+- **Footers print only in the mode they describe.** "`--live` fetches current Claude numbers"
+  printed under `--live` itself, and the app-server disclosure printed when no Codex home had been
+  read at all (`--codex-home` naming a missing directory). The first now prints in default mode
+  only, the second only when a Codex home's app-server was actually started. The stale-window
+  legend says "the reading predates its reset" rather than "the cache": a live Codex window
+  renders through the same row.
+
+### Changed
+
+- `Pool.current()`, a method nothing called, is gone.
+
 ## [multi-profile-plugins 1.3.2] — 2026-09-04
 
 ### Fixed

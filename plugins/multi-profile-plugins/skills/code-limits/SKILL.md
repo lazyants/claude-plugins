@@ -131,27 +131,35 @@ cache to fall back to on the Codex side -- the number is current at the moment i
 A window whose `resets_at` (or `resetsAt`) has already passed describes the PREVIOUS window --
 neither current usage nor zero. The report never presents an expired window as current: the cell
 reads how long ago that window reset (`14h ago`) and is dimmed beside whatever current cells
-share its row. One legend line under the
-table carries the `[stale-after-reset]` token and says the current figure needs `--live`; it is
-printed only when such a cell is actually on the page.
+share its row. One legend line under the table carries the `[stale-after-reset]` token and names
+what the cell's age means; it is printed only when such a cell is actually on the page. The
+`--live` hint is a separate footer under the table, printed only in default mode -- a run that
+already used `--live` is not told to try `--live`. The two lines disclosing that reading Codex
+starts its app-server are their own footer too, printed only when a Codex home was actually
+examined this run.
 
 ## `--live`, Claude Code side
 
 `--live` makes a Claude Code row call `GET https://api.anthropic.com/api/oauth/usage` instead of
 reading the cache. It reads the profile's OAuth token from `.credentials.json` when that file is
-present, and otherwise from the macOS Keychain item the profile's config directory maps to; the
-keychain read prompts the user, because the process doing the reading is not `claude` itself.
-Both sources hold the SAME object and go through one extractor: the Keychain item stores the
-whole credential JSON, not a bare token, so the access token is parsed out of it and its expiry
-checked exactly as the file's is. Which item is asked for was measured, and the default profile
-is a special case -- `~/.claude` keeps its live credential under the unsuffixed
-`Claude Code-credentials`, while every other config directory uses a name suffixed with the
-first 8 hex of the SHA-256 of its absolute path. A profile reached by a different spelling of
-the same directory, or through a separate secure-storage override, hashes to a name that simply
-is not there, so it gaps as `token-absent` rather than reading another account's item. A
-live call that fails is reported as a gap for that profile, with its diagnostic code -- it never
-falls back to the cache, because a live run that quietly degraded would print exactly what a
-successful one prints.
+present and parses; when the login it holds is absent or expired, the macOS Keychain item the
+profile's config directory maps to is consulted as well, and that keychain read prompts the
+user, because the process doing the reading is not `claude` itself. The file is the CLI's own
+fallback store: a login normally goes straight to the Keychain, and the CLI writes this file
+only when that write is rejected (the Keychain locked in an SSH session, its password out of
+sync). Nothing removes the file once the Keychain accepts writes again, so a profile can carry
+an older login on disk beside a Keychain item a later session refreshed -- the file's verdict
+stands only when the Keychain has no usable login of its own to offer instead. One extractor
+reads whichever blob answers: the Keychain item stores the whole credential JSON, not a bare
+token, so the access token is parsed out of it and its expiry checked exactly as the file's is.
+Which item is asked for was measured, and the default profile is a special case -- `~/.claude`
+keeps its live credential under the unsuffixed `Claude Code-credentials`, while every other
+config directory uses a name suffixed with the first 8 hex of the SHA-256 of its absolute path.
+A profile reached by a different spelling of the same directory, or through a separate
+secure-storage override, hashes to a name that simply is not there, so it gaps as `token-absent`
+rather than reading another account's item. A live call that fails is reported as a gap for that
+profile, with its diagnostic code -- it never falls back to the cache, because a live run that
+quietly degraded would print exactly what a successful one prints.
 
 ## What the report touches
 
