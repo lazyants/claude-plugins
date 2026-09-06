@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.98.1 — 2026-09-06
+## 1.99.1 — 2026-09-06
 
 **A driver killed mid-loop persists nothing, and the documented relaunch re-dispatches every
 batch it had already settled (#882).** Every `save_state()` call lived in `main()`, and an

@@ -504,7 +504,7 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.98.1 (#882 -- every save of the glossary driver's state
+    # ROTATED TO 1.99.1 (#882 -- every save of the glossary driver's state
     # document lived in main(), and an initial drive had none until drive_all()
     # returned, so a kill mid-loop persisted nothing and the documented relaunch
     # re-dispatched every settled batch), per the maintenance contract above.
@@ -889,7 +889,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.98.1"
+FIGURES_VERSION = "1.99.1"
 
 
 def _newest_entry():
