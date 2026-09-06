@@ -2004,10 +2004,18 @@ the plugin tree's driver.
    than trusted to be unreachable.
 3. Repeat while `needs_judge[]` comes back non-empty. A REJECTED batch comes
    back in that list at the next attempt, with a fresh nonce — the recording
-   invocation advances the ladder itself, so there is nothing extra to do. The run is done when the
-   output carries `"merged": true`; `not_ready[]` names any batch that failed and
-   why. Every `reason` the Workflow path uses appears unchanged, and the driver
-   may also report failures of its own, because it does work the Workflow cannot —
+   invocation advances the ladder itself, so there is nothing extra to do. The
+   run is done when the output carries `"merged": true`; `not_ready[]` names
+   any batch that failed and why. When `needs_judge[]` comes back empty,
+   `ready[]` is non-empty, and a `not_ready[]` entry carries `reason:
+   "citation-review-exhausted"`, the run is over for that RUN_ID and `merged`
+   stays `false` — re-invoking the driver never reaches the merge while a batch
+   is `failed` — so go to **Recovering the ready batches when a sibling
+   exhausted** below. (Scoped to that reason on purpose: offline runs have no
+   citation review, snapshots or records, and their `not_ready[]` is a
+   different failure.) Every `reason` the Workflow path uses appears unchanged,
+   and the driver may also report failures of its own, because it does work the
+   Workflow cannot —
    among them a repair that was refused, an approval record that could not be
    written, and prose from a step that raised. Since 1.76.1 the driver also
    watches the job it launched: one codex-companion records as `failed` or
@@ -2232,8 +2240,80 @@ over the previous attempt, bounded by `MAX_CITATION_RETRIES`; a prepare that
 fails drives that same ladder without spending a judge call. Exhausting that
 budget ends the run with `merged: false` and
 `reason: "citation-review-exhausted"` — a distinct reason from
-`fragment-check-failed`, and nothing is merged. Under `offline` the stage is
-a no-op, since `established` is forbidden there outright.
+`fragment-check-failed`, and the RUN merges nothing: one serialized
+`--merge-batches` call over every fragment is what keeps `canon.json` to
+one writer, and the pass refuses on purpose to freeze a partial canon
+SILENTLY with the dropped candidates looking un-researched. Under `offline`
+the stage is a no-op, since `established` is forbidden there outright.
+
+**Recovering the ready batches when a sibling exhausted (#883).**
+
+1. Why the hand route is legitimate where the run's own merge is not: the
+   operator does it knowingly, the dropped batches are NAMED (`not_ready[]` /
+   `citationExhausted[]`), and W5's gate (point 4) refuses translation while
+   any eligible candidate stays outside canon. Every `ready` batch passed
+   `--check-batch`, was snapshotted to `approved_{i}_attempt_{n}.json`, and was
+   judged; under the driver, take the `mergePath`/`approvalRecordPath` pair
+   straight from `<verdict-dir>/pending.json`; under the Workflow, take
+   `mergePath` from that `batches[]` entry — which carries `batchIndex` and
+   `attempt`, never `approvalRecordPath` — and BUILD the record path yourself:
+   `${durable_root}/glossary/runs/<RUN_ID>/approval_<i>_attempt_<n>.json` with
+   `i` = `batchIndex` and `n` = `attempt`, the template's own
+   `approvalRecordPath` builder. Merge only a batch whose record EXISTS — a
+   driver `not_ready[]` entry at `reason: "approval-record-write-failed"`, or a
+   Workflow batch with `approvalRecorded: false`, still has its snapshot: write
+   the record with the pass's own record command — `--check-batch` on that
+   snapshot, `--research-mode live`, `--expect-source-forms-file
+   .../manifest_<i>.json`, `--record-approval-to
+   .../approval_<i>_attempt_<n>.json` — and only for a batch the judge
+   approved; never substitute `out_{i}_attempt_{n}.json` for the snapshot.
+
+2. The merge, one call over every ready batch's `mergePath` paired with its
+   approval record IN THE SAME ORDER — `mergeBatchesCmd()`'s own command with
+   the never-ready batches left out:
+
+```
+python3 ${durable_root}/scripts/canon_validate.py \
+  --merge-batches <mergePath of every ready batch, ascending index> \
+  --research-mode live \
+  --glossary-merge-marker ${durable_root}/glossary/runs/<RUN_ID>/merged.json \
+  --citations-reviewed \
+  --approval-records <approvalRecordPath of the same batches, SAME ORDER> \
+  --plugin-root {{PLUGIN_ROOT}}
+```
+
+`--citations-reviewed` and `--approval-records` are refused apart, one record
+per fragment, paired positionally. `--glossary-merge-marker` is NOT optional:
+W5's admission gate (#820) reads it, so a merge without it looks like one that
+never ran. `--plugin-root` is required because merging is a stamping mode
+(#412). Re-merging already-merged fragments is a no-op (#291), so a failed
+marker write is retried with the same command.
+
+3. The verify, `--batch` repeated once per merged fragment:
+
+```
+python3 ${durable_root}/scripts/canon_validate.py --verify-merged \
+  --batch <mergePath> --batch <mergePath> … \
+  --research-mode live
+```
+
+Deliberately WITHOUT `--expect-source-forms-file manifest_all.json`: that
+manifest still lists the exhausted batches, so with it the verify reports them
+`missing` and answers `verified: false` over a correct merge. Read the one JSON
+line; `{"verified": true}` is the only pass.
+
+4. What is still outstanding: the exhausted batches sit in neither `entries{}`
+   nor `review_queue[]`, so while eligible W5's gate refuses with
+   `glossary-pass-unmerged` (CONDITION 2), reporting counts, not names. A
+   further pass, under a fresh RUN_ID, plans the remaining ELIGIBLE candidates
+   via `glossary_batch_plan.py`, excluding what the merge just froze — the gate
+   guards eligibility as of the live `profile.yml` threshold and current
+   `name_candidates.json`, not the memory of this run, so the exhausted list is
+   itself the record of what was dropped: keep it. Read `lastRejection` first:
+   fix the data, report a guard misfire, or run a failing command by hand, per
+   the guard paragraph below. `--allow-unmerged-glossary` is the deliberate
+   override for translating without them, never the default. Do not hand-edit
+   `pending.json` to revive an exhausted batch.
 
 **1.16.0: the approval binds the reviewed BYTES, not a path.** Before
 anything is fetched or judged, PREPARE re-runs the fragment's own

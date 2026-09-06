@@ -51,6 +51,75 @@ That hash is also folded into the glossary resume identity, so once Step 0a refr
 `scripts/` and markers an UNFINISHED glossary pass mints a fresh `RUN_ID` and restarts instead of
 resuming — and a live project gets this fix only then, because the driver a run executes is the
 durable copy, never the plugin tree.
+## 1.99.0 — 2026-09-06
+
+**One batch exhausting its citation ladder ends a W3 glossary run with `merged: false`,
+`reason: "citation-review-exhausted"`, and nothing merged — even when every other batch in the
+run finished clean (#883).** `glossary_dispatch_driver.py`'s `merge_and_verify()` admits only
+exact membership of the run's own batch list, and `main()` never even reaches the merge while a
+batch sits `failed`; it exits 1 first. The Workflow fallback is all-or-nothing by the same
+design. What is lost at that moment is attested work, not raw candidates: every ready batch
+passed `--check-batch`, was snapshotted to `approved_{i}_attempt_{n}.json`, was judged, and —
+for every batch whose approval was actually RECORDED — carries its own
+`approval_{i}_attempt_{n}.json`. The two shapes where the record did not get written are named
+below.
+
+That all-or-nothing shape is a recorded decision from 1.16.0, in `glossary-pass-wf.template.js`:
+a pass must not freeze a partial canon silently and leave the dropped candidates looking
+un-researched. Two things have changed since that decision was written. Both paths now NAME the
+dropped batches — `not_ready[]` under the driver, `citationExhausted[]` under the Workflow —
+instead of only refusing, and #820's W5 admission gate now refuses translation outright while
+any currently eligible candidate still sits outside canon. A hand merge the operator performs
+knowingly is therefore explicit, not silent, and `canon_validate.py --merge-batches` has always
+accepted any subset handed to it on argv.
+
+Measured on two volumes of one series, run in parallel on the night of September fifth into
+sixth: on one volume, four of twelve batches exhausted, and the run would have discarded one
+hundred and forty-seven accepted entries and one hundred and fifty-three review-queue entries;
+on the other, two of thirteen batches exhausted, discarding one hundred and eighty accepted
+entries. Both operators reached for a hand merge independently, working from the refusal text
+alone, and each lost about an hour finding a command that actually ran.
+
+The hand command the issue itself recorded was incomplete in three ways, each found only by
+trial. It omitted `--glossary-merge-marker`, which `mergeBatchesCmd()` passes unconditionally —
+without it, W5's admission gate goes on refusing with `glossary-run-unmerged` over a merge that
+in fact happened. Its `--verify-merged` call kept `--expect-source-forms-file
+manifest_all.json`, which still lists the exhausted batches' names, so a correct partial merge
+reports those names `missing` and answers `verified: false`; that flag has to be left off
+entirely for a partial verify. And a judge-approved batch whose approval-record write failed is
+not mergeable until that record is written — the driver reports it in `not_ready[]` as
+`approval-record-write-failed`, the Workflow reports it as `ready: true` with
+`approvalRecorded: false`. With the documented flags, `canon_validate.py` enforces the record
+itself: it demands exactly one per merged fragment and refuses the whole call otherwise, so a
+hand merge that skips writing the record first is REFUSED before any fragment is applied. The
+record has to be written first — a batch without one is left out of the merge, not merged
+unattested.
+
+`SKILL.md`'s W3 glossary-pass section now names this outcome and says what to do about it. The
+driver-loop step that already describes the run's end state points, for the case `needs_judge[]`
+empty, `ready[]` non-empty and a `not_ready[]` entry at `citation-review-exhausted`, at a new
+paragraph: **Recovering the ready batches when a sibling exhausted**. That paragraph gives the
+two files each ready batch is merged from — `mergePath` and its approval record — read off the
+driver's `pending.json`, or, under the Workflow, `mergePath` from its `batches[]` entry with the
+record path built as `approval_<batchIndex>_attempt_<attempt>.json` in the run directory — the
+complete merge command with `--glossary-merge-marker`, `--citations-reviewed` and
+`--approval-records` in the same order as the merged fragments, the verify command with
+`--batch` repeated once per fragment and no `--expect-source-forms-file`, how to write a missing
+approval record with the pass's own record command, and what still stands afterward: W5 keeps
+refusing `glossary-pass-unmerged` with counts while the dropped candidates are still eligible, a
+further pass re-plans them under a fresh `RUN_ID`, the exhausted list itself is the record of
+what was dropped, and `--allow-unmerged-glossary` remains the deliberate override for
+translating without them. A new test in `tests/skill_prose_present.test.py` runs both documented
+commands, as written, against a fixture project.
+
+**`SKILL.md` only — no script or template byte moves.** The driver-side alternative — merge the
+ready subset itself and report the rest — is not taken: `glossary_dispatch_driver.py` is one of
+the `PLUGIN_BUNDLE_MEMBERS`, so any change to it re-stales `plugin_bundle_hash` and every
+converged segment of every established project the next time that project refreshes its bundle
+marker, and a driver that merges a subset on its own changes what `merged: true` means to every
+reader of its one JSON line. `SKILL.md` sits in no hash bundle. Same trade as #881, #858 and
+#290. The residual is stated rather than hidden: the route stays manual, and it costs one hand
+merge per occurrence.
 
 ## 1.98.0 — 2026-09-05
 
