@@ -72,6 +72,9 @@ HINTS = {
     "token-expired": "open Claude Code in that profile once -- only a running session refreshes"
                       " its login",
 }
+# A key outside the closed vocabulary would look wired up and never fire -- DIAGNOSTIC_SET is
+# the only thing `_with_hint` ever looks a code up against.
+assert set(HINTS) <= DIAGNOSTIC_SET, sorted(set(HINTS) - DIAGNOSTIC_SET)
 
 
 def _with_hint(code: str) -> str:
@@ -1720,8 +1723,7 @@ def main(argv: list[str] | None = None) -> int:
                 # default mode promised to read a cache and it read one.
                 live_state, live_records, live_code = _examine(candidate, _claude_live)
                 if not live_records:
-                    detail = _with_hint(live_code) if live_code \
-                        else "the backend returned nothing to read"
+                    detail = _with_hint(live_code) or "the backend returned nothing to read"
                     notes.append(f"{where}: the cache describes a window that is over, and the"
                                  f" live retry did not answer -- {detail}")
                 state, records, code = _refreshed((live_state, live_records, live_code),
@@ -1732,9 +1734,8 @@ def main(argv: list[str] | None = None) -> int:
                 notes.append(f"{where} [{code}]")
             groups.append((group, str(candidate.path), where, records))
             if state == GAP:
-                detail = _with_hint(code) if code \
-                    else ", ".join(f"{r.name} [{r.diagnostic}]"
-                                   for r in records if r.state == GAP)
+                detail = _with_hint(code) or ", ".join(f"{r.name} [{r.diagnostic}]"
+                                                        for r in records if r.state == GAP)
                 warnings.append(f"{group} {where}: NOT checked -- {detail}")
 
     codex_examined = any(candidate.gap == "" for candidate in codex)
