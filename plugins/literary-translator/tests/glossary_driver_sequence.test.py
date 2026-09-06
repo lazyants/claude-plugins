@@ -409,6 +409,19 @@ def run_driver(bed, *extra, expect=0, env=None, batches=BATCHES):
     return json.loads(line[0]), proc
 
 
+def run_driver_expecting_kill(bed, *extra, batches=BATCHES):
+    """The driver as a subprocess that is expected to die of SIGKILL -- the
+    #882 kill sidecar in the companion stub. Returns the completed process so a
+    test can read what the driver had written before it died. -9 is the direct
+    child's own wait status, never a shell's 137: run_driver_raw spawns the
+    driver itself."""
+    proc = run_driver_raw(bed, *extra, batches=batches)
+    assert proc.returncode == -9, (
+        f"expected the driver to die of SIGKILL (-9), got {proc.returncode}\n"
+        f"STDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}")
+    return proc
+
+
 def plant_fragment(bed, attempt=0, bases=("established", "established")):
     """Writes a fragment WITHOUT a dispatch, for the cases that need one to
     pre-exist (a resumed attempt 0, a wiped-artifact resume). Ordinary dispatch
@@ -1798,10 +1811,7 @@ def test_a_driver_killed_mid_loop_keeps_the_batches_it_settled(bed):
     fragment a judge may already be reviewing, discarding real citation-judge
     spend for no reason but where in the loop the kill happened to land."""
     bed["jobs"].write_text(json.dumps({"out_1_attempt_0.json": {"kill_driver": True}}))
-    proc = run_driver_raw(bed, batches=TWO_BATCHES)
-    assert proc.returncode == -9, (
-        f"expected the direct child to die of SIGKILL (-9), got {proc.returncode}\n"
-        f"STDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}")
+    run_driver_expecting_kill(bed, batches=TWO_BATCHES)
 
     m = load(bed)
     state = m.read_pending(bed["session"])
@@ -1859,10 +1869,7 @@ def test_a_resets_dropped_resume_skip_survives_a_kill(bed):
     _wipe_as_resume_setup_does(bed)
 
     bed["jobs"].write_text(json.dumps({"out_1_attempt_0.json": {"kill_driver": True}}))
-    proc = run_driver_raw(bed, "--resumed-batch-indices", "[0, 1]", batches=TWO_BATCHES)
-    assert proc.returncode == -9, (
-        f"expected SIGKILL (-9) mid-dispatch of batch 1, got {proc.returncode}\n"
-        f"STDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}")
+    run_driver_expecting_kill(bed, "--resumed-batch-indices", "[0, 1]", batches=TWO_BATCHES)
 
     m = load(bed)
     state = m.read_pending(bed["session"])
