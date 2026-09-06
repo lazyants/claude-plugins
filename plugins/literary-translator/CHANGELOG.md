@@ -3,8 +3,8 @@
 ## 1.98.1 — 2026-09-06
 
 **A driver killed mid-loop persists nothing, and the documented relaunch re-dispatches every
-batch it had already settled (#882).** `save_state()` had three conditional call sites, all inside
-`main()`, after `drive_all()` had already returned — so an initial drive killed while advancing its
+batch it had already settled (#882).** Every `save_state()` call lived in `main()`, and an
+initial drive had none until `drive_all()` returned — so a driver killed while advancing its
 batches left no state document behind. SKILL.md's own documented recovery for this driver is that
 the same command re-run resumes where it stopped; after such a kill that sentence was false: the
 next invocation's `load_state()` found nothing, every batch read `pending`, and the run

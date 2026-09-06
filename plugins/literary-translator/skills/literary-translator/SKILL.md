@@ -2062,8 +2062,9 @@ the plugin tree's driver.
    mid-ladder can cost that batch several rungs, up to exhaustion. Do NOT
    recover by restarting the pass at `resume_setup.py`: (i) on this path it
    mints a fresh RUN_ID unless the payload offers the run under
-   `resume_from_run_ids` AND that run's recorded digest matches — the old run's
-   fragments are not deleted, but nothing in the new run reads them; two
+   `resume_from_run_ids` (or the deprecated singular field) AND that run's
+   recorded digest matches — the old run's fragments are not deleted, but
+   nothing in the new run reads them; two
    sibling run dirs under one project carrying the same digest is what an
    unoffered candidate produces; (ii) even when it resumes, its run-start wipe
    deletes the snapshots, and item 4's reset then turns every batch the state

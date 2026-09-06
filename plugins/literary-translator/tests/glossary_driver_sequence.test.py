@@ -50,9 +50,11 @@ CANDIDATES = [{"name": "Alpha", "freq": 5}, {"name": "Beta", "freq": 3}]
 BATCHES = [{"index": 0, "candidates": CANDIDATES}]
 
 # #882: a second batch, for the two tests that need a driver mid-loop -- one
-# batch settled before the kill, one still in flight when it lands. Distinct
-# names (never Alpha/Beta) so a companion_targets() mismatch cannot be misread
-# as batch 0 dispatched twice under a different index.
+# batch settled before the kill, one still in flight when it lands. The
+# distinction the tests assert on is the ARTIFACT NAME (out_1_attempt_0.json
+# against out_0_attempt_0.json): the companion stub writes the same default
+# rows for every out_* key it is asked for, so batch 1's candidate names never
+# reach a fragment and are not what tells the two batches apart.
 BATCH_TWO_CANDIDATES = [{"name": "Gamma", "freq": 4}, {"name": "Delta", "freq": 2}]
 TWO_BATCHES = [{"index": 0, "candidates": CANDIDATES},
               {"index": 1, "candidates": BATCH_TWO_CANDIDATES}]

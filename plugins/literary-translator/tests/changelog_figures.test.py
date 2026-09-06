@@ -504,10 +504,10 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.98.1 (#882 -- the glossary driver saves its state document
-    # only from main(), after drive_all() returns, so a kill mid-loop persists
-    # nothing and the documented relaunch re-dispatches every settled batch),
-    # per the maintenance contract above.
+    # ROTATED TO 1.98.1 (#882 -- every save of the glossary driver's state
+    # document lived in main(), and an initial drive had none until drive_all()
+    # returned, so a kill mid-loop persisted nothing and the documented relaunch
+    # re-dispatched every settled batch), per the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed. It
     # names things the fix touches rather than counting anything the tree
@@ -524,14 +524,6 @@ FIGURES = [
     # identifiers, not measurements: the version numbers, the release date,
     # the issue number (#882), and `attempt 0` / `attempt-0`, which name a
     # rung rather than count one.
-    #
-    # The count this release could have quoted -- how many conditional call
-    # sites `save_state()` had before this fix -- is written as a NAME rather
-    # than a numeral ("three conditional call sites, all inside main()"),
-    # which is this guard's documented way of keeping a fact out of the entry:
-    # a fourth site added later would move the true count while the sentence
-    # describing where the OLD sites lived stays true about the release it
-    # describes.
     #
     # The 1.98.0 rotation this replaces, kept as its own record (#881 --
     # running the glossary driver from the plugin tree silently retargets the
