@@ -8,8 +8,10 @@ run finished clean (#883).** `glossary_dispatch_driver.py`'s `merge_and_verify()
 exact membership of the run's own batch list, and `main()` never even reaches the merge while a
 batch sits `failed`; it exits 1 first. The Workflow fallback is all-or-nothing by the same
 design. What is lost at that moment is attested work, not raw candidates: every ready batch
-passed `--check-batch`, was snapshotted to `approved_{i}_attempt_{n}.json`, was judged, and
-carries its own `approval_{i}_attempt_{n}.json`.
+passed `--check-batch`, was snapshotted to `approved_{i}_attempt_{n}.json`, was judged, and —
+for every batch whose approval was actually RECORDED — carries its own
+`approval_{i}_attempt_{n}.json`. The two shapes where the record did not get written are named
+below.
 
 That all-or-nothing shape is a recorded decision from 1.16.0, in `glossary-pass-wf.template.js`:
 a pass must not freeze a partial canon silently and leave the dropped candidates looking
@@ -36,24 +38,28 @@ reports those names `missing` and answers `verified: false`; that flag has to be
 entirely for a partial verify. And a judge-approved batch whose approval-record write failed is
 not mergeable until that record is written — the driver reports it in `not_ready[]` as
 `approval-record-write-failed`, the Workflow reports it as `ready: true` with
-`approvalRecorded: false` — so a hand merge that skips writing the record first merges an
-approval nothing attests.
+`approvalRecorded: false`. With the documented flags, `canon_validate.py` enforces the record
+itself: it demands exactly one per merged fragment and refuses the whole call otherwise, so a
+hand merge that skips writing the record first is REFUSED before any fragment is applied. The
+record has to be written first — a batch without one is left out of the merge, not merged
+unattested.
 
 `SKILL.md`'s W3 glossary-pass section now names this outcome and says what to do about it. The
 driver-loop step that already describes the run's end state points, for the case `needs_judge[]`
 empty, `ready[]` non-empty and a `not_ready[]` entry at `citation-review-exhausted`, at a new
 paragraph: **Recovering the ready batches when a sibling exhausted**. That paragraph gives the
-two files each ready batch is merged from — `mergePath` and `approvalRecordPath`, read off the
-driver's `pending.json` or the Workflow's own `batches[]` entries — the complete merge command
-with `--glossary-merge-marker`, `--citations-reviewed` and `--approval-records` in the same
-order as the merged fragments, the verify command with `--batch` repeated once per fragment and
-no `--expect-source-forms-file`, how to write a missing approval record with the pass's own
-record command, and what still stands afterward: W5 keeps refusing `glossary-pass-unmerged` with
-counts while the dropped candidates are still eligible, a further pass re-plans them under a
-fresh `RUN_ID`, the exhausted list itself is the record of what was dropped, and
-`--allow-unmerged-glossary` remains the deliberate override for translating without them. A new
-test in `tests/skill_prose_present.test.py` runs both documented commands, as written, against a
-fixture project.
+two files each ready batch is merged from — `mergePath` and its approval record — read off the
+driver's `pending.json`, or, under the Workflow, `mergePath` from its `batches[]` entry with the
+record path built as `approval_<batchIndex>_attempt_<attempt>.json` in the run directory — the
+complete merge command with `--glossary-merge-marker`, `--citations-reviewed` and
+`--approval-records` in the same order as the merged fragments, the verify command with
+`--batch` repeated once per fragment and no `--expect-source-forms-file`, how to write a missing
+approval record with the pass's own record command, and what still stands afterward: W5 keeps
+refusing `glossary-pass-unmerged` with counts while the dropped candidates are still eligible, a
+further pass re-plans them under a fresh `RUN_ID`, the exhausted list itself is the record of
+what was dropped, and `--allow-unmerged-glossary` remains the deliberate override for
+translating without them. A new test in `tests/skill_prose_present.test.py` runs both documented
+commands, as written, against a fixture project.
 
 **`SKILL.md` only — no script or template byte moves.** The driver-side alternative — merge the
 ready subset itself and report the rest — is not taken: `glossary_dispatch_driver.py` is one of

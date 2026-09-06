@@ -2217,13 +2217,18 @@ the stage is a no-op, since `established` is forbidden there outright.
    `citationExhausted[]`), and W5's gate (point 4) refuses translation while
    any eligible candidate stays outside canon. Every `ready` batch passed
    `--check-batch`, was snapshotted to `approved_{i}_attempt_{n}.json`, and was
-   judged; take its `mergePath`/`approvalRecordPath` pair from the driver's
-   `<verdict-dir>/pending.json` or the Workflow's `batches[]`. Merge only a
-   batch whose record EXISTS — a driver `not_ready[]` entry at `reason:
-   "approval-record-write-failed"`, or a Workflow batch with `approvalRecorded:
-   false`, still has its snapshot: write the record with the pass's own record
-   command — `--check-batch` on that snapshot, `--research-mode live`,
-   `--expect-source-forms-file .../manifest_<i>.json`, `--record-approval-to
+   judged; under the driver, take the `mergePath`/`approvalRecordPath` pair
+   straight from `<verdict-dir>/pending.json`; under the Workflow, take
+   `mergePath` from that `batches[]` entry — which carries `batchIndex` and
+   `attempt`, never `approvalRecordPath` — and BUILD the record path yourself:
+   `${durable_root}/glossary/runs/<RUN_ID>/approval_<i>_attempt_<n>.json` with
+   `i` = `batchIndex` and `n` = `attempt`, the template's own
+   `approvalRecordPath` builder. Merge only a batch whose record EXISTS — a
+   driver `not_ready[]` entry at `reason: "approval-record-write-failed"`, or a
+   Workflow batch with `approvalRecorded: false`, still has its snapshot: write
+   the record with the pass's own record command — `--check-batch` on that
+   snapshot, `--research-mode live`, `--expect-source-forms-file
+   .../manifest_<i>.json`, `--record-approval-to
    .../approval_<i>_attempt_<n>.json` — and only for a batch the judge
    approved; never substitute `out_{i}_attempt_{n}.json` for the snapshot.
 

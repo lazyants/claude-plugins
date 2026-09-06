@@ -1265,6 +1265,21 @@ def _whole_arg_present(command: str, *flags: str) -> bool:
     )
 
 
+def _raw_fenced_blocks(window: str) -> list[str]:
+    """Every fenced block in `window`, VERBATIM -- unlike `_fenced_commands()`,
+    no backslash-continuation folding and no whitespace collapse.
+
+    `_fenced_commands()` reconstructs a shell command's real newlines and
+    trailing backslashes into one logical line before a caller ever sees it,
+    which is exactly right for a flag-presence needle but wrong for actually
+    RUNNING the command: a broken trailing backslash (a stray trailing space
+    after it, or a missing one) is invisible to that fold yet breaks a real
+    shell. So the regression-catcher for "a documented command that cannot
+    run" (#412's own class of defect) must feed a real shell the bytes as
+    SKILL.md actually ships them, only with the placeholders substituted."""
+    return re.findall(r"```[^\n]*\n(.*?)\n```", window, re.DOTALL)
+
+
 def test_w3_partial_merge_route_after_exhausted_batch_present():
     # New W3 paragraph (#883): the hand route an operator takes when
     # `needs_judge[]` comes back empty but a `not_ready[]` entry carries
@@ -1301,20 +1316,30 @@ def test_w3_partial_merge_route_after_exhausted_batch_present():
         f"lists the exhausted batches and would report them missing; got: {verify!r}"
     )
 
-    text = _normalized(SKILL_MD)
-    assert "IN THE SAME ORDER" in text, (
+    # Needled on the WINDOW itself, whitespace-normalized -- not the whole
+    # document. Each of these four phrases also occurs elsewhere in SKILL.md
+    # (e.g. `--allow-unmerged-glossary` is documented at its own definition
+    # site, `glossary-pass-unmerged` in the #820 admission-gate section), so
+    # a whole-document membership check would stay green even if THIS
+    # paragraph's own copy of the phrase were replaced or deleted.
+    window_text = re.sub(r"\s+", " ", window)
+    assert "IN THE SAME ORDER" in window_text, (
         "the merge/verify pairing rule must state the fragment/record ordering constraint"
     )
-    assert "glossary-pass-unmerged" in text, (
+    assert "glossary-pass-unmerged" in window_text, (
         "the outstanding-work section must name W5's admission-gate reason"
     )
-    assert "--allow-unmerged-glossary" in text, (
+    assert "--allow-unmerged-glossary" in window_text, (
         "the outstanding-work section must name the deliberate override"
     )
-    assert "approval-record-write-failed" in text, (
+    assert "approval-record-write-failed" in window_text, (
         "the route must name the driver's own reason for a judge-approved, "
         "unrecorded batch"
     )
+
+    # This needle stays on the WHOLE document: the pointer sentence it pins
+    # lives in the driver-loop step-3 paragraph, OUTSIDE this window.
+    text = _normalized(SKILL_MD)
     assert (
         "so go to **Recovering the ready batches when a sibling exhausted** below" in text
     ), "the driver-loop step-3 pointer sentence must survive"
@@ -1355,51 +1380,85 @@ def test_documented_partial_merge_commands_run_as_written(tmp_path):
         "**Recovering the ready batches when a sibling exhausted (#883).**",
         "**1.16.0: the approval binds the reviewed BYTES, not a path.**",
     )
+
+    # Placeholder-presence sanity check on the folded/joined form (same
+    # helpers the presence test uses) -- catches a renamed or deleted flag
+    # cheaply, before the more expensive real-shell run below.
     merge_template = _select_command(
         _fenced_commands(window), "canon_validate.py", "--merge-batches"
     )
+    assert _whole_arg_present(
+        merge_template, "--glossary-merge-marker", "--citations-reviewed", "--approval-records"
+    ), f"partial-merge command missing a required flag: {merge_template!r}"
     verify_template = _select_command(
         _fenced_commands(window), "canon_validate.py", "--verify-merged"
     )
+    assert verify_template.count("--batch ") >= 2, (
+        f"partial verify must repeat --batch; got: {verify_template!r}"
+    )
+
+    # The bytes that actually RUN are the RAW fence, never the folded form:
+    # `_fenced_commands()` reconstructs a broken trailing backslash into a
+    # working one-line command, which would hide the exact defect class this
+    # test exists to catch. Select the raw block by content, same as
+    # `_select_command()` does for the folded form.
+    raw_blocks = _raw_fenced_blocks(window)
+    merge_raw_matches = [b for b in raw_blocks if "--merge-batches" in b]
+    assert len(merge_raw_matches) == 1, (
+        f"expected exactly 1 raw fenced block naming --merge-batches, found "
+        f"{len(merge_raw_matches)}: {merge_raw_matches!r}"
+    )
+    verify_raw_matches = [b for b in raw_blocks if "--verify-merged" in b]
+    assert len(verify_raw_matches) == 1, (
+        f"expected exactly 1 raw fenced block naming --verify-merged, found "
+        f"{len(verify_raw_matches)}: {verify_raw_matches!r}"
+    )
+    merge_raw = merge_raw_matches[0]
+    verify_raw = verify_raw_matches[0]
 
     plugin_root_dir = str(PLUGIN_ROOT / "skills" / "literary-translator")
     merge_paths = f"{frag0} {frag1}"
     record_paths = f"{record0} {record1}"
+    real_python = shlex.quote(sys.executable)
 
-    merge_cmd = merge_template
-    merge_cmd = merge_cmd.replace("${durable_root}", str(root))
-    merge_cmd = merge_cmd.replace("<RUN_ID>", "r1")
-    merge_cmd = merge_cmd.replace("{{PLUGIN_ROOT}}", plugin_root_dir)
-    merge_cmd = merge_cmd.replace(
+    merge_sh = merge_raw
+    merge_sh = re.sub(r"^python3(?=\s)", real_python, merge_sh)
+    merge_sh = merge_sh.replace("${durable_root}", str(root))
+    merge_sh = merge_sh.replace("<RUN_ID>", "r1")
+    merge_sh = merge_sh.replace("{{PLUGIN_ROOT}}", plugin_root_dir)
+    merge_sh = merge_sh.replace(
         "<mergePath of every ready batch, ascending index>", merge_paths
     )
-    merge_cmd = merge_cmd.replace(
+    merge_sh = merge_sh.replace(
         "<approvalRecordPath of the same batches, SAME ORDER>", record_paths
     )
-    assert "<" not in merge_cmd and "{{" not in merge_cmd, (
-        f"an un-substituted placeholder remains in the merge command: {merge_cmd!r}"
+    assert "<" not in merge_sh and "{{" not in merge_sh, (
+        f"an un-substituted placeholder remains in the merge command: {merge_sh!r}"
     )
 
     verify_batches_segment = "--batch <mergePath> --batch <mergePath> …"
-    assert verify_batches_segment in verify_template, (
+    assert verify_batches_segment in verify_raw, (
         f"expected the documented verify command to repeat --batch twice then an "
-        f"ellipsis; got: {verify_template!r}"
+        f"ellipsis; got: {verify_raw!r}"
     )
-    verify_cmd = verify_template.replace(
+    verify_sh = verify_raw
+    verify_sh = re.sub(r"^python3(?=\s)", real_python, verify_sh)
+    verify_sh = verify_sh.replace(
         verify_batches_segment, f"--batch {frag0} --batch {frag1}"
     )
-    verify_cmd = verify_cmd.replace("${durable_root}", str(root))
-    assert "<" not in verify_cmd and "…" not in verify_cmd, (
-        f"an un-substituted placeholder remains in the verify command: {verify_cmd!r}"
+    verify_sh = verify_sh.replace("${durable_root}", str(root))
+    assert "<" not in verify_sh and "…" not in verify_sh, (
+        f"an un-substituted placeholder remains in the verify command: {verify_sh!r}"
     )
 
-    merge_argv = shlex.split(merge_cmd)
-    merge_argv[0] = sys.executable
+    # Run each SUBSTITUTED block through a real shell, backslash
+    # continuations and all -- exactly what an operator's terminal does.
     merge_proc = subprocess.run(
-        merge_argv, cwd=str(root), capture_output=True, text=True, timeout=120
+        ["bash", "-c", merge_sh], cwd=str(root), capture_output=True, text=True, timeout=120
     )
     assert merge_proc.returncode == 0, (
-        f"documented merge command failed:\n{merge_proc.stdout}\n{merge_proc.stderr}"
+        f"documented merge command failed:\n{merge_sh}\n---\n"
+        f"{merge_proc.stdout}\n{merge_proc.stderr}"
     )
 
     merged_path = run_dir / "merged.json"
@@ -1410,13 +1469,12 @@ def test_documented_partial_merge_commands_run_as_written(tmp_path):
     assert merged_doc.get("schema") == "glossary-run-merged/1", merged_doc
     assert merged_doc.get("source") == "merge", merged_doc
 
-    verify_argv = shlex.split(verify_cmd)
-    verify_argv[0] = sys.executable
     verify_proc = subprocess.run(
-        verify_argv, cwd=str(root), capture_output=True, text=True, timeout=120
+        ["bash", "-c", verify_sh], cwd=str(root), capture_output=True, text=True, timeout=120
     )
     assert verify_proc.returncode == 0, (
-        f"documented verify command failed:\n{verify_proc.stdout}\n{verify_proc.stderr}"
+        f"documented verify command failed:\n{verify_sh}\n---\n"
+        f"{verify_proc.stdout}\n{verify_proc.stderr}"
     )
     lines = [ln for ln in verify_proc.stdout.splitlines() if ln.strip()]
     assert lines, f"expected one JSON line on stdout; stderr:\n{verify_proc.stderr}"
