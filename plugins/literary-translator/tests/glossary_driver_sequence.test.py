@@ -49,6 +49,16 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node runs the template bui
 CANDIDATES = [{"name": "Alpha", "freq": 5}, {"name": "Beta", "freq": 3}]
 BATCHES = [{"index": 0, "candidates": CANDIDATES}]
 
+# #882: a second batch, for the two tests that need a driver mid-loop -- one
+# batch settled before the kill, one still in flight when it lands. The
+# distinction the tests assert on is the ARTIFACT NAME (out_1_attempt_0.json
+# against out_0_attempt_0.json): the companion stub writes the same default
+# rows for every out_* key it is asked for, so batch 1's candidate names never
+# reach a fragment and are not what tells the two batches apart.
+BATCH_TWO_CANDIDATES = [{"name": "Gamma", "freq": 4}, {"name": "Delta", "freq": 2}]
+TWO_BATCHES = [{"index": 0, "candidates": CANDIDATES},
+              {"index": 1, "candidates": BATCH_TWO_CANDIDATES}]
+
 
 def _default_rows(bases=("established", "established")):
     """The whole-batch decision an ordinary dispatch produces. One definition, used
@@ -216,6 +226,23 @@ def bed(tmp_path):
           // built by String.join("\\n") over ordinary text).
           fs.appendFileSync({str(prompts_log)!r}, key + "\\u0000" + prompt + "\\u0001\\n");
           if (firstKey === null) firstKey = key;
+          // #882: a jobs sidecar entry {{kill_driver: true}} models a driver
+          // killed by macOS memory pressure mid-loop. It sits BEFORE this
+          // key's own artifact write below, never after: the fragment this
+          // dispatch would have written never lands either, which is the
+          // faithful shape -- an OOM kill has no obligation to let the write
+          // finish first. The parent IS the driver (launch_codex runs this
+          // file via subprocess.run with no shell), so killing process.ppid
+          // from inside the codex turn reaches the same process a real OOM
+          // kill would. It also sits BEFORE the #809 `if (jobs[key]) continue`
+          // branch: that branch models a job whose STATUS call reports the
+          // outcome instead of the artifact ever appearing, a different fake
+          // from a process dying outright, and the two must not be conflated
+          // by sharing one entry shape.
+          if (jobs[key] && jobs[key].kill_driver) {{
+            process.kill(process.ppid, "SIGKILL");
+            process.exit(0);
+          }}
           // #809: a key with a job record means codex-companion is being told to
           // report that JOB's own outcome, not to have written anything for it --
           // an ordinary task that also silently wrote the fragment would hide the
@@ -341,7 +368,7 @@ def load(bed):
     return m
 
 
-def run_driver_raw(bed, *extra, env=None):
+def run_driver_raw(bed, *extra, env=None, batches=BATCHES):
     """The driver as a subprocess, WITHOUT run_driver's exit-code and
     one-JSON-line assertions. An environment fault exits 2 having emitted no
     hand-back at all, which is the property under test -- run_driver would fail
@@ -350,9 +377,13 @@ def run_driver_raw(bed, *extra, env=None):
     ONE argv, built here and nowhere else: a second copy of this command line
     would let the ordinary path and the environment-fault path drift into
     invoking two different drivers, and the fault path's whole claim is that it
-    is the SAME invocation an operator makes."""
+    is the SAME invocation an operator makes.
+
+    `batches` defaults to the single-batch BATCHES every existing test relies
+    on, so no test that predates #882 changes meaning; a caller that needs a
+    second batch in flight passes TWO_BATCHES explicitly."""
     batches_file = bed["tmp"] / "batches.json"
-    batches_file.write_text(json.dumps(BATCHES))
+    batches_file.write_text(json.dumps(batches))
     argv = [sys.executable, str(bed["scripts"] / "glossary_dispatch_driver.py"),
             "--run-id", "run1", "--batches-file", str(batches_file),
             "--verdict-dir", str(bed["session"]),
@@ -367,15 +398,28 @@ def run_driver_raw(bed, *extra, env=None):
                           env=merged)
 
 
-def run_driver(bed, *extra, expect=0, env=None):
+def run_driver(bed, *extra, expect=0, env=None, batches=BATCHES):
     """Invokes the driver as a subprocess, exactly as an operator does, and
     returns its one stdout JSON line."""
-    proc = run_driver_raw(bed, *extra, env=env)
+    proc = run_driver_raw(bed, *extra, env=env, batches=batches)
     assert proc.returncode == expect, (
         f"exit {proc.returncode}, expected {expect}\nSTDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}")
     line = [l for l in proc.stdout.strip().splitlines() if l.startswith("{")]
     assert len(line) == 1, f"expected exactly one JSON line, got {proc.stdout!r}"
     return json.loads(line[0]), proc
+
+
+def run_driver_expecting_kill(bed, *extra, batches=BATCHES):
+    """The driver as a subprocess that is expected to die of SIGKILL -- the
+    #882 kill sidecar in the companion stub. Returns the completed process so a
+    test can read what the driver had written before it died. -9 is the direct
+    child's own wait status, never a shell's 137: run_driver_raw spawns the
+    driver itself."""
+    proc = run_driver_raw(bed, *extra, batches=batches)
+    assert proc.returncode == -9, (
+        f"expected the driver to die of SIGKILL (-9), got {proc.returncode}\n"
+        f"STDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}")
+    return proc
 
 
 def plant_fragment(bed, attempt=0, bases=("established", "established")):
@@ -1744,3 +1788,121 @@ def test_a_status_the_companion_cannot_answer_never_fails_a_batch(bed):
     assert elapsed < 45, f"waited {elapsed:.1f}s for what should resolve in one poll"
     assert _logged(bed, "status"), "the status branch was never exercised"
     assert out["needs_judge"], f"an unreadable status must not fail the batch: {out}"
+
+
+# ---------------------------------------------------------------------------
+# #882: a driver killed mid-loop must keep the batches it already settled --
+# the loop's per-batch save -- and a reset's dropped resume-skip must survive
+# that same kill, because the marker recording it is written to the SAME
+# document, not held in the process that dies.
+# ---------------------------------------------------------------------------
+
+def test_a_driver_killed_mid_loop_keeps_the_batches_it_settled(bed):
+    """Two batches, live. Batch 0 settles to awaiting_judge; the sidecar kills
+    the driver -- SIGKILL, the same signal macOS memory pressure sends -- the
+    instant batch 1's dispatch is logged, before that batch ever gets a
+    chance to reach a status drive_all can persist.
+
+    Before the per-batch save this test pins, drive_all() held every batch's
+    progress in memory until the WHOLE loop returned, and main() only saved
+    once after that call. A kill between two batches then lost the FIRST
+    one's hand-back too, even though nothing about it was in flight: the
+    relaunch below would have re-dispatched batch 0's attempt 0 over a
+    fragment a judge may already be reviewing, discarding real citation-judge
+    spend for no reason but where in the loop the kill happened to land."""
+    bed["jobs"].write_text(json.dumps({"out_1_attempt_0.json": {"kill_driver": True}}))
+    run_driver_expecting_kill(bed, batches=TWO_BATCHES)
+
+    m = load(bed)
+    state = m.read_pending(bed["session"])
+    settled = state["batches"]["0"]
+    assert settled["status"] == "awaiting_judge", (
+        f"batch 0 had already settled when the kill landed on batch 1's "
+        f"dispatch; the document must hold that, not just what main()'s own "
+        f"end-of-run save would have written: {state}")
+    assert settled["pending"]["nonce"], "a hand-back with no nonce cannot be judged"
+    assert settled["judgePrompt"], "a hand-back with no prompt cannot be judged"
+    assert "1" not in state["batches"], (
+        "batch 1 was still in flight, mid-dispatch, when the kill landed -- it "
+        f"must not appear in the saved document at all: {state['batches']}")
+
+    bed["jobs"].write_text(json.dumps({}))
+    out, _ = run_driver(bed, batches=TWO_BATCHES)
+    by_batch = {entry["batch"]: entry for entry in out["needs_judge"]}
+    assert by_batch[0]["nonce"] == settled["pending"]["nonce"], (
+        "batch 0 must come back with the SAME nonce the killed run already "
+        "persisted -- a different nonce means it was re-dispatched instead of "
+        "recovered from the saved state")
+    assert by_batch[0]["judgePrompt"] == settled["judgePrompt"]
+    assert 1 in by_batch, "batch 1 must be driven to completion on the relaunch"
+    assert companion_targets(bed) == [
+        "out_0_attempt_0.json", "out_1_attempt_0.json", "out_1_attempt_0.json",
+    ], (
+        "batch 0 dispatched exactly once overall -- the killed run's own save "
+        "must be enough to skip it on relaunch -- and batch 1 dispatched twice: "
+        f"once cut short by the kill, once on the relaunch that settles it: "
+        f"{companion_targets(bed)}")
+
+
+def test_a_resets_dropped_resume_skip_survives_a_kill(bed):
+    """A reset drops a batch's `--resumed-batch-indices` membership for good
+    (#852), not only for the invocation that made the decision. Before the
+    persisted marker this test pins, that decision lived ONLY in the set
+    main() built in memory from THIS run's own reconcile_state() call --
+    nothing on disk said a reset had ever happened. A kill before the next
+    invocation's own reconcile_state() runs again then hands that batch back
+    to a plain `pending` entry indistinguishable from one that was never
+    reset at all, and the next relaunch honours the CLI's resume-skip and
+    re-approves attempt 0's surviving fragment -- bytes a judge may already
+    have rejected -- without ever dispatching a fresh one.
+
+    Run A settles both batches. A resume wipes both approved snapshots
+    (same run_id, same as every real resume). Run B repeats the command with
+    `--resumed-batch-indices [0, 1]`: reconcile_state resets BOTH batches (their
+    awaiting snapshots are gone), so neither counts as resumed any more, and
+    the drive redispatches batch 0 to completion before the sidecar kills the
+    driver mid-dispatch of batch 1. Run C repeats the SAME command again: if
+    the marker survived the kill, batch 1 dispatches for real; if it did not,
+    batch 1's attempt 0 is resume-skipped and its stale fragment is silently
+    re-approved instead."""
+    run_driver(bed, batches=TWO_BATCHES)
+    _wipe_as_resume_setup_does(bed)
+
+    bed["jobs"].write_text(json.dumps({"out_1_attempt_0.json": {"kill_driver": True}}))
+    run_driver_expecting_kill(bed, "--resumed-batch-indices", "[0, 1]", batches=TWO_BATCHES)
+
+    m = load(bed)
+    state = m.read_pending(bed["session"])
+    reset_one = state["batches"]["1"]
+    assert reset_one["status"] == "pending", (
+        f"batch 1 must be sitting reset, not re-dispatched yet: {reset_one}")
+    assert reset_one.get("resumeSkipDropped") is True, (
+        "the reset's own obligation -- this batch's attempt 0 is no longer "
+        f"resume-skippable -- must be persisted alongside it: {reset_one}")
+    settled_zero = state["batches"]["0"]
+    assert settled_zero["status"] == "awaiting_judge", (
+        f"batch 0 was re-dispatched and settled before the kill landed on "
+        f"batch 1; that must be saved too: {state}")
+    nonce_after_b = settled_zero["pending"]["nonce"]
+
+    bed["jobs"].write_text(json.dumps({}))
+    out, _ = run_driver(bed, "--resumed-batch-indices", "[0, 1]", batches=TWO_BATCHES)
+
+    assert companion_targets(bed) == [
+        "out_0_attempt_0.json", "out_1_attempt_0.json",
+        "out_0_attempt_0.json", "out_1_attempt_0.json",
+        "out_1_attempt_0.json",
+    ], (
+        "run A dispatches both batches; run B's reset re-dispatches both (batch "
+        "0 to completion, batch 1 cut short by the kill); run C must dispatch "
+        "batch 1 a SECOND time -- if it does not, the dropped resume-skip did "
+        f"not survive the kill and batch 1 was resume-skipped instead: "
+        f"{companion_targets(bed)}")
+    assert out["reset"] == [], (
+        "nothing in run C needs resetting: batch 0's snapshot from run B still "
+        f"stands and batch 1 was never left in a stale awaiting/ready status: {out}")
+    by_batch = {entry["batch"]: entry for entry in out["needs_judge"]}
+    assert by_batch[0]["nonce"] == nonce_after_b, (
+        "batch 0 must not be re-dispatched a third time -- its nonce must be "
+        "the one run B already persisted")
+    assert 1 in by_batch, "batch 1 must have been driven to a fresh hand-back"

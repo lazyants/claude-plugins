@@ -504,9 +504,30 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.99.0 (#883 -- the ready batches of a glossary run one
-    # sibling exhausted are merged by hand, and SKILL.md now says how), per
-    # the maintenance contract above.
+    # ROTATED TO 1.99.1 (#882 -- every save of the glossary driver's state
+    # document lived in main(), and an initial drive had none until drive_all()
+    # returned, so a kill mid-loop persisted nothing and the documented relaunch
+    # re-dispatched every settled batch), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. It
+    # names things the fix touches rather than counting anything the tree
+    # owns: `save_state()`, `drive_all()`, `main()`, `resolve_run()`,
+    # `resumeSkipDropped`, `resume_from_run_ids` (and the deprecated singular
+    # `resume_from_run_id`), `write_pending()` and `DispatchSandbox`. The one
+    # measurement it quotes -- two kills by macOS memory pressure on one
+    # project, whose `runs/` directory holds two sibling run directories
+    # sharing one input digest -- is a fact about a live project in ANOTHER
+    # REPOSITORY, so no implementation in THIS tree can re-derive it, the same
+    # class the 1.94.0, 1.91.0 and 1.90.0 rotations below name for theirs; it
+    # is also spelled as a WORD ("two kills", "two sibling run directories"),
+    # which `_TOKEN` cannot see regardless. The remaining numerals are
+    # identifiers, not measurements: the version numbers, the release date,
+    # the issue number (#882), and `attempt 0` / `attempt-0`, which name a
+    # rung rather than count one.
+    #
+    # The 1.99.0 rotation this replaces, kept as its own record (#883 -- the
+    # ready batches of a glossary run one sibling exhausted are merged by
+    # hand, and SKILL.md now says how), per the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed.
     # Every digit-run in it is an IDENTIFIER, not a measurement: the version
@@ -531,6 +552,7 @@ FIGURES = [
     # the entry and the test count is not mentioned at all -- for the same
     # reason the 1.98.0 rotation below gives for its driver-argument count: a
     # digit here is a figure nothing red would catch going stale.
+    #
     #
     # The 1.98.0 rotation this replaces, kept as its own record (#881 --
     # running the glossary driver from the plugin tree silently retargets
@@ -896,7 +918,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.99.0"
+FIGURES_VERSION = "1.99.1"
 
 
 def _newest_entry():
