@@ -813,6 +813,12 @@ def _keychain_blob(profile: Path) -> dict:
         )
     except (OSError, subprocess.SubprocessError):
         raise Malformed("keychain-denied") from None
+    except UnicodeError:
+        # `text=True` decodes stdout as it is captured; undecodable bytes raise here, past the
+        # `except` above. This must still come out Malformed -- a bare exception cannot be
+        # caught by `_claude_token`'s file-first fallback, which would then answer
+        # `internal-error` instead of letting the file's own diagnostic stand.
+        raise Malformed("response-malformed") from None
     if done.returncode != 0:  # stderr is deliberately captured and never rendered
         raise Malformed("keychain-denied")
     payload = done.stdout.strip()

@@ -1641,6 +1641,35 @@ with tempfile.TemporaryDirectory() as tmp:
           marker_f.exists() and "find-generic-password" in marker_f.read_text("utf-8"),
           marker_f.read_text("utf-8") if marker_f.exists() else "no marker written")
 
+    # 21h -- IN-PROCESS: `security`'s stdout is UNDECODABLE, which is a Keychain corruption, not
+    # an ordinary denial or a parse failure of well-formed text. This must still be judged as an
+    # ordinary Keychain failure, so the FILE's own token-expired verdict stands -- never
+    # `response-malformed`, and no UnicodeDecodeError may escape past _claude_token.
+    h_root = root / "keyundecodable"
+    profile_h = make_claude(h_root, ".claudeUndecodable", cached(entries=[entry(percent=91)]))
+    (profile_h / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(-1)}
+    }), encoding="utf-8")
+
+    def raising_run(*args, **kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    original_subprocess_run = R.subprocess.run
+    code_h, exc_text_h = "no-error", ""
+    try:
+        R.subprocess.run = raising_run
+        try:
+            R._claude_token(profile_h)
+        except R.Malformed as exc:
+            code_h = exc.code
+            exc_text_h = str(exc)
+    finally:
+        R.subprocess.run = original_subprocess_run
+
+    check("21h an undecodable keychain stdout keeps the FILE's token-expired verdict",
+          code_h == "token-expired", code_h)
+    assert_no_secret("21h undecodable keychain output", exc_text_h)
+
     # 38 -- an explicitly named profile is made ABSOLUTE before anything hashes it. The
     # Keychain service is the hash of the profile's absolute path, so a relative
     # `--claude-profile .claudeR` run from the parent hashed the two-word spelling the caller
