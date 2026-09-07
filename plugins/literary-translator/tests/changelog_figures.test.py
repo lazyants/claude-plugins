@@ -504,7 +504,7 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # rotation this replaces, kept as its own record: ROTATED TO 1.110.0 (#889 -- the three language fields shipped another
+    # ROTATED TO 1.110.0 (#889 -- the three language fields shipped another
     # project's real values with no CHOOSE_ sentinel, and a particle_config
     # naming a shipped preset was refused only at --fold, after the whole
     # discovery fan-out had been paid for), per the maintenance contract above.
@@ -524,7 +524,7 @@ FIGURES = [
     # plural -- "three language fields" -- is spelled as a WORD, which `_TOKEN`
     # cannot see regardless.
     #
-    # The     # ROTATED TO 1.108.0 (#893 -- Step 0 said nothing when a book scaffolded
+    # The 1.108.0 rotation this replaces, kept as its own record (#893 -- Step 0 said nothing when a book scaffolded
     # FOR a markup-driven vault index never got the block that builds one),
     # per the maintenance contract above.
     #
