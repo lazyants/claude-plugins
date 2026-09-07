@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.101.0 — 2026-09-07
+## 1.105.0 — 2026-09-07
 
 **Name discovery asked an uncased-script model for JSON, and Hebrew punctuation broke it — silently
 removing exactly the names the pass exists to find (#888).** Hebrew, Yiddish and Aramaic mark an

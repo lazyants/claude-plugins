@@ -504,13 +504,13 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.101.0 (#888 -- name discovery asked an uncased-script model
+    # ROTATED TO 1.105.0 (#888 -- name discovery asked an uncased-script model
     # for JSON, and Hebrew punctuation broke it), per the maintenance contract
     # above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed. Every
     # digit-run in it is an IDENTIFIER, not a measurement: the version
-    # (1.101.0), the release date, the issue number (#888), and `W3`, the pass
+    # (1.105.0), the release date, the issue number (#888), and `W3`, the pass
     # the migration note names.
     #
     # The entry DOES carry measured figures, and they are written as WORDS on
@@ -979,7 +979,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.101.0"
+FIGURES_VERSION = "1.105.0"
 
 
 def _newest_entry():

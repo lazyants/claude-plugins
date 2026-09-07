@@ -152,7 +152,7 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.101.0 (#888 -- name discovery asked an uncased-script model
+    # ROTATED TO 1.105.0 (#888 -- name discovery asked an uncased-script model
     # for JSON, and Hebrew punctuation broke it), and EMPTY ON PURPOSE, for the
     # same reason the records below state: the entry names its subjects by FILE
     # and SYMBOL rather than by line -- `PROMPT_TEMPLATE`, `parse_reply`,
