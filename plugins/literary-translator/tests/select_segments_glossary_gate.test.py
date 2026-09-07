@@ -1229,6 +1229,22 @@ def test_13_admits_with_a_valid_backfill_ack_marker(tmp_path):
     assert_admitted_with_segs(payload)
 
 
+def _unmerged_id_clause(payload):
+    """The ID list out of a `glossary-run-unmerged` message, and nothing else.
+
+    #895's assertions are about WHICH run ids the message names, so they must
+    read only the clause that names them. Asserting over the whole message
+    would also be reading the runs directory it prints, and that path is the
+    pytest tmp_path -- under a `--basetemp` that happens to contain "R2" a
+    correct message would fail a `"R2" not in ...` assertion, a false RED with
+    nothing wrong in the code."""
+    _, sep, rest = payload["error"].partition("have no merge marker yet: ")
+    assert sep, payload
+    clause, sep, _ = rest.partition(" -- ")
+    assert sep, payload
+    return clause
+
+
 # ---------------------------------------------------------------------------
 # 14. A run with NO marker at all -> refuses "glossary-run-unmerged", never
 #     silently treated as "nothing to wait for".
@@ -1248,7 +1264,10 @@ def test_14_refuses_when_a_run_has_no_merge_marker(tmp_path):
     assert payload["outstandingBatches"] is None, payload
     assert payload["outstandingCandidates"] is None, payload
     assert "1 glossary run(s)" in payload["error"], payload
-    assert "(newest: R)" in payload["error"], payload
+    # #895: the message names the run that LACKS the marker, not merely the
+    # newest one. Here they are the same run, so this assertion alone cannot
+    # tell the two apart -- test_15 is what separates them.
+    assert _unmerged_id_clause(payload) == "R", payload
     assert "backfill_glossary_merge_ack.py" in payload["error"], payload
     assert "--allow-unmerged-glossary" in payload["error"], payload
 
@@ -1258,6 +1277,11 @@ def test_14_refuses_when_a_run_has_no_merge_marker(tmp_path):
 #     run CONDITION 1 found must be accounted for, not just the newest --
 #     an abandoned older run with no marker is exactly as dangerous as the
 #     newest one lacking one.
+#
+#     #895: this is also the shape that separates "names the offending run"
+#     from "names the newest run". The two are the same id in test_14, so
+#     only here can the message be shown to name R1 -- the run that lacks
+#     the marker -- and not R2, the run that carries one.
 # ---------------------------------------------------------------------------
 
 def test_15_refuses_when_an_older_run_lacks_a_marker_even_if_the_newest_has_one(tmp_path):
@@ -1273,6 +1297,32 @@ def test_15_refuses_when_an_older_run_lacks_a_marker_even_if_the_newest_has_one(
     assert_glossary_refusal(payload, "glossary-run-unmerged")
     assert payload["glossaryRunId"] == "R2", payload  # newest run id, per contract
     assert "1 glossary run(s)" in payload["error"], payload
+    assert _unmerged_id_clause(payload) == "R1", payload
+
+
+# ---------------------------------------------------------------------------
+# 15b. THREE runs, the newest marked and BOTH older ones not -> the message
+#     names BOTH missing ids, not just the first one the loop happened to
+#     collect. An implementation that interpolated `unmerged_run_ids[0]`
+#     would satisfy test_15 and fail here.
+# ---------------------------------------------------------------------------
+
+def test_15b_names_every_run_that_lacks_a_marker(tmp_path):
+    root = make_full_project(tmp_path)
+    write_name_candidates(root, [])
+    make_glossary_run(root, "R1")  # oldest: deliberately no marker
+    make_glossary_run(root, "R2")  # middle: deliberately no marker
+    r3 = make_glossary_run(root, "R3")
+    write_glossary_run_merged_marker(r3, "R3")  # newest: merged
+
+    proc = run_select(root / "scripts" / "select_segments.py", cwd=root)
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert_glossary_refusal(payload, "glossary-run-unmerged")
+    assert payload["glossaryRunId"] == "R3", payload  # newest run id, per contract
+    assert "2 glossary run(s)" in payload["error"], payload
+    # Newest-first, the order scan_glossary_run_ids() already returns.
+    assert _unmerged_id_clause(payload) == "R2, R1", payload
 
 
 # ---------------------------------------------------------------------------
