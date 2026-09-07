@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.116.0 — 2026-09-07
+
+**The §7 editorial-bracket guard tested adjacency, not pairing, so a bracketed aside that opens with
+a name shipped a dead link (#897).** `_editorial_bracket_sides` required the closing `]` to sit
+against the end of the matched name, which recognises `[Name]` and nothing wider. A translator who
+brackets a whole editorial aside — `[Name explained that … .]`, the two sides hundreds of characters
+apart — has written the same editorial pair, but the guard reported no pair at all, took its no-op
+branch, and the renderer emitted a literal `[` glued to the wikilink. Obsidian reads `[[[People/X|X]]`
+as the target `[People/X`, so the reader who clicks that name lands nowhere. The function's own
+docstring already stated the rule the code did not implement: the PAIR is what makes a bracket
+editorial.
+
+**A closer that is not adjacent is now looked for further along the same line, and finding it repairs
+the opening side alone.** The distant `]` is left as written: on its own it is not a parse hazard,
+and rewriting text outside the replaced span is not this rewrite's business. The search stops at a
+`[` (the `]` ahead closes an inner pair, which only a balanced scan could resolve), at a line break
+in either form, and at the end of the text — each leaving the source exactly as the translator wrote
+it. Every case the guard already handled renders byte-identically; the only new output is the escape
+on an opener that used to ship bare.
+
+Both emission sites are covered, because both route through `_editorial_bracket_emit` — the canon
+linker and the entity-markup pre-pass, so a book that declares no markup at all is fixed too. The
+`brackets_escaped` count keeps its meaning: one per emitted link whose editorial pair was repaired,
+on whichever side was literal.
+
+Measured before it was fixed on the reporting operator's two delivered books: a single occurrence
+among all their published links, and the escape branch had never fired there at all. It is filed
+rather than absorbed because the local workaround was to reword the translated sentence so the name
+no longer sat against the bracket, and prose must not be shaped by the renderer.
+
+Residuals, all disclosed in `references/output-target-adapters/obsidian.md`: a bracket whose partner
+never arrives is still left alone, the widening that document records as a product decision
+deliberately not taken; a nested `[` before the matching `]` ends the search; and inside an inline
+code span the escape shows the reader a backslash, which telling code from prose would need a
+markdown parser to avoid — the wikilink syntax such a span already carries is unusable either way.
+
 ## 1.115.0 — 2026-09-07
 
 **A citation-exhausted glossary batch has a supported way back onto the ladder (#892).** A batch

@@ -504,6 +504,28 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
+    # ROTATED TO 1.116.0 (#897 -- the editorial-bracket guard tested adjacency
+    # rather than pairing), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # digit-run in it is an IDENTIFIER: the version (1.116.0), the release date,
+    # the issue number (#897), and the `7` of the spec section `§7` this guard
+    # belongs to. There is no other digit in the entry at all.
+    #
+    # That is deliberate rather than lucky. The measurement behind #897 -- how
+    # many published links carried the defect -- is a fact about TWO DELIVERED
+    # BOOKS IN ANOTHER REPOSITORY, exactly the kind no implementation in this
+    # tree can re-derive, so the entry states it in words ("a single occurrence
+    # among all their published links") instead of quoting a count that would
+    # sit here unverifiable. Everything the tree DOES own is stated by NAMING:
+    # `_editorial_bracket_sides`, `_editorial_bracket_emit`, `brackets_escaped`
+    # and the terminators are named rather than counted, so no later release can
+    # rot this prose by retuning a number.
+    #
+    # This rotation RETIRED 1.115.0's rows, which belong to an entry that is now
+    # the second-newest and which this guard therefore no longer reads.
+    #
+    # The 1.115.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.115.0 (#892 -- a citation-exhausted glossary batch had no
     # transition out, and the hand recovery an operator was left with burns the
     # ladder it was meant to restore), per the maintenance contract above.
@@ -1197,7 +1219,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.115.0"
+FIGURES_VERSION = "1.116.0"
 
 
 def _newest_entry():
