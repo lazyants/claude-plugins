@@ -171,8 +171,10 @@
 //                        citation fetcher may admit, substituted as a plain
 //                        quoted string. Empty string = use fetch_citation.py's
 //                        shipped default (text/, application/xhtml,
-//                        application/xml, application/json). A project citing
-//                        scanned archives sets "text/,application/pdf".
+//                        application/xml, application/json). A project may
+//                        NARROW that list ("text/html") or name another type
+//                        the boundary supports; a type outside the supported
+//                        set is refused here, at instantiation (#890).
 //                        Substituting nothing here leaves a literal
 //                        {{CITATION_CONTENT_TYPES}} in the script, which throws
 //                        at instantiation -- deliberately: a profile setting
@@ -340,10 +342,37 @@ const CITATION_CONTENT_TYPES = "{{CITATION_CONTENT_TYPES}}"
 const CITATION_TYPE_LIST = CITATION_CONTENT_TYPES.split(",")
   .map(function (t) { return t.trim() })
   .filter(function (t) { return t.length > 0 })
+//
+// #890 -- the SECOND way this list could be wrong, and the one that was silent.
+// A prefix naming a type the retrieval boundary does not support as evidence
+// used to be admitted here and destroyed at the fetcher's decode, with
+// index.json still reporting outcome "fetched". Same rule and same set as
+// fetch_citation.py's TEXT_DECODABLE_PREFIXES (see its comment for the
+// measurement and for why two fetch-time repairs were refused in review);
+// spelled here as well, and pinned against that copy by
+// tests/citation_content_type_parity.test.py, because this template is where a
+// bad list is stopped EARLIEST -- before a single agent is dispatched.
+// startsWith, not membership: `text/html` narrows `text/` and stays legal,
+// `application/` would re-admit every binary type and does not.
+const CITATION_TYPE_SUPPORTED = ["text/", "application/xhtml", "application/xml", "application/json"]
 for (const t of CITATION_TYPE_LIST) {
   if (!/^[a-z0-9][a-z0-9.+-]*\/[a-z0-9.+-]*$/.test(t)) {
     throw new Error("glossary.citation_content_types: '" + t + "' is not a bare " +
-      "type/subtype prefix (for example text/ or application/pdf)")
+      "type/subtype prefix (for example text/ or application/json)")
+  }
+  if (!CITATION_TYPE_SUPPORTED.some(function (p) { return t.startsWith(p) })) {
+    // The offending value is NOT echoed, unlike the shape error above. That one
+    // predates this rule; this message is new, it reaches an operator
+    // transcript, and there is no reason for a value to travel with it. Only
+    // the supported set -- this file's own constant -- does. (The value here
+    // HAS already matched the media-type charset: the shape check throws
+    // first. The rule is still "do not carry the value", not "carry it once it
+    // is safe".)
+    throw new Error("glossary.citation_content_types: an entry names a type the " +
+      "retrieval boundary does not support as citation evidence. Supported: " +
+      CITATION_TYPE_SUPPORTED.join(", ") + " (or anything narrower, such as " +
+      "text/html). Anything else is admitted and then read as text, which is " +
+      "not what the document says.")
   }
 }
 // The COUNT cap and the uniqueness rule existed in the other two engines only

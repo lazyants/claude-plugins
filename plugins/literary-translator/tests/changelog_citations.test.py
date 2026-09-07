@@ -152,7 +152,7 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.100.0 (#888 -- name discovery asked an uncased-script model
+    # ROTATED TO 1.101.0 (#888 -- name discovery asked an uncased-script model
     # for JSON, and Hebrew punctuation broke it), and EMPTY ON PURPOSE, for the
     # same reason the records below state: the entry names its subjects by FILE
     # and SYMBOL rather than by line -- `PROMPT_TEMPLATE`, `parse_reply`,
@@ -172,7 +172,10 @@ CITATION_ANCHORS = {
     # The repo-wide `tools/citation_audit.py check` is what proves the
     # neutrality held; run it after any edit to this SKILL.md.
     #
-    # The rotation this replaces is 1.99.0's, kept as its own record (#883 -- the ready batches of a glossary run one
+    # The rotation this replaces is 1.99.0's -- #890 shipped 1.100.0 on main while
+    # this branch was open, forcing this renumber, but did not rotate THIS map, so
+    # its entry passed the guard with the inherited empty dict and is now the
+    # second-newest, which this guard does not read. Kept as its own record (#883 -- the ready batches of a glossary run one
     # sibling exhausted are merged by hand, and SKILL.md now says how), and
     # EMPTY ON PURPOSE, for the same reason the records below state: the
     # entry names its subjects by FILE and SYMBOL rather than by line --
