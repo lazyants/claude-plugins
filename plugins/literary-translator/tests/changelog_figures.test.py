@@ -504,7 +504,23 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.114.0 (#896 -- the two size-cap refusals recommended knobs
+    # ROTATED TO 1.115.0 (#892 -- a citation-exhausted glossary batch had no
+    # transition out, and the hand recovery an operator was left with burns the
+    # ladder it was meant to restore), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. It
+    # names the things the fix touches rather than counting anything this tree
+    # owns: `drive_all()`, `reconcile_state()`, `_release_approved_slots()`,
+    # `--reset-batches`, `--record-verdicts`, `resumeSkipDropped`, `reset[]`,
+    # `not_ready[]`, `recovery`, `PLUGIN_BUNDLE_MEMBERS` and
+    # `plugin_bundle_hash`. Its remaining digit-runs are IDENTIFIERS, not
+    # measurements: the version numbers, the date, the issue numbers (#892,
+    # #883), `attempt 0`, which names a rung rather than counts one, and
+    # `reset: 0`, which quotes a driver OUTPUT VALUE an operator saw rather than
+    # a quantity in this tree. `1_0` is the literal spelling of a rejected CLI
+    # token, and the ten it would resolve to is spelled as a word.
+    #
+    # The 1.114.0 rotation this replaces, kept as its own record (#896 -- the two size-cap refusals recommended knobs
     # that barely move the size), per the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed. Every
@@ -1181,7 +1197,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.114.0"
+FIGURES_VERSION = "1.115.0"
 
 
 def _newest_entry():

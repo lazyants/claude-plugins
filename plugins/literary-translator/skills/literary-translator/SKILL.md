@@ -2010,6 +2010,24 @@ There is deliberately no retry knob: the ladder bound is READ from the template'
 own `MAX_CITATION_RETRIES`, so the driver and the `pipeline()` fallback cannot
 climb different numbers of rungs.
 
+**`--reset-batches <i>[,<j>…]` — the ONE supported way to put a settled batch
+back on the ladder (1.115.0, #892).** Added to the command above, it sends each
+named batch back to attempt 0 BEFORE this invocation drives anything: it deletes
+that batch's approved snapshots at every rung and rewrites its state entry.
+Both halves are the operation — the snapshot is published create-once, so a state
+entry rewritten while the snapshots stay costs the batch a rung per rung on
+`approve-failed` and settles it again, recording a citation review that never
+happened. It is what a batch reported at `reason: "citation-review-exhausted"`
+needs, and the exhausted entry now names it. It resets whatever the batch's
+status is — including `ready`, whose attested approval it throws away — because
+the case it exists for is the one where the state document is itself what is
+wrong; an index this run does not have is refused before anything dispatches.
+**It resets on EVERY invocation that carries it, so drop it from the next one:**
+left on, the follow-up invocation resets the hand-back it just produced, and the
+invocation that submits that batch's verdict refuses it as not awaiting a judge.
+A reset re-opens a FULL ladder, so the run's `worstCaseJudgeCalls` no longer
+bounds the session — that is the operator's decision to make, knowingly.
+
 `--plugin-root` and `--verdict-dir` are both REQUIRED and both are refusals, not
 conveniences. The driver EXECUTES the template's builders, and
 a durable copy of the template would be JavaScript it then runs from a directory
@@ -2108,11 +2126,17 @@ the plugin tree's driver.
    The `out_{i}_attempt_0.json` fragment itself and the approval record are kept. If a
    snapshot cannot be deleted, the reset entry carries `undeleted[]` naming it:
    the batch is still re-driven, but the rung that path belongs to will fail at
-   approve time until the file is removed by hand.
+   approve time until the file is removed by hand. A reset the OPERATOR asked for
+   with `--reset-batches` is reported in the same array, carrying
+   `requested: true` and the status it dropped in `was` — including `was:
+   "failed"`, the exhausted case that has no reset of its own.
 5. The state document is written after every batch the driver drives, so an
    invocation that dies — killed by memory pressure, a crash — is recovered by
    re-running the SAME command with the same `--run-id`, `--verdict-dir`,
-   `--batches-file` and `--resumed-batch-indices`. Batches saved as awaiting
+   `--batches-file` and `--resumed-batch-indices`. One exception, and it is the
+   whole of it: `--reset-batches` is NOT part of "the same command". It resets
+   again on every invocation that carries it, so repeating it would drop the
+   hand-back the dead invocation had already saved. Batches saved as awaiting
    come back in `needs_judge[]` with their original nonce and prompt; batches
    saved as ready or failed keep that status and are reported in `ready[]` /
    `not_ready[]`; the batch that was in flight and every other UNSETTLED batch
@@ -2368,8 +2392,20 @@ line; `{"verified": true}` is the only pass.
    itself the record of what was dropped: keep it. Read `lastRejection` first:
    fix the data, report a guard misfire, or run a failing command by hand, per
    the guard paragraph below. `--allow-unmerged-glossary` is the deliberate
-   override for translating without them, never the default. Do not hand-edit
-   `pending.json` to revive an exhausted batch.
+   override for translating without them, never the default.
+
+   **Before taking the hand route, decide whether the batch should be RE-DRIVEN
+   instead (#892).** The upstream cause of an exhaustion is often transient — a
+   host refusing under load, a page whose body the citation judge correctly
+   rejects — and a fresh ladder from attempt 0 clears it. Under the driver that
+   is `--reset-batches <i>` on the next invocation (the flag's own paragraph
+   above), which releases the batch's approved snapshots as well as rewriting its
+   state entry. Do NOT hand-edit `pending.json` to revive an exhausted batch:
+   deleting the `status` key crashes the next drive with `KeyError`, and
+   rewriting the entry while those snapshots stay spends the whole ladder on
+   `approve-failed`, settling the batch again under a reason that names a
+   citation review which never ran. Take the hand route when a re-drive has been
+   tried, or when `lastRejection` names something a re-drive cannot fix.
 
 **1.16.0: the approval binds the reviewed BYTES, not a path.** Before
 anything is fetched or judged, PREPARE re-runs the fragment's own

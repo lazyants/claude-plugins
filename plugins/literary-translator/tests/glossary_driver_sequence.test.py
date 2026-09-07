@@ -1906,3 +1906,209 @@ def test_a_resets_dropped_resume_skip_survives_a_kill(bed):
         "batch 0 must not be re-dispatched a third time -- its nonce must be "
         "the one run B already persisted")
     assert 1 in by_batch, "batch 1 must have been driven to a fresh hand-back"
+
+
+# ---------------------------------------------------------------------------
+# #892: a citation-exhausted batch has a SUPPORTED way back onto the ladder.
+#
+# Exhaustion is terminal by construction -- drive_all() skips `failed`, and
+# reconcile_state() reaches only a status whose promised artifact is gone, which
+# `failed` has none of. Until this flag the operator's only move was editing the
+# state document by hand, whose half-done form (the entry rewritten, the approved
+# snapshots left behind) spends the whole ladder on approve-failed and records
+# citation-review-exhausted for a cause that was never citation review.
+# ---------------------------------------------------------------------------
+
+def _exhaust_batch_zero(bed, *extra):
+    """Drives batch 0 to `citation-review-exhausted` the way a live run reaches
+    it: a content rejection at every rung of the ladder. Returns the driver's
+    last output. Every rung's approved snapshot is left on disk, exactly as a
+    real exhausted batch leaves them -- which is what makes the release half of
+    the reset observable at all.
+
+    `extra` is passed to EVERY invocation, so a caller can exhaust the batch
+    under the same flags its own case is about -- `--resumed-batch-indices`
+    means "resume_setup.py checked this batch", and a run that carried it on
+    only some of the four invocations would not be the run the operator has."""
+    out, _ = run_driver(bed, *extra)
+    verdicts = bed["session"] / "v.json"
+    for attempt in (0, 1, 2):
+        entry = out["needs_judge"][0]
+        verdicts.write_text(json.dumps([{
+            "batch": 0, "attempt": attempt, "nonce": entry["nonce"],
+            "reply": f"source 1 is not attested.\nCITATIONS_REJECTED 0 ATTEMPT {attempt}"}]))
+        out, _ = run_driver(bed, *extra, "--record-verdicts", str(verdicts),
+                            expect=1 if attempt == 2 else 0)
+    assert out["not_ready"][0]["reason"] == "citation-review-exhausted"
+    return out
+
+
+def test_an_exhausted_batch_names_the_flag_that_recovers_it(bed):
+    """The terminal record described the outcome and named no move that changes
+    it, so an operator reading `not_ready[]` had nowhere to go -- and the move
+    they reached for unaided (editing the state document) destroys the ladder it
+    was meant to restore."""
+    out = _exhaust_batch_zero(bed)
+    failed = out["not_ready"][0]
+    assert "--reset-batches" in failed.get("recovery", ""), (
+        f"the exhausted record must name the supported recovery: {failed}")
+
+
+def test_a_requested_reset_re_drives_an_exhausted_batch_from_attempt_zero(bed):
+    """THE #892 test. After exhaustion the state document says `failed`, all
+    three approved snapshots are on disk, and nothing transitions the batch.
+
+    One `--reset-batches 0` must do BOTH halves: rewrite the entry AND release
+    those snapshots. The assertion is on rung 0 holding the RE-DECIDED bytes,
+    never on a hand-back merely existing -- released or not, the batch hands
+    something back, because a refused approve spends the rung as
+    `evidence_failed` and the loop climbs to the next. Unreleased, all three
+    rungs are refused in turn and the batch exhausts again having bought three
+    more codex dispatches, which is the failure this flag exists to prevent."""
+    _exhaust_batch_zero(bed)
+    for attempt in (0, 1, 2):
+        assert (bed["run_dir"] / f"approved_0_attempt_{attempt}.json").exists(), (
+            f"rung {attempt}'s snapshot must be on disk, or this test is not "
+            "exercising the create-once collision at all")
+
+    # The re-drive decides the batch differently, which is the ordinary case and
+    # what makes a surviving snapshot a REFUSAL rather than a silent no-op.
+    redecided = _default_rows(bases=("transliterated", "transliterated"))
+    bed["planted"].write_text(json.dumps({"out_0_attempt_0.json": redecided}))
+
+    out, _ = run_driver(bed, "--reset-batches", "0")
+
+    assert out["reset"], f"the requested reset must be reported: {out}"
+    entry = out["reset"][0]
+    assert entry["batch"] == 0 and entry["requested"] is True
+    assert entry["was"] == "failed", (
+        f"the status the operator asked to drop must be recorded: {entry}")
+    assert "undeleted" not in entry, (
+        f"every approved slot must have been released: {entry}")
+    assert out["needs_judge"], "the batch must be back on the ladder"
+    assert out["needs_judge"][0]["attempt"] == 0, (
+        "THE assertion. Unreleased, rung 0 is refused by its own surviving "
+        "snapshot and rungs 1 and 2 by theirs, so the batch hands back from no "
+        f"rung at all and exhausts again: {out}")
+    assert json.loads(
+        (bed["run_dir"] / "approved_0_attempt_0.json").read_text()) == redecided, (
+        "rung 0 must hold the RE-DECIDED bytes -- an old snapshot merely "
+        "surviving would satisfy an existence check while proving no "
+        "republication happened")
+
+
+def test_a_requested_reset_batch_stops_counting_as_resumed(bed):
+    """Same obligation reconcile_state()'s reset carries: a reset batch must
+    DISPATCH at attempt 0. `--resumed-batch-indices` means "resume_setup.py
+    checked this batch's attempt-0 fragment and it is good", which an exhausted
+    batch's history refutes -- rung 0's fragment is bytes a judge rejected. Kept
+    resumed, the reset re-approves those and spends rung 0 reproducing a
+    rejection the run has already had."""
+    plant_fragment(bed)
+    _exhaust_batch_zero(bed, "--resumed-batch-indices", "[0]")
+    # Asserted over the WHOLE exhaustion rather than after its first invocation:
+    # rungs 1 and 2 dispatch under their own names, so out_0_attempt_0.json being
+    # absent from the full list still says the skip fired -- and says it for
+    # every invocation, not just the one.
+    assert "out_0_attempt_0.json" not in companion_targets(bed), (
+        "attempt 0 must have been resume-skipped, or this test is not "
+        "exercising the skip at all")
+
+    before = len(companion_targets(bed))
+    out, _ = run_driver(bed, "--resumed-batch-indices", "[0]",
+                        "--reset-batches", "0")
+
+    dispatched_after_reset = companion_targets(bed)[before:]
+    assert dispatched_after_reset[:1] == ["out_0_attempt_0.json"], (
+        "THE assertion. Still counted as resumed, the reset batch skips its "
+        "attempt-0 dispatch and re-approves the fragment the judge already "
+        f"rejected: {dispatched_after_reset}")
+    assert out["needs_judge"] and out["needs_judge"][0]["attempt"] == 0
+
+    state = json.loads((bed["session"] / "pending.json").read_text())
+    assert state["batches"]["0"].get("resumeSkipDropped") is True, (
+        "the drop must be PERSISTED, so a relaunch that repeats the operator's "
+        f"original --resumed-batch-indices does not re-skip it: {state}")
+
+
+def test_a_reset_index_this_run_does_not_have_is_refused(bed):
+    """An index the run does not hold is a typo. Accepting it would report a
+    reset in `reset[]` that released nothing and re-drove nothing -- the same
+    silent shape the operator already gets from deleting snapshots by hand."""
+    proc = run_driver_raw(bed, "--reset-batches", "7")
+    assert proc.returncode == 2, proc.stdout[-2000:] + proc.stderr[-2000:]
+    assert "does not have" in (proc.stdout + proc.stderr), (
+        "the refusal must name its own reason; an unrecognised flag already "
+        f"exits 2, so a bare exit code proves nothing: {proc.stdout[-800:]}")
+    assert not (bed["session"] / "pending.json").exists(), (
+        "a refused invocation must not have written state")
+
+
+def test_a_reset_value_that_is_not_a_batch_index_is_refused(bed):
+    """`int()` is not the membership test: it reads `1_0` as ten, `+3` as three,
+    and every Unicode decimal digit as the number its glyph means -- so a
+    mistyped index could resolve to a REAL batch and reset the wrong one. Every
+    such spelling must be refused by the pattern before that happens, which is
+    also why the pattern says `[0-9]` rather than the Unicode-wide `\\d`."""
+    for value in ("bad", "0,x", "", "1_0", " ",
+                  "٣",       # ARABIC-INDIC DIGIT THREE -- int() reads it as 3
+                  "０"):      # FULLWIDTH DIGIT ZERO -- int() reads it as 0
+        proc = run_driver_raw(bed, "--reset-batches", value)
+        assert proc.returncode == 2, (
+            f"--reset-batches {value!r} must be refused: {proc.stdout[-800:]}")
+        assert "comma-separated list of batch indices" in (proc.stdout + proc.stderr), (
+            f"the refusal must name its own reason for {value!r}: "
+            f"{proc.stdout[-800:]}{proc.stderr[-800:]}")
+    assert not (bed["session"] / "pending.json").exists()
+
+
+def test_a_requested_reset_survives_a_kill_inside_its_first_dispatch(bed):
+    """Round-1 MAJOR, admitted. The reset's two halves are performed in memory;
+    since #882 the first save is the one drive_all() makes AFTER the first batch
+    it drives. A kill inside that first dispatch therefore left the document
+    saying `failed` with the released snapshots already gone.
+
+    A RECONCILED reset survives that: its trigger is a missing artifact, still
+    missing on the relaunch, so the next invocation re-derives it. A REQUESTED
+    one has no such trigger -- its cause was a flag the operator is told to drop
+    from the next command -- so the documented relaunch drove nothing and
+    reported the batch exhausted, leaving exactly the terminal condition #892
+    exists to end."""
+    _exhaust_batch_zero(bed)
+    bed["planted"].write_text(json.dumps({
+        "out_0_attempt_0.json": _default_rows(bases=("transliterated",
+                                                     "transliterated"))}))
+    bed["jobs"].write_text(json.dumps({"out_0_attempt_0.json": {"kill_driver": True}}))
+    run_driver_expecting_kill(bed, "--reset-batches", "0")
+
+    m = load(bed)
+    state = m.read_pending(bed["session"])
+    assert state["batches"]["0"]["status"] == "pending", (
+        "THE assertion. The reset is not re-derivable: its snapshots are "
+        "already released and the flag is not repeated, so a document still "
+        f"holding `failed` strands the batch for good: {state['batches']['0']}")
+    assert state["batches"]["0"]["resumeSkipDropped"] is True
+
+    # The relaunch SKILL.md documents -- the same command, WITHOUT the flag.
+    bed["jobs"].write_text(json.dumps({}))
+    out, _ = run_driver(bed)
+    assert out["reset"] == [], (
+        "nothing is left to reset; the saved document already holds the "
+        f"operator's decision: {out['reset']}")
+    assert out["needs_judge"] and out["needs_judge"][0]["attempt"] == 0, (
+        f"the batch must be driven from attempt 0 by the plain relaunch: {out}")
+
+
+def test_a_reset_token_too_long_to_convert_is_refused_not_crashed(bed):
+    """Round-1 MINOR 3, admitted. `int()` refuses a decimal string past
+    sys.get_int_max_str_digits() with an uncaught ValueError, so a long enough
+    token -- 4301 zeros is numerically batch 0 -- crashed the invocation instead
+    of producing the named refusal this flag promises."""
+    proc = run_driver_raw(bed, "--reset-batches", "0" * 4301)
+    assert proc.returncode == 2, (
+        f"exit {proc.returncode}; a traceback is not a refusal: "
+        f"{proc.stderr[-800:]}")
+    assert "Traceback" not in proc.stderr, (
+        f"the refusal must be the driver's own, not an exception: "
+        f"{proc.stderr[-800:]}")
+    assert "comma-separated list of batch indices" in (proc.stdout + proc.stderr)

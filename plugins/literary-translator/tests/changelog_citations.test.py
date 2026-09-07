@@ -152,7 +152,24 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.114.0 (#896 -- the two size-cap refusals recommended knobs
+    # ROTATED TO 1.115.0 (#892 -- a citation-exhausted glossary batch had no
+    # transition out), and EMPTY ON PURPOSE, for the reason the records below
+    # give: the entry names its subjects by FILE and SYMBOL rather than by line
+    # -- `drive_all()`, `reconcile_state()`, `_release_approved_slots()`,
+    # `--reset-batches`, `resumeSkipDropped`, `not_ready[]`, `reset[]`,
+    # `PLUGIN_BUNDLE_MEMBERS` -- and states no `file.ext:NNN` citation at all,
+    # which is the shape this guard reads. Measured against the entry rather
+    # than asserted: a scan of its slice for that pattern returns zero matches.
+    #
+    # This release DOES insert passages into `SKILL.md` -- the `--reset-batches`
+    # paragraph in the driver's CLI description, the `reset[]` and same-command
+    # clauses in the driver loop, and the re-drive paragraph in the #883
+    # recovery section -- which drifts any live citation aimed below them. The
+    # one such citation is repointed to its RE-MEASURED anchor lines in both the
+    # citing tuple and the anchor-map key, and `tools/citation_audit.py check`
+    # is OK on the result.
+    #
+    # The 1.114.0 record this replaces, kept as its own (#896 -- the two size-cap refusals recommended knobs
     # that barely move the size), and EMPTY ON PURPOSE. The entry names its
     # subjects by FILE, SYMBOL and FLAG -- `person_registry.py`, `--prep`,
     # `--claims`, `--max-contexts-per-form`, `--context-chars`,

@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.115.0 — 2026-09-07
+
+**A citation-exhausted glossary batch has a supported way back onto the ladder (#892).** A batch
+that spends its citation ladder is set to `status: "failed"` with `reason:
+"citation-review-exhausted"`, and nothing transitions it after that: `drive_all()` skips `failed`,
+and `reconcile_state()` — the one function that resets a batch — fires only when the artifact a
+status PROMISES is gone, which `failed` promises none of. Deleting the batch's approved snapshots
+by hand therefore summons no reset either; the drive reports `reset: 0` and leaves the batch
+failed.
+
+The recovery left to an operator was editing the session's state document by hand, which nothing
+documented. Its half-done form is worse than doing nothing. `canon_validate.py` publishes the
+approved snapshot create-once, so a rewritten state entry with those snapshots still in place
+sends the batch back over slots that refuse it: every rung is spent on `approve-failed`, the batch
+settles as exhausted again, and the recorded reason names a citation review that never ran. The
+release half already exists — `_release_approved_slots()`, which `reconcile_state()` calls for
+exactly this reason — but no entry point reached it.
+
+`--reset-batches <i>[,<j>…]` is that entry point. It runs before the invocation drives anything
+and before verdicts are read: each named batch has its approved slots released at every rung and
+its state entry rewritten to attempt 0, carrying `resumeSkipDropped` so the batch DISPATCHES
+rather than re-approving a fragment a judge may already have rejected. Each reset is reported in
+the existing `reset[]` output, carrying `requested: true` and the status it dropped. The flag is
+status-blind on purpose: the case it exists for is the one where the state document itself is
+what is wrong. An index this run does not have, and a token that is not a plain ASCII integer, are
+refused before anything dispatches — `int()` alone is not the check, since it reads `1_0` as ten,
+and an Arabic-Indic or fullwidth digit as the number its glyph means, either of which could
+resolve a typo onto a real batch.
+
+A requested reset is SAVED before anything is driven, and the distinction from a reconciled one is
+why. Without `--record-verdicts`, whose own save follows immediately, the first save is the one
+`drive_all()` makes after the first batch it drives — so a kill inside that first dispatch left
+the document unchanged while the released snapshots were already gone from disk. A reconciled
+reset survives that, its trigger being a missing artifact that is still missing on the relaunch;
+a requested one has no trigger left, so the documented relaunch drove nothing and reported the
+batch exhausted. One write closes it.
+
+The terminal record now carries `recovery`, naming the flag. Until now `not_ready[]` described
+the outcome and named no move that changes it, while the move an operator reached for unaided was
+the destructive one.
+
+SKILL.md documents the flag, the two halves it performs, and the exception it makes to the
+driver's own recovery advice: it resets on EVERY invocation that carries it, so it must be
+dropped from the next one — left on, the follow-up invocation resets the hand-back it just
+produced and the invocation submitting that batch's verdict refuses it as not awaiting a judge.
+The hand-merge route (#883) now points at a re-drive first, since the upstream cause of an
+exhaustion is often transient, and states why hand-editing `pending.json` is still refused.
+
+Migration. `glossary_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this moves
+`plugin_bundle_hash`: every converged segment of a book in progress goes `stale` and
+re-translates once the refreshed plugin is picked up, and an unfinished glossary pass mints a
+fresh `RUN_ID` instead of resuming. Any fix to this defect pays that — it lives in a bundle
+member.
+
 ## 1.114.0 — 2026-09-07
 
 **The person-registry pass refused an oversized document and named two knobs that barely move its
