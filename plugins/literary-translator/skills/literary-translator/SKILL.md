@@ -283,9 +283,24 @@ Order of operations:
     0d condition. `custom` is untouched here: its `renderer_path: null` HALT is
     the documented co-design starting state and belongs to Step 0d, not to
     Step 0.
+15. `glossary.enabled` exactly `false` together with
+    `glossary.skeptic_pass.enabled` exactly `true`: FATAL, naming both fields
+    — they state two different intentions, and the skeptic pass has nothing to
+    audit once the glossary pass itself is skipped (see W3's third branch).
+    Tested with `is false`/`is true`, never a falsy read: an ABSENT
+    `glossary.enabled` means `true`, so every profile written before the key
+    existed keeps validating unchanged.
+16. `output.entity_markup` ABSENT while `output.v1_scope: assembled_book` and
+    `output.target: obsidian` are both set: a non-fatal WARNING naming the
+    field. Absence is legal and stays legal (Step 0d), so this refuses
+    nothing and the run still exits `OK` — it exists because the block ships
+    commented out and sentinel-free, so item 5's scan cannot ask about it and
+    a project that answered Step 0d's index question anywhere other than the
+    field otherwise passes clean. Absence only: a declared block, whatever
+    its shape, is the schema's business and `assemble.py`'s.
 
 Prints one field-named, actionable error line per violation, exits non-zero
-on any failure.
+on any failure. Warnings alone never fail the run.
 
 ## Step 0a — Create durable root; install scripts/languages/schemas; ownership marker
 
@@ -717,6 +732,30 @@ raw markup. An absent block runs none of it, so a project that
 wants no marked index answers by saying nothing (the release's two
 unconditional renderer changes are named in the CHANGELOG; neither is
 reached by a book that carries no such markup).
+
+**A "yes" is only in effect once it is written into `profile.yml`, and
+the whole answer is two fields, not one (#893).** A ruling recorded in a
+series decisions ledger, in `PLAN.md`, or in a style file is not this
+field being set: `assemble.py` reads `output.entity_markup` and nothing
+else, so a project that decided `markup` and never wrote the block
+assembles in `off` mode — nothing is scanned, and the vault's index is
+built from `canon.json` entries alone — with every gate green, because
+drafts whose translator was never told to mark carry nothing for
+`validate_draft.py` or `final_audit.py` to catch. Write `tags` AND
+`index_from: markup`: declaring `tags` alone resolves to `canon`, which
+strips the elements and indexes nothing from them. Then put the same tag
+vocabulary into this project's `style_contract` — which is hashed into
+every segment's cache key, so introducing the convention after
+translation starts restales every converged segment on top of the
+mid-book cost named above.
+
+Step 0 prints a non-fatal WARNING naming `output.entity_markup` whenever
+`output.v1_scope: assembled_book` and `output.target: obsidian` are both
+set while the block is absent, so this question survives an intake that
+answered every printed `CHOOSE_` sentinel and stopped there. It is
+advisory and nothing else: absence remains the legitimate answer for a
+book whose names can be seeded into `canon.json`, and Step 0 still exits
+`OK` (see `profile_validate.py`'s docstring, item 16).
 
 This question is deliberately NOT one of the `CHOOSE_` sentinels Step 0's
 questionnaire prints. Those are asked of every project; this one is only

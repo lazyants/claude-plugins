@@ -156,6 +156,24 @@ Order of operations (numbered to match SKILL.md's Step 0 list exactly):
       means ``true`` (the schema's own default), so every profile written
       before this key existed -- including one with
       ``skeptic_pass.enabled: true`` -- must keep validating unchanged.
+  16. NEW (#893): ``output.entity_markup`` ABSENT while
+      ``output.v1_scope: assembled_book`` and ``output.target: obsidian``
+      are both set -> non-fatal WARNING. Absence stays legal and is the
+      documented default (#873 ships the block commented out, with no
+      ``CHOOSE_`` sentinel, deliberately) -- it resolves to assembly's
+      ``off`` mode, where nothing is scanned for entity markup and the vault
+      index is built from ``canon.json`` entries alone. That is the right
+      answer for a book whose names can be seeded into ``canon.json`` before
+      translation starts, so this is advisory OUTPUT (check 9's precedent),
+      never a refusal. What it defends is the other book: one whose cast is
+      not knowable in advance, whose operator answered Step 0d's index
+      question in a series ledger or a style file and never wrote the block
+      into ``profile.yml``, where every downstream gate then stays green by
+      construction because the drafts carry no markup to check. The gate is
+      the assembly-only combination check 14 already scopes to, so a plain
+      translate+gloss job is never made to read it. ABSENCE ONLY: any
+      present block is the schema's business (and ``assemble.py``'s runtime
+      validator's), never this check's.
 
 Every violation is printed as its own field-named, actionable line. The
 script exits non-zero if ANY fatal violation was found (across every step
@@ -776,6 +794,55 @@ def check_custom_format_warning(profile: dict):
 
 
 # ---------------------------------------------------------------------------
+# Step 16 (#893): output.entity_markup absent under assembled_book + obsidian
+# ---------------------------------------------------------------------------
+
+def check_entity_markup_undeclared_warning(profile: dict):
+    """Step 16 -- see this module's docstring item 16 for why absence is
+    warned about rather than refused, and why the gate is drawn at exactly
+    this combination.
+
+    ABSENCE ONLY, tested with ``in`` rather than a truthy read: a present
+    block is the schema's business (``output``'s own
+    ``additionalProperties: false`` plus ``entity_markup``'s ``required:
+    [tags]``) and, at W9, ``assemble.py``'s ``_entity_markup_config``. A
+    present-but-incomplete block -- ``tags`` declared with no
+    ``index_from`` -- resolves to ``canon``/STRIP, which builds no index
+    from the markup; that is a DIFFERENT state (the operator did reach the
+    field) and this check deliberately stays out of it. The warning text
+    says what the complete affirmative answer is instead, so an operator
+    who reaches it cannot stop at ``tags``.
+
+    Says nothing about what the translator was TOLD to do: that lives in
+    this project's ``style_contract``, which no profile field establishes.
+    Absence establishes assembly's mode and the index's source, and the
+    message claims only those.
+    """
+    output = profile["output"]
+    if output.get("v1_scope") != "assembled_book":
+        return []
+    if output.get("target") != "obsidian":
+        return []
+    if "entity_markup" in output:
+        return []
+    return [
+        "output.entity_markup: not declared, while output.v1_scope is "
+        "'assembled_book' and output.target is 'obsidian' -- assembly will "
+        "not scan the drafts for entity markup, and the vault's entity index "
+        "will be built from canon.json entries alone. That is a legitimate "
+        "answer, and needs no action, for a book whose names can be seeded "
+        "into canon.json before translation starts. A book whose cast is NOT "
+        "knowable in advance needs this block declared BEFORE translation "
+        "starts, with its own `tags` AND `index_from: markup` (declaring "
+        "`tags` alone resolves to `canon`, which strips the markup and "
+        "indexes nothing from it), and the same tag vocabulary written into "
+        "this project's style_contract -- see SKILL.md Step 0d. Deciding it "
+        "anywhere else (a series ledger, PLAN.md, a style file) does not set "
+        "the field."
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Steps 10/11: path-traversal rejections
 # ---------------------------------------------------------------------------
 
@@ -1104,7 +1171,7 @@ def main(argv=None):
             print(f"ERROR: {err}", file=sys.stderr)
         sys.exit(1)
 
-    # --- Steps 7-15: procedural checks (schema already passed) -----------
+    # --- Steps 7-16: procedural checks (schema already passed) -----------
     fatal_errors = []
     warnings = []
 
@@ -1118,6 +1185,7 @@ def main(argv=None):
     warnings += seg_warnings
 
     warnings += check_custom_format_warning(profile)
+    warnings += check_entity_markup_undeclared_warning(profile)
 
     fatal_errors += check_particle_config(profile)
     fatal_errors += check_smoke_test_report_path(profile)

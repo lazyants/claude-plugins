@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.108.0 — 2026-09-07
+
+**Step 0 says nothing when a book scaffolded FOR a markup-driven vault index never got the
+block that builds one (#893).** `output.entity_markup` ships commented out and without a
+`CHOOSE_` sentinel, deliberately (#873): the question is only meaningful under
+`output.v1_scope: assembled_book` with `output.target: obsidian`, and a plain translate+gloss
+job must not be made to answer an assembly question it never reads. The cost of that
+proportionality is that Step 0's placeholder scan has nothing to ask, so an operator who
+answered every printed sentinel correctly, and recorded the index decision in a series ledger
+or a style file rather than in `profile.yml`, passed validation clean. Nothing downstream
+disagrees either: the translator is never told to mark, so the drafts carry no spans,
+`validate_draft.py` has nothing to check, `final_audit.py` passes, and the assembled book
+carries the canon-derived index instead of the marked one. Every gate is green and the shortfall
+is visible only to the reader.
+
+`profile_validate.py` now prints a non-fatal WARNING naming `output.entity_markup` when the
+block is absent while both `assembled_book` and `obsidian` are set — the one combination where
+absence may be an unanswered question rather than an answer. It is advisory and stays advisory:
+absence remains legal, Step 0 still exits `OK` (with the existing `see warnings above` suffix),
+and the shipped example's block stays commented out, so no key was added to any profile.
+
+**Both machinery bundle hashes move in this release, and not because of the fix.** The prose
+added to `SKILL.md` and `profile_validate.py` shifted line numbers that three `file:line`
+citations pointed at, and renumbering two of them meant editing `select_segments.py`, which is
+a member of `PLUGIN_BUNDLE_MEMBERS` and of `ORCHESTRATION_BUNDLE_MEMBERS` alike. Nothing
+content-affecting changed, and the consequences are the ordinary upgrade ones: a refreshed
+project's converged segments are reclassified `stale` on `plugin_bundle_hash`, which is one of
+`final_audit.py`'s `SAFE_STALE_CARVEOUT_FIELDS`, so they are carved back out of
+`project_complete` rather than re-translated; and the moved `orchestration_bundle_hash` marker
+is folded into the resume-integrity digest, so a run started under the previous release resumes
+as a fresh run rather than continuing. Neither is caused by the validator check, which touches
+no bundle member.
+
+The warning names the COMPLETE affirmative answer, because half of it is a silent no-op:
+declaring `tags` alone resolves to `index_from: canon`, which strips the marked elements and
+indexes nothing from them. `tags` AND `index_from: markup` is the answer, with the same tag
+vocabulary in the project's `style_contract`. It claims nothing about what the translator was
+told to do — that lives in `style_contract`, which no profile field establishes — only that
+assembly will not scan for markup and that the index will come from `canon.json` entries alone.
+SKILL.md's Step 0d now states that a ruling recorded anywhere other than the field is not the
+field being set, and that `style_contract` is hashed into every segment's cache key, so
+introducing the marking convention after translation starts restales every converged segment.
+
+Not changed: the issue's own primary remedy, shipping the block uncommented with sentinels, is a
+reversal of the decision released two days earlier and was refused. A live sentinel enters the
+whole-profile FATAL scan for every project, including the plain jobs the block does not concern,
+and a live block changes assembly's mode away from the absent default — both outcomes the
+commented form was chosen to avoid.
+
 ## 1.105.0 — 2026-09-07
 
 **Name discovery asked an uncased-script model for JSON, and Hebrew punctuation broke it — silently

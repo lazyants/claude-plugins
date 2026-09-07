@@ -504,9 +504,32 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.105.0 (#888 -- name discovery asked an uncased-script model
-    # for JSON, and Hebrew punctuation broke it), per the maintenance contract
-    # above.
+    # ROTATED TO 1.108.0 (#893 -- Step 0 said nothing when a book scaffolded
+    # FOR a markup-driven vault index never got the block that builds one),
+    # per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. It
+    # NAMES what it stands on rather than counting it: `output.entity_markup`,
+    # its `tags` and `index_from` fields and their `canon`/`markup` values,
+    # `assembled_book`, `obsidian`, `profile_validate.py`, `validate_draft.py`,
+    # `final_audit.py`, `style_contract`, and the `OK`/`see warnings above`
+    # strings the exit path prints. The same holds for the hash-disclosure
+    # paragraph: `PLUGIN_BUNDLE_MEMBERS`, `ORCHESTRATION_BUNDLE_MEMBERS`,
+    # `SAFE_STALE_CARVEOUT_FIELDS` and `select_segments.py` are NAMED, never
+    # sized. The entry does carry three small counts -- "half of it", "three
+    # `file:line` citations" and "two of them" -- and none is a row here, by
+    # the distinction the 1.87.0 rotation below draws: each describes THIS
+    # RELEASE's own diff, which no later release can grow, rather than a tuple
+    # or a corpus the tree owns. They are also spelled as words, which `_TOKEN`
+    # cannot see, so a row could not be written against them in any case.
+    # The remaining numerals are identifiers: the version numbers, the release
+    # date, and the issue numbers (#893 and the #873 decision it declines to
+    # reverse). "Two days earlier" is a fact about that release's date, spelled
+    # as a word, and no implementation here can re-derive a date anyway.
+    #
+    # The 1.105.0 rotation this replaces, kept as its own record (#888 -- name
+    # discovery asked an uncased-script model for JSON, and Hebrew punctuation
+    # broke it), per the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed. Every
     # digit-run in it is an IDENTIFIER, not a measurement: the version
@@ -1007,7 +1030,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.105.0"
+FIGURES_VERSION = "1.108.0"
 
 
 def _newest_entry():
