@@ -152,6 +152,31 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
+    # ROTATED TO 1.114.0 (#896 -- the two size-cap refusals recommended knobs
+    # that barely move the size), and EMPTY ON PURPOSE. The entry names its
+    # subjects by FILE, SYMBOL and FLAG -- `person_registry.py`, `--prep`,
+    # `--claims`, `--max-contexts-per-form`, `--context-chars`,
+    # `registry_input.json`, `registry_verdicts.json`, `input_sha256`,
+    # `PLUGIN_BUNDLE_MEMBERS` -- and states no `file.ext:NNN` citation at all,
+    # which is the shape this guard reads. Measured against the entry rather
+    # than asserted: a scan of its slice for that pattern returns zero matches.
+    #
+    # Every behavioural claim it makes is pinned by a test that exercises it
+    # instead: the seven cases added to `person_registry_prep.test.py` and
+    # `person_registry_build.test.py` this release cover the composition number,
+    # the byte-not-character count, the re-cut measurement, the clauses naming
+    # what neither knob reaches, the P2 re-dispatch disclosure, the
+    # over-the-cap clause in both directions, and the absence of any
+    # minimum-shaped claim.
+    #
+    # This release edits `person_registry.py` above a live citation aimed into
+    # it (`canon-and-glossary.md`), which is repointed in the same commit --
+    # the repo-wide `tools/citation_audit.py check`, not this map, is what
+    # covers a citation living OUTSIDE the newest changelog entry.
+    #
+    # The rotation this replaces, kept as its own record. It is 1.112.0's and
+    # not 1.113.0's: #894 shipped 1.113.0 without rotating this map, which the
+    # guard permits because that entry cites no `file.ext:NNN` either.
     # ROTATED TO 1.112.0 (#889 -- the three language fields shipped another
     # project's real values with no CHOOSE_ sentinel, and a particle_config
     # naming a shipped preset was refused only at --fold), and EMPTY ON PURPOSE

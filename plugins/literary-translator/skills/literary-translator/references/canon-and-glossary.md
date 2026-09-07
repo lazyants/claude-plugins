@@ -1001,7 +1001,7 @@ that a human adjudicated it.
   argued away: `person_registry.py` turns every DICT-shaped `review_queue[]`
   row into a refusal-only unit (`person_registry.py:899-933`,
   `refusal_only: True`) and emits it in `refusals[]`
-  (`person_registry.py:1994-2004`, `refused_by: "canon_review_queue"`); it
+  (`person_registry.py:2035-2045`, `refused_by: "canon_review_queue"`); it
   never reads `corrections[]`. So a dismissed name stops appearing as a
   `canon_review_queue` refusal in a later W9r registry run — that is the
   intended meaning of the decision, not a side effect to suppress: the

@@ -427,3 +427,21 @@ quote must stay verbatim in the JSON to remain checkable against its container.
   an unchecked Pass A. Both measure the bytes that are WRITTEN and then write
   exactly those — the compact digest serialization is smaller than the file, so
   a guard measuring it is a guard on bytes nobody reads.
+- **Neither cap is a knob problem, and the refusals no longer pretend it is**
+  (#896). `--max-contexts-per-form`/`--context-chars` reach the per-unit
+  `contexts` blocks and, apart from the truncation flags that record the
+  trimming and their aggregate count, nothing else: a review-queue unit has
+  none at all, a
+  homonym-split unit's source context is cut from stored evidence offsets, a
+  matched window always keeps its own occurrence, and the `mentions` list and
+  the canon `note` are outside both. So each refusal now measures instead of
+  advising — `--prep` reports how many of the emitted bytes those blocks
+  occupy, and `--claims` re-projects the same verdicts at
+  `--max-contexts-per-form 1 --context-chars 1` and reports what that would
+  actually emit. Neither number is offered as a minimum: at `max_windows=1` a
+  `printed_surface` question takes its longer, truncated branch, so a middling
+  setting can emit fewer bytes than the aggressive one. At `--claims` the knobs
+  re-cut only the target-occurrence windows anyway — the source contexts are
+  copied from `registry_input.json`, so shrinking them means re-running
+  `--prep`, whose moved `input_sha256` sends gate P2 to refuse the existing
+  verdicts and costs a Pass A re-dispatch.

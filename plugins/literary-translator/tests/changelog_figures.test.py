@@ -504,6 +504,27 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
+    # ROTATED TO 1.114.0 (#896 -- the two size-cap refusals recommended knobs
+    # that barely move the size), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # digit-run in it is an IDENTIFIER or a SETTING, never a measurement: the
+    # version (1.114.0), the release date, the issue number (#896), and the two
+    # `1`s in `--max-contexts-per-form 1 --context-chars 1`, which name the flag
+    # values the refusal re-cuts at.
+    #
+    # The entry quotes no byte counts on purpose. The measured tables behind
+    # #896 are facts about a book project in ANOTHER repository -- no
+    # implementation in THIS tree can re-derive them -- and the numbers the fix
+    # itself prints are per-run, so there is no fixed figure to state. Both
+    # belong outside this guard rather than inside it as an unverifiable row.
+    #
+    # This rotation RETIRED 1.113.0's one row (`up to 15`, the inline slice size
+    # `language_smoke_report.CANDIDATE_SAMPLE_PRINT`). It is retired rather than
+    # kept because this guard reads the NEWEST entry only, and that phrase lives
+    # in 1.113.0's, which is now the second-newest.
+    #
+    # The 1.113.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.113.0 (#894 -- a correct hand-checked name list failed the
     # mandatory language smoke test, and the printed remediation named the
     # particle config, which is the one file that was already right), per the
@@ -512,13 +533,6 @@ FIGURES = [
     # ONE row, and the entry was walked completely rather than assumed. The
     # entry's own inline slice size is the only digit-written figure in it that
     # THIS tree owns, and the release that retunes it moves the prose with it.
-    Figure(
-        phrase="up to 15",
-        value=15,
-        derive=lambda: _int_constant(
-            "language_smoke_report.py", "CANDIDATE_SAMPLE_PRINT"
-        ),
-    ),
     #
     # Not rows, and why. The entry's measurements of the live Hebrew book --
     # its page count, the 108 sample candidates against 794 from the whole
@@ -1167,7 +1181,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.113.0"
+FIGURES_VERSION = "1.114.0"
 
 
 def _newest_entry():

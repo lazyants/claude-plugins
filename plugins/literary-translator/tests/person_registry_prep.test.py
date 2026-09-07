@@ -222,6 +222,77 @@ def test_input_cap_refuses_rather_than_truncating(root):
 
 
 # ---------------------------------------------------------------------------
+# #896 -- the refusal used to name --max-contexts-per-form/--context-chars as
+# the remedy. On a real book neither knob moves the size much, because the bulk
+# is not the context windows, so an operator who followed the advice thinned
+# the evidence each unit carries, was refused again, and had traded quality for
+# nothing. The refusal now MEASURES instead of advising.
+# ---------------------------------------------------------------------------
+
+def _contexts_block_bytes(root):
+    """The bytes the per-unit `contexts` blocks occupy in the emitted document,
+    derived the long way round: emit, then re-emit with every block empty."""
+    assert fx.run(root, "--prep", "--max-input-chars", "100000000")[0] == 0
+    doc = json.loads((root / "registry" / "registry_input.json").read_text(encoding="utf-8"))
+    size = len(pr.emitted_json_text(doc).encode("utf-8"))
+    stripped = dict(doc)
+    stripped["units"] = [{**u, "contexts": []} for u in doc["units"]]
+    return size, size - len(pr.emitted_json_text(stripped).encode("utf-8"))
+
+
+def test_the_prep_refusal_measures_the_contexts_blocks_rather_than_advising_a_knob(root):
+    size, block_bytes = _contexts_block_bytes(root)
+    (root / "registry" / "registry_input.json").unlink()
+
+    code, payload = fx.run(root, "--prep", "--max-input-chars", "10")
+    assert code == 2
+    assert payload["reason"] == "input_too_large"
+    assert f"{block_bytes} of those bytes are the per-unit contexts blocks" in payload["error"]
+    assert "the only part of this document --max-contexts-per-form/--context-chars trim" in payload["error"]
+    # The old advice, verbatim, must be gone: it named the two knobs as the
+    # remedy without saying what they reach.
+    assert "lower --max-contexts-per-form/--context-chars or raise the cap" not in payload["error"]
+    # And the number is composition, never an amount the knobs can recover.
+    assert "remove" not in payload["error"]
+
+
+def test_the_prep_refusal_names_what_neither_knob_reaches(root):
+    code, payload = fx.run(root, "--prep", "--max-input-chars", "10")
+    assert code == 2
+    error = payload["error"]
+    # The three reasons the blocks cannot go to zero ...
+    assert "always keeps its own occurrence" in error
+    assert "homonym-split unit's source context is cut from stored evidence offsets" in error
+    assert "review-queue unit carries no contexts at all" in error
+    # ... and the two fields that are outside both knobs entirely. Deliberately
+    # NOT "metadata": lowering the context cap DOES move contexts_truncated and
+    # its aggregate count, so that broader claim would be false.
+    assert "mentions list and the canon note are outside both knobs" in error
+    assert "metadata" not in error
+
+
+def test_the_prep_refusal_counts_utf8_bytes_and_not_characters(root):
+    """Both caps measure encoded bytes, so the number beside them must too. The
+    fixture's contexts carry accented French, which is exactly where a
+    character count silently under-reports."""
+    assert fx.run(root, "--prep", "--max-input-chars", "100000000")[0] == 0
+    doc = json.loads((root / "registry" / "registry_input.json").read_text(encoding="utf-8"))
+    stripped = dict(doc)
+    stripped["units"] = [{**u, "contexts": []} for u in doc["units"]]
+    as_bytes = (len(pr.emitted_json_text(doc).encode("utf-8"))
+                - len(pr.emitted_json_text(stripped).encode("utf-8")))
+    as_chars = len(pr.emitted_json_text(doc)) - len(pr.emitted_json_text(stripped))
+    # Without this the assertion below would pass on either implementation.
+    assert as_bytes != as_chars, "fixture contexts carry no non-ASCII; the test proves nothing"
+
+    (root / "registry" / "registry_input.json").unlink()
+    code, payload = fx.run(root, "--prep", "--max-input-chars", "10")
+    assert code == 2
+    assert f"{as_bytes} of those bytes" in payload["error"]
+    assert f"{as_chars} of those bytes" not in payload["error"]
+
+
+# ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
 

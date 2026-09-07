@@ -962,11 +962,28 @@ def cmd_prep(args, durable_root: Path, schema_dir: Path) -> dict:
     text = emitted_json_text(doc)
     size = len(text.encode("utf-8"))
     if size > args.max_input_chars:
+        # What the two knobs actually weigh here, measured on the document just
+        # built rather than argued: the same emission with every `contexts`
+        # list empty, subtracted. Reported as composition and nothing more --
+        # it is NOT an amount either knob can recover, because a window never
+        # shrinks past its own occurrence and two of the three populations are
+        # outside their reach entirely. #896: the old advice named both knobs
+        # as the remedy, so an operator thinned the evidence each unit carries,
+        # was refused again, and had traded quality for nothing.
+        without_contexts = dict(doc)
+        without_contexts["units"] = [{**u, "contexts": []} for u in doc["units"]]
+        context_bytes = size - len(emitted_json_text(without_contexts).encode("utf-8"))
         raise RegistryError(
             "input_too_large",
             f"registry_input.json would be {size} bytes, over --max-input-chars {args.max_input_chars}; "
-            f"lower --max-contexts-per-form/--context-chars or raise the cap deliberately -- this pass "
-            f"never truncates its own input silently",
+            f"{context_bytes} of those bytes are the per-unit contexts blocks -- the only part of "
+            f"this document --max-contexts-per-form/--context-chars trim, apart from the "
+            f"truncation flags that record the trimming and their aggregate count -- and they do "
+            f"not reach all of that "
+            f"either: a matched window always keeps its own occurrence, a homonym-split unit's "
+            f"source context is cut from stored evidence offsets, and a review-queue unit carries "
+            f"no contexts at all. The mentions list and the canon note are outside both knobs. "
+            f"Raise the cap deliberately -- this pass never truncates its own input silently",
             code=2,
         )
 
@@ -1420,7 +1437,8 @@ def cmd_claims(args, durable_root: Path, schema_dir: Path) -> dict:
                       "verdicts_schema_invalid", "registry_verdicts.json")
     index = run_pre_claims_gates(prep, prep_digest, verdicts, manifest)
 
-    claims = project_claims(verdicts, index, manifest, assembled_target_text(nodestream),
+    corpus = assembled_target_text(nodestream)
+    claims = project_claims(verdicts, index, manifest, corpus,
                             args.max_contexts_per_form, args.context_chars)
     # The claims body carries the digest of the VERDICT it was projected from,
     # not just of the prep. Binding to the prep alone leaves a real gap: a
@@ -1430,11 +1448,18 @@ def cmd_claims(args, durable_root: Path, schema_dir: Path) -> dict:
     # given for the old one. Hashing the verdict in closes it: any edit to the
     # verdict moves this digest and the build refuses.
     verdicts_digest = sha256_hex(verdicts)
-    body = {"schema_version": 1, "input_sha256": prep_digest,
-            "verdicts_sha256": verdicts_digest, "claims": claims}
-    claims_digest = sha256_hex(body)
-    doc = dict(body)
-    doc["claims_sha256"] = claims_digest
+
+    def claims_document(projected: list) -> dict:
+        """One shape for both the document that is written and the re-cut one
+        the refusal below measures. Building the second by hand would let a
+        field added here drift out of it silently -- and the number that
+        refusal prints is only worth anything if it is the size of the same
+        document under different knobs."""
+        inner = {"schema_version": 1, "input_sha256": prep_digest,
+                 "verdicts_sha256": verdicts_digest, "claims": projected}
+        return {**inner, "claims_sha256": sha256_hex(inner)}
+
+    doc = claims_document(claims)
 
     # Pass B's ENTIRE input, capped for the same reason --prep's is. The
     # projection re-embeds a person's evidence payload into every one of that
@@ -1447,11 +1472,27 @@ def cmd_claims(args, durable_root: Path, schema_dir: Path) -> dict:
     text = emitted_json_text(doc)
     size = len(text.encode("utf-8"))
     if size > args.max_claims_chars:
+        # `project_claims` is a pure function of its inputs, so the size the
+        # two knobs would produce at their most aggressive setting is a
+        # measurement, not an estimate: re-project and emit it. Reported as
+        # exactly that and never as a minimum -- `max_windows=1` turns the
+        # truncated branch of a printed_surface question on, and that branch is
+        # the LONGER string, so a middling setting can emit fewer bytes than
+        # this one. #896: the old advice named these knobs as the remedy here,
+        # where thinning the evidence is what makes Pass B a weaker check.
+        recut = claims_document(project_claims(verdicts, index, manifest, corpus, 1, 1))
+        recut_size = len(emitted_json_text(recut).encode("utf-8"))
         raise RegistryError(
             "claims_too_large",
             f"registry_claims.json would be {size} bytes, over --max-claims-chars "
-            f"{args.max_claims_chars}; lower --max-contexts-per-form/--context-chars or raise the "
-            f"cap deliberately -- Pass B reads this document whole or it is not the check it is "
+            f"{args.max_claims_chars}; re-cut at --max-contexts-per-form 1 --context-chars 1 it "
+            f"would be {recut_size} bytes"
+            + (", still over the cap" if recut_size > args.max_claims_chars else "")
+            + f". Those two knobs re-cut only the target-occurrence windows at this step: the "
+            f"source contexts are copied from registry_input.json, so shrinking them means "
+            f"re-running --prep, which moves its input_sha256 -- gate P2 then refuses "
+            f"registry_verdicts.json as stale and Pass A must be dispatched again. Raise the cap "
+            f"deliberately -- Pass B reads this document whole or it is not the check it is "
             f"relied on to be",
             code=2,
         )
@@ -1465,7 +1506,7 @@ def cmd_claims(args, durable_root: Path, schema_dir: Path) -> dict:
         "mode": "claims",
         "input_sha256": prep_digest,
         "verdicts_sha256": verdicts_digest,
-        "claims_sha256": claims_digest,
+        "claims_sha256": doc["claims_sha256"],
         "claims": len(claims),
         "by_kind": kinds,
     }
