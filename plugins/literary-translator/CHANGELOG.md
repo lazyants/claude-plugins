@@ -1,5 +1,84 @@
 # Changelog
 
+## 1.100.0 — 2026-09-07
+
+**Name discovery asked an uncased-script model for JSON, and Hebrew punctuation broke it — silently
+removing exactly the names the pass exists to find (#888).** Hebrew, Yiddish and Aramaic mark an
+abbreviation with an ASCII double quote and a single letter with an ASCII apostrophe, and both sit
+*inside* the word. `PROMPT_TEMPLATE` asked for every name byte-for-byte and then asked for the reply
+as one line of JSON, without ever saying that a quote inside a name has to be escaped. `parse_reply`
+ran a bare `json.loads`, so a pass that listed such a name died and its whole harvest was discarded.
+
+The rate was not the harm; the SELECTION was. A pass died *because* it listed a mark-bearing form,
+so the passes that survived were the ones that had left those forms out — and a name harvest is
+about five times more mark-dense than the prose it reads, because honorific name-forms, rabbinic
+name abbreviations and Hebrew-letter years all carry the mark. Nothing downstream could see it:
+`--verify-inventory` asks only whether `name_inventory` is non-empty, so a thinned harvest and a
+complete one produce the same green line, and a thinner canon reads exactly like a thinner book.
+Three operators reproduced it on three Hebrew books. Where the cause was pinned to this defect
+rather than inferred from a rate — a rate alone cannot tell this bug from an operator-side extractor
+fault, and on the same day one book's was exactly that — roughly a third to two fifths of all
+dispatched passes were discarded, with the failures concentrated on the chapters that open with a
+date or a name.
+
+**The reply is now one name per line, closed by a `--- END OF LIST ---` marker.** A line break is a
+character Hebrew orthography cannot collide with, so the source's own punctuation no longer has to
+be escaped and the class of failure is gone by construction rather than by asking a model to be
+careful. Asking it to escape was considered and cut: the collision is deterministic and that remedy
+would be probabilistic, once per emitted form.
+
+**The closing marker is load-bearing, and it is doing what JSON's closing brace used to do.**
+`launch_one` ends its wait the moment the reply file exists, without requiring the job to be
+terminal. Under JSON a half-written reply was invalid and the slot failed; under a bare
+line-delimited contract a half-written reply is a valid PREFIX, which would have been harvested as a
+complete pass with the rest of the names missing — the same silent recall loss this release exists
+to remove. The marker restores that completeness check at the parse boundary, where it does not
+depend on a job-status read that is allowed to return UNKNOWN. It is also how a unit that genuinely
+holds no proper names says so: a reply containing only the marker is an explicit empty result, the
+thing `{"forms": []}` used to express, while an empty file is refused.
+
+The marker must appear exactly once and be the last non-blank line. A reply missing it, or carrying
+a second copy earlier, is refused rather than guessed at — the driver cannot tell which half of a
+restarted list is the answer. That reserves the exact string `--- END OF LIST ---`, which the form
+validator would have admitted as a candidate name before this release; the occurrence census would
+have dropped it anyway, and the refusal is pinned by a test rather than left implied.
+
+Everything the form-list contract enforced still holds, at whichever door still reaches it. The
+reply door keeps the byte cap, the form-count cap, the per-form length cap, the control-character
+refusal and the sentinel-delimiter refusal. Two classes move to the harvest door, which is still
+JSON and is the door the workflow invites an operator to hand-edit: the JSON-object shapes only a
+harvest file can now have — a repeated member name, an unknown key, a non-object, a non-array
+`forms` — and the lone-surrogate refusal, which a model reply reached only through a JSON `\uXXXX`
+escape and a line-delimited reply has no way to spell at all. The two refusals that used to say only that a form carried a bad character
+now name the form.
+
+Two consequences worth knowing before upgrading, neither of which re-translates anything:
+
+- **No name-discovery run survives this upgrade as a resumable one.** The prompt's hash is bound
+  into the dispatch identity, the fold's input re-verification and the resume planner, so
+  `--resume-plan` reports every existing run not current and answers `fresh`. An unfinished run is
+  restarted under a new `RUN_ID`. A finished book only pays this if it RE-ENTERS W3 later, and the
+  cost there is the one that step already documents: a fresh run replaces rather than merges
+  `name_inventory`, and moves `particle_config_hash` a second time.
+- **`name_discovery.py` is in none of the three hashed bundles**, so these edits move no bundle hash
+  and no cache key, and no converged segment goes stale because of them.
+
+One signal is genuinely given up, and it is named rather than implied away: a name straddling a
+block an extractor split mid-sentence used to arrive carrying a line break, which the control-
+character refusal caught loudly by killing the pass. Under a line-delimited reply that name simply
+becomes two lines, which the occurrence census drops. That trades a loud whole-pass failure for a
+quiet two-form recall loss, which is the better trade, but the loud signal is gone.
+
+**Step 0a now says who writes the ownership markers.** `scaffold_setup.py` writes the two
+bundle-hash marker files and nothing else, and its `--verify` mode recomputes only those two — it
+never looks at `.literary-translator-root.json` or the per-directory `.literary-translator-managed`
+files, so a root that skipped adoption entirely and a correctly adopted one produced identical green
+output. Three operators read Step 0a's four-outcome adoption logic as the script's job and ended up
+with roots carrying no ownership marker at all. SKILL.md now states plainly that those markers are
+the orchestrating session's own writes and that a clean `--verify` says nothing about them. The
+script is deliberately unchanged: it runs from the plugin path and cannot resolve the project's
+profile, and the ambiguous-directory outcome is an interactive halt no script can perform.
+
 ## 1.99.1 — 2026-09-06
 
 **A driver killed mid-loop persists nothing, and the documented relaunch re-dispatches every

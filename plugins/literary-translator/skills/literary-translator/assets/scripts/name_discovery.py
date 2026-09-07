@@ -269,6 +269,19 @@ MAX_FORMS_PER_REPLY = 2000
 MAX_FORM_CHARS = 200  # matches bootstrap_names.py's _MAX_CANDIDATE_NAME_CHARS
 SENTINEL_DELIMITERS = ("⟦", "⟧")
 
+# The reply's closing token (#888). Kept as a literal in PROMPT_TEMPLATE rather
+# than a .format() substitution of this constant -- the two staying in sync is
+# pinned by a wording test instead, so a future edit to either one alone goes
+# red rather than silently drifting. This is what {"forms": [...]}'s closing
+# brace used to buy for free: without a fixed terminator, a reply this driver
+# reads while the model is still writing it is a VALID PREFIX of a complete
+# one, and would be harvested as a finished pass with the rest silently
+# missing. Requiring it exactly once, last, moves that completeness check to
+# the parse boundary, where it does not depend on read_job_status being
+# readable (that function returns None -- UNKNOWN, never a fact -- on any
+# failure, by design).
+END_OF_LIST = "--- END OF LIST ---"
+
 HARVEST_KEYS = frozenset(
     {"run_id", "unit", "pass", "source_sha1", "prompt_sha1", "model", "effort", "forms"}
 )
@@ -1025,7 +1038,7 @@ class DispatchSandbox:
 
     def reply_path(self):
         assert self.path is not None, "reply_path() before __enter__"
-        return self.path / "names.json"
+        return self.path / "names.txt"
 
     def _teardown(self):
         if self.path is None:
@@ -1147,10 +1160,17 @@ Rules:
   guess costs nothing and a missing name cannot be recovered.
 - Do not invent a spelling that is not in the text.
 
-Reply with exactly one line of JSON and nothing else:
-{{"forms": ["...", "..."]}}
+Reply with ONE NAME PER LINE, and then a final line reading exactly
 
-Write that JSON to the file {reply_path} and nothing else to disk.
+--- END OF LIST ---
+
+and nothing else -- no JSON, no quotes, no numbering, no bullets, no commentary.
+A name that itself contains a quotation mark or an apostrophe is written exactly
+as the text writes it; the line break is the only separator, so those characters
+need no escaping. If the text contains no proper names at all, write only that
+final line.
+
+Write those lines to the file {reply_path} and nothing else to disk.
 
 --- TEXT BEGINS ---
 {text}
@@ -1320,18 +1340,27 @@ def validate_form_list(forms, label):
                 f"{MAX_FORM_CHARS} cap that matches bootstrap_names.py's own "
                 f"_MAX_CANDIDATE_NAME_CHARS", label=label, form_chars=len(form))
         if any(unicodedata.category(ch) in ("Cc", "Cf", "Cs") for ch in form):
+            # Forms are capped at MAX_FORM_CHARS above this check, so the repr()
+            # is bounded too -- no separate truncation needed to keep this
+            # refusal itself from becoming an unbounded write.
             raise NameDiscoveryError(
                 f"{label}: a form carries a Unicode control character or lone "
-                f"surrogate (Cc/Cf/Cs)", label=label)
+                f"surrogate (Cc/Cf/Cs): {form!r}", label=label)
         if any(d in form for d in SENTINEL_DELIMITERS):
             raise NameDiscoveryError(
                 f"{label}: a form carries a sentinel delimiter, which would collide "
-                f"with this pipeline's own inline markers", label=label)
+                f"with this pipeline's own inline markers: {form!r}", label=label)
         cleaned.append(form)
     return sorted(set(cleaned))
 
 
 def parse_reply(data, label):
+    """One name per line, then a mandatory closing END_OF_LIST line (#888) --
+    replaces the earlier one-line-JSON contract, which collided with Hebrew's
+    ASCII double/single quotes written BYTE-FOR-BYTE inside a word (gershayim,
+    geresh): a byte-for-byte honorific form broke json.loads on the very
+    marks this pass exists to collect, and the loss was structural (a pass
+    dies because it listed a mark-bearing form) rather than random."""
     if len(data) > MAX_REPLY_BYTES:
         raise NameDiscoveryError(f"{label}: reply exceeds {MAX_REPLY_BYTES} bytes",
                                  label=label)
@@ -1339,25 +1368,43 @@ def parse_reply(data, label):
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise NameDiscoveryError(f"{label}: reply is not valid UTF-8: {exc}", label=label)
-    try:
-        obj = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-    except _DuplicateKey as exc:
+    # text.split("\n"), never str.splitlines(): splitlines() also breaks on
+    # U+2028, U+2029, U+0085, \v, \f and \x1c-\x1e. U+2028 is category Zl,
+    # which validate_form_list accepts, so splitlines() would silently split
+    # a form the contract otherwise allows whole. The ASCII line feed is the
+    # only character the prompt names as a separator.
+    lines = [line.strip() for line in text.split("\n")]
+    lines = [line for line in lines if line]
+    terminator_count = lines.count(END_OF_LIST)
+    # Exactly once, and last, is what makes a reply COMPLETE. Zero is
+    # refused rather than treated as "no names": zero bytes and "still being
+    # written" are the same shape without a terminator, so one of the two has
+    # to be refused, and refusing the ambiguous one is what makes the
+    # premature-read case (a two-write stub exposing only the first half)
+    # fail the slot instead of harvesting a prefix. More than once means the
+    # model restarted its list mid-reply, and this driver cannot tell which
+    # half is the answer, so it is refused rather than guessed at. Present
+    # but not last means text followed the terminator, which is exactly the
+    # "and nothing else" instruction being violated.
+    if terminator_count == 0:
         raise NameDiscoveryError(
-            f"{label}: reply repeats the member name {exc.args[0]!r}; collapsing it "
-            f"silently would accept an emptied slot as a successful one",
-            label=label, duplicate_key=exc.args[0])
-    except ValueError as exc:
-        raise NameDiscoveryError(f"{label}: reply is not one JSON object: {exc}",
-                                 label=label)
-    if not isinstance(obj, dict) or set(obj) != {"forms"}:
+            f"{label}: reply carries no {END_OF_LIST!r} terminator line -- "
+            f"indistinguishable from a reply this driver read before the model "
+            f"finished writing it", label=label)
+    if terminator_count > 1:
         raise NameDiscoveryError(
-            f"{label}: reply must be a JSON object whose ONLY key is 'forms'; got "
-            f"{sorted(obj) if isinstance(obj, dict) else type(obj).__name__}",
-            label=label)
-    forms = obj["forms"]
-    if not isinstance(forms, list):
-        raise NameDiscoveryError(f"{label}: 'forms' must be an array", label=label)
-    return validate_form_list(forms, label)
+            f"{label}: reply repeats the {END_OF_LIST!r} terminator "
+            f"{terminator_count} times; this driver cannot tell which list is "
+            f"the answer", label=label, terminator_count=terminator_count)
+    if lines[-1] != END_OF_LIST:
+        raise NameDiscoveryError(
+            f"{label}: reply's {END_OF_LIST!r} terminator is not its last "
+            f"line -- the prompt asks for the terminator and nothing else "
+            f"after it", label=label)
+    # A terminator-only reply (lines == [END_OF_LIST]) is the legitimate
+    # "this unit has no proper names" answer and yields []; --fold already
+    # publishes the other units' forms when one unit's harvest is empty.
+    return validate_form_list(lines[:-1], label)
 
 
 def validate_harvest(path, expected, describe):

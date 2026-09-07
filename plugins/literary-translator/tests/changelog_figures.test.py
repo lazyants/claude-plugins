@@ -504,7 +504,33 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.99.1 (#882 -- every save of the glossary driver's state
+    # ROTATED TO 1.100.0 (#888 -- name discovery asked an uncased-script model
+    # for JSON, and Hebrew punctuation broke it), per the maintenance contract
+    # above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # digit-run in it is an IDENTIFIER, not a measurement: the version
+    # (1.100.0), the release date, the issue number (#888), and `W3`, the pass
+    # the migration note names.
+    #
+    # The entry DOES carry measured figures, and they are written as WORDS on
+    # purpose -- "about five times more mark-dense", "between a third and a
+    # half of its dispatched passes", "three operators", "three books". Those
+    # are facts about book projects in ANOTHER REPOSITORY, so no implementation
+    # in THIS tree can re-derive them, the same class the 1.99.1, 1.99.0,
+    # 1.98.0, 1.94.0, 1.91.0 and 1.90.0 rotations below name for theirs;
+    # spelling them out is this guard's documented way of keeping such a fact
+    # out of it.
+    #
+    # The counts this release COULD have quoted as digits are counts of things
+    # in this tree -- the reply byte cap, the form-count cap, the number of
+    # plugin-bundle members -- and every one of them is deliberately named
+    # rather than numbered in the entry ("the byte cap", "the form-count cap",
+    # "none of the three hashed bundles"), for the same reason the 1.99.0
+    # rotation below gives for its flag count: a digit here is a figure nothing
+    # red would catch going stale.
+    #
+    # The 1.99.1 rotation this replaces, kept as its own record (#882 -- every save of the glossary driver's state
     # document lived in main(), and an initial drive had none until drive_all()
     # returned, so a kill mid-loop persisted nothing and the documented relaunch
     # re-dispatched every settled batch), per the maintenance contract above.
@@ -918,7 +944,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.99.1"
+FIGURES_VERSION = "1.100.0"
 
 
 def _newest_entry():

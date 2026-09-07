@@ -152,7 +152,27 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.99.0 (#883 -- the ready batches of a glossary run one
+    # ROTATED TO 1.100.0 (#888 -- name discovery asked an uncased-script model
+    # for JSON, and Hebrew punctuation broke it), and EMPTY ON PURPOSE, for the
+    # same reason the records below state: the entry names its subjects by FILE
+    # and SYMBOL rather than by line -- `PROMPT_TEMPLATE`, `parse_reply`,
+    # `json.loads`, `launch_one`, `--verify-inventory`, `name_inventory`,
+    # `particle_config_hash`, `scaffold_setup.py`, `--verify` -- and states no
+    # `file.ext:NNN` citation at all, which is the shape this guard reads.
+    # Measured against the entry rather than asserted: a scan of its slice for
+    # that pattern returns zero matches.
+    #
+    # This release also edits `SKILL.md`, which is what the 1.99.0 record below
+    # had to repoint for. It does NOT repoint anything, because the SKILL.md
+    # edit is deliberately LINE-COUNT NEUTRAL: one of the two live citations
+    # aimed below the edited region lives in `select_segments.py`, a
+    # `PLUGIN_BUNDLE_MEMBERS` entry whose bytes are inside `plugin_bundle_hash`,
+    # so drifting it would have forced an edit that stales every converged
+    # segment in every project for the sake of a documentation clarification.
+    # The repo-wide `tools/citation_audit.py check` is what proves the
+    # neutrality held; run it after any edit to this SKILL.md.
+    #
+    # The rotation this replaces is 1.99.0's, kept as its own record (#883 -- the ready batches of a glossary run one
     # sibling exhausted are merged by hand, and SKILL.md now says how), and
     # EMPTY ON PURPOSE, for the same reason the records below state: the
     # entry names its subjects by FILE and SYMBOL rather than by line --
