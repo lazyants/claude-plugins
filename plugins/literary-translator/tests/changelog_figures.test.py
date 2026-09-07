@@ -504,7 +504,36 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.99.1 (#882 -- every save of the glossary driver's state
+    # ROTATED TO 1.100.0 (#890 -- `glossary.citation_content_types` could name a
+    # type the citation fetcher has no way to read, and the fetcher then
+    # destroyed the body instead of refusing it), per the maintenance contract
+    # above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. The
+    # entry quotes THREE sets of measurements and no implementation in THIS tree
+    # can re-derive any of them, which is the same class the 1.99.1, 1.94.0,
+    # 1.91.0 and 1.90.0 rotations below name for theirs:
+    #
+    #   * 885 811 / 197 706 / 497 410 -- a live project's PDF citation, reported
+    #     in #890 and attributed to the issue in the entry itself. Another
+    #     repository, another run; nothing here can reach it.
+    #   * 10 263 / 20 511 / 5 124 -- a local replay against the PRE-FIX code,
+    #     over loopback HTTP with a synthetic PDF-shaped body. Re-deriving it
+    #     needs the code this release changes, so it is a historical fact about
+    #     a version the tree no longer holds.
+    #   * 5.6-8.6% and 2.8% -- the two refused designs' counterexamples, taken
+    #     from rendered manual pages and a downloaded W3C sample PDF. Neither
+    #     input is in this tree, and neither predicate ever shipped, so there is
+    #     nothing here to run them against.
+    #
+    # The remaining numerals are identifiers, not measurements: the version
+    # numbers (1.100.0, 1.99.1, 1.16.1), the release date, the issue number
+    # (#890), the charsets and media types named as text (`charset=utf-16`,
+    # `application/pdf`, `application/x-ndjson`, `application/sql`,
+    # `text/html`), and `Step 0` / `Step 0a`, which name a stage rather than
+    # count one.
+    #
+    # The 1.99.1 rotation this replaces, kept as its own record (#882 -- every save of the glossary driver's state
     # document lived in main(), and an initial drive had none until drive_all()
     # returned, so a kill mid-loop persisted nothing and the documented relaunch
     # re-dispatched every settled batch), per the maintenance contract above.
@@ -918,7 +947,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.99.1"
+FIGURES_VERSION = "1.100.0"
 
 
 def _newest_entry():

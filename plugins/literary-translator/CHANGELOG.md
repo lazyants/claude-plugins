@@ -7,9 +7,11 @@ and the fetcher then destroyed the body instead of refusing it (#890).** The kno
 for exactly that use — "the motivating case is scanned archives, `["text/", "application/pdf"]`" —
 but every admitted body goes through one `raw.decode(..., errors="replace")`, so an admitted PDF
 reached disk as rubbish while `index.json` recorded `outcome: "fetched"`, `truncated: false`: the
-same fields a healthy HTML page produces. Measured against the pre-fix code, one PDF citation
-retrieved over HTTPS was written as 20 511 bytes holding 5 124 U+FFFD characters against a
-recorded `bytes: 10 263`. Nothing downstream could notice: `truncated` is applied to raw bytes
+same fields a healthy HTML page produces. #890 reports it from a live project — one PDF citation
+retrieved over HTTPS landed as an 885 811-byte file holding 197 706 U+FFFD characters against a
+recorded `bytes: 497 410` — and it was reproduced here against the unchanged pre-fix code, over
+loopback HTTP with a synthetic PDF-shaped body: 10 263 raw bytes recorded, 20 511 written, 5 124
+of 10 263 characters replaced. Nothing downstream could notice: `truncated` is applied to raw bytes
 before the decode, and `bytes` is documented as carrying no meaning for the judge. The judge then
 read what was on disk, failed the item — correctly — and blamed the CITATION for evidence the
 retrieval boundary had ruined. A rejection spends a citation-review retry, and exhausting that
@@ -48,14 +50,16 @@ change is likewise untouched: it is pre-existing and nothing here reads a media 
 caller that hands it the very list the parser now refuses still gets the old result, which the
 suite pins. What changes is admission of the CONFIGURATION: a project whose `profile.yml` carries
 `application/pdf` (or any other unsupported prefix) now exits at preflight naming the supported
-set, and its W3 glossary pass does not start until the key is corrected. That run was producing
-unusable evidence for those citations in every case before this release, but the halt is real and
-interrupts work that would otherwise have proceeded for the citations that were fine — remove the
-unsupported prefix, and those citations are refused at admission as `content-type-not-allowed`
-and routed to the per-row repair rung instead. `fetch_citation.py` and
-`glossary-pass-wf.template.js` are both `PLUGIN_BUNDLE_MEMBERS` entries, so this release moves
-`plugin_bundle_hash` once; every converged segment of a book in progress goes `stale` and
-re-translates at the next Step-0a refresh. Neither is a `DERIVATION_BUNDLE_MEMBERS` entry, so no
+set, and its W3 glossary pass does not start until the key is corrected. Those PDF citations were
+producing unusable evidence before this release, but the halt is real and interrupts work that
+would otherwise have proceeded for the citations that were fine — remove the unsupported prefix,
+and those citations are refused at admission as `content-type-not-allowed` and routed to the
+per-row repair rung instead. `fetch_citation.py` and `glossary-pass-wf.template.js` are both
+`PLUGIN_BUNDLE_MEMBERS` entries, so this release moves `plugin_bundle_hash` once; every converged
+segment of a book in progress is INVALIDATED at the next Step-0a refresh and reads `stale`. That
+is invalidation, not automatic re-translation: `select_segments.py`'s previously-converged refusal
+still stands between a stale segment and a dispatch, so re-translating one remains an authorized
+act. Neither is a `DERIVATION_BUNDLE_MEMBERS` entry, so no
 W3/W3a regeneration is forced.
 
 ## 1.99.1 — 2026-09-06

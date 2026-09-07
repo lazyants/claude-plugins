@@ -439,7 +439,10 @@ glossary:
                                           # application/xml, application/json -- "a document a human could have
                                           # read", which is what a citation is supposed to be.
                                           # Set it to NARROW that default when THIS corpus cites one kind of
-                                          # page: ["text/html"] admits HTML and refuses the rest.
+                                          # page: ["text/html"] refuses every OTHER declared type. It does not
+                                          # make the evidence HTML — a response that declares no Content-Type
+                                          # at all is still admitted, deliberately and unchanged, because
+                                          # ordinary servers omit the header.
                                           # 1.100.0 (#890): it can no longer WIDEN onto another type, and
                                           # ["text/", "application/pdf"] is now refused at preflight. The
                                           # boundary turns a body into text with a decode and nothing else, so

@@ -361,11 +361,16 @@ for (const t of CITATION_TYPE_LIST) {
       "type/subtype prefix (for example text/ or application/json)")
   }
   if (!CITATION_TYPE_SUPPORTED.some(function (p) { return t.startsWith(p) })) {
-    throw new Error("glossary.citation_content_types: '" + t + "' names a type " +
-      "the retrieval boundary does not support as citation evidence. Supported: " +
+    // The offending value is NOT echoed, unlike the shape error above. That one
+    // predates this rule and its value has already matched the media-type
+    // charset by the time it prints; this branch fires on a value that has NOT,
+    // and this message reaches an operator transcript. Only the supported set --
+    // this file's own constant -- travels with it.
+    throw new Error("glossary.citation_content_types: an entry names a type the " +
+      "retrieval boundary does not support as citation evidence. Supported: " +
       CITATION_TYPE_SUPPORTED.join(", ") + " (or anything narrower, such as " +
-      "text/html). A body of any other type is decoded as text and destroyed " +
-      "rather than read.")
+      "text/html). Anything else is admitted and then read as text, which is " +
+      "not what the document says.")
   }
 }
 // The COUNT cap and the uniqueness rule existed in the other two engines only

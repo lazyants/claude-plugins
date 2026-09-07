@@ -240,13 +240,17 @@ ALLOWED_CONTENT_PREFIXES = ("text/", "application/xhtml", "application/xml", "ap
 # be added in a line; that is deliberately a different act from a project
 # widening its own boundary at run time.
 #
-# WHAT IT PREVENTS, measured on the unchanged pre-#890 code: with
+# WHAT IT PREVENTS. #890 reports it from a live project: with
 # `citation_content_types: ["text/", "application/pdf"]`, one PDF citation
-# retrieved over HTTPS was admitted, decoded through errors="replace", and
-# written to disk as 20 511 bytes of which 5 124 characters were U+FFFD -- while
-# index.json recorded outcome "fetched", truncated false, and bytes 10 263. The
-# judge then failed the item, correctly, and blamed the CITATION for evidence
-# the boundary itself had destroyed. Two fetch-time repairs were designed and
+# retrieved over HTTPS landed as an 885 811-byte file holding 197 706 U+FFFD
+# characters against an `index.json` recording `bytes: 497 410`,
+# `outcome: "fetched"`, `truncated: false` -- and the judge then failed the item,
+# correctly, and blamed the CITATION for evidence the boundary itself had
+# destroyed. Reproduced locally against the unchanged pre-#890 code, over
+# loopback HTTP with a synthetic PDF-shaped body and no judge in the loop:
+# 10 263 raw bytes recorded, 20 511 written, 5 124 of 10 263 characters
+# replaced. The local replay proves the decode; the field sizes and the judge
+# verdict are the issue's, not this comment's. Two fetch-time repairs were designed and
 # refused in review before this one: classifying by declared type refuses text
 # that works today (`application/x-ndjson`, `application/sql`) and is defeated
 # by a duplicate Content-Type header, and classifying by decoded body refuses
@@ -498,8 +502,9 @@ def parse_content_type_prefixes(values) -> tuple:
                 "fetch_citation: --allow-content-type names a type this retrieval "
                 "boundary does not support as citation evidence. Supported: "
                 + ", ".join(TEXT_DECODABLE_PREFIXES)
-                + " (or anything narrower, such as text/html). A body of any "
-                "other type is decoded as text and destroyed rather than read.")
+                + " (or anything narrower, such as text/html). Anything else is "
+                "admitted and then read as text, which is not what the document "
+                "says -- for a binary format that destroys it outright.")
     return tuple(values)
 
 

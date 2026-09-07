@@ -1936,14 +1936,22 @@ def test_the_fetch_path_is_untouched_by_890(monkeypatch):
     caller that hands it the very list the parser now refuses must still get the
     old behaviour -- that is what makes this a configuration policy rather than
     a second gate the responses have to pass."""
+    # Non-ASCII on purpose. Asserting ok/outcome/content_type alone passes
+    # against a mutant that returns body="DESTROYED", bytes=0, truncated=True --
+    # which is exactly the class of change this test exists to forbid, so the
+    # BODY and the counters are what it actually compares.
+    payload = "citation body — ПДФ — 文字".encode("utf-8")
     net_ct = {"Content-Type": "application/pdf"}
-    FakeNet(monkeypatch, default=http_response(200, net_ct, b"%PDF-1.7 ..."))
+    FakeNet(monkeypatch, default=http_response(200, net_ct, payload))
     result = fc.fetch_one("https://example.com/p.pdf",
                           deadline=time.monotonic() + 30.0,
                           allowed_types=("text/", "application/pdf"))
     assert result["ok"] is True
     assert result["outcome"] == "fetched"
     assert result["content_type"] == "application/pdf"
+    assert result["body"] == payload.decode("utf-8")
+    assert result["bytes"] == len(payload)
+    assert result["truncated"] is False
 
 
 def test_an_absent_override_leaves_the_shipped_default_in_place():

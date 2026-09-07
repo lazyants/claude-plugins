@@ -414,10 +414,10 @@ SUBST_FIELDS = frozenset({
     "research_mode", "verse_policy", "source_lang", "target_lang",
     "max_fix_rounds", "batch_agent_cap", "max_codex_jobs_per_batch", "effort",
     # 1.16.1 (#347). It changes the prepare step's actual command line, so it
-    # changes what a cached citation-review result MEANS: widening the list from
-    # ["text/"] to ["text/", "application/pdf"] makes the boundary admit pages it
-    # previously refused, and a resumed run would otherwise reuse verdicts taken
-    # under the OLD policy while reporting them as current. Omitting it was
+    # changes what a cached citation-review result MEANS: narrowing the list from
+    # ["text/"] to ["text/html"] makes the boundary refuse pages it previously
+    # admitted (the other direction is refused at preflight since #890), and a
+    # resumed run would otherwise reuse OLD-policy verdicts as current. Omitting it was
     # caught by codex in the 1.16.1 round-3 review, which measured two identical
     # digests across that exact change -- and it would have recreated this
     # release's own stated anti-goal: a profile setting that silently does not

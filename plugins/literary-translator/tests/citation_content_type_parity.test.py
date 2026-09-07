@@ -89,12 +89,34 @@ def template_validator_js() -> str:
         # "-" is not parsed as a node flag.
         "const raw = process.argv[1];"
         "const CITATION_TYPE_LIST = raw.split(\",\")" + pipeline.group(1) + ";"
-        "const SUPPORTED = " + template_supported_set() + ";"
-        "let ok = CITATION_TYPE_LIST.length > 0;"
-        "for (const t of CITATION_TYPE_LIST) { if (!" + template_pattern() + ".test(t)) ok = false; "
-        "if (!SUPPORTED.some(function (p) { return t.startsWith(p) })) ok = false; }"
+        "const CITATION_TYPE_SUPPORTED = " + template_supported_set() + ";"
+        "let ok = true;"
+        "if (CITATION_TYPE_LIST.length === 0) ok = false;"
+        "try {" + template_guard_body() + "} catch (e) { ok = false }"
         "process.stdout.write(ok ? 'ADMIT' : 'REJECT');"
     )
+
+
+def template_guard_body() -> str:
+    """The template's `for (const t of CITATION_TYPE_LIST) { ... }` guard, lifted
+    from the source and executed AS IT SHIPS.
+
+    The round-1 code review caught this file reconstructing the second condition
+    by hand: with the real guard deleted from the template and only its constant
+    left behind, every JS row here stayed green while the shipped validator
+    admitted `application/pdf`. A parity test that re-implements the thing it is
+    comparing has no opinion about the thing it is comparing. Both conditions now
+    arrive as source text, so deleting either one turns this file red.
+    """
+    text = TEMPLATE_PATH.read_text(encoding="utf-8")
+    match = re.search(r"^for \(const t of CITATION_TYPE_LIST\) \{\n.*?^\}", text, re.S | re.M)
+    assert match, "the template's content-type guard has changed shape; update this test"
+    body = match.group(0)
+    assert ".test(t)" in body and "startsWith" in body, (
+        "the lifted guard is missing one of its two conditions -- it must carry "
+        "BOTH the shape check and the supported-set check, or this file is "
+        "asserting parity it never evaluated")
+    return body
 
 
 def template_supported_set() -> str:
