@@ -152,7 +152,7 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.110.0 (#889 -- the three language fields shipped another
+    # ROTATED TO 1.112.0 (#889 -- the three language fields shipped another
     # project's real values with no CHOOSE_ sentinel, and a particle_config
     # naming a shipped preset was refused only at --fold), and EMPTY ON PURPOSE
     # for the reason the records below state: the entry names its subjects by
