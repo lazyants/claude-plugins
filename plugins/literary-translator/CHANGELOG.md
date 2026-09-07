@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.100.0 — 2026-09-07
+
+**`glossary.citation_content_types` could name a type the citation fetcher has no way to read,
+and the fetcher then destroyed the body instead of refusing it (#890).** The knob was documented
+for exactly that use — "the motivating case is scanned archives, `["text/", "application/pdf"]`" —
+but every admitted body goes through one `raw.decode(..., errors="replace")`, so an admitted PDF
+reached disk as rubbish while `index.json` recorded `outcome: "fetched"`, `truncated: false`: the
+same fields a healthy HTML page produces. Measured against the pre-fix code, one PDF citation
+retrieved over HTTPS was written as 20 511 bytes holding 5 124 U+FFFD characters against a
+recorded `bytes: 10 263`. Nothing downstream could notice: `truncated` is applied to raw bytes
+before the decode, and `bytes` is documented as carrying no meaning for the judge. The judge then
+read what was on disk, failed the item — correctly — and blamed the CITATION for evidence the
+retrieval boundary had ruined. A rejection spends a citation-review retry, and exhausting that
+ladder returns `citation-review-exhausted` and merges zero batches.
+
+`parse_content_type_prefixes()` now refuses such an entry the way it already refuses a malformed
+one, before a single socket is opened, and `glossary-pass-wf.template.js` and
+`profile.schema.json` carry the same rule, so a profile is stopped at Step 0 rather than mid-run.
+The test that pins those three engines against each other exercises the whole parser and the
+template's whole validator now, not the shape regex alone — a second condition behind one of them
+is exactly the drift that file exists to catch. A list may still NARROW the shipped default
+(`["text/html"]`); it may no longer widen past it, and `startswith` is what keeps the first legal
+while refusing the bare `application/` that would re-admit every binary type under it.
+
+**The repair is at the configuration, not at the response, and that was the third design.** Two
+fetch-time repairs were built and refused in plan review first. Classifying by declared type
+refuses text that works today — `application/x-ndjson` and `application/sql` both decode
+losslessly — and is defeated by a duplicate `Content-Type` header, which `http.client` joins with
+a comma. Classifying by decoded body refuses real manual pages, whose backspace overstrike
+measured 5.6–8.6% control characters, while admitting the real W3C `dummy.pdf` declared
+`charset=utf-16` at 2.8%; raising the bar for the first worsens the second. A classifier errs in
+both directions, and three rounds of the same finding is a design error rather than a tuning
+problem. Refusing the configuration cannot be wrong about a response, because it never sees one.
+
+Which types this boundary supports is therefore a decision a RELEASE makes. A text-shaped type
+missing from the set is worth an issue and a one-line addition, not a per-project widening that
+the boundary cannot honour.
+
+Left as it stood: a body MISLABELLED as a supported type — a PDF served as `text/html`, or a page
+in a charset outside `ALLOWED_CHARSETS` — is still decoded and stored. This release does not look
+at bodies at all, both attempts to do so cost more than the defect they closed, and no corpus has
+reported the mislabelled case. The duplicate-`Content-Type` ambiguity found while reviewing this
+change is likewise untouched: it is pre-existing and nothing here reads a media type at fetch time.
+
+**Migration.** Per-item retrieval behaviour is unchanged — `fetch_one` is not touched, and a
+caller that hands it the very list the parser now refuses still gets the old result, which the
+suite pins. What changes is admission of the CONFIGURATION: a project whose `profile.yml` carries
+`application/pdf` (or any other unsupported prefix) now exits at preflight naming the supported
+set, and its W3 glossary pass does not start until the key is corrected. That run was producing
+unusable evidence for those citations in every case before this release, but the halt is real and
+interrupts work that would otherwise have proceeded for the citations that were fine — remove the
+unsupported prefix, and those citations are refused at admission as `content-type-not-allowed`
+and routed to the per-row repair rung instead. `fetch_citation.py` and
+`glossary-pass-wf.template.js` are both `PLUGIN_BUNDLE_MEMBERS` entries, so this release moves
+`plugin_bundle_hash` once; every converged segment of a book in progress goes `stale` and
+re-translates at the next Step-0a refresh. Neither is a `DERIVATION_BUNDLE_MEMBERS` entry, so no
+W3/W3a regeneration is forced.
+
 ## 1.99.1 — 2026-09-06
 
 **A driver killed mid-loop persists nothing, and the documented relaunch re-dispatches every

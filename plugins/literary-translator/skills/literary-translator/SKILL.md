@@ -1826,9 +1826,11 @@ requires it, and `compute_input_digest` fails loudly
 (`missing required field(s): ['effort']`) if it's omitted. **The same is true of
 `citation_content_types` since 1.16.1**, and for a reason worth stating rather
 than pattern-matching: it changes the prepare step's actual command line, so it
-changes what a cached citation verdict MEANS. Widening the list makes the
-boundary admit pages it previously refused, and a resumed run that reused those
-verdicts would be reporting decisions taken under the OLD policy as current.
+changes what a cached citation verdict MEANS. Changing the list moves what the
+boundary admits — since **1.100.0 (#890)** only DOWNWARD, since a list naming a
+type the boundary cannot read as text is now refused at preflight — and a
+resumed run that reused those verdicts would be reporting decisions taken under
+the OLD policy as current.
 Pass it even when it is the empty string — the empty string is itself the
 statement "this run used the shipped default". **1.4.0:** on that same non-empty-candidates
 path, after `glossary_batch_plan.py` and strictly before `resume_setup.py`

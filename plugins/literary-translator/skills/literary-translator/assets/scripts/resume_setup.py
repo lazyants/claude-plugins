@@ -75,7 +75,7 @@ path. Payload shape:
                                                   # REQUIRED but NOT hashed (#735) --
                                                   # see DIGEST_SUBST_FIELDS
         "effort": "low|medium|high|xhigh",       # #197; NOT "model" (see SUBST_FIELDS)
-        "citation_content_types": "text/,application/pdf"   # 1.16.1 (#347);
+        "citation_content_types": "text/html"           # 1.16.1 (#347);
                                                  # "" when the profile key is
                                                  # absent, but REQUIRED even then
       },

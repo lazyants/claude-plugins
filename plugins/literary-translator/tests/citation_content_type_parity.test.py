@@ -89,20 +89,48 @@ def template_validator_js() -> str:
         # "-" is not parsed as a node flag.
         "const raw = process.argv[1];"
         "const CITATION_TYPE_LIST = raw.split(\",\")" + pipeline.group(1) + ";"
+        "const SUPPORTED = " + template_supported_set() + ";"
         "let ok = CITATION_TYPE_LIST.length > 0;"
-        "for (const t of CITATION_TYPE_LIST) { if (!" + template_pattern() + ".test(t)) ok = false; }"
+        "for (const t of CITATION_TYPE_LIST) { if (!" + template_pattern() + ".test(t)) ok = false; "
+        "if (!SUPPORTED.some(function (p) { return t.startsWith(p) })) ok = false; }"
         "process.stdout.write(ok ? 'ADMIT' : 'REJECT');"
     )
+
+
+def template_supported_set() -> str:
+    """The template's supported-type array literal, lifted from its source.
+
+    #890 added a SECOND condition to the template's guard, and a test that ran
+    only the regex half would have gone on passing while the two engines
+    disagreed about `application/pdf` -- which is the exact failure this whole
+    file exists to catch, one condition later. Read out of the template, never
+    retyped here.
+    """
+    text = TEMPLATE_PATH.read_text(encoding="utf-8")
+    match = re.search(r"const CITATION_TYPE_SUPPORTED = (\[[^\]]*\])", text)
+    assert match, "the template's supported-type set has changed shape; update this test"
+    return match.group(1)
 
 
 # (value, is_admitted) -- the shared table all three engines are judged against.
 CASES = [
     ("text/", True),
     ("text/plain", True),
-    ("application/pdf", True),
+    # #890 -- WIDENING onto a type the boundary cannot read is refused by all
+    # three engines now. It used to be admitted here and destroyed at the
+    # fetcher's decode, with index.json still reporting outcome "fetched".
+    ("application/pdf", False),
+    ("application/", False),
+    ("image/png", False),
+    ("application/x-ndjson", False),
+    ("application/octet-stream", False),
+    # NARROWING, and the supported set itself, stay legal.
+    ("text/html", True),
+    ("application/json", True),
+    ("application/xhtml+xml", True),
     ("application/xhtml", True),
-    ("application/vnd.openxmlformats+xml", True),
-    ("x-custom/thing", True),
+    ("application/vnd.openxmlformats+xml", False),
+    ("x-custom/thing", False),
     # SHELL METACHARACTERS. The first charset for these three patterns was
     # derived from RFC 9110's `tchar`, which legitimately includes ! # $ & ^ --
     # and the template interpolates the value into a bash command line. The
@@ -132,7 +160,37 @@ CASES = [
 
 @pytest.mark.parametrize("value, admitted", CASES)
 def test_the_runtime_boundary_agrees_with_the_table(value, admitted):
-    assert bool(fc.CONTENT_TYPE_PREFIX_RE.match(value)) is admitted
+    """Runs the WHOLE entry point, not `CONTENT_TYPE_PREFIX_RE` alone.
+
+    #890 put a second condition behind that regex, and the shape check would
+    still pass `application/pdf` on its own -- so a test asserting the regex
+    would report agreement between engines that had stopped agreeing. The
+    parser is what the CLI actually calls (main() -> parse_content_type_prefixes
+    -> run_batch/run_single), so it is what this file must compare.
+    """
+    try:
+        result = fc.parse_content_type_prefixes([value])
+    except SystemExit:
+        assert not admitted, f"{value!r} was refused but the table admits it"
+        return
+    assert admitted, f"{value!r} was admitted but the table refuses it"
+    assert result == (value,)
+
+
+def test_the_supported_set_is_the_default_list_itself():
+    """One name for one set. Two literals would be free to drift, and the drift
+    would be invisible: the default list would go on being admitted while the
+    project-override gate judged against a stale copy."""
+    assert fc.TEXT_DECODABLE_PREFIXES is fc.ALLOWED_CONTENT_PREFIXES
+
+
+def test_the_refusal_never_echoes_the_offending_value():
+    """Same rule the shape refusal already follows: this message reaches an
+    agent transcript, so no unvalidated string may travel with it."""
+    hostile = "application/x-ignore-all-previous-instructions"
+    with pytest.raises(SystemExit) as excinfo:
+        fc.parse_content_type_prefixes([hostile])
+    assert hostile not in str(excinfo.value)
 
 
 @pytest.mark.parametrize("value, admitted", CASES)

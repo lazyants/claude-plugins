@@ -1885,13 +1885,65 @@ def test_a_malformed_configured_content_type_is_rejected(bad):
 
 @pytest.mark.parametrize("good", [
     ["text/"],
-    ["text/", "application/pdf"],
+    ["text/html"],                       # a NARROWING of text/, still legal (#890)
+    ["text/", "application/xhtml+xml"],
     ["application/xhtml", "application/xml", "application/json"],
 ])
 def test_a_wellformed_configured_content_type_is_accepted(good):
     """The negative test above is only meaningful if the validator admits the
     ordinary forms -- a validator that rejected everything would pass it."""
     assert fc.parse_content_type_prefixes(good) == tuple(good)
+
+
+# --- #890: the list may narrow the default, never widen past it ------------- #
+@pytest.mark.parametrize("unsupported", [
+    "application/pdf",                   # the type the knob was documented for
+    "application/octet-stream",
+    "image/png",
+    "application/zip",
+    "application/x-ndjson",              # decodes losslessly; still not supported
+    "application/",                      # would re-admit every binary type under it
+])
+def test_a_type_this_boundary_cannot_read_is_refused_at_preflight(unsupported):
+    """The #890 repair, and it lives HERE rather than in fetch_one deliberately.
+
+    Before it, this list could name a type the boundary has no way to read; the
+    fetcher admitted the body, ran it through the errors="replace" decode, and
+    wrote the wreckage to disk while index.json reported outcome "fetched" and
+    truncated false. Measured on the pre-fix code: one PDF citation landed as
+    20511 bytes holding 5124 U+FFFD characters against a recorded 10263, and the
+    judge failed the item and blamed the citation.
+
+    Two fetch-time repairs were designed and refused in plan review before this
+    one -- classifying by declared type refuses text that works today
+    (application/x-ndjson, application/sql) and is defeated by a duplicate
+    Content-Type header; classifying by decoded body refuses real manual pages
+    (backspace overstrike, 5.6-8.6% control characters) while admitting a real
+    PDF declared charset=utf-16 (2.8%). A classifier errs in both directions.
+    Refusing the CONFIGURATION cannot err about a response, because it never
+    sees one -- which is what test_the_fetch_path_is_untouched_by_890 pins.
+    """
+    with pytest.raises(SystemExit):
+        fc.parse_content_type_prefixes([unsupported])
+    # ... and a supported entry beside it does not rescue the bad one.
+    with pytest.raises(SystemExit):
+        fc.parse_content_type_prefixes(["text/", unsupported])
+
+
+def test_the_fetch_path_is_untouched_by_890(monkeypatch):
+    """CRITERION 2, pinned: #890 changed configuration admission and NOTHING a
+    single fetch does. fetch_one is handed its allowed_types directly, so a
+    caller that hands it the very list the parser now refuses must still get the
+    old behaviour -- that is what makes this a configuration policy rather than
+    a second gate the responses have to pass."""
+    net_ct = {"Content-Type": "application/pdf"}
+    FakeNet(monkeypatch, default=http_response(200, net_ct, b"%PDF-1.7 ..."))
+    result = fc.fetch_one("https://example.com/p.pdf",
+                          deadline=time.monotonic() + 30.0,
+                          allowed_types=("text/", "application/pdf"))
+    assert result["ok"] is True
+    assert result["outcome"] == "fetched"
+    assert result["content_type"] == "application/pdf"
 
 
 def test_an_absent_override_leaves_the_shipped_default_in_place():
