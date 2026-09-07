@@ -504,10 +504,42 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.112.0 (#889 -- the three language fields shipped another
-    # project's real values with no CHOOSE_ sentinel, and a particle_config
-    # naming a shipped preset was refused only at --fold, after the whole
-    # discovery fan-out had been paid for), per the maintenance contract above.
+    # ROTATED TO 1.113.0 (#894 -- a correct hand-checked name list failed the
+    # mandatory language smoke test, and the printed remediation named the
+    # particle config, which is the one file that was already right), per the
+    # maintenance contract above.
+    #
+    # ONE row, and the entry was walked completely rather than assumed. The
+    # entry's own inline slice size is the only digit-written figure in it that
+    # THIS tree owns, and the release that retunes it moves the prose with it.
+    Figure(
+        phrase="up to 15",
+        value=15,
+        derive=lambda: _int_constant(
+            "language_smoke_report.py", "CANDIDATE_SAMPLE_PRINT"
+        ),
+    ),
+    #
+    # Not rows, and why. The entry's measurements of the live Hebrew book --
+    # its page count, the 108 sample candidates against 794 from the whole
+    # manifest, and the two attempts that reported 11 of 14 and 5 of 14 names
+    # missing -- are facts about a book project in ANOTHER REPOSITORY, so no
+    # implementation in THIS tree can re-derive them, the same class the
+    # 1.99.0, 1.98.0, 1.94.0, 1.91.0 and 1.90.0 rotations below name for
+    # theirs. The ten-distinct-name floor IS re-derivable
+    # (`LOW_NAME_DENSITY_FLOOR`), but the entry spells it as a WORD, which
+    # `_TOKEN` cannot see. The remaining numerals are identifiers rather than
+    # measurements: the version numbers, the release date, the issue number
+    # (#894), and the `0` this release's new mode exits with, which names an
+    # exit status rather than counting anything.
+    #
+    #
+    #
+    # The 1.112.0 rotation this replaces, kept as its own record (#889 -- the
+    # three language fields shipped another project's real values with no
+    # CHOOSE_ sentinel, and a particle_config naming a shipped preset was
+    # refused only at --fold, after the whole discovery fan-out had been paid
+    # for), per the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed: every
     # numeral in it was enumerated and each one is an IDENTIFIER, not a
@@ -1135,7 +1167,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.112.0"
+FIGURES_VERSION = "1.113.0"
 
 
 def _newest_entry():

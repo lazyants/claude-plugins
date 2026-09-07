@@ -87,7 +87,24 @@ CLI (see references/language-pair-parameterization.md, "CLI inputs"):
   --low-name-density-confirmed          (required iff candidate_names_total < 10)
   --no-names-confirmed                  (required iff candidate_names_total == 0)
   --no-particles-confirmed              (required iff particle_list_size == 0)
+  --list-candidates                     (print the sample's candidate set and
+                                         exit 0; no report is written or read,
+                                         and no checked names or confirmation
+                                         flags are required -- the particle
+                                         config still resolves the usual way,
+                                         from profile.yml unless
+                                         --particle-config is given)
   --profile / --manifest / --particle-config / --report-path (path overrides)
+
+Composing --checked-names (#894). The names are matched EXACTLY against the
+candidate set THIS script extracts from THIS script's own stratified sample --
+never against bootstrap_names.py's whole-manifest list, and never against the
+book's own spelling where that differs from what the extractor reconstructs.
+Run --list-candidates first and pick from what it prints; the pass:false
+message says the same thing, because the two facts are invisible at the point
+where they cost an operator a run. That mode needs the same particle_config
+this script always needs -- read from profile.yml unless --particle-config is
+given -- and nothing else.
 """
 
 import argparse
@@ -132,6 +149,42 @@ THIS_SCRIPT_PATH = Path(__file__).resolve()
 
 SAMPLE_WORD_CAP = 750
 LOW_NAME_DENSITY_FLOOR = 10
+# How many candidate names a pass:false message prints inline (#894). The full
+# set is one --list-candidates run away, so this is a taste of the FORM the
+# names take, not an attempt to fit the set into a terminal.
+CANDIDATE_SAMPLE_PRINT = 15
+
+# #894 worked examples for the candidate FORM, spelled as escapes so this
+# source file stays ASCII and no bidi reordering can garble them in an editor:
+#   _EX_SOURCE_FINAL_GERESH  "R' Aharon" -- geresh ENDS the first token
+#   _EX_CANDIDATE_FINAL_GERESH  what the extractor emits for it
+#   _EX_INTERNAL_MAQAF       "Moshe-Leib" -- maqaf sits BETWEEN two letters,
+#                            so it is part of the token and survives verbatim
+_EX_SOURCE_FINAL_GERESH = "\u05e8\u05f3 \u05d0\u05d4\u05e8\u05df"
+_EX_CANDIDATE_FINAL_GERESH = "\u05e8 \u05d0\u05d4\u05e8\u05df"
+_EX_INTERNAL_MAQAF = "\u05de\u05e9\u05d4\u05be\u05dc\u05d9\u05d9\u05d1"
+
+# The two properties of the candidate set that are invisible at the point where
+# a correct hand-checked list fails (#894): it is built from a SAMPLE, and its
+# members are the extractor's own reconstruction, not the book's spelling.
+# Printed by the pass:false path and, in one line, by the low-name-density
+# coverage fatal.
+CANDIDATE_SET_SCOPE_FACT = (
+    "the candidate set is built from THIS script's own stratified sample of "
+    "the book (the segments listed above), never from the whole manifest -- "
+    "bootstrap_names.py runs the same algorithm over EVERY segment, so its "
+    "candidate list may hold names this one does not -- it is not the set "
+    "this check uses, and --checked-names must not be composed from it"
+)
+CANDIDATE_SET_FORM_FACT = (
+    "each candidate is the extractor's own reconstruction of the tokens it "
+    "matched, joined by single spaces. A connector mark (geresh, gershayim, "
+    "maqaf, apostrophe, hyphen) belongs to a token ONLY between two letters: "
+    f"{_EX_INTERNAL_MAQAF} survives verbatim, while a token-FINAL connector "
+    f"ends its token, so the source's {_EX_SOURCE_FINAL_GERESH} is the "
+    f"candidate {_EX_CANDIDATE_FINAL_GERESH}. Supply each name as this script "
+    "prints it, not as the book spells it"
+)
 
 # Generalized, offset-safe, MARK-inclusive tokenizer (issue #225): a token =
 # one Unicode LETTER, its own trailing combining MARKs, then zero or more
@@ -1431,7 +1484,15 @@ def main():
     parser.add_argument(
         "--checked-names",
         default="",
-        help="Comma-separated hand-picked names (>=10, or per density branches).",
+        help=(
+            "Comma-separated hand-picked names (>=10, or per density "
+            "branches). Matched EXACTLY against the candidates this script "
+            "extracts from its own stratified SAMPLE of the book -- not the "
+            "whole manifest, and not bootstrap_names.py's list -- and in the "
+            "extractor's own reconstructed form, in which a connector mark "
+            "survives only between two letters. Run --list-candidates first "
+            "and compose this list from what it prints."
+        ),
     )
     parser.add_argument(
         "--elision-test-file",
@@ -1443,6 +1504,18 @@ def main():
         default=None,
         help="JSON array of {token, is_particle}. Required iff particle_list_size > 0.",
     )
+    parser.add_argument(
+        "--list-candidates",
+        action="store_true",
+        help=(
+            "Print the candidate names extracted from this script's own "
+            "sample, one per line, and exit 0 WITHOUT writing or reading a "
+            "report. This is the set --checked-names is matched against, in "
+            "the form it is matched in. No checked names and no confirmation "
+            "flag are needed; the particle config resolves as always, from "
+            "profile.yml unless --particle-config is given."
+        ),
+    )
     parser.add_argument("--low-name-density-confirmed", action="store_true")
     parser.add_argument("--no-names-confirmed", action="store_true")
     parser.add_argument("--no-particles-confirmed", action="store_true")
@@ -1452,7 +1525,15 @@ def main():
 
     manifest_path = Path(args.manifest).resolve() if args.manifest else DEFAULT_MANIFEST_PATH
     particle_config_path = resolve_particle_config_path(args.particle_config, profile_path)
-    report_path = resolve_report_path(args.report_path, profile_path)
+    # --list-candidates writes nothing, so where the report WOULD go is not
+    # resolved at all: a bad smoke_test.report_path -- or a missing PyYAML on
+    # an invocation that gave --particle-config explicitly -- must not stop an
+    # operator from reading the candidate set (#894). The particle config
+    # itself still resolves the usual way, since this mode cannot extract
+    # anything without it.
+    report_path = None if args.list_candidates else resolve_report_path(
+        args.report_path, profile_path
+    )
 
     lang = load_particle_config(particle_config_path)
     particle_config_sha1 = sha1_bytes(lang["raw_bytes"])
@@ -1485,6 +1566,32 @@ def main():
         for name, _ in extract_candidate_names(clean_piece, lang):
             candidate_name_set.add(name)
     candidate_names_total = len(candidate_name_set)
+
+    # One rendering of the sample's segment labels, shared by --list-candidates
+    # and by the checked-name miss below (#894).
+    segments_line = ", ".join(
+        f"{seg['segment_id']} ({seg['anchor']})" for seg in selection["segments_used"]
+    )
+
+    if args.list_candidates:
+        # #894: composing --checked-names at all requires seeing this set, and
+        # nothing else prints it -- the production extractor's candidate file
+        # is a different, whole-manifest set. Deliberately before every
+        # density branch, so a name-sparse or name-free sample lists too
+        # instead of demanding the confirmation flag for a branch this mode
+        # never reaches.
+        print(f"language_smoke_report.py: particle_config = {particle_config_path}")
+        print(f"language_smoke_report.py: sample word_count           = {selection['word_count']}")
+        print(f"language_smoke_report.py: sample segments             = {segments_line}")
+        print(f"language_smoke_report.py: candidate_names_total       = {candidate_names_total}")
+        for name in sorted(candidate_name_set):
+            print(name)
+        print(
+            "language_smoke_report.py: LIST-CANDIDATES -- no report written, "
+            "this is NOT a smoke-test pass. Compose --checked-names from the "
+            f"names above, exactly as printed: {CANDIDATE_SET_FORM_FACT}."
+        )
+        sys.exit(0)
 
     checked_names = parse_checked_names(args.checked_names)
 
@@ -1523,7 +1630,10 @@ def main():
                 f"hand-checked (set-coverage of the {candidate_names_total} distinct "
                 "candidates, dedup-aware -- duplicates do not count). "
                 f"{len(uncovered)} still uncovered: {uncovered}. Supply each distinct "
-                "candidate in --checked-names."
+                "candidate in --checked-names -- that list IS the candidate set, so "
+                "copy the spellings from it rather than from the book: "
+                f"{CANDIDATE_SET_FORM_FACT}. Run --list-candidates to print the set "
+                "on its own."
             )
         low_name_density_confirmed = True
         no_names_confirmed = False
@@ -1698,6 +1808,39 @@ def main():
                 f"expected is_particle={c['is_particle']!r}",
                 file=sys.stderr,
             )
+    # #894: a not-found checked name has two causes the message never named,
+    # and neither is fixable in the particle config -- so they are printed
+    # BEFORE the particle-config remediation, which an operator following this
+    # message used to edit while nothing was wrong with it.
+    if any(not c["found"] for c in checked_names_out):
+        print(
+            "  Sample the candidates came from: "
+            f"{selection['word_count']} words, segments {segments_line}",
+            file=sys.stderr,
+        )
+        print("  Why a CORRECT name is reported missing:", file=sys.stderr)
+        print(f"    * SCOPE -- {CANDIDATE_SET_SCOPE_FACT}.", file=sys.stderr)
+        print(f"    * FORM  -- {CANDIDATE_SET_FORM_FACT}.", file=sys.stderr)
+        shown = sorted(candidate_name_set)[:CANDIDATE_SAMPLE_PRINT]
+        print(
+            f"  Candidate names ({len(shown)} of {candidate_names_total}, "
+            f"alphabetical): {', '.join(shown)}",
+            file=sys.stderr,
+        )
+        print(
+            "  Re-run this command with --list-candidates added and the "
+            "checked-name/test-case arguments dropped -- KEEP the same "
+            "--profile / --particle-config / --manifest inputs -- to print "
+            f"all {candidate_names_total} and compose --checked-names from "
+            "them. Nothing is written; no report is read or replaced.",
+            file=sys.stderr,
+        )
+        print(
+            "  Only a name that IS in that sample, spelled as this script "
+            "prints it, and still not extracted -- and every elision or "
+            "particle-smoke failure above -- is a particle_config problem:",
+            file=sys.stderr,
+        )
     print(
         "  Remediation: copy "
         f"{particle_config_path} to a project-local '<code>.local.json' "

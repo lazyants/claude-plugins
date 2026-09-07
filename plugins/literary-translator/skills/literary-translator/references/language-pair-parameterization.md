@@ -196,11 +196,24 @@ the first attempt rather than failing on a missing parent directory.
 
 ### Procedure
 
-1. Run `bootstrap_names.py` against a real sample of *this book's* actual
-   source text (not synthetic sentences only).
-2. Hand-pick a list of names/titles a human reader can already see in that
-   sample, and manually verify every one of them surfaces as a candidate
-   (it doesn't need to rank "strong" — just present).
+1. Run `language_smoke_report.py --list-candidates` with the same path
+   arguments the real run will use (`--profile` / `--particle-config` /
+   `--manifest`; the particle config still resolves from `profile.yml` when
+   the flag is absent). No report is written or read, and no checked names or
+   confirmation flags are needed. It prints the sample it read — word count
+   and segment ids — and every candidate name it extracted, one per line. **This, not
+   `bootstrap_names.py`'s output, is the set `--checked-names` is matched
+   against**: `bootstrap_names.py` runs the same algorithm over every
+   segment, so its list is a different and much larger one, and composing
+   from it fails names that are perfectly correct.
+2. Hand-pick the checked-name list *from those printed lines*, copying each
+   spelling exactly as printed, and confirm as a human reader that each one
+   really is a name in the book (that is the judgement the gate cannot make
+   — the script only checks that the extractor sees them). A candidate is a
+   reconstruction of the tokens the extractor matched, so a connector mark
+   survives only between two letters: `משה־לייב` is printed with its maqaf,
+   while the geresh in `ר׳ אהרן` ends its own token and the candidate reads
+   `ר אהרן`.
 3. Test the elision/particle rules with synthetic sentences built from
    *this source language's actual* elision/particle patterns — not just
    French `d'X`/`l'X` examples, which don't apply to a non-elision language.
@@ -356,7 +369,20 @@ elision-miss risk genuinely does not apply there.
 ### CLI inputs
 
 - `--checked-names name1,name2,...` — the hand-picked list (≥10, or per the
-  density branches above).
+  density branches above). Matched **exactly** against the candidates this
+  script extracts from **its own stratified sample**, in the extractor's own
+  reconstructed form. Compose it from `--list-candidates`, never from
+  `bootstrap_names.py`'s whole-manifest candidate file.
+- `--list-candidates` — print the resolved `particle_config`, the sample's
+  word count and segment ids, `candidate_names_total`, and every candidate
+  name, one per line; then exit `0`. No report is written or read, and no
+  checked names or confirmation flags are required. `report_path` is not
+  resolved at all, so a bad `smoke_test.report_path` cannot stop the listing;
+  the **`particle_config` still resolves the usual way**, from `profile.yml`
+  unless `--particle-config` is given, because nothing can be extracted
+  without it. It runs before every density branch, so a name-sparse or
+  name-free sample lists too. It is **not** a smoke-test pass and says so on
+  its last line.
 - `--elision-test-file <path>` — required when `has_elision`. A small file
   of synthetic sentences + expected extracted names built from this
   language's actual elision pattern. Minimum 1 case.
@@ -424,9 +450,18 @@ is where the fix lands.
 
 Fix the specific failure class:
 
-- a missed checked name usually means an incomplete `PARTICLES` or
-  `STOPWORDS` entry for this source language's actual usage — extend the
-  list;
+- a missed checked name is read in this order, because the first two causes
+  are far commoner than the third and **none of them is fixable in the
+  particle config**: (a) *scope* — the name occurs only outside the
+  stratified sample, and the terminal message names the segments the sample
+  came from; (b) *form* — the name is spelled as the book spells it rather
+  than as the extractor reconstructs it (a connector mark survives only
+  between two letters, so the book's `ר׳ אהרן` is the candidate `ר אהרן`);
+  only then (c) the name is in the sample, spelled as the script prints it,
+  and still not extracted — which does mean an incomplete `PARTICLES` or
+  `STOPWORDS` entry for this source language's actual usage, so extend the
+  list. Run `--list-candidates` to settle (a) and (b) in one command; the
+  `pass:false` message prints a slice of the same set for the same reason;
 - a failed particle-smoke case means the `PARTICLES`/`STOPWORDS`
   classification for that token disagrees with the human-supplied
   `is_particle` expectation — fix the relevant list;
