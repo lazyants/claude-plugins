@@ -63,6 +63,13 @@ Two consequences worth knowing before upgrading, neither of which re-translates 
 - **`name_discovery.py` is in none of the three hashed bundles**, so these edits move no bundle hash
   and no cache key, and no converged segment goes stale because of them.
 
+One residual the terminator introduces, recorded rather than implied away: the chapter itself is
+interpolated into the same prompt, so a source whose own text carries that exact line is a lever to
+make the model close its list early, and the parser cannot tell an early-terminated reply from a
+complete one. Two things bound it, which is why it is disclosed rather than defended against: the
+same lever existed under the old contract spelled `{"forms": []}`, and the pass unions several
+independent stateless passes at the fold, so one poisoned pass is diluted rather than decisive.
+
 One signal is genuinely given up, and it is named rather than implied away: a name straddling a
 block an extractor split mid-sentence used to arrive carrying a line break, which the control-
 character refusal caught loudly by killing the pass. Under a line-delimited reply that name simply

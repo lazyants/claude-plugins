@@ -394,12 +394,13 @@ def test_a2_fold_refuses_an_unusable_or_unbound_harvest(bed, cause):
         victim.write_text("{not json", encoding="utf-8")
     elif cause == "duplicate-key":
         # Built from the SEEDED harvest's own metadata, never from hand-written
-        # placeholder hashes. With a wrong source_sha1/prompt_sha1 in it, the
-        # slot-binding check refuses this file BEFORE read_json_strict's
-        # duplicate-member hook is ever consulted -- measured, by deleting the
-        # hook and watching this case still pass on the binding message. Every
-        # other field valid is what makes the repeated `forms` member the only
-        # possible reason for the refusal.
+        # placeholder hashes. read_json_strict runs FIRST and the slot-binding
+        # loop after it (validate_harvest), so a wrong source_sha1/prompt_sha1
+        # masked this case from the far side: delete the duplicate-member hook
+        # and json.loads silently collapses the repeat, but the LATER binding
+        # refusal still fires and a generic fatal assertion still passes.
+        # Measured both ways. Every other field valid is what makes the
+        # repeated `forms` member the only possible reason for the refusal.
         doc = json.loads(victim.read_text(encoding="utf-8"))
         members = ", ".join(
             '%s: %s' % (json.dumps(k), json.dumps(v, ensure_ascii=False))
