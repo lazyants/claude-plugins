@@ -1,5 +1,84 @@
 # Changelog
 
+## 1.109.0 — 2026-09-07
+
+**`research_mode: offline` forbids a citation, and the glossary pass read it as forbidding the
+established target FORM as well, so names the target language already spells its own way came back
+letter-by-letter (#891).** The ban exists because `basis: "established"` is a claim backed by a
+reference URL. A form the project's own `style_bible.md` section C / C-translit rule already settles
+makes no such claim and needs no citation — but `glossary_TASK.template.md` defined
+`transliterated` as "no established form exists", so a candidate that DID have a well-known target
+form had no basis whose definition it satisfied. Measured on a live 96,539-word Hebrew book:
+`King Dovid`, `Mitzrayim`, `Avraham our father`.
+
+The fix is deliberately CONDITIONAL, and the limit is recorded here because it is the honest
+answer. Both glossary prompts now say that offline forbids the citation-backed BASIS and never the
+target form, and that `basis: "transliterated"` carries whatever section C-translit — read AS
+WRITTEN, together with section C's naming rule — settles, a widely-used target-language form
+included where that rule prefers one. They state no preference of their own: a generic clause
+inside a prompt overriding the project's own stated convention is exactly the defect #860 closed in
+1.89.0. So a project whose C-translit rule says nothing about widely-used forms has nothing to
+defer TO, and this change does not by itself correct that project's output. The surface that
+reaches it is `style_bible.template.md`, whose C-translit fill block now asks the question
+outright — and that reaches only projects not yet scaffolded, because Step 0a seeds the file once.
+The same template's `Transliterated` classification and its C-translit heading move with the
+question, so a project answering it does not end up holding two contradicting rules inside the very
+authority every glossary batch defers to.
+
+`SOURCE_UNAVAILABLE:` now means what it says. A row the project's own rule settled is a resolved
+row, not an unavailable source, and carries no such prefix — marking one fills `canon.json` with
+entries a later reader is told to re-research for nothing. Under `live` the opposite reminder
+ships: where a citable conventional target form does exist, cite it under `established` rather than
+taking it as `transliterated` from the project's preference, because that provenance is obtainable
+and the canon should carry it.
+
+**Both glossary prompts now say that a source form's own ASCII quote must be escaped inside the
+JSON fragment — the #888 collision one step later (#891).** Hebrew, Yiddish and Aramaic mark an
+abbreviation with an ASCII double quote INSIDE the word and a single letter with an ASCII
+apostrophe, and `source_form` is copied verbatim into a JSON string. Neither prompt said the quote
+must be written as an escaped one. Roughly one candidate in four in the reporting book carries such
+a mark; its operator measured about 40% of attempts lost to this before adding the sentence by
+hand, then 28 of 28 batches passing on the first attempt after.
+
+This one is a COST defect, not a silent one, and the entry says so rather than claiming lost data:
+`canon_validate.py --check-batch` refuses a malformed fragment on its parse, and a fragment whose
+mark was "repaired" into a look-alike on its exact source-form coverage. What it costs is repeated
+attempts, and an attempt is not cheap: each one buys a fresh codex dispatch of the whole batch, and
+on the retained Workflow path the preflight prices a `live` batch at up to 16 agent calls — that
+figure is the estimator's worst-case ceiling across the retry ladder, not the default driver's
+per-attempt cost, which is one judge call plus whatever repairs the batch needs.
+
+**The other TWO of the issue's four findings are refuted against current source, and so is the
+third of its three suggested fixes. None of them ships a change** — two shipped, two refuted, and
+one suggested fix refuted alongside them.
+
+The report's central claim rests on `references/glossary-pass.md` sanctioning a hand-written
+per-batch driver: no such file exists in this plugin, none ever has, and no shipped document
+sanctions writing your own glossary driver. What ships is `glossary_dispatch_driver.py`,
+the default since 1.75.0, which runs the deterministic steps locally and keeps as agent calls
+exactly the research the report says is missing — the citation judge, the per-item repair rung and
+the retry ladder. The suggested `live`-plus-large-batch warning already exists as the
+mode-dependent `batch-too-large` refusal both paths compute, though it counts batches in the run
+rather than candidates in a batch. And `backfill_glossary_merge_ack.py`'s artifact contract —
+every `manifest_<index>.json` with a matching `out_<index>_attempt_0.json` — is stated in that
+script's own module docstring and is satisfied by construction by the shipped `resume_setup.py`
+and driver pair, so it binds only a self-written driver. It is NOT reachable through `--help`,
+which carries a separate argparse description; that is the one correction the refutation owes.
+
+`canon_validate.py`'s offline-backstop refusal — text the model reads during its own `--check-batch`
+loop — and `references/canon-and-glossary.md`'s statement of the policy both carried the same
+narrow reading and move with the prompts, so the four surfaces that state this rule agree.
+`canon_validate.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so the edit does move `plugin_bundle_hash`:
+no converged segment is re-translated, because that field sits inside the #491 machinery-only
+carve-out and assembly admits such a record exactly like `converged`, but a resume identity does
+move.
+
+`PROMPT_CONTRACT_VERSION` is deliberately NOT bumped, and stays at 3. These are clarifications of
+existing rules: they add no required field and move no role boundary, which is that constant's own
+criterion, and a bump would restale every converged segment through `prompt_hash`. The consequence
+is this file's ordinary one — an existing project's durable `glossary_TASK.md` is seeded once and
+never re-copied, so it keeps its old wording. That is precisely why both new rules are also placed
+in the dispatch prompt, which is regenerated from the plugin on every run.
 ## 1.108.0 — 2026-09-07
 
 **Step 0 says nothing when a book scaffolded FOR a markup-driven vault index never got the

@@ -2280,12 +2280,12 @@ def _enforce_offline_backstop(batch: list, research_mode: str) -> None:
     when ANY item claims basis:"established" -- accepted or queued alike,
     matching the authoritative spec's literal "ANY entry" wording. Nothing
     is written to canon.json when this fires; the correct fix is upstream,
-    in the glossary-pass agent's own output (basis:"transliterated" if
-    mechanical transliteration suffices, basis:"sense_translated" if a
-    project-specific editorial sense-rendering fits -- both are offline-legal,
-    neither needs an external citation -- or disposition:"review_queue" with
-    a note:"SOURCE_UNAVAILABLE: ..." prefix), never a silent downgrade
-    performed by this script.
+    in the glossary-pass agent's own output (basis:"transliterated" if the
+    project's own section C-translit rule settles the form, basis:
+    "sense_translated" if a project-specific editorial sense-rendering fits --
+    both are offline-legal, neither needs an external citation -- or
+    disposition:"review_queue" with a note:"SOURCE_UNAVAILABLE: ..." prefix),
+    never a silent downgrade performed by this script.
     """
     if research_mode != "offline":
         return
@@ -2294,12 +2294,12 @@ def _enforce_offline_backstop(batch: list, research_mode: str) -> None:
         raise CanonValidationError(
             "research_mode=offline forbids basis:\"established\" for every new "
             "entry, but the batch claims it for: " + ", ".join(_bounded_list(offenders))
-            + ". Reassign basis:\"transliterated\" (if mechanical transliteration "
-            "suffices), basis:\"sense_translated\" (if a project-specific editorial "
-            "sense-rendering fits -- style_bible.md §C -- no external citation "
-            "needed), or disposition:\"review_queue\" with a note carrying the "
-            "literal prefix \"SOURCE_UNAVAILABLE:\" instead -- the whole batch "
-            "merge is rejected, canon.json is unchanged.",
+            + ". What offline forbids is the citation-backed BASIS, not the target form: reassign "
+            "basis:\"transliterated\" (if the project's own section C-translit rule settles the form -- read as "
+            "written, a widely-used target-language form included where that rule prefers one), "
+            "basis:\"sense_translated\" (if a project-specific editorial sense-rendering fits -- style_bible.md §C "
+            "-- no external citation needed), or disposition:\"review_queue\" with a note carrying the literal "
+            "prefix \"SOURCE_UNAVAILABLE:\" instead -- the whole batch merge is rejected, canon.json is unchanged.",
             offending=offenders,
         )
 
