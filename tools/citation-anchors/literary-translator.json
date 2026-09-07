@@ -657,19 +657,19 @@
       ],
       "claim": "Keep the declaration stable across the whole W7→W9 chain; toggling it between steps is the only way a normal run can make the two gates disagree about the same book. (They read the moved-field list from different authorities -- W7 from `select_segments.py`'s recomputation against the CURRENT cache key, W9 from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:873-887` drops any inherited value and re-derives that list from the same diff, so the two agree by construction on anything a run produces. Hand-editing the materialized `ledger.json` between the two steps can split them; so can editing one segment's `status` to `converged`, which skips both carve-outs"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"person_registry.py:1994-2004\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"person_registry.py:2035-2045\", 0]": {
       "anchors": [
         "for row in verdicts.get(\"refusals\") or []:",
         "\"refused_by\": \"canon_review_queue\" if prep_unit.get(\"refusal_only\") else \"pass_a\","
       ],
-      "claim": "**One consumer DOES see a dismissal**, and it is disclosed rather than argued away: `person_registry.py` turns every DICT-shaped `review_queue[]` row into a refusal-only unit (`person_registry.py:899-933`, `refusal_only: True`) and emits it in `refusals[]` (`person_registry.py:1994-2004`, `refused_by: \"canon_review_queue\"`); it never reads `corrections[]`. So a dismissed name stops appearing as a `canon_review_queue` refusal in a later W9r registry run — that is the intended meaning of the decision, not a side effect to suppress: the operator said this candidate is not canon-worthy, and the refusal list is"
+      "claim": "**One consumer DOES see a dismissal**, and it is disclosed rather than argued away: `person_registry.py` turns every DICT-shaped `review_queue[]` row into a refusal-only unit (`person_registry.py:899-933`, `refusal_only: True`) and emits it in `refusals[]` (`person_registry.py:2035-2045`, `refused_by: \"canon_review_queue\"`); it never reads `corrections[]`. So a dismissed name stops appearing as a `canon_review_queue` refusal in a later W9r registry run — that is the intended meaning of the decision, not a side effect to suppress: the operator said this candidate is not canon-worthy, and the refusal list is"
     },
     "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"person_registry.py:899-933\", 0]": {
       "anchors": [
         "review_queue rows, coalesced by raw source_form",
         "\"refusal_only\": True,"
       ],
-      "claim": "**One consumer DOES see a dismissal**, and it is disclosed rather than argued away: `person_registry.py` turns every DICT-shaped `review_queue[]` row into a refusal-only unit (`person_registry.py:899-933`, `refusal_only: True`) and emits it in `refusals[]` (`person_registry.py:1994-2004`, `refused_by: \"canon_review_queue\"`); it never reads `corrections[]`. So a dismissed name stops appearing as a `canon_review_queue` refusal in a later W9r registry run — that is the"
+      "claim": "**One consumer DOES see a dismissal**, and it is disclosed rather than argued away: `person_registry.py` turns every DICT-shaped `review_queue[]` row into a refusal-only unit (`person_registry.py:899-933`, `refusal_only: True`) and emits it in `refusals[]` (`person_registry.py:2035-2045`, `refused_by: \"canon_review_queue\"`); it never reads `corrections[]`. So a dismissed name stops appearing as a `canon_review_queue` refusal in a later W9r registry run — that is the"
     },
     "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"person_registry.py:903-921\", 0]": {
       "anchors": [

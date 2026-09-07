@@ -1262,6 +1262,92 @@ def test_an_oversized_claims_document_is_refused_before_it_is_written(prepped):
     assert not (prepped / "registry" / "registry_claims.json").exists()
 
 
+# ---------------------------------------------------------------------------
+# #896 -- the claims refusal used to name --max-contexts-per-form/--context-chars
+# as the remedy, which at THIS step is worse than useless: thinning the evidence
+# Pass B adjudicates against is precisely what makes Pass B a weaker check, and
+# the projected document is a multiple of a prep those knobs no longer reach.
+# ---------------------------------------------------------------------------
+
+def _recut_size(prepped):
+    """What `--max-contexts-per-form 1 --context-chars 1` actually emits."""
+    path = prepped / "registry" / "registry_claims.json"
+    if path.exists():
+        path.unlink()
+    assert fx.run(prepped, "--claims", "--max-claims-chars", "100000000",
+                  "--max-contexts-per-form", "1", "--context-chars", "1")[0] == 0
+    size = len(path.read_bytes())
+    path.unlink()
+    return size
+
+
+def test_the_claims_refusal_reports_what_the_aggressive_setting_would_emit(prepped):
+    """Not an estimate and not a strip-everything hypothetical: the refusal
+    re-projects the same verdicts at the most aggressive setting of the two
+    knobs and reports the document that setting really produces."""
+    fx.write_verdict(prepped, fx.verdict_doc(prepped))
+    recut = _recut_size(prepped)
+
+    code, payload = fx.run(prepped, "--claims", "--max-claims-chars", "100")
+    assert code == 2
+    assert payload["reason"] == "claims_too_large"
+    assert (f"re-cut at --max-contexts-per-form 1 --context-chars 1 it would be {recut} bytes"
+            in payload["error"])
+    assert "lower --max-contexts-per-form/--context-chars or raise the cap" not in payload["error"]
+
+
+def test_the_claims_refusal_never_calls_that_number_a_minimum(prepped):
+    """`max_windows=1` turns the truncated branch of a printed_surface question
+    on, and that branch is the LONGER string -- so a middling setting can emit
+    fewer bytes than the aggressive one, and "no setting can pass" would be an
+    inference the measurement does not support."""
+    fx.write_verdict(prepped, fx.verdict_doc(prepped))
+    recut = _recut_size(prepped)
+    code, payload = fx.run(prepped, "--claims", "--max-claims-chars", "100")
+    assert code == 2
+    # Without this the negatives below would all hold of the OLD message, which
+    # carried no measurement at all -- a test that cannot fail on the defect it
+    # is named for.
+    assert f"it would be {recut} bytes" in payload["error"]
+    for forbidden in ("minimum", "smallest", "no setting"):
+        assert forbidden not in payload["error"]
+
+
+def test_the_claims_refusal_names_the_pass_a_redispatch_the_advice_used_to_hide(prepped):
+    fx.write_verdict(prepped, fx.verdict_doc(prepped))
+    code, payload = fx.run(prepped, "--claims", "--max-claims-chars", "100")
+    assert code == 2
+    error = payload["error"]
+    assert "re-cut only the target-occurrence windows at this step" in error
+    assert "copied from registry_input.json" in error
+    assert "gate P2" in error and "Pass A must be dispatched again" in error
+
+
+def test_the_over_the_cap_clause_appears_only_when_the_recut_is_over_the_cap(prepped):
+    fx.write_verdict(prepped, fx.verdict_doc(prepped))
+    recut = _recut_size(prepped)
+
+    assert fx.run(prepped, "--claims", "--max-claims-chars", "100000000")[0] == 0
+    path = prepped / "registry" / "registry_claims.json"
+    full = len(path.read_bytes())
+    path.unlink()
+    # The two knobs do shrink THIS document, which is what makes the two
+    # branches distinguishable at all.
+    assert recut < full
+
+    code, payload = fx.run(prepped, "--claims", "--max-claims-chars", str(recut - 1))
+    assert code == 2
+    assert ", still over the cap" in payload["error"]
+
+    between = (recut + full) // 2
+    assert recut <= between < full
+    code, payload = fx.run(prepped, "--claims", "--max-claims-chars", str(between))
+    assert code == 2
+    assert payload["reason"] == "claims_too_large"
+    assert ", still over the cap" not in payload["error"]
+    assert not path.exists()
+
+
 def test_the_claims_cap_is_a_cap_and_not_a_refusal(prepped):
     """Raised deliberately, the same document emits -- the guard is blunt, not
     a model-capacity check the plugin is in no position to make."""

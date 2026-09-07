@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.114.0 — 2026-09-07
+
+**The person-registry pass refused an oversized document and named two knobs that barely move its
+size (#896).** `person_registry.py --prep` and `--claims` both ended their refusal with *lower
+`--max-contexts-per-form`/`--context-chars` or raise the cap deliberately*. On a real book neither
+knob moves the size much, because the bulk of the document is not the context windows. An operator
+who followed the advice thinned the evidence each unit carries, was refused again, and had traded
+quality for nothing.
+
+At `--claims` the advice was worse than useless. That cap exists because Pass B reads the claims
+document whole or it is not the independent check Pass A is gated on — and thinning the evidence
+Pass B adjudicates against is precisely what makes it a weaker check. The refusal was pushing the
+operator to pay in exactly the currency the cap is there to protect.
+
+**Both refusals now measure instead of advising.** `--prep` reports how many of the emitted bytes
+the per-unit `contexts` blocks occupy — emitted size minus the same document re-emitted with every
+block empty — and then says what stops either knob reaching even that: a matched window always keeps
+its own occurrence, a homonym-split unit's source context is cut from stored evidence offsets, a
+review-queue unit carries no contexts at all, and the `mentions` list and the canon `note` are
+outside both knobs entirely. `--claims` re-projects the same verdicts at `--max-contexts-per-form 1
+--context-chars 1` and reports what that setting would really emit; the projection is a pure
+function of its inputs, so this is a measurement rather than an estimate.
+
+**Neither number is offered as a minimum, and the difference is the whole point of the fix.** The
+first draft of this change reported a strip-every-window size as *what the knobs can remove*, which
+is a quantity they cannot reach; reporting it would have reproduced the harm the issue is about, one
+step further along. Review then killed the weaker version of the same claim: at
+`--max-contexts-per-form 1` a `printed_surface` question takes its longer, truncated branch, so a
+middling setting can emit fewer bytes than the aggressive one, and "no setting can pass" is an
+inference the measurement does not support. What ships is the measured fact and nothing derived from
+it — when the re-cut is still over the cap the refusal says so, and stops there.
+
+**The `--claims` refusal also names the cost the old advice hid.** Those two knobs re-cut only the
+target-occurrence windows at that step: the source contexts are copied out of `registry_input.json`,
+so shrinking them means re-running `--prep`, whose moved `input_sha256` sends gate P2 to refuse the
+existing `registry_verdicts.json` as stale — Pass A has to be dispatched again. An operator turning
+a knob at `--claims` was buying a re-dispatch nothing warned them about.
+
+Both computations run on the refusal path only, so a successful run does the same work it always
+did. `person_registry.py` is in neither `PLUGIN_BUNDLE_MEMBERS` nor `ORCHESTRATION_BUNDLE_MEMBERS`,
+so this release moves no cache key, stales no converged segment and changes no resume identity.
+
 ## 1.113.0 — 2026-09-07
 
 **A correct hand-checked name list failed the mandatory smoke test, and the printed remedy named
