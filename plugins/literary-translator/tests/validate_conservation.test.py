@@ -1336,6 +1336,15 @@ def test_ratio_band_schema_rejects_deleted_absolute_threshold_keys(tmp_path):
     # own KNOB_QUESTIONS for the authoritative, drift-guarded set.)
     base_profile["glossary"]["enabled"] = True
     base_profile["glossary"]["research_mode"] = "offline"
+    # #889. source.language.code and target.language.code ship as CHOOSE_
+    # sentinels and both violate profile.schema.json's "^[a-z]{2}$" pattern,
+    # so both need an explicit fill here. source.language.particle_config
+    # ships as a sentinel too, but "CHOOSE_source_code.local.json" happens
+    # to already satisfy the filename pattern ("^[A-Za-z0-9_.-]+\.json$",
+    # minLength 6) -- which is exactly why the two code fields cannot be
+    # assumed covered by a generic sweep and must be filled explicitly.
+    base_profile["source"]["language"]["code"] = "he"
+    base_profile["target"]["language"]["code"] = "en"
     base_profile["footnotes"]["apparatus_policy"] = "translate_all"
     base_profile["output"]["v1_scope"] = "segment_drafts_and_audit"
     base_profile["output"]["target"] = "obsidian"

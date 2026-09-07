@@ -38,6 +38,9 @@ that count against the script's own module docstring.
 import copy
 import importlib.util
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1603,6 +1606,32 @@ def test_knob_questions_carry_the_shared_contracts_frozen_substance():
         "source.adapter_config.plain_text.footnotes": (
             "none_confirmed", "markdown_ref", "custom_regex",
         ),
+        # #889. The two code fields ask for a two-letter code in as many
+        # words; the profile_semantics_hash consequence is pinned on
+        # source.language.code as its own full subject->consequence clause,
+        # and again on target.language.code as the shorter "same terms as"
+        # cross-reference back to it.
+        "source.language.code": (
+            "Give a two-letter ISO-639-1 code.",
+            "it is hashed into `profile_semantics_hash`, so correcting it "
+            "after work has started re-stales every converged segment.",
+        ),
+        "source.language.particle_config": (
+            "must give one whose name contains `.local.`, because `--fold` "
+            "refuses to write discovery output into a shipped preset a "
+            "plugin upgrade would overwrite, and refuses it only AFTER the "
+            "whole dispatch fan-out has been paid for.",
+            "Replace the ENTIRE quoted value with the filename you choose "
+            "-- deleting only the CHOOSE_ prefix leaves "
+            "'source_code.local.json', which passes Step 0's checks while "
+            "naming no file this project has -- and create or copy that "
+            "file during Step 0a.",
+        ),
+        "target.language.code": (
+            "Give a two-letter ISO-639-1 code.",
+            "it is hashed into `profile_semantics_hash` on the same terms "
+            "as `source.language.code`.",
+        ),
     }
     assert set(assertions.keys()) == set(pv.KNOB_QUESTIONS.keys()), (
         "this pinning test itself has drifted out of sync with KNOB_QUESTIONS's "
@@ -1795,7 +1824,174 @@ def test_glossary_disabled_with_skeptic_pass_explicitly_false_is_not_a_conflict(
     assert pv.check_glossary_disabled_conflicts_with_skeptic_pass(profile) == []
 
 
-if __name__ == "__main__":
-    import sys
+# ===========================================================================
+# #889 -- Step 16 (NEW): source.language.particle_config's own '.local.'
+# marker, required only when W3 name discovery is going to run
+# (check_particle_config_local_for_discovery), its real-CLI wiring, and its
+# behavioural parity with name_discovery.py --fold's own late refusal.
+# ===========================================================================
 
+
+def _discovery_profile(particle_config, name_discovery_block):
+    """The discovery-ENABLED shapes only. `name_discovery_block` is required
+    on purpose: an optional one would advertise a no-discovery shape that
+    omits `glossary` entirely, which profile.schema.json REQUIRES -- the
+    false control this file already replaced once. The no-discovery arms
+    below build on `make_base_profile()` instead, so they stay schema-valid."""
+    return {"glossary": {"name_discovery": name_discovery_block},
+            "source": {"language": {"particle_config": particle_config}}}
+
+
+def test_particle_config_local_for_discovery_fatal_when_not_local():
+    """A real regression-catcher: on the current unfixed tree this profile
+    validated clean, because nothing looked at '.local.' before
+    `name_discovery.py --fold` refused it -- after the whole dispatch
+    fan-out had already been paid for. Pins the error's own shape: it names
+    the field, quotes the offending value, and explains both the gate
+    (`glossary.name_discovery.enabled`) and the cost of discovering this
+    late (`--fold`)."""
+    profile = _discovery_profile("he.json", {"enabled": True})
+    errors = pv.check_particle_config_local_for_discovery(profile)
+    assert len(errors) == 1
+    assert errors[0].startswith("source.language.particle_config: ")
+    assert "he.json" in errors[0]
+    assert ".local." in errors[0]
+    assert "glossary.name_discovery.enabled" in errors[0]
+    assert "--fold" in errors[0]
+
+
+@pytest.mark.parametrize(
+    "name_discovery_block",
+    [
+        pytest.param(None, id="name_discovery_block_absent"),
+        pytest.param({}, id="name_discovery_block_present_but_empty"),
+    ],
+)
+def test_particle_config_local_for_discovery_absent_block_is_the_false_red_control(
+    name_discovery_block,
+):
+    """False-RED control AND the absence-polarity pin. `glossary` itself is
+    REQUIRED by the schema (`research_mode` is its own mandatory key) -- what
+    is optional is the `name_discovery` block, and within it, the `enabled`
+    key; `enabled` defaults to FALSE, the OPPOSITE default from
+    `glossary.enabled`'s own sibling check just above. Absence of either
+    reads as "not running discovery". Built from `make_base_profile()` (which
+    already carries a required `glossary` block) rather than hand-rolled, so
+    this control is a profile the schema actually accepts -- not just an
+    input the checker happens to pass, which is what made the previous
+    version of this test a false control (it omitted `glossary` entirely,
+    and `profile.schema.json` requires it). Two arms: the block absent
+    entirely, and the block present but empty (`{}`, a distinct shape the
+    schema also admits since `enabled` is optional inside it) -- an ungated
+    or wrongly-polarised `.get()` chain must return [] for both."""
+    profile = make_base_profile()
+    if name_discovery_block is not None:
+        profile["glossary"]["name_discovery"] = name_discovery_block
+    assert schema_errors(profile) == []
+    assert pv.check_particle_config_local_for_discovery(profile) == []
+
+
+def test_particle_config_local_for_discovery_explicit_false_is_not_gated():
+    profile = _discovery_profile("fr.json", {"enabled": False})
+    assert pv.check_particle_config_local_for_discovery(profile) == []
+
+
+def test_step_0_main_actually_reports_the_ungated_discovery_particle_config(tmp_path, capsys):
+    """The WIRING, not the checker -- same shape as
+    `test_step_0_main_actually_reports_the_unshipped_epub_halt` above. Every
+    other case in this section calls `check_particle_config_local_for_discovery`
+    directly, so deleting its one line in `main()`'s procedural block would
+    leave them all green while the real Step 0 CLI silently accepted a
+    discovery run pointed at a shipped preset. The fixture's `source.path`
+    and `durable_root` are the baseline's own non-existent placeholders, so
+    main() collects their fatal lines too; that is fine and deliberate."""
+    profile = make_base_profile()
+    profile["glossary"]["name_discovery"] = {"enabled": True}
+    profile["source"]["language"]["particle_config"] = "he.json"
+    profile_path = tmp_path / "profile.yml"
+    profile_path.write_text(pv.yaml.safe_dump(profile), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        pv.main(["--profile", str(profile_path)])
+
+    stderr = capsys.readouterr().err
+    assert excinfo.value.code == 1
+    assert "source.language.particle_config" in stderr
+    assert "he.json" in stderr
+
+
+# ---------------------------------------------------------------------------
+# Behavioural parity with name_discovery.py --fold's own late refusal: drive
+# BOTH sides against the same filename and assert they AGREE, rather than
+# inspecting the fold's source for its own predicate (which would pass
+# against the pre-#889 tree too and prove nothing).
+# ---------------------------------------------------------------------------
+
+_ND_SCRIPTS_SRC = SCRIPT_PATH.parent
+_ND_STAGED = ("name_discovery.py", "json_stdout.py", "language_smoke_report.py")
+_ND_TIMEOUT = 180
+
+
+@pytest.fixture
+def discovery_fold_bed(tmp_path):
+    """A durable_root carrying only what `--fold` needs to REACH its
+    particle-config / run-manifest checks: no manifest.json, no run
+    manifest, no harvest fixture, no dispatch simulation. That absence is
+    exactly what produces the accepted arm's `run_manifest_absent` verdict.
+    `name_discovery.py` resolves its own root from `__file__.resolve()`, so
+    these must be real copies under a real `scripts/` directory -- changing
+    cwd alone would not move it -- and the sibling imports run before
+    argument handling, so `json_stdout.py` and `language_smoke_report.py`
+    must be staged too."""
+    dr = tmp_path / "dr"
+    (dr / "scripts").mkdir(parents=True)
+    (dr / "languages").mkdir()
+    for name in _ND_STAGED:
+        src = _ND_SCRIPTS_SRC / name
+        assert src.is_file(), f"shipped script missing: {src}"
+        shutil.copy2(src, dr / "scripts" / name)
+    return dr
+
+
+def _run_fold(dr, filename):
+    # Resolution checks filename syntax and is_file() only, never contents.
+    (dr / "languages" / filename).write_text("{}\n", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(dr / "scripts" / "name_discovery.py"),
+         "--fold", "--run-id", "parity-889", "--particle-config", filename],
+        capture_output=True, text=True, timeout=_ND_TIMEOUT,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+@pytest.mark.parametrize(
+    "filename, checker_should_error, fold_offending",
+    [
+        ("he.json", True, "particle_config_not_local"),
+        ("he.local.json", False, "run_manifest_absent"),
+        # The case that separates the real CONTAINMENT predicate from an
+        # accidentally stricter '.local.json' SUFFIX rule.
+        ("he.local.backup.json", False, "run_manifest_absent"),
+    ],
+)
+def test_step_0_check_agrees_with_the_folds_own_late_refusal(
+    discovery_fold_bed, filename, checker_should_error, fold_offending
+):
+    checker_errors = pv.check_particle_config_local_for_discovery(
+        _discovery_profile(filename, {"enabled": True})
+    )
+    assert (len(checker_errors) == 1) == checker_should_error, checker_errors
+
+    rc, out, err = _run_fold(discovery_fold_bed, filename)
+    assert rc == 2, (out, err)
+    # fatal() writes its named line to stderr ONLY and deliberately emits no
+    # stdout JSON (name_discovery.py:431-437) -- nothing it writes can be
+    # mistaken for a result.
+    assert out == ""
+    assert f"offending: {fold_offending}" in err, err
+    print(f"measured: filename={filename!r} step0_errors={len(checker_errors)} "
+          f"fold_offending={fold_offending!r}")
+
+
+if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

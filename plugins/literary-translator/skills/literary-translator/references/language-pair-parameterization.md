@@ -38,6 +38,17 @@ project-local override. `bootstrap_names.py` dereferences the same literal
 `particle_config` value — never `source.language.code` — so an override such as
 `fr.local.json` is not silently ignored.
 
+When `glossary.name_discovery.enabled` is `true`, Step 0 also fatally rejects a
+`particle_config` value whose filename does not contain `.local.` — the same
+containment predicate `name_discovery.py`'s `--fold` enforces before it will
+write discovery output. This is a NAME check, not an existence check: Step 0
+still does not confirm the file exists, and the existence check above still
+runs, unchanged, at the end of Step 0a. Its purpose is only to refuse a
+non-project-local filename before the whole discovery fan-out is paid for and
+refused later, at `--fold`. When `name_discovery` is absent or its `enabled`
+key is not `true`, this check contributes nothing, and a plain shipped preset
+filename such as `fr.json` remains valid, exactly as before.
+
 A language config file contains four required keys, plus an optional fifth:
 
 - `PARTICLES` — the source language's particle list (e.g. French

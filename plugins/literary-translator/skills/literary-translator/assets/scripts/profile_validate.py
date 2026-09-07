@@ -174,6 +174,13 @@ Order of operations (numbered to match SKILL.md's Step 0 list exactly):
       translate+gloss job is never made to read it. ABSENCE ONLY: any
       present block is the schema's business (and ``assemble.py``'s runtime
       validator's), never this check's.
+  17. NEW (#889): with ``glossary.name_discovery.enabled`` exactly ``True``,
+      ``source.language.particle_config`` must CONTAIN ``.local.`` -- FATAL,
+      naming the field and the offending value. Moves ``name_discovery.py
+      --fold``'s own refusal (discovery output must not land in a shipped
+      preset an upgrade overwrites) forward to Step 0, before the dispatch
+      fan-out is paid for. A falsy ``.get()`` chain is CORRECT here, the
+      opposite of step 15: ``name_discovery.enabled`` defaults to ``false``.
 
 Every violation is printed as its own field-named, actionable line. The
 script exits non-zero if ANY fatal violation was found (across every step
@@ -379,6 +386,39 @@ KNOB_QUESTIONS = {
         "How the `plain_text` adapter finds footnotes: `none_confirmed`, "
         "`markdown_ref`, or `custom_regex`. Consulted only when "
         "`source.format: plain_text`, but it must still be answered."
+    ),
+    # #889. The shipped example used to carry real-but-wrong values here
+    # (`fr` / `"fr.json"` / `ru`) with no CHOOSE_ sentinel, so a project
+    # translating a different language pair validated clean while silently
+    # keeping another project's language settings.
+    "source.language.code": (
+        "Which language is this book translated FROM? Give a two-letter "
+        "ISO-639-1 code. It selects nothing by itself -- the "
+        "particle_config below is chosen by filename, never by this code "
+        "-- but it reaches the dispatch prompts, and it is hashed into "
+        "`profile_semantics_hash`, so correcting it after work has "
+        "started re-stales every converged segment."
+    ),
+    "source.language.particle_config": (
+        "What is the bare filename of the source-language particle "
+        "config, resolved as `${durable_root}/languages/<value>`? A "
+        "project running LLM name discovery "
+        "(`glossary.name_discovery.enabled: true`) must give one whose "
+        "name contains `.local.`, because `--fold` refuses to write "
+        "discovery output into a shipped preset a plugin upgrade would "
+        "overwrite, and refuses it only AFTER the whole dispatch fan-out "
+        "has been paid for. Replace the ENTIRE quoted value with the "
+        "filename you choose -- deleting only the CHOOSE_ prefix leaves "
+        "'source_code.local.json', which passes Step 0's checks while "
+        "naming no file this project has -- and create or copy that file "
+        "during Step 0a."
+    ),
+    "target.language.code": (
+        "Which language is this book translated INTO? Give a two-letter "
+        "ISO-639-1 code. It reaches the dispatch prompts, so a wrong "
+        "value is a wrong instruction to the translator rather than a "
+        "wrong lookup, and it is hashed into `profile_semantics_hash` on "
+        "the same terms as `source.language.code`."
     ),
 }
 
@@ -880,6 +920,53 @@ def check_particle_config(profile: dict):
     return []
 
 
+def check_particle_config_local_for_discovery(profile: dict):
+    """Step 17 (NEW, #889). When ``glossary.name_discovery.enabled`` is
+    ``True``, ``source.language.particle_config`` must name a file whose name
+    CONTAINS the literal substring ``.local.`` -- the same containment
+    predicate ``name_discovery.py`` itself applies at fold time
+    (``".local." not in config_path.name``), never a ``.local.json`` SUFFIX
+    test, so ``he.local.backup.json`` is accepted by both.
+
+    Sits beside ``check_particle_config()`` (Step 10) because both look at the
+    same field for different reasons: Step 10 rejects a value that cannot
+    resolve to a path at all; this one rejects a value that resolves fine but
+    names the wrong KIND of file for how this project is configured to run.
+    Drawn at Step 0 rather than left to ``name_discovery.py --fold``'s own
+    refusal, because ``--fold`` reaches it only AFTER the whole dispatch
+    fan-out has been paid for: it refuses to write discovery output into a
+    shipped preset a plugin upgrade would overwrite, and by then every job is
+    spent and the filename is bound into the run manifest, so recovery costs a
+    fresh run id. An operator invoking ``--fold`` by hand, outside the W3 chain
+    Step 0 gates, still meets that late refusal as the backstop.
+
+    Reads with a falsy ``.get()`` chain, the OPPOSITE polarity from
+    ``check_glossary_disabled_conflicts_with_skeptic_pass()``'s
+    ``glossary.enabled`` (which defaults to ``true`` and so needs an explicit
+    ``is False``): both the ``name_discovery`` block and its ``enabled`` key
+    are optional and ``enabled`` defaults to ``false``, so an absent block or
+    key correctly reads as "not running discovery" and every profile written
+    before this key existed keeps validating unchanged."""
+    discovery = (profile.get("glossary") or {}).get("name_discovery") or {}
+    if not discovery.get("enabled"):
+        return []
+    value = profile["source"]["language"]["particle_config"]
+    if not isinstance(value, str):
+        return []
+    if ".local." in value:
+        return []
+    return [
+        f"source.language.particle_config: {value!r} does not contain the "
+        f"'.local.' substring name_discovery.py itself requires at fold "
+        f"time -- a project with glossary.name_discovery.enabled: true "
+        f"must choose a project-local particle_config filename (e.g. "
+        f"'<code>.local.json'), because name_discovery.py --fold refuses "
+        f"to write discovery output into a shipped preset a plugin "
+        f"upgrade would overwrite, and otherwise its refusal arrives only "
+        f"after the whole dispatch fan-out has been paid for."
+    ]
+
+
 def check_smoke_test_report_path(profile: dict):
     """Step 11. Rejects (FATAL) any report_path value containing the literal
     substring '..' anywhere -- BEFORE any path-join is attempted."""
@@ -1188,6 +1275,7 @@ def main(argv=None):
     warnings += check_entity_markup_undeclared_warning(profile)
 
     fatal_errors += check_particle_config(profile)
+    fatal_errors += check_particle_config_local_for_discovery(profile)
     fatal_errors += check_smoke_test_report_path(profile)
 
     fatal_errors += check_glossary_disabled_conflicts_with_skeptic_pass(profile)

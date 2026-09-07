@@ -222,8 +222,10 @@ Order of operations:
    placeholder keep their existing message unchanged. Every remaining
    `CHOOSE_`-prefixed enum sentinel — `glossary.research_mode`,
    `glossary.enabled`, `footnotes.apparatus_policy`, `output.v1_scope`,
-   `output.target`, `verse_policy.mode`, and the `plain_text` adapter's
-   `verse_detection`/`footnotes` fields — gets an error naming that dotted
+   `output.target`, `verse_policy.mode`, `source.language.code`,
+   `source.language.particle_config`, `target.language.code`, and the
+   `plain_text` adapter's `verse_detection`/`footnotes` fields — gets an
+   error naming that dotted
    path, plus, for every sentinel this skill documents a question for, that
    question appended verbatim (a sentinel with no documented question keeps
    the base message, never loses the error). Before the first sentinel
@@ -298,6 +300,14 @@ Order of operations:
     a project that answered Step 0d's index question anywhere other than the
     field otherwise passes clean. Absence only: a declared block, whatever
     its shape, is the schema's business and `assemble.py`'s.
+17. `source.language.particle_config` must CONTAIN `.local.` when
+    `glossary.name_discovery.enabled` is `true`: FATAL, naming the field and the
+    value. The same containment predicate `name_discovery.py` applies at fold
+    time, moved here so a shipped preset is refused before the whole discovery
+    fan-out is paid for rather than after — by then every job is spent and the
+    filename is bound into the run manifest, so recovery costs a fresh run id. A
+    falsy `.get()` is correct here, the opposite of item 15:
+    `name_discovery.enabled` defaults to `false`.
 
 Prints one field-named, actionable error line per violation, exits non-zero
 on any failure. Warnings alone never fail the run.
@@ -1444,6 +1454,10 @@ Unicode category `Lo` — so `name_inventory` is the only route to any candidate
 at all, and until now the only way to fill it was by hand. Run, as ONE
 fail-fast chain, substituting the profile's own `glossary.name_discovery`
 values.
+
+Step 0 already enforces part of this: with `name_discovery.enabled` true it
+fatally rejects a `particle_config` filename that does not contain
+`.local.`, before any of this chain runs.
 
 **RE-ENTRY IS COMPUTED, NOT BRANCHED ON BY HAND.** W3 can be re-entered after
 an interruption, and which run to resume — with which command — is not a

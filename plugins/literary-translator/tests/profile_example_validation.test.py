@@ -86,6 +86,15 @@ SHIPPED_CHOOSE_SENTINELS = (
     # release, so the six-value enum never reached the user as a question.
     "CHOOSE_full_rhymed_plus_literal_or_full_rhymed_only_or_rhythmic_approximation"
     "_or_mixed_by_length_or_literal_only_or_skip",
+    # #889. source.language.code, source.language.particle_config and
+    # target.language.code shipped as fr / "fr.json" / ru -- real,
+    # schema-valid values carrying no CHOOSE_ sentinel -- so Step 0's
+    # placeholder scan never asked about them and a project for a different
+    # language pair validated clean while still wearing this example's own
+    # answers.
+    "CHOOSE_iso_639_1_source_language_code",
+    "CHOOSE_source_code.local.json",
+    "CHOOSE_iso_639_1_target_language_code",
 )
 
 
@@ -154,6 +163,14 @@ def _build_filled_profile(durable_root: Path, source_path: Path) -> dict:
             "path": str(source_path),
             "gutenberg_id": None,
             "language": {
+                # #889: these two fields shipped as fr / "fr.json" -- real,
+                # already-decided values -- until this release turned them
+                # into CHOOSE_ sentinels. They needed no filling-in here
+                # before #889 and are transcribed here now, like #727's
+                # glossary fields above, only because the example now ships
+                # sentinels in their place -- otherwise this helper's own
+                # docstring claim of "every placeholder replaced" would
+                # silently go false.
                 "code": "fr",
                 "particle_config": "fr.json",
                 "smoke_test": {"report_path": None},
@@ -180,6 +197,9 @@ def _build_filled_profile(durable_root: Path, source_path: Path) -> dict:
         },
         "target": {
             "language": {
+                # #889: shipped as ru -- a real, already-decided value --
+                # until this release turned it into a CHOOSE_ sentinel too.
+                # See the matching note on source.language above.
                 "code": "ru",
                 # #874: a REAL filled-in answer, not a transliteration of what
                 # the example used to ship. The example's own value is now a
