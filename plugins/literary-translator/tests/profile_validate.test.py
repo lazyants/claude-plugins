@@ -1236,6 +1236,155 @@ def test_custom_target_is_untouched_at_step_0():
         "custom": {"renderer_path": None},
     }
     assert pv.check_output_target_shipped(profile) == []
+
+
+# ---------------------------------------------------------------------------
+# Step 16 (#893): output.entity_markup absent under assembled_book + obsidian.
+#
+# The block ships COMMENTED OUT and sentinel-free (#873, deliberate), so Step
+# 0's placeholder scan has nothing to ask and a profile that never answers
+# Step 0d's index question passes clean. Absence is legal and stays legal --
+# it resolves to assembly's `off` mode and a canon-derived index -- so this is
+# an advisory WARNING, never a refusal. Every case below therefore pins one of
+# two things: that the one combination where absence is likely unintended says
+# so, and that nothing else does.
+# ---------------------------------------------------------------------------
+
+
+def test_absent_entity_markup_under_assembled_book_obsidian_warns():
+    warnings = pv.check_entity_markup_undeclared_warning(
+        _output_profile("assembled_book", "obsidian")
+    )
+
+    assert len(warnings) == 1
+    # The three things an operator cannot act on the warning without: the
+    # field, the complete affirmative answer (NOT `tags` alone, which
+    # resolves to `canon`/STRIP), and where the question is asked.
+    assert "output.entity_markup" in warnings[0]
+    assert "index_from: markup" in warnings[0]
+    assert "Step 0d" in warnings[0]
+
+
+def test_the_warning_does_not_claim_what_the_translator_was_told():
+    """`style_contract`, not any profile field, carries the instruction to
+    mark entities. Absence establishes assembly's mode and the index's
+    source, and the message must claim only those -- a warning that asserts
+    the translator was never told to mark is stating something this profile
+    does not establish."""
+    warning = pv.check_entity_markup_undeclared_warning(
+        _output_profile("assembled_book", "obsidian")
+    )[0]
+
+    assert "canon.json entries alone" in warning
+    assert "will not scan" in warning
+    # The exclusion itself, which the two assertions above cannot see: a
+    # sentence about what the translator was or was not told could be
+    # appended and they would both still pass.
+    lowered = warning.lower()
+    assert "translator" not in lowered
+    assert "never told" not in lowered
+
+
+def test_the_default_scope_is_silent_whatever_the_target():
+    """Under `segment_drafts_and_audit` Step 0d is a no-op and nothing ever
+    assembles, so there is no index to be missing. Warning there would make
+    every plain translate+gloss job read an assembly question, which is the
+    exact proportionality rule #873 drew the commented block around."""
+    for target in ("obsidian", "epub", "custom"):
+        assert pv.check_entity_markup_undeclared_warning(
+            _output_profile("segment_drafts_and_audit", target)
+        ) == []
+
+
+def test_a_non_obsidian_target_is_silent():
+    """`index_from: markup` REQUIRES `target: obsidian` -- no other shipped
+    adapter consumes the recorded spans (assemble.py refuses outright with
+    `entity_markup_index_unsupported_target`). Warning about a block the
+    target could not use would be advice the operator must not take."""
+    for target in ("epub", "custom"):
+        assert pv.check_entity_markup_undeclared_warning(
+            _output_profile("assembled_book", target)
+        ) == []
+
+
+def test_an_absent_target_under_assembled_book_is_silent():
+    """`output.target` is OPTIONAL in the schema, so the read must be `.get`.
+    A missing target under `assembled_book` is a real problem, but it is
+    `resolve_output_adapter`'s at Step 0d -- exactly as check 14 draws it."""
+    profile = _output_profile("assembled_book")
+    assert "target" not in profile["output"]
+    assert pv.check_entity_markup_undeclared_warning(profile) == []
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"tags": ["person", "place"], "index_from": "markup"},
+        {"tags": ["person", "place"], "index_from": "canon"},
+        {"tags": ["person"]},
+        # Both are schema-INVALID, so production never reaches the checker
+        # with them -- and both are exactly what separates the shipped
+        # membership test from a truthiness one. A `.get()`-based predicate
+        # would warn here, i.e. tell an operator who DID write the key that
+        # they never answered.
+        None,
+        {},
+    ],
+    ids=[
+        "index-mode",
+        "strip-mode",
+        "tags-only-defaults-to-canon",
+        "null-block",
+        "empty-block",
+    ],
+)
+def test_a_declared_block_is_never_this_checks_business(block):
+    """ABSENCE ONLY. A present block -- including the incomplete `tags`-only
+    one, which resolves to `canon`/STRIP and indexes nothing from the markup
+    -- is a state the operator DID reach the field in. Its shape is the
+    schema's business and assemble.py's `_entity_markup_config`'s; growing
+    this check into it would second-guess a declared answer."""
+    profile = _output_profile("assembled_book", "obsidian")
+    profile["output"]["entity_markup"] = block
+
+    assert pv.check_entity_markup_undeclared_warning(profile) == []
+
+
+def test_step_0_main_prints_the_advisory_and_still_exits_zero(
+    tmp_path, capsys, monkeypatch
+):
+    """The WIRING plus the non-fatality, which no direct call to the checker
+    can show. A warning that reached `fatal_errors` instead of `warnings`
+    would refuse every canon-index project outright -- absence is legal, and
+    #873's decision would be reversed by the wiring alone.
+
+    Unlike the step-14 wiring test above, this one needs a profile that is
+    otherwise CLEAN: exit 0 and the `(see warnings above)` suffix are the
+    assertions, and the baseline's placeholder `source.path`/`durable_root`
+    would collect fatal lines of their own. `tmp_path` is under /tmp on Linux
+    (it is not on macOS), so the shipped tmp/scratchpad refusal for
+    durable_root would fail this test on CI alone unless the environment
+    opts back in through the override the two check_durable_root cases above
+    already pin."""
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
+    profile = _output_profile("assembled_book", "obsidian")
+    source = tmp_path / "book.epub"
+    source.write_bytes(b"")
+    profile["source"]["path"] = str(source)
+    profile["project"]["durable_root"] = str(tmp_path / "project")
+    profile["output"]["destination"] = str(tmp_path / "project" / "out")
+    profile_path = tmp_path / "profile.yml"
+    profile_path.write_text(pv.yaml.safe_dump(profile), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        pv.main(["--profile", str(profile_path)])
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 0, captured.err
+    assert "WARNING: output.entity_markup" in captured.out
+    assert "OK -- Step 0 validation passed (see warnings above)" in captured.out
+
+
 # ===========================================================================
 # #727 -- glossary.enabled: boolean master switch, schema-level cases
 # ===========================================================================

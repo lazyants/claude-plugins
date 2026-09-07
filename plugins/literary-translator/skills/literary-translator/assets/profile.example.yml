@@ -604,6 +604,11 @@ output:
   # you get instead is the canon-derived index `target` above describes -- one cross-linked
   # entity note per canon.json entry. Say nothing here to keep it.
   #
+  # #893: because there is no sentinel to survive, Step 0 instead prints a non-fatal WARNING
+  # naming this field whenever `v1_scope: assembled_book` and `target: obsidian` are both set
+  # while the block is absent -- the one combination where absence may be an unanswered
+  # question rather than an answer. It never refuses: absence stays legal, and Step 0 exits OK.
+  #
   # ANSWER "YES" WHEN this book's cast is NOT knowable in advance from a name list, so it
   # cannot be seeded into canon.json before translation starts. Ask it at Step 0d, never
   # later: the `tags` vocabulary is what this project's style_contract then has to tell the

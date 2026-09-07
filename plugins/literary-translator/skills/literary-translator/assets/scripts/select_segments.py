@@ -4677,7 +4677,7 @@ def check_glossary_current(dirs: dict) -> "dict | None":
     CONDITION 2: invoke glossary_batch_plan.py -- the shipped authority on
     "what W3 still has to adjudicate", the SAME script the orchestrating
     session already runs at W3 to decide whether to dispatch the glossary
-    pass (SKILL.md:1601) -- and read its own verdict rather than
+    pass (SKILL.md:1640) -- and read its own verdict rather than
     re-deriving it. `-B` (sys.dont_write_bytecode is set too late inside
     glossary_batch_plan.py itself, AFTER its `canon_senses` import, to stop
     that import writing a .pyc into a tree this gate must only read). The
@@ -4895,7 +4895,7 @@ def load_glossary_config(durable_root: Path) -> dict:
     `"default": true` on `glossary.enabled` is documentation-only, nothing
     fills it in at validation time, and `profile_validate.py`'s own
     `check_glossary_disabled_conflicts_with_skeptic_pass()`
-    (profile_validate.py:845-846) spells out the identical convention:
+    (profile_validate.py:912-913) spells out the identical convention:
     "Tests glossary.enabled is False explicitly, NEVER a falsy .get(): an
     ABSENT glossary.enabled means true". Only an EXPLICIT `false` disables
     this gate.

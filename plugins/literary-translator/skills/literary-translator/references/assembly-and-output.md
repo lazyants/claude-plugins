@@ -447,6 +447,15 @@ predicates are the precedent for that discipline):
 | present, `index_from: markup`, `output.target: obsidian` | `index` | elements become `⟦ENT_n⟧payload⟦/ENT_n⟧` and the spans are recorded; the adapter mints and links notes |
 | present, `index_from: markup`, any other target | FATAL | `entity_markup_index_unsupported_target` — no other shipped adapter consumes the spans, and degrading to `strip` would hand the operator an index they asked for and did not get |
 
+The first row is a legitimate answer and stays one, so nothing refuses it —
+but it is also what an operator who WANTED the third row gets by never
+writing the block, and no later gate can tell the two apart (drafts nobody
+told the translator to mark carry nothing to check). Step 0 therefore prints
+a non-fatal WARNING naming `output.entity_markup` under
+`v1_scope: assembled_book` + `target: obsidian` with the block absent (#893),
+and says what the complete affirmative answer is: `tags` AND
+`index_from: markup`, since the second row is what `tags` alone resolves to.
+
 The grammar is deliberately narrow — `<TAG>` / `<TAG REF="…">` … `</TAG>`,
 non-nested — so an unknown angle-bracket run in the prose is source text and
 survives untouched. What it will NOT do is pass a malformed use of a name the
@@ -789,7 +798,7 @@ non-shipped historiettes-t3 provenance project referenced above.
   searching a variant spelling finds nothing; and emit no per-row count
   unless it is re-derived from the artifact itself, an index page being where
   a fabricated number is least likely to be checked. Step 0a copies
-  `PLAN.template.md` once and never refreshes it (`SKILL.md:459`), so a
+  `PLAN.template.md` once and never refreshes it (`SKILL.md:474`), so a
   project scaffolded before the retirement may still name
   `output.index.enabled` in its hand-edited `PLAN.md` intake answer; drop
   that phrase by hand — there is no automatic migration.
