@@ -152,7 +152,16 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
-    # ROTATED TO 1.105.0 (#888 -- name discovery asked an uncased-script model
+    # rotation this replaces, kept as its own record: ROTATED TO 1.110.0 (#889 -- the three language fields shipped another
+    # project's real values with no CHOOSE_ sentinel, and a particle_config
+    # naming a shipped preset was refused only at --fold), and EMPTY ON PURPOSE
+    # for the reason the records below state: the entry names its subjects by
+    # FILE and SYMBOL rather than by line, and states no `file.ext:NNN` citation
+    # at all, which is the shape this guard reads. Measured against the entry
+    # rather than asserted: a scan of its slice for that pattern returns zero
+    # matches.
+    #
+    # The     # ROTATED TO 1.105.0 (#888 -- name discovery asked an uncased-script model
     # for JSON, and Hebrew punctuation broke it), and EMPTY ON PURPOSE, for the
     # same reason the records below state: the entry names its subjects by FILE
     # and SYMBOL rather than by line -- `PROMPT_TEMPLATE`, `parse_reply`,
