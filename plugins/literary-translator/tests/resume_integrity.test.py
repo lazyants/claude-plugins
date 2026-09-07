@@ -590,7 +590,7 @@ def test_case6b_citation_content_types_change_forces_fresh_run_no_byte_change(tm
     been missed: a `citation_content_types` change is a PROFILE SUBSTITUTION with
     no byte-hash change anywhere on disk.
 
-    Widening ["text/"] to ["text/", "application/pdf"] makes the retrieval
+    Narrowing ["text/"] to ["text/html"] makes the retrieval
     boundary admit pages it previously refused, so every cached citation verdict
     was taken under a policy that no longer applies. Codex measured two IDENTICAL
     digests across exactly this change in the 1.16.1 round-3 review -- meaning a
@@ -611,7 +611,7 @@ def test_case6b_citation_content_types_change_forces_fresh_run_no_byte_change(tm
     assert_resumes(proc1, parsed1, run_id)
 
     perturbed = copy.deepcopy(base_payload)
-    perturbed["subst"]["citation_content_types"] = "text/,application/pdf"
+    perturbed["subst"]["citation_content_types"] = "text/html"
     proc2, parsed2 = run_resume_setup(root, with_resume_from(perturbed, run_id))
     assert_fresh_no_resume(proc2, parsed2, run_id)
 
@@ -1563,7 +1563,7 @@ _HASHED_SUBST_PROBES = {
     "max_fix_rounds": 9,
     "batch_agent_cap": 7,
     "effort": "xhigh",
-    "citation_content_types": "text/,application/pdf",
+    "citation_content_types": "text/html",
 }
 
 

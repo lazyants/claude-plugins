@@ -71,7 +71,7 @@ def mod(tmp_path_factory):
 def subst(**over):
     base = dict(durable_root="/durable", source_lang="he", target_lang="en",
                 research_mode="live", run_id="runX", effort="high",
-                citation_content_types="text/html,application/pdf",
+                citation_content_types="text/html,application/json",
                 batch_agent_cap=10 ** 9, plugin_root="/plugin",
                 resumed_batch_indices=[])
     base.update(over)
@@ -195,7 +195,7 @@ def test_fetch_quotes_every_content_type_separately(built):
     import shlex
     argv = shlex.split(built["fetch"])
     types = [argv[i + 1] for i, a in enumerate(argv) if a == "--allow-content-type"]
-    assert types == ["text/html", "application/pdf"]
+    assert types == ["text/html", "application/json"]
 
 
 # ---------------------------------------------------------------------------
