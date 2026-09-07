@@ -112,6 +112,12 @@ def template_guard_body() -> str:
     match = re.search(r"^for \(const t of CITATION_TYPE_LIST\) \{\n.*?^\}", text, re.S | re.M)
     assert match, "the template's content-type guard has changed shape; update this test"
     body = match.group(0)
+    # Keeps template_pattern()'s "exactly one shape guard" assertion LIVE. Round
+    # 1 moved this file off that helper and nothing called it any more, so a
+    # SECOND shape guard appearing in the template would have gone unnoticed --
+    # a drift check that stopped running reads exactly like one that passes.
+    assert template_pattern() in body, (
+        "the template's shape guard is no longer inside the content-type loop")
     assert ".test(t)" in body and "startsWith" in body, (
         "the lifted guard is missing one of its two conditions -- it must carry "
         "BOTH the shape check and the supported-set check, or this file is "
@@ -197,6 +203,17 @@ def test_the_runtime_boundary_agrees_with_the_table(value, admitted):
         return
     assert admitted, f"{value!r} was admitted but the table refuses it"
     assert result == (value,)
+
+
+def test_the_template_supports_exactly_what_the_fetcher_supports():
+    """The third pair. The schema and the fetcher are pinned to each other by
+    the shipped-default test, and the table below judges all three against one
+    list of VALUES -- but a value both engines already agree on cannot catch a
+    set that only ONE of them grew. Add a prefix to TEXT_DECODABLE_PREFIXES and
+    forget CITATION_TYPE_SUPPORTED, and the template refuses a type the fetcher
+    supports: a preflight gate disagreeing with the runtime gate, which is the
+    failure this whole file exists to catch."""
+    assert json.loads(template_supported_set()) == list(fc.TEXT_DECODABLE_PREFIXES)
 
 
 def test_the_supported_set_is_the_default_list_itself():

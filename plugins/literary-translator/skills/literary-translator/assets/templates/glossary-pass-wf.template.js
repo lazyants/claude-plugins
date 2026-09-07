@@ -362,10 +362,12 @@ for (const t of CITATION_TYPE_LIST) {
   }
   if (!CITATION_TYPE_SUPPORTED.some(function (p) { return t.startsWith(p) })) {
     // The offending value is NOT echoed, unlike the shape error above. That one
-    // predates this rule and its value has already matched the media-type
-    // charset by the time it prints; this branch fires on a value that has NOT,
-    // and this message reaches an operator transcript. Only the supported set --
-    // this file's own constant -- travels with it.
+    // predates this rule; this message is new, it reaches an operator
+    // transcript, and there is no reason for a value to travel with it. Only
+    // the supported set -- this file's own constant -- does. (The value here
+    // HAS already matched the media-type charset: the shape check throws
+    // first. The rule is still "do not carry the value", not "carry it once it
+    // is safe".)
     throw new Error("glossary.citation_content_types: an entry names a type the " +
       "retrieval boundary does not support as citation evidence. Supported: " +
       CITATION_TYPE_SUPPORTED.join(", ") + " (or anything narrower, such as " +

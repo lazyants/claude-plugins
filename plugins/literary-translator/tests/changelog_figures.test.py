@@ -533,7 +533,8 @@ FIGURES = [
     # `text/html`), and `Step 0` / `Step 0a`, which name a stage rather than
     # count one.
     #
-    # The 1.99.1 rotation this replaces, kept as its own record (#882 -- every save of the glossary driver's state
+    # The 1.99.1 rotation this replaces, kept as its own record (#882 -- every
+    # save of the glossary driver's state
     # document lived in main(), and an initial drive had none until drive_all()
     # returned, so a kill mid-loop persisted nothing and the documented relaunch
     # re-dispatched every settled batch), per the maintenance contract above.

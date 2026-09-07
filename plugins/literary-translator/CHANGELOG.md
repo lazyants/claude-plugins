@@ -59,8 +59,7 @@ per-row repair rung instead. `fetch_citation.py` and `glossary-pass-wf.template.
 segment of a book in progress is INVALIDATED at the next Step-0a refresh and reads `stale`. That
 is invalidation, not automatic re-translation: `select_segments.py`'s previously-converged refusal
 still stands between a stale segment and a dispatch, so re-translating one remains an authorized
-act. Neither is a `DERIVATION_BUNDLE_MEMBERS` entry, so no
-W3/W3a regeneration is forced.
+act. Neither is a `DERIVATION_BUNDLE_MEMBERS` entry, so no W3/W3a regeneration is forced.
 
 ## 1.99.1 — 2026-09-06
 
