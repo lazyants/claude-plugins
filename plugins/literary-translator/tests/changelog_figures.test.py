@@ -504,7 +504,34 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.111.0 (#901 -- the two citation-downgrade prompts read
+    # ROTATED TO 1.112.0 (#889 -- the three language fields shipped another
+    # project's real values with no CHOOSE_ sentinel, and a particle_config
+    # naming a shipped preset was refused only at --fold, after the whole
+    # discovery fan-out had been paid for), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed: every
+    # numeral in it was enumerated and each one is an IDENTIFIER, not a
+    # measurement this tree can re-derive -- the version, the release date, the
+    # issue number (#889), the sibling release 1.108.0 named for the hash it
+    # already moved, `Step 0` / `Step 0a` and `item 5` / `item 17`, which name a
+    # stage or a list position rather than counting one, and `W3`. The entry
+    # states its subjects by FILE and SYMBOL instead: `profile.example.yml`,
+    # `source.language.code`, `source.language.particle_config`,
+    # `target.language.code`, `CHOOSE_`, `KNOB_QUESTIONS`,
+    # `check_particle_config_local_for_discovery()`,
+    # `glossary.name_discovery.enabled`, `plugin_bundle_hash`,
+    # `profile_semantics_hash`, `fatal()` and the `offending` line. Its one
+    # plural -- "three language fields" -- is spelled as a WORD, which `_TOKEN`
+    # cannot see regardless.
+    #
+    # The 1.108.0 rotation this replaces, kept as its own record (#893 -- Step 0 said nothing when a book scaffolded
+    # FOR a markup-driven vault index never got the block that builds one),
+    # per the maintenance contract above.
+    # The 1.109.0 rotation this replaces, kept as its own record (#891 -- `research_mode: offline` forbids a citation,
+    # and the glossary pass read it as forbidding the established target FORM
+    # too; plus the JSON-escaping rule for a source form's own ASCII quote), per
+    # the maintenance contract above.
+    # The 1.111.0 rotation this replaces, kept as its own record (#901 -- the two citation-downgrade prompts read
     # basis:"transliterated" as mechanical transcription only), per the
     # maintenance contract above.
     #
@@ -1108,7 +1135,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.111.0"
+FIGURES_VERSION = "1.112.0"
 
 
 def _newest_entry():

@@ -40,15 +40,38 @@ source:
                                           # which may include more than this one path -- see custom.md.
   gutenberg_id: null                     # optional, gutenberg_epub only -- set the real Gutenberg ebook ID if known
   language:
-    code: fr                             # ISO-639-1, source language
-    particle_config: "fr.json"           # BARE FILENAME ONLY, resolved as ${durable_root}/languages/<value> --
-                                          # e.g. this resolves to ${durable_root}/languages/fr.json, copied there
-                                          # by Step 0a (NOT assets/languages/, which is inside the plugin install
-                                          # dir and may not be reachable at runtime). Never include a "languages/"
+    code: CHOOSE_iso_639_1_source_language_code
+                                          # Ships as an intentionally INVALID placeholder -- Step 0's placeholder
+                                          # scan fatally rejects it until you consciously replace it with the real
+                                          # two-letter ISO-639-1 code for the language THIS BOOK is translated
+                                          # FROM. This code selects nothing by itself (the particle_config below
+                                          # is chosen by filename, never by this code), but it reaches the
+                                          # dispatch prompts, and it is hashed into profile_semantics_hash --
+                                          # correcting it after work has started re-stales every converged segment.
+    particle_config: "CHOOSE_source_code.local.json"
+                                          # Ships as an intentionally INVALID placeholder -- Step 0's placeholder
+                                          # scan fatally rejects it until you consciously replace it. REPLACE THE
+                                          # ENTIRE QUOTED VALUE with the bare filename you choose (do not just
+                                          # delete the CHOOSE_ prefix: the residue "source_code.local.json" would
+                                          # pass Step 0's checks while naming no file this project has), and create
+                                          # or copy that file during Step 0a. BARE FILENAME ONLY, resolved as
+                                          # ${durable_root}/languages/<value> -- e.g. this resolves to
+                                          # ${durable_root}/languages/<your source code>.local.json (NOT
+                                          # assets/languages/, which is inside the plugin install dir and may not
+                                          # be reachable at runtime). A shipped preset such as fr.json is what Step
+                                          # 0a copies into ${durable_root}/languages/; a .local.json override is
+                                          # one this project creates in that same directory (typically by copying a
+                                          # preset), and Step 0a never overwrites it. Never include a "languages/"
                                           # prefix here -- the resolution base already supplies that segment.
-                                          # A project-local override (e.g. after a failed smoke test) lives in
-                                          # this same ${durable_root}/languages/ directory, under a
-                                          # DIFFERENT filename Step 0a never copies over (e.g. "fr.local.json").
+                                          # A project running LLM name discovery (glossary.name_discovery.enabled:
+                                          # true) MUST choose a filename whose name contains ".local." --
+                                          # name_discovery.py --fold refuses to write discovery output into a
+                                          # shipped preset a plugin upgrade would overwrite, and refuses it only
+                                          # AFTER the whole dispatch fan-out has been paid for; profile_validate.py
+                                          # now catches this at Step 0, before that cost is paid.
+                                          # A project-local override (e.g. after a failed smoke test) lives in this
+                                          # same ${durable_root}/languages/ directory, under a DIFFERENT filename
+                                          # Step 0a never copies over.
                                           # This value must be a simple alphanumeric/dot/underscore/hyphen filename
                                           # ending in .json -- no path separators, no "..", no absolute path;
                                           # profile_validate.py fatally rejects any value that violates this,
@@ -125,7 +148,14 @@ source:
 
 target:
   language:
-    code: ru                             # ISO-639-1, target language
+    code: CHOOSE_iso_639_1_target_language_code
+                                          # Ships as an intentionally INVALID placeholder -- Step 0's placeholder
+                                          # scan fatally rejects it until you consciously replace it with the real
+                                          # two-letter ISO-639-1 code for the language THIS BOOK is translated
+                                          # INTO. It reaches the dispatch prompts, so a wrong value is a wrong
+                                          # instruction to the translator rather than a wrong lookup, and it is
+                                          # hashed into profile_semantics_hash on the same terms as
+                                          # source.language.code.
     register_notes: "[TODO: target-language register] -- see style_bible.md section B"
     # REQUIRED FILL (#874). Replace the bracketed token with what THIS target language's
     # register axis actually is: which second-person or honorific forms it distinguishes,

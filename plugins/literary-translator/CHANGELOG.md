@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.112.0 — 2026-09-07
+
+**A Hebrew-to-English project validated as French-to-Russian, because the three language fields
+shipped another project's real values (#889).** `profile.example.yml` carried
+`source.language.code: fr`, `source.language.particle_config: "fr.json"` and
+`target.language.code: ru` — schema-valid values with no `CHOOSE_` sentinel on any of them. Step
+0's placeholder scan therefore never asked about them, jsonschema accepted them, and a run whose
+every printed question had been answered correctly still printed `OK -- Step 0 validation
+passed` over a profile describing the wrong language pair.
+
+This is a third shape beside the two the operator guidance already names. A field with no slot
+ships commented out, so there is no sentinel to survive; a field whose default is merely
+plausible is a real value that is wrong for this book. These three are worse than either,
+because they are *coherent*: `fr` and `fr.json` agree with each other, so no cross-field check
+fires. All three are now `CHOOSE_` sentinels with `KNOB_QUESTIONS` entries, which puts them in
+front of the operator through the machinery that already existed rather than adding any.
+
+**The same family, with a larger blast radius: a shipped default steered you into a value the
+tool later refuses.** The `particle_config` comment invites substituting your own code, and the
+result is a filename like `he.json` that genuinely exists — Step 0a copies every shipped preset
+into `${durable_root}/languages/`. So it resolved, Step 0 passed it, `name_discovery.py
+--dispatch` accepted it and ran the entire fan-out, and `--resume-plan` reported a healthy
+`dispatch_then_fold`. Only `--fold` refused it, on the correct ground that discovery output is
+project data and must not land in a preset a plugin upgrade overwrites. Renaming afterwards does
+not rescue the run either, because the fold also binds the filename to the run manifest, so
+recovery is a fresh run id and the whole fan-out is re-paid.
+
+`profile_validate.py` gains `check_particle_config_local_for_discovery()`, which moves that
+refusal to Step 0 — the one point where it costs nothing yet. It is gated on
+`glossary.name_discovery.enabled`, because that flag is what routes a project into the W3
+discovery chain, and a shipped preset stays a documented, legitimate answer for any project that
+never folds. Its predicate is the fold's own: CONTAINMENT of `.local.`, not a `.local.json`
+suffix, so a name like `he.local.backup.json` is accepted by both. The tests establish that
+agreement behaviourally rather than by reading the fold's source — each filename is put through
+the new check and through `--fold` itself, and the fold's verdict is read by name off its
+`offending` line, on stderr, where `fatal()` deliberately writes it instead of stdout.
+
+SKILL.md's Step 0 contract gains the new check as item 17 and names the three new sentinels in
+item 5's inventory, so the ordered contract an orchestrating session reads describes them where
+Step 0 is defined rather than only in the W3 section.
+
+Also corrected: the example claimed Step 0a copies the resolved `<code>.local.json` into
+`${durable_root}/languages/`. Step 0a copies the shipped presets under their own filenames and
+never creates or overwrites a project's own override — which is the whole reason the fold accepts
+only a `.local.` name.
+
+Left as it stood: `name_discovery.py --fold` invoked by hand, outside the W3 chain, still never
+consults Step 0, and its own late refusal is deliberately kept as the backstop for that path and
+for a project that enables discovery after Step 0 has already passed. An operator can also still
+answer a code sentinel with a wrong but well-formed two-letter code; what changes is that the
+value is now the user's answer rather than another project's inherited default.
+
+This release adds no member to any hashed bundle. It does move `plugin_bundle_hash`, because the
+line-numbered citations `select_segments.py` carries into SKILL.md and `profile_validate.py` had
+to follow the text they point at — the same hash 1.108.0 already moved for the same reason, so an
+operator upgrading through this range pays that re-stale once, not twice. Correcting a language
+code in an EXISTING project separately moves `profile_semantics_hash`, which is exactly why
+catching the value at Step 0, before anything has converged, is worth doing.
 ## 1.111.0 — 2026-09-07
 
 **When a citation died, the two prompts that handle it told the model that `basis:"transliterated"`

@@ -1,18 +1,5 @@
 {
   "declarations": {
-    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"SKILL.md:1640\", 0]": {
-      "anchors": [
-        "scripts/glossary_batch_plan.py` FIRST"
-      ],
-      "claim": "CONDITION 2: invoke glossary_batch_plan.py -- the shipped authority on \"what W3 still has to adjudicate\", the SAME script the orchestrating session already runs at W3 to decide whether to dispatch the glossary pass (SKILL.md:1640) -- and read its own verdict rather than re-deriving it."
-    },
-    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"profile_validate.py:912-913\", 0]": {
-      "anchors": [
-        "Tests `glossary.enabled is False` explicitly",
-        "ABSENT `glossary.enabled` means `true`"
-      ],
-      "claim": "`profile_validate.py`'s own `check_glossary_disabled_conflicts_with_skeptic_pass()` (profile_validate.py:912-913) spells out the identical convention: \"Tests glossary.enabled is False explicitly, NEVER a falsy .get(): an ABSENT glossary.enabled means true\". Only an EXPLICIT `false` disables this gate."
-    },
     "[\"plugins/literary-translator/skills/literary-translator/assets/schemas/profile.schema.json\", \"cache_key.py:544\", 0]": {
       "anchors": [
         "compute_profile_semantics_hash"
@@ -656,12 +643,6 @@
       ],
       "claim": "// NOT PER_CALL_CAP. #348 suggested making the declared-but-unused // PER_CALL_CAP = 90 load-bearing here; deliberately declined. PER_CALL_CAP // mirrors codex_job.py:215's ceiling for THE DRIVER'S OWN SUBPROCESSES (\"hard // ceiling for ANY single subprocess\") -- a different quantity from this // template's per-agent-call poll bound, and conflating them would make one // constant answer two unrelated questions. WAIT_CHUNK_SEC is the new // load-bearing chunk bound; do not \"restore\" the conflation."
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"SKILL.md:474\", 0]": {
-      "anchors": [
-        "never re-copied, never regenerated"
-      ],
-      "claim": "the note covers (its `aliases` minus the display name), or a reader searching a variant spelling finds nothing; and emit no per-row count unless it is re-derived from the artifact itself, an index page being where a fabricated number is least likely to be checked. Step 0a copies `PLAN.template.md` once and never refreshes it (`SKILL.md:482`), so a project scaffolded before the retirement may still name `output.index.enabled` in its hand-edited `PLAN.md` intake answer; drop that phrase by hand — there is no automatic migration."
-    },
     "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"assemble.py:3485\", 0]": {
       "anchors": [
         "assert_project_complete(manifest, converged, refusals)"
@@ -879,14 +860,6 @@
       ],
       "claim": "# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1559), and D3 (:5009) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces"
     },
-    "[\"plugins/literary-translator/tests/codex_job_driver.test.py\", \"SKILL.md:312-314\", 0]": {
-      "anchors": [
-        "Everything else under `durable_root`",
-        "is ignored for this check",
-        "explicitly supported config"
-      ],
-      "claim": "RED: nest durable_root inside a real git repo (the SUPPORTED durable_root==project_root configuration, SKILL.md:254-256) and show that `--cwd durable_root` (the OLD design) resolves to the OUTER repo toplevel -- i.e. codex would be granted workspace-write over the WHOLE repo (scripts/, segments/, the lock, the joblog), not just durable_root."
-    },
     "[\"plugins/literary-translator/tests/codex_job_driver.test.py\", \"mass-translate-wf.template.js:1313\", 0]": {
       "anchors": [
         "const expectToken = RUN_ID + \":\" + seg + \":r\" + roundLabel;"
@@ -978,18 +951,6 @@
         "occurrence_targets.build() failed"
       ],
       "claim": "\"\"\"A map that is not `str -> str` yields exactly 1.58.0 behaviour. Rejected WHOLE, not filtered to its well-formed pairs -- a surviving subset could still satisfy the exemption, which is the decision a malformed map has not earned. Non-raising: Contract 3, and validate_backlinks.py:1317-1325 turns any exception out of build() into a hard gate FATAL.\"\"\" result = ot.build(*_collision_fixture(link_groups=link_groups)) assert result[\"eligible_by_source_form\"] == {} assert result[\"unresolved_homonyms\"][SPACED][\"reason\"] == \"fold_match_key_collision\""
-    },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:504\", 0]": {
-      "anchors": [
-        "ORCHESTRATION_BUNDLE_MEMBERS` — non-gating for convergence, never part of the"
-      ],
-      "claim": "STALE_PHRASES = [ (\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"),"
-    },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:506\", 0]": {
-      "anchors": [
-        "digest, and also surfaced in W8's reporting"
-      ],
-      "claim": "(\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"),"
     },
     "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"cache_key.py:129\", 0]": {
       "anchors": [
@@ -1610,7 +1571,46 @@
       ],
       "claim": "The read mode's envelope keeps exactly its documented seven keys, re-asserted here as well as at tests/review_rejection.test.py:1352."
     },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4441-4447\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"SKILL.md:1654\", 0]": {
+      "anchors": [
+        "scripts/glossary_batch_plan.py` FIRST"
+      ],
+      "claim": "CONDITION 2: invoke glossary_batch_plan.py -- the shipped authority on \"what W3 still has to adjudicate\", the SAME script the orchestrating session already runs at W3 to decide whether to dispatch the glossary pass (SKILL.md:1640) -- and read its own verdict rather than re-deriving it."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"profile_validate.py:999-1000\", 0]": {
+      "anchors": [
+        "Tests `glossary.enabled is False` explicitly",
+        "ABSENT `glossary.enabled` means `true`"
+      ],
+      "claim": "`profile_validate.py`'s own `check_glossary_disabled_conflicts_with_skeptic_pass()` (profile_validate.py:912-913) spells out the identical convention: \"Tests glossary.enabled is False explicitly, NEVER a falsy .get(): an ABSENT glossary.enabled means true\". Only an EXPLICIT `false` disables this gate."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/references/assembly-and-output.md\", \"SKILL.md:484\", 0]": {
+      "anchors": [
+        "never re-copied, never regenerated"
+      ],
+      "claim": "the note covers (its `aliases` minus the display name), or a reader searching a variant spelling finds nothing; and emit no per-row count unless it is re-derived from the artifact itself, an index page being where a fabricated number is least likely to be checked. Step 0a copies `PLAN.template.md` once and never refreshes it (`SKILL.md:482`), so a project scaffolded before the retirement may still name `output.index.enabled` in its hand-edited `PLAN.md` intake answer; drop that phrase by hand — there is no automatic migration."
+    },
+    "[\"plugins/literary-translator/tests/codex_job_driver.test.py\", \"SKILL.md:322-324\", 0]": {
+      "anchors": [
+        "Everything else under `durable_root`",
+        "is ignored for this check",
+        "explicitly supported config"
+      ],
+      "claim": "RED: nest durable_root inside a real git repo (the SUPPORTED durable_root==project_root configuration, SKILL.md:254-256) and show that `--cwd durable_root` (the OLD design) resolves to the OUTER repo toplevel -- i.e. codex would be granted workspace-write over the WHOLE repo (scripts/, segments/, the lock, the joblog), not just durable_root."
+    },
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:514\", 0]": {
+      "anchors": [
+        "ORCHESTRATION_BUNDLE_MEMBERS` — non-gating for convergence, never part of the"
+      ],
+      "claim": "STALE_PHRASES = [ (\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"),"
+    },
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:516\", 0]": {
+      "anchors": [
+        "digest, and also surfaced in W8's reporting"
+      ],
+      "claim": "(\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"),"
+    },
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4455-4461\", 0]": {
       "anchors": [
         "Excluded from every bundle hash",
         "nor of `orchestration_bundle_hash`",
@@ -1618,6 +1618,13 @@
         "never flips a cache key or the resume-integrity digest via either bundle"
       ],
       "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
+    },
+    "[\"plugins/literary-translator/tests/profile_validate.test.py\", \"name_discovery.py:431-437\", 0]": {
+      "anchors": [
+        "fatal(message, exit_code=2, **payload)",
+        "stderr ONLY"
+      ],
+      "claim": "The fold-parity test reads its verdict off name_discovery.py's `offending:` line on STDERR, not stdout, because fatal() prints its named line to stderr only and deliberately emits no stdout JSON (name_discovery.py:431-437)."
     }
   },
   "exemptions": {

@@ -199,6 +199,13 @@ def make_real_values_profile(tmp_path):
         "CHOOSE_segment_drafts_and_audit_or_assembled_book", "segment_drafts_and_audit"
     )
     text = text.replace("CHOOSE_obsidian_or_epub_or_custom", "obsidian")
+    # #889. he/en/he.local.json on purpose, not fr/ru/fr.json: the answer
+    # must itself be schema-valid (a two-letter code; a filename matching
+    # particle_config's pattern), and a project-local ".local." filename is
+    # the exemplary answer the sentinel's own shape is asking for.
+    text = text.replace("CHOOSE_iso_639_1_source_language_code", "he")
+    text = text.replace("CHOOSE_source_code.local.json", "he.local.json")
+    text = text.replace("CHOOSE_iso_639_1_target_language_code", "en")
     # #730. A non-mixed_by_length answer on purpose: that is the one mode the
     # schema makes threshold_lines REQUIRED for, and the example ships it null.
     text = text.replace(
