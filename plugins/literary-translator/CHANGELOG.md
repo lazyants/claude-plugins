@@ -86,6 +86,48 @@ the orchestrating session's own writes and that a clean `--verify` says nothing 
 script is deliberately unchanged: it runs from the plugin path and cannot resolve the project's
 profile, and the ambiguous-directory outcome is an interactive halt no script can perform.
 
+## 1.104.1 — 2026-09-07
+
+**The #820 W5 admission gate refused over an unmerged glossary run and named the newest run —
+which is routinely the one that DOES carry its merge marker (#895).**
+`check_glossary_runs_merged()` iterates every run directory and collects the ids that have no
+`merged.json`, then built its refusal message out of `newest_run_id` instead. The count was right
+and the refusal was right; the id was the wrong one.
+
+Measured on one live project: three run directories on disk, the newest having just merged and
+carrying its marker, an earlier aborted run having none. The refusal read `1 glossary run(s) under
+.../glossary/runs (newest: 20260906T233632Z) have no merge marker yet` — naming the healthy run.
+Two RUN_IDs minted the same day differ only inside their timestamp, and that difference does not
+survive being read as a diagnostic — so the natural reading is that the named run is the offending
+one.
+
+That misdirection costs more than a moment, because the remedy is per-run:
+`backfill_glossary_merge_ack.py --apply` acknowledges a structurally complete run and refuses an
+incomplete one, and deciding which applies means first establishing that the named run owes
+nothing. Run against the wrong run, that check reports the run is fine, and the next step from
+there is `--allow-unmerged-glossary` — the override this gate exists to make unnecessary.
+
+The message now names every id in `unmerged_run_ids`, newest-first, in the order
+`scan_glossary_run_ids()` already returns: `2 glossary run(s) under .../glossary/runs have no merge
+marker yet: 20260906T232544Z, 20260905T101122Z -- ...`. The count, the runs directory and the three
+remedies are unchanged.
+
+Left as it stood: the structured `glossaryRunId` field still carries `newest_run_id`. It is the
+continuity CONDITION 2's refusal shape establishes, and CONDITION 2's counts are PROJECT-scoped —
+`glossary_batch_plan.py` reports what the project still has to adjudicate and knows nothing about
+which run a candidate belongs to, so welding its count to a run id would be a claim that check
+never made. CONDITION 3 is the one condition that does establish the per-run fact, and it is the
+message, not the field, that now says so.
+
+**Migration.** `select_segments.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this release moves
+`plugin_bundle_hash`; every converged segment of a book in progress goes `stale` and re-translates.
+It is not a `DERIVATION_BUNDLE_MEMBERS` entry, so no W3/W3a regeneration is forced. It is also an
+`ORCHESTRATION_BUNDLE_MEMBERS` entry, so an interrupted run mints a fresh `RUN_ID` rather than
+resuming. Recorded hashes and the resulting staleness change when Step 0a refreshes the durable
+`scripts/` copy — but an upgraded live plugin can be felt before that: with `--plugin-root` the
+selector is resolved from the live plugin, and `scaffold_setup.py`'s verification refuses a
+live/durable mismatch as `live_plugin_drift`.
+
 ## 1.100.0 — 2026-09-07
 
 **`glossary.citation_content_types` could name a type the citation fetcher has no way to read,
