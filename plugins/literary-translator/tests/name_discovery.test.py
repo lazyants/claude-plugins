@@ -393,10 +393,21 @@ def test_a2_fold_refuses_an_unusable_or_unbound_harvest(bed, cause):
     elif cause == "malformed":
         victim.write_text("{not json", encoding="utf-8")
     elif cause == "duplicate-key":
+        # Built from the SEEDED harvest's own metadata, never from hand-written
+        # placeholder hashes. With a wrong source_sha1/prompt_sha1 in it, the
+        # slot-binding check refuses this file BEFORE read_json_strict's
+        # duplicate-member hook is ever consulted -- measured, by deleting the
+        # hook and watching this case still pass on the binding message. Every
+        # other field valid is what makes the repeated `forms` member the only
+        # possible reason for the refusal.
+        doc = json.loads(victim.read_text(encoding="utf-8"))
+        members = ", ".join(
+            '%s: %s' % (json.dumps(k), json.dumps(v, ensure_ascii=False))
+            for k, v in doc.items() if k != "forms")
         victim.write_text(
-            '{"run_id":"r1","unit":"seg02","pass":1,"source_sha1":"x",'
-            '"prompt_sha1":"y","model":null,"effort":"low",'
-            '"forms":["%s"],"forms":[]}' % MOSHE_LEIB, encoding="utf-8")
+            '{%s, "forms": %s, "forms": []}'
+            % (members, json.dumps(doc["forms"], ensure_ascii=False)),
+            encoding="utf-8")
     elif cause == "unknown-key":
         doc = json.loads(victim.read_text(encoding="utf-8"))
         doc["extra"] = 1
@@ -424,6 +435,11 @@ def test_a2_fold_refuses_an_unusable_or_unbound_harvest(bed, cause):
                        "--particle-config", "he.local.json", expect=2)
     assert out is None, "a fatal must print NO stdout JSON"
     assert "FATAL name_discovery.py" in err
+    if cause == "duplicate-key":
+        # The REASON, not just a refusal: this case exists to prove the
+        # duplicate-member hook fires, and a generic fatal assertion would go
+        # on passing if that hook were disconnected.
+        assert "repeats the member name 'forms'" in err, err
     assert inventory_of(bed) is None, "no inventory may be written on a refusal"
 
 
