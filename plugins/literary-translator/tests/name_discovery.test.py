@@ -358,10 +358,32 @@ def test_a1_occurrence_filter_keeps_what_occurs_and_drops_what_does_not(bed):
     print(f"union={out['union_size']} surviving={out['surviving']} dropped={out['dropped']}")
 
 
+def test_a1_a_unit_with_every_pass_empty_still_folds_and_publishes_the_rest(bed):
+    """A terminator-only reply -- parse_reply's legitimate "no names here"
+    answer (#888) -- reaches the harvest as a form list with zero forms. A
+    fold over a run where one unit's every pass is empty and the others are
+    not must still exit 0 and publish the OTHER units' forms; an empty
+    harvest is a valid harvest, not a failed one."""
+    seed_run(bed, forms_by_unit={"seg02": []})
+    rc, out, err = run(bed, "--fold", "--run-id", "r1",
+                       "--particle-config", "he.local.json", expect=0)
+    got = set(inventory_of(bed))
+    assert got == EXPECTED_SURVIVORS, (
+        f"inventory={sorted(got)}; the other units still supply every "
+        f"surviving form, so an empty unit must not thin the union")
+    assert out["surviving"] == len(EXPECTED_SURVIVORS)
+
+
 @pytest.mark.parametrize("cause", ["missing", "not-utf8", "malformed", "duplicate-key",
-                                   "unknown-key", "wrong-unit", "wrong-pass",
+                                   "unknown-key", "not-an-object", "forms-not-array",
+                                   "wrong-unit", "wrong-pass",
                                    "wrong-source-sha1", "wrong-prompt-sha1", "renamed"])
 def test_a2_fold_refuses_an_unusable_or_unbound_harvest(bed, cause):
+    """`not-an-object` and `forms-not-array` are the two JSON-object shapes
+    parse_reply used to refuse at the reply door under the old contract; a
+    line-based reply has no such shapes to refuse, so the harvest door -- a
+    hand-editable artifact this same read_json_strict/validate_form_list pair
+    still guards -- is where they stay reachable (#888)."""
     nd, rm = seed_run(bed)
     victim = nd.harvest_path("r1", "seg02", 1)
     if cause == "missing":
@@ -371,13 +393,31 @@ def test_a2_fold_refuses_an_unusable_or_unbound_harvest(bed, cause):
     elif cause == "malformed":
         victim.write_text("{not json", encoding="utf-8")
     elif cause == "duplicate-key":
+        # Built from the SEEDED harvest's own metadata, never from hand-written
+        # placeholder hashes. read_json_strict runs FIRST and the slot-binding
+        # loop after it (validate_harvest), so a wrong source_sha1/prompt_sha1
+        # masked this case from the far side: delete the duplicate-member hook
+        # and json.loads silently collapses the repeat, but the LATER binding
+        # refusal still fires and a generic fatal assertion still passes.
+        # Measured both ways. Every other field valid is what makes the
+        # repeated `forms` member the only possible reason for the refusal.
+        doc = json.loads(victim.read_text(encoding="utf-8"))
+        members = ", ".join(
+            '%s: %s' % (json.dumps(k), json.dumps(v, ensure_ascii=False))
+            for k, v in doc.items() if k != "forms")
         victim.write_text(
-            '{"run_id":"r1","unit":"seg02","pass":1,"source_sha1":"x",'
-            '"prompt_sha1":"y","model":null,"effort":"low",'
-            '"forms":["%s"],"forms":[]}' % MOSHE_LEIB, encoding="utf-8")
+            '{%s, "forms": %s, "forms": []}'
+            % (members, json.dumps(doc["forms"], ensure_ascii=False)),
+            encoding="utf-8")
     elif cause == "unknown-key":
         doc = json.loads(victim.read_text(encoding="utf-8"))
         doc["extra"] = 1
+        victim.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    elif cause == "not-an-object":
+        victim.write_text(json.dumps(["a"]), encoding="utf-8")
+    elif cause == "forms-not-array":
+        doc = json.loads(victim.read_text(encoding="utf-8"))
+        doc["forms"] = "a"
         victim.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
     elif cause == "renamed":
         # A schema-valid harvest copied into ANOTHER expected slot. Filename
@@ -396,6 +436,11 @@ def test_a2_fold_refuses_an_unusable_or_unbound_harvest(bed, cause):
                        "--particle-config", "he.local.json", expect=2)
     assert out is None, "a fatal must print NO stdout JSON"
     assert "FATAL name_discovery.py" in err
+    if cause == "duplicate-key":
+        # The REASON, not just a refusal: this case exists to prove the
+        # duplicate-member hook fires, and a generic fatal assertion would go
+        # on passing if that hook were disconnected.
+        assert "repeats the member name 'forms'" in err, err
     assert inventory_of(bed) is None, "no inventory may be written on a refusal"
 
 
@@ -590,6 +635,8 @@ def test_a12_an_edited_harvest_re_commits_rather_than_republishing(bed):
     ("control-char", "control character"),
     ("sentinel", "sentinel delimiter"),
     ("not-a-string", "non-empty string"),
+    ("empty-form", "non-empty string"),
+    ("lone-surrogate", "lone surrogate"),
     ("wrong-model", "not bound to this slot"),
     ("wrong-effort", "not bound to this slot"),
 ])
@@ -598,7 +645,14 @@ def test_a13_a_harvest_read_back_gets_the_same_contract_as_a_reply(bed, edit, ne
     the fold, so `--fold` reads form lists that never passed through
     parse_reply in this process. Every bound the reply boundary enforces has to
     hold on the way back in, or an edited artifact reaches the particle config
-    through a door the model's own reply cannot use."""
+    through a door the model's own reply cannot use.
+
+    `empty-form` (a blank line is now dropped by the parser rather than
+    refused at the reply door) and `lone-surrogate` (impossible at the reply
+    door since parse_reply decodes UTF-8 before parsing, and a lone surrogate
+    cannot survive that decode) join this door instead -- exactly the door
+    validate_form_list's own docstring says a hand-edited artifact reaches
+    through (#888)."""
     nd, _rm = seed_run(bed)
     path = nd.harvest_path("r1", "seg01", 1)
     doc = json.loads(path.read_text(encoding="utf-8"))
@@ -612,11 +666,25 @@ def test_a13_a_harvest_read_back_gets_the_same_contract_as_a_reply(bed, edit, ne
         doc["forms"] = ["a\u27e6FNREF\u27e7b"]
     elif edit == "not-a-string":
         doc["forms"] = [17]
+    elif edit == "empty-form":
+        doc["forms"] = ["  "]
+    elif edit == "lone-surrogate":
+        doc["forms"] = ["A\ud800B"]
     elif edit == "wrong-model":
         doc["model"] = "some-other-model"
     else:
         doc["effort"] = "high"
-    nd.write_json_atomic(path, doc)
+    if edit == "lone-surrogate":
+        # write_json_atomic serialises with ensure_ascii=False and then
+        # UTF-8-encodes the result, so a lone surrogate raises
+        # UnicodeEncodeError while BUILDING the fixture, before the refusal
+        # this test is after is ever reached. ensure_ascii=True escapes it to
+        # \ud800 instead, matching what a hand-edited harvest with that
+        # escape sequence actually looks like on disk.
+        body = json.dumps(doc, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
+        path.write_text(body, encoding="utf-8")
+    else:
+        nd.write_json_atomic(path, doc)
     rc, out, err = run(bed, "--fold", "--run-id", "r1",
                        "--particle-config", "he.local.json", expect=2)
     assert needle in err, err
@@ -838,6 +906,20 @@ def test_a17_dispatch_already_refused_prompt_drift(bed):
     rc, out, err = run(bed, "--dispatch", "--run-id", "r1",
                        "--particle-config", "he.local.json", expect=2)
     assert "prompt_sha1" in err, err
+
+
+def test_prompt_template_never_reverts_to_json_or_drops_its_terminator(bed):
+    """A wording pin (#888): neither the JSON contract nor a prompt/parser
+    disagreement about the terminator can be reintroduced by a later edit
+    without this test going red. Cannot key on the word "JSON" -- the
+    replacement wording says "no JSON" on purpose."""
+    nd = load_module(bed)
+    assert '"forms"' not in nd.PROMPT_TEMPLATE, (
+        "the prompt must not ask for the old {\"forms\": [...]} reply shape")
+    assert "ONE NAME PER LINE" in nd.PROMPT_TEMPLATE
+    assert nd.END_OF_LIST in nd.PROMPT_TEMPLATE, (
+        "the prompt's terminator wording and parse_reply's END_OF_LIST "
+        "constant must name the same literal string")
 
 
 def test_a18_a_changed_honorific_prefix_is_not_swallowed_by_the_shortcut(bed):
@@ -1173,48 +1255,144 @@ def test_b15_a_durable_root_under_a_temp_root_is_refused_before_any_launch(bed,
     assert not (bed / "runs" / "name-discovery" / "fresh" / "run-manifest.json").exists()
 
 
+def _lines_reply(names, terminate=True, end_of_list="--- END OF LIST ---"):
+    """A parse-door reply: one name per line, then the terminator -- the wire
+    format #888 replaced one-line JSON with."""
+    lines = list(names)
+    if terminate:
+        lines.append(end_of_list)
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 @pytest.mark.parametrize("bad", ["too-many-forms", "form-too-long", "control-char",
-                                 "lone-surrogate",
-                                 "sentinel-delimiter", "duplicate-key", "unknown-key",
-                                 "not-an-object", "forms-not-array", "empty-form"])
+                                 "sentinel-delimiter"])
 def test_b17_reply_bounds_reject_at_their_boundary(bed, bad):
+    """validate_form_list's bounds, at the door a model reply still reaches
+    them through: a line list, terminated, never JSON. `lone-surrogate`,
+    `duplicate-key`, `unknown-key`, `not-an-object`, `forms-not-array` and
+    `empty-form` moved to the harvest door (test_a13 / test_a2) -- the
+    JSON-object shapes and the lone-surrogate case no longer have a parse-door
+    path (a lone surrogate cannot survive parse_reply's UTF-8 decode, and a
+    blank line is now dropped rather than refused)."""
     nd = load_module(bed)
     if bad == "too-many-forms":
-        payload = json.dumps({"forms": [f"a{i}" for i in range(nd.MAX_FORMS_PER_REPLY + 1)]})
+        names = [f"a{i}" for i in range(nd.MAX_FORMS_PER_REPLY + 1)]
         needle = "exceeds the"
     elif bad == "form-too-long":
-        payload = json.dumps({"forms": ["a" * (nd.MAX_FORM_CHARS + 1)]})
+        names = ["a" * (nd.MAX_FORM_CHARS + 1)]
         needle = "over the"
     elif bad == "control-char":
-        payload = json.dumps({"forms": ["a​b"]})
+        names = ["a\u200bb"]  # zero-width space, category Cf
         needle = "control character"
-    elif bad == "lone-surrogate":
-        # Valid JSON, decodes to a str, and cannot be UTF-8 encoded: without this
-        # bound the form reaches the harvest write and fails it THERE, turning a
-        # bad reply into a mid-write error instead of a refused one.
-        payload = '{"forms":["A\\ud800B"]}'
-        needle = "lone surrogate"
-    elif bad == "sentinel-delimiter":
-        payload = json.dumps({"forms": ["a⟦FNREF⟧b"]}, ensure_ascii=False)
-        needle = "sentinel delimiter"
-    elif bad == "duplicate-key":
-        payload = '{"forms":["a"],"forms":[]}'
-        needle = "repeats the member name"
-    elif bad == "unknown-key":
-        payload = json.dumps({"forms": ["a"], "notes": "x"})
-        needle = "ONLY key is 'forms'"
-    elif bad == "not-an-object":
-        payload = json.dumps(["a"])
-        needle = "ONLY key is 'forms'"
-    elif bad == "forms-not-array":
-        payload = json.dumps({"forms": "a"})
-        needle = "must be an array"
     else:
-        payload = json.dumps({"forms": ["  "]})
-        needle = "non-empty string"
+        names = ["a\u27e6FNREF\u27e7b"]  # SENTINEL_DELIMITERS, by codepoint
+        needle = "sentinel delimiter"
+    payload = _lines_reply(names, end_of_list=nd.END_OF_LIST)
     with pytest.raises(nd.NameDiscoveryError) as excinfo:
-        nd.parse_reply(payload.encode("utf-8"), "unit.1")
+        nd.parse_reply(payload, "unit.1")
     assert needle in str(excinfo.value)
+
+
+def test_b17_a_non_utf8_reply_is_refused_at_decode(bed):
+    """New coverage of an EXISTING refusal, not a newly reachable path:
+    parse_reply decoded before it parsed under the JSON contract too, and
+    still does -- this door just never had a dedicated test."""
+    nd = load_module(bed)
+    with pytest.raises(nd.NameDiscoveryError) as excinfo:
+        nd.parse_reply(b"\xff\xfe not valid utf-8", "unit.1")
+    assert "not valid UTF-8" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("terminator_defect", ["absent", "duplicated", "not-last"])
+def test_b17_the_terminator_must_appear_exactly_once_and_last(bed, terminator_defect):
+    """The terminator is what the old contract's closing `}` bought for free:
+    a completeness check. Absent is indistinguishable from a reply read
+    before the model finished writing it -- the premature-read case this
+    mechanism exists to catch. Duplicated means the model restarted its list
+    and this driver cannot tell which half is the answer. Present but not
+    last means text followed it, violating "and nothing else". All three are
+    refused, and the message says which."""
+    nd = load_module(bed)
+    if terminator_defect == "absent":
+        payload = "Name1\nName2\n".encode("utf-8")
+        needle = "carries no"
+    elif terminator_defect == "duplicated":
+        payload = f"Name1\n{nd.END_OF_LIST}\nName2\n{nd.END_OF_LIST}\n".encode("utf-8")
+        needle = "repeats the"
+    else:
+        payload = f"{nd.END_OF_LIST}\nName1\n".encode("utf-8")
+        needle = "is not its last line"
+    with pytest.raises(nd.NameDiscoveryError) as excinfo:
+        nd.parse_reply(payload, "unit.1")
+    assert needle in str(excinfo.value)
+
+
+def test_b17_a_terminator_used_as_a_reserved_line_is_still_a_duplicate(bed):
+    """The terminator's own line is reserved: a reply whose lines are the
+    terminator, then a name, then the terminator again is refused as a
+    duplicate, whichever position the first copy sits at -- the count is what
+    parse_reply checks, not just the last line."""
+    nd = load_module(bed)
+    payload = f"{nd.END_OF_LIST}\nName1\n{nd.END_OF_LIST}\n".encode("utf-8")
+    with pytest.raises(nd.NameDiscoveryError) as excinfo:
+        nd.parse_reply(payload, "unit.1")
+    assert "repeats the" in str(excinfo.value)
+
+
+def test_b17_a_terminator_only_reply_parses_to_an_empty_list(bed):
+    """The legitimate "this unit has no proper names" answer -- what
+    `{"forms": []}` expressed under the old contract."""
+    nd = load_module(bed)
+    payload = f"{nd.END_OF_LIST}\n".encode("utf-8")
+    assert nd.parse_reply(payload, "unit.1") == []
+
+
+def test_b17_a_blank_or_whitespace_only_reply_is_refused_as_no_terminator(bed):
+    """Blank lines are dropped by the parser, so an empty or whitespace-only
+    file collapses to zero non-blank lines -- the same shape as a reply this
+    driver read before the model wrote anything, and refused for the same
+    reason: it is indistinguishable from "still being written"."""
+    nd = load_module(bed)
+    with pytest.raises(nd.NameDiscoveryError) as excinfo:
+        nd.parse_reply(b"   \n\n  \n", "unit.1")
+    assert "carries no" in str(excinfo.value)
+
+
+def test_b17_a_reply_read_mid_write_fails_the_slot_not_a_thin_harvest(bed):
+    """The regression this mechanism exists to prevent: a model that writes
+    its names in two batches must not be harvested as a complete pass with
+    the second batch silently missing."""
+    nd = load_module(bed)
+    first_write = "Name1\nName2\n".encode("utf-8")  # no terminator yet
+    with pytest.raises(nd.NameDiscoveryError) as excinfo:
+        nd.parse_reply(first_write, "unit.1")
+    assert "carries no" in str(excinfo.value)
+    second_write = f"Name1\nName2\nName3\n{nd.END_OF_LIST}\n".encode("utf-8")
+    assert nd.parse_reply(second_write, "unit.1") == sorted({"Name1", "Name2", "Name3"})
+
+
+def test_b17_gershayim_and_geresh_bearing_forms_survive_verbatim(bed):
+    """The regression that would have caught #888: five Hebrew forms (an
+    honorific, a pointed phrase, a title, a Hebrew-letter year and a
+    vocalised phrase), each carrying an ASCII gershayim (U+0022) or geresh
+    (U+0027) BYTE-FOR-BYTE inside the word -- exactly what broke json.loads
+    under the old contract, since Hebrew writes those marks with the very
+    characters JSON uses as its own string delimiters.
+
+    Authored as explicit \\uXXXX code points, never hand-typed mixed-direction
+    literals: an invisible or reordered character pasted into this fixture
+    would be silently wrong, and unlike a stray whitespace difference, wrong
+    in a way nothing else in this suite would catch."""
+    nd = load_module(bed)
+    forms = [
+        "\u05de\u05d5\u05d4\u05e8\u0022\u05df",
+        "\u05e9\u05b4\u05c2\u05d9\u05d7\u05d5\u05b9\u05ea\u0020\u05d4\u05b8\u05e8\u05b7\u0022\u05df",
+        "\u05e8\u0027\u0020\u05e9\u05b0\u05c1\u05de\u05d5\u05bc\u05d0\u05b5\u05dc",
+        "\u05ea\u05e7\u05e1\u0022\u05d2",
+        "\u05de\u05b9\u05e9\u05b6\u05c1\u05d4\u0020\u05e2\u05b6\u05d1\u05b6\u05d3\u0020\u05d4\u0027",
+    ]
+    payload = _lines_reply(forms, end_of_list=nd.END_OF_LIST)
+    assert nd.parse_reply(payload, "unit.1") == sorted(set(forms))
 
 
 def test_b17_an_oversized_reply_is_refused_not_truncated(bed, tmp_path):
@@ -1228,7 +1406,7 @@ def test_b17_an_oversized_reply_is_refused_not_truncated(bed, tmp_path):
     # check over bytes already in memory.
     box = tmp_path / "over"
     box.mkdir()
-    reply = box / "names.json"
+    reply = box / "names.txt"
     reply.write_bytes(b"x" * (nd.MAX_REPLY_BYTES + 1))
     with pytest.raises(nd.NameDiscoveryError) as excinfo:
         nd.read_sandbox_reply(reply, "unit.1")
@@ -1236,37 +1414,55 @@ def test_b17_an_oversized_reply_is_refused_not_truncated(bed, tmp_path):
     # The three caps are INDEPENDENT, and each has input the other two accept.
     # First: the largest ASCII reply within both structural caps stays under the
     # byte cap, and must be ACCEPTED -- otherwise a legitimate maximal reply is a
-    # failed slot. The forms are kept DISTINCT on purpose: truncating a distinct
-    # suffix away collapses the payload to one repeated string, and the
-    # assertion then passes over 1 form rather than 2000.
+    # failed slot. The forms are kept DISTINCT on purpose: collapsing the payload
+    # to one repeated string would pass the assertion over 1 form rather than
+    # 2000.
     forms = [("a" * nd.MAX_FORM_CHARS)[:-len(str(i))] + str(i)
              for i in range(nd.MAX_FORMS_PER_REPLY)]
     assert len(set(forms)) == nd.MAX_FORMS_PER_REPLY, "the payload must be distinct"
     assert {len(f) for f in forms} == {nd.MAX_FORM_CHARS}, "each form is AT the cap"
-    biggest = json.dumps({"forms": forms}).encode("utf-8")
+    biggest = _lines_reply(forms)
     assert len(biggest) < nd.MAX_REPLY_BYTES, (
         f"the largest ASCII well-formed reply is {len(biggest)} bytes, which must "
         f"stay under the {nd.MAX_REPLY_BYTES}-byte cap")
     assert nd.parse_reply(biggest, "unit.1") == sorted(set(forms))
     # One more form is refused, by the count cap rather than the byte cap.
     with pytest.raises(nd.NameDiscoveryError) as excinfo:
-        nd.parse_reply(json.dumps({"forms": forms + ["z"]}).encode("utf-8"), "unit.1")
+        nd.parse_reply(_lines_reply(forms + ["z"]), "unit.1")
     assert "exceeds the" in str(excinfo.value)
-    # Second, and this is why the byte cap is not redundant machinery: the same
-    # shape in NON-ASCII, JSON-escaped the way a model reply legitimately may be,
-    # is six bytes per character and blows the byte cap while satisfying BOTH
-    # structural caps. Valid JSON, within every other bound, refused on bytes.
-    heb = [("ר" * nd.MAX_FORM_CHARS)[:-len(str(i))] + str(i)
+    # Second, and this is why the byte cap is not redundant machinery: WITHOUT
+    # escaping, a maximal reply in a 2-BYTE-PER-CHAR script (Hebrew) now
+    # legitimately PARSES -- a real reduction in false refusals over the old
+    # JSON contract, where the same shape blew the cap once escaped to 6
+    # bytes/char. Still within both structural caps.
+    heb = [("\u05d0" * nd.MAX_FORM_CHARS)[:-len(str(i))] + str(i)
            for i in range(nd.MAX_FORMS_PER_REPLY)]
-    escaped = json.dumps({"forms": heb}, ensure_ascii=True).encode("utf-8")
-    assert len(escaped) > nd.MAX_REPLY_BYTES, (
-        f"expected an escaped maximal reply to exceed the cap; got {len(escaped)}")
+    assert len(set(heb)) == nd.MAX_FORMS_PER_REPLY, "the payload must be distinct"
+    assert {len(f) for f in heb} == {nd.MAX_FORM_CHARS}, "each form is AT the cap"
+    heb_reply = _lines_reply(heb)
+    assert len(heb_reply) < nd.MAX_REPLY_BYTES, (
+        f"a maximal 2-byte-per-char reply is {len(heb_reply)} bytes, which must "
+        f"stay under the {nd.MAX_REPLY_BYTES}-byte cap now that it is not "
+        f"JSON-escaped")
+    assert nd.parse_reply(heb_reply, "unit.1") == sorted(set(heb))
+    # Third: the byte cap is still REACHABLE within the same two structural
+    # caps -- by a 3-byte-per-char script. This is where the "byte cap is not
+    # redundant" demonstration moves to, now that the wire format carries raw
+    # UTF-8 instead of a JSON escape sequence.
+    triple = [("\u2014" * nd.MAX_FORM_CHARS)[:-len(str(i))] + str(i)  # em dash
+              for i in range(nd.MAX_FORMS_PER_REPLY)]
+    assert len(set(triple)) == nd.MAX_FORMS_PER_REPLY, "the payload must be distinct"
+    triple_reply = _lines_reply(triple)
+    assert len(triple_reply) > nd.MAX_REPLY_BYTES, (
+        f"expected a maximal 3-byte-per-char reply to exceed the cap; got "
+        f"{len(triple_reply)}")
     with pytest.raises(nd.NameDiscoveryError) as excinfo:
-        nd.parse_reply(escaped, "unit.1")
+        nd.parse_reply(triple_reply, "unit.1")
     assert "exceeds" in str(excinfo.value), (
         "the byte cap must be the bound that refuses it, not a structural cap")
-    print(f"ascii_bytes={len(biggest)} escaped_bytes={len(escaped)} "
-          f"cap={nd.MAX_REPLY_BYTES} forms={len(forms)}")
+    print(f"ascii_bytes={len(biggest)} heb_bytes={len(heb_reply)} "
+          f"triple_bytes={len(triple_reply)} cap={nd.MAX_REPLY_BYTES} "
+          f"forms={len(forms)}")
 
 
 @pytest.mark.parametrize("kind", ["symlink", "fifo"])
@@ -1274,9 +1470,9 @@ def test_b16_a_symlink_or_fifo_at_the_reply_path_is_refused(bed, tmp_path, kind)
     nd = load_module(bed)
     box = tmp_path / "box"
     box.mkdir()
-    target = box / "real.json"
-    target.write_text(json.dumps({"forms": ["x"]}), encoding="utf-8")
-    reply = box / "names.json"
+    target = box / "real.txt"
+    target.write_text(f"x\n{nd.END_OF_LIST}\n", encoding="utf-8")
+    reply = box / "names.txt"
     if kind == "symlink":
         reply.symlink_to(target)
     else:
@@ -1681,11 +1877,14 @@ with record.open("a", encoding="utf-8") as fh:
     fh.write(json.dumps({"sandbox": str(sandbox), "broker_pid": child.pid,
                          "visible": visible}) + "\n")
 
-if mangle == "bad-json":
-    (sandbox / "names.json").write_text("{not json", encoding="utf-8")
+if mangle == "no-terminator":
+    # A reply this driver would read as a valid PREFIX under the old JSON
+    # contract's completeness check: no closing token, so it is
+    # indistinguishable from one read before the model finished writing it.
+    (sandbox / "names.txt").write_text("\n".join(forms) + "\n", encoding="utf-8")
 else:
-    (sandbox / "names.json").write_text(
-        json.dumps({"forms": forms}, ensure_ascii=False), encoding="utf-8")
+    (sandbox / "names.txt").write_text(
+        "\n".join(list(forms) + ["--- END OF LIST ---"]) + "\n", encoding="utf-8")
 print(json.dumps({"jobId": "job-%d" % os.getpid()}))
 '''
 
@@ -1890,7 +2089,7 @@ def test_b12_a_bound_harvest_is_reused_and_a_deleted_one_is_re_dispatched(bed, s
 @pytest.mark.parametrize("mangle,needle", [
     ("launch-fails", "codex launch returned"),
     ("no-jobid", "printed no jobId"),
-    ("bad-json", "not one JSON object"),
+    ("no-terminator", "carries no"),
 ])
 def test_b20_a_failed_slot_is_counted_and_writes_no_harvest(bed, shim, mangle, needle):
     rc, out, err = run(bed, "--dispatch", "--run-id", "d3",

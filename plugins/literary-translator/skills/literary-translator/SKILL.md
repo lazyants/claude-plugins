@@ -490,7 +490,9 @@ here) and `${durable_root}/runs/.orchestration_bundle_hash` (sha1 over
 composite cache key, but gating for resume: folded into the resume-integrity
 digest, and also surfaced in W8's reporting). Both are written atomically
 (sibling temp file + `os.replace`) with a trailing newline; both readers
-`.strip()`.
+`.strip()`. These are the ONLY two files this script writes — the ownership markers (root
+marker, per-directory `.literary-translator-managed`) are the session's own writes, and
+`--verify` below never checks them, so a green `--verify` says nothing about adoption.
 
 Last action: the deferred `particle_config` existence check — resolve
 `source.language.particle_config` as `${durable_root}/languages/<value>`
@@ -503,17 +505,15 @@ it still doesn't resolve to a real file.
 `plugin_bundle_hash` for every project on upgrade. A moved
 `plugin_bundle_hash` makes every already-converged segment's cache key
 mismatch, reclassifying it `stale` — dispatch-eligible again.
-`select_segments.py`'s Step 1 gate (see the `--allow-retranslate-converged`
-flag, W5 below) refuses that using the durable
-`${durable_root}/segments/.ever_converged.{seg}` sentinel — but a project
-that converged segments on an OLDER version of this plugin, before that
-sentinel existed, has NO sentinels at all, so the gate has nothing to
-refuse with: the very first W5 dispatch after upgrading would sail through
-ungated and silently retranslate the whole book. Before the first W5
-dispatch on any project this plugin has touched before it had
-`segment_dispatch_driver.py`, run (dry run by default — issues no mutating
-operation and changes no project content; the script's own docstring
-explains why that is the exact wording and "zero filesystem writes" is not):
+`select_segments.py`'s Step 1 gate (see the `--allow-retranslate-converged` flag, W5
+below) refuses that using the durable `${durable_root}/segments/.ever_converged.{seg}`
+sentinel — but a project that converged segments on an OLDER version of this plugin,
+before that sentinel existed, has NO sentinels at all, so the gate has nothing to refuse
+with: the very first W5 dispatch after upgrading would sail through ungated and silently
+retranslate the whole book. Before the first W5 dispatch on any project this plugin has
+touched before it had `segment_dispatch_driver.py`, run (dry run by default — issues no
+mutating operation and changes no project content; the script's own docstring explains
+why that is the exact wording and "zero filesystem writes" is not):
 
 ```
 python3 ${durable_root}/scripts/backfill_ever_converged.py
