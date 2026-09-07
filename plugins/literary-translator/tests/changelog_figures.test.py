@@ -504,7 +504,34 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.100.0 (#890 -- `glossary.citation_content_types` could name a
+    # ROTATED TO 1.104.1 (#895 -- the #820 W5 admission gate refused over an
+    # unmerged glossary run and named `newest_run_id`, which is routinely the
+    # run that DOES carry its merge marker), per the maintenance contract
+    # above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. The
+    # entry's own measurement -- three run directories on one live project,
+    # the newest merged and an earlier aborted one not -- is a fact about a
+    # book project in ANOTHER REPOSITORY, so no implementation in THIS tree
+    # can re-derive it, the same class the 1.99.0, 1.98.0, 1.94.0, 1.91.0 and
+    # 1.90.0 rotations below name for theirs; it is also spelled as a WORD
+    # ("three run directories"), which `_TOKEN` cannot see regardless.
+    #
+    # Every other digit-run in the entry is an IDENTIFIER, not a measurement:
+    # the version (1.104.1), the release date, the issue numbers (#895 and the
+    # #820 gate it repairs), the two RUN_IDs quoted verbatim out of the live
+    # refusal, and `W3`/`W3a`/`W5`, the passes the entry names. The `1` and `2`
+    # inside the two quoted `N glossary run(s)` message samples are parts of a
+    # rendered message string, not counts of anything this tree owns -- the
+    # count they show is a property of the fixture that produced them.
+    #
+    # The count this release COULD have quoted is a count of something in this
+    # tree: how many tests `tests/select_segments_glossary_gate.test.py` now
+    # carries for this refusal. It is deliberately left unstated, for the same
+    # reason the 1.99.0 rotation below gives for its own: a digit here is a
+    # figure nothing red would catch going stale.
+    #
+    # The 1.100.0 rotation this replaces, kept as its own record (#890 -- `glossary.citation_content_types` could name a
     # type the citation fetcher has no way to read, and the fetcher then
     # destroyed the body instead of refusing it), per the maintenance contract
     # above.
@@ -948,7 +975,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.100.0"
+FIGURES_VERSION = "1.104.1"
 
 
 def _newest_entry():

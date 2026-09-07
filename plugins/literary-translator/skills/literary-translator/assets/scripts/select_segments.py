@@ -4557,11 +4557,11 @@ def check_glossary_runs_merged(
     `outstandingCandidates` = None (this condition counts RUNS, not
     batches or candidate names -- neither of the other two reasons'
     counted quantities applies here), `glossaryRunId` = `newest_run_id`,
-    naming how many runs lack a marker, the runs directory, the newest run
-    id, and the three remedies (finish/resume W3/W3a, run
-    backfill_glossary_merge_ack.py --apply for a run that predates this
-    gate, or pass --allow-unmerged-glossary). Every run accounted for ->
-    admit (`None`)."""
+    naming how many runs lack a marker, the runs directory, EVERY id in
+    `unmerged_run_ids` (#895 -- the remedy is per-run, and the newest run
+    is routinely the one that DOES carry a marker), and the three remedies
+    (finish/resume W3/W3a, run backfill_glossary_merge_ack.py --apply, or
+    pass --allow-unmerged-glossary). Every run accounted for -> admit."""
     unmerged_run_ids = []
     for run_id in run_ids:
         marker_path = glossary_runs_dir / run_id / "merged.json"
@@ -4632,7 +4632,7 @@ def check_glossary_runs_merged(
     return _glossary_refusal(
         "glossary-run-unmerged",
         f"{len(unmerged_run_ids)} glossary run(s) under {glossary_runs_dir} "
-        f"(newest: {newest_run_id}) have no merge marker yet -- the "
+        f"have no merge marker yet: {', '.join(unmerged_run_ids)} -- the "
         "W3/W3a glossary pass for this project has not recorded that its "
         "batches were merged. Finish (or resume) it, run "
         "backfill_glossary_merge_ack.py --apply for a run that predates "
@@ -4758,11 +4758,11 @@ def check_glossary_current(dirs: dict) -> "dict | None":
     claim the check did not make." On a project with an abandoned earlier
     run and a later, unrelated run, a welded sentence would be false. Do
     NOT re-merge these into one clause without re-deriving that the merged
-    claim is actually true. CONDITION 3's own refusal keeps the same
-    discipline: it names the newest run id for continuity with CONDITION
-    2's refusal shape, but its count (when populated at all) is never
-    attributed to the newest run alone -- see
-    `check_glossary_runs_merged()`'s own docstring."""
+    claim is actually true. CONDITION 3 keeps that discipline from the
+    other side (#895): its `glossaryRunId` stays the newest run id, for
+    continuity with CONDITION 2's refusal shape, while its MESSAGE names
+    every run that lacks a marker -- a per-run claim CONDITION 3, and only
+    CONDITION 3, actually establishes for each run it read."""
     durable_root = dirs["durable_root"]
     glossary_runs_dir = durable_root / "glossary" / "runs"
     scan_result = scan_glossary_run_ids(glossary_runs_dir)
