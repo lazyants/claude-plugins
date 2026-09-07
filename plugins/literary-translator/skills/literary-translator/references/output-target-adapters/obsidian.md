@@ -709,11 +709,25 @@ other.
 
 The PAIR is what makes a bracket editorial, so both sides must be present or
 nothing is touched — an unmatched `[` stays the literal source text the
-unresolved-bracket contract promises. **That is an accepted residual:** a bare
-literal `[` immediately before an emitted link still corrupts the target, and
-escaping it would preserve what the reader sees, but a lone bracket is not an
+unresolved-bracket contract promises. **Present is not adjacent**, though: a
+translator brackets a whole editorial aside that opens with the name —
+`[Reb Noson explained that … .]` — as readily as the name alone, and there the
+two sides sit hundreds of characters apart. A `]` that is not against the name
+is looked for further along the same line, and finding it escapes the opening
+side alone: a `]` far from the link is not a parse hazard, and nothing outside
+the replaced span is this rewrite's to touch.
+
+The search gives up at a `[` (the `]` ahead closes an inner pair, and only a
+balanced scan could tell which is which), at a line break in either form, and
+at the end of the text — each leaving the source exactly as written. **Those
+are the accepted residuals**, together with the case they generalise: a bare
+literal `[` whose `]` never arrives still corrupts the target, and escaping it
+would preserve what the reader sees, but a bracket with no partner is not an
 editorial pair and widening the rule to reach it is a product decision this
-release does not take.
+release does not take. Neither is markdown context: inside an inline code span
+the escape shows the reader a backslash, which telling code from prose would
+need a markdown parser to avoid — and the wikilink syntax that span already
+carries is unusable either way.
 
 The two sides are then decided SEPARATELY, each on the PARITY of its own
 backslash run. On the opening side that run sits BEFORE the `[` and stays in

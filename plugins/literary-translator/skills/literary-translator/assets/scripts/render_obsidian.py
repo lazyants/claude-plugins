@@ -1826,6 +1826,16 @@ def _editorial_bracket_sides(text, start, end):
     operator's own escape is never doubled -- a reader must never be shown a
     backslash.
 
+    PRESENT IS NOT ADJACENT. A translator brackets a whole editorial aside
+    that OPENS with a name -- `[Name explained that … .]` -- as readily as the
+    name alone, and there the pair is hundreds of characters wide. Requiring
+    the `]` to sit against the span recognised only `[Name]` and shipped the
+    aside's opener bare, which is exactly the `[[[` collision this function
+    exists to prevent. So a closer that is not adjacent is looked for FURTHER
+    ALONG THE LINE (`_closes_later_on_the_line`), and finding it repairs the
+    opening side alone: a `]` far from the link is not a parse hazard, and
+    nothing outside `text[…:end]` is the caller's to rewrite.
+
     PARITY ON BOTH SIDES, and the third return value is what makes the
     closing side possible. The opening side's backslash run sits BEFORE its
     `[`, so it stays in the prefix untouched and the caller consumes one
@@ -1842,9 +1852,39 @@ def _editorial_bracket_sides(text, start, end):
     run = 0
     while end + run < len(text) and text[end + run] == "\\":
         run += 1
-    if end + run >= len(text) or text[end + run] != "]":
-        return False, False, 0
-    return open_literal, run % 2 == 0, run
+    if end + run < len(text) and text[end + run] == "]":
+        return open_literal, run % 2 == 0, run
+    # No adjacent closer. Only a LITERAL opener has anything to repair, so an
+    # already-escaped one skips the scan entirely rather than paying for a
+    # result it cannot use.
+    if open_literal and _closes_later_on_the_line(text, end):
+        return True, False, 0
+    return False, False, 0
+
+
+def _closes_later_on_the_line(text, index):
+    """Does an aside opened immediately before an emitted link CLOSE later on
+    the same line, with nothing in between that would make the `]` somebody
+    else's?
+
+    A `[` first means the `]` ahead belongs to the INNER pair, so this is
+    `[Name said [x] more]` -- a nested bracket, which only a balanced scan
+    could resolve and which this file treats as disproportionate elsewhere
+    too. A line break first means the aside is not an aside: an editorial
+    bracket the translator opened is closed in the prose it interrupts, not a
+    paragraph later. Running out of text is the third way, and every one of
+    them fails SAFE, leaving the source exactly as written.
+
+    CR as well as LF, and each on its own: a payload may carry neither
+    (assemble.py refuses them) but the text BETWEEN two spans may carry
+    either, and testing only LF would let a bare-CR document pair a `]` from
+    the next line."""
+    for char in text[index:]:
+        if char == "]":
+            return True
+        if char in "[\n\r":
+            return False
+    return False
 
 
 def _editorial_bracket_emit(text, last, start, end, piece):

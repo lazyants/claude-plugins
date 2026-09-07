@@ -1710,6 +1710,29 @@ def test_a_span_record_whose_payload_disagrees_with_the_text_is_refused(tmp_path
         pytest.param("{link}", "{piece}", 0, id="no-brackets"),
         pytest.param("[{link}", "[{piece}", 0, id="unmatched-opener-untouched"),
         pytest.param("{link}]", "{piece}]", 0, id="unmatched-closer-untouched"),
+        # PRESENT, not ADJACENT (#897). A translator brackets a whole
+        # editorial aside that OPENS with the name as readily as the name
+        # alone, and there the pair is hundreds of characters wide. Requiring
+        # the `]` to sit against the span left that opener bare -- the `[[[`
+        # collision this whole section exists to prevent. The distant `]` is
+        # NOT escaped: alone it is not a parse hazard.
+        pytest.param("[{link} explained that the sky was blue.]",
+                     "\\[{piece} explained that the sky was blue.]", 1,
+                     id="distant-closer-repairs-the-opener"),
+        pytest.param("\\[{link} explained that the sky was blue.]",
+                     "\\[{piece} explained that the sky was blue.]", 0,
+                     id="distant-closer-leaves-an-escaped-opener-alone"),
+        # Two of the terminators the search stops at, each leaving the source
+        # text exactly as the translator wrote it. A `[` first means the `]`
+        # ahead closes the INNER pair; a line break first means the aside is
+        # not one. The line break's other form, a bare CR, is unobservable
+        # HERE: the note is read back in text mode, which turns a lone CR into
+        # LF, so a passing assertion would say nothing about CR at all. It is
+        # pinned on the helper instead, along with running out of text.
+        pytest.param("[{link} said [x] more]", "[{piece} said [x] more]", 0,
+                     id="nested-opener-stops-the-search"),
+        pytest.param("[{link} spoke.\nAnd then ]", "[{piece} spoke.\nAnd then ]", 0,
+                     id="line-feed-stops-the-search"),
     ],
 )
 def test_each_bracket_side_is_escaped_only_when_it_is_literal(
@@ -1717,8 +1740,8 @@ def test_each_bracket_side_is_escaped_only_when_it_is_literal(
 ):
     """Whatever the reader was shown before must still be what they see --
     `[Reb Noson]` either way -- while the emitted wikilink always parses. An
-    escape the operator already wrote is never doubled, and an UNMATCHED
-    bracket is left alone: without a pair it is not an editorial bracket, it
+    escape the operator already wrote is never doubled, and a bracket with no
+    partner is left alone: without a pair it is not an editorial bracket, it
     is the literal source text the unresolved-bracket contract promises."""
     piece = "[[People/Reb Noson|Reb Noson]]"
     nodes = [make_node("p1", "seg01",
@@ -1745,6 +1768,76 @@ def test_the_canon_linker_decides_bracket_sides_the_same_way(tmp_path):
     )
     body = segment_note_texts(out_dir)[0]
     assert "And \\[[[People/Иван|Ivan]]\\] spoke." in body, f"got:\n{body}"
+
+
+def test_the_canon_linker_also_pairs_a_distant_closer(tmp_path):
+    """#897 at the site an UNDECLARED project reaches. The parity table above
+    covers the marked site only, and a distant pair recognised there and not
+    here would ship the dead link to exactly the books that never opted into
+    entity markup."""
+    canon = make_canon({"Иван": canon_entry("Иван", "Ivan")})
+    nodes = [make_node("p1", "seg01", "And [Ivan explained that the sky was blue.] then left.")]
+    out_dir, _manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans=None), canon,
+        make_profile(entity_markup=False),
+    )
+    body = segment_note_texts(out_dir)[0]
+    assert ("And \\[[[People/Иван|Ivan]] explained that the sky was blue.] then left."
+            in body), f"got:\n{body}"
+
+
+def test_a_heading_with_a_distant_pair_escapes_the_body_and_leaves_the_title_plain(tmp_path):
+    """An opener escaped with NO closing escape behind it is a shape
+    `_flatten_wikilinks` had never seen: every case before #897 handed it a
+    balanced `\\[…\\]`. The title must still come out as the translator wrote
+    it, with no backslash and no wikilink."""
+    nodes = [make_node("h1", "seg01", f"[{ent(1, 'John')} explained it.]",
+                       kind="heading", raw_type="H2")]
+    out_dir, _manifest = render_into(
+        tmp_path, make_nodestream(nodes, spans={"1": span("person", "John")}),
+        make_canon({}), make_profile(),
+    )
+    body = segment_note_texts(out_dir)[0]
+    assert "## \\[[[People/John|John]] explained it.]" in body, f"got:\n{body}"
+    title = parse_frontmatter(body)["title"]
+    assert title == "[John explained it.]", f"got title {title!r}"
+    assert "\\" not in title and "[[" not in title
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        pytest.param("[Name]", (True, True, 0), id="adjacent-pair"),
+        pytest.param("[Name explained that the sky was blue.]", (True, False, 0),
+                     id="distant-pair"),
+        pytest.param("[Name explained that the sky was blue.", (False, False, 0),
+                     id="no-closer-at-all"),
+        # The terminators, at the only layer that can see them. A payload
+        # carries neither CR nor LF (assemble.py refuses both) but the text
+        # BETWEEN two spans carries either, and a bare CR reaches this helper
+        # exactly as written -- unlike a rendered note, which is read back in
+        # text mode and would report a CR as LF. Testing only CRLF would pass
+        # on its LF alone.
+        pytest.param("[Name spoke.\nAnd then ]", (False, False, 0),
+                     id="line-feed-stops-the-search"),
+        pytest.param("[Name spoke.\rAnd then ]", (False, False, 0),
+                     id="carriage-return-stops-the-search"),
+        pytest.param("[Name spoke.\r\nAnd then ]", (False, False, 0),
+                     id="crlf-stops-the-search"),
+        pytest.param("[Name said [x] more]", (False, False, 0),
+                     id="nested-opener-stops-the-search"),
+    ],
+)
+def test_the_sides_helper_decides_the_pair_and_its_closing_run(text, expected):
+    """Asserted on the helper directly for two reasons a rendered body cannot
+    cover. `close_run_len` is the helper's return contract -- "characters to
+    consume after the span" -- and a distant pair reports zero because it
+    consumes nothing there; the caller reads the field only when it escapes
+    the closing side, so a wrong value would be invisible in rendered output
+    and would surface as a splice bug the day that branch changes. And a bare
+    CR never survives the note round-trip, so this is the only layer where
+    that terminator is observable at all."""
+    assert render_obsidian._editorial_bracket_sides(text, 1, 5) == expected
 
 
 # ===========================================================================
