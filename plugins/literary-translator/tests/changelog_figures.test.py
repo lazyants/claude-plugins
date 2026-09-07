@@ -531,8 +531,20 @@ FIGURES = [
     # and the glossary pass read it as forbidding the established target FORM
     # too; plus the JSON-escaping rule for a source form's own ASCII quote), per
     # the maintenance contract above.
+    # The 1.111.0 rotation this replaces, kept as its own record (#901 -- the two citation-downgrade prompts read
+    # basis:"transliterated" as mechanical transcription only), per the
+    # maintenance contract above.
     #
-    # ONE row, and the entry was walked completely rather than assumed.
+    # ------------------------------------------------------------------------
+    # The 1.109.0 rotation this replaces, kept as its own record (#891 --
+    # `research_mode: offline` forbids a citation,
+    # and the glossary pass read it as forbidding the established target FORM
+    # too; plus the JSON-escaping rule for a source form's own ASCII quote).
+    #
+    # ONE row when it was current, RETIRED here with the entry it was written
+    # against: this guard checks the newest entry only, so a row left live
+    # would be re-derived against the 1.111.0 entry, which claims nothing
+    # about `PROMPT_CONTRACT_VERSION`. The row it carried, kept as a record:
     #
     # THE ROW: `PROMPT_CONTRACT_VERSION` "stays at 3". This release deliberately
     # does NOT bump it, and says so with the digit, because a reader deciding
@@ -563,13 +575,45 @@ FIGURES = [
     # version numbers, the release date, the issue numbers (#891, and the #860,
     # #888, #491 and 1.75.0 / 1.89.0 releases the entry names), and `basis`
     # values quoted as strings.
+    #     Figure("stays at 3", 3, _int_constant("profile_validate.py",
+    #            "CURRENT_PROMPT_CONTRACT_VERSION"))
     #
     # ------------------------------------------------------------------------
     # The 1.108.0 rotation this replaces, kept as its own record (#893 -- Step 0
     # said nothing when a book scaffolded FOR a markup-driven vault index never
     # got the block that builds one), per the maintenance contract above.
     #
-    # ZERO rows, and the entry was walked completely rather than assumed. It
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # numeral in it is either an IDENTIFIER or a measurement taken OUTSIDE this
+    # tree, and neither shape can be re-derived here.
+    #
+    # The measurements: "29 of 143" established citations that did not retrieve
+    # on one live 22-batch volume, and "11 of 64" cited URLs already dead in the
+    # run behind #891, broken down as four 403s, six PDFs refused by content
+    # type and one 404. Those are facts about live book projects in other
+    # repositories and about one run's fetch results. No implementation in this
+    # tree owns any of them, so a row would have to hardcode its own answer --
+    # the `lambda: 17` failure this file's docstring names as the one thing
+    # nothing mechanical can catch.
+    #
+    # The identifiers: the version numbers (1.111.0, and 1.75.0 and 1.89.0 as
+    # the releases whose decisions the entry stands on), the release date, and
+    # the issue numbers (#901, and #891 for the sibling sites this release
+    # deliberately leaves alone). The HTTP statuses 403 and 404 are protocol
+    # constants quoted from what the fetcher recorded, not sizes of anything.
+    #
+    # What the entry states about THIS tree it states by NAME rather than by
+    # count: `batchDispatchPrompt()`, `batchRepairPrompt()`,
+    # `glossary-pass-wf.template.js`, `glossary_TASK.template.md`,
+    # `style_bible.md` section C-translit, `PLUGIN_BUNDLE_MEMBERS` and
+    # `plugin_bundle_hash` are all named, never sized. Those claims are pinned
+    # by `glossary_citation_downgrade_basis.test.py`, which asserts them on the
+    # RENDERED prompts, and by the byte-parity pin in
+    # `glossary_dispatch_driver.test.py`.
+    #
+    # The 1.108.0 rotation this replaces, kept as its own record (#893 -- Step 0 said nothing when a book scaffolded
+    # FOR a markup-driven vault index never got the block that builds one):
+    # also ZERO rows, and that entry was walked completely rather than assumed. It
     # NAMES what it stands on rather than counting it: `output.entity_markup`,
     # its `tags` and `index_from` fields and their `canon`/`markup` values,
     # `assembled_book`, `obsidian`, `profile_validate.py`, `validate_draft.py`,
