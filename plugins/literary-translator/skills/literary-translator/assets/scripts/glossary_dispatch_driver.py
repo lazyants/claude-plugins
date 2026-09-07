@@ -2573,6 +2573,66 @@ def reconcile_state(ctx: Ctx, batches: list, state: dict) -> "list[dict]":
     return reset
 
 
+def apply_requested_resets(ctx: Ctx, indices: "list[int]",
+                           state: dict) -> "list[dict]":
+    """The reset an OPERATOR asks for, doing both halves reconcile_state() does.
+
+    A batch that settles at `citation-review-exhausted` has no transition out:
+    drive_all() skips `failed`, and reconcile_state() reaches only a status whose
+    promised artifact is gone -- `failed` promises none, so deleting that batch's
+    snapshots does not summon a reset either. The recovery left to the operator
+    was a hand-edited state document, and its HALF-done form -- the entry
+    rewritten, the approved snapshots left in place -- is worse than doing
+    nothing: every rung re-collides with the create-once snapshot its predecessor
+    left, spends itself on `approve-failed`, and the batch settles again
+    recording a citation review that had nothing to do with it (#892).
+
+    So this performs the SAME two halves reconcile_state() performs, on the
+    indices NAMED on the command line rather than on a status test: release the
+    approved slots, then write the entry that function writes -- including
+    `resumeSkipDropped`, for its reason: a reset batch must DISPATCH at attempt 0
+    rather than re-approve a fragment a judge may already have rejected.
+
+    Deliberately STATUS-BLIND. The operator names the batch, and a status filter
+    here would refuse exactly the case the flag exists for -- the one where the
+    state document itself is what is wrong. The cost of resetting a batch that
+    did not need it is one re-drive, and it is reported in `reset[]` like any
+    other."""
+    reset = []
+    for idx in indices:
+        st = state["batches"].get(str(idx)) or {}
+        log(f"batch {idx}: reset requested on the command line -- dropping its "
+            f"{st.get('status', 'pending')!r} status and re-driving it from attempt 0")
+        undeleted = _release_approved_slots(ctx, idx)
+        state["batches"][str(idx)] = {"attempt": 0, "status": "pending",
+                                      "rejection_reason": None,
+                                      "resumeSkipDropped": True}
+        entry = {"batch": idx, "was": st.get("status"), "attempt": st.get("attempt"),
+                 "reason": "reset requested on the command line",
+                 "requested": True}
+        if undeleted:
+            # Same non-fatal handling reconcile_state() gives it, and for the same
+            # reason: an unremovable file is an environment fault, the rung it
+            # blocks reports itself as approve-failed, and failing the whole
+            # invocation would take down the batches that are fine.
+            entry["undeleted"] = undeleted
+            log(f"batch {idx}: could not release {len(undeleted)} approved slot(s); "
+                f"the re-drive may be refused at approve time: {undeleted}")
+        reset.append(entry)
+    return reset
+
+
+# Named ON the terminal record rather than logged, because `not_ready[]` is what
+# the session reads: until #892 that entry described the outcome and named no move
+# that changes it, while the only move there was -- a hand-edited state document --
+# was both undocumented and, done by halves, destructive.
+EXHAUSTED_RECOVERY = (
+    "re-drive this batch from attempt 0: re-invoke the driver with "
+    "--reset-batches <this entry's batchIndex>, which releases the approved "
+    "snapshots the re-drive would otherwise be refused by. Drop the flag again "
+    "from the next invocation.")
+
+
 def _exhaust(st: dict, attempt: int, last_rejection, *, attempts_used: int) -> dict:
     """The ladder's ONE terminal transition, recorded at the rung that ran.
 
@@ -2581,7 +2641,8 @@ def _exhaust(st: dict, attempt: int, last_rejection, *, attempts_used: int) -> d
     is the only way in), so it reports the ladder's own length, while every other
     caller exhausts at a rung it actually drove."""
     st.update(status="failed", attempt=attempt, reason="citation-review-exhausted",
-              attemptsUsed=attempts_used, lastRejection=last_rejection)
+              attemptsUsed=attempts_used, lastRejection=last_rejection,
+              recovery=EXHAUSTED_RECOVERY)
     return st
 
 
@@ -3091,6 +3152,54 @@ def template_max_citation_retries(template_text: str) -> int:
     return int(match.group(1))
 
 
+# A batch index is one to nine digits, optionally signed. The DIGIT CAP is not
+# decoration: `int()` refuses a decimal string past sys.get_int_max_str_digits()
+# (4300 by default) with an uncaught ValueError, so a long enough token -- even
+# 4301 zeros, which is numerically batch 0 -- would crash the invocation instead
+# of producing the named refusal this flag promises. glossary_batch_plan.py
+# enumerates 0..len(batches)-1 with no ceiling of its own, so the bound is stated
+# as what it is: nine digits is far beyond any practical glossary plan -- the
+# first index it excludes needs a billion batches -- and it is checked before any
+# conversion rather than after one.
+# `[0-9]`, not `\d`: the class is Unicode-wide, so an Arabic-Indic "\u0663" or a
+# fullwidth "\uff11" would fullmatch and convert to an ordinary int. Neither can
+# reach a batch this run does not have -- the membership check below still
+# refuses -- but a batch index is an ASCII integer, and a pattern that admits a
+# spelling no plan ever produces is looser than what this flag documents.
+_BATCH_INDEX_RE = re.compile(r"-?[0-9]{1,9}")
+
+
+def parse_reset_batches(raw: str, batches: list) -> "list[int]":
+    """The indices --reset-batches names, checked against THIS run's batch list.
+
+    Every token must be a plain integer AND must name a batch this run holds. An
+    index the run does not have is a typo, and accepting it would report a reset
+    in `reset[]` that released nothing and re-drove nothing -- the same shape as
+    the `reset: 0` an operator already gets from deleting snapshots by hand.
+
+    `int()` is not the membership test: it accepts `1_0` as ten and `+3` as
+    three, so a mistyped index could resolve to a real batch and reset the wrong
+    one. The pattern is matched first, and it is `fullmatch` on purpose.
+
+    Duplicates collapse and the result is ascending, so the reset list reads the
+    same however the operator typed it."""
+    known = {batch["index"] for batch in batches}
+    wanted = set()
+    for token in raw.split(","):
+        text = token.strip()
+        if not _BATCH_INDEX_RE.fullmatch(text):
+            fatal("--reset-batches takes a comma-separated list of batch indices, "
+                  "as in --reset-batches 0,3; "
+                  f"{text!r} is not one", exit_code=2, given=raw[:200])
+        idx = int(text)
+        if idx not in known:
+            fatal(f"--reset-batches names batch {idx}, which this run does not "
+                  "have; the indices come from --batches-file",
+                  exit_code=2, known=sorted(known))
+        wanted.add(idx)
+    return sorted(wanted)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="glossary_dispatch_driver.py",
@@ -3120,6 +3229,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    default=3500)
     p.add_argument("--resumed-batch-indices", dest="resumed_batch_indices",
                    default="[]")
+    p.add_argument("--reset-batches", dest="reset_batches",
+                   help="comma-separated batch indices to send back to attempt 0 "
+                        "BEFORE this invocation drives anything (#892): each one's "
+                        "approved snapshots are released and its state entry is "
+                        "rewritten. The supported recovery for a batch that settled "
+                        "at citation-review-exhausted. It resets on EVERY invocation "
+                        "that carries it, so drop it from the next one.")
     p.add_argument("--poll-sec", dest="poll_sec", type=float,
                    default=DEFAULT_POLL_SEC)
     p.add_argument("--deadline-sec", dest="deadline_sec", type=float,
@@ -3168,6 +3284,11 @@ def main(argv=None) -> int:
         fatal("--resumed-batch-indices must be a JSON array of integer batch "
               "indices", exit_code=2, given=repr(resumed_raw)[:200])
     resumed = set(resumed_raw)
+    # Parsed HERE, against the batch list, and before anything is dispatched: a
+    # mistyped index must refuse the invocation rather than be discovered after
+    # the run has bought codex jobs for the batches behind it.
+    requested_resets = (parse_reset_batches(args.reset_batches, batches)
+                        if args.reset_batches is not None else [])
 
     judges = enforce_local_cap(len(batches), max_retries, args.batch_agent_cap,
                                args.research_mode)
@@ -3202,7 +3323,32 @@ def main(argv=None) -> int:
         # whose snapshot no longer exists must be refused as "not awaiting a judge"
         # rather than as a snapshot fault, and the batch must be re-driven in the
         # same invocation instead of waiting for one that never comes.
-        reset_batches = reconcile_state(ctx, batches, state)
+        # The operator's own resets go FIRST, for two reasons. They must land
+        # before the verdicts are read, exactly as reconciliation must: a verdict
+        # answering a batch the operator has just sent back to attempt 0 is
+        # refused as "not awaiting a judge" rather than admitted against a
+        # snapshot that is about to be replaced. And they leave the batch
+        # `pending`, which _stale_status_reason() has no reason for -- so
+        # reconcile_state() cannot report the same batch a second time.
+        reset_batches = apply_requested_resets(ctx, requested_resets, state)
+        reset_batches += reconcile_state(ctx, batches, state)
+        if reset_batches:
+            # PERSISTED BEFORE ANYTHING IS DRIVEN, and the requested reset is why.
+            # WITHOUT --record-verdicts (whose own save runs just below) the first
+            # save is the one drive_all() makes after the first batch it drives,
+            # so a kill inside that first dispatch left the document exactly as it
+            # was, while the released snapshots were already gone from disk. For a
+            # RECONCILED reset that is harmless, since the missing artifact is
+            # still missing and the next invocation re-derives the same reset.
+            # A REQUESTED one has no such
+            # trigger: its cause was a flag on a command line, the snapshots it
+            # released are already gone, and the document still says `failed` --
+            # so the relaunch this driver documents (the same command, without
+            # the flag, which must not be repeated) drives nothing and reports
+            # the batch exhausted. The operator's decision is lost across exactly
+            # the interruption #882 exists for. Saving here costs one write and
+            # makes the reset survive its own crash.
+            save_state(verdict_dir, state)
         # A RESET BATCH IS NO LONGER A RESUMED ONE. `resumed` is decided once,
         # before this run touches anything, and it means "resume_setup.py checked
         # this batch's attempt-0 fragment and it is good" -- which is what
@@ -3227,7 +3373,8 @@ def main(argv=None) -> int:
         # by an earlier invocation that was then killed is on disk as a `pending`
         # entry carrying `resumeSkipDropped`, and it is no less a reset for having
         # been made earlier (#882). This invocation's own resets are included too
-        # -- reconcile_state() has just written the marker for each of them.
+        # -- reconcile_state() and apply_requested_resets() have just written the
+        # marker for each of them.
         resumed -= {int(index) for index, st in state["batches"].items()
                     if st.get("resumeSkipDropped")}
         recorded = {"recorded": [], "refused": []}
