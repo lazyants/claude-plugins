@@ -50,6 +50,16 @@ canon-batch item:
   two different over-long runs stay distinguishable. Still copy it
   verbatim -- that exact string is this batch's own key -- but see the
   truncation rule under `disposition`.
+  **Your fragment is JSON, so mind the wire format.** Some source
+  languages spell an ASCII double quote INSIDE a word -- the Hebrew,
+  Yiddish and Aramaic abbreviation mark is one -- and an ASCII apostrophe
+  likewise. Inside the JSON string that `"` MUST be written `\"`, and the
+  `'` is written bare, exactly as it stands. Never double the quote, never
+  write `\'` (that is not valid JSON at all), and never substitute a
+  look-alike Unicode mark for either: the decoded string has to come back
+  equal to the candidate's own `name`, or the self-check below refuses the
+  whole fragment -- for a parse error on the first two, and for coverage on
+  the third.
 - **`is_proper_name`** -- `false` when the candidate is not actually a
   proper name at all (a frequent common word, an interjection, a bare
   title, or a sentence-initial capitalization artifact). Such a candidate
@@ -73,9 +83,16 @@ canon-batch item:
     exists for this name. Confirm it through an actual reference source
     (never from memory alone) and record the URL in `source`. Forbidden
     outright when `research_mode: offline` -- see below.
-  - **`transliterated`** -- no established form exists; apply this
-    project's own fixed practical-transcription rule
-    (`style_bible.md` section C-translit) instead.
+  - **`transliterated`** -- no citation-backed established form is being
+    claimed; this project's own rules settle the form instead. Apply
+    `style_bible.md` section C-translit AS WRITTEN, together with section
+    C's naming rule. **The style bible governs what that produces, not
+    this bullet.** Where the project's own rule prefers a widely-used
+    target-language form for a place or person that already has one, that
+    form is what this basis carries -- `transliterated` is not a
+    letter-by-letter obligation overriding the rule it points at. Where
+    the project's rule says nothing of the kind, apply its transcription
+    mapping exactly as written.
   - **`title`** -- an honorific/role phrase (e.g. a form meaning
     "Monsieur the Prince" or "the Queen Mother") -- `canonical_target_form`
     holds the unpacked target-language phrase, per this project's own
@@ -165,16 +182,27 @@ canon-batch item:
 
 ### research_mode policy
 
-- **`offline`** forbids `basis: "established"` outright, no exception --
-  use `transliterated` when the fixed rule in `style_bible.md` section
-  C-translit is enough on its own, use `sense_translated` instead when the
-  candidate is a speaking name with a clean sense-rendering (it makes no
-  citation claim at all, so it stays legal under offline), or route the
-  candidate to `review_queue` instead, with a `note` starting with the
-  literal prefix `SOURCE_UNAVAILABLE:`. Never fabricate a citation to get
-  around this.
+- **`offline`** forbids `basis: "established"` outright, no exception.
+  What it forbids is the CITATION-BACKED BASIS, never the target form
+  itself: a form this project's own rules already settle needs no
+  citation, so it stays fully available. Use `transliterated` when
+  `style_bible.md` section C-translit, read with section C's naming rule,
+  settles the form -- including a widely-used target-language form where
+  that rule prefers one. Use `sense_translated` instead when the candidate
+  is a speaking name with a clean sense-rendering (it makes no citation
+  claim at all, so it stays legal under offline). Or route the candidate
+  to `review_queue`, with a `note` starting with the literal prefix
+  `SOURCE_UNAVAILABLE:`. Never fabricate a citation to get around this.
+  `SOURCE_UNAVAILABLE:` is for a candidate whose form this project's own
+  rules do NOT settle and that genuinely needs a human's research later.
+  It is not for a row those rules resolved: marking a settled row that way
+  fills `canon.json` with entries a later reader is told to re-research
+  for nothing.
 - **`live`** allows `established`, but only together with a real, citable
-  reference URL -- never an invented one.
+  reference URL -- never an invented one. When a citable conventional
+  target form does exist, cite it under `established` rather than taking
+  it as `transliterated` from this project's own preference: under `live`
+  that provenance is obtainable, and the canon should carry it.
 
 Word-sense and realia accuracy applies to names too: a title or place name
 can carry a period/domain-specific sense that differs from its modern one.

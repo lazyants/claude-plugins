@@ -81,8 +81,10 @@ applicable, delete this section entirely rather than leaving it empty.
 
 - **Established** (an already-current target-language form exists) -- use it. Confirmed by codex through a
   real reference source, URL recorded in `canon.json`. Never decided from memory alone.
-- **Transliterated** (no established form exists) -- apply the single fixed rule in section C-translit
-  below, uniformly across the whole book.
+- **Transliterated** (no citation-backed established form is claimed) -- apply the single fixed rule in
+  section C-translit below, uniformly across the whole book. That rule is this project's own, and what
+  it produces IS the transliterated form: where it prefers a widely-used target-language form for a
+  name that already has one, that form is the outcome, not a letter-by-letter respelling of it.
 - **Title/honorific mapping** -- this project's own fixed mapping from the source language's titles and
   forms of address to the target language (e.g. how to render an honorific placed before a surname, vs. in
   direct address; how to render standard noble/clerical/civic titles).
@@ -115,14 +117,20 @@ academic romanization scheme, not an ad hoc one)?
 - Nicknames / speaking names -- translate the sense where the source clearly intends one; keep the
   original alongside it when it matters and the sense doesn't carry over cleanly.
 
-### C-translit. Practical source -> target transcription rule (the fixed rule for names with no established form)
+### C-translit. Practical source -> target transcription rule (the fixed rule for every name resolved without a citation)
 
 <!-- LT_REQUIRED_FILL_BEGIN: translit-rule -->
 LT_PLACEHOLDER_UNFILLED -- state your book's fixed source -> target practical transcription rule here: the
-sound-by-sound (or letter-by-letter) mapping this project applies uniformly to every name that doesn't
-have an established target-language form. Base it on this language pair's own standard practical-
-transcription practice where one exists. Cases the rule doesn't cleanly resolve go to the `REVIEW:` queue
-(section G) for manual confirmation before the mass-translate batches run at scale.
+sound-by-sound (or letter-by-letter) mapping this project applies uniformly to every name resolved
+without a citation. Base it on this language pair's own standard practical-transcription practice where
+one exists. Cases the rule doesn't cleanly resolve go to the `REVIEW:` queue (section G) for manual
+confirmation before the mass-translate batches run at scale.
+Say here, explicitly, whether a widely-used target-language form is PREFERRED where the target language
+already spells a place or person its own way (David and Egypt rather than a respelling of the source
+letters), or whether this book transcribes such names too. Either answer is a legitimate editorial
+choice, but leaving it unstated is not: the glossary pass reads this rule as written, and under
+`research_mode: offline` it has no citation route to fall back on, so a silent rule produces
+letter-by-letter forms for names your readers know under another spelling.
 <!-- LT_REQUIRED_FILL_END -->
 
 ### D. Formatting

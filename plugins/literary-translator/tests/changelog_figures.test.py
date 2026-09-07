@@ -504,9 +504,52 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.108.0 (#893 -- Step 0 said nothing when a book scaffolded
-    # FOR a markup-driven vault index never got the block that builds one),
-    # per the maintenance contract above.
+    # ROTATED TO 1.109.0 (#891 -- `research_mode: offline` forbids a citation,
+    # and the glossary pass read it as forbidding the established target FORM
+    # too; plus the JSON-escaping rule for a source form's own ASCII quote), per
+    # the maintenance contract above.
+    #
+    # ONE row, and the entry was walked completely rather than assumed.
+    #
+    # THE ROW: `PROMPT_CONTRACT_VERSION` "stays at 3". This release deliberately
+    # does NOT bump it, and says so with the digit, because a reader deciding
+    # whether their durable `glossary_TASK.md` went stale needs the number
+    # rather than the intention. It is a module-level int in a shipped script,
+    # so it is exactly the class that rots silently: a LATER release that bumps
+    # it legitimately leaves this sentence asserting a value the tree no longer
+    # holds, and nothing else here would go red.
+    # `tests/seed_template_presence.test.py` does not cover it -- that file pins
+    # the EQUALITY of the template's leading marker and the constant, which
+    # survives any bump of both.
+    #
+    # NOT DECLARED, and why: the entry's "up to 16 agent calls" is the Workflow
+    # preflight's worst-case live ceiling, and the fact it stands on is already
+    # pinned as an executable assertion in `tests/batch_size_estimator.test.py`,
+    # which computes the same total from the template's own
+    # `1 + (2 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)` expression and fails
+    # if either constant moves. Declaring it here would re-derive that formula a
+    # third time, which this file's own economics section calls the row that
+    # guards nothing. Same reasoning as the 1.84.1 rotation below.
+    #
+    # The remaining measurements are facts about a live book project in ANOTHER
+    # REPOSITORY -- the 96,539-word source, the ~40% of attempts lost to the
+    # quoting collision, the 28 of 28 batches passing after, one candidate in
+    # four carrying the mark -- so no implementation in THIS tree can re-derive
+    # them, the same class the 1.99.1, 1.99.0, 1.94.0, 1.91.0 and 1.90.0
+    # rotations below name for theirs. Everything else is an identifier: the
+    # version numbers, the release date, the issue numbers (#891, and the #860,
+    # #888, #491 and 1.75.0 / 1.89.0 releases the entry names), and `basis`
+    # values quoted as strings.
+    Figure(
+        "stays at 3",
+        3,
+        lambda: _int_constant("profile_validate.py", "CURRENT_PROMPT_CONTRACT_VERSION"),
+    ),
+    #
+    # ------------------------------------------------------------------------
+    # The 1.108.0 rotation this replaces, kept as its own record (#893 -- Step 0
+    # said nothing when a book scaffolded FOR a markup-driven vault index never
+    # got the block that builds one), per the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed. It
     # NAMES what it stands on rather than counting it: `output.entity_markup`,
@@ -586,10 +629,10 @@ FIGURES = [
     # reason the 1.99.0 rotation below gives for its own: a digit here is a
     # figure nothing red would catch going stale.
     #
-    # The 1.100.0 rotation this replaces, kept as its own record (#890 -- `glossary.citation_content_types` could name a
-    # type the citation fetcher has no way to read, and the fetcher then
-    # destroyed the body instead of refusing it), per the maintenance contract
-    # above.
+    # The 1.100.0 rotation this replaces, kept as its own record (#890 --
+    # `glossary.citation_content_types` could name a type the citation fetcher
+    # has no way to read, and the fetcher then destroyed the body instead of
+    # refusing it), per the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed. The
     # entry quotes THREE sets of measurements and no implementation in THIS tree
@@ -1030,7 +1073,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.108.0"
+FIGURES_VERSION = "1.109.0"
 
 
 def _newest_entry():

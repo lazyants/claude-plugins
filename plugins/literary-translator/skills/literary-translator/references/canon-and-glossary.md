@@ -1247,16 +1247,24 @@ something a script silently probes (and potentially gets wrong).
   glossary-pass agent has real web/research access. The orchestrating Claude
   session declares this — it is never auto-detected, exactly like
   `verse_policy.mode` or `apparatus_policy`.
-- **`research_mode: offline` forbids `basis: "established"` outright.** Every
-  candidate that would otherwise warrant `established` must instead be assigned
-  `basis: "transliterated"` (the existing fixed practical-transcription
-  rule, if mechanical transliteration is adequate), `basis: "sense_translated"`
+- **`research_mode: offline` forbids `basis: "established"` outright.** What it
+  forbids is the citation-backed BASIS, never the target form itself: a form the
+  project's own rules already settle needs no citation and stays available.
+  Every candidate that would otherwise warrant `established` must instead be
+  assigned `basis: "transliterated"` (the existing fixed practical-transcription
+  rule, read AS WRITTEN — including a widely-used target-language form where
+  that rule prefers one), `basis: "sense_translated"`
   (1.4.0 — if the candidate is a genuine speaking name and the correct
   rendering is a deliberate sense-translation rather than a citable form; see
   the precedence rule above), or routed into `review_queue` (if the name is
   genuinely disputed and needs a human's real research later) —
   never left with a fabricated citation, and never silently forced into
-  `established` anyway. The `transliterated`/`review_queue` outcomes carry the
+  `established` anyway. The three outcomes are disjoint, and only one of them
+  is unresolved. A `transliterated` row is BY DEFINITION one this project's own
+  rule settled, so it is a resolved row rather than an unavailable source and
+  carries no prefix; a form those rules do NOT settle is routed into
+  `review_queue` instead, and that is the outcome the prefix marks.
+  A `review_queue` row that fell back for want of research therefore carries the
   literal note prefix `SOURCE_UNAVAILABLE:` — mirroring the `NEW:` note-prefix
   convention used for `new_names[]` below — so a human reviewing
   `canon.json`/`review_queue` later can find every entry that still needs real
