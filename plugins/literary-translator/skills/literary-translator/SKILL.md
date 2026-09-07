@@ -1583,18 +1583,18 @@ if null); check for a report recording all three hashes matching currently.
 A brand-new project reusing the unmodified `fr.json` against a different
 book still requires its own fresh smoke test.
 
-If no matching report exists, run the mandatory smoke test: run
-`bootstrap_names.py` against a real text sample, hand-pick a checked-name
-list, prepare elision test sentences if `has_elision`, prepare particle-smoke
-cases whenever the resolved preset's `particle_list_size > 0` (unless the
-particle-free `--no-particles-confirmed` path applies), run
+If no matching report exists, run the mandatory smoke test: hand-pick the
+checked-name list from `language_smoke_report.py --list-candidates`, never
+from `bootstrap_names.py`'s whole-book set (#894), prepare elision test
+sentences if `has_elision` and particle-smoke cases whenever the resolved
+preset's `particle_list_size > 0` (unless the particle-free
+`--no-particles-confirmed` path applies), run
 `scripts/language_smoke_report.py` to compute all three hashes, check every
-hand-picked name against the extractor's actual output, run
-elision/particle test cases, write a `language-smoke-report.schema.json`-
-shaped JSON report with `pass:true` only if every checked name found, every
-particle-smoke case passed, and every elision test passed. A
-stale/mismatched report on any of the three hashes, a `pass:false` report, or
-a mismatched `has_elision` value, is treated as no report at all.
+hand-picked name against the extractor's actual output, run elision/particle
+test cases, write a `language-smoke-report.schema.json`-shaped report with
+`pass:true` only if every checked name, particle-smoke case and elision test
+passed. A stale/mismatched report on any of the three hashes, a `pass:false`
+report, or a mismatched `has_elision` value, is treated as no report at all.
 
 On an uncased-script source (Hebrew/Yiddish/Arabic — no `Lu` uppercase
 letters), `pass:true` here certifies only what `bootstrap_names.py`'s

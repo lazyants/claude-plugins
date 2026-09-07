@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.113.0 — 2026-09-07
+
+**A correct hand-checked name list failed the mandatory smoke test, and the printed remedy named
+the one file that was already right (#894).** `language_smoke_report.py` matches `--checked-names`
+against candidates it extracts from its OWN stratified sample of the book, using its own copy of
+the extractor, and the names it holds are the extractor's reconstruction rather than the book's
+spelling. None of that was stated anywhere the operator meets it, and every `pass:false` printed
+one remediation paragraph: copy the preset, extend `PARTICLES`/`STOPWORDS`, fix `ELISION_RE`. For
+a checked-name miss that advice cannot help — no particle-config edit puts a name from an
+unsampled segment into the sample, and none changes how a token-final connector mark is
+reconstructed.
+
+Measured on a 105-page Hebrew book: 108 candidates from the sample against 794 from the whole
+manifest, with a correct `he.local.json` (`PARTICLES: []`, `has_elision: false`, `STOPWORDS`
+untouched). Two attempts were spent editing the wrong file — 11 of 14 names reported missing when
+composed from the book's genealogical pages, 5 of 14 when composed from the production extractor's
+candidate file. The same run passed unchanged once the names came from the script's own set.
+
+`--list-candidates` is the new answer to "what am I supposed to pick from": it prints the resolved
+`particle_config`, the sample's word count and the segment ids it read, `candidate_names_total`,
+and every candidate one per line, then exits 0. It writes no report and reads none, needs no
+checked names and no confirmation flag, and does not resolve `report_path` at all — so a bad
+`smoke_test.report_path` cannot stop the listing, and an invocation that passes
+`--particle-config` needs neither `profile.yml` nor PyYAML. The `particle_config` itself still
+resolves the usual way, from `profile.yml` unless that flag is given, since nothing can be
+extracted without it. It runs before every density branch, so a name-sparse or name-free sample
+lists too. Its last line says it is not a smoke-test pass.
+
+A `pass:false` carrying a not-found name now prints, BEFORE the particle-config paragraph, the
+sample it read (word count and segment ids), the two facts as `SCOPE` and `FORM` lines, up to 15
+candidate names, and a pointer to `--list-candidates`. The `FORM` line states the rule the
+tokenizer actually implements, which is narrower than "connector marks are dropped": a connector
+belongs to a token only BETWEEN two letters, so `משה־לייב` survives verbatim while a token-final
+geresh ends its token and the source's `ר׳ אהרן` is the candidate `ר אהרן`. The particle-config
+paragraph is unchanged and still prints alone for an elision or particle-smoke failure, which is
+the failure class it was always right about. The low-name-density coverage fatal, which refuses a
+list that does not cover every distinct candidate, now says the same thing in one line.
+`--checked-names`'s `--help`, the module docstring, SKILL.md's W3 step and
+`references/language-pair-parameterization.md` (its Procedure, its CLI inputs and its remediation
+list) all now name `--list-candidates` as the way to compose the list, and stop pointing at
+`bootstrap_names.py`, whose whole-manifest candidate list is a different and larger set.
+
+The gate itself is untouched: the ten-distinct-name floor, the set-coverage requirement on the
+low-density branch, the exact-string membership test, the sample-keyed report identity and the
+schema all stand exactly as before. Nothing here can turn a failing configuration into a passing
+one.
+
+**Migration.** This script's bytes are hashed twice, and neither hash reaches a translation.
+`smoke_report_contract_hash` moves, so a stored `pass:true` report is treated as no report and the
+smoke test re-runs — that hash exists for exactly this. `language_smoke_report.py` is an
+`ORCHESTRATION_BUNDLE_MEMBERS` entry, so `orchestration_bundle_hash` moves too and a glossary or
+mass run in flight when the scripts are re-copied will not resume into its old run directory. It
+is not a `PLUGIN_BUNDLE_MEMBERS` or `DERIVATION_BUNDLE_MEMBERS` entry, so `cache_key` does not
+move: no converged segment goes stale and nothing re-translates.
 ## 1.112.0 — 2026-09-07
 
 **A Hebrew-to-English project validated as French-to-Russian, because the three language fields

@@ -158,6 +158,10 @@ def run_smoke(
     low_name_density_confirmed=False,
     no_names_confirmed=False,
     no_particles_confirmed=False,
+    list_candidates=False,
+    omit_report_path=False,
+    omit_particle_config=False,
+    cwd=None,
 ):
     unique = uuid.uuid4().hex
     manifest_path = tmp_path / f"manifest_{unique}.json"
@@ -170,10 +174,18 @@ def run_smoke(
     cmd = [
         sys.executable,
         str(root / "scripts" / "language_smoke_report.py"),
-        "--particle-config", str(particle_config_path),
         "--manifest", str(manifest_path),
-        "--report-path", str(report_path),
     ]
+    # #894: one caller drops --particle-config to pin WHERE profile.yml is
+    # still needed in --list-candidates mode.
+    if not omit_particle_config:
+        cmd += ["--particle-config", str(particle_config_path)]
+    # #894: --list-candidates must run without a resolvable report path (and
+    # therefore without profile.yml), so one caller needs to omit the flag.
+    if not omit_report_path:
+        cmd += ["--report-path", str(report_path)]
+    if list_candidates:
+        cmd.append("--list-candidates")
     if checked_names is not None:
         cmd += ["--checked-names", ",".join(checked_names)]
     if elision_cases is not None:
@@ -191,7 +203,7 @@ def run_smoke(
     if no_particles_confirmed:
         cmd.append("--no-particles-confirmed")
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=cwd)
     report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else None
     return proc, report, {
         "manifest": manifest_path,
@@ -1795,6 +1807,240 @@ def test_loader_still_accepts_an_empty_elision_re_beside_has_elision_false(tmp_p
     )
     assert lang["has_elision"] is False
     assert lang["elision_re"] is None
+
+
+# ---------------------------------------------------------------------------
+# #894: the candidate set is discoverable, and a checked-name miss says why
+#
+# Two properties decide whether a hand-picked name is "found", and neither was
+# stated where it costs an operator a run: the set is built from THIS script's
+# own stratified SAMPLE, and its members are the extractor's reconstruction of
+# the tokens it matched, not the book's spelling. The particle-config
+# remediation cannot fix either one.
+# ---------------------------------------------------------------------------
+
+# "R' Aharon" and "Moshe-Leib", spelled as escapes so this fixture cannot be
+# garbled by bidi reordering in an editor. The first name's geresh ENDS its
+# first token, so the extractor reconstructs it without the geresh; the
+# second's maqaf sits between two letters and survives verbatim.
+HEB_SOURCE_FINAL_GERESH = "\u05e8\u05f3 \u05d0\u05d4\u05e8\u05df"
+HEB_CANDIDATE_FINAL_GERESH = "\u05e8 \u05d0\u05d4\u05e8\u05df"
+HEB_INTERNAL_MAQAF = "\u05de\u05e9\u05d4\u05be\u05dc\u05d9\u05d9\u05d1"
+# Both names stand ALONE in the sentence: a one-letter prefix ("le-", "ve-")
+# fuses into the token and the inventory entry then matches nothing, which
+# would leave the maqaf half of the assertion below true only because the same
+# spelling appears in the message's own worked example.
+HEB_SENTENCE = (
+    f"\u05d5\u05d9\u05d0\u05de\u05e8 {HEB_SOURCE_FINAL_GERESH} "
+    f"\u05d5\u05d2\u05dd {HEB_INTERNAL_MAQAF} \u05d4\u05d2\u05d9\u05e2."
+)
+
+
+def test_list_candidates_prints_the_whole_set_and_writes_no_report(tmp_path, root):
+    manifest = build_manifest([MANY_NAMES_TEXT])
+    proc, report, paths = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        list_candidates=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    # No report written -- the mode is a read, and must never be mistaken for
+    # a pass by a later hash-matching check.
+    assert report is None
+    assert not paths["report"].is_file()
+    printed = proc.stdout.splitlines()
+    for name in MANY_NAMES:
+        assert name in printed, name
+    assert "candidate_names_total       = 12" in proc.stdout
+    assert "LIST-CANDIDATES" in proc.stdout
+    assert "not a smoke-test pass" in proc.stdout.lower()
+    # Composable without any of the arguments a real run demands.
+    assert "--checked-names" not in proc.stderr
+
+
+def test_list_candidates_names_the_sample_it_read(tmp_path, root):
+    manifest = build_manifest([MANY_NAMES_TEXT, FEW_NAMES_TEXT, "Nora waited alone."])
+    proc, _, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        list_candidates=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "sample segments" in proc.stdout
+    assert "seg0 (first)" in proc.stdout
+    assert "seg2 (late)" in proc.stdout
+
+
+def test_list_candidates_needs_no_report_path(tmp_path, root):
+    # Pins the conditional: the report path is not resolved at all in this
+    # mode, so nothing about `smoke_test.report_path` can stop a listing. The
+    # particle config is given here, which is what makes THIS invocation need
+    # no profile.yml at all -- the sibling test below pins the other half.
+    manifest = build_manifest([MANY_NAMES_TEXT])
+    proc, _, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        list_candidates=True,
+        omit_report_path=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "Alice" in proc.stdout.splitlines()
+
+
+def test_list_candidates_still_resolves_the_particle_config_from_the_profile(
+    tmp_path, root
+):
+    # The contract, stated where it is easy to overclaim: this mode skips the
+    # REPORT path, not the particle config -- it cannot extract anything
+    # without one. So a bare `--list-candidates` in a directory with no
+    # profile.yml stops on the PROFILE, and the message names the flag that
+    # makes the invocation profile-free.
+    manifest = build_manifest([MANY_NAMES_TEXT])
+    no_profile_cwd = tmp_path / "no_profile"
+    no_profile_cwd.mkdir()
+    proc, _, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        list_candidates=True,
+        omit_report_path=True,
+        omit_particle_config=True,
+        cwd=str(no_profile_cwd),
+    )
+    assert proc.returncode == 2
+    assert "profile" in proc.stderr.lower()
+    assert "--particle-config" in proc.stderr
+    # ... and the same invocation WITH --particle-config needs no profile at
+    # all, which is the half the documentation promises.
+    ok, _, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        list_candidates=True,
+        omit_report_path=True,
+        cwd=str(no_profile_cwd),
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert "Alice" in ok.stdout.splitlines()
+
+
+def test_list_candidates_works_on_a_name_free_sample(tmp_path, root):
+    # Deliberately BEFORE every density branch: a zero-candidate sample lists
+    # (as an empty set) rather than demanding the confirmation flags for a
+    # branch this mode never reaches.
+    manifest = build_manifest(ZERO_NAMES_TEXTS)
+    proc, _, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        list_candidates=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "candidate_names_total       = 0" in proc.stdout
+
+
+def test_checked_name_miss_explains_scope_and_form_before_the_particle_config(
+    tmp_path, root
+):
+    manifest = build_manifest([MANY_NAMES_TEXT])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=MANY_NAMES[:9] + ["Zenobia"],
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 1
+    assert report is not None and report["pass"] is False
+    err = proc.stderr
+    assert "checked name not found among extracted candidates: 'Zenobia'" in err
+    assert "SCOPE --" in err
+    assert "FORM  --" in err
+    assert "bootstrap_names.py" in err
+    assert "Candidate names (" in err
+    assert "--list-candidates" in err
+    # The re-run instruction must not tell the operator to drop the inputs
+    # that resolve the particle config -- following it verbatim has to reach
+    # the listing, including on a project driven without profile.yml.
+    assert "KEEP the same --profile / --particle-config / --manifest" in err
+    assert "no other argument" not in err
+    # Order is the point of the fix: the two causes the particle config cannot
+    # fix are read BEFORE the particle-config remediation, which is what an
+    # operator used to act on while nothing was wrong with that file.
+    assert err.index("SCOPE --") < err.index("Remediation: copy")
+    assert err.index("FORM  --") < err.index("Remediation: copy")
+
+
+def test_checked_name_miss_names_the_sample_segments(tmp_path, root):
+    manifest = build_manifest([MANY_NAMES_TEXT, FEW_NAMES_TEXT, "Nora waited alone."])
+    proc, _, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=MANY_NAMES[:9] + ["Zenobia"],
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 1
+    assert "Sample the candidates came from:" in proc.stderr
+    assert "seg0 (first)" in proc.stderr
+
+
+def test_particle_only_failure_keeps_the_particle_config_remediation_alone(
+    tmp_path, root
+):
+    # The particle-config remediation is CORRECT for this failure class, so it
+    # still prints -- and the checked-name explanation must not appear, since
+    # every checked name was found.
+    manifest = build_manifest([MANY_NAMES_TEXT])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=MANY_NAMES[:10],
+        particle_cases=[{"token": "de", "is_particle": True}],
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 1
+    assert report is not None and report["pass"] is False
+    err = proc.stderr
+    assert "particle-smoke case failed" in err
+    assert "Remediation: copy" in err
+    assert "SCOPE --" not in err
+    assert "FORM  --" not in err
+    assert "Candidate names (" not in err
+
+
+def test_a_geresh_bearing_checked_name_is_shown_in_its_extracted_form(
+    tmp_path, root
+):
+    # The measured behaviour this issue turned on: the operator supplies the
+    # book's spelling, the extractor holds the reconstruction, and nothing in
+    # the old message connected the two.
+    config = dict(NO_PARTICLES_NO_ELISION)
+    config["name_inventory"] = [HEB_SOURCE_FINAL_GERESH, HEB_INTERNAL_MAQAF]
+    manifest = build_manifest([MANY_NAMES_TEXT, HEB_SENTENCE])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, config,
+        checked_names=MANY_NAMES[:9] + [HEB_SOURCE_FINAL_GERESH],
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 1
+    assert report is not None
+    found = {c["name"]: c["found"] for c in report["checked_names"]}
+    assert found[HEB_SOURCE_FINAL_GERESH] is False
+    # Read the CANDIDATE LIST line specifically, not all of stderr: both
+    # spellings also appear in the message's own worked example, so a
+    # whole-stderr assertion would pass with an empty inventory.
+    candidate_line = next(
+        line for line in proc.stderr.splitlines() if "Candidate names (" in line
+    )
+    assert HEB_CANDIDATE_FINAL_GERESH in candidate_line
+    assert HEB_SOURCE_FINAL_GERESH not in candidate_line
+    # ... and the maqaf name, whose connector sits between two letters, is
+    # carried through unchanged -- the rule the message states, both halves.
+    assert HEB_INTERNAL_MAQAF in candidate_line
+
+
+def test_low_name_density_coverage_fatal_points_at_the_candidate_form(
+    tmp_path, root
+):
+    manifest = build_manifest([FEW_NAMES_TEXT])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=FEW_NAMES[:2],
+        low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 2
+    assert report is None
+    assert "uncovered" in proc.stderr
+    assert "--list-candidates" in proc.stderr
+    assert "between two letters" in proc.stderr
 
 
 if __name__ == "__main__":
