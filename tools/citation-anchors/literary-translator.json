@@ -1512,13 +1512,6 @@
    ],
    "claim": "names[] rows are read with final_audit's own _name_entry_forms, which already accepts both field conventions draft.schema.json permits, rather than a reimplementation in the harmonisation step."
   },
-  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:3154-3160\", 0]": {
-   "anchors": [
-    "if source_form not in entries:",
-    "ordinary glossary-pass merge"
-   ],
-   "claim": "--report offers a --correct skeleton only for a member whose source_form is a live canon key: --correct refuses a form it cannot find and directs it to the ordinary glossary merge, so a skeleton naming an uncanonized form would be a paste that cannot work."
-  },
   "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"glossary_batch_plan.py:390-414\", 0]": {
    "anchors": [
     "def select_included(rows, entry_keys, queued, dismissed, retry, min_freq, senses):",
@@ -1632,13 +1625,6 @@
    ],
    "claim": "`SystemExit` is not an `Exception`: `select_segments.py`'s own sibling loader for `json_stdout.py` calls `sys.exit()` on a staging gap (`select_segments.py:316-322`), and that call must not be allowed to walk past this function and fail an already-applied, already-verified correction."
   },
-  "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:4179-4219\", 0]": {
-   "anchors": [
-    "elif args.restamp_derivation:",
-    "elif args.batch is not None:"
-   ],
-   "claim": "# `resolve_cache_key_script`/`_stamp_generation_hash` are shared code, but # each of these three threads its OWN `plugin_root_str` parameter through # from `main()`'s dispatch (canon_validate.py:3970-4017) to its own # `_stamp_write_verify` call -- a regression in any one of those three # threading sites would not be caught by the `--init` test above."
-  },
   "[\"plugins/literary-translator/tests/canon_correct_stale_segpacks.test.py\", \"select_segments.py:316-322\", 0]": {
    "anchors": [
     "except (ImportError, OSError) as _json_stdout_exc",
@@ -1652,6 +1638,26 @@
     "ids=[\"confidence\", \"note\", \"category\"]"
    ],
    "claim": "The interlock compares the whole new_entry against old_entry, so a same-target correction (confidence-only, here) is legal -- canon_correct_entry.test.py:767-771 already proves that, parametrizing confidence/note/category as fields a correction may move on its own."
+  },
+  "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:4184-4224\", 0]": {
+   "anchors": [
+    "elif args.restamp_derivation:",
+    "elif args.batch is not None:"
+   ],
+   "claim": "# `resolve_cache_key_script`/`_stamp_generation_hash` are shared code, but # each of these three threads its OWN `plugin_root_str` parameter through # from `main()`'s dispatch (canon_validate.py:3970-4017) to its own # `_stamp_write_verify` call -- a regression in any one of those three # threading sites would not be caught by the `--init` test above."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:3159-3166\", 0]": {
+   "anchors": [
+    "if source_form not in entries:",
+    "ordinary glossary-pass merge"
+   ],
+   "claim": "--report offers a --correct skeleton only for a member whose source_form is a live canon key: --correct refuses a form it cannot find and directs it to the ordinary glossary merge, so a skeleton naming an uncanonized form would be a paste that cannot work."
+  },
+  "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/canon_validate.py\", \"select_segments.py:3050\", 0]": {
+   "anchors": [
+    "if len(segpack_mismatches) == 1 and \"error\" in segpack_mismatches[0]:"
+   ],
+   "claim": "Read the producer's error sentinel exactly as its ONE other caller does (select_segments.py:3050). An exact-key-set test is stricter and degrades worse: an error dict that ever gained a second key would fall through to the mismatch arm and raise KeyError."
   }
  },
  "exemptions": {

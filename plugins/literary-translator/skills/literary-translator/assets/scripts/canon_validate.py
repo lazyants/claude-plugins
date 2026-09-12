@@ -2963,8 +2963,13 @@ def _finish_correction(
         # verbatim, by design.
         "generation_hashes_restamped": restamped,
     }
-    payload.update(_scan_stale_segpacks(canon_path, on_disk))
+    # `extra` first, the scan SECOND: the scan's five keys are the frozen
+    # report contract and `extra` is disposition-specific, so a future
+    # `extra` key must not be able to shadow `note` or a bucket count. The
+    # two key sets are disjoint today, which is exactly why fixing the
+    # precedence now costs nothing.
     payload.update(extra)
+    payload.update(_scan_stale_segpacks(canon_path, on_disk))
     return payload
 
 
@@ -4248,6 +4253,17 @@ def main(argv=None) -> int:
     return 0
 
 
+# The scope disclaimer, stated ONCE and interpolated, rather than retyped in
+# each branch that needs it. Three of the four note branches carry it, the
+# tests pin it as a fixed substring, and a re-wrap of one branch would
+# otherwise drift it out of another silently. Same reason
+# select_segments.py's _S3_NO_TOKEN is a constant.
+_SCAN_SCOPE_DISCLAIMER = (
+    "this is not a validity check on the segpacks -- segpack.py's W3a gate "
+    "owns that."
+)
+
+
 def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
     """#910 (folds #840's retired sentence, see the `--correct` docstring
     above). `--correct`'s one write CAN leave canon.json ahead of an
@@ -4349,9 +4365,34 @@ def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
         evaluate_fresh_segpack_precondition = (
             select_segments.evaluate_fresh_segpack_precondition
         )
+        # The same module's own canonical id allowlist, REUSED rather than
+        # re-spelled here. segpack.py's contract comment says to keep the
+        # rule identical across every consuming script, and the way to keep
+        # it identical is to call it, not to write a third copy of the
+        # regex beside the two that already exist. A filename whose
+        # recovered id fails it is reported unevaluated rather than handed
+        # on: nothing downstream builds a path from it that the glob did
+        # not already produce, but the id IS emitted into this payload,
+        # which operators paste and agents read.
+        validate_seg = select_segments.validate_seg
+        # Both names are bound BEFORE the loop deliberately. Binding them
+        # here turns a module that loaded but lost a symbol into an
+        # AttributeError inside G1 even when segments/ is empty; resolving
+        # them inside the loop would let such a module report a clean
+        # `segpacks_scanned: 0` instead.
 
         segments_dir = DURABLE_ROOT / "segments"
         pack_paths = sorted(segments_dir.glob("segpack_*.json"))
+        if not pack_paths and segments_dir.is_dir():
+            # Path.glob SWALLOWS a scandir OSError, so a segments/ the
+            # process cannot read is indistinguishable from an empty one and
+            # would print "nothing to check yet" over a directory full of
+            # packs -- the one false clean left in this helper. iterdir()
+            # raises instead, which G1 turns into scan_error ("freshness
+            # unknown, run segpack.py --all"). Measured on the pinned CI
+            # runtime: with segments/ at mode 000 and a real pack inside,
+            # glob returns [] while is_dir() is True and iterdir() raises.
+            next(segments_dir.iterdir(), None)
         canon_entries = on_disk["entries"]
 
         stale = []
@@ -4364,10 +4405,22 @@ def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
             # handed back to the owning function, which re-derives the path
             # itself through segpack_path() -- it is never used as a path.
             seg_id = pack_path.name[len("segpack_") : -len(".json")]
+            seg_error = validate_seg(seg_id)
+            if seg_error is not None:
+                unevaluated.append(
+                    {"seg": pack_path.name, "error": seg_error}
+                )
+                continue
             mismatches = evaluate_fresh_segpack_precondition(
                 seg_id, DURABLE_ROOT, canon_entries
             )
-            if len(mismatches) == 1 and set(mismatches[0]) == {"error"}:
+            # Read the producer's error sentinel exactly as its ONE other
+            # caller does (select_segments.py:3050). An exact-key-set test
+            # is stricter and degrades worse: an error dict that ever gained
+            # a second key would fall through to the mismatch arm, raise
+            # KeyError on m["name"], and turn one unreadable pack into a
+            # whole-scan scan_error with every bucket zeroed.
+            if len(mismatches) == 1 and "error" in mismatches[0]:
                 unevaluated.append({"seg": seg_id, "error": mismatches[0]["error"]})
             elif mismatches:
                 names = sorted({m["name"] for m in mismatches})
@@ -4397,8 +4450,7 @@ def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
                 f"{len(stale)} of {scanned} segpack(s) carry a canon_map "
                 "that canon.json no longer agrees with; run "
                 "python3 scripts/segpack.py --all before dispatching. "
-                "This is not a validity check on the segpacks -- "
-                "segpack.py's W3a gate owns that."
+                f"This {_SCAN_SCOPE_DISCLAIMER}"
             )
             if unevaluated:
                 note += (
@@ -4412,16 +4464,13 @@ def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
             note = (
                 f"{len(unevaluated)} of {scanned} segpack(s) could not be "
                 "read or parsed at all (see segpacks_unevaluated); the "
-                "rest show no canon_map disagreement, but this is not a "
-                "validity check on the segpacks -- segpack.py's W3a gate "
-                "owns that."
+                f"rest show no canon_map disagreement, but {_SCAN_SCOPE_DISCLAIMER}"
             )
         else:
             note = (
                 f"checked {scanned} segpack(s) for a canon_map that "
                 "disagrees with canon.json over each pack's own names; "
-                "none disagrees. This is not a validity check on the "
-                "segpacks -- segpack.py's W3a gate owns that."
+                f"none disagrees. This {_SCAN_SCOPE_DISCLAIMER}"
             )
 
         fragment = {
@@ -4434,7 +4483,15 @@ def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
         dumps_line(fragment).encode("utf-8")
         return fragment
     except (Exception, SystemExit) as exc:
-        reason = f"{type(exc).__name__}: {exc}".encode("ascii", "backslashreplace").decode("ascii")
+        # Coerced to ASCII because THIS dict is the one return shape that
+        # does not go through G2's dumps_line round-trip below. An exception
+        # message can carry a lone surrogate lifted straight out of a pack
+        # name -- a KeyError on such a name is the obvious route -- and that
+        # would break the output line on the very path that exists to keep
+        # the line printable.
+        reason = f"{type(exc).__name__}: {exc}".encode(
+            "ascii", "backslashreplace"
+        ).decode("ascii")
         return {
             "segpacks_scanned": 0,
             "segpacks_current": 0,

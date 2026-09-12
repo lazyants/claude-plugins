@@ -25,7 +25,7 @@ changes a `PLUGIN_BUNDLE_MEMBERS` file for its own reasons." This release is tha
 sentence retires along with the fix it was wrong about.
 
 **Cost, stated plainly.** This release moves `plugin_bundle_hash`. That field is one of the three
-`SAFE_STALE_CARVEOUT_FIELDS` (`final_audit.py:1951`), so a converged segment whose only mismatched
+`SAFE_STALE_CARVEOUT_FIELDS` (`final_audit.py`), so a converged segment whose only mismatched
 field is this one is counted as `stale_previously_converged` and `project_complete` is computed net
 of it — the final audit does not block and nothing re-translates on account of this release alone.
 The carve-out's premise was checked against this diff rather than assumed: the change adds an
@@ -39,6 +39,7 @@ not visited — a pre-existing blind spot, the subject of sibling issue #917, ne
 widened here; a `remove` of an entry whose `canonical_target_form` was already empty produces no
 `canon_map` mismatch and is not listed; and the no-exit-change guarantee is scoped to `Exception`
 and `SystemExit` — `KeyboardInterrupt` is deliberately not caught.
+
 ## 1.118.0 — 2026-09-12
 
 **The citation judge had no rule for a citation body that arrived whole but packed onto one

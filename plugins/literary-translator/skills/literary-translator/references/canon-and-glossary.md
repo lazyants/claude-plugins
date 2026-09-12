@@ -1692,7 +1692,7 @@ three of `corpus`, `source_form` and `target_form` — not, as before, a
   draft observations — the class that was invisible before this corpus
   existed, because it never reached `canon.json` at all. Their route is
   NOT `--correct`, which refuses a `source_form` absent from canon
-  (`canon_validate.py:3154-3160`) and sends it to the ordinary glossary merge
+  (`canon_validate.py:3159-3166`) and sends it to the ordinary glossary merge
   instead — see `--report` below.
 - `multi_referent` is **exactly one member, total** — not one canon member
   plus whatever else, which counting only canon members would have

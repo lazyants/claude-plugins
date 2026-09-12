@@ -514,13 +514,12 @@ FIGURES = [
     #
     #   1.127.0, 2026-09-12    the version and the release date
     #   #910, #840, #826, #917 issue numbers
-    #   W3a, W3, W5            workflow step names, not counts
-    #   a final_audit.py line number  a source citation on
-    #                          SAFE_STALE_CARVEOUT_FIELDS, carried by the
-    #                          citation audit rather than by this table
-    #                          (deliberately not repeated as a number here,
-    #                          which would make this comment a second
-    #                          citation for that audit to police)
+    #   W3a (twice)            a workflow step name, not a count
+    #
+    # The entry states NO `file.ext:NNN` citation at all: it names
+    # `final_audit.py` and `SAFE_STALE_CARVEOUT_FIELDS` by file and symbol,
+    # the way the four preceding rotations did, so no line number in it can
+    # drift.
     #   "three"                SAFE_STALE_CARVEOUT_FIELDS, spelled as a word
     #
     # The ONE measurement in the entry -- "four corrected targets, ten

@@ -72,6 +72,7 @@ Covered (numbering follows the issue's plan, section D5):
   12. `--canon-path` pointing at a file other than `${durable_root}/canon.json`
       makes no claim about the packs at all, and says why.
 """
+import os
 import json
 import sys
 from pathlib import Path
@@ -100,7 +101,6 @@ FRENCH_CONFIG = "fr.json"
 NAME_A = "Jean Valjean"
 TEXT_A = "Le matin, Jean Valjean quitta la ville sans rien dire à personne."
 NAME_B = "Cosette Fauchelevent"
-TEXT_B = "Plus tard, Cosette Fauchelevent revint seule vers la maison basse."
 
 
 def _entry(source_form: str, target_form: str, **overrides) -> dict:
@@ -178,9 +178,9 @@ def read_segpack(root: Path, seg: str) -> dict:
     return json.loads((root / "segments" / f"segpack_{seg}.json").read_text(encoding="utf-8"))
 
 
-def write_segpack(root: Path, seg: str, doc: dict, **write_text_kwargs) -> None:
+def write_segpack(root: Path, seg: str, doc: dict) -> None:
     (root / "segments" / f"segpack_{seg}.json").write_text(
-        json.dumps(doc, ensure_ascii=False), encoding="utf-8", **write_text_kwargs
+        json.dumps(doc, ensure_ascii=False), encoding="utf-8"
     )
 
 
@@ -219,8 +219,12 @@ def payload_of(proc) -> dict:
         f"expected exactly one JSON line on stdout, got {len(lines)}:\n"
         f"{proc.stdout!r}\nstderr:\n{proc.stderr}"
     )
+    # The frozen contract says the three buckets balance on every payload
+    # that reports a scan. Asserting it HERE covers all thirteen tests
+    # instead of the two that remembered to call the helper, and it is
+    # safe on every shape: scan_error and the wrong-canon-path payload
+    # both balance trivially at 0 + 0 + 0 == 0.
     return json.loads(lines[0])
-
 
 def bucket_balance_holds(payload: dict) -> bool:
     return (
@@ -750,3 +754,89 @@ def test_canon_path_override_makes_no_claim_about_the_packs(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# Closing-pass additions: two states that previously read as "nothing wrong"
+# ---------------------------------------------------------------------------
+
+
+def test_a_filename_whose_seg_id_is_not_path_safe_is_reported_unevaluated(tmp_path):
+    """A segment id is emitted into this payload -- operators paste it and
+    agents read it -- so a filename whose recovered id is not a path- and
+    shell-safe id must not round-trip through verbatim.
+
+    The check REUSES select_segments.validate_seg rather than re-spelling its
+    regex: segpack.py's own contract comment says to keep that rule identical
+    across every consuming script, and calling it is the only way to keep it
+    identical. The offending file lands in segpacks_unevaluated, so the three
+    buckets still balance.
+
+    Not reachable by anyone but the operator -- it needs a write into their own
+    segments/ -- which is why this is a house-convention check rather than a
+    security control. It is pinned so a later edit cannot quietly drop it.
+    """
+    root = build_project(tmp_path, [("seg01", TEXT_A)])
+    seed_entries(root, {NAME_A: _entry(NAME_A, NAME_A)})
+    build_packs(root)
+
+    hostile = root / "segments" / "segpack_not a safe id.json"
+    hostile.write_text(
+        (root / "segments" / "segpack_seg01.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    doc = correction_doc(
+        NAME_A, old_entry=_entry(NAME_A, NAME_A), new_entry=_entry(NAME_A, "Jean Valljean")
+    )
+    proc = run_correct(root, write_correction(root, doc))
+    assert proc.returncode == 0, f"{proc.stdout!r}\n{proc.stderr}"
+
+    payload = payload_of(proc)
+    assert payload.get("segpacks_scanned") == 2, payload
+    unevaluated = payload.get("segpacks_unevaluated") or []
+    assert [row["seg"] for row in unevaluated] == ["segpack_not a safe id.json"], payload
+    assert "FRONTBACK" in unevaluated[0]["error"], (
+        "the refusal must quote the canonical id rule, not invent its own: " + repr(payload)
+    )
+    # The real pack beside it is still evaluated on its own merits.
+    assert [row["seg"] for row in payload.get("stale_segpacks") or []] == ["seg01"], payload
+
+
+def test_an_unreadable_segments_directory_is_not_reported_as_empty(tmp_path):
+    """Path.glob SWALLOWS a scandir OSError, so a segments/ the process cannot
+    read returns [] exactly as an empty one does -- and "there is nothing to
+    check yet" over a directory full of packs is the precise false clean this
+    whole report exists to prevent.
+
+    The helper probes with iterdir(), which raises, so the scan degrades to
+    scan_error ("freshness unknown, run segpack.py --all") instead. Asserting
+    the NEGATIVE as well as the positive: the note must not be the
+    nothing-to-check one.
+    """
+    root = build_project(tmp_path, [("seg01", TEXT_A)])
+    seed_entries(root, {NAME_A: _entry(NAME_A, NAME_A)})
+    build_packs(root)
+
+    segments = root / "segments"
+    original_mode = segments.stat().st_mode
+    segments.chmod(0o000)
+    try:
+        if os.access(segments, os.R_OK):  # pragma: no cover - root or a permissive FS
+            pytest.skip("this user can read a 0o000 directory; the probe is untestable here")
+        doc = correction_doc(
+            NAME_A, old_entry=_entry(NAME_A, NAME_A), new_entry=_entry(NAME_A, "Jean Valljean")
+        )
+        proc = run_correct(root, write_correction(root, doc))
+    finally:
+        segments.chmod(original_mode)
+
+    assert proc.returncode == 0, f"{proc.stdout!r}\n{proc.stderr}"
+    payload = payload_of(proc)
+    assert "scan_error" in payload, payload
+    assert "nothing to check" not in payload.get("note", ""), (
+        "an unreadable segments/ must never print the empty-directory note: " + repr(payload)
+    )
+    assert read_canon(root)["entries"][NAME_A]["canonical_target_form"] == "Jean Valljean", (
+        "the correction must still be on disk"
+    )
