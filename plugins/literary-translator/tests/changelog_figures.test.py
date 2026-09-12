@@ -534,6 +534,41 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
+    # ROTATED TO 1.210.0 (#916 -- a style-contract edit taken mid-book had no
+    # documented way back), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked rather than assumed: every digit-run in it
+    # was enumerated and each one is an IDENTIFIER, not a measurement. The complete
+    # list is the version (1.210.0), the release date, the four issue numbers it
+    # names (#916, #778, #771, #529), the `6` of the workflow step `W6`, and the `0`
+    # of `Step-0a`. There is no other digit in the entry.
+    #
+    # That is deliberate. This release changes operator-facing prose and one refusal
+    # message, so the facts it states are STRUCTURAL rather than numeric, and the
+    # entry states each by NAMING the thing: `refuse_run_over_foreign_drafts()`,
+    # `restore_note`, `resumed`, `cause`, `style_contract_hash`, `input_digest`,
+    # `.ever_converged`, `validation.admit_contract_only_stale`, `input.digest`,
+    # `backfill_resume_gate_ack.py`, `PLUGIN_BUNDLE_MEMBERS`, `STYLE_CONTRACT_BEGIN`/
+    # `END`, section G and W6's routing list. A name is checked by reading the tree;
+    # a count would have to be re-derived here, and this entry claims none.
+    #
+    # The one number a reader might expect -- the driver file's line count, which this
+    # release holds steady so the citation anchors below the edited functions do not
+    # move -- is deliberately NOT quoted in the entry, and is NOT asserted by any test.
+    # A line-count pin was drafted for this release and then dropped: it duplicated
+    # tools/citation_audit.py check, which verifies every declared anchor against the
+    # live file and so catches a moved anchor directly, while taxing every later
+    # release that legitimately grows this file with a rotation of an unrelated number.
+    # The audit is the guard; the total is an implementation detail of this change.
+    #
+    # The reporting operator's own measurements (three of one agent's four findings
+    # in one round were the same class; three of four reviews raised it again after
+    # the ruling landed; 35 drafts and 214 changes in the sweep that resolved it) are
+    # facts about a book in ANOTHER repository, which nothing in this tree can
+    # re-derive. They belong in the issue, where they are recorded, and the entry
+    # refers to them in words rather than quoting counts that would sit here
+    # unverifiable -- the same judgement the 1.116.0 rotation this replaces made.
+    #
     # ROTATED TO 1.188.0 (#928 -- a link group recorded after assembly was
     # silently inert, and the collision warning named the sidecar rather than
     # the step that applies it), per the maintenance contract above.
@@ -1733,7 +1768,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.201.0"
+FIGURES_VERSION = "1.210.0"
 
 
 def _newest_entry():

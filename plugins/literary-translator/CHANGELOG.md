@@ -1,5 +1,103 @@
 # Changelog
 
+
+=======
+## 1.210.0 — 2026-09-12
+
+**A style-contract edit taken mid-book had no documented way back, and the one recovery that costs
+nothing was written down nowhere (#916).** Editing the bytes between `style_bible.md`'s
+`STYLE_CONTRACT_BEGIN`/`END` markers moves `style_contract_hash`, which moves every segment's cache
+key, which moves the mass `input_digest` — so `resume_setup.py` mints a fresh `RUN_ID` and every draft
+still in flight becomes foreign to it. `refuse_run_over_foreign_drafts()` then halts the whole
+invocation, which is correct, and its three remedies each cost either the drafts or hand work. The
+reporting operator lost rounds to a book-wide decision that only became visible once translation was
+under way, and found the free recovery by reading `cache_key.py`.
+
+**The refusal now names it, on both unpinned paths, worded as a condition rather than a
+diagnosis.** A fourth qualified remedy says that restoring every changed hashed input to its exact
+prior bytes returns this invocation's digest to the value the owning run recorded. It prints on the
+MINTED and the RESUMED branch alike, because gating it on `resumed` would have withdrawn it exactly
+when it was needed: `resolve_run_id()` writes the freshly minted run's `input.digest` before this gate
+refuses and the directory is left behind, so a second identical invocation RESUMES the run the first
+one minted and is blocked for the same reason — with the advice gone. So the clause asks a question
+about the drafts instead of asserting a cause: it applies *if* these drafts were orphaned by editing a
+hashed input, whether this call minted a run or an earlier one did. That keeps it true on an ordinary
+resume where nothing was ever edited, which is what this function requires of every clause it prints.
+Three qualifications travel with it, because each is otherwise a
+dead end found by running it: the owning run becomes ELIGIBLE, never resolved, since resolution still
+returns the first digest-matching candidate newest-first and another run sharing that digest can win
+(then it combines with the owner-pin remedy); the route needs that owner's `input.digest` to still be
+a regular file, which an owner acknowledged only by `backfill_resume_gate_ack.py` does not have; and
+restoring un-does the edit, so the rule still has to land before the first dispatch or after the
+selection converges. The pinned refusal gets one sentence putting the same restore where it belongs
+there — as how that pin's own digest precondition gets satisfied, not as an independent route.
+
+**The route is printed at the refusal the operator actually reaches, which is not the one it was
+first written on.** `resolve_run_id()` runs BEFORE the foreign-draft gate, and it refuses outright
+when a pinned run's digest does not match. So the operator who edits the contract and then pins the
+draft's owner — precisely the person the advice is for — never reached the sentence on the later gate;
+they saw only "drop the pin and accept the fresh run". The pinned digest-mismatch refusal now carries
+the route too, and there it correctly names the pinned run's own recorded digest, because on that
+branch the pin IS the run whose value a restore has to return. A test pins the two sites' shared
+wording by counting it in the driver's own source, so a third site cannot be added, and neither
+existing one dropped, without that count going red.
+
+**The guide the template now points at stopped enumerating the routes.**
+`references/ledger-and-resumability.md` listed three of them and called that list "the routes", so the
+first documentation an operator reached from the new pointer was already wrong — and wrong in exactly
+the way that paragraph's own rule warns about, being the second copy that drifts from the string the
+operator sees. It now defers to the refusal for which routes exist and how many, and keeps only the
+two things the message has no room for: the safe re-stamp mechanics and the proof a re-stamp worked.
+Extending the list to four would have been the weaker fix and left a fifth to go stale.
+
+**`style_bible.template.md`'s own price for the edit covered one population out of two.** The E-traps
+timing paragraph priced units the append flips FROM `converged` and named their mitigation,
+`validation.admit_contract_only_stale`. It said nothing about units that have not yet converged, where
+the cost is different in kind and that declaration does not reach: its acceptance path requires an
+`.ever_converged` sentinel a never-converged unit has never had. The paragraph now names that
+population, says the driver refuses over those drafts by name rather than retranslating them, and
+points at `references/ledger-and-resumability.md` instead of restating mechanics — that file rules
+that the refusal is the copy to follow and a second copy in the docs is free to drift.
+
+**And it now states the economics the reporting operator discovered, which were written down
+nowhere.** For a decision that only becomes visible mid-run, applying it to the not-yet-converged
+drafts costs only the review those units already owe: a hand edit moves no cache-key field, so the
+draft keeps its token and is adopted rather than refused. Deferring such a decision to a contract
+append buys that population nothing. The mechanism was already in `SKILL.md`'s hand-edit guidance;
+the conclusion an operator should draw from it was not.
+
+**The header answers the reviewer question this issue asked, as a limit rather than a widening.** The
+operator placed a ruling below `STYLE_CONTRACT_END` worded as an instruction not to report a finding,
+and three of four reviewers raised the class anyway. The header now says that such an instruction is
+suppression, not a style rule, and does not bind a reviewer anywhere in the file, because the artifact
+under review is never the authority it is reviewed against. Everything about the marker taxonomy is
+deliberately unchanged: must-apply rule text still belongs inside the markers and still pays the
+documented invalidation price, and outside them still holds the glossary summary and the section-G
+tables. An earlier draft of this release said the unhashed region was a home for rules, which review
+caught as a reversal of the decision #778 retained — it would have let a book ship with early segments
+held to one standard and later ones to another, with no hash able to tell.
+
+**Two of the issue's four asks are declined, and a third was already shipped.** A `style_rulings.md`
+sibling artifact is declined: the cache-key-neutral, reviewer-visible channel already exists as
+section G, with `SKILL.md`'s W6 routing list naming it, and #771 withdrew the equivalent proposal
+outright. A per-project list of settled classes handed to the reviewer is declined as a reversal of
+#529 — per-finding refusals are fixer context, deliberately never reviewer authority — and the
+issue's own follow-up reports that what resolved the book was applying the decision to the drafts,
+after which the finding had nothing to report. And the complaint that the refusal never says which
+admission profiles cannot take a never-converged draft is refuted:
+`references/ledger-and-resumability.md` already says it with the per-profile reason, and gives the
+route the issue did not know about.
+
+Scope: message text, template prose and tests. No new artifact, flag, schema or gate; no gate's
+verdict changes; no cache-key field set moves. `segment_dispatch_driver.py` is a
+`PLUGIN_BUNDLE_MEMBERS` entry, so `plugin_bundle_hash` moves and every converged segment goes stale at
+the next Step-0a refresh — machinery-only staleness, which `assemble.py`'s carve-out admits, so
+delivery is not blocked. The driver edit was written to be line-count neutral, because declared citation anchors and changelog
+ranges both aim below the edited functions. A test pinning that total was drafted and then REMOVED
+rather than shipped: `tools/citation_audit.py check` already verifies every declared anchor against
+the live file, so the pin checked the same thing by proxy while taxing every sibling release that
+legitimately touches this file with a rotation of a number unrelated to its change -- and a sibling's
+release did exactly that during this review, which is how the redundancy surfaced.
 ## 1.201.0 — 2026-09-12
 
 **A link group recorded after the book was assembled did nothing, silently — and the
@@ -56,8 +154,6 @@ fail-closed and non-raising — and every NodeStream already on disk carries no 
 the guard would have to treat "absent" as "pass", which is the state the defect produces.
 Auto-selecting a per-key primary was refused too: which member of a key owns its records
 is a choice the ruling does not contain, and a script never decides identity here.
-=======
-
 ## 1.188.0 — 2026-09-12
 
 **A link group recorded after the book was assembled did nothing, silently — and the

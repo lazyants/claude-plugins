@@ -734,10 +734,11 @@ an EMPTY `mismatched_fields`, which satisfies "every moved field is
 machinery-only" vacuously while being exactly the population assembly refuses.
 
 **Recovering a draft the refusal named (#742).** The refusal itself enumerates
-the routes — an owner-scoped pin, deleting the draft, or re-stamping it — each
-with the precondition that makes it work, and it is the copy to follow: an
-operator reading a halt is not reading this file. Restating them here would be
-a second copy free to drift from the string the operator actually sees.
+the routes, each with the precondition that makes it work, and it is the copy
+to follow: an operator reading a halt is not reading this file, and how many
+routes exist is a fact about that message, not about this one. Restating the
+list here — or even its count — would be a second copy free to drift from the
+string the operator actually sees.
 
 Two things the message does not have room to say. First, the MECHANICS of a
 safe re-stamp: rewrite that draft's `dispatch_token` to the RUN_ID the refusal
