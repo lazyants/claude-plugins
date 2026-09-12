@@ -74,6 +74,7 @@ Covered (numbering follows the issue's plan, section D5):
 """
 import os
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -862,7 +863,13 @@ def test_the_remedy_the_note_prints_is_a_command_that_actually_runs(tmp_path):
     that only grepped the note for a substring would have passed against the
     broken command.
     """
-    root = build_project(tmp_path, [("seg01", TEXT_A)])
+    # A durable root WITH A SPACE in its path. Operator-chosen directories on
+    # this platform have spaces routinely, and pytest's own tmp_path never
+    # does -- so a test that used tmp_path directly could not see an unquoted
+    # path break, which is exactly how that defect reached review.
+    spaced = tmp_path / "a durable root"
+    spaced.mkdir()
+    root = build_project(spaced, [("seg01", TEXT_A)])
     seed_entries(root, {NAME_A: _entry(NAME_A, NAME_A)})
     build_packs(root)
 
@@ -874,10 +881,19 @@ def test_the_remedy_the_note_prints_is_a_command_that_actually_runs(tmp_path):
     assert [row["seg"] for row in payload.get("stale_segpacks") or []] == ["seg01"], payload
 
     note = payload["note"]
-    assert "segpack.py --all" in note, note
+    # NOT a substring check for "segpack.py --all": the path is shell-quoted,
+    # so the two tokens are no longer adjacent in the text. The command is
+    # checked by PARSING it below, which is the only reading that survives
+    # quoting.
+    assert "segpack.py" in note, note
+    assert " --all " in note, note
     # Both required flags must be named, or the line cannot be run at all.
     assert "--particle-config" in note, ("the remedy omits a REQUIRED flag: " + note)
     assert "--apparatus-policy" in note, ("the remedy omits a REQUIRED flag: " + note)
+    assert "This this" not in note and "this this" not in note.lower(), (
+        "the scope sentence is interpolated behind a lead-in; neither may supply "
+        "a second subject: " + note
+    )
 
     # Lift the command out of the note and run it VERBATIM. The only
     # substitution allowed here is the two profile.yml placeholders, which an
@@ -892,7 +908,11 @@ def test_the_remedy_the_note_prints_is_a_command_that_actually_runs(tmp_path):
     command = command.replace(
         "<source.language.particle_config's literal value>", FRENCH_CONFIG
     ).replace("<footnotes.apparatus_policy's literal value>", "translate_all")
-    argv = command.split()
+    # shlex.split, never str.split: the note is a SHELL command line, and a
+    # plain split round-trips an unquoted path while mangling a correctly
+    # quoted one -- so it agrees with whatever the implementation does and
+    # proves nothing about either.
+    argv = shlex.split(command)
     assert Path(argv[1]).is_absolute(), (
         "the advertised script path must not depend on an unstated cwd: " + command
     )

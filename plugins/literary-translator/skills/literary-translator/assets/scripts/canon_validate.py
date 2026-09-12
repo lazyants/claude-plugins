@@ -253,6 +253,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -4275,11 +4276,20 @@ def main(argv=None) -> int:
 #   file lives in, so interpolating it costs nothing and removes the
 #   assumption.
 #
+#   An UNQUOTED absolute path breaks again the moment the durable root holds
+#   a space, which is an ordinary thing for an operator-chosen directory on
+#   this platform to do. shlex.quote is the mechanism that makes ANY path
+#   safe rather than the ones we happened to test, so the path goes through
+#   it -- and the regression reads the command back with shlex.split from a
+#   root that HAS a space. A plain str.split() on the note is what hid this:
+#   it round-trips an unquoted path and mangles a quoted one, so it agreed
+#   with whatever the code did.
+#
 # Stated ONCE, in one constant: an operator-facing remedy that is wrong in one
 # of two branches is worse than one wrong in both, because only one of them
 # gets noticed.
 _SCAN_REMEDY = (
-    f"python3 {SCRIPTS_DIR / 'segpack.py'} --all "
+    f"python3 {shlex.quote(str(SCRIPTS_DIR / 'segpack.py'))} --all "
     "--particle-config <source.language.particle_config's literal value> "
     "--apparatus-policy <footnotes.apparatus_policy's literal value>"
 )
@@ -4476,7 +4486,7 @@ def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
                 f"{len(stale)} of {scanned} segpack(s) carry a canon_map "
                 "that canon.json no longer agrees with; run "
                 f"{_SCAN_REMEDY} before dispatching. "
-                f"This {_SCAN_SCOPE_DISCLAIMER}"
+                f"Note that {_SCAN_SCOPE_DISCLAIMER}"
             )
             if unevaluated:
                 note += (
@@ -4496,7 +4506,7 @@ def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
             note = (
                 f"checked {scanned} segpack(s) for a canon_map that "
                 "disagrees with canon.json over each pack's own names; "
-                f"none disagrees. This {_SCAN_SCOPE_DISCLAIMER}"
+                f"none disagrees. Note that {_SCAN_SCOPE_DISCLAIMER}"
             )
 
         fragment = {
