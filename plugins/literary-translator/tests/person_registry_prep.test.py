@@ -64,6 +64,17 @@ def _units_by_key(doc):
     return {(u["unit"]["source_form"], u["unit"]["sense_id"]): u for u in doc["units"]}
 
 
+def _expected_cast_units(input_doc):
+    """The cast's `units[]`, computed independently of `cast_document`: drop
+    every refusal_only unit, then drop `mentions` and `refusal_only` from
+    what remains, keeping every other key in place."""
+    return [
+        {k: v for k, v in u.items() if k not in ("mentions", "refusal_only")}
+        for u in input_doc["units"]
+        if not u.get("refusal_only")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # The prep universe
 # ---------------------------------------------------------------------------
@@ -219,6 +230,66 @@ def test_input_cap_refuses_rather_than_truncating(root):
     assert code == 2
     assert payload["reason"] == "input_too_large"
     assert not (root / "registry" / "registry_input.json").exists()
+    assert not (root / "registry" / "registry_cast.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# #923 -- the cast Pass A actually reads
+# ---------------------------------------------------------------------------
+
+def test_prep_writes_the_cast_beside_the_input(root):
+    code, payload, doc = _prep(root)
+    assert code == 0, payload
+    input_path = root / "registry" / "registry_input.json"
+    cast_path = root / "registry" / "registry_cast.json"
+    assert input_path.is_file()
+    assert cast_path.is_file()
+    cast = json.loads(cast_path.read_text(encoding="utf-8"))
+
+    assert cast["input_sha256"] == doc["input_sha256"]
+    expected_units = _expected_cast_units(doc)
+    assert cast["units"] == expected_units
+    for unit in cast["units"]:
+        assert "mentions" not in unit
+        assert "refusal_only" not in unit
+
+    # Bernard is the fixture's review-queue form -- refusal_only, and so
+    # absent from the cast while still present in the input.
+    assert "Bernard" not in {u["unit"]["source_form"] for u in cast["units"]}
+    assert "Bernard" in {u["unit"]["source_form"] for u in doc["units"]}
+
+    assert cast["cast_units"] == len(expected_units)
+    assert payload["cast_units"] == cast["cast_units"]
+    assert payload["cast_bytes"] == len(cast_path.read_bytes())
+    assert payload["bytes"] == len(input_path.read_bytes())
+    assert len(input_path.read_bytes()) > len(cast_path.read_bytes())
+
+
+def test_the_cap_measures_the_cast_not_the_input(root):
+    assert fx.run(root, "--prep")[0] == 0
+    cast_size = len((root / "registry" / "registry_cast.json").read_bytes())
+    input_size = len((root / "registry" / "registry_input.json").read_bytes())
+    assert input_size > cast_size
+
+    code, payload = fx.run(root, "--prep", "--max-input-chars", str(cast_size))
+    assert code == 0, payload
+    assert (root / "registry" / "registry_cast.json").is_file()
+    assert (root / "registry" / "registry_input.json").is_file()
+
+    (root / "registry" / "registry_cast.json").unlink()
+    (root / "registry" / "registry_input.json").unlink()
+    code, payload = fx.run(root, "--prep", "--max-input-chars", str(cast_size - 1))
+    assert code == 2
+    assert payload["reason"] == "input_too_large"
+    assert not (root / "registry" / "registry_cast.json").exists()
+    assert not (root / "registry" / "registry_input.json").exists()
+
+    # A cap strictly between the two sizes must pass -- the guard measures
+    # the cast, never the input file's own (larger) size.
+    between = (cast_size + input_size) // 2
+    assert cast_size < between < input_size
+    code, payload = fx.run(root, "--prep", "--max-input-chars", str(between))
+    assert code == 0, payload
 
 
 # ---------------------------------------------------------------------------
@@ -226,23 +297,26 @@ def test_input_cap_refuses_rather_than_truncating(root):
 # the remedy. On a real book neither knob moves the size much, because the bulk
 # is not the context windows, so an operator who followed the advice thinned
 # the evidence each unit carries, was refused again, and had traded quality for
-# nothing. The refusal now MEASURES instead of advising.
+# nothing. The refusal now MEASURES instead of advising -- on the CAST (#923),
+# since that is the document the cap actually guards.
 # ---------------------------------------------------------------------------
 
 def _contexts_block_bytes(root):
-    """The bytes the per-unit `contexts` blocks occupy in the emitted document,
-    derived the long way round: emit, then re-emit with every block empty."""
+    """The bytes the per-unit `contexts` blocks occupy in the CAST, derived
+    the long way round: emit, then re-emit with every block empty."""
     assert fx.run(root, "--prep", "--max-input-chars", "100000000")[0] == 0
     doc = json.loads((root / "registry" / "registry_input.json").read_text(encoding="utf-8"))
-    size = len(pr.emitted_json_text(doc).encode("utf-8"))
-    stripped = dict(doc)
-    stripped["units"] = [{**u, "contexts": []} for u in doc["units"]]
+    cast = pr.cast_document(doc)
+    size = len(pr.emitted_json_text(cast).encode("utf-8"))
+    stripped = dict(cast)
+    stripped["units"] = [{**u, "contexts": []} for u in cast["units"]]
     return size, size - len(pr.emitted_json_text(stripped).encode("utf-8"))
 
 
 def test_the_prep_refusal_measures_the_contexts_blocks_rather_than_advising_a_knob(root):
     size, block_bytes = _contexts_block_bytes(root)
     (root / "registry" / "registry_input.json").unlink()
+    (root / "registry" / "registry_cast.json").unlink()
 
     code, payload = fx.run(root, "--prep", "--max-input-chars", "10")
     assert code == 2
@@ -260,14 +334,16 @@ def test_the_prep_refusal_names_what_neither_knob_reaches(root):
     code, payload = fx.run(root, "--prep", "--max-input-chars", "10")
     assert code == 2
     error = payload["error"]
-    # The three reasons the blocks cannot go to zero ...
+    # The two reasons the blocks cannot go to zero (the review-queue-carries-
+    # no-contexts reason is gone with #923: that population is not in this
+    # document at all any more) ...
     assert "always keeps its own occurrence" in error
     assert "homonym-split unit's source context is cut from stored evidence offsets" in error
-    assert "review-queue unit carries no contexts at all" in error
-    # ... and the two fields that are outside both knobs entirely. Deliberately
-    # NOT "metadata": lowering the context cap DOES move contexts_truncated and
+    # ... the fields that are outside both knobs entirely. Deliberately NOT
+    # "metadata": lowering the context cap DOES move contexts_truncated and
     # its aggregate count, so that broader claim would be false.
-    assert "mentions list and the canon note are outside both knobs" in error
+    assert "The canon note and each unit's own fields are outside both knobs" in error
+    assert "the mentions lists and the review-queue units are not in this document at all" in error
     assert "metadata" not in error
 
 
@@ -277,15 +353,17 @@ def test_the_prep_refusal_counts_utf8_bytes_and_not_characters(root):
     character count silently under-reports."""
     assert fx.run(root, "--prep", "--max-input-chars", "100000000")[0] == 0
     doc = json.loads((root / "registry" / "registry_input.json").read_text(encoding="utf-8"))
-    stripped = dict(doc)
-    stripped["units"] = [{**u, "contexts": []} for u in doc["units"]]
-    as_bytes = (len(pr.emitted_json_text(doc).encode("utf-8"))
+    cast = pr.cast_document(doc)
+    stripped = dict(cast)
+    stripped["units"] = [{**u, "contexts": []} for u in cast["units"]]
+    as_bytes = (len(pr.emitted_json_text(cast).encode("utf-8"))
                 - len(pr.emitted_json_text(stripped).encode("utf-8")))
-    as_chars = len(pr.emitted_json_text(doc)) - len(pr.emitted_json_text(stripped))
+    as_chars = len(pr.emitted_json_text(cast)) - len(pr.emitted_json_text(stripped))
     # Without this the assertion below would pass on either implementation.
     assert as_bytes != as_chars, "fixture contexts carry no non-ASCII; the test proves nothing"
 
     (root / "registry" / "registry_input.json").unlink()
+    (root / "registry" / "registry_cast.json").unlink()
     code, payload = fx.run(root, "--prep", "--max-input-chars", "10")
     assert code == 2
     assert f"{as_bytes} of those bytes" in payload["error"]
@@ -395,15 +473,17 @@ def test_two_occurrences_in_one_container_are_two_distinct_contexts(root):
 
 def test_the_prep_cap_measures_the_bytes_the_model_receives(root):
     """Same rule as the claims cap: the guard and the file must be the same
-    serialization, or the guard is about bytes nobody ever reads."""
+    serialization, or the guard is about bytes nobody ever reads. The file
+    that guard is checked against is the CAST (#923), the one Pass A opens."""
     assert fx.run(root, "--prep")[0] == 0
-    path = root / "registry" / "registry_input.json"
+    path = root / "registry" / "registry_cast.json"
     emitted = len(path.read_bytes())
     doc = json.loads(path.read_text(encoding="utf-8"))
     compact = len(pr.canonical_json_bytes(doc))
     assert compact < emitted
 
     path.unlink()
+    (root / "registry" / "registry_input.json").unlink()
     code, payload = fx.run(root, "--prep", "--max-input-chars", str(compact))
     assert code == 2
     assert payload["reason"] == "input_too_large"

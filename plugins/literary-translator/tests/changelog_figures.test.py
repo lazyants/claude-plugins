@@ -504,6 +504,29 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
+    # ROTATED TO 1.125.0 (#923 -- `person_registry.py --prep` was unreachable
+    # on a large canon), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. It
+    # quotes MANY figures -- document sizes at five knob settings, the bytes of
+    # four parts of the document, unit and row counts, three registries'
+    # refusal tallies -- and every one of them is a measurement taken on
+    # DELIVERED BOOKS IN ANOTHER REPOSITORY (the `breslov-he-en` series), the
+    # kind no implementation in this tree can re-derive, so no row can call the
+    # authoritative implementation for them and none is declared. The entry
+    # states them as what they are: numbers measured on one book, dated. What
+    # the tree DOES own is stated by NAMING -- `registry_cast.json`,
+    # `refusal_only_misplaced`, `--max-input-chars`, `refused_by:
+    # canon_review_queue` -- rather than by counting. The remaining numerals are
+    # identifiers: the version numbers, the release date, the issue numbers
+    # (#923, #896) and the gate names (P2, P3, Pass A, Pass B).
+    #
+    # This rotation RETIRED 1.123.0's one row (`default 2`, the
+    # `DEFAULT_MIN_CANDIDATE_FREQ` constant), which belongs to an entry that is
+    # now the second-newest and which this guard therefore no longer reads;
+    # the row is kept below as a comment inside that release's own record.
+    #
+    # The 1.123.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.123.0 (#912 -- the glossary planner reported no count of the
     # candidates its frequency floor removed), per the maintenance contract
     # above.
@@ -535,9 +558,9 @@ FIGURES = [
     # the second-newest and which this guard therefore no longer reads. #912,
     # #914 and #921 landed the same day; each earlier rotation's own record is
     # kept below, unchanged.
-    Figure("default 2", 2,
-           lambda: _int_constant("glossary_batch_plan.py",
-                                 "DEFAULT_MIN_CANDIDATE_FREQ")),
+    #   Figure("default 2", 2,
+    #          lambda: _int_constant("glossary_batch_plan.py",
+    #                                "DEFAULT_MIN_CANDIDATE_FREQ")),
     #
     #
     # ------------------------------------------------------------------------
@@ -1304,7 +1327,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.123.0"
+FIGURES_VERSION = "1.125.0"
 
 
 def _newest_entry():
