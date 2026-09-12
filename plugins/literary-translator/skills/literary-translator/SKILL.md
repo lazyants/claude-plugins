@@ -2554,7 +2554,10 @@ correcting `canon.json` so the two records become one surface (no
 `canon_adjudications.json` is needed for this route — an absent file reads
 as empty), or, if the two spellings really are two different people, by
 recording a `confirmed_ok` verdict for the item. The escalation makes the
-question mandatory; it does not assert the answer. On a project whose
+question mandatory; it does not assert the answer. But when the two forms
+are the same string under Unicode NFC they are two spellings of one string,
+not two different people, so `confirmed_ok` is never the right answer there
+and `canon_validate.py` now refuses that canon outright. On a project whose
 `canon_senses.json` is absent or
 schema-valid-empty, this call is a no-op pass-through (`gate_passed: true`)
 **for category 5** — run it unconditionally rather than special-casing

@@ -256,6 +256,7 @@ import re
 import shlex
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -2494,7 +2495,11 @@ def _merge_batch(canon: dict, batch: list, senses: "SensesResult") -> dict:
     touches disk -- the caller writes only after this returns successfully.
     Raises CanonValidationError (naming both old and new values) on a
     genuine cross-run collision: two different resolutions claimed for the
-    same source_form. An identical re-submission is a silent no-op.
+    same source_form. An identical re-submission is a silent no-op -- with one
+    #911 exception: the NFC-collision scan below reads the ACCUMULATED
+    `entries`, which starts as the canon on disk, so a canon that already
+    carries a colliding pair refuses every merge, an unchanged fragment
+    included, until one of the two rows is removed.
 
     Refuse-recollapse guard (RFC #215 1d): an ACCEPTED item whose
     source_form is an adjudicated homonym split in `senses` (>=2 senses,
@@ -2555,6 +2560,27 @@ def _merge_batch(canon: dict, batch: list, senses: "SensesResult") -> dict:
                 f"{source_form!r}: unrecognized disposition {disposition!r}"
             )
 
+    # #911: the same refusal, one level up from a per-item comparison. The two
+    # rows are byte-different, so nothing in the loop above can pair them; only
+    # grouping the ACCUMULATED mapping by NFC form can. `entries` here is the
+    # post-merge state that run_merge_batches threads from fragment to
+    # fragment, so this catches a collision across fragments and inside one
+    # fragment alike, and it raises before _stamp_write_verify is ever reached.
+    # The group may PREDATE this batch: `entries` starts as the canon on disk,
+    # so a canon that already carries a pair refuses every further merge until
+    # it is repaired, whatever the batch contained. That is deliberate -- a
+    # canon in this state resolves one phrase two ways, and merging more into
+    # it compounds the defect rather than deferring it -- but it means the
+    # message must name the repair, because the operator's batch may be
+    # blameless.
+    #
+    # `include_targets=False` and a terse suffix, both so the REPAIR ROUTE
+    # fits inside _bounded_message's 200 characters. This refusal is the only
+    # output the merge path produces -- unlike the read-side modes there is no
+    # fuller report behind it -- so an instruction truncated away here is an
+    # instruction the operator never gets.
+    collisions.extend(_nfc_colliding_entry_keys(entries, include_targets=False))
+
     if collisions:
         raise CanonValidationError(
             "batch merge rejected due to entries{} collision(s):\n  "
@@ -2599,6 +2625,268 @@ def _assert_no_entries_review_queue_overlap(canon: dict) -> None:
             "in both entries{} and review_queue[]: "
             + ", ".join(_bounded_list(overlap)),
             offending=overlap,
+        )
+
+
+# --- #911: two entries{} keys that are one string under NFC -----------------
+#
+# Hebrew points, Arabic harakat and Latin NFD accents carry DISTINCT canonical
+# combining classes, which is precisely the condition under which Unicode
+# canonical ordering reorders them -- so one mark run written in two different
+# orders is two byte-different strings that NFC folds into one. The two render
+# identically: no reviewer, diff, or editor can see the difference.
+#
+# Nothing upstream folds them. entries{} is keyed by the source form exactly as
+# the source text spells it (occurrence_targets.py's "LITERAL, UNFOLDED"
+# contract), _merge_batch compares source_form by plain string equality, and
+# canon-file.schema.json puts no propertyNames constraint on the map. Two such
+# rows are therefore two unrelated entries that may carry DIFFERENT
+# canonical_target_form values, and each segpack freezes whichever one its own
+# extracted surface happened to match -- so the book ships one phrase two ways,
+# every segment obeying its own frozen contract.
+#
+# canon_adjudication_audit.py's category-1 surface_variant finding DOES detect
+# this pair and blocks on it, unmaskable by --advisory (#244). What it does not
+# do is persist: it runs once, before W3a, a later merge or key rename can
+# introduce the pair after it, and its finding is legitimately clearable with a
+# confirmed_ok verdict -- which is the right answer to the question that
+# category asks ("two people sharing a spelling?") and the wrong one here,
+# where the two forms are one string. The gap this closes is therefore the
+# absence of a STANDING check on the write and read paths, not an absence of
+# any detection at all.
+#
+# Compared under PLAIN NFC, never normalize_form(). normalize_form() also
+# casefolds, which merges genuinely distinct strings ('Strasse' vs the eszett
+# spelling), and a vowel-point-stripping key folds a name onto an unrelated
+# word (#927) -- either would make this refusal capable of being WRONG. NFC is
+# semantics-preserving by definition, so a violation named here can only ever
+# be two spellings of one string.
+#
+# A LONE non-NFC key stays accepted. The source text legitimately carries
+# non-NFC forms and the entry is anchored to how the source spells it; only the
+# COLLISION is refused.
+#
+# Deliberately NOT called from _validate_whole_file, which the --correct write
+# path also runs (:2797, :2802). --correct handles exactly ONE entry per
+# invocation, so gating it on this invariant would make a canon holding TWO
+# collisions unrepairable: removing one member leaves the other collision, the
+# pre-write validation rejects the post-state, and neither removal can be
+# persisted. Exempting --correct is safe rather than a compromise -- no
+# disposition it admits can ADD an entries{} key ("correct" rewrites under the
+# same key, "remove" deletes one, "dismiss" touches only review_queue[]) -- and
+# it is the repair route, which must never be gated by the condition it
+# repairs. The three call sites below are the paths that either introduce a
+# collision or are asked to report on one.
+# A `canonical_target_form` is an unconstrained schema string, so one long
+# target could otherwise consume the whole 200-char line budget on its own.
+# The targets on a collision line are context, never the instruction, so they
+# get a small fixed allowance each.
+_COLLISION_TARGET_MAX_CHARS = 40
+
+# A collision report enumerates as many WHOLE groups as fit the same element
+# budget every other bounded list in this module obeys, reserving one slot for
+# the overflow note. Bounding by group rather than leaving it to an element cap
+# is the point: a group costs one header line plus one line per key, so a cap
+# applied to elements truncates MID-GROUP -- dropping a member the operator
+# then cannot see -- and its "... and N more" counts LINES, misreporting how
+# many collisions exist. Deriving the group count FROM the element budget,
+# rather than picking a group number and hoping, is what makes that safe on
+# every field at once: `error` builds its own text, but `offending` is capped
+# independently by CanonValidationError's generic `_MAX_LISTED_PROBLEMS`, which
+# knows nothing about groups. Fitting inside that budget here means neither
+# field can ever show a half-group.
+_MAX_COLLISION_REPORT_ELEMENTS = _MAX_LISTED_PROBLEMS
+
+
+def _bounded_target(value) -> str:
+    """`repr()` of a `canonical_target_form`, capped at
+    `_COLLISION_TARGET_MAX_CHARS`, so no single row can crowd another row's
+    KEY out of a collision line."""
+    # Truncate the SOURCE, then repr() -- never the other way round, the same
+    # order and for the same reason as `_indexed_item_label`: slicing repr()'s
+    # OUTPUT cuts off its closing quote, so a truncated target renders as an
+    # unterminated string sitting beside correctly-quoted ones, and a cut
+    # landing inside an escape can leave a dangling backslash.
+    if isinstance(value, str) and len(value) > _COLLISION_TARGET_MAX_CHARS:
+        value = value[:_COLLISION_TARGET_MAX_CHARS] + "..."
+    return repr(value)
+
+
+def _group_entry_keys_by_nfc(entries: dict) -> dict:
+    """`{NFC form: [every entries{} map key that folds to it]}`. The ONE place
+    the grouping is computed, so the report and the count that introduces it
+    can never disagree about how many collisions there are."""
+    by_nfc: dict = {}
+    for key in entries:
+        by_nfc.setdefault(unicodedata.normalize("NFC", key), []).append(key)
+    return by_nfc
+
+
+def _nfc_colliding_entry_keys(entries: dict, *, include_targets: bool = True) -> list:
+    """Returns the reportable lines for every NFC-collision group in `entries`
+    (empty when there is none): a group of 2+ byte-DISTINCT map keys that are
+    the same string after `unicodedata.normalize("NFC", ...)`.
+
+    ONE LINE PER KEY, under a per-group header, rather than one line per group.
+    Every element the caller passes to `_bounded_list` gets its OWN 200-char
+    `_bounded_message` budget, so a group rendered as a single line has to fit
+    its header, both keys and both targets into one budget -- and under
+    `ascii()` a Hebrew codepoint costs six characters, so the KEYS alone
+    overrun it at ordinary name lengths. MEASURED on the merge path: the
+    single-line shape named both keys for a 7-codepoint word, named neither
+    for the 19-codepoint two-word phrase that motivated #911, and lost the
+    repair instruction before either. Splitting the group across lines gives
+    each key a budget of its own: measured, a key up to 32 codepoints renders
+    whole, and the first loss is at 33. Beyond that the key itself is longer
+    than the budget and no layout can help -- but `_bounded_message` marks
+    what it cut, so an over-long key reads as TRUNCATED rather than as a row
+    that quietly went unnamed.
+
+    The header carries the shared NFC form, the member count and the repair
+    instruction; each member line carries one key and its
+    `canonical_target_form`, since two keys agreeing on a target is a redundant
+    row while two disagreeing is the shipped-two-ways defect.
+
+    Each colliding key is ESCAPED, never printed as glyphs. The whole point of
+    this defect is that the two keys LOOK THE SAME -- printing them would emit
+    the identical string twice and leave the operator no way to tell which row
+    to remove. Escaping makes the differing mark ORDER the visible difference.
+    The shared NFC form keeps its glyphs, so the message still says WHICH name
+    it is about; it is not ALSO printed escaped, because every character here
+    is charged against `_bounded_message`'s 200-char per-element budget and a
+    third rendering of a string the line already carries twice buys nothing.
+
+    `json.dumps(key, ensure_ascii=True)`, NOT `ascii()`, because the escaped
+    key is documented as copy-pasteable into a `--correct` document and that
+    document is JSON. The two agree on `\\uXXXX`, but `ascii()` emits `\\xXX`
+    for U+0080-U+00FF, which is not a valid JSON escape -- so a key holding
+    any Latin-1 character (an accented Latin NFD form, one of the very classes
+    this check exists for) produced a line that would not parse when pasted.
+
+    EVERY KEY IS EMITTED BEFORE ANY TARGET, and each target is capped at
+    `_COLLISION_TARGET_MAX_CHARS`. The keys are what the operator needs in
+    order to act -- they are the thing a correction document must name, and
+    they are the thing that cannot be read off the screen -- while the targets
+    are context. `canonical_target_form` is a free-length schema string, so a
+    single long target ahead of the second key would push that key past the
+    200-char cap and leave a refusal that identifies only one of the two rows
+    it is refusing. Ordering the line keys-first makes the truncation eat the
+    context instead of the instruction.
+
+    MEASURED, on the mode an operator actually diagnoses with
+    (`run_validate_only`, where the 200-char cap applies to each collision
+    LINE and not to the whole message): every key stays visible for a
+    two-member group with a 300-character target, for a three-member group,
+    and for two groups at once. `--verify-merged` caps the WHOLE exception at
+    200 characters a second time, so a long or multi-group report is cut there
+    -- but that cap predates this check and applies identically to every
+    failure that mode folds into `missing`, and the two-member group it is
+    sized for still shows both keys. The full report is one validate-only run
+    away, so this is a bounded report, not a lost one.
+
+    `include_targets=False` drops the target clause, freeing roughly 45
+    characters of that budget. `_merge_batch` passes it: its refusal is the
+    ONLY output that path produces -- there is no fuller mode to fall back on
+    -- so the repair instruction has to fit inside the cap, and on a REFUSED
+    MERGE the operator's question is which two rows collide, not what they
+    each resolve to. The targets stay one validate-only run away."""
+    by_nfc = _group_entry_keys_by_nfc(entries)
+    groups = [(form, keys) for form, keys in sorted(by_nfc.items()) if len(keys) > 1]
+
+    collisions = []
+    shown = 0
+    for nfc_form, keys in groups:
+        header = (
+            f"{nfc_form!r}: {len(keys)} entries{{}} keys are ONE string under "
+            f'NFC -- keep one, --correct disposition:"remove" the rest'
+        )
+        members = []
+        for key in sorted(keys):
+            line = f"    = {json.dumps(key, ensure_ascii=True)}"
+            if include_targets:
+                target = (
+                    _bounded_target(entries[key].get("canonical_target_form"))
+                    if isinstance(entries[key], dict)
+                    else "<malformed row>"
+                )
+                line += f" -> {target}"
+            members.append(line)
+
+        # Always leave one slot for the trailing "more collision group(s)"
+        # note, so the count of what was NOT shown can never itself be cut.
+        room = _MAX_COLLISION_REPORT_ELEMENTS - 1 - len(collisions)
+        if room < 2:
+            break  # not even a header plus one key would fit
+        if len(members) + 1 <= room:
+            block = [header] + members
+        else:
+            # ONE equivalence class can be bigger than the whole budget --
+            # four combining marks of distinct canonical class permute into
+            # nine byte-distinct spellings of one string. Truncating such a
+            # group by the generic element cap would drop member keys with
+            # nothing saying so. Cut it HERE instead, and say how many keys
+            # were withheld, so a partial group always announces itself.
+            keep = room - 2
+            block = [header] + members[:keep]
+            block.append(f"    ... and {len(members) - keep} more key(s) in this group")
+        collisions.extend(block)
+        shown += 1
+
+    extra = len(groups) - shown
+    if extra > 0:
+        collisions.append(f"... and {extra} more collision group(s)")
+    return collisions
+
+
+def _assert_no_nfc_colliding_entry_keys(canon: dict) -> None:
+    """Raises `CanonValidationError` when `entries{}` holds an NFC-collision
+    group (see `_nfc_colliding_entry_keys` and the block comment above it).
+    Used by the two READ-side modes; `_merge_batch` folds the same finding into
+    its own collision list instead, so its refusal names the batch it rejected.
+    """
+    collisions = _nfc_colliding_entry_keys(canon.get("entries", {}))
+    if collisions:
+        # THE POINTER COMES FIRST, then the count, then the detail -- and that
+        # order is measured, not stylistic. `--verify-merged` folds this whole
+        # string into `missing` and `_bounded_list` caps it a SECOND time at
+        # 200 characters, and a realistic collision report does not fit in 200
+        # characters under ANY ordering: measured keys-first, a 7-codepoint
+        # pair named one key of two and a 19-codepoint pair named none. So
+        # that mode cannot be given the keys, and pretending otherwise just
+        # loses the keys AND the instruction. What it can be given, inside the
+        # only window guaranteed to survive, is how to REACH the mode that
+        # does print them. Do NOT move the detail forward to "rescue" this: it
+        # does not fit, and moving it evicts the pointer instead.
+        #
+        # The pointer names a form argparse actually accepts, and it names
+        # EVERY flag that has to come off. Two wordings failed here before
+        # this one, both the same way: this is the one message that
+        # deliberately withholds the keys, so a recipe that does not run
+        # leaves no route to them at all. First "validate-only" was
+        # advertised as a positional -- it is the NAME of the no-mode-flag
+        # mode -- and exited `unrecognized arguments: validate-only`. Then
+        # only two flags were named, but the shipped --verify-merged command
+        # also carries --expect-source-forms-file, which validate-only
+        # explicitly refuses, so following the sentence literally still
+        # exited 2. Any edit to this sentence must be EXECUTED against the
+        # full documented verify argv, not proofread.
+        # Counted from `entries` itself, never by classifying the rendered
+        # lines: the report holds header lines, member lines AND a possible
+        # overflow note, and a count derived from that shape would silently
+        # drift the next time the shape changes.
+        n_groups = sum(
+            1
+            for _form, group in _group_entry_keys_by_nfc(canon.get("entries", {})).items()
+            if len(group) > 1
+        )
+        raise CanonValidationError(
+            f"rerun canon_validate.py with no --verify-merged and no --batch "
+            f"and no --expect-source-forms-file to print every colliding key: "
+            f"canon.json entries{{}} holds {n_groups} NFC-colliding "
+            f"source_form key group(s). Each is byte-different but renders "
+            f"identically, so a segpack froze whichever one it matched: "
+            + "; ".join(_bounded_message(line) for line in collisions),
+            offending=collisions,
         )
 
 
@@ -2822,21 +3110,48 @@ def run_init(
     W3a.
 
     CREATE-ONLY, by design: an already-existing canon.json is left
-    byte-untouched (`"created": false`) and is not even read here.
-    Re-stamping one would hand an operator a way to clear
-    select_segments.py's derivation-state gate without regenerating
-    anything, since that gate reads precisely these two hashes to decide
-    whether a particle_config edit or a bootstrap_names.py/segpack.py fix
-    has been regenerated through. Health-checking an existing canon.json is
-    VALIDATE-ONLY mode's job, not this one's; keeping --init silent about
-    it means the documented SKIP-branch command stays a safe no-op on every
-    re-run of an already-bootstrapped project.
+    byte-untouched (`"created": false`). Re-stamping one would hand an
+    operator a way to clear select_segments.py's derivation-state gate
+    without regenerating anything, since that gate reads precisely these two
+    hashes to decide whether a particle_config edit or a
+    bootstrap_names.py/segpack.py fix has been regenerated through.
+    Health-checking an existing canon.json is VALIDATE-ONLY mode's job, not
+    this one's; keeping --init silent about it means the documented
+    SKIP-branch command stays a safe no-op on every re-run of an
+    already-bootstrapped project.
+
+    ONE EXCEPTION, and it is a READ, never a write (#911): an existing
+    canon.json is opened and refused if `entries{}` holds two keys that are
+    one string under NFC. That single class needs enforcement HERE because
+    this is the only mode the zero-candidate and `glossary.enabled: false`
+    branches invoke -- they run no merge, so `_merge_batch`'s guard never
+    fires, and nothing else stands between a colliding canon and W3a. The
+    adjudication audit that follows detects the pair but does not settle it:
+    it runs once, and its finding is clearable with a `confirmed_ok`
+    verdict. Reading is not restamping, so the create-only rationale above is
+    untouched -- `created: false` still means byte-untouched.
+
+    Deliberately NARROW. An unparseable file, a non-object `entries`, a
+    schema violation: all still pass silently here, exactly as before,
+    because those ARE validate-only's job and widening this into a general
+    health check would make the documented SKIP-branch command stop being a
+    safe no-op.
 
     `plugin_root_str` (#412) is this script's own --plugin-root CLI value,
     threaded through to `_stamp_write_verify`.
     """
     created = not canon_path.is_file()
     restamped = False
+    if not created:
+        # #911, read-only. Parse leniently: anything this cannot understand is
+        # left to validate-only, so only a well-formed canon carrying a real
+        # NFC collision is refused.
+        try:
+            existing = json.loads(canon_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict) and isinstance(existing.get("entries"), dict):
+            _assert_no_nfc_colliding_entry_keys(existing)
     if created:
         # No prior file, so _stamp_write_verify always stamps fresh here --
         # the #291 conservation path cannot apply to a bootstrap.
@@ -3601,6 +3916,9 @@ def run_verify_merged(
     missing = []
     try:
         _validate_whole_file(canon, registry)
+        # #911: inside this same try on purpose -- this mode never raises past
+        # itself, every failure it reports is folded into `missing`.
+        _assert_no_nfc_colliding_entry_keys(canon)
     except CanonValidationError as e:
         missing.append(str(e))
 
@@ -3639,6 +3957,7 @@ def run_validate_only(canon_path: Path, research_mode: str, registry: "Registry"
 
     _validate_existing_entries(canon, registry)
     _validate_whole_file(canon, registry)
+    _assert_no_nfc_colliding_entry_keys(canon)
 
     return {
         "success": True,
