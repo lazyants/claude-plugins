@@ -2010,158 +2010,158 @@ There is deliberately no retry knob: the ladder bound is READ from the template'
 own `MAX_CITATION_RETRIES`, so the driver and the `pipeline()` fallback cannot
 climb different numbers of rungs.
 
-**`--reset-batches <i>[,<j>…]` — the ONE supported way to put a settled batch
-back on the ladder (1.115.0, #892).** Added to the command above, it sends each
-named batch back to attempt 0 BEFORE this invocation drives anything: it deletes
-that batch's approved snapshots at every rung and rewrites its state entry.
-Both halves are the operation — the snapshot is published create-once, so a state
-entry rewritten while the snapshots stay costs the batch a rung per rung on
-`approve-failed` and settles it again, recording a citation review that never
-happened. It is what a batch reported at `reason: "citation-review-exhausted"`
-needs, and the exhausted entry now names it. It resets whatever the batch's
-status is — including `ready`, whose attested approval it throws away — because
-the case it exists for is the one where the state document is itself what is
-wrong; an index this run does not have is refused before anything dispatches.
-**It resets on EVERY invocation that carries it, so drop it from the next one:**
-left on, the follow-up invocation resets the hand-back it just produced, and the
-invocation that submits that batch's verdict refuses it as not awaiting a judge.
-A reset re-opens a FULL ladder, so the run's `worstCaseJudgeCalls` no longer
-bounds the session — that is the operator's decision to make, knowingly.
+**`--reset-batches <i>[,<j>…]` — the ONE supported way to put a settled batch back on
+the ladder (1.115.0, #892).** Added to the command above, it sends each named batch
+back to attempt 0 BEFORE this invocation drives anything: it deletes that batch's
+approved snapshots at every rung and rewrites its state entry. Both halves are the
+operation — the snapshot is published create-once, so a state entry rewritten while
+the snapshots stay costs the batch a rung per rung on `approve-failed` and settles it
+again, recording a citation review that never happened. Every terminal `not_ready[]`
+entry now names its own recovery: the environmental failures name this flag, while
+`approval-record-write-failed` deliberately does not, since its recovery points at
+the hand route under **Recovering the ready batches when a sibling exhausted**
+further down. It resets whatever the batch's status is — including `ready`, whose
+attested approval it throws away — because the case it exists for is the one where
+the state document is itself what is wrong; an index this run does not have is
+refused before anything dispatches. **It resets on EVERY invocation that carries it,
+so drop it from the next one:** left on, the follow-up invocation resets the
+hand-back it just produced, and the invocation that submits that batch's verdict
+refuses it as not awaiting a judge. A reset re-opens a FULL ladder, so the run's
+`worstCaseJudgeCalls` no longer bounds the session — that is the operator's decision
+to make, knowingly.
 
 `--plugin-root` and `--verdict-dir` are both REQUIRED and both are refusals, not
-conveniences. The driver EXECUTES the template's builders, and
-a durable copy of the template would be JavaScript it then runs from a directory
-it does not own, so it will run only the plugin tree's copy — there is
-deliberately no durable fallback. #806 removed the sharpest writer of that copy,
-and the refusal is deliberately not relaxed on the strength of it: the
-`pipeline()` path's jobs are unconfined, a manual drive still runs with `--write`
-and cwd = the durable root, and a durable copy can be stale as easily as hostile.
-`--verdict-dir` holds the judge verdicts, which authorize an approval record and
-a merge into an immutable canon; a path inside `${durable_root}` is refused
-outright, as is one that is not owned by you and private.
+conveniences. The driver EXECUTES the template's builders, and a durable copy of the
+template would be JavaScript it then runs from a directory it does not own, so it
+will run only the plugin tree's copy — there is deliberately no durable fallback.
+#806 removed the sharpest writer of that copy, and the refusal is deliberately not
+relaxed on the strength of it: the `pipeline()` path's jobs are unconfined, a manual
+drive still runs with `--write` and cwd = the durable root, and a durable copy can be
+stale as easily as hostile. `--verdict-dir` holds the judge verdicts, which authorize
+an approval record and a merge into an immutable canon; a path inside
+`${durable_root}` is refused outright, as is one that is not owned by you and
+private.
 
-**Run the DRIVER from `${durable_root}/scripts/`, never the plugin tree's own
-copy of it — the path you invoke IS the durable-root selector.** This driver
-anchors itself: `SCRIPTS_DIR` is the directory the running file sits in and
-`DURABLE_ROOT` is that directory's parent, both resolved from the file's own
-location rather than from cwd, and there is deliberately no `--durable-root` flag
-to correct either with. Invoke the plugin tree's copy and the plugin's own
-`assets/` directory silently becomes the durable root, because it too has a
-`scripts/` under it. Nothing refuses that: the driver checks `--run-id`, the shape
-of `--batches-file` and `--resumed-batch-indices`, and `--verdict-dir`, and it
-refuses EITHER path under a temp root — but nothing establishes that the resolved
-durable root is this project's. The mistake is paid for before anything stops it —
-a batch's failure is detected only AFTER that batch's codex job has been launched,
-and a failed batch does not stop the ones behind it: the driver logs each one and
-goes straight on to the next. So the run announces inputs it cannot find one batch
-at a time while continuing to buy the rest, and the JSON verdict that names the
-whole failure arrives once they are all spent. Measured on one live volume:
-12 codex jobs. So check the SCRIPT PATH in the command you are about to run —
-`${durable_root}/scripts/glossary_dispatch_driver.py`, in the `scripts/` directory
-beside the run's own `canon.json` — rather than checking that `${durable_root}`
-itself looks populated, which it will, identically, while the command still names
-the plugin tree's driver.
+**Run the DRIVER from `${durable_root}/scripts/`, never the plugin tree's own copy of
+it — the path you invoke IS the durable-root selector.** This driver anchors itself:
+`SCRIPTS_DIR` is the directory the running file sits in and `DURABLE_ROOT` is that
+directory's parent, both resolved from the file's own location rather than from cwd,
+and there is deliberately no `--durable-root` flag to correct either with. Invoke the
+plugin tree's copy and the plugin's own `assets/` directory silently becomes the
+durable root, because it too has a `scripts/` under it. Nothing refuses that: the
+driver checks `--run-id`, the shape of `--batches-file` and
+`--resumed-batch-indices`, and `--verdict-dir`, and it refuses EITHER path under a
+temp root — but nothing establishes that the resolved durable root is this project's.
+The mistake is paid for before anything stops it — a batch's failure is detected only
+AFTER that batch's codex job has been launched, and a failed batch does not stop the
+ones behind it: the driver logs each one and goes straight on to the next. So the run
+announces inputs it cannot find one batch at a time while continuing to buy the rest,
+and the JSON verdict that names the whole failure arrives once they are all spent.
+Measured on one live volume: 12 codex jobs. So check the SCRIPT PATH in the command
+you are about to run — `${durable_root}/scripts/glossary_dispatch_driver.py`, in the
+`scripts/` directory beside the run's own `canon.json` — rather than checking that
+`${durable_root}` itself looks populated, which it will, identically, while the
+command still names the plugin tree's driver.
 
 **The loop the session drives.** Read the driver's one JSON line.
 
-1. `needs_judge[]` non-empty → dispatch ONE agent per entry, **in parallel**,
-   each with `agentType: "literary-translator:citation-judge"` and that entry's
-   `judgePrompt` verbatim. That parallelism is the point; a serial loop throws
-   the saving away.
-2. Write the replies to a file **inside `--verdict-dir`** as
-   `[{"batch": i, "attempt": n, "nonce": "<the entry's own nonce>", "reply": "<the
-   agent's full reply>"}, ...]` and re-invoke with `--record-verdicts <that file>`
-   plus the same `--verdict-dir`, `--plugin-root` and `--run-id`. A path outside
-   that directory is refused: the file carries the nonces that admit an approval,
-   so it is authorization input, and the directory holding it is kept separate
-   from `${durable_root}` — which the agents this pass drives do write — rather
-   than trusted to be unreachable.
-3. Repeat while `needs_judge[]` comes back non-empty. A REJECTED batch comes
-   back in that list at the next attempt, with a fresh nonce — the recording
-   invocation advances the ladder itself, so there is nothing extra to do. The
-   run is done when the output carries `"merged": true`; `not_ready[]` names
-   any batch that failed and why. When `needs_judge[]` comes back empty,
-   `ready[]` is non-empty, and a `not_ready[]` entry carries `reason:
-   "citation-review-exhausted"`, the run is over for that RUN_ID and `merged`
-   stays `false` — re-invoking the driver never reaches the merge while a batch
-   is `failed` — so go to **Recovering the ready batches when a sibling
-   exhausted** below. (Scoped to that reason on purpose: offline runs have no
-   citation review, snapshots or records, and their `not_ready[]` is a
-   different failure.) Every `reason` the Workflow path uses appears unchanged,
-   and the driver may also report failures of its own, because it does work the
-   Workflow cannot —
+1. `needs_judge[]` non-empty → dispatch ONE agent per entry, **in parallel**, each
+   with `agentType: "literary-translator:citation-judge"` and that entry's
+   `judgePrompt` verbatim. That parallelism is the point; a serial loop throws the
+   saving away.
+2. Write the replies to a file **inside `--verdict-dir`** as `[{"batch": i, "attempt":
+   n, "nonce": "<the entry's own nonce>", "reply": "<the agent's full reply>"}, ...]`
+   and re-invoke with `--record-verdicts <that file>` plus the same `--verdict-dir`,
+   `--plugin-root` and `--run-id`. A path outside that directory is refused: the file
+   carries the nonces that admit an approval, so it is authorization input, and the
+   directory holding it is kept separate from `${durable_root}` — which the agents
+   this pass drives do write — rather than trusted to be unreachable.
+3. Repeat while `needs_judge[]` comes back non-empty. A REJECTED batch comes back in
+   that list at the next attempt, with a fresh nonce — the recording invocation
+   advances the ladder itself, so there is nothing extra to do. The run is done when
+   the output carries `"merged": true`; `not_ready[]` names any batch that failed and
+   why. When `needs_judge[]` comes back empty, `ready[]` is non-empty, and a
+   `not_ready[]` entry carries `reason: "citation-review-exhausted"`, the run is over
+   for that RUN_ID and `merged` stays `false` — re-invoking the driver never reaches
+   the merge while a batch is `failed` — so go to **Recovering the ready batches when
+   a sibling exhausted** below. (Scoped to that reason on purpose: offline runs have
+   no citation review, snapshots or records, and their `not_ready[]` is a different
+   failure.) Every `reason` the Workflow path uses appears unchanged, and the driver
+   may also report failures of its own, because it does work the Workflow cannot —
    among them a repair that was refused, an approval record that could not be
-   written, and prose from a step that raised. Since 1.76.1 the driver also
-   watches the job it launched: one codex-companion records as `failed` or
-   `cancelled` — the batch's ordinary dispatch or a per-item repair alike; the
-   observed case is the model at capacity — ends the batch at once as
-   `reason: "codex-job-failed"`, with the companion's own message in `jobDetail`
-   and the job's id in `jobId`, instead of polling to the deadline. That batch is
-   terminal for the run exactly as `glossary-pass-null` is, so recover the same
-   way once the cause is gone. An ordinary dispatch the companion records
-   `completed` without the fragment ends the wait at once as `glossary-pass-null`
-   with `jobStatus: "completed"`; a repair job that completes without writing
-   keeps `repair-never-written` and its whole-fragment fallback. A status the
-   companion cannot answer is unknown, never a failure — the fragment stays
-   authoritative. A sandbox that cannot be confined
-   is NOT among them: that is an environment fault, and the refusal records no
-   terminal failure for the batch — progress saved so far is kept, and the same
-   command re-run after fixing `TMPDIR` continues from the last saved batch
-   state.
-4. `reset[]` names any batch the driver put back to attempt 0 because the
-   artifact its status promised is gone. A resume reuses the RUN_ID, and
-   `resume_setup.py` deletes that run's approved snapshots, approval records and
-   evidence — so a state file written before the interruption can claim a batch is
-   awaiting a judge, or ready to merge, over files that no longer exist. Such a
-   batch is re-prepared rather than left in a status nothing can transition out
-   of. It costs one more judge call; a verdict you already collected for it is
-   refused, so send the fresh `judgePrompt` instead of the old reply. The same
-   condition arises without a resume, whenever an approved snapshot is rewritten
-   from outside the run. A reset therefore also DELETES that batch's approved
-   snapshots — every rung, since the snapshot is published create-once and any
-   one left in place would refuse the re-drive that replaces it. A reset batch
-   also stops counting as resumed, so its attempt 0 is re-dispatched rather than
-   re-approving the fragment `resume_setup.py` validated before the run began:
-   for a batch reset from a higher rung those are bytes a judge already rejected.
-   The `out_{i}_attempt_0.json` fragment itself and the approval record are kept. If a
-   snapshot cannot be deleted, the reset entry carries `undeleted[]` naming it:
-   the batch is still re-driven, but the rung that path belongs to will fail at
-   approve time until the file is removed by hand. A reset the OPERATOR asked for
-   with `--reset-batches` is reported in the same array, carrying
-   `requested: true` and the status it dropped in `was` — including `was:
+   written, and prose from a step that raised. Since 1.76.1 the driver also watches
+   the job it launched: one codex-companion records as `failed` or `cancelled` — the
+   batch's ordinary dispatch or a per-item repair alike; the observed case is the
+   model at capacity — ends the batch at once as `reason: "codex-job-failed"`, with
+   the companion's own message in `jobDetail` and the job's id in `jobId`, instead of
+   polling to the deadline. That batch is terminal for the run exactly as
+   `glossary-pass-null` is: the entry names its own way back in a `recovery` field,
+   and the move it names is `--reset-batches`. An ordinary dispatch the companion
+   records `completed` without the fragment ends the wait at once as
+   `glossary-pass-null` with `jobStatus: "completed"`; a repair job that completes
+   without writing keeps `repair-never-written` and its whole-fragment fallback. A
+   status the companion cannot answer is unknown, never a failure — the fragment
+   stays authoritative. A sandbox that cannot be confined is NOT among them: that is
+   an environment fault, and the refusal records no terminal failure for the batch —
+   progress saved so far is kept, and the same command re-run after fixing `TMPDIR`
+   continues from the last saved batch state.
+4. `reset[]` names any batch the driver put back to attempt 0 because the artifact
+   its status promised is gone. A resume reuses the RUN_ID, and `resume_setup.py`
+   deletes that run's approved snapshots, approval records and evidence — so a state
+   file written before the interruption can claim a batch is awaiting a judge, or
+   ready to merge, over files that no longer exist. Such a batch is re-prepared
+   rather than left in a status nothing can transition out of. It costs one more
+   judge call; a verdict you already collected for it is refused, so send the fresh
+   `judgePrompt` instead of the old reply. The same condition arises without a
+   resume, whenever an approved snapshot is rewritten from outside the run. A reset
+   therefore also DELETES that batch's approved snapshots — every rung, since the
+   snapshot is published create-once and any one left in place would refuse the
+   re-drive that replaces it. A reset batch also stops counting as resumed, so its
+   attempt 0 is re-dispatched rather than re-approving the fragment `resume_setup.py`
+   validated before the run began: for a batch reset from a higher rung those are
+   bytes a judge already rejected. The `out_{i}_attempt_0.json` fragment itself and
+   the approval record are kept. If a snapshot cannot be deleted, the reset entry
+   carries `undeleted[]` naming it: the batch is still re-driven, but the rung that
+   path belongs to will fail at approve time until the file is removed by hand. A
+   reset the OPERATOR asked for with `--reset-batches` is reported in the same array,
+   carrying `requested: true` and the status it dropped in `was` — including `was:
    "failed"`, the exhausted case that has no reset of its own.
 5. The state document is written after every batch the driver drives, so an
    invocation that dies — killed by memory pressure, a crash — is recovered by
    re-running the SAME command with the same `--run-id`, `--verdict-dir`,
-   `--batches-file` and `--resumed-batch-indices`. One exception, and it is the
-   whole of it: `--reset-batches` is NOT part of "the same command". It resets
-   again on every invocation that carries it, so repeating it would drop the
-   hand-back the dead invocation had already saved. Batches saved as awaiting
-   come back in `needs_judge[]` with their original nonce and prompt; batches
-   saved as ready or failed keep that status and are reported in `ready[]` /
-   `not_ready[]`; the batch that was in flight and every other UNSETTLED batch
-   are driven. A reset the earlier invocation decided is kept: that batch is
-   dispatched, never resume-skipped, however many relaunches follow. The batch
-   that was in flight re-enters at attempt 0 (an initial drive) or at the rung
-   the last save recorded — progress inside its ladder since that save is lost;
-   the approved snapshot is create-once, so a regenerated fragment with
-   DIFFERENT bytes is refused at every rung the interrupted ladder had already
-   approved — identical bytes pass — and each refusal spends a rung, so a kill
-   mid-ladder can cost that batch several rungs, up to exhaustion. Do NOT
-   recover by restarting the pass at `resume_setup.py`: (i) on this path it
-   mints a fresh RUN_ID unless the payload offers the run under
-   `resume_from_run_ids` (or the deprecated singular field) AND that run's
-   recorded digest matches — the old run's fragments are not deleted, but
-   nothing in the new run reads them; two
-   sibling run dirs under one project carrying the same digest is what an
-   unoffered candidate produces; (ii) even when it resumes, its run-start wipe
-   deletes the snapshots, and item 4's reset then turns every batch the state
-   document holds as awaiting into a full re-dispatch. A kill that lands inside
-   a state write CAN leave the document unreadable; if it does, the next run
-   exits 2 saying so, and deleting the document discards the driver's state
-   only — the fragments on disk and the `--resumed-batch-indices` value keep
-   their meaning, and the drive starts over from them, which is today's
-   behaviour.
+   `--batches-file` and `--resumed-batch-indices`. One exception, and it is the whole
+   of it: `--reset-batches` is NOT part of "the same command". It resets again on
+   every invocation that carries it, so repeating it would drop the hand-back the
+   dead invocation had already saved. Batches saved as awaiting come back in
+   `needs_judge[]` with their original nonce and prompt; batches saved as ready or
+   failed keep that status and are reported in `ready[]` / `not_ready[]`; the batch
+   that was in flight and every other UNSETTLED batch are driven. A reset the earlier
+   invocation decided is kept: that batch is dispatched, never resume-skipped,
+   however many relaunches follow. The batch that was in flight re-enters at attempt
+   0 (an initial drive) or at the rung the last save recorded — progress inside its
+   ladder since that save is lost; the approved snapshot is create-once, so a
+   regenerated fragment with DIFFERENT bytes is refused at every rung the interrupted
+   ladder had already approved — identical bytes pass — and each refusal spends a
+   rung, so a kill mid-ladder can cost that batch several rungs, up to exhaustion. Do
+   NOT recover by restarting the pass at `resume_setup.py`: (i) on this path it mints
+   a fresh RUN_ID unless the payload offers the run under `resume_from_run_ids` (or
+   the deprecated singular field) AND that run's recorded digest matches — the old
+   run's fragments are not deleted, but nothing in the new run reads them; two
+   sibling run dirs under one project carrying the same digest is what an unoffered
+   candidate produces; (ii) even when it resumes, its run-start wipe deletes the
+   snapshots, and item 4's reset then turns every batch the state document holds as
+   awaiting into a full re-dispatch. A kill that lands inside a state write CAN leave
+   the document unreadable; if it does, the next run exits 2 saying so, and deleting
+   the document discards the driver's state only — the fragments on disk and the
+   `--resumed-batch-indices` value keep their meaning, and the drive starts over from
+   them, which is today's behaviour.
+6. The result also carries two run-level fields, not just per-entry ones: `reason:
+   "batches-failed"` when the run has failures and nothing awaiting a judge (a run
+   that also has `needs_judge[]` keeps `awaiting-more-verdicts` instead), and
+   `notReadyDetail`, `{"message": <str|null>, "batches": [<int>]}` — the one
+   failure message the most failures share and the batch indices that reported it,
+   so a session reading only the summary sees the real cause once rather than opening
+   every `not_ready[]` entry.
 
 Do NOT edit a verdict's `nonce`, reuse one twice, or answer a batch/attempt the
 driver did not ask about — each is refused, and the refusal is what keeps a

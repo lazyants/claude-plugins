@@ -504,6 +504,24 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
+    # ROTATED TO 1.120.0 (#914 -- a glossary batch that died on its environment
+    # named no way back, and the driver's result carried no top-level `reason`
+    # when batches failed), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # digit-run in it is an IDENTIFIER: the version (1.120.0), the release date,
+    # and the issue number (#914). There is no other digit in the entry at all.
+    #
+    # The entry states its subject by NAMING rather than counting:
+    # `_settle_failed()`, `ENVIRONMENTAL_RECOVERY`, `APPROVAL_RECORD_RECOVERY`,
+    # `summarize_not_ready()`, `notReadyDetail`, `--reset-batches`, `drive_all()`
+    # and `DriverError` are all named, never sized, so no later release can rot
+    # this prose by retuning a number that was never written here.
+    #
+    # This rotation RETIRED 1.118.0's rows, which belong to an entry that is now
+    # the second-newest and which this guard therefore no longer reads.
+    #
+    # The 1.118.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.118.0 (#921 -- the citation judge had a rule for a TRUNCATED
     # body and none for an intact body it cannot read in one call), per the
     # maintenance contract above.
@@ -532,10 +550,7 @@ FIGURES = [
     # `input_digest`, so no later release can rot this prose by retuning a
     # number.
     #
-    # This rotation RETIRED 1.116.0's rows, which belong to an entry that is now
-    # the second-newest and which this guard therefore no longer reads.
-    #
-    # The 1.116.0 rotation this replaces, kept as its own record:
+    # The 1.116.0 rotation, kept as its own record:
     # ROTATED TO 1.116.0 (#897 -- the editorial-bracket guard tested adjacency
     # rather than pairing), per the maintenance contract above.
     #
@@ -1251,7 +1266,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.118.0"
+FIGURES_VERSION = "1.120.0"
 
 
 def _newest_entry():
