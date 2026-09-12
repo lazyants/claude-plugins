@@ -88,13 +88,15 @@ OUTPUT CONTRACT (consumed by the prepare/judge split -- do not change casually).
       Single-URL mode, for tests and manual checking. Prints the metadata line,
       then a delimiter line, then the decoded body. Writes no files.
 
-Outcomes recorded per item: "fetched", "refused:<reason>", "http_error:<code>".
+Outcomes recorded per item: "fetched", "refused:<reason>", "http_error:<code>",
+"unusable:duplicate-body".
 """
 from __future__ import annotations
 
 import argparse
 import codecs
 import contextlib
+import hashlib
 import http.client
 import ipaddress
 import json
@@ -1305,12 +1307,53 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
         # correctness fix; _fetch_hop's totality rule is only the backstop.
         # `safe` keeps the sub-delimiters already legal in a request-target, and
         # keeps `%` so an already-encoded path is not double-encoded.
-        conn.request("GET", quote(path, safe="/?=&%:@+$,;~!*'()[]"), headers={
+        #
+        # Bound to a local, not inlined twice: this is also the exact
+        # request-target the #918 duplicate-body check reports as
+        # "request_identity" below, together with `wire_host`.
+        #
+        # THE TERMINAL SUCCESSFUL HOP, deliberately -- not the first one a
+        # redirect chain started from. `_fetch_hop_inner` only reaches this
+        # line on the hop that actually produced a 200 response (every
+        # earlier hop exits via `_Redirect` or a refusal before getting
+        # here), so `scheme`/`host`/`port` here ARE that hop's, by
+        # construction. Two source URLs
+        # that both redirect to the SAME final address are an ALIAS PAIR, not
+        # two independent requests: identical bytes are then expected and
+        # prove nothing, and keying on the first hop instead would flag that
+        # pair as a shared shell. The property this check claims is "two
+        # citations caused DIFFERENT requests and still got identical bytes",
+        # so citations must be compared on the request that actually
+        # PRODUCED the bytes being compared, never on their `source` strings
+        # -- `validate_url` already strips the fragment, so `...#section-a`
+        # and `...#section-b` are one request under two spellings, and
+        # computing this identity a second way in run_batch (or from
+        # `entry["source"]`, which _recorded() truncates) could silently
+        # drift from what was actually put on the wire. The cost is an
+        # under-catch, the same safe direction as every other limit in this
+        # file: two DIFFERENT dead hosts that happen to redirect to one
+        # shared shell go unflagged here, and the judge still catches them
+        # exactly as it does today.
+        quoted_path = quote(path, safe="/?=&%:@+$,;~!*'()[]")
+        # BOUND ONCE, spent twice: the `Host` header below and the
+        # `request_identity` returned on success must be the SAME string, or
+        # the identity stops describing the request. #918, found by review:
+        # it was built from `chain[-1]["origin"]`, which keeps the Unicode
+        # DISPLAY form of the host, while the wire carries the A-label. Those
+        # are not one-to-one -- a composed and a decomposed spelling of the
+        # same non-ASCII hostname send one identical `Host: xn--...` and one
+        # identical target, yet produced two different identities, so one
+        # request made twice was classified as two different URLs returning
+        # the same bytes. That is precisely the same-request case the
+        # exemption exists to preserve, and a non-ASCII citation URL is
+        # ordinary in the languages this plugin translates.
+        wire_host = wire_authority(scheme, host, port)
+        conn.request("GET", quoted_path, headers={
             # authority(), not `host`: the connection goes to the pinned IP,
             # so this header is the ONLY thing telling the server which site
             # was asked for. A bare hostname misroutes every non-default-port
             # URL and is invalid for an IPv6 literal.
-            "Host": wire_authority(scheme, host, port),
+            "Host": wire_host,
             "User-Agent": "literary-translator/1.16.1 (+citation-audit)",
             "Accept": "text/html, text/plain, application/xhtml+xml;q=0.9, */*;q=0.1",
         })
@@ -1396,12 +1439,27 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
             raw = _read_bounded(resp, deadline)
         truncated = len(raw) > MAX_BYTES
         raw = raw[:MAX_BYTES]
+        # Digested over the RAW, capped-but-not-yet-decoded response bytes --
+        # deliberately BEFORE body_charset's decode(errors="replace") below.
+        # #918 round 2, admitted: hashing the decoded-and-re-encoded body
+        # instead (as the first version of this check did) is wrong in both
+        # directions. FALSE FLAG: b"\xff" and b"\xfe", both declared UTF-8,
+        # each decode to one U+FFFD and re-encode to the identical 3 bytes --
+        # two different responses would compare equal. MISS: the same raw
+        # byte b"\xe9" served once as windows-1252 and once as UTF-8 decodes
+        # to two different code points and writes two different byte
+        # sequences on disk -- two identical responses would compare
+        # different. Hashing `raw` itself is blind to both, because it never
+        # runs the decode that creates either failure.
+        raw_digest = hashlib.sha256(raw).hexdigest()
         body = raw.decode(body_charset(ctype_header), errors="replace")
         return {
             "ok": True, "status": status, "url": url, "final_origin": chain[-1]["origin"],
             "chain": chain, "content_type": ctype_token,
             "bytes": len(raw),
             "truncated": truncated, "outcome": "fetched", "body": body,
+            "raw_digest": raw_digest,
+            "request_identity": f"{scheme}://{wire_host}{quoted_path}",
         }
     except (socket.timeout, TimeoutError):
         if _past_deadline(deadline):
@@ -1510,6 +1568,28 @@ def run_batch(batch_path: Path, out_dir: Path, *,
     # Companion budget, spent in BYTES rather than seconds. Incremented only
     # at the single write site below; nothing else touches it.
     spent_bytes = 0
+    # sha256(RAW response bytes, before the charset decode) -> [(entry,
+    # request_identity), ...], filled at the same write site from fetch_one's
+    # own "raw_digest"/"request_identity" fields -- never recomputed here.
+    # Read after the loop, in the reconciliation pass below. Both fields' own
+    # comments in _fetch_hop_inner explain why: hashing the decoded body is
+    # wrong in both directions, and normalizing the request a second way (or
+    # reading it off `entry["source"]`, which _recorded() truncates) could
+    # silently drift from what fetch_one actually sent.
+    #
+    # ONLY basis: "established" rows are ever inserted (#918 round 3
+    # simplification): the reconciliation pass below never reads a group's
+    # length or its non-established members before filtering them out, so
+    # storing them here only to discard them unread is dead weight. A
+    # non-established row sharing a flagged group's digest still shows
+    # "fetched" in index.json -- it is simply never a candidate at all, which
+    # reaches the same place as being filtered out after insertion. See the
+    # reconciliation pass for why basis is checked at all: a "transliterated"
+    # row must never drag a genuine established citation into
+    # unusable:duplicate-body, and measured over 795 evidence directories
+    # this costs nothing real -- 143 established rows caught either way,
+    # because only 47 of 5 542 retrieved bodies are non-established.
+    digests: dict[str, list] = {}
     # ADMIT THRESHOLD, not the ceiling itself -- derived here rather than kept
     # as a second module constant, so the relationship holds even for a test
     # that monkeypatches BATCH_MAX_TOTAL_BYTES alone. See that constant's own
@@ -1633,6 +1713,18 @@ def run_batch(batch_path: Path, out_dir: Path, *,
             entry["truncated"] = result["truncated"]
             entry["content_type"] = result.get("content_type")
             counts["fetched"] += 1
+            # A capped body's identity is unknowable past MAX_BYTES: two
+            # different complete pages sharing only their first MAX_BYTES look
+            # identical here, and no dead application shell measured for this
+            # check is remotely close to a 2 MB page -- so a truncated row
+            # never enters a digest group, on either side of a comparison.
+            # From the RAW item, never entry["basis"] -- the latter is only a
+            # length-capped, whitespace-flattened COPY, and using it here
+            # would be the same class of drift #918 round 2 closed for
+            # `source`/request_identity below.
+            if not result["truncated"] and item.get("basis") == "established":
+                digests.setdefault(result["raw_digest"], []).append(
+                    (entry, result["request_identity"]))
         else:
             # No spend here: the write above is the only evidence-body write in
             # the function (run_single writes no files at all). A non-200
@@ -1642,6 +1734,88 @@ def run_batch(batch_path: Path, out_dir: Path, *,
             # but none reach _read_bounded or disk.
             counts["http_error"] += 1
         index.append(entry)
+
+    # RECONCILIATION, after the loop and before index.json is written: a group
+    # of >=2 ESTABLISHED fetched bodies that hash IDENTICAL (over the raw
+    # response, see fetch_one's own comment) but were requested at two or more
+    # DIFFERENT request targets is a site serving one application shell for
+    # every address, not evidence for any of the pages it names. Byte identity
+    # between responses this batch actually received is a structural fact
+    # about the responses, not a classification of what a body IS -- this file
+    # has twice refused a fetch-time content classifier
+    # (TEXT_DECODABLE_PREFIXES' own comment records both, "a classifier is
+    # wrong in both directions"), and nothing here reads what a body says.
+    #
+    # Measured over 795 evidence directories from real translation projects:
+    # 5 542 retrieved bodies, 5 495 of them basis: "established". Exactly
+    # THREE distinct bodies ever appeared under two or more different URLs
+    # inside one evidence directory, and all three are dead application
+    # shells -- the Great Russian Encyclopedia's 30 960/30 966-byte bootstrap
+    # (bigenc.ru and old.bigenc.ru, 454 characters of visible chrome and no
+    # article, under 90 distinct article URLs) and encyclopedia.yivo.org's
+    # 643-byte React shell. ZERO false positives: not one group was a real
+    # page legitimately shared by two URL spellings. 171 established rows
+    # retrieved one of those shells; this check catches 143 of them (83.6 %).
+    # The other 28 sat alone in their evidence directory and are still caught
+    # by the judge exactly as today -- a lone dead-shell citation is not this
+    # check's job.
+    #
+    # ONLY basis: "established" MEMBERS are ever in this dict (#918 round 2,
+    # admitted; round 3 moved the gate to the single append site above, so a
+    # non-established row is never inserted at all rather than inserted and
+    # filtered out here). The index deliberately covers every source-bearing
+    # row, so a "transliterated" row's unrelated URL returning the same bytes
+    # must not be allowed to drag a genuine established citation into
+    # "unusable:duplicate-body" -- the driver ignores non-established
+    # outcomes entirely, so the established row alone would be sent to
+    # per-item repair on the strength of a row no judge ever looks at. The
+    # asymmetry is why this is the safe direction to round in: a false flag
+    # spends a repair rung on a CORRECT citation, while a miss just leaves the
+    # judge to catch it exactly as it does today. Measured over the same 795
+    # directories: restricting the grouping to established rows changes the
+    # catch count NOT AT ALL -- 143 either way, because only 47 of the 5 542
+    # retrieved bodies are non-established. A non-established row sharing a
+    # flagged group's digest is simply never a candidate here; it keeps
+    # "fetched" in index.json.
+    #
+    # ALL members of a flagged group are rewritten, not only the second
+    # onward: leaving the first as "fetched" would still send the batch to a
+    # judge and buy nothing.
+    #
+    # THE RESIDUAL, stated rather than guarded against: equality is over the
+    # bytes actually received on the wire, capped at MAX_BYTES -- see
+    # fetch_one's own comment for why hashing the DECODED body instead is
+    # wrong in both directions, and why a truncated row never reaches this
+    # dict at all. Zero over/under-flagged pair exists in the 5 495 measured
+    # retrievals.
+    for group in digests.values():
+        if len(group) < 2:
+            continue
+        # Two citations naming the SAME request target that happen to
+        # retrieve the same body prove nothing about a shared shell -- that
+        # is simply the same page cited twice, or two source URLs that both
+        # redirect to one shared final address (an ALIAS PAIR, not a shell;
+        # see _fetch_hop_inner's own comment on `request_identity`, next to
+        # `quoted_path`, for why the TERMINAL hop -- not the first one a
+        # redirect chain started from -- is the right key, and for the
+        # resulting under-catch this accepts). Only distinct request targets
+        # are the signature. `request_identity` is the scheme/host/port/path
+        # fetch_one actually put on the wire for that terminal hop, never
+        # entry["source"] (which _recorded() flattens and truncates) and
+        # never the raw citation `source` string (which a redirect or a bare
+        # `#fragment` difference can make distinct while the request sent is
+        # identical).
+        if len({ident for _entry, ident in group}) < 2:
+            continue
+        for entry, _ident in group:
+            entry["outcome"] = "unusable:duplicate-body"
+            counts["fetched"] -= 1
+            # Inserted LAZILY: a batch with no duplicate group must keep the
+            # exact three-key counts dict it emits today, byte-identical, so
+            # its index.json and stdout line do not change shape for the
+            # common case. Two existing tests assert that dict by exact
+            # equality.
+            counts["unusable"] = counts.get("unusable", 0) + 1
 
     (out_dir / "index.json").write_text(
         json.dumps({"batch": str(batch_path), "entries": index, "counts": counts},
@@ -1669,6 +1843,15 @@ def run_single(url: str, *, allowed_types=ALLOWED_CONTENT_PREFIXES) -> int:
         print(json.dumps({"success": False, "outcome": f"refused:{exc}", "url": url}))
         return 1
     body = result.pop("body", "")
+    # Internal-only, dropped before this line ever prints: `request_identity`
+    # carries the TERMINAL hop's PATH, which after a redirect is built from
+    # the server's own Location header -- the same attacker-authored-text
+    # channel `_fetch_hop_inner`'s "ORIGIN ONLY -- never `current`" comment
+    # forbids for `chain`. run_batch never writes either key to index.json
+    # (`entry` only ever gets its own explicit keys), but this print site
+    # should not become the one place that rule stops being literally true.
+    for key in ("raw_digest", "request_identity"):
+        result.pop(key, None)
     print(json.dumps({"success": result["ok"], **result}))
     if result["ok"]:
         print(DELIMITER)

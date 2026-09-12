@@ -1148,11 +1148,18 @@ def test_run_repair_forwards_host_advisory_as_the_sixth_prompt_argument(mod, tmp
     assert result["state"] == "repaired"
     assert "args" in captured, "batchRepairPrompt must actually have been built"
     args = captured["args"]
-    assert len(args) == 6, (
-        "batchRepairPrompt must be called with exactly six positional "
-        f"arguments once host_advisory is wired through; got {len(args)}")
+    assert len(args) == 7, (
+        "batchRepairPrompt must be called with exactly seven positional "
+        "arguments once host_advisory (#919) and the duplicate-body ordinals "
+        f"(#918) are both wired through; got {len(args)}")
     assert args[4] == "unretrievable", "cause stays the fifth argument"
     assert args[5] == host_advisory, "host_advisory must be the sixth argument"
+    assert args[6] == [], (
+        "the duplicate-body ordinals (#918) are the SEVENTH argument, and an "
+        "unretrievable repair names no duplicate rows, so the list is empty "
+        "rather than absent -- run_repair always computes it. If they ever "
+        "land in slot 6 they are delivered as the host advisory instead, "
+        "silently, which is what this arity assertion exists to catch")
 
 
 # ---------------------------------------------------------------------------
