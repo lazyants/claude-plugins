@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.157.0 — 2026-09-12
+## 1.170.0 — 2026-09-12
 
 **A host that rate-limits was read as a fact about the citation, so the repair ladder re-sourced
 against it on every rung and the batch exhausted (#919).** `is_transient_fetch_outcome` covers the
@@ -60,6 +60,92 @@ raised an `AttributeError` that escaped the driver's own error path — and reje
 `item_index`, which `isinstance(True, int)` had been admitting as row 1.
 
 
+## 1.162.0 — 2026-09-12
+
+**A single-word name the canon had already frozen could still ship without its target form, because
+`segpack.py`'s strong-name heuristic overruled the canon instead of deferring to it.** That heuristic
+(`mid > 0 or multiword`) exists to guess whether an unknown token is a real proper noun or merely a
+word that opened a sentence, and it also ran against candidates `canon.json` had already decided. A
+canonized single-word name whose every occurrence in a segment happened to be sentence-initial scored
+`mid == 0`, failed the guess, and reached neither `canon_names` nor `canon_map` — the translate prompt
+for that segment was built without the name's frozen `canonical_target_form`, and nothing in the run
+reported it. Closes #917.
+
+**#917 reported this as an uncased-script (Hebrew) problem. It is not script-specific, and the cased
+case is far worse.** Measured on the live books: 1 of 308 segments lost a canonized name on the
+Hebrew book, versus 96 of 359 measurable segments across five French volumes — a French sentence
+routinely opens with a proper noun, so the heuristic's blind spot fires constantly there. Names lost
+on the French books include `Paris`, `Jésus`, `Conrart` and `Chapelain`.
+
+**The fix admits a canon entry that is positively a name, regardless of the heuristic.** A candidate
+now reaches `strong_names` either by the existing heuristic or because `canon.json` already holds it
+as an eligible name; the heuristic keeps full authority over every candidate the canon does not know,
+which is what keeps out the false positives the issue's own proposed remedy — admitting any
+inventory-route candidate unconditionally — would have let through (measured on the same Hebrew book:
+83 candidates admitted, of which exactly 1 is in the canon; reading a sample of the other 82 shows
+the great majority are ordinary words and chapter-number labels that the LLM-derived name inventory
+picked up. Admitting them would have re-translated 112 of that book's 308 segments to deliver the
+one name).
+
+**Bare canon membership is not the test.** A canon entry can legally declare itself not
+identity-bearing — `is_proper_name: false`, or `basis: "not_a_name"` — and such entries are still
+merged into `entries{}`. Admitting on membership alone would have pushed a common noun into
+`canon_map`, where the translate prompt tells the translator to render it with that entry's
+authoritative form: a new way to ship a wrong name, introduced by this fix. The admission test is
+therefore the same two-clause eligibility check the rest of the pipeline already uses for the
+Mentions universe, not "is there an entry at all".
+
+**A canon decision is now terminal in both directions, which fixes a smaller pre-existing wrong on
+the way past.** Before this release, an entry declaring itself not a name was admitted anyway
+whenever the heuristic happened to like it — mid-sentence, or multiword — and the routing that
+follows labels every entry it finds canonized and emits its target form into `canon_map`. So a form
+the canon had explicitly ruled out could reach the translator as an authoritative rendering
+instruction. That was not what #917 reported and the heuristic-only code had the same behaviour, but
+this release is where a canon decision meets a guess, so it is where the decision has to win: an
+eligible entry is admitted whatever the heuristic thinks, and a self-declared non-name is refused
+whatever the heuristic thinks. Only a malformed, non-object entry still falls through to the
+heuristic. Measured before making it terminal, because removing a name from a pack is not free:
+across every project on the author's machine — 2 087 canon entries over six books — the number of
+entries carrying `is_proper_name: false` or `basis: "not_a_name"` is **0**, so nothing shipping today
+loses a name by this. Read that number the right way round: it is what makes the change SAFE, not
+what makes it valuable. This half of the release repairs no existing segment and changes no pack on
+any measured corpus — it closes a hole found by review before anyone's canon happened to contain the
+entry shape that would have opened it. Do not go looking for the segments it fixed; there are none.
+
+### What it costs
+
+`segpack.py` is a `DERIVATION_BUNDLE_MEMBERS` file, so `derivation_bundle_hash` moves for every
+project. At each project's next Step 0a refresh, every converged segment reclassifies to
+`blocked_needs_regeneration`; the sanctioned recovery is
+`canon_validate.py --research-mode <mode> --restamp-derivation --plugin-root <path>` followed by an
+ordinary `segpack.py` rerun, after which the segments sit at `stale` on `derivation_bundle_hash`
+alone — a field inside the safe-stale carve-out — and ship with no re-review. That is the same
+routine cost every previous bundle-member release has paid (1.16.2, 1.45.0, 1.69.0, 1.70.0).
+
+**This release adds a cost those did not: segpack OUTPUT changes for segments that gain a name.**
+`used_terms_hash` is per-segment and deliberately not inside the safe-stale carve-out, so a segment
+whose `names` / `canon_map` grows a frozen form moves it and genuinely re-translates, rather than
+shipping as machinery-only stale. Measured: 1 segment on the Hebrew book, 96 across the five
+measurable French volumes — exactly the segments this release found missing a frozen target form in
+the first place, so the re-translation is the repair, not collateral.
+
+### What this deliberately does not fix
+
+It does not admit a `canon_senses.json` split form on the same ground: a split has no frozen target
+form by design, so admitting one would buy a content-bearing re-translation for nothing this fix is
+for, and the measured corpus population of the withheld-split case is 0. Split routing is unchanged —
+a split form the heuristic already admits still goes to `split_names`, never to `canon_names`.
+
+`tests/name_discovery.test.py`'s d28 byte guard, which blob-compares four bundle-member scripts
+against `origin/main` on every PR, drops only its `segpack.py` arm; `bootstrap_names.py`,
+`cache_key.py` and `glossary_batch_plan.py` stay guarded and are byte-identical to `origin/main` in
+this release. A release that deliberately moves `derivation_bundle_hash` prices that cost here, in
+its changelog entry, rather than being frozen out by a guard written for another feature's scope.
+
+It also does not fix the other half of #917: inventory-identified names that were never canonized at
+all, so they never reach `new_names` either. Measured: 82 such forms on the Hebrew book, of which the
+great majority are not names. The genuine residual inside that set — a real name the inventory found
+but never canonized — is the same class as open issue #912 and belongs there.
 ## 1.154.0 — 2026-09-12
 
 **Nothing compared a declared markup vocabulary against the style contract that has to ask for it,

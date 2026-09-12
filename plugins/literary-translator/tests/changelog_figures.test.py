@@ -570,6 +570,52 @@ FIGURES = [
         75,
         _fetch_retry_ladder_span,
     ),
+    # ROTATED TO 1.162.0 (#917 -- a name the canon has frozen is no longer
+    # withheld from the segment pack), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed: every
+    # digit-run in it was enumerated and classified, and all of them fall into
+    # two kinds this guard cannot own.
+    #
+    # IDENTIFIERS: the version (1.162.0), the release date, the issue numbers
+    # (#917, #912), the `d28` in the guard's own test name, and the four
+    # precedent versions the cost section cites (1.16.2, 1.45.0, 1.69.0,
+    # 1.70.0). Those four ARE resolvable against this file's own headings, but
+    # they are version identifiers naming which releases already paid a
+    # bundle-hash cost -- not quantities, and a row asserting they exist would
+    # be checking a cross-reference, which is the citations guard's job and not
+    # this one's.
+    #
+    # MEASUREMENTS FROM ANOTHER REPOSITORY, which is every remaining number:
+    # 1 of 308 segments on the Hebrew book and 96 of 359 across five French
+    # volumes losing a canonized name; the 83 candidates the issue's own remedy
+    # would have admitted, of which 1 is in the canon and 82 are not; the 112 of
+    # 308 segments that remedy would have re-translated; and the 2 087 canon
+    # entries over six books in which entries declaring themselves not a name,
+    # and single-character source forms, both number 0. Every one of those is a
+    # fact about operator-owned durable roots that are NOT in this repository --
+    # two live book projects -- so no derivation here could re-check any of
+    # them however it were phrased, and a row quoting one would hardcode an
+    # answer, pass every assertion below and prove nothing.
+    #
+    # The two ZEROES deserve their own sentence, because a zero is the shape
+    # most likely to be mistaken for something this tree owns. They are counts
+    # over those same out-of-repo canon files, and the entry states plainly what
+    # they are for: they make the terminal-decision half of this release SAFE
+    # rather than valuable, since that half repairs no existing segment. A row
+    # asserting "0" against anything in this tree would be true for the wrong
+    # reason -- there are no canon.json files here to count.
+    #
+    # What the tree DOES own, the entry states by NAMING rather than counting:
+    # `DERIVATION_BUNDLE_MEMBERS`, `is_proper_name`, `basis`, `canon_names`,
+    # `canon_map`, `split_names`, `used_terms_hash`, `derivation_bundle_hash`
+    # and the d28 guard. None of those is a figure, which is why this rotation
+    # is empty rather than thin.
+    #
+    # The 1.120.0 rotation this replaces, kept as its own record, and the 1.118.0
+    # one below it. This branch was rebased twice while sibling releases landed, so
+    # the sentence names what it actually sits on rather than what it sat on when
+    # it was written.
     # ROTATED TO 1.154.0 (#913 -- nothing compared a declared markup vocabulary
     # against the style contract that has to ask for it), per the maintenance
     # contract above.
@@ -1537,7 +1583,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.157.0"
+FIGURES_VERSION = "1.170.0"
 
 
 def _newest_entry():

@@ -1697,7 +1697,7 @@ def test_d27_a_missing_census_dependency_is_this_scripts_own_named_fatal(bed):
     assert "no fallback census" in err
 
 
-@pytest.mark.parametrize("path", ["bootstrap_names.py", "segpack.py", "cache_key.py"])
+@pytest.mark.parametrize("path", ["bootstrap_names.py", "cache_key.py"])
 def test_d28_the_files_this_change_must_not_touch_are_unmodified(path):
     """A REAL blob comparison against origin/main, not a tuple-membership proxy:
     tuple equality says nothing about whether either file's BYTES changed, and
@@ -1714,10 +1714,28 @@ def test_d28_the_files_this_change_must_not_touch_are_unmodified(path):
     requested outcome is a new field in that planner's OUTPUT, which can only be
     computed where the floor is applied, so there is no conforming fix outside
     the file. That release pays the `plugin_bundle_hash` move its own CHANGELOG
-    entry discloses. The other three stay pinned, and
-    `test_d28_no_bundle_membership_was_changed` below is untouched -- MEMBERSHIP
-    did not change, only bytes. A future change wanting one of the remaining
-    three owes the same explicit argument, not a quiet edit to this list.
+    entry discloses.
+
+    #917 removed `segpack.py` on exactly the same grounds, and the two removals
+    are independent -- this release rebased onto #912's and kept BOTH, rather
+    than restoring the file the other one had just dropped. Its requested
+    outcome is that a name `canon.json` has already frozen stops being withheld
+    from the segment pack, and the withholding happens inside
+    `build_pack()`'s own strong-name predicate, so again there is no conforming
+    fix outside the file. It pays the `derivation_bundle_hash` move its own
+    CHANGELOG entry discloses -- what re-stales, what the sanctioned recovery
+    is, and what genuinely re-translates -- which is where an operator reads it.
+    A test reddening on an unrelated branch would not have told anyone that.
+
+    `bootstrap_names.py` and `cache_key.py` stay pinned, and
+    `bootstrap_names.py` in particular is leaned on by current source: other
+    scripts spell code the long way ON PURPOSE to keep their citations into it
+    from drifting, precisely because this guard forbids editing it.
+    `test_d28_no_bundle_membership_was_changed` below is untouched --
+    MEMBERSHIP did not change in either release, only bytes -- so dropping an
+    arm here cannot hide a file quietly joining or leaving a bundle. A future
+    change wanting one of the remaining two owes the same explicit argument,
+    not a quiet edit to this list.
     """
     rel = f"plugins/literary-translator/skills/literary-translator/assets/scripts/{path}"
     repo = PLUGIN_ROOT.parent.parent
@@ -1735,11 +1753,11 @@ def test_d28_the_files_this_change_must_not_touch_are_unmodified(path):
     assert show.returncode == 0, f"could not read origin/main:{rel}"
     assert (SCRIPTS_SRC / path).read_bytes() == show.stdout, (
         f"{path} differs from origin/main. This feature must not edit it: "
-        f"bootstrap_names.py and segpack.py are the DERIVATION_BUNDLE_MEMBERS "
-        f"(editing either re-stales every project's converged segments) and "
-        f"cache_key.py is a PLUGIN_BUNDLE_MEMBERS entry. Editing one of these "
-        f"is a release-level decision that owes a CHANGELOG disclosure and an "
-        f"argument in this docstring, the way #912 did for the file it removed "
+        f"bootstrap_names.py is a DERIVATION_BUNDLE_MEMBERS file (editing it "
+        f"re-stales every project's converged segments) and cache_key.py is a "
+        f"PLUGIN_BUNDLE_MEMBERS entry. Editing one of these is a release-level "
+        f"decision that owes a CHANGELOG disclosure and an argument in this "
+        f"docstring, the way #912 and #917 each did for the file they removed "
         f"from this list -- it is not something a feature does in passing.")
 
 

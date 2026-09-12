@@ -735,8 +735,9 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
             d = name_stats.setdefault(name, {"freq": 0, "mid": 0, "multiword": multiword})
             d["freq"] += 1
             d["mid"] += int(mid_sentence)
+    canon_entries = canon.get("entries", {})
     strong_names = sorted(
-        (name for name, d in name_stats.items() if (d["mid"] > 0 or d["multiword"]) and len(name) != 1),
+        (name for name, d in name_stats.items() if _is_strong_candidate(name, d, canon_entries)),
         key=lambda name: (-name_stats[name]["freq"], name),
     )
 
@@ -770,7 +771,6 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
     #      only the sidecar lookup to match a capped representation would make it
     #      strictly more capable than the canon lookup beside it. Pinned as a
     #      characterization in tests/segpack_split_names_delivery.test.py. ----
-    canon_entries = canon.get("entries", {})
     canon_names, new_names = [], []
     canon_map = {}
     split_names = {}
@@ -1190,6 +1190,108 @@ def main(argv=None):
         sys.exit(1)
 
     print(f"\n{len(written)} segpack(s) written under {segments_dir}")
+
+
+def _is_strong_candidate(name, stats, canon_entries):
+    """Does this extracted candidate belong in a segpack's `names` list?
+
+    #917. The `mid > 0 or multiword` half below is a HEURISTIC, and its whole
+    job is to guess whether an unknown token is a proper noun or merely a word
+    that happened to open a sentence (`bootstrap_names.py`'s own module header:
+    "a high mid-sentence share is strong evidence it is a real proper noun and
+    not merely a sentence-opening capital"). Applied to a name the canon has
+    ALREADY decided, that guess is not just redundant -- it OVERRULES the
+    decision. A single-word canonized name whose every occurrence in this
+    segment happens to be sentence-initial scored `mid == 0`, failed the test,
+    and reached neither `canon_names` nor `canon_map`, so the translate prompt
+    for the one segment naming it was built without its frozen
+    `canonical_target_form` and nothing in the run said so.
+
+    Measured on the live books before this was written, because the issue that
+    reported it framed it as an uncased-script problem and that framing is
+    wrong: on the Hebrew book 1 of 308 segments lost a canonized name, but on
+    the five measurable French volumes 96 of 359 segments did -- `Paris`,
+    `Jesus`, `Conrart`, `Chapelain` among them. A sentence opening with a
+    proper noun is ordinary prose, not an edge case, and the defect is
+    script-independent.
+
+    CANON MEMBERSHIP IS NOT ENOUGH, and this is the part that is easy to get
+    wrong. A canon entry legally declares itself NOT identity-bearing in two
+    ways -- `is_proper_name: false` and `basis: "not_a_name"`
+    (canon-entry.schema.json; `canon_validate.py` merges every accepted item
+    into `entries{}` without testing name status). Admitting on bare membership
+    would put a common noun into `canon_names`, and -- whenever it carries a
+    non-empty target form -- into `canon_map`, where `translate_TASK.template.md`
+    instructs the translator to render it with that authoritative form. That
+    would be a NEW way to ship a wrong name, invented by the fix. So the test
+    is positive eligibility, never presence.
+
+    A CANON DECISION IS TERMINAL IN BOTH DIRECTIONS, which is the other half
+    of the same principle and is easy to write as a one-sided `return True`.
+    If the canon has ruled on this form, the heuristic has nothing left to
+    decide EITHER WAY: an eligible entry is admitted no matter what the
+    heuristic thinks, and an entry that declares itself not a name is refused
+    no matter what the heuristic thinks. Falling through to the heuristic on
+    the negative branch would have kept a real asymmetry -- a `not_a_name`
+    entry that happens to appear mid-sentence would still be admitted, and the
+    routing below labels every non-`None` entry canonized and emits its target
+    into `canon_map`, so a form the canon explicitly ruled out would arrive at
+    the translator as an authoritative rendering instruction. That behaviour
+    predates this change and is not what #917 is about, but this function is
+    now the place where a canon decision meets a guess, so it is where the
+    decision has to win. Measured before making it terminal, because removing
+    a name from a pack is not free: across every durable root on this machine
+    -- 2 087 canon entries over six books -- the number of entries carrying
+    `is_proper_name: false` or `basis: "not_a_name"` is 0. Nothing shipping
+    today loses a name by this.
+
+    ONE ASYMMETRY THIS CREATES, named here because every other one already is:
+    the heuristic branch still refuses a single-character candidate
+    (`len(name) != 1`, a guard against noise from an unknown one-letter token),
+    and the canon branch does not. So a canonized ONE-CHARACTER source form is
+    now admitted where it previously was not. That is the terminality rule
+    doing exactly what it says -- a one-character form the canon has ruled on
+    is a decision, not noise -- but it is a real behaviour change and a reader
+    should not have to derive it. Measured alongside the negative-entry count:
+    single-character entries in the same six books, 0.
+
+    That two-clause test is DUPLICATED from `occurrence_targets.py`'s
+    `entry_is_index_eligible()` -- its owning definition, and the one predicate
+    every category-based inclusion in the Mentions universe goes through --
+    rather than imported, DELIBERATELY: `occurrence_targets.py` is in neither
+    `cache_key.PLUGIN_BUNDLE_MEMBERS` nor `DERIVATION_BUNDLE_MEMBERS`, so
+    importing it would make this file's derivation output depend on a file no
+    hash covers, and a later edit there would silently change every project's
+    packs while `derivation_bundle_hash` stood still. The duplication is closed
+    by a drift test that runs BOTH predicates over every combination of the two
+    fields (tests/segpack_canonized_name_admission.test.py), not by a comment
+    asking the next reader to remember.
+
+    The `canon_senses.json` split sidecar is deliberately NOT a second
+    admission ground. A split carries no frozen target form by design, so
+    admitting one delivers nothing this fix is for, while `split_names` is
+    inside `used_terms_hash` and would buy a content-bearing re-translation.
+    Measured corpus population of the withheld-split case: 0. Split ROUTING is
+    untouched -- a split the heuristic already admits still reaches
+    `split_names` and never `canon_names`, via the branch in `build_pack()`.
+
+    `stats` is one `name_stats` row: `mid`, `multiword` and `freq`.
+
+    WHY THIS SITS BELOW `main()` RATHER THAN BESIDE ITS CALLER: this file is a
+    `cache_key.DERIVATION_BUNDLE_MEMBERS` member AND the target of live
+    `segpack.py:NNN` citations from three other files, declared across two
+    different anchor maps under `tools/citation-anchors/`. Defining it next to
+    `build_pack()` would push every one of those anchors down by the length of
+    this docstring, and the lowest of them is cited FROM `bootstrap_names.py` --
+    the other bundle member, which a byte guard forbids editing, so that
+    citation could not be renumbered at all. Appending below every anchor is
+    what lets this change cost one moved hash instead of two.
+    """
+    entry = canon_entries.get(name)
+    if isinstance(entry, dict):
+        return (entry.get("is_proper_name") is not False
+                and entry.get("basis") != "not_a_name")
+    return (stats["mid"] > 0 or stats["multiword"]) and len(name) != 1
 
 
 if __name__ == "__main__":
