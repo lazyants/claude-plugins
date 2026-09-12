@@ -508,6 +508,42 @@ ruling for them lives in `${durable_root}/markup_display.json`, read by the
 renderer and never by this script — `references/output-target-adapters/obsidian.md`,
 "Display forms" (#925).
 
+**W2 now enforces the OTHER half of this contract, before any of the above
+ever runs (#913).** Everything above answers "did the translator's markup
+parse", checked at assembly, after every segment has already converged.
+Nothing checked whether the translator was ever TOLD to mark anything in the
+first place — a project that declares `index_from: markup` but never puts
+the tag vocabulary in `style_bible.md` passes every check above vacuously,
+with zero spans, and ships a plausible, complete-looking index missing
+exactly the population the knob exists to capture. `validate_extraction.py`
+(the W2 managed post-extraction gate; see
+[`false-green-gate.md`](./false-green-gate.md)) now requires, under
+`index_from: markup`, that every declared tag name appear inside the
+`style_bible.md` STYLE_CONTRACT span — refusing (exit 1, every missing tag
+named) before the first LLM dispatch of any kind, at zero translation spend.
+The rule must sit INSIDE the STYLE_CONTRACT markers: that span is hashed
+into every segment's cache key, so adding the rule after translation has
+already started restales every converged segment.
+
+**A nesting counter-example, for whoever writes that rule fresh.** A place
+inside a person's byname must NOT be tagged as a `place` *inside* the
+`person` tag — `<person>…<place>…</place></person>` is `entity_markup_malformed`
+above ("nested … or a malformed declared-tag token"), refused for the WHOLE
+book at the first site, not a per-segment skip. One book's style bible told
+the translator exactly this shape was correct (bynames like "Rabbi X of
+«Town»"), the translator obeyed, three separate review rounds converged on
+it, and `assemble.py` refused the whole book at W9 after the review loop had
+already converged — a findings sequence of 111 → 39 → 12 → 7 → 0, which is a
+count of findings per round and not a count of rounds. Un-nesting then moved 35
+of 69 segments' `reviewed_draft_sha1`,
+forcing a full re-review of each. In a rabbinical/Hasidic corpus this nested
+shape is the DEFAULT sentence, not an occasional slip: in one such book 25
+distinct towns occur only inside a rabbi's byname and nowhere else, so
+"un-nest by dropping the inner span" deletes exactly the place-anchored
+identities the translation exists to record. Promote the inner span to a
+SIBLING with its connective word instead — `<person>Rabbi X</person> of
+<place>Town</place>`, never one inside the other.
+
 #### The adapter entry point
 
 Every built-in output-target adapter module exposes the same signature:

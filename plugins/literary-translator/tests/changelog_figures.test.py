@@ -504,6 +504,34 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
+    # ROTATED TO 1.154.0 (#913 -- nothing compared a declared markup vocabulary
+    # against the style contract that has to ask for it), per the maintenance
+    # contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Its
+    # numerals are of exactly two kinds, and neither kind can have a row here.
+    #
+    # IDENTIFIERS: the version (1.154.0), the release date, and the issue
+    # number (#913).
+    #
+    # MEASUREMENTS OF BOOKS IN ANOTHER REPOSITORY, which is the same class the
+    # 1.116.0 rotation recorded and for the same reason -- no implementation in
+    # this tree can re-derive them, and `derive` MUST call an authoritative
+    # implementation rather than a lookalike. They are: the twelve books
+    # surveyed and the five of them carrying `index_from: markup` with no tag
+    # rule; the 9 person marks and 2 place marks a re-dispatch produced where
+    # the silent contract had produced none; the 102 nested spans across 35 of
+    # 69 segments and the 111 -> 39 -> 12 -> 7 -> 0 review-round sequence they
+    # survived; and the 25 towns occurring only inside a rabbi's byname.
+    #
+    # Everything this tree DOES own the entry states by NAMING instead of by
+    # counting: `validate_extraction.py`, `entity_markup_style_contract`,
+    # `compute_style_contract_hash`, `PLUGIN_BUNDLE_MEMBERS`,
+    # `ORCHESTRATION_BUNDLE_MEMBERS`, `DERIVATION_BUNDLE_MEMBERS`,
+    # `entity_markup_malformed`, `reviewed_draft_sha1` and the two regex forms
+    # it rejects. A name cannot rot into a wrong number.
+    #
+    # ---- records this rotation replaces, kept per the maintenance contract ----
     # ROTATED TO 1.150.0 (#920 -- a review verdict carrying no findings
     # wedged the dispatch driver), per the maintenance contract above.
     #
@@ -1443,7 +1471,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.150.0"
+FIGURES_VERSION = "1.154.0"
 
 
 def _newest_entry():

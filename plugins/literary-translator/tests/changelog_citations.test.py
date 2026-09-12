@@ -152,6 +152,26 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
+    # ROTATED TO 1.154.0 (#913 -- nothing compared a declared markup vocabulary
+    # against the style contract that has to ask for it), and EMPTY ON PURPOSE.
+    # The entry names its subjects by FILE and SYMBOL rather than by line --
+    # `validate_extraction.py`, `entity_markup_style_contract`,
+    # `scaffold_validate.py`, `validate_draft.py`, `assemble.py`, `cache_key.py`,
+    # `compute_style_contract_hash`, `profile.example.yml`,
+    # `references/assembly-and-output.md`, `output.entity_markup`,
+    # `index_from: markup`, `entity_markup_malformed`, `reviewed_draft_sha1`,
+    # `PLUGIN_BUNDLE_MEMBERS`, `ORCHESTRATION_BUNDLE_MEMBERS` and
+    # `DERIVATION_BUNDLE_MEMBERS` -- and states no `file.ext:NNN` citation at
+    # all, which is the shape this guard reads. Measured against the entry
+    # rather than asserted: a scan of its slice for that pattern returns zero
+    # matches.
+    #
+    # This release inserts nothing into `SKILL.md`: its two edits there are
+    # line-count neutral by construction, so no live citation aimed below them
+    # drifts and none needed repointing. `tools/citation_audit.py check` is OK
+    # on the result.
+    #
+    # ---- records this rotation replaces, kept per the maintenance contract ----
     # ROTATED TO 1.130.0 (#922 -- `--reset-batches` nulled the rejection the
     # exhausted ladder ended on), and EMPTY ON PURPOSE, for the reason the
     # records below give: the entry names its subjects by FILE and SYMBOL --
