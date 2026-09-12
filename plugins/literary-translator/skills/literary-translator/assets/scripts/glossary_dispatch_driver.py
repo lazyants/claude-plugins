@@ -2601,11 +2601,50 @@ def apply_requested_resets(ctx: Ctx, indices: "list[int]",
     reset = []
     for idx in indices:
         st = state["batches"].get(str(idx)) or {}
+        # #922: a batch reset to attempt 0 still carries the ladder's last
+        # rejection into the fresh dispatch, rather than writing None the way
+        # reconcile_state()'s missing-artifact reset does. A citation-review-
+        # exhausted batch's terminal rejection lives in `lastRejection` --
+        # _exhaust() writes it there from the rung that actually exhausted,
+        # while the entry's own `rejection_reason` at that point is one rung
+        # behind (record_verdicts() left it at the PREVIOUS rung's rejection,
+        # the one that caused the advance INTO the exhausting rung). A batch
+        # this flag reaches before it exhausts -- the status test is
+        # deliberately skipped, so any status is possible -- has no
+        # `lastRejection` yet, and `rejection_reason` is the newest the batch
+        # holds. Preferring `lastRejection` and falling back to
+        # `rejection_reason` covers both.
+        #
+        # Carrying it is what makes the fresh attempt-0 dispatch render the
+        # template's REGENERATION block (advance_batch() hands this same
+        # field to batchDispatchPrompt() -- the ordinary retry path, no new
+        # plumbing) instead of reproducing a citation set a judge already
+        # refused: measured on the reporting run, six of eleven items
+        # reverted on one batch because the re-drive repeated the same
+        # rejected sources.
+        #
+        # This is a REPLAY of the last verdict, not a restore of everything a
+        # judge ever said about this batch -- the state document keeps no
+        # more than the last rejection, so a repair an earlier rung made that
+        # the terminal report does not name is not recovered here. Nor does
+        # it change WHY the re-drive starts at attempt 0 rather than
+        # re-approving: a fragment a judge may have rejected is still never
+        # re-approved sight-unseen, per the docstring above.
+        #
+        # A non-string value (a hand-edited state document is the only way
+        # one reaches this field) is dropped to None rather than carried,
+        # so the prompt renders an ordinary first attempt instead of
+        # embedding garbage in the REGENERATION block.
+        carried = st.get("lastRejection") or st.get("rejection_reason")
+        if not (isinstance(carried, str) and carried):
+            carried = None
         log(f"batch {idx}: reset requested on the command line -- dropping its "
-            f"{st.get('status', 'pending')!r} status and re-driving it from attempt 0")
+            f"{st.get('status', 'pending')!r} status and re-driving it from attempt 0, "
+            + ("carrying its last rejection into the attempt-0 dispatch"
+               if carried else "with no rejection on record"))
         undeleted = _release_approved_slots(ctx, idx)
         state["batches"][str(idx)] = {"attempt": 0, "status": "pending",
-                                      "rejection_reason": None,
+                                      "rejection_reason": carried,
                                       "resumeSkipDropped": True}
         entry = {"batch": idx, "was": st.get("status"), "attempt": st.get("attempt"),
                  "reason": "reset requested on the command line",
