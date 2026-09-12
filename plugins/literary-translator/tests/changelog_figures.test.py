@@ -504,7 +504,7 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.138.0 (#910 -- --correct reported success while the
+    # ROTATED TO 1.145.0 (#910 -- --correct reported success while the
     # already-built segpacks still carried the pre-correction canon_map; #840
     # folded in), per the maintenance contract above.
     #
@@ -512,7 +512,7 @@ FIGURES = [
     # Every digit-run in it is an IDENTIFIER or a CITATION, never a figure
     # this tree can re-derive:
     #
-    #   1.138.0, 2026-09-12    the version and the release date
+    #   1.145.0, 2026-09-12    the version and the release date
     #   #910, #840, #826, #917 issue numbers
     #   W3a (twice)            a workflow step name, not a count
     #   "three"                SAFE_STALE_CARVEOUT_FIELDS, spelled as a word
@@ -538,8 +538,48 @@ FIGURES = [
     # `plugin_bundle_hash` are named, so no later release can rot this prose
     # by retuning a number.
     #
-    # This rotation RETIRED 1.134.0's rows, which belong to an entry that is
+    # This rotation RETIRED 1.143.0's rows, which belong to an entry that is
     # no longer the newest and which this guard therefore no longer reads.
+    #
+    # The 1.143.0 rotation this replaces, kept as its own record:
+    # ROTATED TO 1.143.0 (#925 -- a markup-minted entity note was headed with
+    # its ref slug), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Its
+    # digit-runs are: the version (1.143.0), the release date, the issue
+    # numbers (#925, #930), the identifiers `H1` and `W9` (twice), and four
+    # numerals in two phrases about ONE DELIVERED BOOK IN ANOTHER REPOSITORY
+    # -- "279 of 356 person rows" (the measured defect) and "0 of 409 named"
+    # (the visible-zero example the `displays` count exists for) -- none of
+    # which any implementation in this tree can re-derive.
+    # Everything the tree owns is stated by NAMING: the sidecar, its three
+    # refusal reasons, the manifest keys and the moved computations are named,
+    # never counted, so no later release can rot this prose by retuning a
+    # number.
+    #
+    # This rotation RETIRED 1.139.0's (empty) row set, kept below as its own
+    # record.
+    #
+    # ROTATED TO 1.139.0 (#926 -- the renderer counts entity-note labels that
+    # differ from another note's label only by a leading connective), per the
+    # maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # figure it quotes -- 50 labels over 53 notes, the 22/24 and 28/29 split,
+    # five labels and twelve notes for one town, 230 index rows for 140 places,
+    # 43 of 90 hand-written folds, the next-largest book's 32, eight of fifteen
+    # books at zero -- is a measurement taken on DELIVERED BOOKS IN ANOTHER
+    # REPOSITORY (the `breslov-he-en` and `ssk-he-en` series) through the
+    # shipped `_build_connective_candidates`, the kind no implementation in
+    # this tree can re-derive without those books. The one thing the tree
+    # OWNS, the connective list, the entry states by ENUMERATING its members
+    # (`in`, `at`, `from`, `to`, `of`, `and to`, `and from`, `and in`,
+    # `and at`) and never as a count, so there is no number to pin against
+    # `LEADING_CONNECTIVES`. The remaining numerals are identifiers: the
+    # version numbers, the release date and the issue numbers (#926, #823,
+    # #871, #929).
+    #
+    # This rotation RETIRED nothing: 1.134.0's list was already empty.
     #
     # The 1.134.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.134.0 (#924 -- the review turn reads the refusal record), per
@@ -636,7 +676,7 @@ FIGURES = [
     # kept below, unchanged.
     # 1.123.0's own row, RETIRED here rather than carried: it measured the
     # phrase "default 2" in THAT entry, and this guard only ever reads the
-    # NEWEST one. Left live it would be checked against the 1.138.0 entry,
+    # NEWEST one. Left live it would be checked against the 1.145.0 entry,
     # where the phrase does not occur -- a red that says nothing about
     # either release. The row itself was correct for its own entry and is
     # recorded in the 1.123.0 block below.
@@ -1394,7 +1434,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.138.0"
+FIGURES_VERSION = "1.145.0"
 
 
 def _newest_entry():

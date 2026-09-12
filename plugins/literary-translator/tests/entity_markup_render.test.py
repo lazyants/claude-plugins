@@ -260,9 +260,12 @@ def test_unknown_marked_entity_gets_its_own_note_and_every_occurrence_links(tmp_
         "every marked occurrence links -- no marked span is ever left as bare "
         f"text for the canon scan to (mis)handle. Got:\n{body}"
     )
-    assert manifest["entity_markup"] == {
-        "spans": 2, "notes": 1, "links": 2, "brackets_escaped": 0
-    }
+    report = manifest["entity_markup"]
+    assert (report["spans"], report["notes"], report["links"], report["brackets_escaped"]) == (
+        2, 1, 2, 0
+    )
+    assert report["displays"] == 0, "no markup_display.json ruling on this render"
+    assert isinstance(report["identities"], list) and len(report["identities"]) == 1
 
 
 def test_declared_block_with_zero_spans_renders_and_reports_a_visible_zero(tmp_path):
@@ -273,9 +276,12 @@ def test_declared_block_with_zero_spans_renders_and_reports_a_visible_zero(tmp_p
     _out_dir, manifest = render_into(
         tmp_path, make_nodestream(nodes, spans={}), make_canon({}), make_profile()
     )
-    assert manifest["entity_markup"] == {
-        "spans": 0, "notes": 0, "links": 0, "brackets_escaped": 0
-    }
+    report = manifest["entity_markup"]
+    assert (report["spans"], report["notes"], report["links"], report["brackets_escaped"]) == (
+        0, 0, 0, 0
+    )
+    assert report["displays"] == 0
+    assert report["identities"] == []
 
 
 # ===========================================================================
@@ -2120,8 +2126,12 @@ def test_an_unmarked_collision_is_still_merely_delinked(tmp_path):
         tmp_path, make_nodestream(nodes, spans={}),
         make_canon(TWO_OWNERS), make_profile(),
     )
-    assert manifest["entity_markup"] == {"spans": 0, "notes": 0, "links": 0,
-                                         "brackets_escaped": 0}
+    report = manifest["entity_markup"]
+    assert (report["spans"], report["notes"], report["links"], report["brackets_escaped"]) == (
+        0, 0, 0, 0
+    )
+    assert report["displays"] == 0
+    assert report["identities"] == []
     assert manifest["delink_cost"]["unlinked_occurrences_total"] == 2
 
 

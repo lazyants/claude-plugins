@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.138.0 — 2026-09-12
+## 1.145.0 — 2026-09-12
 
 **`canon_validate.py --correct` rewrote canon.json and reported success while every already-built
 segpack still carried the pre-correction `canon_map` — and `canon_map` is what actually reaches the
@@ -39,6 +39,110 @@ not visited — a pre-existing blind spot, the subject of sibling issue #917, ne
 widened here; a `remove` of an entry whose `canonical_target_form` was already empty produces no
 `canon_map` mismatch and is not listed; and the no-exit-change guarantee is scoped to `Exception`
 and `SystemExit` — `KeyboardInterrupt` is deliberately not caught.
+## 1.143.0 — 2026-09-12
+
+**A markup-minted entity note was headed with its ref slug, so every index built from the notes
+listed internal identifiers (#925).** Under `output.entity_markup.index_from: markup` the renderer
+mints one note per marked identity and writes the LABEL — the translator's `ref` attribute — as the
+note's `# H1`. A translator that writes slug refs (`ref="r-nachman-noson"`) therefore ships
+`# r-nachman-noson`, and a back-of-book index built from the headings labels its rows with the slug:
+measured at **279 of 356 person rows** on a delivered he→en book whose own index header promised
+"alphabetical by the name the translation prints". Both halves were correct in isolation — the
+renderer held no display form, and the index builder was right to trust the heading — and nothing
+downstream inspects a label, so the defect was visible only to a person reading the published file.
+
+**The operator now records the printed name in `${durable_root}/markup_display.json`, and the
+renderer applies it — it never chooses.** Picking "the name the book prints" out of a note's
+`aliases` is a judgement over prose, and the two obvious rules both failed on that book: the
+commonest payload is the anaphor (*the Rav* over *R. Aharon*), the shortest naming form is the rare
+spelling (*Lvov*, once, over *Lemberg*, thirty-seven times). So the renderer computes the
+deterministic signal and publishes it: `adapter_result.entity_markup.identities` lists every minted
+identity with its `aliases` as `{form, count}` pairs, commonest first, and `entity_markup.displays`
+counts the identities that have a ruling — "0 of 409 named" is a visible number. The W9 turn reads
+the listing, rules, writes `{"displays": [{"tag", "label", "display"}, …]}` and re-renders
+(SKILL.md, W9). A ruling changes the heading and adds `display:` to the frontmatter after `ref`;
+`name`, `ref`, `aliases`, the filename and every wikilink target are byte-identical to before, so
+nothing keyed on a note's path moves. Without a ruling the note renders exactly as it did — for a
+figure the book never names, the ref's own words are the only honest label.
+
+The sidecar is read at render time from the script's own `durable_root`, not attached to the
+NodeStream by `assemble.py` as `canon_link_groups.json` is, so a ruling added after assembly takes
+effect on the next render. It is validated BEFORE the vault is cleaned, in the same window as the
+link-group and span-table checks, so a rejected sidecar never costs the operator the vault on disk:
+`markup_display_invalid` for a malformed document (a non-regular path, a repeated JSON member name,
+an entry not exactly `tag`/`label`/`display` as non-empty strings, a display carrying a line break,
+the reserved Mentions token, an entity sentinel or a lone surrogate, two entries for one
+`(tag, NFC(label))` identity), `markup_display_unknown_identity` for an identity this render mints
+no note for (unknown, or one canon owns), and `markup_display_not_printed` for a display that is not
+one of the identity's current printed forms. The last two are what make a stale ruling refused
+rather than silently inert: after a re-translation stops printing the ruled form or drops the ref,
+the render halts naming the entry. To make that check possible the pure index/composition
+computations in `render()` now run before the clean; nothing they do touches disk.
+
+`render_obsidian.py` changed, so `render_version` moves: a project's next `diff_rendered_output.py`
+run mismatches until the baseline is re-accepted (`--accept-baseline --force-accept-baseline`) — a
+render-baseline re-accept, not a re-translation.
+
+Residuals, disclosed in `references/output-target-adapters/obsidian.md`, "Display forms": `aliases`
+and their counts are gathered over every recorded span, including one in a footnote definition no
+node references (the documented resolved-but-undelivered gap), so a display ruled from such a form
+passes; and a ruling names a label only — a markup note's filename is still its label's slug, which
+is #930's question, not this one's.
+## 1.139.0 — 2026-09-12
+
+**The renderer counts the entity notes whose labels differ from another note's label only by a
+leading connective (#926).** The vault carries one note per canon entry and one per markup
+identity, and nothing compared any two of those labels to each other. A Hebrew source fuses its
+prepositions onto the name — `מקרעמינטשאג` is "from Kremenchug" in one token — so the candidate
+extractor hands the glossary pass the fused form as its own candidate, the pass freezes it as
+`from Kremenchug`, and the vault then ships that town under `Kremenchug`, `from Kremenchug`,
+`in Kremenchug`, `to Kremenchug` and `and to Kremenchug`: five labels, twelve notes, one place,
+and every gate green.
+The whole-canon harmonisation pass (#823) had flagged the family; the operator harmonised the
+spelling and kept the prefixes, because nothing said a prefixed target is a second note. Measured
+on the delivered book that reported it: **50 such labels standing over 53 notes** — 22 labels (24
+notes) whose remainder is another canon target, and 28 (29 notes) whose fused-preposition entry
+stands beside a bare form canon never entered and the translator marked in the prose (`to
+Akkerman` beside `<place>Akkerman</place>`) — of a place index that ran to 230 rows for 140
+places. The next-largest local book reports 32 labels; eight of fifteen report zero.
+
+`render()` now returns `connective_candidates` — every emitted note label that is one of a fixed
+list of leading connectives (`in`, `at`, `from`, `to`, `of`, `and to`, `and from`, `and in`,
+`and at`) plus another emitted note's label, with the owners behind a canon label, the label it
+reduces to and whether that remainder is currently linkable — and prints one stderr `WARN` whenever
+the count is non-zero. It rides out on `assemble.py`'s stdout as `adapter_result.connective_candidates`,
+beside `delink_cost`, and for the same reason that block lives in the renderer rather than the W9
+gate: `validate_backlinks.py` short-circuits when the Mentions appendix is off, which is the
+configuration the measured vault ran under.
+
+**A row is a structural fact about two labels, never an identity claim, and the WARN names no
+canon command.** Whether `from Kremenchug` and `Kremenchug` are one town is the operator's call —
+or the harmonisation pass's — and folding two notes into one index row is downstream work the
+report now feeds; the issue's own count was that 43 of the 90 hand-written folds on that book
+were exactly this class. `references/canon-and-glossary.md`'s "What a group CANNOT do" (#871) is
+the shipped decision for one referent under two targets — leave the two notes — and this release
+does not reopen it: a `canon_link_groups.json` group re-routes inline links and keeps every note,
+and a canon correction re-stales the carriers of the corrected form, so neither is offered as a
+remedy. Two non-blank categories that disagree are not a candidate: `of Orleans` (a person) beside
+`Orleans` (a place) is two entities by the canon's own word, and the lookup takes the first
+COMPATIBLE identity rather than the first existing one, so a canon `Jordan` frozen as a person
+does not hide a place/place pair the translator marked.
+
+The issue's other two remedies were measured and not taken. Folding the connective-prefixed
+MARKUP labels outright at render time: across the eleven local books that carry entity markup
+not one marked label begins with a connective — every row on every local book has a CANON label
+on its left-hand side — so that machinery would never fire. Surfacing the improvised spellings
+(`Krimintshak`, `Kromintshag`, …) as candidates: the render layer holds no source form for a
+marked span, so it can only list what the manifest's `entity_markup.notes` already counts; the
+join that makes the spelling class adjudicable — the printed label against the source token in
+the same block — is #929's report and is owned there.
+
+Residuals, disclosed in `references/output-target-adapters/obsidian.md`: the connective list is
+English, so a target language whose connectives are other words reports zero, and that zero is not
+evidence; a canon entry with a blank `canonical_target_form` is headed by its source form and is
+not compared; a label whose remainder is no emitted note (`from Odes` with no `Odes`) is the
+spelling class, not this one.
+
 ## 1.134.0 — 2026-09-12
 
 **The review turn now reads the operator's per-finding refusal record, because a correct refusal had

@@ -501,7 +501,12 @@ mode handles correctly.
 The summary JSON reports `entity_markup: {mode, strings_scanned, spans,
 tags}` whenever the block is declared. A book may genuinely carry no markup,
 so a zero is not a refusal — but it is VISIBLE, rather than
-indistinguishable from a scan that never ran.
+indistinguishable from a scan that never ran. Under `index` mode the
+adapter's own block, `adapter_result.entity_markup`, also carries the minted
+identities with their printed forms and counts, and the operator's naming
+ruling for them lives in `${durable_root}/markup_display.json`, read by the
+renderer and never by this script — `references/output-target-adapters/obsidian.md`,
+"Display forms" (#925).
 
 #### The adapter entry point
 

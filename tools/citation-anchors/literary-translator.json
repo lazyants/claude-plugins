@@ -1474,13 +1474,13 @@
       ],
       "claim": "risk-accepted (`canon_adjudication_audit.py:989-1007`, `:1275-1282`, `:1725-1731`) — landing a proposal there would make it a Deliver-time blocker on any projec"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2619-2650\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2620-2651\", 0]": {
       "anchors": [
         "def _content_view",
         "everything except the stamp itself",
         "if k != \"generation_hashes\""
       ],
-      "claim": "`canon_link_groups.json` above is a sidecar and not a key: `_content_view` (`canon_validate.py:2619-2650`) treats any non-`generation_hashes` key as CONTENT, so"
+      "claim": "`canon_link_groups.json` above is a sidecar and not a key: `_content_view` (`canon_validate.py:2620-2651`) treats any non-`generation_hashes` key as CONTENT, so"
     },
     "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"orchestration-and-batching.md:252\", 0]": {
       "anchors": [
@@ -1641,7 +1641,7 @@
       ],
       "claim": "The interlock compares the whole new_entry against old_entry, so a same-target correction (confidence-only, here) is legal -- canon_correct_entry.test.py:767-771 already proves that, parametrizing confidence/note/category as fields a correction may move on its own."
     },
-    "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:4184-4224\", 0]": {
+    "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:4185-4225\", 0]": {
       "anchors": [
         "elif args.restamp_derivation:",
         "elif args.batch is not None:"
