@@ -1716,6 +1716,10 @@ def test_a_job_that_completes_without_an_artifact_stops_the_wait_too(bed):
     entry = out["not_ready"][0]
     assert entry["reason"] == "glossary-pass-null"
     assert entry["jobStatus"] == "completed"
+    # #914: settled through the SAME _settle_failed() call site as an outright
+    # job failure, so it must carry the same recovery. A job that ran and wrote
+    # nothing decided nothing about the candidates either.
+    assert entry["recovery"] == load(bed).ENVIRONMENTAL_RECOVERY
 
 
 def test_a_failed_repair_job_settles_the_batch_at_its_rung(bed):
@@ -1740,6 +1744,9 @@ def test_a_failed_repair_job_settles_the_batch_at_its_rung(bed):
     assert entry["attempt"] == 0, (
         "the batch settles at the rung whose repair failed, not the reserved "
         "next rung it never populated")
+    # #914: the repair call site is the SECOND of the three folded into
+    # _settle_failed(), so it must carry the shared recovery too.
+    assert entry["recovery"] == load(bed).ENVIRONMENTAL_RECOVERY
     assert out["merged"] is False
     cwds = companion_cwds(bed)
     assert len(cwds) == 2 and cwds[0] != cwds[1], "a dispatch and a repair launch"
@@ -1788,6 +1795,181 @@ def test_a_status_the_companion_cannot_answer_never_fails_a_batch(bed):
     assert elapsed < 45, f"waited {elapsed:.1f}s for what should resolve in one poll"
     assert _logged(bed, "status"), "the status branch was never exercised"
     assert out["needs_judge"], f"an unreadable status must not fail the batch: {out}"
+
+
+# ---------------------------------------------------------------------------
+# #914 -- every terminal record except _exhaust()'s named NO way back at all.
+# `_settle_failed()` is the one non-exhaustion terminal transition, and its
+# ENVIRONMENTAL_RECOVERY text is a fixed constant, so pinning it once per call
+# site is what proves each site was wired to the SAME helper rather than to a
+# fresh copy of the same three lines. Two of the four sites are pinned inside
+# the tests above that already drive them -- the completed-without-an-artifact
+# case and the failed-repair case -- rather than in a second subprocess run
+# each; only the two this section could not otherwise reach live here.
+# ---------------------------------------------------------------------------
+
+def test_a_codex_job_failed_entry_carries_the_environmental_recovery(bed):
+    """A batch that dies because codex-companion's own job record says FAILED
+    is an environmental fault, not a verdict on the candidates -- before #914
+    this entry named no way back at all, unlike an exhausted batch's. The
+    "jobDetail" check pins that the shared text stays generic prose naming
+    the FLAG to run, never a pointer at a field name that happens to sit
+    beside it in the same entry (a wording that would break the moment this
+    reason fired for a repair job instead, whose "jobDetail" lives at a
+    different rung)."""
+    bed["jobs"].write_text(json.dumps({"out_0_attempt_0.json": {
+        "status": "failed",
+        "summary": "Selected model is at capacity. Please try a different model."}}))
+    out, _ = run_driver(bed, "--deadline-sec", "120", expect=1)
+    entry = out["not_ready"][0]
+    assert entry["reason"] == "codex-job-failed"
+    m = load(bed)
+    assert entry["recovery"] == m.ENVIRONMENTAL_RECOVERY
+    assert "--reset-batches" in entry["recovery"], (
+        "the recovery must name the flag that actually clears a failed batch")
+    assert "jobDetail" not in entry["recovery"], (
+        "the recovery is fixed prose, not a reference to this entry's own field names")
+
+
+def test_a_driver_error_during_publish_carries_the_environmental_recovery(bed):
+    """The THIRD site #914 folded into _settle_failed() is drive_all()'s own
+    `except DriverError` catch, and nothing in this suite already reaches it:
+    every existing DriverError case either exercises publish_fragment()
+    directly (the publish_bed unit tests) or is a fault this driver's own
+    fail-safe path routes AROUND before a DriverError is ever raised (the
+    dropped-marker tests above). So this test builds the one full-sequence
+    path that actually raises one: read_sandbox_artifact()'s own no-follow
+    walk refuses a SYMLINK leaf, exactly as test_a_symlinked_sandbox_artifact
+    _is_never_published already pins at the unit level -- reached here by
+    having the fake codex turn plant a symlink (to a file that genuinely
+    exists, so the poll's own --check-batch sees a batch ready to publish)
+    instead of writing the fragment. publish_fragment() then raises reading
+    it back, which is exactly the "turn rewrote the artifact after passing
+    its own check" shape the driver's DriverError message describes.
+
+    The exception's own message becomes `reason`, and it carries no
+    `jobDetail` key at all -- this batch never went through a job-status
+    read, so a recovery that assumed one would be lying about this entry."""
+    elsewhere = bed["tmp"] / "elsewhere.json"
+    elsewhere.write_text("{}")
+    _write(bed["tmp"] / "companion.mjs", f'''
+        import fs from "node:fs";
+        const args = process.argv.slice(2);
+        if (args[0] === "status") {{
+          console.log(JSON.stringify({{job: {{status: "running"}}}}));
+          process.exit(0);
+        }}
+        const cwd = args[args.indexOf("--cwd") + 1];
+        fs.symlinkSync({str(elsewhere)!r}, cwd + "/out_0_attempt_0.json");
+        console.log(JSON.stringify({{jobId: "job-out_0_attempt_0.json", status: "queued"}}));
+    ''')
+    out, _ = run_driver(bed, expect=1)
+    assert out["merged"] is False
+    entry = out["not_ready"][0]
+    assert "jobDetail" not in entry, (
+        "a DriverError-derived entry never went through a job-status read")
+    assert entry["recovery"] == load(bed).ENVIRONMENTAL_RECOVERY
+
+
+def test_summarize_not_ready_decides_a_three_way_tie_and_an_empty_one(bed):
+    """summarize_not_ready() called DIRECTLY, because the rules that actually
+    decide its answer are unreachable from a subprocess run of this bed: a
+    driver run cannot cheaply produce three distinct messages across four
+    batches, and it cannot produce a failure carrying NEITHER message key at
+    all. Both are ordinary on a real book -- a run wide enough for one host to
+    fail differently from another, and a DriverError-only run, whose entries
+    carry their prose in `reason` and no detail key of either name.
+
+    The three-way case is the one where "most agreed" does real work: two
+    batches share one message and two others each have their own, so a reader
+    of the summary is told the shared one. The tie inside it pins the
+    order-independence -- the two singletons are equal on count, and neither
+    may displace the pair."""
+    m = load(bed)
+
+    assert m.summarize_not_ready([]) == {"message": None, "batches": []}, (
+        "an empty failure list must not invent a message")
+
+    reason_only = [{"batchIndex": 0, "reason": "the evidence index is unreadable"},
+                   {"batchIndex": 1, "reason": "the evidence index is unreadable"}]
+    assert m.summarize_not_ready(reason_only) == {"message": None, "batches": []}, (
+        "`reason` is not a message key -- a DriverError-only run reports None "
+        "rather than promoting prose this function was never given")
+
+    blank = [{"batchIndex": 0, "jobDetail": "   "}, {"batchIndex": 1, "detail": ""}]
+    assert m.summarize_not_ready(blank)["message"] is None, (
+        "a whitespace-only or empty message is not a message")
+
+    three_way = [
+        {"batchIndex": 3, "jobDetail": "quota exhausted"},
+        {"batchIndex": 0, "jobDetail": "host refused"},
+        {"batchIndex": 1, "jobDetail": "quota exhausted"},
+        {"batchIndex": 2, "detail": "the record could not be written"},
+    ]
+    assert m.summarize_not_ready(three_way) == {
+        "message": "quota exhausted", "batches": [1, 3]}, (
+        "the message the MOST failures share wins, and its batches come back "
+        "sorted rather than in the order they happened to fail")
+
+    two_way_tie = [{"batchIndex": 4, "jobDetail": "second"},
+                   {"batchIndex": 2, "jobDetail": "first"}]
+    assert m.summarize_not_ready(two_way_tie)["message"] == "first", (
+        "an exact tie on count goes to the lowest batch index, so the summary "
+        "of one run is the summary of the same run replayed")
+
+    both_keys = [{"batchIndex": 0, "jobDetail": "the job said this",
+                  "detail": "and something else said this"}]
+    assert m.summarize_not_ready(both_keys)["message"] == "the job said this", (
+        "jobDetail wins where an entry somehow carries both -- the companion's "
+        "own words are the ones an operator acts on")
+
+
+def test_a_failed_run_names_the_companions_message_at_the_top_of_the_payload(bed):
+    """Before #914 a session reading `.reason` off stdout got null the moment
+    any batch failed -- nothing in main() ever set it on that path. This pins
+    the companion payload the fix adds: `reason` becomes "batches-failed", and
+    `notReadyDetail` names the one message the failure agreed on plus which
+    batch index reported it, so a session does not have to open every
+    `not_ready[]` entry to learn what a single-batch run already knows."""
+    bed["jobs"].write_text(json.dumps({"out_0_attempt_0.json": {
+        "status": "failed",
+        "summary": "Selected model is at capacity. Please try a different model."}}))
+    out, _ = run_driver(bed, "--deadline-sec", "120", expect=1)
+    assert out["reason"] == "batches-failed"
+    assert out["notReadyDetail"]["message"] == out["not_ready"][0]["jobDetail"]
+    assert out["notReadyDetail"]["batches"] == [0]
+
+
+def test_two_batches_failing_with_the_same_message_are_both_named(bed):
+    """summarize_not_ready() ties on the MOST-agreed message; with exactly two
+    failures sharing one message there is nothing to break the tie by count,
+    so this is also the test that pins the result names BOTH batch indices,
+    sorted, rather than only the first (or last) one counted."""
+    bed["jobs"].write_text(json.dumps({
+        "out_0_attempt_0.json": {"status": "failed", "summary": "quota exceeded"},
+        "out_1_attempt_0.json": {"status": "failed", "summary": "quota exceeded"}}))
+    out, _ = run_driver(bed, "--deadline-sec", "120", expect=1, batches=TWO_BATCHES)
+    assert len(out["not_ready"]) == 2
+    assert out["notReadyDetail"]["message"] == "quota exceeded"
+    assert out["notReadyDetail"]["batches"] == [0, 1], (
+        "both failing batches must be named, sorted by index")
+
+
+def test_a_mixed_run_keeps_awaiting_more_verdicts_but_still_carries_not_ready_detail(bed):
+    """The `setdefault`, not an assignment, is the whole point of this test:
+    a run with one failed batch and one still awaiting a judge must keep
+    reporting "awaiting-more-verdicts" -- the ordinary not-yet a session
+    already knows how to handle -- while STILL surfacing the failure's own
+    detail, rather than the failure's "batches-failed" silently overwriting
+    the judge-waiting reason a session is actively polling for."""
+    bed["jobs"].write_text(json.dumps({"out_0_attempt_0.json": {
+        "status": "failed", "summary": "quota exceeded"}}))
+    out, _ = run_driver(bed, "--deadline-sec", "120", expect=1, batches=TWO_BATCHES)
+    assert out["reason"] == "awaiting-more-verdicts", (
+        "a batch still needing a judge must not be masked by a sibling's failure")
+    assert out["needs_judge"], "batch 1 must still be waiting on a judge"
+    assert out["notReadyDetail"]["message"] == "quota exceeded"
+    assert out["notReadyDetail"]["batches"] == [0]
 
 
 # ---------------------------------------------------------------------------
@@ -1952,6 +2134,14 @@ def test_an_exhausted_batch_names_the_flag_that_recovers_it(bed):
     failed = out["not_ready"][0]
     assert "--reset-batches" in failed.get("recovery", ""), (
         f"the exhausted record must name the supported recovery: {failed}")
+    # #914 gave every OTHER terminal record a recovery too, and the two texts
+    # are similar enough that a substring check passes on the wrong one. The
+    # equality is against the module's own constants for exactly that reason:
+    # an exhausted batch stopped on a content verdict its ladder reached, not
+    # on its environment, and must keep saying so.
+    m = load(bed)
+    assert failed["recovery"] == m.EXHAUSTED_RECOVERY
+    assert failed["recovery"] != m.ENVIRONMENTAL_RECOVERY
 
 
 def test_a_requested_reset_re_drives_an_exhausted_batch_from_attempt_zero(bed):

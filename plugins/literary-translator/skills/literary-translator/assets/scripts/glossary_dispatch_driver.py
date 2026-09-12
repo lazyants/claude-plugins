@@ -105,8 +105,8 @@ CLI:
       [... same root args]
 
 Output: exactly ONE JSON line to stdout, all human detail to stderr.
-Exit 0 = the pass advanced (read the JSON: `merged`, `needs_judge`, `not_ready`);
-1 = a gate refused or a batch failed; 2 = usage/environment error.
+Exit 0 = the pass advanced (read the JSON: `merged`, `needs_judge`, `not_ready`,
+`reason`); 1 = a gate refused or a batch failed; 2 = usage/environment error.
 
 stdlib-only, self-anchored (`Path(__file__).resolve().parents[1]`), no shared util module --
 so the two no-follow filesystem helpers below are BYTE-IDENTICAL copies of
@@ -2632,6 +2632,33 @@ EXHAUSTED_RECOVERY = (
     "snapshots the re-drive would otherwise be refused by. Drop the flag again "
     "from the next invocation.")
 
+# #914: every OTHER terminal record named no way back at all, unlike
+# EXHAUSTED_RECOVERY above -- a batch that dies on its environment (the
+# observed case is the Codex account's usage quota running out mid-run) reads
+# exactly like one that died on its candidates, and drive_all() skips a failed
+# batch forever either way. This text is deliberately cause-blind: no matcher
+# over the vendor's error text, no quota-specific terminal state, because the
+# fix is the same regardless of WHY the environment failed.
+ENVIRONMENTAL_RECOVERY = (
+    "this batch failed on its environment, not on its candidates -- nothing about the "
+    "glossary rows was decided here. Clear the cause this entry reports, then re-drive "
+    "the batch from attempt 0 by re-invoking the driver with --reset-batches <this "
+    "entry's batchIndex>, which releases the approved snapshots the re-drive would "
+    "otherwise be refused by. Drop the flag again from the next invocation.")
+
+# #914: --reset-batches is the WRONG move here and must not be suggested as
+# the plain route -- it deletes the batch's snapshot and replaces the whole
+# entry, throwing away a judge approval that is already attested and whose
+# snapshot already survives. Only the bookkeeping write failed, so the record
+# is recoverable by hand; the batch is not.
+APPROVAL_RECORD_RECOVERY = (
+    "the judge APPROVED this batch and its approved snapshot survives -- only the record "
+    "of that approval could not be written. Do NOT reset it: --reset-batches deletes that "
+    "snapshot and throws the attested approval away. Write the record by hand instead, "
+    "with the pass's own record command against this batch's snapshot, and then take the "
+    "partial-merge route SKILL.md gives under \"Recovering the ready batches when a "
+    "sibling exhausted\".")
+
 
 def _exhaust(st: dict, attempt: int, last_rejection, *, attempts_used: int) -> dict:
     """The ladder's ONE terminal transition, recorded at the rung that ran.
@@ -2644,6 +2671,57 @@ def _exhaust(st: dict, attempt: int, last_rejection, *, attempts_used: int) -> d
               attemptsUsed=attempts_used, lastRejection=last_rejection,
               recovery=EXHAUSTED_RECOVERY)
     return st
+
+
+def _settle_failed(st: dict, attempt: int, fields: dict) -> dict:
+    """The ONE non-exhaustion terminal transition (#914).
+
+    Existed as three identical st.update() calls -- the ladder's own dispatch
+    failure, a repair job's failure, and drive_all()'s DriverError catch -- and
+    none of the three named a way back. One function is the point: a fourth
+    failure site added later cannot forget the recovery line, because it is
+    set here exactly once rather than repeated at each call site.
+
+    "recovery" is in the excluded set for the same reason "status" is: this
+    function OWNS that key, and a caller that happened to carry one would
+    otherwise be silently overwritten by the line below rather than refused by
+    the filter the reader is already looking at. No caller passes one today.
+
+    _exhaust() stays separate rather than folding into this one: its route is
+    the same flag (--reset-batches), but its cause is a content verdict the
+    ladder itself reached -- citations that would not retrieve after every
+    rung was spent -- and its own EXHAUSTED_RECOVERY text already says so.
+    Rewriting that as an environmental failure would misdescribe a batch whose
+    candidates, not its environment, are why it stopped."""
+    st.update(status="failed", attempt=attempt,
+              **{k: v for k, v in fields.items()
+                 if k not in ("state", "attempt", "status", "recovery")})
+    st["recovery"] = ENVIRONMENTAL_RECOVERY
+    return st
+
+
+def summarize_not_ready(failed: "list[dict]") -> dict:
+    """The one failure message the most failures agree on (#914), named ONCE
+    at the top of the result instead of only inside each `not_ready[]` entry --
+    a session reading a run where every batch died the same way should not have
+    to open every entry to notice that.
+
+    Reads `jobDetail` first -- codex-companion's own words -- then `detail`,
+    which is where the approval-record-write failure puts canon_validate.py's
+    own. A run whose failures carry neither key reports message None rather
+    than inventing one. Ties go to the lowest batch index, so the output stays
+    deterministic across otherwise-equal runs."""
+    counts = {}
+    for entry in failed:
+        for key in ("jobDetail", "detail"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                counts.setdefault(value, []).append(entry["batchIndex"])
+                break
+    if not counts:
+        return {"message": None, "batches": []}
+    message = max(counts, key=lambda m: (len(counts[m]), -min(counts[m])))
+    return {"message": message, "batches": sorted(counts[message])}
 
 
 def _clear_awaiting(st: dict) -> None:
@@ -2768,10 +2846,7 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
         if kind == "failed":
             # "state" is this function's own vocabulary and "attempt"/"status"
             # are set explicitly; spreading any of them collides with the keyword.
-            st.update(status="failed", attempt=attempt, **{
-                k: v for k, v in result.items()
-                if k not in ("state", "attempt", "status")})
-            return st
+            return _settle_failed(st, attempt, result)
 
         if kind == "needs_repair":
             # TERMINAL RUNG: no attempt+1 exists to reserve, so no repair is
@@ -2793,10 +2868,7 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
                 # an ordinary dispatch failure. Reached here, not there, because
                 # run_repair() returns this rather than raising: the rung it
                 # reserved must NOT be advanced past for a job that never ran.
-                st.update(status="failed", attempt=attempt, **{
-                    k: v for k, v in repaired.items()
-                    if k not in ("state", "attempt", "status")})
-                return st
+                return _settle_failed(st, attempt, repaired)
             # The rung is RESERVED either way: a valid repair writes its spliced
             # fragment there, an invalid one regenerates there. Never attempt+2.
             attempt += 1
@@ -2874,7 +2946,10 @@ def drive_all(ctx: Ctx, batches: list, state: dict,
         try:
             advance_until_blocked(ctx, batch, state, resumed_indices)
         except DriverError as exc:
-            st.update(status="failed", reason=str(exc), **exc.extra)
+            # st["attempt"] preserves today's behaviour of not touching attempt
+            # here: this batch's rung was never entered, so there is no rung
+            # to advance past.
+            _settle_failed(st, st["attempt"], {"reason": str(exc), **exc.extra})
         save_state(ctx.verdict_dir, state)
 
 
@@ -3054,7 +3129,8 @@ def record_verdicts(ctx: Ctx, verdicts_path: Path, state: dict) -> dict:
             _clear_awaiting(st)
             st.update(status="failed", attempt=attempt,
                       reason="approval-record-write-failed",
-                      detail=(err[-300:] if err else out[:300]))
+                      detail=(err[-300:] if err else out[:300]),
+                      recovery=APPROVAL_RECORD_RECOVERY)
             admitted.append({"batch": batch_i, "attempt": attempt,
                              "approved": True, "approvalRecorded": False})
             continue
@@ -3437,7 +3513,20 @@ def main(argv=None) -> int:
             gate_refused = (not outcome.get("merged")
                             and outcome.get("reason") != "awaiting-more-verdicts")
         elif needs_judge:
+            # #914: a batch still owed a verdict OUTRANKS a sibling's failure
+            # here. "awaiting-more-verdicts" is the ordinary not-yet a session
+            # is actively polling for, and a run that reported "batches-failed"
+            # instead would look settled while a judge call is still owed.
             payload["reason"] = "awaiting-more-verdicts"
+        elif failed:
+            # #914: reached only when nothing awaits a judge, so nothing above
+            # has set `reason` -- and until #914 nothing here did either, so a
+            # session reading `.reason` off stdout got null on exactly the run
+            # that most needed a cause. The merge branch above cannot also have
+            # run: it is guarded on `not failed`.
+            payload["reason"] = "batches-failed"
+        if failed:
+            payload["notReadyDetail"] = summarize_not_ready(failed)
         emit(payload)
         return 0 if not (failed or recorded["refused"] or gate_refused) else 1
 

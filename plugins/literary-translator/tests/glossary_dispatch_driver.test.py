@@ -746,6 +746,16 @@ def test_the_approval_record_failure_persists_the_reason_into_the_state_record(
     assert "SENTINEL-REASON" in st["detail"], (
         "the persisted reason was empty: " + repr(st.get("detail")))
     assert result["recorded"][0]["approvalRecorded"] is False
+    # #914: this batch's recovery must NOT be the environmental one. The judge
+    # APPROVED it and its approved snapshot survives -- only the bookkeeping
+    # write failed -- so advising --reset-batches would delete that snapshot and
+    # throw an attested approval away. The equality is against the module's own
+    # two constants rather than a substring, because the wrong text also
+    # contains the flag's name (inside its "Do NOT reset it" warning), so a
+    # substring check would pass on exactly the swap this pins against.
+    assert st["recovery"] == mod.APPROVAL_RECORD_RECOVERY
+    assert st["recovery"] != mod.ENVIRONMENTAL_RECOVERY, (
+        "an approval-record failure must never be told to reset the batch")
 
 
 # ---------------------------------------------------------------------------
