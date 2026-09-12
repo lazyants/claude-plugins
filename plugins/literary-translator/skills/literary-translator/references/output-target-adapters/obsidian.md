@@ -560,6 +560,31 @@ Two limits worth knowing before you rely on this:
   `person_registry.py` binds the whole NodeStream into `registry_input.json`'s
   digest.
 
+### Pointing decides attribution (1.144.0+, #927)
+
+The fold key above lets an unpointed canon entry find pointed text and back
+(#238/#241), but **since #927 a shared fold key decides recall only — it is no
+longer enough by itself to attribute a span.** A span counts toward a canon
+spelling only when its own vowel points, its shin/sin dot, and its dagesh do
+not contradict that spelling's: two different vowels on one letter, a dot on
+the wrong side, or a dagesh against a rafe make it a different pointed word,
+not this entry's occurrence. Where a fold key already groups more than one
+index-eligible spelling — the collision above, or a link group crediting one
+primary — a span still counts as long as it agrees with ANY spelling sharing
+the key: the rule narrows what a single spelling can absorb, never what a
+group can. A span that agrees with none of the eligible spellings on its key
+is withheld from every one of them, and `occurrence_targets.build()` prints a
+WARN naming the withheld spellings, next to the collision WARN this section
+already describes.
+
+Two residuals worth knowing. A homograph sharing BOTH the fold key and the
+pointing (the rebbe's רַבֵּנוּ against plain "our teacher") is still counted
+here — that ambiguity is a `canon_senses` split question, not a pointing
+question, and its route stays `unresolved_homonyms` unchanged. And a withheld
+span that really is the same referent, only written with variant pointing, is
+not merged automatically: record the variant spelling as its own canon entry
+inside a link group, and the group-any rule above then counts it.
+
 **A script never decides membership.** `note` is required and non-blank for
 exactly that reason: the file records a call, it does not make one (the
 iron rule). `assemble.py` loads it fail-closed — a malformed sidecar, a

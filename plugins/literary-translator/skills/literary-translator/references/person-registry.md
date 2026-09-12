@@ -166,7 +166,12 @@ on how that occurrence's translated surface happens to be spelled. Forms the
 engine refuses to attribute (a fold-key collision, a split) carry no count and
 appear under `unattributed_units`. A unit with no occurrence path at all
 carries `null` **with a reason**, never `0`: a zero would read as "not in the
-book", which is a different fact.
+book", which is a different fact. Since 1.144.0 (#927), a span whose vowel
+pointing contradicts every eligible spelling of the unit's fold key is neither
+counted nor offered as a context window — the windows use the same
+attribution group the count used, so a window can never centre on a span the
+count excluded — and a WARN on stderr, printed once per affected form, names
+the spellings withheld this way.
 
 ## Evidence locators are origin-aware
 

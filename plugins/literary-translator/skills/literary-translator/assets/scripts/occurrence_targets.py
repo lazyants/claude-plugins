@@ -198,7 +198,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPT_DIR.parent
 
 try:
-    from bootstrap_names import extract_candidate_spans, fold_match_key, span_match_keys
+    from bootstrap_names import extract_candidate_spans, fold_match_key, span_match_keys, mask_sentinels
 except ImportError as exc:
     sys.exit(
         f"occurrence_targets.py: cannot import bootstrap_names.py from {SCRIPT_DIR} ({exc}).\n"
@@ -244,6 +244,18 @@ except ImportError as exc:
         "reimplement) so a verse eligibility decision here can never drift from "
         "what the renderer itself would actually emit. Re-run Step 0a, or verify "
         "the plugin install is not corrupted."
+    )
+
+try:
+    from occ_index import attributable_spans
+except ImportError as exc:
+    sys.exit(
+        f"occurrence_targets.py: cannot import occ_index.py from {SCRIPT_DIR} ({exc}).\n"
+        "occ_index.py must be installed alongside occurrence_targets.py under "
+        "${durable_root}/scripts/ -- it supplies attributable_spans(), the #927 "
+        "Hebrew-pointing refusal this module applies at the same per-text "
+        "grouping site occ_index.production_occurrences() applies it at. "
+        "Re-run Step 0a, or verify the plugin install is not corrupted."
     )
 
 
@@ -298,6 +310,57 @@ def entry_is_index_eligible(entry: dict) -> bool:
     `basis: "sense_translated"` is deliberately NOT excluded here -- see this
     module's own docstring."""
     return entry.get("is_proper_name") is not False and entry.get("basis") != "not_a_name"
+
+
+def _eligible_source_forms(entries: dict) -> list:
+    """The index-eligible (`entry_is_index_eligible`) `canon['entries']` keys,
+    in canon insertion order -- the ONE eligible set `build()` scans and
+    `attribution_group()` groups over."""
+    return [
+        source_form
+        for source_form, entry in entries.items()
+        if isinstance(entry, dict) and entry_is_index_eligible(entry)
+    ]
+
+
+def attribution_group(canon: dict, source_form: str) -> list:
+    """The #927 **attribution group** for `source_form`: the index-eligible
+    (`entry_is_index_eligible`) canon `source_forms` whose
+    `bootstrap_names.fold_match_key` equals `fold_match_key(source_form)`,
+    in canon insertion order, `source_form` itself included when it is
+    itself eligible. Empty (`source_form` itself ineligible or absent from
+    `canon`, and no OTHER eligible entry shares its key either) returns
+    `[source_form]` -- the single-form fallback every `occ_index.
+    production_occurrences()` caller gets by default.
+
+    Built from `canon_senses.fold_collision_map()` over the eligible forms
+    ONLY, so there is exactly ONE grouping algorithm in the plugin (the same
+    one `build()`/`_colliding_source_forms()` use over this same eligible
+    set) -- never a second, hand-rolled fold-key grouping here.
+
+    Deliberately the ELIGIBLE same-key group, and nothing wider or
+    narrower:
+
+    - Never the full COMPETITOR universe (`canon.json` entries UNION
+      `canon_senses.json` forms, `not_a_name`/split-only siblings included)
+      -- a `basis: "not_a_name"` sibling sharing this key is not a spelling
+      of this person and must never vouch for a span credited to them.
+    - Never the LINK group (`canon_link_groups.json`, #497) -- a link group
+      may legally hold a member with a DIFFERENT fold key
+      (`canon_link_groups.py` checks membership/disjointness only, never
+      alignment), and such a member could never even align with a span it
+      would be asked to vouch for (`occ_index.attributable_spans()`'s own
+      "unaligned never vouches" rule).
+
+    Public: `person_registry.py` imports this directly so its own
+    `production_occurrences()` call credits a link-group primary with
+    every member spelling's spans, exactly as `build()`'s own scanners do
+    (see `occ_index.production_occurrences()`'s `attribution_forms`
+    docstring)."""
+    eligible_forms = _eligible_source_forms((canon or {}).get("entries") or {})
+    key = fold_match_key(source_form)
+    group = list(fold_collision_map(eligible_forms).groups.get(key, ()))
+    return group if group else [source_form]
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +483,54 @@ def block_renders_nonempty(block_id, render_index: dict) -> bool:
 # renderer's job (dedup per note).
 # ---------------------------------------------------------------------------
 
-def _block_records(source_forms, manifest: dict, language_config, render_index: dict) -> list:
+def _attributable(masked_text: str, spans_by_name: dict, source_form: str,
+                   groups_by_key: dict) -> tuple:
+    """``(kept_spans, withheld_slices)`` for `source_form`'s own spans in one
+    already-masked text (#927). Looks up `source_form`'s #238/#241 fold key
+    in `spans_by_name` (as `_spans_by_name()` built it -- ONE extraction pass
+    already shared across every `source_form` scanned against this text),
+    then refuses any span whose Hebrew pointing contradicts every canon
+    spelling in that key's own group (`occ_index.attributable_spans()`,
+    **group-any**): `groups_by_key.get(key) or [source_form]` -- the eligible
+    same-fold-key group `build()` computed once, falling back to the
+    single-form contract when the key carries no group of its own (a key
+    outside `groups_by_key` cannot happen for an eligible `source_form`, but
+    the fallback keeps this helper correct even if it is ever called with a
+    narrower map). `masked_text` MUST already be `bootstrap_names.
+    mask_sentinels(text)` -- computed ONCE per text by the caller, never
+    once per `source_form`, since it does not depend on `source_form` at
+    all. `withheld_slices` is the masked text of every refused span -- the
+    raw material `build()`'s WARN aggregates per `source_form`; empty when
+    nothing was withheld."""
+    key = fold_match_key(source_form)
+    spans = spans_by_name.get(key, ())
+    kept = attributable_spans(masked_text, spans, groups_by_key.get(key) or [source_form])
+    kept_set = set(kept)
+    withheld = [masked_text[cs:ce] for cs, ce in spans if (cs, ce) not in kept_set]
+    return kept, withheld
+
+
+def _attributed_per_text(text: str, source_forms, language_config, groups_by_key: dict,
+                         withheld_by_source_form: dict):
+    """Yields ``(source_form, kept_spans)`` for every `source_form` scanned
+    against ONE text -- the loop all three per-origin scanners below share.
+    The extraction pass (`_spans_by_name`) and the sentinel mask
+    (`bootstrap_names.mask_sentinels`) each run exactly once per text, never
+    once per `source_form`; each form's withheld slices (`_attributable`)
+    are appended to `withheld_by_source_form` -- only when non-empty, so a
+    form with nothing withheld never gains an entry for `build()`'s WARN to
+    report as zero."""
+    spans_by_name = _spans_by_name(text, language_config)
+    masked = mask_sentinels(text)
+    for source_form in source_forms:
+        kept, withheld = _attributable(masked, spans_by_name, source_form, groups_by_key)
+        if withheld:
+            withheld_by_source_form[source_form].extend(withheld)
+        yield source_form, kept
+
+
+def _block_records(source_forms, manifest: dict, language_config, render_index: dict,
+                    groups_by_key: dict, withheld_by_source_form: dict) -> list:
     records = []
     blocks = (manifest or {}).get("blocks") or {}
     for block_id, block in blocks.items():
@@ -432,9 +542,10 @@ def _block_records(source_forms, manifest: dict, language_config, render_index: 
         if not block_renders_nonempty(block_id, render_index):
             continue
         seg = render_index["node_by_block_id"][block_id].get("seg")
-        spans_by_name = _spans_by_name(text, language_config)
-        for source_form in source_forms:
-            for _ in spans_by_name.get(fold_match_key(source_form), ()):
+        for source_form, kept in _attributed_per_text(
+            text, source_forms, language_config, groups_by_key, withheld_by_source_form,
+        ):
+            for _ in kept:
                 records.append({
                     "source_form": source_form,
                     "seg": seg,
@@ -444,7 +555,8 @@ def _block_records(source_forms, manifest: dict, language_config, render_index: 
     return records
 
 
-def _embedded_verse_records(source_forms, manifest: dict, language_config, render_index: dict) -> list:
+def _embedded_verse_records(source_forms, manifest: dict, language_config, render_index: dict,
+                             groups_by_key: dict, withheld_by_source_form: dict) -> list:
     records = []
     verse_store = ((manifest or {}).get("verse") or {}).get("store") or []
     for entry in verse_store:
@@ -462,9 +574,10 @@ def _embedded_verse_records(source_forms, manifest: dict, language_config, rende
         if carrier_node is None:
             continue  # unresolved carrier -- never guessed a seg
         seg = carrier_node.get("seg")
-        spans_by_name = _spans_by_name(plain_text, language_config)
-        for source_form in source_forms:
-            for _ in spans_by_name.get(fold_match_key(source_form), ()):
+        for source_form, kept in _attributed_per_text(
+            plain_text, source_forms, language_config, groups_by_key, withheld_by_source_form,
+        ):
+            for _ in kept:
                 records.append({
                     "source_form": source_form,
                     "seg": seg,
@@ -475,7 +588,8 @@ def _embedded_verse_records(source_forms, manifest: dict, language_config, rende
     return records
 
 
-def _footnote_records(source_forms, manifest: dict, language_config, render_index: dict) -> list:
+def _footnote_records(source_forms, manifest: dict, language_config, render_index: dict,
+                       groups_by_key: dict, withheld_by_source_form: dict) -> list:
     records = []
     blocks = (manifest or {}).get("blocks") or {}
     for fn_entry in (manifest or {}).get("footnotes") or []:
@@ -498,9 +612,10 @@ def _footnote_records(source_forms, manifest: dict, language_config, render_inde
         if not block_text or not block_text.strip():
             continue
         anchor_seg = fn_entry.get("anchor_seg")
-        spans_by_name = _spans_by_name(block_text, language_config)
-        for source_form in source_forms:
-            for _ in spans_by_name.get(fold_match_key(source_form), ()):
+        for source_form, kept in _attributed_per_text(
+            block_text, source_forms, language_config, groups_by_key, withheld_by_source_form,
+        ):
+            for _ in kept:
                 records.append({
                     "source_form": source_form,
                     "seg": anchor_seg,
@@ -665,11 +780,7 @@ def build(manifest: dict, canon: dict, senses_result, language_config, nodestrea
     entries = (canon or {}).get("entries") or {}
     render_index = build_render_index(manifest, nodestream)
 
-    source_forms = [
-        source_form
-        for source_form, entry in entries.items()
-        if isinstance(entry, dict) and entry_is_index_eligible(entry)
-    ]
+    source_forms = _eligible_source_forms(entries)
 
     # MAJOR 1 (this train, #238/#241): detect fold-key collisions BEFORE any
     # lookup happens -- see _colliding_source_forms()'s own docstring and the
@@ -691,13 +802,45 @@ def build(manifest: dict, canon: dict, senses_result, language_config, nodestrea
         senses_result,
     )
 
+    # #927: the ELIGIBLE same-fold-key group each key's spans are attributed
+    # against -- computed once (source_forms is already the eligible list),
+    # never once per scanner or per source_form. `attribution_group()`
+    # builds the identical grouping for a single source_form via the same
+    # `fold_collision_map()` call; this is the whole-canon form the three
+    # scanners need.
+    groups_by_key = fold_collision_map(source_forms).groups
+    withheld_by_source_form = defaultdict(list)
+
     records_by_source_form = defaultdict(list)
-    for rec in _block_records(source_forms, manifest, language_config, render_index):
+    for rec in _block_records(source_forms, manifest, language_config, render_index,
+                               groups_by_key, withheld_by_source_form):
         records_by_source_form[rec["source_form"]].append(rec)
-    for rec in _embedded_verse_records(source_forms, manifest, language_config, render_index):
+    for rec in _embedded_verse_records(source_forms, manifest, language_config, render_index,
+                                        groups_by_key, withheld_by_source_form):
         records_by_source_form[rec["source_form"]].append(rec)
-    for rec in _footnote_records(source_forms, manifest, language_config, render_index):
+    for rec in _footnote_records(source_forms, manifest, language_config, render_index,
+                                  groups_by_key, withheld_by_source_form):
         records_by_source_form[rec["source_form"]].append(rec)
+
+    # #927: one stderr WARN per source_form carrying withheld spans -- never
+    # raises (Contract 3's no-new-raise rule), mirroring the collision WARN's
+    # own style above. A withheld span is a different word's occurrence, not
+    # an unresolved question about THIS form, so it adds no new aggregate
+    # key -- the operator reading the W7/W8 script output is the consumer.
+    for source_form in sorted(withheld_by_source_form):
+        slices = withheld_by_source_form[source_form]
+        distinct = sorted(set(slices))
+        spellings = distinct[:5] + (["..."] if len(distinct) > 5 else [])
+        print(
+            f"WARN occurrence_targets.py: {len(slices)} occurrence(s) whose Hebrew "
+            f"pointing contradicts every canon spelling of {source_form!r} were "
+            f"withheld from it (withheld spellings: {spellings!r}) -- a different "
+            "pointed word shares its consonants; if one of these is the same "
+            "referent, record that spelling as a canon entry inside a "
+            "canon_link_groups.json group so the group's primary is credited "
+            "with it.",
+            file=sys.stderr,
+        )
 
     eligible_by_source_form = {}
     unresolved_homonyms = {}

@@ -77,11 +77,40 @@ that ultimately calls ``production_occurrences()``
   physical occurrence to more than one colliding ``source_form``, or
   silently overwriting one with another, is exactly the bug that guard
   exists to prevent (see ``index_manifest()``'s own docstring below).
+
+## #927 -- pointing-aware attribution (Hebrew vowel points/dot/dagesh)
+
+The #243 fold key above decides which spans are CANDIDATES for a given
+canon ``source_form`` -- it is deliberately mark-BLIND, so an unpointed
+canon entry still finds a pointed occurrence (and vice versa). #927 adds a
+second, independent check at the same lookup sites: a candidate span whose
+Hebrew pointing CONTRADICTS every canon spelling it is being looked up
+under is refused, never credited. Three independent classes of mark decide
+a contradiction -- the vowel attached to a letter, the shin/sin dot, and
+the dagesh/rafe distinction (``pointing_verdict()``/``attributable_spans()``
+below) -- so ``נָתָן`` ("Nathan") never absorbs ``נָתַן`` ("gave"), a
+different pointed word sharing the same unfolded skeleton. An unpointed
+side, or a side whose marks all agree with the other, still passes (the
+#238 guarantee above is unaffected); only a genuinely contradicting mark
+refuses.
+
+This lives here, in the lookup-time authority #243 already made
+fold-aware, and not in ``bootstrap_names.py``: that module is a
+``DERIVATION_BUNDLE_MEMBERS`` file, and any byte moved there forces a
+W3/W3a regeneration (or ``--restamp-derivation``) on every live book. The
+fold KEY itself is unchanged -- name discovery stays exactly as
+recall-oriented as before -- and the new refusal is applied only where a
+span is being credited to a specific canon spelling, never to what
+discovery finds. ``occ_index.py`` is also a
+``suspicion_scan.PRODUCER_CODE_CLOSURE`` member, so this change alone is
+enough for the next suspicion scan to re-derive its worklist -- intended,
+since the matching itself changed.
 """
 import argparse
 import hashlib
 import json
 import sys
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
@@ -96,7 +125,7 @@ DEFAULT_OUT_PATH = DURABLE_ROOT / "occurrence_index.json"
 try:
     from bootstrap_names import (
         extract_candidate_spans, fold_match_key, span_match_keys,
-        load_language_config, BootstrapNamesError,
+        load_language_config, mask_sentinels, BootstrapNamesError,
     )
 except ImportError as exc:
     sys.exit(
@@ -106,9 +135,11 @@ except ImportError as exc:
         "It supplies extract_candidate_spans(), the offset-preserving production "
         "tokenizer/matcher this module reuses (never reimplements); "
         "fold_match_key(), the #238/#241 Hebrew mark/connector MATCH KEY #243 uses "
-        "to compare a caller-supplied source_form against a span's own key; and "
+        "to compare a caller-supplied source_form against a span's own key; "
         "span_match_keys(), the ONE construction of that key from a span (neither "
-        "the capped name nor the raw slice is a valid lookup key -- see its docstring). "
+        "the capped name nor the raw slice is a valid lookup key -- see its docstring); "
+        "and mask_sentinels(), the #927 same-length substitution "
+        "attributable_spans() below aligns Hebrew pointing against. "
         "Re-run Step 0a, or verify the plugin install is not corrupted."
     )
 
@@ -124,6 +155,148 @@ except ImportError as exc:
         "to more than one source_form (or overwriting one with another). Re-run Step "
         "0a, or verify the plugin install is not corrupted."
     )
+
+
+# #927 -- the three independent Hebrew mark classes `pointing_verdict()`
+# compares. Each maps a combining-mark codepoint (Hebrew block, U+0591-
+# U+05C7) to a class name; two marks in the SAME table that map to
+# DIFFERENT names are what "contradicts" means below. A mark absent from
+# every table (cantillation, meteg, any non-Hebrew combining mark) never
+# conflicts -- it is simply never looked up. Keys are built with `chr()`
+# from the codepoint, never a pasted combining character: a bare combining
+# mark is invisible in source and silently attaches to whatever precedes it
+# when edited.
+HEBREW_VOWEL_CLASS = {
+    chr(0x05B0): "sheva",
+    chr(0x05B1): "hataf-segol",
+    chr(0x05B2): "hataf-patah",
+    chr(0x05B3): "hataf-qamats",
+    chr(0x05B4): "hiriq",
+    chr(0x05B5): "tsere",
+    chr(0x05B6): "segol",
+    chr(0x05B7): "patah",
+    chr(0x05B8): "qamats",
+    chr(0x05C7): "qamats",  # qamats qatan -- same vowel quality for this purpose
+    chr(0x05B9): "holam",
+    chr(0x05BA): "holam",  # holam haser for vav -- same vowel as plain holam
+    chr(0x05BB): "qubuts",
+}
+HEBREW_DOT_CLASS = {
+    chr(0x05C1): "shin",
+    chr(0x05C2): "sin",
+}
+HEBREW_DAGESH_CLASS = {
+    chr(0x05BC): "dagesh",
+    chr(0x05BF): "rafe",
+}
+_POINTING_MARK_TABLES = (HEBREW_VOWEL_CLASS, HEBREW_DOT_CLASS, HEBREW_DAGESH_CLASS)
+
+
+def _pointing_letter_groups(s: str) -> list:
+    """NFD-normalise ``s`` and walk it into ``[letter, [marks]]`` groups: a
+    character whose ``unicodedata.category()`` starts with ``L`` opens a new
+    group; a combining mark (category starts with ``M``) in the Hebrew mark
+    range U+0591-U+05C7 attaches to the CURRENT group (dropped if none is
+    open yet -- a leading mark with no base letter is not this predicate's
+    problem); everything else (spaces, maqaf, geresh, gershayim, quotes,
+    punctuation, digits, a non-Hebrew combining mark) is skipped entirely."""
+    groups = []
+    for ch in unicodedata.normalize("NFD", s):
+        category = unicodedata.category(ch)
+        if category.startswith("L"):
+            groups.append([ch, []])
+        elif category.startswith("M") and 0x0591 <= ord(ch) <= 0x05C7:
+            if groups:
+                groups[-1][1].append(ch)
+    return groups
+
+
+def pointing_verdict(a: str, b: str) -> str:
+    """``"conflict"``, ``"compatible"``, or ``"unaligned"`` -- whether ``a``
+    and ``b`` are the same Hebrew word under vowel-point/shin-sin-dot/
+    dagesh-rafe pointing (#927).
+
+    NFD-normalises both, then walks each into letter groups
+    (``_pointing_letter_groups()``): a letter (``unicodedata.category``
+    starting ``L``) opens a group, a Hebrew mark (U+0591-U+05C7) attaches to
+    the group it follows, everything else is skipped. ``"unaligned"`` when
+    the letter sequences differ in length or in any aligned letter -- this
+    predicate is not about letters, which the #238/#241 fold key already
+    decided; only ``"unaligned"``'s absence lets the marks be compared at
+    all. Otherwise, per aligned letter and per one of the three independent
+    classes above (VOWEL, DOT, DAGESH), each side's marks are mapped through
+    that class's table into a SET of class names (a mark outside the table
+    is ignored for that table); ``"conflict"`` the moment any class has BOTH
+    sides non-empty and NOT EQUAL -- equality, not disjointness, because a
+    letter carrying two vowels (``אַָ``, an OCR/typing artefact ``TOKEN_RE``
+    still accepts) overlaps a single-vowel set on the other side without
+    agreeing with it. A class present on only one side, or agreeing on both,
+    never conflicts, so: an unpointed side is always ``"compatible"`` (the
+    #238 guarantee); a partially pointed side is ``"compatible"`` exactly
+    when every mark it does carry agrees with the other side; cantillation
+    (U+0591-U+05AF), meteg (U+05BD), and any mark outside the three tables
+    above never conflict; NFC vs NFD spellings of the same word are
+    ``"compatible"`` (both are NFD-normalised here, and set comparison does
+    not care about combining-mark order -- #911 is a different defect); the
+    function is symmetric in ``a``/``b``.
+    """
+    groups_a = _pointing_letter_groups(a)
+    groups_b = _pointing_letter_groups(b)
+    if len(groups_a) != len(groups_b):
+        return "unaligned"
+    for (letter_a, marks_a), (letter_b, marks_b) in zip(groups_a, groups_b):
+        if letter_a != letter_b:
+            return "unaligned"
+        for table in _POINTING_MARK_TABLES:
+            classes_a = {table[m] for m in marks_a if m in table}
+            classes_b = {table[m] for m in marks_b if m in table}
+            if classes_a and classes_b and classes_a != classes_b:
+                return "conflict"
+    return "compatible"
+
+
+def pointing_conflicts(a: str, b: str) -> bool:
+    """``pointing_verdict(a, b) == "conflict"`` -- the boolean form callers
+    that only need to REFUSE a span (never distinguish "unaligned" from
+    "compatible") use."""
+    return pointing_verdict(a, b) == "conflict"
+
+
+def attributable_spans(masked_text: str, spans, canon_forms) -> list:
+    """Keeps a ``(char_start, char_end)`` span from ``spans`` iff it does not
+    contradict the Hebrew pointing of at least one form in ``canon_forms``
+    (#927, **group-any**): ``pointing_verdict(masked_text[char_start:
+    char_end], form) == "compatible"`` for SOME ``form``. A form that is
+    ``"unaligned"`` with the span (a different fold key -- can only happen
+    when a caller hands this a broader group than the span's own key
+    vouches for) or ``"conflict"`` with it never vouches; only
+    ``"compatible"`` does. ``canon_forms`` empty returns ``spans``
+    unchanged -- fail-OPEN to pre-#927 behaviour, never a silent drop,
+    matching every existing caller's single-form contract when no
+    attribution group applies.
+
+    ``masked_text`` MUST be ``bootstrap_names.mask_sentinels(block_text)``,
+    never the raw block text: it is a same-length substitution, so
+    ``char_start``/``char_end`` -- offsets into the RAW block -- still slice
+    it correctly, while the raw slice could carry a ``⟦FNREF_5⟧``-style
+    sentinel's own letters into the alignment and corrupt the letter-group
+    walk above. A form that does not align with the span can never vouch
+    for it, on purpose: a link group (``canon_link_groups.json``, #497) may
+    legally hold a member with a DIFFERENT fold key, and such a member must
+    never be asked to authenticate a span it cannot even align with.
+    """
+    canon_forms = list(canon_forms)
+    if not canon_forms:
+        return list(spans)
+    kept = []
+    for char_start, char_end in spans:
+        candidate = masked_text[char_start:char_end]
+        if any(
+            pointing_verdict(candidate, form) == "compatible"
+            for form in canon_forms
+        ):
+            kept.append((char_start, char_end))
+    return kept
 
 
 def _run_spans(block_text: str, language_config):
@@ -163,9 +336,12 @@ def _run_span_keys(block_text: str, language_config):
     ])
 
 
-def production_occurrences(source_form: str, block_text: str, language_config) -> list:
+def production_occurrences(source_form: str, block_text: str, language_config, *,
+                            attribution_forms: Optional[list] = None) -> list:
     """The exact matcher spans the PRODUCTION tokenizer/matcher emits for
-    ``source_form`` in ``block_text`` under ``language_config``. Half-open
+    ``source_form`` in ``block_text`` under ``language_config``, MINUS any
+    span whose Hebrew pointing contradicts every form in
+    ``attribution_forms`` (#927, see ``attributable_spans()``). Half-open
     Unicode-codepoint offsets. An offset pair is valid evidence ONLY if it
     is one of these spans -- never a mere in-bounds substring. Never call
     this with an unresolved/default config; a project's RESOLVED
@@ -183,6 +359,17 @@ def production_occurrences(source_form: str, block_text: str, language_config) -
     ``source_form``s -- a caller comparing more than one ``source_form`` at
     once must apply its own fail-closed guard (``canon_senses.
     fold_collision_map()``); see ``index_manifest()``'s docstring below.
+
+    ``attribution_forms``, when given, is the group of canon spellings a
+    kept span must not contradict the pointing of (#927 **group-any**,
+    ``attributable_spans()``) -- e.g. a ``canon_link_groups.json`` primary's
+    own multi-spelling group (``occurrence_targets.attribution_group()``).
+    ``None`` (the default) means ``[source_form]`` -- today's single-form
+    contract every existing caller keeps unchanged. A multi-form caller
+    passes the same index-eligible same-fold-key group
+    ``occurrence_targets.py`` attributed occurrences with, never the link
+    group itself (a link group may legally hold a different-fold-key
+    member, which must never vouch for a span it cannot even align with).
     """
     # Match on the span's OWN slice of `block_text`, never on the emitted
     # `name` -- which is neither the run's identity nor a key `source_form`
@@ -194,11 +381,13 @@ def production_occurrences(source_form: str, block_text: str, language_config) -
     # run -- the key folds them together, so this narrows nothing; pinned by
     # the controls in tests/capped_name_occurrence_lookup.test.py.
     key = fold_match_key(source_form)
-    return [
+    key_matched_spans = [
         (char_start, char_end)
         for char_start, char_end, span_key in _run_span_keys(block_text, language_config)
         if span_key == key
     ]
+    forms = [source_form] if attribution_forms is None else attribution_forms
+    return attributable_spans(mask_sentinels(block_text), key_matched_spans, forms)
 
 
 def _context_window(block_text: str):
@@ -421,9 +610,13 @@ def index_manifest(manifest_path, source_forms, language_config, *,
             folded_spans_by_key.keys() & fold_to_name.keys(),
             key=lambda k: rank[fold_to_name[k]],
         )
+        # #927: one mask per BLOCK, never per span or per key -- masking is a
+        # same-length substitution over the whole text (mask_sentinels()),
+        # so it is correct to reuse across every present_key below.
+        masked = mask_sentinels(text)
         for key in present_keys:
             source_form = fold_to_name[key]
-            for char_start, char_end in folded_spans_by_key[key]:
+            for char_start, char_end in attributable_spans(masked, folded_spans_by_key[key], [source_form]):
                 records.append(
                     _build_record(source_form, block_id, seg, text, char_start, char_end,
                                   context_start, context_end, context_sha256)

@@ -504,7 +504,7 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.145.0 (#910 -- --correct reported success while the
+    # ROTATED TO 1.152.0 (#910 -- --correct reported success while the
     # already-built segpacks still carried the pre-correction canon_map; #840
     # folded in), per the maintenance contract above.
     #
@@ -512,7 +512,7 @@ FIGURES = [
     # Every digit-run in it is an IDENTIFIER or a CITATION, never a figure
     # this tree can re-derive:
     #
-    #   1.145.0, 2026-09-12    the version and the release date
+    #   1.152.0, 2026-09-12    the version and the release date
     #   #910, #840, #826, #917 issue numbers
     #   W3a (twice)            a workflow step name, not a count
     #   "three"                SAFE_STALE_CARVEOUT_FIELDS, spelled as a word
@@ -538,9 +538,39 @@ FIGURES = [
     # `plugin_bundle_hash` are named, so no later release can rot this prose
     # by retuning a number.
     #
-    # This rotation RETIRED 1.143.0's rows, which belong to an entry that is
+    # This rotation RETIRED 1.144.0's rows, which belong to an entry that is
     # no longer the newest and which this guard therefore no longer reads.
     #
+    #
+    # The 1.144.0 rotation this replaces, kept as its own record:
+    # ROTATED TO 1.144.0 (#927 -- a pointed Hebrew name absorbed an unrelated
+    # word's occurrences because the fold key drops every vowel and
+    # cantillation mark), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # digit-run in it is an IDENTIFIER: the version (1.144.0), the release
+    # date, the issue number (#927), the two fold-key precedents it cites
+    # (#238, #241), the link-group precedent (#497), and the `3` inside
+    # `W3`/`W3a`, the derivation-bundle pass names the entry mentions. There is
+    # no other digit in the entry at all.
+    #
+    # That is deliberate rather than lucky. Every measured figure behind #927
+    # -- three thousand and one credited spans, one hundred eighty-three of
+    # them on thirty-five forms, and the roughly-thirty-two /
+    # one-hundred-forty / thirteen split across the three kinds of
+    # contradiction -- is a count over ONE REPORTING OPERATOR'S BOOK, exactly
+    # the kind no implementation in this tree can re-derive, so the entry
+    # spells every one of them as a WORD rather than a digit, and `_TOKEN`
+    # matches digits only. Everything the tree DOES own is stated by NAMING:
+    # `occ_index.pointing_conflicts`, `pointing_verdict`, `attributable_spans`
+    # and `occurrence_targets.attribution_group` are named rather than sized,
+    # so no later release can rot this prose by retuning a number.
+    #
+    # This rotation RETIRED nothing: 1.143.0's list was already empty; its
+    # record is kept below, unchanged, as every earlier rotation's is.
+    # #912, #914, #921, #922, #923, #924, #925, #926 and #927 landed the same day.
+    #
+    # ------------------------------------------------------------------------
     # The 1.143.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.143.0 (#925 -- a markup-minted entity note was headed with
     # its ref slug), per the maintenance contract above.
@@ -676,7 +706,7 @@ FIGURES = [
     # kept below, unchanged.
     # 1.123.0's own row, RETIRED here rather than carried: it measured the
     # phrase "default 2" in THAT entry, and this guard only ever reads the
-    # NEWEST one. Left live it would be checked against the 1.145.0 entry,
+    # NEWEST one. Left live it would be checked against the 1.152.0 entry,
     # where the phrase does not occur -- a red that says nothing about
     # either release. The row itself was correct for its own entry and is
     # recorded in the 1.123.0 block below.
@@ -1434,7 +1464,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.145.0"
+FIGURES_VERSION = "1.152.0"
 
 
 def _newest_entry():
