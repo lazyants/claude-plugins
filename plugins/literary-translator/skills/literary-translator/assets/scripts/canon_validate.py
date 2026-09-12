@@ -4258,6 +4258,22 @@ def main(argv=None) -> int:
 # tests pin it as a fixed substring, and a re-wrap of one branch would
 # otherwise drift it out of another silently. Same reason
 # select_segments.py's _S3_NO_TOKEN is a constant.
+# The remedy this report recommends, spelled as an invocation that actually
+# RUNS. `segpack.py --all` alone exits 2: --particle-config and
+# --apparatus-policy are both REQUIRED (segpack.py's own argparse), and their
+# values are resolved literals from profile.yml, which this script does not
+# read. So the command is stated the way SKILL.md states every other segpack
+# and name_discovery invocation -- naming the profile key whose literal value
+# goes in each slot -- rather than printing a line an operator would paste and
+# watch fail. Stated ONCE: an operator-facing remedy that is wrong in one of
+# two branches is worse than one that is wrong in both, because only one of
+# them gets fixed.
+_SCAN_REMEDY = (
+    "python3 scripts/segpack.py --all "
+    "--particle-config <source.language.particle_config's literal value> "
+    "--apparatus-policy <footnotes.apparatus_policy's literal value>"
+)
+
 _SCAN_SCOPE_DISCLAIMER = (
     "this is not a validity check on the segpacks -- segpack.py's W3a gate "
     "owns that."
@@ -4449,7 +4465,7 @@ def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
             note = (
                 f"{len(stale)} of {scanned} segpack(s) carry a canon_map "
                 "that canon.json no longer agrees with; run "
-                "python3 scripts/segpack.py --all before dispatching. "
+                f"{_SCAN_REMEDY} before dispatching. "
                 f"This {_SCAN_SCOPE_DISCLAIMER}"
             )
             if unevaluated:
@@ -4501,8 +4517,7 @@ def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
             "note": (
                 "the segpack freshness scan could not run, so the "
                 "freshness of every segpack against the corrected "
-                "canon.json is unknown; run python3 scripts/segpack.py "
-                "--all to be safe."
+                f"canon.json is unknown; run {_SCAN_REMEDY} to be safe."
             ),
         }
 

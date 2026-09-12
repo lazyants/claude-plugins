@@ -74,6 +74,7 @@ Covered (numbering follows the issue's plan, section D5):
 """
 import os
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -840,3 +841,75 @@ def test_an_unreadable_segments_directory_is_not_reported_as_empty(tmp_path):
     assert read_canon(root)["entries"][NAME_A]["canonical_target_form"] == "Jean Valljean", (
         "the correction must still be on disk"
     )
+
+
+def test_the_remedy_the_note_prints_is_a_command_that_actually_runs(tmp_path):
+    """The bot caught this on the first head, and it is the reason a printed
+    command must be EXECUTED by a test rather than eyeballed.
+
+    The note used to recommend a bare `python3 scripts/segpack.py --all`,
+    copied from the issue's own prose. That exits 2: `--particle-config` and
+    `--apparatus-policy` are both REQUIRED by segpack.py's argparse, and their
+    values are resolved literals from profile.yml, which canon_validate.py does
+    not read. An operator pasting the advertised line got an argparse error at
+    the exact moment they had been told their book was about to ship the wrong
+    name.
+
+    So this test lifts the command OUT of the emitted note, substitutes the two
+    literal values the way an operator would read them out of profile.yml, and
+    RUNS it -- asserting exit 0 and, more importantly, that the rebuild it
+    performs actually clears the staleness the note complained about. A test
+    that only grepped the note for a substring would have passed against the
+    broken command.
+    """
+    root = build_project(tmp_path, [("seg01", TEXT_A)])
+    seed_entries(root, {NAME_A: _entry(NAME_A, NAME_A)})
+    build_packs(root)
+
+    doc = correction_doc(
+        NAME_A, old_entry=_entry(NAME_A, NAME_A), new_entry=_entry(NAME_A, "Jean Valljean")
+    )
+    proc = run_correct(root, write_correction(root, doc))
+    payload = payload_of(proc)
+    assert [row["seg"] for row in payload.get("stale_segpacks") or []] == ["seg01"], payload
+
+    note = payload["note"]
+    assert "segpack.py --all" in note, note
+    # Both required flags must be named, or the line cannot be run at all.
+    assert "--particle-config" in note, ("the remedy omits a REQUIRED flag: " + note)
+    assert "--apparatus-policy" in note, ("the remedy omits a REQUIRED flag: " + note)
+
+    # Lift the command out of the note and run it, with the placeholders
+    # resolved exactly as an operator reads them out of profile.yml.
+    start = note.index("python3 scripts/segpack.py")
+    end = note.index(" before dispatching")
+    command = note[start:end]
+    command = command.replace(
+        "<source.language.particle_config's literal value>", FRENCH_CONFIG
+    ).replace("<footnotes.apparatus_policy's literal value>", "translate_all")
+    argv = command.split()
+    argv[1] = str(root / "scripts" / "segpack.py")
+
+    rebuilt = subprocess.run(argv, cwd=root, capture_output=True, text=True)
+    assert rebuilt.returncode == 0, (
+        "the remedy the note prints must RUN, not merely read well:\n"
+        f"{command}\n{rebuilt.stdout}\n{rebuilt.stderr}"
+    )
+
+    # And it must actually fix what the note complained about.
+    again = run_correct(
+        root,
+        write_correction(
+            root,
+            correction_doc(
+                NAME_A,
+                old_entry=_entry(NAME_A, "Jean Valljean"),
+                new_entry=_entry(NAME_A, "Jean Valljean", confidence="medium"),
+            ),
+        ),
+    )
+    after = payload_of(again)
+    assert after.get("stale_segpacks") == [], (
+        "the advertised remedy ran but did not clear the staleness: " + repr(after)
+    )
+    assert after.get("segpacks_current") == 1, after
