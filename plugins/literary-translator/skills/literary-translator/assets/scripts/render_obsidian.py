@@ -2830,6 +2830,285 @@ def _warn_delink_cost(delink_cost, stream=None):
     )
 
 
+# ---------------------------------------------------------------------------
+# #926: labels that differ only by a leading connective
+# ---------------------------------------------------------------------------
+#
+# Deliberately placed here, next to `_warn_delink_cost` rather than up with
+# this file's other module constants: every existing line-anchored citation
+# into this file lands at or above line 2350, so inserting even one line
+# up there would move every one of them and fail `tools/citation_audit.py`
+# for each. Appending after the function this is closest to in spirit
+# costs nothing those citations depend on.
+
+# English-only, by design (#926): the shipped glossary/translation pass
+# renders labels in the TARGET language, and this list only knows the
+# prepositions and conjunctions an English render can carry. A zero on a
+# non-English target is a fact about this list, not proof the class does
+# not exist there -- see the reference doc before reading a zero as clean.
+LEADING_CONNECTIVES = ("and to", "and from", "and in", "and at", "in", "at", "from", "to", "of")
+CONNECTIVE_CANDIDATES_KEY = "connective_candidates"
+
+
+def _split_leading_connective(label):
+    """`(connective, remainder)` when `label` is exactly one of
+    LEADING_CONNECTIVES, one space, and a non-blank remainder -- else None.
+
+    Longest connective first ("and to" before "to"), so a label built from
+    a longer connective is never mis-split on a shorter one that happens to
+    be a suffix of it. Lowercase-only: the connective must appear exactly as
+    spelled in LEADING_CONNECTIVES, so "In Memoriam" does not split on "in"
+    -- capitalized, it reads as part of a name, and this plugin never
+    guesses at that judgement. Exactly one space is required: "from  X"
+    (two spaces) is a distinct spelling this function does NOT fold onto
+    "from X" (the render never invents a spelling for the operator), and
+    "from" with nothing following it is not a split at all -- both return
+    None, same as a label with no connective. The remainder is returned
+    exactly as it appears after the connective; callers NFC-normalize it
+    before comparing, the same way every other target lookup in this file
+    does."""
+    for connective in sorted(LEADING_CONNECTIVES, key=len, reverse=True):
+        prefix = connective + " "
+        if not label.startswith(prefix):
+            continue
+        remainder = label[len(prefix):]
+        if not remainder or remainder[0] == " ":
+            return None  # nothing after the connective, or a second space
+        return connective, remainder
+    return None
+
+
+def _categories_compatible(a, b):
+    """Symmetric form of `_category_compatible`: blank, absent or
+    non-string is a wildcard on EITHER side; two non-blank values must be
+    equal. `_category_compatible(category, tag)` already applies exactly
+    this test whenever ITS first argument is blank -- this is a thin,
+    order-independent composition over that one rule, not a second
+    declaration of it, so the two can never disagree about what
+    "compatible" means."""
+    a_declared = a.strip() if isinstance(a, str) else ""
+    if not a_declared:
+        return True
+    return _category_compatible(b, a_declared)
+
+
+def _build_connective_candidates(entries, target_to_entity, markup_records):
+    """#926's structural half of "one referent, several vault notes": rows
+    for every emitted note LABEL that is a leading connective plus ANOTHER
+    emitted note's own label -- the population a harmonized canon still
+    ships as separate notes (`from Kremenchug`, `in Kremenchug` and
+    `Kremenchug` as three notes for one town) with nothing before this
+    counting it.
+
+    Universe: canon TARGETS via `_owners_by_target(entries)` (NFC,
+    UNREDUCED -- a collision-de-linked target keeps its owners here; only
+    `reduces_to_linkable` below, which reads the already-reduced
+    `target_to_entity`, reflects the de-link) and markup identities, the
+    `(tag, NFC label)` keys of `markup_records` (`{}` when markup is
+    inactive, so the canon half of this function still runs on every
+    obsidian render -- only the markup half is gated on `index_from:
+    markup`). A blank `canonical_target_form` is not a target at all:
+    `_owners_by_target` already drops it by that helper's own rule, so a
+    blank-target entry's heading (its bare `source_form`) is never compared
+    here -- that heading lives in a different universe (a source form, not
+    an emitted target), and widening to it is not this issue's ask.
+
+    For each candidate label `_split_leading_connective` reduces to a
+    remainder, the row names the FIRST emitted identity that remainder is
+    COMPATIBLE with: a canon target sharing that remainder, if one exists
+    and its owner categories are pairwise `_categories_compatible` with the
+    candidate's own; else a markup identity sharing that remainder whose
+    tag is compatible. An existing canon target at that remainder that is
+    NOT compatible does NOT stop the markup lookup -- this is round 2's own
+    case: a canon `Jordan` filed under category `person` must not swallow
+    `<place>in Jordan</place>`'s reduction to the marked `<place>Jordan
+    </place>` note just because a same-spelled, wrong-category canon entry
+    happens to occupy that remainder. Compatibility is blank-wildcard on
+    either side (`_categories_compatible`): the shipped glossary pass rarely
+    populates `category`, and a positive-match rule would make this report
+    mute on a typical project -- the same reason `_category_compatible`
+    next door treats blank as a wildcard rather than a non-match.
+
+    Returns `{"rows": [...], "candidate_labels": len(rows),
+    "candidate_notes": sum(len(owners) for canon rows) + count(markup rows)}`
+    -- two counts under names that say what each actually counts, since a
+    canon row speaks for every one of its owners' notes while a markup row
+    speaks for exactly one. Canon rows carry `owners` (sorted source forms)
+    and `categories` (sorted distinct non-blank owner categories); markup
+    rows carry `tag` instead -- there is no owner list to report. A row's
+    `reduces_to_linkable` (is the remainder in `target_to_entity`, i.e. does
+    the vault actually inline-link it) is present ONLY when
+    `reduces_to_kind == "canon"`; a markup remainder is never inline-linked
+    by this mechanism, so the key would be a fabrication there. Rows sort
+    by `(reduces_to, label)`, so every family of labels reducing to one
+    remainder sits together and reads as one family.
+
+    This is a STRUCTURAL check, never an identity claim: it never asserts
+    two labels name the same referent, only that one label is a leading
+    connective away from another emitted label. Nothing here recommends a
+    canon command -- `canon-and-glossary.md`'s "What a group CANNOT do"
+    (#871) is the shipped decision for this shape (one referent, several
+    notes: leave the notes), and folding, if an operator decides two labels
+    do name one place, is downstream work these rows only feed.
+
+    Measured through this function on #926's own motivating book: 50
+    labels / 53 notes -- 22 labels (24 notes) reducing to another CANON
+    target, the population the issue was filed against, and 28 labels (29
+    notes) whose fused-preposition canon entry reduces to a MARKUP identity
+    (`to Akkerman` beside a marked `<place>Akkerman</place>` that canon never
+    entered). Not one row with a markup label as its own `label`, there or
+    on any of the other fourteen local books (eleven of which carry spans).
+    See `LEADING_CONNECTIVES`'s own comment for why a zero elsewhere is not
+    evidence of an empty population."""
+    owners_by_target = _owners_by_target(entries)
+    markup_tags_by_label = defaultdict(list)
+    for tag, label in markup_records:
+        markup_tags_by_label[label].append(tag)
+
+    def _owner_categories(target):
+        return [
+            (entries.get(source_form) or {}).get("category")
+            for source_form, _basis in owners_by_target.get(target, ())
+        ]
+
+    def _all_compatible(one_category, other_categories):
+        return all(_categories_compatible(one_category, other) for other in other_categories)
+
+    def _mutually_compatible(categories_a, categories_b):
+        return all(_all_compatible(category, categories_b) for category in categories_a)
+
+    rows = []
+
+    # Canon targets: "from Kremenchug" (owned by >=1 source form) reduces to
+    # a canon "Kremenchug" or a markup <place>Kremenchug</place>.
+    for target, owners in owners_by_target.items():
+        split = _split_leading_connective(target)
+        if split is None:
+            continue
+        connective, remainder = split
+        remainder_nfc = unicodedata.normalize("NFC", remainder)
+        owner_categories = _owner_categories(target)
+
+        reduces_to_kind = None
+        if remainder_nfc in owners_by_target and _mutually_compatible(
+            owner_categories, _owner_categories(remainder_nfc)
+        ):
+            reduces_to_kind = "canon"
+        else:
+            for tag in markup_tags_by_label.get(remainder_nfc, ()):
+                if _all_compatible(tag, owner_categories):
+                    reduces_to_kind = "markup"
+                    break
+        if reduces_to_kind is None:
+            continue
+
+        row = {
+            "label": target,
+            "kind": "canon",
+            "owners": sorted(source_form for source_form, _basis in owners),
+            "categories": sorted({
+                category for category in owner_categories
+                if isinstance(category, str) and category.strip()
+            }),
+            "connective": connective,
+            "reduces_to": remainder_nfc,
+            "reduces_to_kind": reduces_to_kind,
+        }
+        if reduces_to_kind == "canon":
+            row["reduces_to_linkable"] = remainder_nfc in target_to_entity
+        rows.append(row)
+
+    # Markup identities: "<place>in Uman</place>" reduces to a canon "Uman"
+    # or another marked "<place>Uman</place>".
+    for tag, label in markup_records:
+        split = _split_leading_connective(label)
+        if split is None:
+            continue
+        connective, remainder = split
+        remainder_nfc = unicodedata.normalize("NFC", remainder)
+
+        reduces_to_kind = None
+        if remainder_nfc in owners_by_target and _all_compatible(
+            tag, _owner_categories(remainder_nfc)
+        ):
+            reduces_to_kind = "canon"
+        elif (tag, remainder_nfc) in markup_records:
+            reduces_to_kind = "markup"
+        if reduces_to_kind is None:
+            continue
+
+        row = {
+            "label": label,
+            "kind": "markup",
+            "tag": tag,
+            "connective": connective,
+            "reduces_to": remainder_nfc,
+            "reduces_to_kind": reduces_to_kind,
+        }
+        if reduces_to_kind == "canon":
+            row["reduces_to_linkable"] = remainder_nfc in target_to_entity
+        rows.append(row)
+
+    rows.sort(key=lambda row: (row["reduces_to"], row["label"]))
+    candidate_notes = sum(
+        len(row["owners"]) if row["kind"] == "canon" else 1
+        for row in rows
+    )
+    return {
+        "rows": rows,
+        "candidate_labels": len(rows),
+        "candidate_notes": candidate_notes,
+    }
+
+
+def _warn_connective_candidates(report, stream=None):
+    """One stderr WARN naming the population whenever
+    `_build_connective_candidates` finds ANY label that reduces to another
+    emitted identity by stripping a leading connective (#926) -- the
+    report-only half of the class the issue filed: a harmonized canon still
+    ships `from Kremenchug` and `Kremenchug` as two separate vault notes,
+    and nothing before this counted it.
+
+    Silent at zero, mirroring `_warn_delink_cost` next door: a render whose
+    labels never split needs no worklist. The message groups rows by their
+    `reduces_to` target so the operator reads a family, not a flat list --
+    the FIRST THREE groups, in the report's own `(reduces_to, label)` sort
+    order, since rows sharing a `reduces_to` are already contiguous.
+
+    What it does NOT say, on purpose: no canon command -- not
+    `canon_validate.py`, not `--correct`, not `canon_link_groups.json`.
+    `canon-and-glossary.md`'s "What a group CANNOT do" (#871) is the
+    shipped decision for this shape -- one referent, several notes: leave
+    the notes -- and folding, should an operator decide two labels do name
+    one referent, is downstream work these rows only feed. Naming a
+    command here would prescribe the very identity call this render is
+    built never to make."""
+    labels = report.get("candidate_labels", 0)
+    if not labels:
+        return
+    notes = report.get("candidate_notes", 0)
+    # Rows arrive sorted by (reduces_to, label), so insertion order here IS
+    # the report's order and the first three keys are the first three groups.
+    labels_by_target = defaultdict(list)
+    for row in report.get("rows") or []:
+        labels_by_target[row["reduces_to"]].append(row["label"])
+    preview = "; ".join(
+        f"{target!r} <- " + ", ".join(f"{label!r}" for label in group_labels)
+        for target, group_labels in list(labels_by_target.items())[:3]
+    )
+    print(
+        f"WARN: {labels} label(s) ({notes} note(s)) reduce to another "
+        f"emitted identity by stripping a leading connective. {preview}. "
+        "The vault keeps one note per canon entry and one per markup "
+        "identity by design (references/canon-and-glossary.md, \"What a "
+        "group CANNOT do\", #871), so whether two labels name one referent "
+        "-- and any folding -- is decided downstream of this render; these "
+        "rows are the mechanical half of that worklist. See "
+        "references/output-target-adapters/obsidian.md.",
+        file=stream if stream is not None else sys.stderr,
+    )
+
+
 def _marker_payload(delink_cost=None):
     """The vault ownership marker's content. `managed_by`/`target` are the
     identity `_is_valid_vault_marker` checks; `delink_cost` (#588) rides
@@ -3345,6 +3624,13 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     delink_cost = _build_delink_cost(delinked_owners, linker)
     _warn_delink_cost(delink_cost)
 
+    # #926: does this render ship any label that reduces to ANOTHER emitted
+    # label by stripping a leading connective ("from Kremenchug" beside
+    # "Kremenchug")? Report-only, never stamped into the vault marker (see
+    # _build_connective_candidates's own docstring for why).
+    connective_candidates = _build_connective_candidates(entries, target_to_entity, markup_records)
+    _warn_connective_candidates(connective_candidates)
+
     # Stamp/refresh the ownership marker LAST, only after every note has
     # been written successfully -- the next render into this same out_dir
     # sees it and _clean_vault_content proceeds normally (review round 2).
@@ -3355,7 +3641,12 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # to a COMPLETE vault -- see the unmeasured stamp right after the clean.
     _stamp_vault_marker(out_dir, delink_cost=delink_cost)
 
-    manifest = {"written": sorted(written), "kind": "vault", "delink_cost": delink_cost}
+    manifest = {
+        "written": sorted(written),
+        "kind": "vault",
+        "delink_cost": delink_cost,
+        CONNECTIVE_CANDIDATES_KEY: connective_candidates,
+    }
     if entity_markup_report is not None:
         # #795 §6.7. An extra manifest key is already accepted by
         # diff_rendered_output.py -- `delink_cost` set that precedent.

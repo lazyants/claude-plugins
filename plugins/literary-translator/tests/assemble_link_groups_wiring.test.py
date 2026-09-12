@@ -398,6 +398,41 @@ def test_delink_cost_rides_out_on_stdout_with_the_mentions_appendix_off(tmp_path
     assert "WARN: collision de-linking left 2 occurrence(s)" in proc.stderr
 
 
+def test_connective_candidates_rides_out_on_stdout_like_delink_cost(tmp_path):
+    """#926's report key rides out of `assemble.py`'s stdout the exact same
+    way `delink_cost` does (the test right above this one) -- which is the
+    whole reason `_build_connective_candidates` lives in the RENDERER
+    rather than in a separate gate: it runs on every real obsidian render,
+    appendix on or off, with no second consumer to wire up.
+
+    Extends the fixture's canon with a THIRD entry targeting
+    `f"from {SHARED_TARGET}"` -- non-zero on purpose (review round 1), so
+    this test proves the key carries a real row through the wire, not just
+    an honest-zero shape that would pass even if the field were dropped
+    silently somewhere between renderer and stdout. `SHARED_TARGET` itself
+    is still owned by `SPACED` and `MAQAF` (2 owners, no sidecar in this
+    test), so it stays collision-de-linked -- the row it reduces to is
+    reported present but NOT currently linkable."""
+    root = make_root(tmp_path, entries={
+        SPACED: _canon_entry(SPACED, SHARED_TARGET),
+        MAQAF: _canon_entry(MAQAF, SHARED_TARGET),
+        "extra_source": _canon_entry("extra_source", f"from {SHARED_TARGET}"),
+    })
+    proc = run_assemble(root)
+    assert proc.returncode == 0, proc.stderr
+    candidates = one_json_line(proc)["adapter_result"]["connective_candidates"]
+    assert candidates == {
+        "rows": [{
+            "label": f"from {SHARED_TARGET}", "kind": "canon", "owners": ["extra_source"],
+            "categories": ["person"], "connective": "from", "reduces_to": SHARED_TARGET,
+            "reduces_to_kind": "canon", "reduces_to_linkable": False,
+        }],
+        "candidate_labels": 1,
+        "candidate_notes": 1,
+    }
+    assert "reduce to another emitted identity" in proc.stderr, proc.stderr
+
+
 def test_empty_groups_sidecar_attaches_nothing(tmp_path):
     """A schema-valid `groups: []` is a distinguished empty state, not an
     error -- and it must not put an empty key into the persisted artifact

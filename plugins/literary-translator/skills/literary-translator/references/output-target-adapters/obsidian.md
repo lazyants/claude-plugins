@@ -398,6 +398,92 @@ marker, a `delink_cost` block:
   about whether the render measured anything. The renderer's stderr WARN and
   `adapter_result.delink_cost` are the authority in that second case.
 
+### Labels that differ only by a leading connective — `connective_candidates` (1.139.0, #926)
+
+A harmonized canon can still ship one place or person under several vault
+notes: a Hebrew fused-preposition source form gets its own
+`canonical_target_form` (`"from Kremenchug"`, `"in Kremenchug"`) right next
+to the bare form's own entry (`"Kremenchug"`), and one note per canon entry
+then mints three notes for one town, with no gate counting it. `render()`
+now returns, but does **not** stamp into the vault marker, a
+`connective_candidates` block:
+
+```json
+{"rows": [{"label": "from Kremenchug", "kind": "canon",
+           "owners": ["מקרעמינטשאג", "מקרעמינטשוג", "מקרעמיניטשאג"],
+           "categories": [], "connective": "from",
+           "reduces_to": "Kremenchug", "reduces_to_kind": "canon",
+           "reduces_to_linkable": true},
+          {"label": "in Kremenchug", "kind": "canon", "owners": ["בקרעמינטשאק"],
+           "categories": [], "connective": "in", "reduces_to": "Kremenchug",
+           "reduces_to_kind": "canon", "reduces_to_linkable": true},
+          "…"],
+ "candidate_labels": 50, "candidate_notes": 53}
+```
+
+(`rows` abbreviated — the motivating book's block carries fifty; the two counts are its real
+top-level values.)
+
+- It rides out on `assemble.py`'s stdout as
+  `adapter_result.connective_candidates`, and a non-zero `candidate_labels`
+  always prints one stderr WARN, on every obsidian render — same shape as
+  `delink_cost` above, and for the same reason: `validate_backlinks.py`
+  short-circuits entirely when the `## Mentions` appendix is disabled, which
+  is exactly the configuration the motivating book ran under, so the
+  renderer's own WARN and stdout key are the only place this reaches the
+  operator. It is **not** republished by `validate_backlinks.py` and **not**
+  stamped into the vault marker — nothing downstream currently reads it, and
+  adding a reader is not this issue's ask.
+- **The universe is emitted labels, not source forms.** A canon row's
+  `label` is a `canonical_target_form` (via `_owners_by_target`); a markup
+  row's `label` is the `(tag, NFC label)` identity `_markup_note_records`
+  mints its own note under. A **blank** `canonical_target_form` is not a
+  target at all and is never compared — its heading is the bare
+  `source_form`, a different universe from an emitted target.
+- **The vault keeps one note per canon entry and one note per markup
+  identity, by design** (`canon-and-glossary.md`'s "What a group CANNOT do",
+  #871) — so a fused-preposition source form frozen as `"from Kremenchug"`
+  beside a separate entry's `"Kremenchug"` is, and stays, **two notes and
+  two index rows**. This report does not change that; it only counts it.
+- **A row is a STRUCTURAL fact, never an identity claim.** It says one
+  label is a leading connective away from another emitted label — never
+  that the two name the same referent, and it names **no** canon command
+  anywhere (`canon_validate.py`, `--correct`, `canon_link_groups.json`).
+  Whether two labels do name one referent, and any folding, is an
+  identity call left to the operator (or a future harmonization pass) —
+  this render only ever surfaces the mechanical half of that worklist.
+- **Category rule**: blank/absent is a wildcard on either side; two
+  non-blank categories/tags must be equal. The row for a remainder picks
+  the **first COMPATIBLE** emitted identity — a compatible canon target, if
+  one exists, else a compatible markup identity — so an incompatible
+  same-spelled canon entry (a `Jordan` filed as a `person`) does not hide a
+  genuinely matching `place`/`place` pair; it is skipped, not treated as a
+  hard stop.
+- **`reduces_to_linkable`** (only on rows whose `reduces_to_kind` is `canon`) says
+  whether the remainder is in the render's own linkable map — a collision
+  de-linked or `sense_translated`-only remainder is present in the row set
+  (it is still an emitted target) but reports `false` here, since no inline
+  link in this vault actually reaches it.
+- **The connective list is English-only** (`LEADING_CONNECTIVES`:
+  `and to`/`and from`/`and in`/`and at`/`in`/`at`/`from`/`to`/`of`), because
+  the shipped glossary/translation pass renders labels in the target
+  language and this list only knows what an English render can carry. A
+  **zero on another target language is not evidence** the class does not
+  exist there — it means this list has nothing to match against yet.
+- Measured through the shipped function on the motivating book: **50
+  labels / 53 notes** — 22 labels / 24 notes reduce to another CANON
+  target (the population #926 was filed against), and 28 labels / 29 notes
+  reduce to a MARKUP identity instead (a fused-preposition canon entry
+  whose bare remainder was never itself entered into canon, only marked in
+  the running prose — `to Akkerman` beside `<place>Akkerman</place>`). The
+  next-largest of the fifteen local book runs reports 32 / 34, eight report
+  zero. Across all fifteen (eleven carry spans), **zero rows have a markup
+  label as their own `label`** — the "mark the connective inside the span"
+  shape the issue also named has no population here, and the improvised
+  spellings it lists beside it are a different join (printed label against
+  the source token in the same block) that belongs to #929, not this
+  report.
+
 ### Re-linking one referent — `canon_link_groups.json` (1.32.0)
 
 De-linking cannot tell two spellings of one man from two different men, and
