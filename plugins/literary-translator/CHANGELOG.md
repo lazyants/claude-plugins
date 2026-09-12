@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.150.0 — 2026-09-12
+
+**A stored review verdict carrying NO findings wedged `segment_dispatch_driver.py` permanently, and
+nothing shipped could release it (#920).** At a numbered round, `derive_next_action()` returned
+`needs_fix` whenever the draft still matched the review that judged it. When that review's `findings`
+list is EMPTY there is nothing for a fix turn to apply: the turn correctly leaves the draft
+byte-identical, the draft's content hash keeps matching, and the same branch returns the same thing on
+every later invocation, for good. `reject_review.py` is no escape — its own gate refuses any review
+whose `clean` is not `False`, and the verdict measured on a live Hebrew-to-English book was
+`clean: true` with `coverage_ok: false`. No shipped script writes or removes a `*.review.json` either,
+so the only exit was moving a pipeline artifact aside by hand.
+
+**Such a verdict is now re-reviewed once at the SAME round label, and a second unusable verdict stops
+the segment under `reason: "review-empty-findings"`.** The guard is keyed on the EMPTY FINDINGS LIST,
+not on the `clean`/`coverage_ok` pair the report happened to carry: `needs_fix` exists solely to hand
+findings to a fix turn, so an empty one is never legitimate, and the self-contradictory
+`clean: false` with no findings — refused nowhere upstream — has the identical shape. It fires only
+where the old code would have reached `needs_fix` (the draft matches the review, or either content
+hash is unknowable), so the ordinary "this draft already moved past a stale review" advance path is
+untouched. When the draft's own hash cannot be computed it raises instead, rather than spending a
+codex job judging a draft this process never read — the argument the mandatory-final branch already
+makes for the same condition.
+
+This is a NUMBERED-round outcome only. The mandatory `final` round still caps an empty-findings
+verdict, exactly as it caps any other non-clean one. The stop writes no terminal ledger entry of its
+own, so a segment that was default-eligible comes back on the next launch; a segment that already
+carried a cap or a block keeps it and stays `human_escalation`, reachable only by naming it back in.
+Releasing such a segment on the strength of an empty verdict is a warrant this change deliberately
+does not take — the existing un-escalation path validates a record's whole shape, audit trail and
+provenance first.
+
+`fabricated_loc_retries` becomes `unusable_verdict_retries`, shared by both causes. That is
+load-bearing rather than tidying: the per-segment loop reserves exactly one spare classification
+iteration, so two independent counters would let a fabricated-loc retry and an empty-findings retry
+each claim it, and the segment would exit under the generic `loop-exhausted-without-terminal-state`
+instead of a named reason. Both orders of the two causes are pinned at the schema's minimum
+`max_fix_rounds`, on the fresh and the claimed path.
+
+**The upstream cause was a path resolved against the wrong directory.** A RELATIVE
+`owner_profile_path` in the durable root's ownership marker resolved against the CALLER's working
+directory, so the deterministic gate a reviewer is told to run first exited with an environment
+failure inside its per-invocation sandbox while the operator, running the identical command from the
+durable root, saw `OK` — two different answers from one command, with neither party wrong. The
+reviewer then reported incomplete coverage, correctly, and the segment wedged. `validate_draft.py`,
+`select_segments.py` and the driver's own two config loaders now resolve that value against
+`durable_root`, which is what `cache_key.py` and `extract.py.template` always did.
+
+That last part is a migration rather than strict compatibility, and it is stated here because nothing
+in the plugin writes the marker. Every supported workflow runs from the durable root, where the join
+lands on the same path a bare read did, so no such project changes behaviour. A standalone invocation
+whose relative marker happened to resolve to an EXTERNAL profile from some other working directory
+now needs an absolute `owner_profile_path`, or one written relative to the durable root.
+
+`segment_dispatch_driver.py`, `validate_draft.py` and `select_segments.py` are all
+`PLUGIN_BUNDLE_MEMBERS`, so this release moves `plugin_bundle_hash` — the machinery-only carve-out.
+No converged segment needs re-translating or re-reviewing because of it.
+
 ## 1.144.0 — 2026-09-12
 
 **A pointed Hebrew name absorbed an unrelated word's occurrences, because the match key drops

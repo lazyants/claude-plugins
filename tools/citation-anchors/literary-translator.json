@@ -127,12 +127,6 @@
       "claim": "#488 added `canon_senses.senses_for`, which computes exactly this, and this function was DELIBERATELY not re-pointed at it. The lookup here is normalized through THIS module's own `normalize_form` binding, and `tests/canon_validate_recollapse.test.py:289-301` pins the indexed fast path by monkeypatching that binding and asserting exactly one call; delegating would move the call inside canon_senses, silently reduce that count to zero, and force a passing performance test to be rewritten for a refactor #488 does not need. The shared comparator is",
       "target": "plugins/literary-translator/tests/canon_validate_recollapse.test.py"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5773\", 0]": {
-      "anchors": [
-        "run_id_problem = validate_run_id(run_id)"
-      ],
-      "claim": "WHY THIS MODULE NEEDS ITS OWN COPY AT ALL: the asymmetry that made claimed_path() a path-traversal hole. The WRITER validated its run id before minting a claim (select_segments.py:5000, called from its claim block) and every READER built the same path from an unvalidated one."
-    },
     "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/final_audit.py\", \"cache_key.py:149-156\", 0]": {
       "anchors": [
         "canon_senses.py (RFC #215)",
@@ -527,14 +521,6 @@
       ],
       "claim": "# unchanged draft the moment its baseline went missing. Reuses # `current_cache_key`, computed once directly above: a second # cache_key.py subprocess call here would be exactly the kind of # second, later-timestamped invocation D4's own \"the key as of # publication\" contract must not tolerate (claim_record.py:438-439). stored_cache_key_for_drift = ledger_record.get(\"cache_key\") if not isinstance(stored_cache_key_for_drift, dict):"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"segment_dispatch_driver.py:1333-1388\", 0]": {
-      "anchors": [
-        "codex round-3: a runtime self-test",
-        "self_test_fd = None",
-        "os.close(self_test_fd)"
-      ],
-      "claim": "The self-test after a successful acquire is segment_dispatch_driver.py:1313-1369's, with ONE deliberate difference: it warns and proceeds, THIS REFUSES. The asymmetry is the point. On an unenforced mount the driver's own acquire is merely not exclusive, whereas this script's standalone path would FALSELY ACQUIRE runs/.driver.lock while a real driver holds it and then admit a live unit -- the unsafe direction,"
-    },
     "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/validate_assembled.py\", \"assemble.py:428-429\", 0]": {
       "anchors": [
         "see e.g. ledger_merge.py's own CACHE_KEY_FIELDS"
@@ -801,25 +787,6 @@
       ],
       "claim": "# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic # style bans) per the maintenance contract above. This rotation inherited the # NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:202-264`, # `cache_key.py:283-304` and `resume_setup.py:837-856` -- and RETIRED all three, # because 1.67.0 became the newest entry when this branch rebased onto a main # that had already shipped 1.66.0, and this guard checks the newest entry only."
     },
-    "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:1763-1801\", 0]": {
-      "anchors": [
-        "is forwarded HERE, and ONLY here",
-        "cmd += [\"--driver-lease-held\"]"
-      ],
-      "claim": "--from-stalled additionally drives run()'s own runs/.driver.lock acquisition and its --driver-lease-held forwarding to the child selector (segment_dispatch_driver.py:1763-1801) -- both real here, not stubbed, since this test calls run() directly rather than through a subprocess and nothing about that machinery is mocked.\"\"\" seg = \"seg21\" root = wiring_make_driver_root_from_stalled(tmp_path, seg)"
-    },
-    "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7808\", 0]": {
-      "anchors": [
-        "session_id=session_id, claims=claims"
-      ],
-      "claim": "# =========================================================================== # C -- the WIRING itself: does segment_dispatch_driver.py's own run() # (segment_dispatch_driver.py:7808's `claims=claims`) actually carry a REAL # select_segments.py admission into ctx.claims, or does # claim_capability_refusal_for_translate() only ever get exercised against a # context THIS SUITE injected `claims=` into by hand? Every test in Sections # A/B builds DispatchContext directly and passes `claims=` itself -- deleting"
-    },
-    "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7808\", 1]": {
-      "anchors": [
-        "session_id=session_id, claims=claims"
-      ],
-      "claim": "construct DispatchContext directly and inject `claims=` themselves, so they prove `claim_capability_refusal_for_translate()` works but prove NOTHING about whether run() actually populates `ctx.claims` from the selector's own output -- deleting `claims=claims` from the real construction at segment_dispatch_driver.py:7808 leaves all eleven of them green, because none of them ever go through run() at all."
-    },
     "[\"plugins/literary-translator/tests/claim_prompt_contract.test.py\", \"mass-translate-wf.template.js:1707\", 0]": {
       "anchors": [
         "byte for byte into your rewritten draft, unchanged; never invent, drop, or recompute it."
@@ -838,12 +805,6 @@
       ],
       "claim": "\"in_progress\"})` (mass-translate-wf.template.js:2447) completes BEFORE `agent(translateDrivePrompt(seg))` (:2450) -- so any refusal inside codex_job.py (the chokepoint layer, a different teammate's file, out of"
     },
-    "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5773\", 0]": {
-      "anchors": [
-        "run_id_problem = validate_run_id(run_id)"
-      ],
-      "claim": "inversion crosses: the RUN_ID resume_setup.py just minted (a real value, from a real subprocess run, never a hand-typed guess at the format) must be accepted by select_segments.py's OWN `validate_run_id()` -- the exact function D1a's `select_segments.py --run-id` flag consults (select_segments.py:5000, `run_id_problem = validate_run_id(run_id)`)."
-    },
     "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1572\", 0]": {
       "anchors": [
         "return {\"category\": \"recoverable\", \"status\": status}"
@@ -853,12 +814,6 @@
     "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:1590\", 0, \"continuation\"]": {
       "anchors": [
         "DEFAULT_ELIGIBLE_CATEGORIES = frozenset"
-      ],
-      "claim": "# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1559), and D3 (:5009) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces"
-    },
-    "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5782\", 0, \"continuation\"]": {
-      "anchors": [
-        "D3: the authorization must be a SUBSET"
       ],
       "claim": "# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1559), and D3 (:5009) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces"
     },
@@ -888,18 +843,6 @@
         "from canon_senses import CanonSensesLoadError, is_split, load_senses"
       ],
       "claim": "\"\"\"DEFAULT_BATCH_SIZE, read from glossary_batch_plan.py's own AST -- no import. glossary_batch_plan.py:146 does a bare `from canon_senses import CanonSensesLoadError, is_split, load_senses`, so an actual import would need sys.path surgery that would persist for the whole test session. Mirrors _emitted_refusal_reasons's own idiom above.\"\"\""
-    },
-    "[\"plugins/literary-translator/tests/final_audit.test.py\", \"validate_draft.py:625\", 0]": {
-      "anchors": [
-        "parent_block_claims.setdefault(v[\"parent_block\"]"
-      ],
-      "claim": "# The SEGPACK side of the same class is deliberately NOT tested, and that is a # measurement rather than an omission: a segpack whose verse `parent_block` is # unhashable, or whose `footnotes` is a mapping, never reaches any WARN check -- # hard check 1 calls `validate_draft.validate()` first and dies on the identical # input at validate_draft.py:625 and :684 respectively. That is pre-existing and # out of scope. The `isinstance` guards in `term_carriers()` are kept anyway; # they cost three calls, and \"a lane that never raises\" should not depend on # which OTHER check happens to run before it."
-    },
-    "[\"plugins/literary-translator/tests/final_audit.test.py\", \"validate_draft.py:684\", 0, \"continuation\"]": {
-      "anchors": [
-        "src_fn = {str(f[\"n\"]): f.get(\"source_text\", \"\") for f in (src.get(\"footnotes\") or [])}"
-      ],
-      "claim": "# The SEGPACK side of the same class is deliberately NOT tested, and that is a # measurement rather than an omission: a segpack whose verse `parent_block` is # unhashable, or whose `footnotes` is a mapping, never reaches any WARN check -- # hard check 1 calls `validate_draft.validate()` first and dies on the identical # input at validate_draft.py:625 and :684 respectively. That is pre-existing and # out of scope. The `isinstance` guards in `term_carriers()` are kept anyway; # they cost three calls, and \"a lane that never raises\" should not depend on # which OTHER check happens to run before it."
     },
     "[\"plugins/literary-translator/tests/fixtures/backlink_e2e/case_spec.py\", \"segpack.schema.json:132\", 0]": {
       "anchors": [
@@ -1133,26 +1076,6 @@
         "return candidate, False, input_digest"
       ],
       "claim": "never a hand-forged digest (a forged one would prove nothing about the real resolution path). Each call sends a payload with no `resume_from_run_ids` field at all (the same shape resolve_run_id() builds for a first-ever run), so resume_setup.py's own resolve_run() always mints fresh (resume_setup.py:930-934); since nothing about the project changed between the two calls, compute_input_digest() returns the IDENTICAL value both times (resume_setup.py:775). Returns (older_id, newer_id) -- asserts newer_id sorts after older_id, matching _resumable_run_id_candidates()'s own \"lexicographic == chronological\""
-    },
-    "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:5055\", 0]": {
-      "anchors": [
-        "current_sha1 = current_draft_sha1(seg, segments_dir, dirs[\"scripts_dir\"])"
-      ],
-      "claim": "\"\"\"The invalid_post_fix_draft branch's own current_draft_sha1() call (segment_dispatch_driver.py:5055) is a SECOND call site sharing the identical --plugin-root trust boundary as the already_converged branch's (see the sibling test above) -- untested here for the same reason: every existing --plugin-root fixture stages the REAL, unmodified draft_sha1.py at both the durable root and the plugin",
-      "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py"
-    },
-    "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:5200\", 0]": {
-      "anchors": [
-        "current_sha1 = current_draft_sha1(seg, segments_dir, dirs[\"scripts_dir\"])"
-      ],
-      "claim": "\"\"\"codex round-4 (\"Tests that could not fail\"): current_draft_sha1()'s third argument -- dirs[\"scripts_dir\"] -- is what makes this \"clean and draft matches\" branch (segment_dispatch_driver.py:5200, feeding the already_converged decision at :5227) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable root's own writable, self-anchored copy (current_draft_sha1()'s own `scripts_dir=SCRIPTS_DIR` default). That default matters because the",
-      "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py"
-    },
-    "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:5227\", 0, \"continuation\"]": {
-      "anchors": [
-        "\"action\": \"already_converged\""
-      ],
-      "claim": "draft matches\" branch (segment_dispatch_driver.py:5200, feeding the already_converged decision at :5227) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable"
     },
     "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"template.js:1834-1844\", 0]": {
       "anchors": [
@@ -1612,7 +1535,91 @@
       ],
       "claim": "(\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"),"
     },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4506-4512\", 0]": {
+    "[\"plugins/literary-translator/tests/profile_validate.test.py\", \"name_discovery.py:431-437\", 0]": {
+      "anchors": [
+        "fatal(message, exit_code=2, **payload)",
+        "stderr ONLY"
+      ],
+      "claim": "The fold-parity test reads its verdict off name_discovery.py's `offending:` line on STDERR, not stdout, because fatal() prints its named line to stderr only and deliberately emits no stdout JSON (name_discovery.py:431-437)."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/claim_record.py\", \"select_segments.py:5781\", 0]": {
+      "anchors": [
+        "run_id_problem = validate_run_id(run_id)"
+      ],
+      "claim": "WHY THIS MODULE NEEDS ITS OWN COPY AT ALL: the asymmetry that made claimed_path() a path-traversal hole. The WRITER validated its run id before minting a claim (select_segments.py:5000, called from its claim block) and every READER built the same path from an unvalidated one."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py\", \"segment_dispatch_driver.py:1341-1396\", 0]": {
+      "anchors": [
+        "codex round-3: a runtime self-test",
+        "self_test_fd = None",
+        "os.close(self_test_fd)"
+      ],
+      "claim": "The self-test after a successful acquire is segment_dispatch_driver.py:1313-1369's, with ONE deliberate difference: it warns and proceeds, THIS REFUSES. The asymmetry is the point. On an unenforced mount the driver's own acquire is merely not exclusive, whereas this script's standalone path would FALSELY ACQUIRE runs/.driver.lock while a real driver holds it and then admit a live unit -- the unsafe direction,"
+    },
+    "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:1782-1820\", 0]": {
+      "anchors": [
+        "is forwarded HERE, and ONLY here",
+        "cmd += [\"--driver-lease-held\"]"
+      ],
+      "claim": "--from-stalled additionally drives run()'s own runs/.driver.lock acquisition and its --driver-lease-held forwarding to the child selector (segment_dispatch_driver.py:1782-1820) -- both real here, not stubbed, since this test calls run() directly rather than through a subprocess and nothing about that machinery is mocked.\"\"\" seg = \"seg21\" root = wiring_make_driver_root_from_stalled(tmp_path, seg)"
+    },
+    "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7955\", 0]": {
+      "anchors": [
+        "session_id=session_id, claims=claims"
+      ],
+      "claim": "# =========================================================================== # C -- the WIRING itself: does segment_dispatch_driver.py's own run() # (segment_dispatch_driver.py:7955's `claims=claims`) actually carry a REAL # select_segments.py admission into ctx.claims, or does # claim_capability_refusal_for_translate() only ever get exercised against a # context THIS SUITE injected `claims=` into by hand? Every test in Sections # A/B builds DispatchContext directly and passes `claims=` itself -- deleting"
+    },
+    "[\"plugins/literary-translator/tests/claim_forces_review_only.test.py\", \"segment_dispatch_driver.py:7955\", 1]": {
+      "anchors": [
+        "session_id=session_id, claims=claims"
+      ],
+      "claim": "construct DispatchContext directly and inject `claims=` themselves, so they prove `claim_capability_refusal_for_translate()` works but prove NOTHING about whether run() actually populates `ctx.claims` from the selector's own output -- deleting `claims=claims` from the real construction at segment_dispatch_driver.py:7955 leaves all eleven of them green, because none of them ever go through run() at all."
+    },
+    "[\"plugins/literary-translator/tests/claim_run_ordering.test.py\", \"select_segments.py:5781\", 0]": {
+      "anchors": [
+        "run_id_problem = validate_run_id(run_id)"
+      ],
+      "claim": "inversion crosses: the RUN_ID resume_setup.py just minted (a real value, from a real subprocess run, never a hand-typed guess at the format) must be accepted by select_segments.py's OWN `validate_run_id()` -- the exact function D1a's `select_segments.py --run-id` flag consults (select_segments.py:5000, `run_id_problem = validate_run_id(run_id)`)."
+    },
+    "[\"plugins/literary-translator/tests/claim_stalled_admission.test.py\", \"select_segments.py:5790\", 0, \"continuation\"]": {
+      "anchors": [
+        "D3: the authorization must be a SUBSET"
+      ],
+      "claim": "# (select_segments.py:1541), `recoverable` is in DEFAULT_ELIGIBLE_CATEGORIES # (:1559), and D3 (:5009) enforces only the ONE direction # `claim_requests ⊆ segs`. For --from-cap the subset direction forces"
+    },
+    "[\"plugins/literary-translator/tests/final_audit.test.py\", \"validate_draft.py:643\", 0]": {
+      "anchors": [
+        "parent_block_claims.setdefault(v[\"parent_block\"]"
+      ],
+      "claim": "# The SEGPACK side of the same class is deliberately NOT tested, and that is a # measurement rather than an omission: a segpack whose verse `parent_block` is # unhashable, or whose `footnotes` is a mapping, never reaches any WARN check -- # hard check 1 calls `validate_draft.validate()` first and dies on the identical # input at validate_draft.py:643 and :702 respectively. That is pre-existing and # out of scope. The `isinstance` guards in `term_carriers()` are kept anyway; # they cost three calls, and \"a lane that never raises\" should not depend on # which OTHER check happens to run before it."
+    },
+    "[\"plugins/literary-translator/tests/final_audit.test.py\", \"validate_draft.py:702\", 0, \"continuation\"]": {
+      "anchors": [
+        "src_fn = {str(f[\"n\"]): f.get(\"source_text\", \"\") for f in (src.get(\"footnotes\") or [])}"
+      ],
+      "claim": "# The SEGPACK side of the same class is deliberately NOT tested, and that is a # measurement rather than an omission: a segpack whose verse `parent_block` is # unhashable, or whose `footnotes` is a mapping, never reaches any WARN check -- # hard check 1 calls `validate_draft.validate()` first and dies on the identical # input at validate_draft.py:643 and :702 respectively. That is pre-existing and # out of scope. The `isinstance` guards in `term_carriers()` are kept anyway; # they cost three calls, and \"a lane that never raises\" should not depend on # which OTHER check happens to run before it."
+    },
+    "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:5093\", 0]": {
+      "anchors": [
+        "current_sha1 = current_draft_sha1(seg, segments_dir, dirs[\"scripts_dir\"])"
+      ],
+      "claim": "\"\"\"The invalid_post_fix_draft branch's own current_draft_sha1() call (segment_dispatch_driver.py:5093) is a SECOND call site sharing the identical --plugin-root trust boundary as the already_converged branch's (see the sibling test above) -- untested here for the same reason: every existing --plugin-root fixture stages the REAL, unmodified draft_sha1.py at both the durable root and the plugin",
+      "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py"
+    },
+    "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:5238\", 0]": {
+      "anchors": [
+        "current_sha1 = current_draft_sha1(seg, segments_dir, dirs[\"scripts_dir\"])"
+      ],
+      "claim": "\"\"\"codex round-4 (\"Tests that could not fail\"): current_draft_sha1()'s third argument -- dirs[\"scripts_dir\"] -- is what makes this \"clean and draft matches\" branch (segment_dispatch_driver.py:5238, feeding the already_converged decision at :5265) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable root's own writable, self-anchored copy (current_draft_sha1()'s own `scripts_dir=SCRIPTS_DIR` default). That default matters because the",
+      "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/segment_dispatch_driver.py"
+    },
+    "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"segment_dispatch_driver.py:5265\", 0, \"continuation\"]": {
+      "anchors": [
+        "\"action\": \"already_converged\""
+      ],
+      "claim": "draft matches\" branch (segment_dispatch_driver.py:5238, feeding the already_converged decision at :5265) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable"
+    },
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4518-4524\", 0]": {
       "anchors": [
         "Excluded from every bundle hash",
         "nor of `orchestration_bundle_hash`",
@@ -1621,12 +1628,19 @@
       ],
       "claim": "(\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4044-4050\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"), (\"orchestration-and-batching.md:220\", ORCHESTRATION_DOC, \"is diagnostic only, never part of the composite\"),"
     },
-    "[\"plugins/literary-translator/tests/profile_validate.test.py\", \"name_discovery.py:431-437\", 0]": {
+    "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"select_segments.py:1172\", 0]": {
       "anchors": [
-        "fatal(message, exit_code=2, **payload)",
-        "stderr ONLY"
+        "HUMAN_ESCALATION_STATUSES = frozenset({\"blocked\", \"non_converged\"})"
       ],
-      "claim": "The fold-parity test reads its verdict off name_discovery.py's `offending:` line on STDERR, not stdout, because fatal() prints its named line to stderr only and deliberately emits no stdout JSON (name_discovery.py:431-437)."
+      "claim": "segment() would route away from \"recoverable\": `non_converged` and `blocked` (HUMAN_ESCALATION_STATUSES, select_segments.py:1172) or `converged` (WAS_CONVERGED_STATUSES, :1178) -- `blocked` in particular",
+      "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py"
+    },
+    "[\"plugins/literary-translator/tests/segment_dispatch_driver.test.py\", \"select_segments.py:1178\", 0, \"continuation\"]": {
+      "anchors": [
+        "WAS_CONVERGED_STATUSES = frozenset({\"converged\", \"stale\"})"
+      ],
+      "claim": "`blocked` (HUMAN_ESCALATION_STATUSES, select_segments.py:1172) or `converged` (WAS_CONVERGED_STATUSES, :1178) -- `blocked` in particular is a THIRD terminal shape alongside the more familiar",
+      "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py"
     }
   },
   "exemptions": {

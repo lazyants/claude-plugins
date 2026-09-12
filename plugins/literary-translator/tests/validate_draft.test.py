@@ -67,13 +67,24 @@ DEFAULT_PROFILE = {
 # Fixture harness
 # ---------------------------------------------------------------------------
 
-def make_durable_root(tmp_path, profile=None):
+def make_durable_root(tmp_path, profile=None, owner_profile_path=None):
     """Build an isolated durable_root: copies the REAL validate_draft.py into
     {root}/scripts/ (so its self-anchoring `Path(__file__).resolve().parents[1]`
     resolves to THIS temp root, exactly matching how it is actually invoked in
     production -- never assumes cwd == durable_root, never takes a
     --durable-root flag), writes the ownership marker + profile.yml, and
-    creates segments/."""
+    creates segments/.
+
+    `owner_profile_path`, if given, OVERRIDES the marker's own
+    `owner_profile_path` value verbatim (a #920 test writes a RELATIVE value,
+    or an absolute value pointing OUTSIDE this durable_root entirely) --
+    profile.yml on disk at `root / "profile.yml"` is unaffected either way,
+    so a relative override of exactly "profile.yml" still resolves to a real
+    file once joined against durable_root. Absent (the default, every
+    pre-#920 caller), the marker keeps writing the absolute path to
+    profile.yml exactly as it always did -- untouched by is_absolute()
+    either before or after #920, so every existing call here is byte-for-
+    byte unaffected."""
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
@@ -89,7 +100,11 @@ def make_durable_root(tmp_path, profile=None):
         encoding="utf-8",
     )
 
-    marker = {"owner_profile_path": str(profile_path)}
+    marker = {
+        "owner_profile_path": (
+            owner_profile_path if owner_profile_path is not None else str(profile_path)
+        )
+    }
     (root / ".literary-translator-root.json").write_text(
         json.dumps(marker), encoding="utf-8"
     )
@@ -106,13 +121,29 @@ def write_segment(root, seg, segpack, draft):
     )
 
 
-def run_validate(root, seg):
+def run_validate(root, seg, cwd=None):
     return subprocess.run(
         [sys.executable, str(root / "scripts" / "validate_draft.py"), seg],
         capture_output=True,
         text=True,
         timeout=30,
+        cwd=cwd,
     )
+
+
+def run_validate_with_cwd(root, seg, cwd):
+    """Like run_validate(), but pins the CHILD PROCESS's own working
+    directory to `cwd` explicitly, rather than letting it inherit whatever
+    directory the test runner happens to be started from. #920's fix
+    resolves a relative `owner_profile_path` against `durable_root`, never
+    the caller's cwd -- proving that requires a cwd that is DEMONSTRABLY
+    NOT durable_root, and inheriting pytest's own ambient cwd (which is
+    already durable_root only by accident, never by contract) would prove
+    nothing about which one the code actually used. Passing `cwd=` here is
+    the subprocess-native equivalent of chdir-and-restore: it pins the
+    child's directory for exactly this one invocation without mutating the
+    test process's own cwd at all, so there is nothing to restore."""
+    return run_validate(root, seg, cwd=cwd)
 
 
 def defect_count(stdout):
@@ -208,6 +239,145 @@ def test_clean_baseline_passes(tmp_path):
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     assert "[seg01] OK" in result.stdout
+
+
+def test_relative_owner_profile_path_resolves_against_durable_root_not_cwd(tmp_path):
+    """#920: the ownership marker's `owner_profile_path` is durable-root-
+    relative, not cwd-relative. A bare `Path(owner_profile_path)` used to
+    resolve a relative value against whatever directory the CALLER
+    happened to be running from -- so a codex review job running in a
+    per-invocation mkdtemp sandbox could exit 2 on the identical
+    `python3 validate_draft.py SEG` an operator running from durable_root
+    saw exit 0 for.
+
+    The marker here holds only "profile.yml" -- no directory component at
+    all -- so a cwd-relative resolution would look for it beside whatever
+    directory the child process starts in and fail outright; only a join
+    against durable_root ever finds it. Run with the child's OWN cwd
+    pinned to a directory that is neither durable_root nor anywhere near
+    it (a bare tmp_path sibling, holding nothing this script could ever
+    use), so a pass here is attributable to the durable_root join and
+    nothing else -- see run_validate_with_cwd()'s own docstring for why an
+    explicit cwd is required rather than relying on pytest's ambient one."""
+    root = make_durable_root(tmp_path, owner_profile_path="profile.yml")
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+
+    elsewhere = tmp_path / "nowhere-near-the-durable-root"
+    elsewhere.mkdir()
+    assert not (elsewhere / "profile.yml").exists(), (
+        "fixture bug: a profile.yml existing beside the wrong cwd would let "
+        "a cwd-relative resolution pass by accident, proving nothing"
+    )
+
+    result = run_validate_with_cwd(root, "seg01", elsewhere)
+
+    assert result.returncode == 0, (
+        f"a relative owner_profile_path must resolve against durable_root "
+        f"regardless of the process cwd -- got rc={result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "[seg01] OK" in result.stdout
+
+
+def test_absolute_owner_profile_path_is_untouched_by_the_durable_root_join(tmp_path):
+    """The companion COMPATIBILITY pin to the relative-marker test above:
+    an ABSOLUTE `owner_profile_path` -- here pointing at a profile.yml
+    that lives OUTSIDE durable_root entirely -- must behave exactly as it
+    did before #920, with an external profile still loading correctly.
+    Run from the SAME demonstrably-elsewhere cwd as the relative test
+    above, so this is not merely re-proving the relative test's own point.
+
+    NOTE what this does NOT prove, corrected after code review: pathlib's
+    own `/` operator DISCARDS its left operand whenever the right one is
+    absolute (`Path("/a") / Path("/b") == Path("/b")`), so
+    `(durable_root / profile_path).resolve()` would land on the exact same
+    external file even if `is_absolute()` were removed and the join ran
+    UNCONDITIONALLY -- deleting root/profile.yml below still could not
+    distinguish "the guard skipped the join" from "the join ran anyway and
+    happened to produce the same path". This test's actual value is
+    narrower and still real: it pins that an external, non-durable-root
+    profile continues to load correctly at all. See the symlink test below
+    for the one mutation that DOES make is_absolute() load-bearing and
+    observable."""
+    external_dir = tmp_path / "external_profile_location"
+    external_dir.mkdir()
+    external_profile_path = external_dir / "profile.yml"
+    external_profile_path.write_text(
+        yaml.safe_dump(DEFAULT_PROFILE, sort_keys=False), encoding="utf-8"
+    )
+
+    root = make_durable_root(tmp_path, owner_profile_path=str(external_profile_path))
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+    # make_durable_root() always writes root/profile.yml as a side effect
+    # (every existing caller relies on that file existing), but the marker
+    # here points at external_profile_path instead -- deleting the
+    # in-durable_root copy makes a buggy join (one that silently re-roots
+    # an absolute value underneath durable_root) fail LOUDLY with "not
+    # found" rather than accidentally passing against the wrong file.
+    (root / "profile.yml").unlink()
+
+    elsewhere = tmp_path / "nowhere-near-the-durable-root"
+    elsewhere.mkdir()
+
+    result = run_validate_with_cwd(root, "seg01", elsewhere)
+
+    assert result.returncode == 0, (
+        f"an absolute owner_profile_path must resolve to the external file "
+        f"exactly as before #920, never re-rooted under durable_root -- got "
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "[seg01] OK" in result.stdout
+
+
+def test_absolute_owner_profile_path_that_is_a_symlink_is_never_canonicalized(tmp_path):
+    """The mutation the sibling test above CANNOT catch, per code review:
+    is_absolute() short-circuits BEFORE `.resolve()` ever runs for an
+    absolute `owner_profile_path` -- `profile_path` stays exactly the
+    string the marker spelled, symlink and all. If a future edit removed
+    that guard and ran `(durable_root / profile_path).resolve()`
+    unconditionally, `.resolve()` would canonicalize a symlinked
+    owner_profile_path to its TARGET -- pathlib's own `/` semantics can't
+    hide that difference the way they hid it for a plain external file,
+    because `.resolve()` is the one operation in this join that actually
+    changes a symlink's own path string.
+
+    Proven through a DIAGNOSTIC, not a success/failure split: the marker
+    names a symlink whose target holds deliberately invalid YAML, so
+    validate_draft.py's own `_fatal()` message interpolates whatever
+    `profile_path` resolved to. The correct (is_absolute()-guarded)
+    behavior reports the SYMLINK's own path; a canonicalizing regression
+    would report the TARGET's path instead -- a different string, naming a
+    different file, that this assertion would catch."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+
+    external_dir = tmp_path / "external_profile_location"
+    external_dir.mkdir()
+    real_target = external_dir / "real_profile.yml"
+    real_target.write_text("key: [1, 2\n", encoding="utf-8")  # deliberately invalid YAML
+    symlink_path = external_dir / "profile_symlink.yml"
+    symlink_path.symlink_to(real_target)
+
+    marker = {"owner_profile_path": str(symlink_path)}
+    (root / ".literary-translator-root.json").write_text(json.dumps(marker), encoding="utf-8")
+
+    elsewhere = tmp_path / "nowhere-near-the-durable-root"
+    elsewhere.mkdir()
+
+    result = run_validate_with_cwd(root, "seg01", elsewhere)
+
+    assert result.returncode == 2, (
+        f"expected the invalid-YAML fatal (exit 2), got rc={result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert str(symlink_path) in result.stderr, (
+        f"the diagnostic must name the SPELLED symlink path -- got:\n{result.stderr}"
+    )
+    assert real_target.name not in result.stderr, (
+        f"the diagnostic must NOT name the canonicalized target -- a regression that ran "
+        f".resolve() unconditionally would report {real_target.name} instead of "
+        f"{symlink_path.name}:\n{result.stderr}"
+    )
 
 
 # ---------------------------------------------------------------------------

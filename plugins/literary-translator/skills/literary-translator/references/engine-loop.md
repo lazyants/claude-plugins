@@ -655,3 +655,27 @@ driver-stranded `in_progress` unit (`references/ledger-and-resumability.md`) all
 end the same way — a unit no longer dispatched while the round summary still reads
 complete. **Reconcile the dispatch COUNT against the requested set every round**;
 `dispatched = N-1` for N requested units is the cheapest detector of all three.
+
+**A fourth cause, closed in the driver since #920 — recognise it on an older
+installed copy.** A stored verdict whose `findings` list is EMPTY has the same
+shape and none of the same remedy: there is nothing for a fix turn to apply, so
+the draft stays byte-identical, `draft_sha1` keeps matching, and the round
+returns `needs_fix` forever. `reject_review.py` does not release it either — its
+own gate refuses any review whose `clean` is not `False`, and the verdict that
+produced the measured case was `clean: true` with `coverage_ok: false`. Nothing
+shipped writes or removes a `*.review.json`, so before the fix the only exit was
+moving that artifact aside by hand. The driver now re-reviews such a verdict once
+at the SAME round label and stops the unit under
+`reason: "review-empty-findings"` if the next one is also unusable. Only at a
+NUMBERED round: the mandatory `final` round still caps, there as for any other
+non-clean verdict. The upstream cause worth knowing about: a RELATIVE
+`owner_profile_path` in the durable root's ownership marker used to resolve
+against the CALLER's working directory, so the deterministic gate the reviewer
+is told to run first exited 2 in its sandbox while the operator saw `OK` from
+the durable root — two different answers from one command, with neither party
+wrong. That value is now resolved against `durable_root` by each of the six
+independent readers that open it: `validate_draft.py` (and every script
+importing its `load_profile()`), `select_segments.py`, `cache_key.py`,
+`extract.py.template`, and the driver's own two config loaders. `cache_key.py`
+and the extractor template always resolved it that way; the other four were
+brought into agreement with them.
