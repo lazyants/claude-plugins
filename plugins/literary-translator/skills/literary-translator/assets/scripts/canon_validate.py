@@ -4259,17 +4259,27 @@ def main(argv=None) -> int:
 # otherwise drift it out of another silently. Same reason
 # select_segments.py's _S3_NO_TOKEN is a constant.
 # The remedy this report recommends, spelled as an invocation that actually
-# RUNS. `segpack.py --all` alone exits 2: --particle-config and
-# --apparatus-policy are both REQUIRED (segpack.py's own argparse), and their
-# values are resolved literals from profile.yml, which this script does not
-# read. So the command is stated the way SKILL.md states every other segpack
-# and name_discovery invocation -- naming the profile key whose literal value
-# goes in each slot -- rather than printing a line an operator would paste and
-# watch fail. Stated ONCE: an operator-facing remedy that is wrong in one of
-# two branches is worse than one that is wrong in both, because only one of
-# them gets fixed.
+# RUNS from wherever the operator happens to be standing. Two things make the
+# obvious spelling fail, and BOTH were shipped and caught in review:
+#
+#   `segpack.py --all` alone exits 2. --particle-config and --apparatus-policy
+#   are REQUIRED by segpack.py's own argparse, and their values are resolved
+#   literals from profile.yml, which this script does not read -- so each slot
+#   names the profile key to read it from, the way SKILL.md spells every other
+#   segpack and name_discovery invocation.
+#
+#   A RELATIVE `scripts/segpack.py` exits 2 as well, from any cwd but the
+#   durable root -- and this script is self-anchored precisely so it can be
+#   run from anywhere, so its own advice must not quietly require a cwd it
+#   never states. SCRIPTS_DIR is already the resolved absolute directory this
+#   file lives in, so interpolating it costs nothing and removes the
+#   assumption.
+#
+# Stated ONCE, in one constant: an operator-facing remedy that is wrong in one
+# of two branches is worse than one wrong in both, because only one of them
+# gets noticed.
 _SCAN_REMEDY = (
-    "python3 scripts/segpack.py --all "
+    f"python3 {SCRIPTS_DIR / 'segpack.py'} --all "
     "--particle-config <source.language.particle_config's literal value> "
     "--apparatus-policy <footnotes.apparatus_policy's literal value>"
 )

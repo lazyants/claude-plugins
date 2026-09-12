@@ -879,18 +879,29 @@ def test_the_remedy_the_note_prints_is_a_command_that_actually_runs(tmp_path):
     assert "--particle-config" in note, ("the remedy omits a REQUIRED flag: " + note)
     assert "--apparatus-policy" in note, ("the remedy omits a REQUIRED flag: " + note)
 
-    # Lift the command out of the note and run it, with the placeholders
-    # resolved exactly as an operator reads them out of profile.yml.
-    start = note.index("python3 scripts/segpack.py")
+    # Lift the command out of the note and run it VERBATIM. The only
+    # substitution allowed here is the two profile.yml placeholders, which an
+    # operator resolves by reading their own profile. Anything else the test
+    # "fixes up" is a defect it has agreed not to see: the first version of
+    # this test rewrote the script path and set cwd to the durable root, and
+    # that is exactly how a relative `scripts/segpack.py` -- which exits 2 from
+    # any other cwd -- survived a passing test and reached review.
+    start = note.index("python3 ")
     end = note.index(" before dispatching")
     command = note[start:end]
     command = command.replace(
         "<source.language.particle_config's literal value>", FRENCH_CONFIG
     ).replace("<footnotes.apparatus_policy's literal value>", "translate_all")
     argv = command.split()
-    argv[1] = str(root / "scripts" / "segpack.py")
+    assert Path(argv[1]).is_absolute(), (
+        "the advertised script path must not depend on an unstated cwd: " + command
+    )
 
-    rebuilt = subprocess.run(argv, cwd=root, capture_output=True, text=True)
+    # Run it from a directory that is NOT the durable root and not its parent,
+    # which is the situation this script's self-anchoring exists to support.
+    foreign_cwd = tmp_path / "somewhere-else"
+    foreign_cwd.mkdir()
+    rebuilt = subprocess.run(argv, cwd=foreign_cwd, capture_output=True, text=True)
     assert rebuilt.returncode == 0, (
         "the remedy the note prints must RUN, not merely read well:\n"
         f"{command}\n{rebuilt.stdout}\n{rebuilt.stderr}"
