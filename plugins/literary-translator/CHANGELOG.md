@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.170.0 — 2026-09-12
+
+**A host that rate-limits was read as a fact about the citation, so the repair ladder re-sourced
+against it on every rung and the batch exhausted (#919).** `is_transient_fetch_outcome` covers the
+timeout, network-error, HTTP-protocol, TLS and DNS families, and deliberately has no `http_error:`
+branch — every HTTP status is an answer the peer delivered and we then declined, which for most 4xx
+is exactly right. For a host that refuses intermittently it is not. The row goes to `run_repair`,
+`batchRepairPrompt` tells the agent the URL could not be retrieved and is a fact about the URL, the
+agent re-sources — and for the reference terms in question the natural replacement is another page
+on the same refusing host. Three rungs, `citation-review-exhausted`, and per #892 the all-or-nothing
+merge is then blocked until an operator resets the batch by hand.
+
+Measured on one live glossary pass of 41 batches: six settled at `citation-review-exhausted` with
+three genuine repair rungs each and zero collisions; seven of the ten final-attempt failures were
+one host answering 403 — the same host that answered 47 fetches successfully in that same run. Given
+a fresh ladder, three of the six failed again, each rung on a DIFFERENT page of that same host.
+Cumulatively 13 refusals against about 47 successes, and nine of the 41 batches blocked at some
+point. A peer's unrelated book measured the same host at 58 of 70. So the loop is not a repair stuck
+on one dead URL (#857's shape); it is a repair that cannot see that the HOST is the problem, because
+nothing ever told it what happened to any other row in the run.
+
+**The driver now keeps a per-run record of which SOURCE hosts had a fetch end with 403, 429 or 5xx,
+and the repair prompt states it.** It is advisory and nothing else: no gate, no refusal, no new terminal
+state, and no change to the fetch retry policy. The paragraph reports the observed statuses and
+their counts and draws no conclusion — a host listed there may still be the best source available,
+and the judgment stays with the repair agent, which is the actor that can weigh it. The
+honest-downgrade rule is unchanged and still preferred over a second unverifiable URL. With an empty
+record the built prompt is byte-identical to the release before this one, which
+`glossary_dispatch_driver.test.py` pins verbatim.
+
+**Three details are load-bearing rather than incidental.** The tally accumulates over every fetch
+pass, not the last one: a 403 whose row succeeds on the retry pass is precisely the measured pattern,
+so the pass that retried must not erase it. Every host involved in the CURRENT repair is listed
+uncapped — a repair carries up to a whole batch's failed rows, and the host refusing right now is
+the one about to be re-picked — while run history is capped at 10 further hosts. And the host names
+come from the approved snapshot's own rows, never from `index.json`, never from the server-chosen
+`final_origin`, and never from a retrieved body, so the boundary #347 established — the process that
+decides what to fetch next never reads what was retrieved — does not move. The prompt says "fetches
+of source URLs on these hosts ENDED with" rather than "these hosts answered", because the fetcher
+follows cross-host redirects and records the last hop's status.
+
+The issue's second candidate — treating `http_error:403` as transient once the host has succeeded in
+the same run — was considered and cut. It changes the retry policy on a premise the corpus cannot
+answer: those 403s were never retried, so nothing measured says a rate limit clears inside the
+ladder's roughly 75 seconds. The reproduced failure is a steering defect, not a retry defect.
+
+Both changed files are `PLUGIN_BUNDLE_MEMBERS` entries, so this release moves `plugin_bundle_hash`
+and marks every converged segment in every project stale. That is unavoidable: the defect lives in
+exactly those two files.
+
+Two hardenings of the same class the review rounds kept finding came out of the closing passes.
+`_safe_host` refuses a SCOPED IPv6 literal outright rather than bounding its scope id: `%1`, `%01`
+and `%001` were three tally keys for one endpoint `getaddrinfo` treats as one, and a scope id may
+carry punctuation no DNS label may. The rejection costs nothing, because a scoped address is
+link-local and `fetch_citation.py` refuses to fetch one. And `read_outcome_pairs` now requires the
+evidence index's root to be an object — a list, `null`, a number or a string reached `.get` and
+raised an `AttributeError` that escaped the driver's own error path — and rejects a Boolean
+`item_index`, which `isinstance(True, int)` had been admitting as row 1.
+
+
 ## 1.162.0 — 2026-09-12
 
 **A single-word name the canon had already frozen could still ship without its target form, because
