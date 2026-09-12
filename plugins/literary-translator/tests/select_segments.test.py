@@ -2324,6 +2324,159 @@ def _load_script_module(name):
     return mod
 
 
+# ---------------------------------------------------------------------------
+# #920: load_glossary_config()'s own ownership-marker reader. Exercised as a
+# direct function call against the REAL select_segments.py (via
+# _load_script_module() above), never through the full CLI -- reaching this
+# function through run()/check_glossary_current() would additionally require
+# staging a glossary run directory, glossary_batch_plan.py, canon.json and
+# name_candidates.json, none of which this narrow fix touches. A minimal
+# durable_root -- just the ownership marker plus a profile.yml carrying the
+# schema-required `glossary` block -- is everything load_glossary_config()
+# itself ever reads.
+# ---------------------------------------------------------------------------
+
+def _glossary_config_durable_root(tmp_path, owner_profile_path=None, profile_relpath="profile.yml"):
+    """Builds the minimal durable_root load_glossary_config() needs: the
+    ownership marker plus a profile.yml at `durable_root / profile_relpath`
+    (default the exact filename a same-directory relative marker would
+    name). `owner_profile_path`, if given, overrides the marker's own value
+    verbatim -- absent, it defaults to the ABSOLUTE path of the profile.yml
+    just written, exactly like every pre-#920 caller of this fixture would
+    have needed."""
+    root = tmp_path / "durable_root"
+    root.mkdir(parents=True, exist_ok=True)
+    profile_path = root / profile_relpath
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(
+        json.dumps({"glossary": {"research_mode": "adjudicate"}}), encoding="utf-8",
+    )
+    marker = {
+        "owner_profile_path": (
+            owner_profile_path if owner_profile_path is not None else str(profile_path)
+        )
+    }
+    (root / ".literary-translator-root.json").write_text(json.dumps(marker), encoding="utf-8")
+    return root, profile_path
+
+
+def test_load_glossary_config_relative_owner_profile_path_resolves_against_durable_root(
+    tmp_path, monkeypatch,
+):
+    """#920: mirrors validate_draft.py's own fix -- a relative
+    `owner_profile_path` is durable-root-relative, not cwd-relative. The
+    marker here holds only "profile.yml", no directory component, so a
+    cwd-relative `Path(...)` would look for it beside whatever directory
+    the CALLER happens to be running from and fail; only a join against
+    `durable_root` (the explicit parameter this function already takes)
+    ever finds it.
+
+    The test MUST chdir away from durable_root -- without that this proves
+    nothing, because a bug reading `Path(owner_profile_path)` bare would
+    still coincidentally find profile.yml if the process cwd happened to
+    already BE durable_root (e.g. because an earlier test in this session
+    left it there, or because that is where pytest itself was launched
+    from)."""
+    root, _ = _glossary_config_durable_root(tmp_path, owner_profile_path="profile.yml")
+    elsewhere = tmp_path / "nowhere-near-the-durable-root"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    module = _load_script_module("select_segments.py")
+    assert module.load_glossary_config(root) == {"enabled": True, "min_candidate_freq": None}
+
+
+def test_load_glossary_config_absolute_owner_profile_path_is_untouched_by_the_join(
+    tmp_path, monkeypatch,
+):
+    """The companion COMPATIBILITY pin: an ABSOLUTE `owner_profile_path` --
+    here pointing OUTSIDE durable_root entirely -- must behave exactly as
+    before #920, with an external profile still loading correctly. Same
+    demonstrably-elsewhere cwd as the relative test above.
+
+    NOTE, corrected after code review: pathlib's own `/` operator DISCARDS
+    its left operand whenever the right one is absolute (`Path("/a") /
+    Path("/b") == Path("/b")`), so `(durable_root / profile_path).resolve()`
+    would land on this exact same external file even if `is_absolute()`
+    were removed and the join ran unconditionally -- this test alone
+    cannot distinguish "the guard skipped the join" from "the join ran
+    anyway and happened to land on the same path". See the symlink test
+    below for the one mutation that DOES make is_absolute() load-bearing
+    and observable."""
+    external_dir = tmp_path / "external_profile_location"
+    external_dir.mkdir()
+    external_profile_path = external_dir / "profile.yml"
+    external_profile_path.write_text(
+        json.dumps({"glossary": {"research_mode": "adjudicate", "min_candidate_freq": 3}}),
+        encoding="utf-8",
+    )
+    root = tmp_path / "durable_root"
+    root.mkdir()
+    marker = {"owner_profile_path": str(external_profile_path)}
+    (root / ".literary-translator-root.json").write_text(json.dumps(marker), encoding="utf-8")
+    assert not (root / "profile.yml").exists(), (
+        "fixture bug: no profile.yml under durable_root at all -- a buggy "
+        "join that re-roots the absolute value would find nothing there "
+        "and fatal, rather than silently passing against the wrong file"
+    )
+
+    elsewhere = tmp_path / "nowhere-near-the-durable-root"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    module = _load_script_module("select_segments.py")
+    assert module.load_glossary_config(root) == {"enabled": True, "min_candidate_freq": 3}
+
+
+def test_load_glossary_config_absolute_owner_profile_path_that_is_a_symlink_is_never_canonicalized(
+    tmp_path, monkeypatch,
+):
+    """The mutation the sibling test above CANNOT catch, per code review:
+    is_absolute() short-circuits BEFORE `.resolve()` ever runs for an
+    absolute `owner_profile_path` -- `profile_path` stays exactly the
+    string the marker spelled, symlink and all. A future edit that removed
+    that guard and ran `(durable_root / profile_path).resolve()`
+    unconditionally would canonicalize a symlinked owner_profile_path to
+    its TARGET -- the one case pathlib's own `/` semantics cannot make
+    look identical, because `.resolve()` is what actually changes a
+    symlink's own path string.
+
+    Proven through the FatalError DIAGNOSTIC, not a success/failure split:
+    the marker names a symlink whose target holds deliberately invalid
+    YAML, so load_glossary_config()'s own `fatal()` message interpolates
+    whatever `profile_path` resolved to. The correct (is_absolute()-
+    guarded) behavior names the SYMLINK's own path; a canonicalizing
+    regression would name the TARGET's path instead."""
+    external_dir = tmp_path / "external_profile_location"
+    external_dir.mkdir()
+    real_target = external_dir / "real_profile.yml"
+    real_target.write_text("key: [1, 2\n", encoding="utf-8")  # deliberately invalid YAML
+    symlink_path = external_dir / "profile_symlink.yml"
+    symlink_path.symlink_to(real_target)
+
+    root = tmp_path / "durable_root"
+    root.mkdir()
+    marker = {"owner_profile_path": str(symlink_path)}
+    (root / ".literary-translator-root.json").write_text(json.dumps(marker), encoding="utf-8")
+
+    elsewhere = tmp_path / "nowhere-near-the-durable-root"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    module = _load_script_module("select_segments.py")
+    with pytest.raises(module.FatalError) as excinfo:
+        module.load_glossary_config(root)
+    message = json.loads(str(excinfo.value))["error"]
+    assert str(symlink_path) in message, (
+        f"the diagnostic must name the SPELLED symlink path -- got: {message}"
+    )
+    assert real_target.name not in message, (
+        f"the diagnostic must NOT name the canonicalized target -- a regression that ran "
+        f".resolve() unconditionally would report {real_target.name} instead of "
+        f"{symlink_path.name}: {message}"
+    )
+
+
 def test_a_dangling_symlink_sentinel_is_not_read_as_absent(tmp_path):
     """THE case the finding is about, reader half. `Path.exists()` follows the
     link and reports False for a dangling one, so the pre-fix gate let the

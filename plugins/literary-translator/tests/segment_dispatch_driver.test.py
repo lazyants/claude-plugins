@@ -470,13 +470,40 @@ def main():
         # the current draft -- rather than the default always-clean,
         # always-matching review below. Absent, this reproduces the
         # pre-existing unconditional shape exactly.
-        review_draft_sha1 = spec.get("review_draft_sha1")
+        #
+        # #920 budget-boundary tests need something the plain "review_*"
+        # keys above cannot express: the FIRST review dispatch and the
+        # RETRY dispatch for the same seg carrying two DIFFERENT verdict
+        # shapes (e.g. a fabricated loc, then an empty findings list) --
+        # proving the shared unusable_verdict_retries counter, not two
+        # independent ones, is what bounds the loop. "review_sequence", if
+        # present, is a list of per-call step dicts (each using the same
+        # review_* keys) indexed by a call counter persisted alongside the
+        # argv log; the counter clamps at the sequence's last entry so a
+        # test only has to name as many steps as actually differ. Absent
+        # "review_sequence", `step` is `spec` itself, so every review_*
+        # lookup below falls back to the exact same spec.get(key, default)
+        # this fixture always did -- byte-identical for every test that
+        # predates this addition.
+        review_sequence = spec.get("review_sequence")
+        if review_sequence:
+            count_path = cwd / "test_fixture_review_call_count.json"
+            counts = {}
+            if count_path.is_file():
+                counts = json.loads(count_path.read_text(encoding="utf-8"))
+            call_index = counts.get(args.seg, 0)
+            counts[args.seg] = call_index + 1
+            count_path.write_text(json.dumps(counts), encoding="utf-8")
+            step = review_sequence[min(call_index, len(review_sequence) - 1)]
+        else:
+            step = spec
+        review_draft_sha1 = step.get("review_draft_sha1", spec.get("review_draft_sha1"))
         if review_draft_sha1 is None:
             review_draft_sha1 = sha1_mod.draft_content_sha1(draft_path)
         review = {
-            "clean": spec.get("review_clean", True),
-            "coverage_ok": spec.get("review_coverage_ok", True),
-            "findings": spec.get("review_findings", []),
+            "clean": step.get("review_clean", spec.get("review_clean", True)),
+            "coverage_ok": step.get("review_coverage_ok", spec.get("review_coverage_ok", True)),
+            "findings": step.get("review_findings", spec.get("review_findings", [])),
             "draft_sha1": review_draft_sha1, "dispatch_token": args.expect_token,
         }
         (segments_dir / (args.seg + ".review.json")).write_text(json.dumps(review), encoding="utf-8")
@@ -5195,8 +5222,8 @@ def test_derive_next_action_already_converged_round_1_when_clean_and_draft_match
 def test_derive_next_action_already_converged_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """codex round-4 ("Tests that could not fail"): current_draft_sha1()'s
     third argument -- dirs["scripts_dir"] -- is what makes this "clean and
-    draft matches" branch (segment_dispatch_driver.py:5200, feeding the
-    already_converged decision at :5227) hash the draft using the TRUSTED
+    draft matches" branch (segment_dispatch_driver.py:5238, feeding the
+    already_converged decision at :5265) hash the draft using the TRUSTED
     plugin tree's draft_sha1.py under --plugin-root, never the durable
     root's own writable, self-anchored copy (current_draft_sha1()'s own
     `scripts_dir=SCRIPTS_DIR` default). That default matters because the
@@ -5261,6 +5288,128 @@ def test_derive_next_action_needs_fix_when_not_clean_and_draft_unchanged(tmp_pat
     assert driver_mod.derive_next_action("seg01", ctx) == {
         "action": "needs_fix", "round_label": "1", "findings": findings,
     }
+
+
+def test_derive_next_action_non_empty_findings_still_needs_fix_even_at_the_920_shape(tmp_path):
+    """The mirror image of every #920 empty-findings test below: a NUMBERED
+    round carrying `clean: true, coverage_ok: false` -- the exact shape
+    issue #920 reports -- but with a REAL, non-empty findings list must
+    still return `needs_fix`, never `{"action": "review", ...,
+    "cause": "empty_findings"}`. The new `if not findings:` guard sits
+    directly above the tri-state guard that used to own this whole shape;
+    this pins that the new guard only intercepts the EMPTY case and never
+    widens to swallow the ordinary needs_fix path just because `clean` is
+    true or `coverage_ok` is false."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="1", clean=True, coverage_ok=False,
+                       draft_sha1=draft_sha1, findings=findings)
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "needs_fix", "round_label": "1", "findings": findings,
+    }
+
+
+@pytest.mark.parametrize("clean", [True, False])
+def test_derive_next_action_empty_findings_re_reviews_instead_of_needs_fix(tmp_path, clean):
+    """#920: a `needs_fix` whose findings list is EMPTY is always a wedge --
+    `needs_fix` exists solely to hand findings to a fix turn
+    (render_fix_prompt()), and a fix turn given nothing to substantiate
+    correctly leaves the draft byte-identical, so the pre-#920 tri-state
+    guard would return this exact `needs_fix` again on every later
+    invocation, forever.
+
+    Parametrized over BOTH `clean` values the tri-state guard's three arms
+    could otherwise reach: `clean: true, coverage_ok: false` is the shape
+    the real book run in #920 actually produced (a reviewer that judged the
+    draft correctly clean on the content it reviewed, but flagged coverage
+    as incomplete, with nothing further to say); `clean: false,
+    coverage_ok: false` is self-contradictory -- a non-clean verdict with
+    no finding to justify it -- and is refused nowhere upstream, so it must
+    land on the identical `cause: "empty_findings"` re-review rather than
+    silently reaching needs_fix through the OTHER arm of the same guard.
+    Both are non-final numbered rounds, so neither the `clean and
+    coverage_ok` branch nor the `matched_round_label == "final"` branch
+    above intercepts them first."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="1", clean=clean, coverage_ok=False,
+                       draft_sha1=draft_sha1, findings=[])
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "1", "cause": "empty_findings",
+    }, (
+        "an empty findings list must never reach needs_fix, whatever "
+        "`clean` says on its own"
+    )
+
+
+def test_derive_next_action_empty_findings_re_reviews_when_the_review_has_no_draft_sha1(tmp_path):
+    """The `reviewed_sha1 is None` arm of the SAME tri-state guard #920
+    closes for empty findings -- a stored review with no `draft_sha1` key
+    at all. This never becomes present through a normal fix-turn write
+    (review_ready.py schema-refuses a promoted review without it), so it
+    is a hand-written or older artifact, but the pre-#920 guard would still
+    have handed it straight to needs_fix on findings: [] -- the identical
+    wedge as the other two arms, just reached through a different missing
+    fact rather than a stale sha1."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    review = {
+        "clean": True, "coverage_ok": False, "findings": [],
+        "dispatch_token": driver_mod.review_dispatch_token(_DNA_RUN_ID, "seg01", "1"),
+    }
+    (root / "segments" / "seg01.review.json").write_text(json.dumps(review), encoding="utf-8")
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "1", "cause": "empty_findings",
+    }
+
+
+def test_derive_next_action_empty_findings_raises_instead_of_re_reviewing_when_current_sha1_is_unobtainable(
+    tmp_path, monkeypatch,
+):
+    """The one arm #920 does NOT turn into a re-review: when the draft's
+    own current content sha1 cannot even be computed, this function has no
+    draft to re-review either. Raising (via fatal(), reusing the exact
+    argument and mechanism the `matched_round_label == "final"` branch
+    already uses for the identical infrastructure failure) is correct
+    because spending a codex job judging a draft this process cannot read
+    would be the same cost that branch already refuses -- and the message
+    must carry the ORIGINAL cause verbatim, never a second, possibly
+    differently-failing probe, and never the generic `needs_fix` shape."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="1", clean=True, coverage_ok=False,
+                       draft_sha1=draft_sha1, findings=[])
+
+    def _unreadable_current_draft_sha1(seg, segments_dir, scripts_dir):
+        raise driver_mod.DriverError(f"simulated draft_sha1 failure for {seg}")
+
+    monkeypatch.setattr(driver_mod, "current_draft_sha1", _unreadable_current_draft_sha1)
+
+    with pytest.raises(driver_mod.DriverError) as excinfo:
+        driver_mod.derive_next_action("seg01", ctx)
+    assert "simulated draft_sha1 failure" in str(excinfo.value), (
+        "the ORIGINAL cause must survive to the operator, not be replaced by "
+        "a generic message from a second probe"
+    )
+
+    result = driver_mod.process_segment("seg01", ctx)
+    assert result["outcome"] == "failed", result
+    assert result["reason"] == "unexpected-error:DriverError", (
+        f"an uncomputable draft sha1 behind an empty-findings review must land "
+        f"in the recoverable, no-ledger-write row of process_segment()'s own "
+        f"outcome table, never a needs_fix dispatch -- got {result}"
+    )
+    assert not (root / "runs" / "ledger.d" / "seg01.json").exists(), (
+        "no ledger write of any kind on this infrastructure failure"
+    )
 
 
 def test_derive_next_action_advances_to_round_2_when_not_clean_but_fix_already_applied(tmp_path):
@@ -6230,7 +6379,7 @@ def test_derive_next_action_fabricated_loc_gate_respects_node_bin(tmp_path):
 
 def test_derive_next_action_invalid_post_fix_draft_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """The invalid_post_fix_draft branch's own current_draft_sha1() call
-    (segment_dispatch_driver.py:5055) is a SECOND call site sharing the
+    (segment_dispatch_driver.py:5093) is a SECOND call site sharing the
     identical --plugin-root trust boundary as the already_converged
     branch's (see the sibling test above) -- untested here for the same
     reason: every existing --plugin-root fixture stages the REAL,
@@ -8095,6 +8244,270 @@ def test_a_claimed_persistently_fabricated_loc_still_classifies_at_the_max_fix_r
     assert len(review_dispatches) == 2, (
         f"exactly one retry (2 review dispatches) at this boundary, on the claimed "
         f"budget too -- got {len(review_dispatches)}: {review_dispatches}"
+    )
+
+
+_TERMINAL_LEDGER_STATUSES = frozenset({"converged", "non_converged", "blocked"})
+
+
+def _assert_no_terminal_ledger_write(root, seg):
+    """The #920 acceptance criterion is "writes NO NEW terminal ledger
+    fragment", never "writes no ledger fragment of any kind" -- a FRESH
+    segment's own translate dispatch already promotes an `in_progress`
+    fragment (`_translate_promotion_note`'s own note) as ordinary baseline
+    behavior, entirely unrelated to review-empty-findings/review-
+    fabricated-loc termination, and select_segments.py's own
+    classify_segment() treats `in_progress` exactly like "recoverable" --
+    it is what makes the segment eligible for the NEXT invocation's
+    default selection. What must never appear is a status this fix's own
+    retry-exhaustion path mints that select_segments.py's classify_
+    segment() would route away from "recoverable": `non_converged` and
+    `blocked` (HUMAN_ESCALATION_STATUSES, select_segments.py:1172) or
+    `converged` (WAS_CONVERGED_STATUSES, :1178) -- `blocked` in particular
+    is a THIRD terminal shape alongside the more familiar
+    `non_converged`/"cap" one this fix is actually about."""
+    frag_path = root / "runs" / "ledger.d" / f"{seg}.json"
+    if not frag_path.is_file():
+        return
+    status = json.loads(frag_path.read_text(encoding="utf-8")).get("status")
+    assert status not in _TERMINAL_LEDGER_STATUSES, (
+        f"review-empty-findings/review-fabricated-loc termination must never mint a new "
+        f"terminal ledger fragment -- found status={status!r} at {frag_path}"
+    )
+
+
+def test_a_persistently_empty_findings_verdict_terminates_after_exactly_one_retry(tmp_path):
+    """#920's second unusable-verdict shape, the mirror of
+    test_a_persistently_fabricated_loc_terminates_after_exactly_one_retry
+    above: a reviewer returning `clean: true, coverage_ok: false, findings:
+    []` on EVERY dispatch -- the exact shape the real book run reported --
+    must terminate after exactly ONE re-dispatch, under THIS DRIVER's own
+    "review-empty-findings" reason (unlike "review-fabricated-loc",
+    "review-empty-findings" names no template string at all -- a bounded
+    search finds it in no template -- because #920's guard is entirely
+    this driver's own reading of review.json, with no
+    findingsAuthentic()/matchedVerdict() equivalent to borrow a reason
+    from), never silently spend the whole per-segment iteration budget and
+    exit through the generic loop-exhaustion reason instead.
+
+    Proves the RENAMED, SHARED `unusable_verdict_retries` counter bounds
+    this cause exactly the way it already bounded `fabricated_loc` --
+    without a shared budget, this cause could otherwise claim the same
+    "+1 spare iteration" fabricated_loc already owns and never terminate on
+    its own dedicated reason at all."""
+    root = phase2_project(tmp_path, n=1)
+    write_codex_scenario(root, {
+        "review:seg01": {"review_clean": True, "review_coverage_ok": False, "review_findings": []},
+    })
+    driver_mod, ctx = _fixture_ctx(root, "20260101T000000Z")
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result == {"seg": "seg01", "converged": False, "outcome": "failed",
+                       "reason": "review-empty-findings"}, result
+
+    argv_log = (root / "test_fixture_argv_log.jsonl").read_text(encoding="utf-8").splitlines()
+    review_dispatches = [json.loads(ln) for ln in argv_log if json.loads(ln)["kind"] == "review"]
+    assert len(review_dispatches) == 2, (
+        f"expected exactly one retry (2 review dispatches total), got {len(review_dispatches)}: "
+        f"{review_dispatches}"
+    )
+    _assert_no_terminal_ledger_write(root, "seg01")
+
+
+def test_a_fabricated_loc_then_an_empty_findings_verdict_terminates_under_the_920_boundary(tmp_path):
+    """The whole POINT of renaming `fabricated_loc_retries` to the shared
+    `unusable_verdict_retries` and letting BOTH #920 causes spend the same
+    single-retry budget, at the schema's minimum `max_fix_rounds=1` where
+    there is exactly ONE spare classification iteration total (see the long
+    comment above process_segment()'s own `max_iterations`, and
+    codex_jobs_per_segment()'s docstring, both of which name this exact
+    scenario): a reviewer whose FIRST verdict is a fabricated loc and whose
+    RETRY verdict is an empty findings list.
+
+    If these were two INDEPENDENT counters, each cause would believe it
+    still had its own untouched budget and each would claim the single
+    shared spare iteration for its own retry -- exhausting the loop's raw
+    dispatch cap before either could ever be CLASSIFIED, and falling
+    through to the generic "loop-exhausted-without-terminal-state" reason
+    instead of naming either cause. A SHARED counter has already spent its
+    one retry on the fabricated loc, so the second unusable verdict (empty
+    findings) is recognized immediately, on the very next iteration, as the
+    terminal one -- and reported under ITS OWN reason, "review-empty-
+    findings", never the generic backstop.
+
+    This is the FRESH (unclaimed) path: codex_jobs_per_segment(1) = 3
+    (1 translate + review r1 + the one retry), so max_iterations = 4 -- one
+    translate, two review dispatches (round 1 fabricated, the retry empty),
+    and one further iteration that re-reads the retry's own review and
+    classifies it without dispatching anything new. Exactly the boundary
+    the single-cause sibling test already pins for fabricated_loc alone;
+    this is the two-cause version that only a genuinely SHARED counter can
+    pass."""
+    root = phase2_project(tmp_path, n=1)
+    write_codex_scenario(root, {
+        "review:seg01": {
+            "review_sequence": [
+                {"review_clean": False,
+                 "review_findings": [{"loc": "TASK", "severity": "major", "issue": "x", "suggest": "y"}]},
+                {"review_clean": True, "review_coverage_ok": False, "review_findings": []},
+            ],
+        },
+    })
+    driver_mod, ctx = _fixture_ctx(root, "20260101T000000Z", translate_cfg=dict(_FIXTURE_TRANSLATE_CFG, max_fix_rounds=1))
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result == {"seg": "seg01", "converged": False, "outcome": "failed",
+                       "reason": "review-empty-findings"}, (
+        f"the SECOND unusable verdict names the terminal reason, not the generic "
+        f"loop-exhaustion backstop -- got {result}"
+    )
+
+    argv_log = (root / "test_fixture_argv_log.jsonl").read_text(encoding="utf-8").splitlines()
+    review_dispatches = [json.loads(ln) for ln in argv_log if json.loads(ln)["kind"] == "review"]
+    assert len(review_dispatches) == 2, (
+        f"exactly one retry across BOTH causes combined (2 review dispatches total, never "
+        f"one retry PER cause) -- got {len(review_dispatches)}: {review_dispatches}"
+    )
+    _assert_no_terminal_ledger_write(root, "seg01")
+
+
+def test_a_claimed_fabricated_loc_then_an_empty_findings_verdict_terminates_under_the_920_boundary(tmp_path):
+    """The claimed-budget half of the test above -- codex_jobs_per_claimed_
+    segment(1) = 2 (review r1 + the one retry, no translate), so
+    max_iterations = 3: two review dispatches (round 1 fabricated, the
+    retry empty) plus the one further iteration that classifies the retry.
+    Same shared-counter proof, on the smaller budget a claimed id gets."""
+    root = phase2_project(tmp_path, n=1)
+    write_codex_scenario(root, {
+        "review:seg01": {
+            "review_sequence": [
+                {"review_clean": False,
+                 "review_findings": [{"loc": "TASK", "severity": "major", "issue": "x", "suggest": "y"}]},
+                {"review_clean": True, "review_coverage_ok": False, "review_findings": []},
+            ],
+        },
+    })
+    driver_mod, ctx = _fixture_ctx(
+        root, "20260101T000000Z",
+        translate_cfg=dict(_FIXTURE_TRANSLATE_CFG, max_fix_rounds=1),
+        claims={"seg01": "from-converged"},
+    )
+    _write_claimed_draft(driver_mod, root, "seg01", ctx.run_id)
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result == {"seg": "seg01", "converged": False, "outcome": "failed",
+                       "reason": "review-empty-findings"}, result
+
+    argv_log = (root / "test_fixture_argv_log.jsonl").read_text(encoding="utf-8").splitlines()
+    review_dispatches = [json.loads(ln) for ln in argv_log if json.loads(ln)["kind"] == "review"]
+    assert len(review_dispatches) == 2, (
+        f"exactly one retry across both causes on the claimed budget too -- "
+        f"got {len(review_dispatches)}: {review_dispatches}"
+    )
+    assert not (root / "runs" / "ledger.d" / "seg01.json").exists()
+
+
+def test_an_empty_findings_then_a_fabricated_loc_verdict_terminates_under_review_fabricated_loc(tmp_path):
+    """The REVERSE order of the shared-counter test above: the FIRST
+    verdict is empty findings, the RETRY is a fabricated loc. The shared
+    `unusable_verdict_retries` counter does not care which cause spends the
+    one retry first -- whichever cause is standing on the SECOND unusable
+    verdict names the terminal reason. Without a genuinely shared counter
+    (e.g. two independent per-cause counters), this order would also let
+    each cause believe it still had its own budget, so this test's own
+    reason -- the reverse of the sibling test above -- is what proves the
+    counter is symmetric, not accidentally ordered to favor one cause."""
+    root = phase2_project(tmp_path, n=1)
+    write_codex_scenario(root, {
+        "review:seg01": {
+            "review_sequence": [
+                {"review_clean": True, "review_coverage_ok": False, "review_findings": []},
+                {"review_clean": False,
+                 "review_findings": [{"loc": "TASK", "severity": "major", "issue": "x", "suggest": "y"}]},
+            ],
+        },
+    })
+    driver_mod, ctx = _fixture_ctx(root, "20260101T000000Z", translate_cfg=dict(_FIXTURE_TRANSLATE_CFG, max_fix_rounds=1))
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result == {"seg": "seg01", "converged": False, "outcome": "failed",
+                       "reason": "review-fabricated-loc"}, (
+        f"the SECOND unusable verdict (fabricated_loc this time) names the terminal reason -- "
+        f"got {result}"
+    )
+
+    argv_log = (root / "test_fixture_argv_log.jsonl").read_text(encoding="utf-8").splitlines()
+    review_dispatches = [json.loads(ln) for ln in argv_log if json.loads(ln)["kind"] == "review"]
+    assert len(review_dispatches) == 2, (
+        f"exactly one retry across both causes combined -- got {len(review_dispatches)}: {review_dispatches}"
+    )
+    _assert_no_terminal_ledger_write(root, "seg01")
+
+
+@pytest.mark.parametrize("pre_existing_status,pre_existing_reason", [
+    ("non_converged", "cap"),
+    ("blocked", None),
+])
+def test_a_persistent_empty_findings_verdict_leaves_a_pre_existing_terminal_fragment_untouched(
+    tmp_path, pre_existing_status, pre_existing_reason,
+):
+    """The acceptance criterion `_assert_no_terminal_ledger_write()` above
+    cannot cover on its own: "a pre-existing cap or block is left exactly
+    as it is today" (plan's Review adjudication #2, `accepted-tradeoff`) --
+    this path deliberately does NOT attach `reopen_capped` the way the
+    FINAL round's stale-cap re-review does (see that branch's own
+    docstring), so a segment that already carries a terminal
+    `non_converged`/"cap" fragment -- or, per code review, the OTHER
+    terminal shape, `blocked` -- from a PRIOR run must come out of this
+    path with that fragment BYTE-IDENTICAL, not merely "no new terminal
+    status" in the abstract.
+
+    Driven on the CLAIMED path deliberately, not the fresh one: a fresh
+    segment's own translate dispatch promotes an `in_progress` note via
+    write_ledger() (`_translate_promotion_note`), and ledger_update.py's
+    own "Full replace only" contract means that write would silently
+    replace whatever pre-existing fragment this test seeded before the
+    review-dispatch path is even reached -- proving nothing about THIS
+    fix's own behavior. The claimed path has no draft to dispatch (the
+    draft is written directly, exactly like the sibling claimed-budget
+    tests above), so the only write this loop could ever make is the one
+    under test.
+
+    Verified directly (not merely asserted here) that process_segment()
+    reaches this path with pre-existing terminal fragment: with no
+    `reopen_capped` handling anywhere near the empty-findings/fabricated-
+    loc branch (grep confirms it is scoped to the FINAL-round stale-cap
+    re-review only), and no ledger read gating dispatch at the top of the
+    loop, there is no code path that would refuse or reroute a claimed
+    segment merely because a terminal fragment already exists on disk --
+    this is exactly what lets a segment that WAS capped/blocked in a prior
+    run still be retried via an explicit --only-segs override, and this
+    test's own passing result is the proof."""
+    root = phase2_project(tmp_path, n=1)
+    write_codex_scenario(root, {
+        "review:seg01": {"review_clean": True, "review_coverage_ok": False, "review_findings": []},
+    })
+    driver_mod, ctx = _fixture_ctx(root, "20260101T000000Z", claims={"seg01": "from-converged"})
+    _write_claimed_draft(driver_mod, root, "seg01", ctx.run_id)
+
+    fragment_record = {"timestamp": "2026-01-01T00:00:00Z", "status": pre_existing_status}
+    if pre_existing_reason is not None:
+        fragment_record["reason"] = pre_existing_reason
+    fragment_path = write_fragment(root, "seg01", fragment_record)
+    before = fragment_path.read_bytes()
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result == {"seg": "seg01", "converged": False, "outcome": "failed",
+                       "reason": "review-empty-findings"}, result
+    assert fragment_path.read_bytes() == before, (
+        f"a pre-existing status={pre_existing_status!r} fragment must be left byte-identical -- "
+        f"this path must never attach reopen_capped or otherwise touch a durable record it did "
+        f"not itself write"
     )
 
 

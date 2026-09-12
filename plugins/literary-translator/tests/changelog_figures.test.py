@@ -504,6 +504,30 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
+    # ROTATED TO 1.150.0 (#920 -- a review verdict carrying no findings
+    # wedged the dispatch driver), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed: every
+    # digit-run in it is an IDENTIFIER -- the version (1.150.0), the
+    # release date, and the issue number (#920). A regex over the whole entry
+    # returns those three and nothing else.
+    #
+    # That is deliberate rather than lucky, and it cost the entry one sentence
+    # each time. The retry budget is stated as "exactly one spare
+    # classification iteration" and "the schema's minimum `max_fix_rounds`"
+    # rather than as the numbers those resolve to, because both are facts the
+    # driver owns and would have to be derived from it here to mean anything.
+    # The reach of the marker defect -- how many durable roots on the reporting
+    # operator's machine carried a relative `owner_profile_path` -- is a fact
+    # about durable roots in ANOTHER tree, exactly the kind no implementation
+    # here can re-derive, so the entry does not quote a count at all. What the
+    # tree DOES own is stated by NAMING it: `PLUGIN_BUNDLE_MEMBERS`,
+    # `unusable_verdict_retries`, `review-empty-findings`, the readers of the
+    # ownership marker.
+    #
+    #
+    # ------------------------------------------------------------------------
+    # The 1.144.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.144.0 (#927 -- a pointed Hebrew name absorbed an unrelated
     # word's occurrences because the fold key drops every vowel and
     # cantillation mark), per the maintenance contract above.
@@ -1419,7 +1443,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.144.0"
+FIGURES_VERSION = "1.150.0"
 
 
 def _newest_entry():

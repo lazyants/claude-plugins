@@ -343,9 +343,27 @@ def load_profile(durable_root=DURABLE_ROOT):
     if not owner_profile_path:
         _fatal(f"ownership marker at {marker_path} has no owner_profile_path")
 
+    # #920: owner_profile_path is durable-root-relative, not cwd-relative.
+    # Every supported workflow runs this script from durable_root, where a
+    # bare Path(...) and this join land on the same string -- but a relative
+    # marker value resolved against the CALLER's cwd made the whole ownership
+    # check cwd-dependent: a codex review job running in a per-invocation
+    # mkdtemp sandbox saw exit 2 for the identical `python3 validate_draft.py
+    # SEG` an operator running from durable_root saw exit 0 for. This is a
+    # migration, not strict backward compatibility -- it brings this site into
+    # agreement with cache_key.py's `load_profile()`, which has always
+    # resolved a relative owner_profile_path against durable_root. An
+    # ABSOLUTE owner_profile_path is untouched by is_absolute() below, so an
+    # external profile.yml still works, but a standalone invocation whose
+    # relative marker happened to resolve to an external profile from some
+    # OTHER cwd exits 2 after this change; such a setup now needs an absolute
+    # owner_profile_path, or one written `../...`-relative to durable_root.
     profile_path = Path(owner_profile_path)
+    if not profile_path.is_absolute():
+        profile_path = (durable_root / profile_path).resolve()
     if not profile_path.is_file():
-        _fatal(f"profile.yml not found at {profile_path} (per {marker_path})")
+        _fatal(f"profile.yml not found at {profile_path} (resolved from the "
+               f"ownership marker's owner_profile_path, per {marker_path})")
     try:
         profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:

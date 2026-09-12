@@ -3455,7 +3455,19 @@ not-clean, the driver stops at that segment and returns
 `outcome: "needs_fix"` — the round label, the findings, and the exact
 rendered fix prompt — then moves on/exits without fixing it (applying
 findings to a draft is a real LLM content-editing turn a plain Python process
-cannot perform). Someone — a human, or an orchestrating session — has to
+cannot perform). One shape is the exception, because no fix turn can act on
+it: a NUMBERED-round review whose `findings` list is EMPTY. There is nothing
+to apply, so a fix prompt rendered over it would leave the draft
+byte-identical and the driver would re-derive the same `needs_fix` on every
+later launch, forever. Since #920 that verdict is re-reviewed ONCE at the SAME
+round label instead, and a second unusable verdict stops the segment under
+`reason: "review-empty-findings"` — reported in `summary.failed`, and writing
+no terminal ledger entry of its own, so an id that was default-eligible before
+stays default-eligible. An id that already carried a cap or a block is
+untouched by this and stays `human_escalation`, reachable only by naming it
+back in. The mandatory `final` round is NOT covered: an empty-findings verdict
+there still caps, exactly as any other non-clean final verdict does.
+Someone — a human, or an orchestrating session — has to
 notice that: the only two channels it is ever announced on are the driver's
 own JSON output and its redirected log (`runs/driver.<SESSION_ID>.log`, per
 the launch command above), and what follows from reading either is the fix

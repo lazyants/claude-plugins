@@ -4082,7 +4082,7 @@ def acquire_and_hold_lease(lock_path: Path, what: str) -> "tuple[bool, str]":
     the admission decision rest on state that changed while we waited).
 
     The self-test after a successful acquire is
-    segment_dispatch_driver.py:1333-1388's, with ONE deliberate difference: it
+    segment_dispatch_driver.py:1341-1396's, with ONE deliberate difference: it
     warns and proceeds, THIS REFUSES. The asymmetry is the point. On an
     unenforced mount the driver's own acquire is merely not exclusive, whereas
     this script's standalone path would FALSELY ACQUIRE runs/.driver.lock while
@@ -4931,9 +4931,17 @@ def load_glossary_config(durable_root: Path) -> dict:
     owner_profile_path = marker.get("owner_profile_path") if isinstance(marker, dict) else None
     if not owner_profile_path:
         fatal(f"ownership marker at {marker_path} has no owner_profile_path")
+    # #920: owner_profile_path is durable-root-relative, not cwd-relative --
+    # mirrors cache_key.py's load_profile(), which has always resolved a
+    # relative owner_profile_path against durable_root. A bare Path(...) here
+    # made this gate's ownership check cwd-dependent instead. An ABSOLUTE
+    # owner_profile_path is untouched by is_absolute() below.
     profile_path = Path(owner_profile_path)
+    if not profile_path.is_absolute():
+        profile_path = (durable_root / profile_path).resolve()
     if not profile_path.is_file():
-        fatal(f"profile.yml not found at {profile_path} (per {marker_path})")
+        fatal(f"profile.yml not found at {profile_path} (resolved from the "
+              f"ownership marker's owner_profile_path, per {marker_path})")
     try:
         profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
