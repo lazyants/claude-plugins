@@ -1621,7 +1621,7 @@ structurally closed, for four independent reasons:
 
 A new top-level key in `canon.json` itself is rejected for the same reason
 `canon_link_groups.json` above is a sidecar and not a key: `_content_view`
-(`canon_validate.py:2619-2650`) treats any non-`generation_hashes` key as
+(`canon_validate.py:2620-2651`) treats any non-`generation_hashes` key as
 CONTENT, so adding one would force a `generation_hashes` re-stamp with
 nothing actually regenerated — the #291 hole this function's own docstring
 names.
@@ -1712,7 +1712,7 @@ three of `corpus`, `source_form` and `target_form` — not, as before, a
   draft observations — the class that was invisible before this corpus
   existed, because it never reached `canon.json` at all. Their route is
   NOT `--correct`, which refuses a `source_form` absent from canon
-  (`canon_validate.py:3154-3160`) and sends it to the ordinary glossary merge
+  (`canon_validate.py:3159-3166`) and sends it to the ordinary glossary merge
   instead — see `--report` below.
 - `multi_referent` is **exactly one member, total** — not one canon member
   plus whatever else, which counting only canon members would have

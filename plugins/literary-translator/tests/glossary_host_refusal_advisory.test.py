@@ -155,7 +155,7 @@ def test_safe_host_accepts_and_lowercases_an_ordinary_host(mod):
 
 
 def test_safe_host_normalizes_a_trailing_dot_like_the_fetcher(mod):
-    """fetch_citation.py:833-847 strips a trailing dot before comparing hosts;
+    """fetch_citation.py:835-849 strips a trailing dot before comparing hosts;
     counting the un-stripped form would silently split one host's tally in two."""
     assert mod._safe_host("https://EXAMPLE.com./x") == "example.com"
 

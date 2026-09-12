@@ -1861,7 +1861,7 @@ def _safe_host(url) -> "str | None":
          otherwise hide exactly the input this check exists to catch.
       2. urlsplit() itself raises ValueError on a malformed IPv6 literal.
       3. the trailing-dot-then-lowercase normalisation matches
-         fetch_citation.py's own (fetch_citation.py:833-847), so
+         fetch_citation.py's own (fetch_citation.py:835-849), so
          `https://example.com./x` counts under the same host that script
          fetched.
       4. an IP literal -- IPv4, or IPv6 already bracket-stripped by

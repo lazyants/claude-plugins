@@ -1,7 +1,44 @@
 # Changelog
 
-## 1.172.0 — 2026-09-12
+## 1.174.0 — 2026-09-12
+**`canon_validate.py --correct` rewrote canon.json and reported success while every already-built
+segpack still carried the pre-correction `canon_map` — and `canon_map` is what actually reaches the
+translate/review prompt (#910).** Nothing reported it: the per-segment `used_terms_hash` re-stale
+signal is written only on the convergence path, so a segment built at W3a but never translated has
+no cache key to compare against; the derivation-state gate cannot see a correction because
+`--correct` deliberately preserves the generation stamp; and the fresh-segpack precondition runs
+only on the claim-admission path, not on ordinary unclaimed `not_started` dispatch. Measured by the
+reporter on a live he->en book: four corrected targets, ten segments dispatched afterwards, 23
+superseded spans printed into the drafts — one of them naming a different book, not a different
+spelling.
 
+`--correct`'s own success output now carries `segpacks_scanned`, `segpacks_current`,
+`stale_segpacks`, `segpacks_unevaluated`, and a scoped `note`. It is a positive finding list, NOT a
+validity verdict on the segpacks — segpack.py's own W3a gate owns that, and the note says so. Exit
+code is unchanged in every case.
+
+**The same `--correct` docstring paragraph claimed a correction "never reaches translate" — the
+last live copy of wording #826 (#840, folded in).** #840 sat parked because `canon_validate.py` is a
+`cache_key.PLUGIN_BUNDLE_MEMBERS` file, with the unpark condition "the next release that already
+changes a `PLUGIN_BUNDLE_MEMBERS` file for its own reasons." This release is that one; the stale
+sentence retires along with the fix it was wrong about.
+
+**Cost, stated plainly.** This release moves `plugin_bundle_hash`. That field is one of the three
+`SAFE_STALE_CARVEOUT_FIELDS` (`final_audit.py`), so a converged segment whose only mismatched
+field is this one is counted as `stale_previously_converged` and `project_complete` is computed net
+of it — the final audit does not block and nothing re-translates on account of this release alone.
+The carve-out's premise was checked against this diff rather than assumed: the change adds an
+output field and rewrites prose, and alters no decision, no frozen value, and nothing a translation
+should say.
+
+Residuals, all disclosed: a `--merge-batches` run performed after W3a leaves packs equally stale and
+equally unreported, not addressed here; the check iterates each pack's own `names[]`, so a canonized
+name the candidate extractor dropped from a segment is in neither `names[]` nor `canon_map{}` and is
+not visited — a pre-existing blind spot, the subject of sibling issue #917, neither introduced nor
+widened here; a `remove` of an entry whose `canonical_target_form` was already empty produces no
+`canon_map` mismatch and is not listed; and the no-exit-change guarantee is scoped to `Exception`
+and `SystemExit` — `KeyboardInterrupt` is deliberately not caught.
+## 1.172.0 — 2026-09-12
 **A citation whose host serves one application shell for every address was recorded as `fetched`,
 and cost a judge dispatch and often a whole-fragment regeneration to discover (#918).** The
 retrieval boundary tested that a response decoded, never that the body was this URL's own page, so

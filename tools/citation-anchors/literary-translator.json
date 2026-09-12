@@ -757,13 +757,6 @@
       ],
       "claim": "def _parse_obsidian_frontmatter_enum(): \"\"\"obsidian.md:58 -- the entity-note frontmatter's `basis:` pipe-enum line inside the fenced YAML example block.\"\"\" text = OBSIDIAN_SPEC.read_text(encoding=\"utf-8\") m = re.search(r\"^basis:\\s*([a-z_ |]+)$\", text, re.MULTILINE) assert m, \"no 'basis: a | b | c' frontmatter line found in obsidian.md\""
     },
-    "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:4178-4218\", 0]": {
-      "anchors": [
-        "elif args.restamp_derivation:",
-        "elif args.batch is not None:"
-      ],
-      "claim": "# `resolve_cache_key_script`/`_stamp_generation_hash` are shared code, but # each of these three threads its OWN `plugin_root_str` parameter through # from `main()`'s dispatch (canon_validate.py:3970-4017) to its own # `_stamp_write_verify` call -- a regression in any one of those three # threading sites would not be caught by the `--init` test above."
-    },
     "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"cache_key.py:202-276\", 0]": {
       "anchors": [
         "PLUGIN_BUNDLE_MEMBERS = (",
@@ -1404,14 +1397,6 @@
       ],
       "claim": "risk-accepted (`canon_adjudication_audit.py:989-1007`, `:1275-1282`, `:1725-1731`) — landing a proposal there would make it a Deliver-time blocker on any projec"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2619-2650\", 0]": {
-      "anchors": [
-        "def _content_view",
-        "everything except the stamp itself",
-        "if k != \"generation_hashes\""
-      ],
-      "claim": "`canon_link_groups.json` above is a sidecar and not a key: `_content_view` (`canon_validate.py:2619-2650`) treats any non-`generation_hashes` key as CONTENT, so"
-    },
     "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"orchestration-and-batching.md:252\", 0]": {
       "anchors": [
         "orchestration_bundle_hash` is non-gating for convergence — never part of"
@@ -1443,13 +1428,6 @@
         "def _name_entry_forms(entry):"
       ],
       "claim": "names[] rows are read with final_audit's own _name_entry_forms, which already accepts both field conventions draft.schema.json permits, rather than a reimplementation in the harmonisation step."
-    },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:3154-3160\", 0]": {
-      "anchors": [
-        "if source_form not in entries:",
-        "ordinary glossary-pass merge"
-      ],
-      "claim": "--report offers a --correct skeleton only for a member whose source_form is a live canon key: --correct refuses a form it cannot find and directs it to the ordinary glossary merge, so a skeleton naming an uncanonized form would be a paste that cannot work."
     },
     "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"glossary_batch_plan.py:390-414\", 0]": {
       "anchors": [
@@ -1642,19 +1620,74 @@
       "claim": "`blocked` (HUMAN_ESCALATION_STATUSES, select_segments.py:1172) or `converged` (WAS_CONVERGED_STATUSES, :1178) -- `blocked` in particular is a THIRD terminal shape alongside the more familiar",
       "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/glossary_dispatch_driver.py\", \"fetch_citation.py:833-847\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2620-2651\", 0]": {
       "anchors": [
-        "host = host.lower()",
-        "host = host.rstrip(\".\")"
+        "def _content_view",
+        "everything except the stamp itself",
+        "if k != \"generation_hashes\""
       ],
-      "claim": "3. the trailing-dot-then-lowercase normalisation matches fetch_citation.py's own (fetch_citation.py:833-847), so `https://example.com./x` counts under the same host that script fetched. (#919 -- _safe_host must fold a host exactly as the fetcher did, or one host's refusal tally splits in two.)"
+      "claim": "`canon_link_groups.json` above is a sidecar and not a key: `_content_view` (`canon_validate.py:2620-2651`) treats any non-`generation_hashes` key as CONTENT, so"
     },
-    "[\"plugins/literary-translator/tests/glossary_host_refusal_advisory.test.py\", \"fetch_citation.py:833-847\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/canon_validate.py\", \"segpack.py:1102\", 0]": {
+      "anchors": [
+        "canon_path = DURABLE_ROOT / \"canon.json\""
+      ],
+      "claim": "The applicability check is an IDENTITY against `DURABLE_ROOT / \"canon.json\"`, not a path comparison against whatever `canon_path` is. `segpack.py` hard-codes that same path (`segpack.py:1102`) and can read no other one, so a report computed against a different file would name packs its own recommended remedy (`segpack.py --all`) cannot touch."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/canon_validate.py\", \"select_segments.py:316-322\", 0]": {
+      "anchors": [
+        "except (ImportError, OSError) as _json_stdout_exc",
+        "sys.exit("
+      ],
+      "claim": "`SystemExit` is not an `Exception`: `select_segments.py`'s own sibling loader for `json_stdout.py` calls `sys.exit()` on a staging gap (`select_segments.py:316-322`), and that call must not be allowed to walk past this function and fail an already-applied, already-verified correction."
+    },
+    "[\"plugins/literary-translator/tests/canon_correct_stale_segpacks.test.py\", \"select_segments.py:316-322\", 0]": {
+      "anchors": [
+        "except (ImportError, OSError) as _json_stdout_exc",
+        "sys.exit("
+      ],
+      "claim": "select_segments.py present but its MODULE BODY raises SystemExit -- mirroring select_segments.py's own real json_stdout.py loader, which calls sys.exit() when ITS sibling is missing (select_segments.py:316-322)."
+    },
+    "[\"plugins/literary-translator/tests/canon_correct_stale_segpacks.test.py\", \"canon_correct_entry.test.py:767-771\", 0]": {
+      "anchors": [
+        "(\"confidence\", \"medium\")",
+        "ids=[\"confidence\", \"note\", \"category\"]"
+      ],
+      "claim": "The interlock compares the whole new_entry against old_entry, so a same-target correction (confidence-only, here) is legal -- canon_correct_entry.test.py:767-771 already proves that, parametrizing confidence/note/category as fields a correction may move on its own."
+    },
+    "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:4185-4225\", 0]": {
+      "anchors": [
+        "elif args.restamp_derivation:",
+        "elif args.batch is not None:"
+      ],
+      "claim": "# `resolve_cache_key_script`/`_stamp_generation_hash` are shared code, but # each of these three threads its OWN `plugin_root_str` parameter through # from `main()`'s dispatch (canon_validate.py:3970-4017) to its own # `_stamp_write_verify` call -- a regression in any one of those three # threading sites would not be caught by the `--init` test above."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:3159-3166\", 0]": {
+      "anchors": [
+        "if source_form not in entries:",
+        "ordinary glossary-pass merge"
+      ],
+      "claim": "--report offers a --correct skeleton only for a member whose source_form is a live canon key: --correct refuses a form it cannot find and directs it to the ordinary glossary merge, so a skeleton naming an uncanonized form would be a paste that cannot work."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/canon_validate.py\", \"select_segments.py:3050\", 0]": {
+      "anchors": [
+        "if len(segpack_mismatches) == 1 and \"error\" in segpack_mismatches[0]:"
+      ],
+      "claim": "Read the producer's error sentinel exactly as its ONE other caller does (select_segments.py:3050). An exact-key-set test is stricter and degrades worse: an error dict that ever gained a second key would fall through to the mismatch arm and raise KeyError."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/glossary_dispatch_driver.py\", \"fetch_citation.py:835-849\", 0]": {
       "anchors": [
         "host = host.lower()",
         "host = host.rstrip(\".\")"
       ],
-      "claim": "fetch_citation.py:833-847 strips a trailing dot before comparing hosts; counting the un-stripped form would silently split one host's tally in two."
+      "claim": "3. the trailing-dot-then-lowercase normalisation matches fetch_citation.py's own (fetch_citation.py:835-849), so `https://example.com./x` counts under the same host that script fetched. (#919 -- _safe_host must fold a host exactly as the fetcher did, or one host's refusal tally splits in two.)"
+    },
+    "[\"plugins/literary-translator/tests/glossary_host_refusal_advisory.test.py\", \"fetch_citation.py:835-849\", 0]": {
+      "anchors": [
+        "host = host.lower()",
+        "host = host.rstrip(\".\")"
+      ],
+      "claim": "fetch_citation.py:835-849 strips a trailing dot before comparing hosts; counting the un-stripped form would silently split one host's tally in two."
     }
   },
   "exemptions": {

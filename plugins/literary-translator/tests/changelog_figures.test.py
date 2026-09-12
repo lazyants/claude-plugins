@@ -534,6 +534,50 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
+    # ROTATED TO 1.174.0 (#910 -- --correct reported success while the
+    # already-built segpacks still carried the pre-correction canon_map; #840
+    # folded in), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed.
+    # Every digit-run in it is an IDENTIFIER or a CITATION, never a figure
+    # this tree can re-derive:
+    #
+    #   1.174.0, 2026-09-12    the version and the release date
+    #   #910, #840, #826, #917 issue numbers
+    #   W3a (twice)            a workflow step name, not a count
+    #   "three"                SAFE_STALE_CARVEOUT_FIELDS, spelled as a word
+    #
+    # The entry states NO `file.ext:NNN` citation at all: it names
+    # `final_audit.py` and `SAFE_STALE_CARVEOUT_FIELDS` by file and symbol,
+    # the way the preceding rotations did, so no line number in it can drift.
+    #
+    # The ONE measurement in the entry -- "four corrected targets, ten
+    # segments dispatched afterwards, 23 superseded spans" -- is deliberately
+    # NOT a row, for exactly the reason 1.116.0's rotation gave for its own
+    # omission: it is a fact about ONE OPERATOR'S BOOK IN ANOTHER REPOSITORY,
+    # observed before this fix existed. Nothing in this tree can re-derive it,
+    # so a row asserting it would pin prose rather than anything a test can
+    # check. The entry attributes it in words ("measured by the reporter on a
+    # live he->en book") so a later reader can see whose measurement it is,
+    # and two of the three are spelled as words rather than digits.
+    #
+    # What this release DOES own is stated by NAMING rather than counting:
+    # `segpacks_scanned`, `segpacks_current`, `stale_segpacks`,
+    # `segpacks_unevaluated`, `_scan_stale_segpacks`,
+    # `evaluate_fresh_segpack_precondition`, `SAFE_STALE_CARVEOUT_FIELDS` and
+    # `plugin_bundle_hash` are named, so no later release can rot this prose
+    # by retuning a number.
+    #
+    # This rotation RETIRED 1.172.0's rows, which belong to an entry that is
+    # no longer the newest and which this guard therefore no longer reads.
+    #
+    #
+    #
+    # The 1.154.0 rotation this replaces, kept as its own record:
+    #
+    # The 1.170.0 rotation this replaces, kept as its own record:
+    #
+    # The 1.172.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.172.0 (#918 -- the citation fetcher recorded `fetched` for a
     # body byte-identical to another URL's in the same batch), per the
     # maintenance contract above.
@@ -595,6 +639,14 @@ FIGURES = [
     #
     # Both rows below are watched failing by mutating the TREE -- the cap
     # default and the retry tuple -- never by mutating the row.
+    # The two rows of the rotation this one replaces, RETIRED rather than
+    # carried:
+    #     Figure("capped at 10 further hosts", 10, lambda: _advisory_host_limit()),
+    #     Figure("roughly 75 seconds", 75, _fetch_retry_ladder_span),
+    # They measured phrases in THAT entry, and this guard only ever reads the
+    # NEWEST one -- left live they are checked against the 1.174.0 entry, where
+    # neither phrase occurs, which is a red that says nothing about either
+    # release. Both were correct for their own entry and are recorded here.
     # ROTATED TO 1.162.0 (#917 -- a name the canon has frozen is no longer
     # withheld from the segment pack), per the maintenance contract above.
     #
@@ -854,6 +906,12 @@ FIGURES = [
     # the second-newest and which this guard therefore no longer reads. #912,
     # #914 and #921 landed the same day; each earlier rotation's own record is
     # kept below, unchanged.
+    # 1.123.0's own row, RETIRED here rather than carried: it measured the
+    # phrase "default 2" in THAT entry, and this guard only ever reads the
+    # NEWEST one. Left live it would be checked against the 1.174.0 entry,
+    # where the phrase does not occur -- a red that says nothing about
+    # either release. The row itself was correct for its own entry and is
+    # recorded in the 1.123.0 block below.
     #   Figure("default 2", 2,
     #          lambda: _int_constant("glossary_batch_plan.py",
     #                                "DEFAULT_MIN_CANDIDATE_FREQ")),
@@ -1608,7 +1666,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.172.0"
+FIGURES_VERSION = "1.174.0"
 
 
 def _newest_entry():

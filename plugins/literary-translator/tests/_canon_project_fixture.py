@@ -48,6 +48,7 @@ STAGED_SCRIPTS = (
     "cache_key.py",
     "glossary_batch_plan.py",
     "segpack.py",
+    "select_segments.py",
 )
 CANON_SCHEMA_FILES = (
     "canon-entry.schema.json",
