@@ -290,6 +290,30 @@ closes that hole two ways (for `gutenberg_epub`/`plain_text`; see below for
    mismatch, is FATAL — naming the "editing a self-check to reach green"
    anti-pattern and pointing genuine gaps at a plugin issue.
 
+**A third way, deliberately not about extraction (#913).** Both checks
+above defend the same thing: that `manifest.json` is what it claims to be.
+`entity_markup_style_contract` defends something else that happens to be
+checkable at the same moment for the same reason — under
+`output.entity_markup` with a resolved `index_from: markup`, it FATALs
+unless every declared tag name appears inside `style_bible.md`'s
+STYLE_CONTRACT span. The block itself was never unvalidated — the schema
+constrains every tag name, and `assemble.py` revalidates the whole block at
+runtime — but nothing compared the declared vocabulary against the style
+contract that has to ask for it, so a project can
+declare the markup convention and never tell the translator about it — the
+translator marks nothing, `assemble.py`/`render_obsidian.py` have nothing to
+scan, and the vault ships a complete-looking index missing exactly the
+population the knob exists to capture, undetected until an operator notices
+the vault is thin. This check lives here, not in `scaffold_validate.py`
+(W1) or `profile_validate.py` (Step 0), because this is the earliest
+MANDATORY, PLUGIN-PATH-ONLY gate that holds both the parsed profile and the
+durable root at once, before the first LLM dispatch of any kind — and being
+plugin-path-only (never copied to `durable_root`, unlike `scaffold_validate.py`),
+it cannot be hand-edited away the way a copied gate could. See
+[`assembly-and-output.md`](./assembly-and-output.md)'s "Inline entity
+markup" section for the grammar this rule feeds and the nesting
+counter-example for whoever writes it.
+
 **The honest residual.** Three of the extractor's self-checks —
 `body_coverage_no_holes`, `no_orphan_footnote_continuation`, and
 `verse_no_uncovered` — depend on intermediate parse state that is **not**

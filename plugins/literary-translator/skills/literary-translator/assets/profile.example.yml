@@ -644,6 +644,17 @@ output:
   # later: the `tags` vocabulary is what this project's style_contract then has to tell the
   # translator to mark, and a convention invented mid-book reaches the reader as raw markup.
   #
+  # ENFORCED (#913): under index_from: markup, W2's validate_extraction.py FATALs unless
+  # every tag above appears inside style_bible.md's STYLE_CONTRACT span -- before any
+  # translation spend. Put the rule INSIDE the markers: that span is hashed into every
+  # segment's cache key, so adding it after translation starts restales every converged
+  # segment. COUNTER-EXAMPLE when writing that rule: a place inside a person's byname
+  # (bynames like "Rabbi X of «Town»") must NOT be tagged as place INSIDE the person tag --
+  # <person>...<place>...</place></person> is refused for the WHOLE book at W9, on the first
+  # site, and un-nesting after the fact moves every touched segment's reviewed_draft_sha1,
+  # forcing a full re-review. Promote the inner span to a SIBLING with its connective word
+  # instead: <person>Rabbi X</person> of <place>Town</place>.
+  #
   # COST, before you switch it on: index_from: markup REQUIRES output.target: obsidian -- no
   # other shipped adapter consumes the recorded spans, so assemble.py refuses outright
   # (reason entity_markup_index_unsupported_target) rather than degrading to strip and handing

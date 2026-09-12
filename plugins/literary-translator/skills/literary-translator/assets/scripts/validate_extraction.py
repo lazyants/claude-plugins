@@ -56,7 +56,14 @@ Order of operations:
      first. A schema-valid manifest that still lacks a check-only field, or has
      a value of the wrong type for one, is reported as a single FATAL
      validation failure (exit 1), not a crash.
-  5. Read the durable ``extract.py`` and pin its self-check region:
+  5. (#913) INDEPENDENTLY check the entity-markup style-contract prerequisite
+     (``check_entity_markup_style_contract``) against the profile mapping
+     already parsed in step 2. Inert unless ``output.entity_markup`` declares
+     a resolved ``index_from`` of ``markup``; when it does, FATAL (exit 1,
+     never a skip) unless every declared tag name has evidence inside
+     ``style_bible.md``'s ``STYLE_CONTRACT_BEGIN``/``STYLE_CONTRACT_END``
+     span. Joins the SAME FATAL check list as step 4, not the advisory scans.
+  6. Read the durable ``extract.py`` and pin its self-check region:
      ``selfcheck_region_hash`` vs ``CURRENT_EXTRACTOR_SELFCHECK_HASH``. A
      missing/tampered region (``None``) or a hash mismatch is FATAL (exit 1),
      with a message naming the false-green anti-pattern and pointing genuine
@@ -69,10 +76,23 @@ Order of operations:
      unadapted template copy would only ever vacuously pass, certifying nothing
      (see ``references/source-format-adapters/custom.md``). ``region_ok``
      defaults ``True`` in this case; the gate's exit code for a custom source
-     then depends only on steps 3-4.
-  6. Print PASS/FAIL per check plus the region-pin result; exit 0 iff
+     then depends only on steps 3-5.
+  7. Print PASS/FAIL per check plus the region-pin result; exit 0 iff
      everything passed, 1 on any FATAL validation failure, 2 on usage/env
      error -- mirroring ``profile_validate.py``'s exit-code discipline.
+
+A style-contract prerequisite is NOT extraction false-green work in the sense
+steps A/B above describe -- ``style_bible.md`` is not something ``extract.py``
+produces or self-checks, and no amount of re-deriving manifest invariants or
+pinning a self-check region would ever catch a missing markup instruction.
+It lives in THIS gate anyway because this is the earliest MANDATORY check that
+holds both the profile (which declares the tag vocabulary) and the durable
+root (where ``style_bible.md`` lives), and it runs before the first LLM
+dispatch of any kind (W3/W5). It is also PLUGIN-PATH-ONLY and never copied to
+``durable_root`` (see above), so -- unlike a check placed in a durable_root
+copy such as ``scaffold_validate.py`` -- it cannot be hand-edited to silence
+itself; for a check whose catastrophic failure direction is a false GREEN
+that reaches translation spend, tamper-proof is the property that matters.
 
 REPORT-ONLY RESIDUAL -- the three self-checks this gate does NOT re-derive,
 because their inputs live only in the extractor's in-memory build ``report``
@@ -246,16 +266,21 @@ def _dependency_preflight():
 # ---------------------------------------------------------------------------
 
 def load_profile_values(profile_path: Path):
-    """Returns (max_segment_words, apparatus_policy, source_format), resolved
-    exactly as extract.py resolves the first two (``project.max_segment_words``
-    and ``footnotes.apparatus_policy`` via yaml.safe_load). Any unreadable/non-YAML/
-    non-mapping profile, a missing required key, or an unknown apparatus_policy
-    is a usage/env error (exit 2): the gate cannot decide what to check without
-    them, and profile_validate.py (Step 0) is the place those are diagnosed in
-    full. ``source_format`` (``profile["source"]["format"]``) is read
-    best-effort -- a missing/malformed value is tolerated as ``None`` (treated
-    as non-custom, fail-safe) rather than escalated to exit 2, since this gate's
-    hard requirements are only the two values above."""
+    """Returns (max_segment_words, apparatus_policy, source_format, profile),
+    resolved exactly as extract.py resolves the first two (``project.
+    max_segment_words`` and ``footnotes.apparatus_policy`` via yaml.safe_load).
+    Any unreadable/non-YAML/non-mapping profile, a missing required key, or an
+    unknown apparatus_policy is a usage/env error (exit 2): the gate cannot
+    decide what to check without them, and profile_validate.py (Step 0) is the
+    place those are diagnosed in full. ``source_format`` (``profile["source"]
+    ["format"]``) is read best-effort -- a missing/malformed value is
+    tolerated as ``None`` (treated as non-custom, fail-safe) rather than
+    escalated to exit 2, since this gate's hard requirements are only the two
+    values above. ``profile`` (the full parsed mapping) is returned as a
+    FOURTH value so callers needing other profile fields -- e.g. #913's
+    ``check_entity_markup_style_contract`` reading ``output.entity_markup`` --
+    never re-parse the file: two parses of one YAML document could disagree
+    on a concurrent edit, and this gate has already paid the parse cost."""
     assert yaml is not None, "_dependency_preflight() must run before load_profile_values()"
     try:
         text = profile_path.read_text(encoding="utf-8")
@@ -308,7 +333,190 @@ def load_profile_values(profile_path: Path):
         if isinstance(fmt, str):
             source_format = fmt
 
-    return max_segment_words, apparatus_policy, source_format
+    return max_segment_words, apparatus_policy, source_format, profile
+
+
+# ---------------------------------------------------------------------------
+# #913: entity-markup style-contract gate
+# ---------------------------------------------------------------------------
+
+# Restated here rather than shared with cache_key.py, even though
+# compute_style_contract_hash() there defines the identical pair. Stating the
+# reason precisely, because the loose version of it is false: IMPORTING from
+# cache_key.py would move no hash at all -- plugin_bundle_hash is computed over
+# that file's own bytes, and an importer is not one of them. What would move it
+# is the refactor an import invites: hoisting the pair into a shared constant
+# EDITS cache_key.py, and cache_key.py is a ``PLUGIN_BUNDLE_MEMBERS`` entry, so
+# that edit reclassifies every converged segment in every project as stale. A
+# gate that needs no runtime coupling to that module should not be the reason
+# anyone opens it. A drift test reads both definitions and asserts they are
+# equal, so the two constants cannot silently diverge instead.
+STYLE_CONTRACT_BEGIN_MARKER = "<!-- STYLE_CONTRACT_BEGIN -->"
+STYLE_CONTRACT_END_MARKER = "<!-- STYLE_CONTRACT_END -->"
+
+
+def check_entity_markup_style_contract(profile: dict, manifest_path: Path):
+    """(name, ok, detail) for the #913 gate: a project that declares
+    ``output.entity_markup`` with a resolved ``index_from`` of ``markup``
+    must not be able to reach translation spend while its ``style_bible.md``
+    never tells the translator to mark with the declared tag vocabulary.
+
+    INERT (an unconditional PASS, no comparison performed) when
+    ``output.entity_markup`` is absent, ``null``, or not a mapping, or when
+    its resolved ``index_from`` is anything but ``markup`` -- absent resolves
+    to ``canon``, the schema's documentation-only default, the same resolution
+    assemble.py's ``_entity_markup_config()`` performs for the two VALID
+    values. It is not the same for an invalid one, and the difference is
+    stated rather than smoothed over: assemble.py REFUSES a block outside the
+    enum, while going inert is this gate's answer to anything that is not
+    exactly ``markup``. Neither divergence can produce a wrong index -- a typo
+    like ``markkup`` is already refused by profile.schema.json's enum at Step
+    0, and a non-mapping block still fatals, only later, at W9. What this gate
+    guarantees is the direction that matters: it cannot go inert on a project
+    assembly would treat as markup mode. This
+    fires regardless of ``output.v1_scope``/``output.target``: declaring
+    INDEX mode is the intent to mark, and a project that assembles later is
+    still covered.
+
+    FATAL (never a silent skip) when:
+      - ``tags`` is not a list of at least one non-empty string. A bare
+        string (``tags: person``) is the documented load-bearing trap: a
+        string is iterable, so an unvalidated reader would zip over its
+        CHARACTERS and report success on a per-character vocabulary.
+      - ``style_bible.md`` (resolved as a SIBLING of ``--manifest``, the same
+        way this gate already trusts ``--extract``) is missing or unreadable.
+      - the STYLE_CONTRACT marker pair is malformed -- the same five states
+        ``cache_key.py``'s ``compute_style_contract_hash`` refuses: either
+        marker absent, either marker duplicated, or END preceding BEGIN.
+      - any declared tag has no evidence inside the span.
+
+    The rule has to sit INSIDE the markers, never merely present anywhere in
+    the file, because that span is hashed into every segment's cache key
+    (``compute_style_contract_hash``) -- adding the instruction after
+    translation starts would restale every already-converged segment. The
+    FAIL detail says so, and names every missing tag (never just the first).
+
+    Needle per tag: ``re.search(rf"</?{re.escape(tag)}(?=$|[\\s/>])", span)``
+    -- a POSITIVE lookahead for a real delimiter (``>``, ``/``, whitespace, or
+    end-of-span), not a negative lookahead over the tag alphabet. Two things
+    make the difference load-bearing here:
+      (a) ``\\b`` is wrong because a tag may legally end in ``-`` or ``_``,
+          and Python places no word boundary between a trailing ``-`` and the
+          ``>`` that follows it (assemble.py's ``_compile_entity_markup``
+          documents the same trap for its own lexical guard).
+      (b) assemble.py's own negative lookahead ``(?![a-z0-9_-])`` is NOT
+          sufficient here, because declared tags are lowercase by schema but
+          ``style_bible.md`` is unrestricted prose: it still admits
+          ``<personTitle>``, ``<person:name>`` and ``<personé>`` as false
+          evidence that ``person`` was named. These are accepted TAG-NAME
+          BOUNDARIES for a structural presence check, not the assembler's
+          token grammar -- the assembler's own guard governs what may
+          actually ship in the translated text, which is a different job."""
+    name = "entity_markup_style_contract"
+
+    output_cfg = profile.get("output")
+    block = output_cfg.get("entity_markup") if isinstance(output_cfg, dict) else None
+    if not isinstance(block, dict):
+        return name, True, "inert -- no output.entity_markup block declared"
+
+    index_from = block.get("index_from", "canon")
+    if index_from != "markup":
+        return (
+            name,
+            True,
+            f"inert -- output.entity_markup.index_from is {index_from!r}, not 'markup'",
+        )
+
+    tags = block.get("tags")
+    if (
+        not isinstance(tags, list)
+        or not tags
+        or not all(isinstance(t, str) and t for t in tags)
+    ):
+        return (
+            name,
+            False,
+            f"output.entity_markup.tags must be a list of one or more non-empty "
+            f"strings (got {tags!r}). A bare string here is the documented "
+            f"load-bearing trap: a string is iterable, so an unvalidated reader "
+            f"would build a per-CHARACTER vocabulary and report success.",
+        )
+
+    style_bible_path = manifest_path.parent / "style_bible.md"
+    try:
+        text = style_bible_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError is NOT an OSError: a style_bible.md carrying one
+        # invalid byte raised straight past an OSError-only clause and left this
+        # gate printing a traceback where it promises a named finding. Same
+        # widening, for the same reason, as validate_draft.py's #398 reads.
+        return name, False, f"could not read {style_bible_path}: {exc}"
+
+    begin_count = text.count(STYLE_CONTRACT_BEGIN_MARKER)
+    end_count = text.count(STYLE_CONTRACT_END_MARKER)
+    if begin_count == 0:
+        return (
+            name,
+            False,
+            f"{style_bible_path} is missing the STYLE_CONTRACT_BEGIN marker "
+            f"({STYLE_CONTRACT_BEGIN_MARKER})",
+        )
+    if begin_count > 1:
+        return (
+            name,
+            False,
+            f"{style_bible_path} has {begin_count} STYLE_CONTRACT_BEGIN markers "
+            f"-- expected exactly one",
+        )
+    if end_count == 0:
+        return (
+            name,
+            False,
+            f"{style_bible_path} is missing the STYLE_CONTRACT_END marker "
+            f"({STYLE_CONTRACT_END_MARKER})",
+        )
+    if end_count > 1:
+        return (
+            name,
+            False,
+            f"{style_bible_path} has {end_count} STYLE_CONTRACT_END markers "
+            f"-- expected exactly one",
+        )
+
+    begin_idx = text.find(STYLE_CONTRACT_BEGIN_MARKER) + len(STYLE_CONTRACT_BEGIN_MARKER)
+    end_idx = text.find(STYLE_CONTRACT_END_MARKER)
+    if end_idx < begin_idx:
+        return (
+            name,
+            False,
+            f"{style_bible_path}'s STYLE_CONTRACT_END marker precedes its "
+            f"STYLE_CONTRACT_BEGIN marker -- markers are out of order",
+        )
+
+    span = text[begin_idx:end_idx]
+    missing = [
+        tag for tag in tags
+        if not re.search(rf"</?{re.escape(tag)}(?=$|[\s/>])", span)
+    ]
+    if missing:
+        rendered = ", ".join(f"<{t}>" for t in missing)
+        return (
+            name,
+            False,
+            f"{style_bible_path}'s STYLE_CONTRACT span does not name declared "
+            f"tag(s) {rendered} -- add each one to the style contract so the "
+            f"translator is told to mark with it. The instruction must sit "
+            f"INSIDE the STYLE_CONTRACT_BEGIN/END markers: that span is hashed "
+            f"into every segment's cache key, so adding it after translation "
+            f"starts would restale every already-converged segment.",
+        )
+
+    return (
+        name,
+        True,
+        f"{len(tags)} declared tag(s) verified against style_bible.md's "
+        f"STYLE_CONTRACT span",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1622,7 +1830,7 @@ def main(argv=None):
     manifest = _load_manifest(manifest_path)
 
     _dependency_preflight()
-    max_segment_words, apparatus_policy, source_format = load_profile_values(profile_path)
+    max_segment_words, apparatus_policy, source_format, profile = load_profile_values(profile_path)
 
     # --- (a) independent schema validation ------------------------------------
     # A structurally-invalid manifest (missing a required top-level key, a stray
@@ -1738,6 +1946,16 @@ def main(argv=None):
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # --- (b2) #913: entity-markup style-contract gate -------------------------
+    # Not derived FROM the manifest (it needs the profile and the durable
+    # style_bible.md, neither of which run_derivable_checks() sees), so it is
+    # appended here rather than folded into that function -- but it joins the
+    # SAME (name, ok, detail) list and the SAME print/exit-code path below, so
+    # it is a MANDATORY FATAL check like every other entry in this list, never
+    # an advisory: an advisory here would be exactly the silence issue #913
+    # reports.
+    check_results.append(check_entity_markup_style_contract(profile, manifest_path))
 
     derivable_ok = True
     for name, ok, detail in check_results:
