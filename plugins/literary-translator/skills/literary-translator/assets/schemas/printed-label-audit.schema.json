@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "printed-label-audit.schema.json",
+  "title": "Printed-Label Canon Audit -- Attempt Shard",
+  "description": "One SHARD of a dispatched printed-label-audit judging pass's output (#929), read by printed_label_audit.py --report via a repeatable --attempt PATH. Validates only the shape of what the judge produced -- the untrusted half of this pass. The corpus half (built by --build-corpus, which the judge never writes) is this script's own trusted output and is checked procedurally against its session-held sha256 digest instead, the same trust split canon_harmonisation.py draws between its corpus and its check target. Every semantic binding this shard's verdicts must satisfy against the corpus -- anchor byte-exactness, shard-membership, one-verdict-per-dispatchable-site cardinality -- is enforced in code, never here: a schema can assert this document's own shape but cannot compare it against a sibling file. THE IRON RULE applies to this pass too: a verdict here is a proposal a human reads, never an automatic edit to canon.json or to any draft.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "shard_id", "shard_digest", "verdicts"],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Format version of this shard file's own shape."
+    },
+    "shard_id": {
+      "type": "string",
+      "pattern": "^shard_[0-9]{4,}$",
+      "description": "Which of the corpus's deterministically-packed shards this file answers. --report requires the SET of shard_ids across every --attempt to equal exactly the set --build-corpus declared in the corpus's own 'shards' map -- no shard missing, none extra, none duplicated."
+    },
+    "shard_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "The digest --build-corpus computed over this shard's own site_id set and recorded in the corpus's 'shards' map under this shard_id. Copied here by the dispatched pass as a self-consistency stamp -- --report refuses when it does not equal the corpus's own recorded value for this shard_id, exactly the corpus_sha256 binding canon_harmonisation.py already uses for its own attempt artifact."
+    },
+    "verdicts": {
+      "type": "array",
+      "description": "One entry per dispatchable site this shard was shown. --report enforces, procedurally against the corpus, that every site named here belongs to THIS shard_id, that no site is answered twice (in this shard or any other), and that every dispatchable site the corpus assigned to this shard is answered exactly once -- none of which a schema can express, since it needs the sibling corpus file to check against.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["site_id", "tag", "label", "verdict"],
+        "description": "One site's judged outcome. THE IRON RULE holds here: this object records that the judge decided a printed label DOES or DOES NOT match a frozen canon target -- never an instruction to act on that decision. `tag` and `label` are carried here (rather than looked up by site_id alone) so --report can refuse a verdict that answers the right site_id but under a label the corpus never printed there -- an invented anchor, exactly as canon_harmonisation.py's own member-triple matching refuses a relabelled row.",
+        "properties": {
+          "site_id": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "The corpus's own site_id for the marked span this verdict answers. Byte-exact; a site_id the corpus never declared is refused as invented."
+          },
+          "tag": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "The marked element's tag, byte-exact against the corpus site's own 'tag' -- part of the anchor a matches_frozen_target verdict must reproduce and a no_canon_match verdict must still name correctly."
+          },
+          "label": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "The printed payload, byte-exact (NFC) against the corpus site's own 'label' -- part of the anchor both verdict kinds must reproduce."
+          },
+          "verdict": {
+            "type": "string",
+            "enum": ["matches_frozen_target", "no_canon_match"],
+            "description": "The closed, two-valued vocabulary #929's plan settles on. 'matches_frozen_target': the printed label re-spells a source term canon.json has already frozen under a different canonical_target_form -- carries the full anchor five-tuple. 'no_canon_match': the judge found no such conflict for this site (which may legitimately have carried zero, one, or several canon rows to consider) -- carries no source_form/canonical_target_form at all, because there is no specific row this verdict is anchoring to."
+          },
+          "source_form": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "REQUIRED, and only meaningful, on a matches_frozen_target verdict: the source-language form the judge read as re-spelled by the printed label. Must byte-exactly match one of the corpus site's own canon_rows[].source_form entries -- --report refuses a value the corpus never offered at this site as an invented anchor. FORBIDDEN on no_canon_match: a rejected-referent guess is not the same claim as a match and must not be smuggled in under a different verdict kind."
+          },
+          "canonical_target_form": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "REQUIRED, and only meaningful, on a matches_frozen_target verdict: the frozen target canon.json already assigned to source_form. Must byte-exactly match the corpus site's own canon_rows[] entry paired with source_form -- a target the pass invented, or paired with the wrong source_form, is refused. FORBIDDEN on no_canon_match, for the same reason source_form is."
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "verdict": { "const": "matches_frozen_target" } },
+              "required": ["verdict"]
+            },
+            "then": {
+              "required": ["source_form", "canonical_target_form"]
+            }
+          },
+          {
+            "if": {
+              "properties": { "verdict": { "const": "no_canon_match" } },
+              "required": ["verdict"]
+            },
+            "then": {
+              "properties": {
+                "source_form": false,
+                "canonical_target_form": false
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

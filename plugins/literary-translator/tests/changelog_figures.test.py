@@ -534,6 +534,42 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
+    # ROTATED TO 1.221.0 (#929 -- nothing compared a draft's PRINTED entity
+    # labels against canon.json's frozen canonical_target_forms), per the
+    # maintenance contract above.
+    #
+    # ZERO rows, and the entry was WALKED rather than assumed: every digit-run
+    # in it was enumerated with a scan of its own slice, and each one is an
+    # IDENTIFIER. The complete list is the version (1.221.0), the release date
+    # (2026-09-12), the five issue numbers it names (#929, #931, #926, #925,
+    # #823), the `7` and `8` of the workflow steps W7 and W8, and the `0` of
+    # `Step 0a`. There is no other digit in the entry.
+    #
+    # That is deliberate, not lucky, and it follows the 1.211.0 rotation's own
+    # reasoning. Every measured figure behind #929 -- the size of the report
+    # the issue's structural remedy would have produced, the progressively
+    # tighter variants tried after it, the real defect population, and the
+    # corpus the four named caps were raised against -- is a count over
+    # OPERATOR BOOKS IN ANOTHER REPOSITORY. No implementation in this tree can
+    # re-derive any of them, so no row here could call an authoritative
+    # implementation for them and none is declared. The entry therefore states
+    # those magnitudes QUALITATIVELY ("six figures of rows", "a real defect
+    # population in the dozens") and names what the tree does own by SYMBOL --
+    # `printed_label_audit.py`, `_serialize_shard_payload`,
+    # `_carriers_dropped_for_missing_source`, `_compile_entity_markup`,
+    # `_entity_markup_scan`, `_carrier_source_text`, `warn_glossary_diff`,
+    # `_schemas_dir_hash` -- rather than by counting.
+    #
+    # The four cap constants ARE re-derivable in this tree, and the entry
+    # deliberately names them without stating a value for exactly that reason:
+    # `tests/printed_label_audit.test.py` pins all four as bare literals by
+    # driving the module, which is a stronger check than a row here, and a
+    # value restated in changelog prose would be a second copy free to rot.
+    #
+    # This rotation RETIRED nothing: the 1.220.0 rotation it replaces also
+    # declared zero rows. Its record is kept below, unchanged.
+    #
+    # The 1.220.0 record this replaces, kept as its own:
     # ROTATED TO 1.220.0 (#931 -- correcting a class in the prose silently
     # invalidated every notes[]/names[] record describing it), per the
     # maintenance contract above.
@@ -1818,7 +1854,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.220.0"
+FIGURES_VERSION = "1.221.0"
 
 
 def _newest_entry():
