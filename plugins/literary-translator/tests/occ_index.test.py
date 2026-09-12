@@ -218,10 +218,15 @@ def test_elision_no_elision_matcher_parity_identical_bytes():
 def test_elision_no_elision_matcher_parity_never_a_two_arg_call():
     # A 2-arg no-config helper would necessarily fail one half of the pair
     # above (it can't know which config to honor). Assert the real function
-    # requires the third positional/keyword argument.
+    # requires the third positional/keyword argument. #927 added a fourth,
+    # keyword-only `attribution_forms=None`, which does not weaken this: the
+    # config is still the third REQUIRED parameter.
     import inspect
-    sig = inspect.signature(occ.production_occurrences)
-    assert len(sig.parameters) == 3
+    params = list(inspect.signature(occ.production_occurrences).parameters.values())
+    required = [p for p in params if p.default is inspect.Parameter.empty]
+    assert len(required) == 3
+    assert required[2].name == "language_config"
+    assert [p.name for p in params if p.kind is inspect.Parameter.KEYWORD_ONLY] == ["attribution_forms"]
 
 
 # ---------------------------------------------------------------------------

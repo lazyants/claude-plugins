@@ -77,24 +77,37 @@ from typing import Optional
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 try:
-    from occ_index import production_occurrences, _run_span_keys
+    from occ_index import production_occurrences, _run_span_keys, attributable_spans
 except ImportError as exc:
     sys.exit(
         f"evidence_verify.py: cannot import occ_index.py from {SCRIPT_DIR} ({exc}).\n"
         "occ_index.py must be installed alongside evidence_verify.py under "
         "${durable_root}/scripts/ -- it supplies production_occurrences() and "
         "_run_span_keys(), the shared matcher-authentication authority every stored "
-        "evidence span is bound against. Re-run Step 0a, or verify the plugin install "
-        "is not corrupted."
+        "evidence span is bound against, and attributable_spans(), the #927 "
+        "Hebrew-pointing refusal applied at the same grouping site. Re-run Step 0a, "
+        "or verify the plugin install is not corrupted."
     )
 
-# No direct bootstrap_names import: this module reaches the #238/#241 match
-# key ONLY through occ_index's `_run_span_keys()` above, which owns the one
-# valid construction of it (`bootstrap_names.span_match_keys()`). Importing
-# `fold_match_key` here as well is what previously let this file build the key
-# its own way and drift from `occ_index.index_manifest()` -- the drift #243
-# and this release both had to close. occ_index.py's own guarded import
-# carries the install-integrity check for bootstrap_names.py.
+# No direct bootstrap_names import beyond mask_sentinels() below: this module
+# reaches the #238/#241 match key ONLY through occ_index's `_run_span_keys()`
+# above, which owns the one valid construction of it (`bootstrap_names.
+# span_match_keys()`). Importing `fold_match_key` here as well is what
+# previously let this file build the key its own way and drift from
+# `occ_index.index_manifest()` -- the drift #243 and this release both had to
+# close. occ_index.py's own guarded import carries the install-integrity
+# check for bootstrap_names.py.
+
+try:
+    from bootstrap_names import mask_sentinels
+except ImportError as exc:
+    sys.exit(
+        f"evidence_verify.py: cannot import bootstrap_names.py from {SCRIPT_DIR} ({exc}).\n"
+        "bootstrap_names.py must be installed alongside evidence_verify.py under "
+        "${durable_root}/scripts/ -- it supplies mask_sentinels(), the #927 "
+        "same-length substitution attributable_spans() aligns Hebrew pointing "
+        "against. Re-run Step 0a, or verify the plugin install is not corrupted."
+    )
 
 try:
     from canon_senses import fold_collision_map, FoldCollisionMap
@@ -166,7 +179,13 @@ def _group_production_spans_by_name(block_text: str, language_config,
     fail-closed, credited to no `source_form` -- rather than exposed under
     the matcher's own raw spelling, which `verify_evidence()`'s `.get(
     source_form, ())` lookup would never find anyway (it queries by canon
-    `source_form`, not by matcher-emitted `name`)."""
+    `source_form`, not by matcher-emitted `name`).
+
+    #927: parity with `occ_index.production_occurrences()` is kept -- the
+    same single-form Hebrew-pointing rule (`attributable_spans()`) is
+    applied here too, so a span whose pointing contradicts the one
+    non-colliding `source_form` it resolved to is withheld from it here
+    exactly as it would be from a direct `production_occurrences()` call."""
     # Group on the span's OWN occurrence-identity key, never on the emitted
     # `name` and never on the raw `block_text` slice -- either one silently
     # loses a run (an over-cap one, a sentinel-interrupted one respectively),
@@ -178,12 +197,13 @@ def _group_production_spans_by_name(block_text: str, language_config,
     for char_start, char_end, span_key in _run_span_keys(block_text, language_config):
         folded_spans_by_key[span_key].append((char_start, char_end))
 
+    masked = mask_sentinels(block_text)
     grouped = {}
     for key, spans in folded_spans_by_key.items():
         members = competitors.groups.get(key)
         if members is None or len(members) != 1:
             continue  # unknown to the competitor universe, or a fold-key collision
-        grouped[members[0]] = spans
+        grouped[members[0]] = attributable_spans(masked, spans, [members[0]])
     return grouped
 
 
