@@ -151,7 +151,7 @@ dumps_line = _json_stdout.dumps_line
 SCRIPT_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPT_DIR.parent
 
-# Sibling imports, never reimplementations (occurrence_targets.py:199-247's own
+# Sibling imports, never reimplementations (occurrence_targets.py:214-262's own
 # pattern). `segpack.py` can `sys.exit(<str>)` at import time when ITS sibling
 # import fails, which would surface here as an uncaught SystemExit with status
 # 1 -- a data/environment failure wearing the one status this script promises

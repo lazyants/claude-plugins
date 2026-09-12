@@ -1055,3 +1055,144 @@ def test_lt497_a_group_over_non_colliding_forms_changes_nothing():
     assert "Ivan" in result["eligible_by_source_form"]
     assert "Pyotr" in result["eligible_by_source_form"]
     assert result["unresolved_homonyms"] == {}
+
+
+# ---------------------------------------------------------------------------
+# #928 -- a ruling that is correctly formed and STILL does not apply.
+#
+# Two ways that happens, and before #928 both warned in the same words as a
+# key with no ruling at all: "record them as ONE referent in
+# canon_link_groups.json" -- addressed to an operator who had just done
+# exactly that. The routing is unchanged (every case below still collides,
+# pinned by the #497 block above); what is pinned here is the STDERR text,
+# which is the only thing that tells the operator what to do next.
+#
+# Half 1 is the sidecar edited without re-assembling: `assemble.py` bakes the
+# map into the NodeStream, so this module sees NO ruling and must name that
+# step. Half 2 is a ruling that reached us and still does not credit this
+# key -- there the WARN must carry the failed condition instead.
+# ---------------------------------------------------------------------------
+
+
+def test_lt928_an_unruled_collision_names_assemble_py(capsys):
+    """Half 1. No member is named by the NodeStream map -- which is exactly
+    the state a sidecar edit without a re-assembly produces -- so the remedy
+    has to say that recording the group is not enough on its own."""
+    ot.build(*_collision_fixture(link_groups=None))
+    err = capsys.readouterr().err
+    assert "assemble.py" in err
+    assert "re-run assemble.py" in err
+    assert "canon_link_groups.json" in err
+    # The success condition it names must be one that can actually hold. This
+    # branch IS a fold collision, so every in-group form shares the key by
+    # construction; only a form OUTSIDE the index-eligible group can break it.
+    assert "no form OUTSIDE the index-eligible group shares it" in err
+    assert "no other form does" not in err
+    # ...and it still says what it always said.
+    assert "fold_match_key_collision" in err
+    assert SPACED in err and MAQAF in err
+
+
+def test_lt928_a_primary_outside_the_key_names_that_reason_not_the_generic_one(capsys):
+    """Half 2, the issue's own measured case: a group spanning TWO fold keys,
+    `primary` in the other one. The ruling is complete, correctly formed and
+    semantically right, and credits this key not at all."""
+    outsider = "אברהם"
+    ot.build(
+        *_collision_fixture(
+            link_groups={SPACED: outsider, MAQAF: outsider, outsider: outsider},
+            canon_extra={outsider: make_entry(canonical_target_form="Avraham")},
+        )
+    )
+    err = capsys.readouterr().err
+    assert "does not share this match key" in err
+    assert outsider in err
+    assert "crediting is decided PER KEY" in err
+    # The operator has already recorded the group; never tell them to do it.
+    assert "record them as ONE referent" not in err
+
+
+def test_lt928_a_partial_ruling_names_the_unruled_members(capsys):
+    """A ruling reached us, so the generic text is wrong here too -- it is the
+    members it does NOT cover that the operator has to add."""
+    ot.build(*_collision_fixture(link_groups={SPACED: SPACED}))
+    err = capsys.readouterr().err
+    assert "covers only part of this match key" in err
+    assert MAQAF in err
+    assert "record them as ONE referent" not in err
+
+
+def test_lt928_two_primaries_name_the_conflict(capsys):
+    ot.build(*_collision_fixture(link_groups={SPACED: SPACED, MAQAF: MAQAF}))
+    err = capsys.readouterr().err
+    assert "MORE THAN ONE primary" in err
+    assert "record them as ONE referent" not in err
+
+
+def test_lt928_a_split_member_names_the_split(capsys):
+    ot.build(
+        *_collision_fixture(
+            link_groups={SPACED: SPACED, MAQAF: SPACED}, senses=split_senses(MAQAF)
+        )
+    )
+    err = capsys.readouterr().err
+    assert "homonym split" in err
+    assert MAQAF in err
+    assert "record them as ONE referent" not in err
+
+
+def test_lt928_a_closure_failure_names_the_outside_form(capsys):
+    """The MINOR from plan review: a closure failure is NOT "the ruling does
+    not cover these forms" -- an index-ineligible entry CAN legally be a group
+    member and still fail closure. The text must name the outsider, not
+    accuse the ruling of an omission it did not make."""
+    ineligible = "משה-לייב"
+    ot.build(
+        *_collision_fixture(
+            link_groups={SPACED: SPACED, MAQAF: SPACED, ineligible: SPACED},
+            canon_extra={ineligible: make_entry(is_proper_name=False)},
+        )
+    )
+    err = capsys.readouterr().err
+    assert "outside the index-eligible group share this match key" in err
+    assert ineligible in err
+    # ...and does NOT accuse the ruling of an omission it did not make: this
+    # outsider IS mapped by the sidecar, which is legal -- the loader checks
+    # canon membership, never index eligibility.
+    assert "does not speak for" not in err
+    assert "even where the ruling DOES map it" in err
+
+
+def test_lt928_a_credited_group_still_warns_about_nothing(capsys):
+    """Control. The whole point is that a WORKING ruling gained no new noise."""
+    ot.build(*_collision_fixture(link_groups={SPACED: SPACED, MAQAF: SPACED}))
+    assert capsys.readouterr().err == ""
+
+
+def test_lt928_group_credited_primary_returns_a_reason_with_every_refusal():
+    """`_group_credited_primary` is the ONE owner of the four conditions, so
+    the reason is derived there and never re-tested by the caller. Exercised
+    directly: a refusal always carries a non-empty reason, a success never
+    does."""
+    group = {SPACED, MAQAF}
+    primary, reason = ot._group_credited_primary(
+        group, set(group), {SPACED: SPACED, MAQAF: SPACED}, EMPTY_SENSES
+    )
+    assert primary == SPACED
+    assert reason is None
+
+    for ruling in ({}, {SPACED: SPACED}, {SPACED: SPACED, MAQAF: MAQAF},
+                   {SPACED: "אברהם", MAQAF: "אברהם"}):
+        primary, reason = ot._group_credited_primary(
+            group, set(group), ruling, EMPTY_SENSES
+        )
+        assert primary is None
+        assert isinstance(reason, str) and reason.strip()
+
+    # Closure failing the OTHER way -- an eligible form missing from the
+    # competitor universe -- is refused fail-closed and says so.
+    primary, reason = ot._group_credited_primary(
+        group, {SPACED}, {SPACED: SPACED, MAQAF: SPACED}, EMPTY_SENSES
+    )
+    assert primary is None
+    assert "fail-closed" in reason

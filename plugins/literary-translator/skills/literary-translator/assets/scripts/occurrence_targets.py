@@ -108,6 +108,21 @@ obsidian` only, because that is the only target `assemble.py` attaches the
 projection under (#588's own gate, deliberately not widened here): on an
 `epub`/`custom` project a fold group stays withheld exactly as in 1.58.0.
 
+**Two ways a correctly-formed ruling is mechanically inert, both of which
+this module now SAYS rather than leaving to be inferred (#928).** First,
+`assemble.py` bakes the map into the NodeStream at assembly time, so editing
+`canon_link_groups.json` and re-running only a consuming pass changes
+nothing here -- the sidecar has to be re-assembled to reach this module, and
+the collision WARN below names that step rather than the file alone.
+Measured on the live he->en volume: nine groups added to the sidecar left 20
+canon entries still uncredited; re-running `assemble.py` first dropped it to
+2. Second, crediting is decided PER FOLD KEY while a group is a set of forms
+for one REFERENT, and a referent's forms need not share a key -- so a group
+whose `primary` sits in one key credits that key only, and its members in
+any other key stay withheld (condition 3 of `_group_credited_primary`). Both
+cases used to warn as though no ruling had been recorded at all; each now
+carries the condition that actually failed.
+
 `manifest`/`canon`/`nodestream` are already-parsed dicts (the exact shapes
 `assemble.py` itself builds/loads before `dispatch_adapter`); `senses_result`
 is a `canon_senses.SensesResult` (from `load_senses(..., allow_absent=True)`);
@@ -664,8 +679,18 @@ def _link_groups_from_nodestream(nodestream) -> dict:
 
 
 def _group_credited_primary(group, competitors, primary_by_source_form, senses_result):
-    """The link-group primary this fold-key group's occurrences are credited
-    to, or `None` when the group stays a collision (#497).
+    """`(primary, reason)` for this fold-key group: the link-group primary
+    its occurrences are credited to and `None`, or `None` and a REASON naming
+    the first of the four conditions below that failed (#497, #928).
+
+    The reason exists so the caller can tell an operator who has ALREADY
+    recorded a ruling why it did not apply. A group can be correctly formed
+    and semantically right and still be mechanically inert here -- condition
+    3 alone does that to every key the ruling's `primary` does not sit in --
+    and before #928 all four failures warned as though no ruling existed. It
+    is derived HERE, inside the function that owns the conditions, so nothing
+    downstream re-tests them: a second implementation of the same four tests
+    is how the two would drift apart.
 
     `group` is the ELIGIBLE canon source_forms sharing one `fold_match_key`;
     `competitors` is EVERY form sharing that key across the competitor
@@ -699,16 +724,59 @@ def _group_credited_primary(group, competitors, primary_by_source_form, senses_r
        would reach the primary's note as if unambiguous.
     """
     if competitors != set(group):
-        return None
-    if any(is_split(senses_result, source_form) for source_form in group):
-        return None
+        outsiders = competitors - set(group)
+        if outsiders:
+            return None, (
+                "forms outside the index-eligible group share this match key -- "
+                f"{sorted(outsiders)!r}. Each is either a canon_senses.json "
+                "split-only form or a canon entry the index excludes (basis: "
+                "not_a_name, or is_proper_name: false), and this key fails "
+                "closure even where the ruling DOES map it -- the sidecar's "
+                "loader checks canon membership, never index eligibility, so "
+                "mapping such a form is legal and still not a decision this "
+                "index can act on. A ruling credits a key only when EVERY form "
+                "sharing it is an index-eligible canon entry inside the group"
+            )
+        return None, (
+            "the competitor universe does not list "
+            f"{sorted(set(group) - competitors)!r}, which this match key "
+            "retrieves -- refused fail-closed rather than credited against an "
+            "incomplete universe"
+        )
+    split_members = sorted(f for f in group if is_split(senses_result, f))
+    if split_members:
+        return None, (
+            f"canon_senses.json records a homonym split for {split_members!r}"
+            " -- a group asserting ONE referent and a split asserting >= 2 senses "
+            "are contradictory operator statements that nothing cross-validates; "
+            "resolve the split, or drop that form from the group"
+        )
     primaries = {primary_by_source_form.get(source_form) for source_form in group}
+    if primaries == {None}:
+        return None, "no canon_link_groups.json ruling names any of these forms"
     if len(primaries) != 1:
-        return None
+        unruled = sorted(f for f in group if f not in primary_by_source_form)
+        if unruled:
+            return None, (
+                f"the ruling covers only part of this match key -- {unruled!r} "
+                "carry no group at all, so the record is not a decision about "
+                "the whole key; add them to the group"
+            )
+        return None, (
+            "these forms are ruled to MORE THAN ONE primary -- "
+            f"{sorted(p for p in primaries if p is not None)!r} -- which states "
+            "that they are different referents, not one"
+        )
     primary = primaries.pop()
-    if primary is None or primary not in group:
-        return None
-    return primary
+    if primary not in group:
+        return None, (
+            f"the ruling's primary {primary!r} does not share this match key, so "
+            "it can never retrieve these records. A group's members need not all "
+            "share one key, and crediting is decided PER KEY -- move `primary` "
+            f"onto one of {sorted(group)!r}, or record this key's forms as their "
+            "own group"
+        )
+    return primary, None
 
 
 def _colliding_source_forms(source_forms, competitor_forms, primary_by_source_form,
@@ -735,6 +803,14 @@ A group carrying a complete `canon_link_groups.json` ruling
     gate FATAL) once per group, naming every member and the shared key,
     mirroring `bootstrap_names._warn_inventory_match_key_collisions`'s own
     style.
+
+    That WARN comes in TWO forms (#928), chosen on whether the NodeStream's
+    map names any member of this key. It does not when the operator edited
+    `canon_link_groups.json` without re-assembling, so the form for an
+    UNRULED key names `assemble.py` as part of the remedy rather than naming
+    only the file the operator has already edited. The form for a key a
+    ruling DOES reach carries `_group_credited_primary`'s own reason instead,
+    so an operator is never told to record a group they have recorded.
     """
     # Two INDEPENDENT groupings, deliberately not one map with the eligible
     # forms filtered back out of it: the closure test below must fail CLOSED
@@ -753,7 +829,7 @@ A group carrying a complete `canon_link_groups.json` ruling
         # `.get(key, ())` -> an empty competitor set, which can never equal a
         # >= 2-member group, so a key absent from the competitor universe
         # collides. Same outcome the defaultdict this replaced produced.
-        primary = _group_credited_primary(
+        primary, reason = _group_credited_primary(
             group, set(competitor_groups.get(key, ())), primary_by_source_form,
             senses_result,
         )
@@ -761,18 +837,44 @@ A group carrying a complete `canon_link_groups.json` ruling
             credited_non_primary.update(f for f in group if f != primary)
             continue
         colliding.update(group)
-        print(
+        shared = (
             f"WARN occurrence_targets.py: canon source_forms {sorted(group)!r} "
             f"all fold to the same #238/#241 match key {key!r} -- every "
             "physical source occurrence they would BOTH claim is routed to "
             "unresolved_homonyms (reason: fold_match_key_collision) instead "
             "of being double-filed under both entries; neither gets it "
-            "until the operator disambiguates (rename or merge the "
-            "colliding canon entries, or record them as ONE referent in "
-            "canon_link_groups.json -- which credits the whole group to its "
-            "primary, and only when no other form shares the key).",
-            file=sys.stderr,
         )
+        # #928: which of the two sentences an operator needs depends on
+        # whether a ruling reached this module AT ALL. The map here is the
+        # one assemble.py baked into the NodeStream, so an operator who
+        # edited the sidecar without re-assembling lands in the FIRST branch
+        # -- which is exactly why that branch now names assemble.py instead
+        # of naming the file they have already edited. An operator whose
+        # ruling DID reach us lands in the second and is told the condition
+        # that failed, never told to record a group again.
+        if any(source_form in primary_by_source_form for source_form in group):
+            remedy = (
+                "until the ruling BAKED INTO THIS NODESTREAM, which "
+                "already covers at least one of them, credits this match key: "
+                f"{reason}. If canon_link_groups.json already says otherwise, "
+                "the baked map is stale and re-running assemble.py is the whole "
+                "fix; otherwise fix the sidecar first and re-run assemble.py "
+                "after -- this pass reads the map assemble.py baked into the "
+                "NodeStream, never the sidecar itself."
+            )
+        else:
+            remedy = (
+                "until the operator disambiguates: rename or merge "
+                "the colliding canon entries, or record them as ONE referent "
+                "in canon_link_groups.json -- which credits the whole group "
+                "to its primary, and only when that primary is itself one of "
+                "the forms sharing this match key and no form OUTSIDE the "
+                "index-eligible group shares it. Recording it is not enough on "
+                "its own: re-run assemble.py afterwards, because this pass "
+                "reads the map assemble.py baked into the NodeStream, never "
+                "canon_link_groups.json itself."
+            )
+        print(shared + remedy, file=sys.stderr)
     return colliding, credited_non_primary
 
 

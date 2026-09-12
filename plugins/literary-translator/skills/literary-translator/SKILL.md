@@ -4651,7 +4651,13 @@ forms — is an index-eligible canon entry inside one group with one primary and
 no member carries a split. `output.target: obsidian` only, since that is the
 only target the sidecar projection is attached under. An in-flight W9r registry
 run must restart when a group is adopted (`person_registry.py` binds the whole
-NodeStream into `registry_input.json`'s digest).
+NodeStream into `registry_input.json`'s digest). **Two traps (#928): editing
+`canon_link_groups.json` does nothing until `assemble.py` runs again — it is
+`assemble.py` that bakes the map into the NodeStream every consumer reads — and
+crediting is decided per fold key while a group is per referent, so a group
+whose members span two keys credits only the key its `primary` sits in. Read
+the WARN: since 1.188.0 it names `assemble.py` when no ruling reached the run,
+and names the condition a recorded ruling failed when one did.**
 
 **Under `index_from: markup`, name the minted notes — `markup_display.json`
 (#925).** A markup-minted note is headed with its LABEL, which is the `ref`

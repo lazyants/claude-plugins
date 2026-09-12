@@ -152,6 +152,40 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
+    # ROTATED TO 1.188.0 (#928 -- a link group recorded after assembly was
+    # silently inert, and the warning named the sidecar rather than the step
+    # that applies it). The entry states ONE `file.ext:NNN` citation, declared
+    # below. Everything else it claims it names by FILE and SYMBOL --
+    # `occurrence_targets.py`, `_group_credited_primary()`,
+    # `_link_groups_from_nodestream()`, `assemble.py`, `canon_link_groups.json`,
+    # `nodestream["link_groups"]`, `fold_match_key`, `canon_senses.json`,
+    # `person_registry.py`, `input_sha256` -- which is not the shape this guard
+    # reads. Measured against the entry, not asserted: a scan of its slice for
+    # the `file.ext:NNN` pattern returns exactly the one key below.
+    #
+    # The citation is load-bearing for the entry's "deliberately NOT done"
+    # paragraph: the digest-and-refuse design the issue proposed is refused
+    # BECAUSE this range turns any exception out of `build()` into a hard gate
+    # FATAL. If that stops being true the refusal stops being justified, which
+    # is exactly the drift an anchor is for.
+    #
+    # This release inserts a paragraph into `occurrence_targets.py`'s module
+    # docstring, which drifts every citation aimed below it. The one such
+    # citation -- `verbatim_census.py`'s, aimed at this module's own
+    # sibling-import block -- is repointed to its RE-MEASURED lines in both
+    # the citing comment and `tools/citation-anchors/literary-translator.json`,
+    # and `tools/citation_audit.py check` is OK on the result.
+    #
+    # This rotation RETIRED 1.154.0's list, which was already empty.
+    "validate_backlinks.py:1317-1325": (
+        "aggregate = occurrence_targets.build(",
+        "except Exception as exc:",
+        "never a silently empty report.",
+        "occurrence_targets.build() failed:",
+    ),
+    #
+    # ------------------------------------------------------------------------
+    # The 1.177.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.177.0 (#930 -- a canon entity note's filename was always
     # the source-script canon key), and EMPTY ON PURPOSE, for the reason the
     # records below give: the entry names its subjects by FILE, KEY and

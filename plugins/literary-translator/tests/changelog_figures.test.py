@@ -534,6 +534,49 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
+    # ROTATED TO 1.188.0 (#928 -- a link group recorded after assembly was
+    # silently inert, and the collision warning named the sidecar rather than
+    # the step that applies it), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # digit-run in it is an IDENTIFIER, a CITATION, or a measurement taken
+    # OUTSIDE this tree.
+    #
+    # The identifiers: the version (1.188.0), the release date, the issue
+    # number (#928), the `#238/#241` fold-key train it names, and the
+    # `input_sha256` field name it names as the guard pattern it is NOT
+    # adopting. The entry's one line-range citation, into `validate_backlinks.py`,
+    # is pinned by `tests/changelog_citations.test.py`'s own anchor map and by
+    # `tools/citation_audit.py check`, not by a figure row.
+    #
+    # The measurements: "nine groups added", "20 canon entries still
+    # uncredited" and "dropped it to 2" are facts about a book project in
+    # ANOTHER REPOSITORY -- the same class the 1.125.0 and 1.123.0 rotations
+    # below name for theirs -- so a row would have to hardcode its own answer,
+    # the `lambda: 17` failure this file's docstring calls the row that guards
+    # nothing.
+    #
+    # Two SPELLED-OUT counts in the entry do describe this tree: "the collision
+    # WARN comes in two forms" and "the two facts an operator needs". They are
+    # outside this gate by its own design -- the docstring above records that
+    # the spelled-out sweep, and the model call it would have needed, were
+    # deliberately cut. Both are pinned executably instead, by the #928 block in
+    # `tests/occurrence_targets.test.py`: one test per WARN form, plus a control
+    # that a working ruling emits nothing. A third count, "which of the four
+    # conditions failed", was REMOVED from the entry rather than left
+    # unguardable -- a fifth condition is a plausible future release, and the
+    # prose does not need the number to say what it says.
+    #
+    # This rotation RETIRED the TWO rows of 1.170.0 (#919 -- the advisory host
+    # limit and the fetch-retry ladder span), which belong to an entry that is
+    # now the second-newest and which this guard therefore no longer reads;
+    # both are kept below as comments inside that release's own record. Its
+    # rotation comment still says "ROTATED TO 1.157.0" -- that release was
+    # renumbered to 1.170.0 in the version race and only FIGURES_VERSION was
+    # moved with it.
+    #
+    # ------------------------------------------------------------------------
+    # The 1.186.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.186.0 (#915 -- a run stopped by a signal left its codex
     # app-server broker running, and the orphan named no durable root), per the
     # maintenance contract above.
@@ -1690,7 +1733,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.186.0"
+FIGURES_VERSION = "1.188.0"
 
 
 def _newest_entry():
