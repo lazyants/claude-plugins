@@ -152,6 +152,21 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
+    # ROTATED TO 1.177.0 (#930 -- a canon entity note's filename was always
+    # the source-script canon key), and EMPTY ON PURPOSE, for the reason the
+    # records below give: the entry names its subjects by FILE, KEY and
+    # SYMBOL -- `entity_note_stem`, `render_obsidian.py`,
+    # `_entity_note_stem_field`, `validate_backlinks.py`, `entries{}`,
+    # `profile_semantics_hash`, `resume_setup.py`, `plugin_bundle_hash`,
+    # `mentions_section.enabled` -- and states no `file.ext:NNN` citation at
+    # all, which is the shape this guard reads. Measured against the entry
+    # rather than asserted: a scan of its slice for that pattern returns zero
+    # matches.
+    #
+    # It is 1.154.0's record this rotation replaces; its record is kept below
+    # unchanged, as every earlier rotation's is.
+    #
+    # ---- records this rotation replaces, kept per the maintenance contract ----
     # ROTATED TO 1.154.0 (#913 -- nothing compared a declared markup vocabulary
     # against the style contract that has to ask for it), and EMPTY ON PURPOSE.
     # The entry names its subjects by FILE and SYMBOL rather than by line --

@@ -1574,7 +1574,9 @@ and the canon now instructs the translator to drop a formula the source prints;
 the next review round correctly raises the missing blessing as omitted source
 content. Measured: applied to 31 entries on one volume and reverted the same
 day. Note what it does NOT buy, either — the note FILENAME comes from the
-`source_form` (`_entity_note_relpath`), so both notes still exist afterwards.
+`source_form` by default (`_entity_note_relpath`), so both notes still exist
+afterwards; under `entity_note_stem: canonical_target_form` (#930) both
+notes still exist too, one carrying the dedupe's `-2` suffix.
 
 **What to do instead: nothing — leave the two notes.** In the vault where this
 was measured they were orphans, with zero inbound links: only one of the two

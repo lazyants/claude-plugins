@@ -16,8 +16,8 @@ and, when the project declares `output.entity_markup` with
 inline (see "Markup-driven entity notes" below; absent that declaration
 nothing on this page changes except the two unconditional items named under
 "Editorial brackets"). Its own knobs live under
-`output.adapter_config.obsidian` — currently just `folders` (the
-category→folder catalog, see below); `assets/profile.example.yml` ships the
+`output.adapter_config.obsidian`: `folders`, `mentions_section`, and
+`entity_note_stem` (see below). `assets/profile.example.yml` ships the
 shape. `output.entity_markup` is NOT one of them: it is read by
 `assemble.py` as well, so it sits directly under `output`.
 
@@ -80,13 +80,60 @@ documented the same as any other entry, and are matched into body text the
 same way (below); the frontmatter contract does not branch on
 `is_proper_name`.
 
+## Entity-note filenames
+
+`output.adapter_config.obsidian.entity_note_stem` (#930) picks which canon
+field a canon entity note's filename stem comes from, resolved once by
+`render_obsidian.py`'s `_entity_note_stem_field` helper (`validate_backlinks.py`
+calls the same helper on the same profile, so the two can never disagree
+about a note's path). Two values:
+
+- `source_form` (the default — absent key resolves here too, unchanged from
+  every earlier render): the stem is the entry's original-script identity,
+  the `entries{}` key. This is why the default stays default: every existing
+  vault's notes keep their names, and every hand-kept wikilink into a note
+  keeps resolving.
+- `canonical_target_form`: the stem is the entry's target-language
+  rendering instead, so a book translated out of a non-Latin script gets
+  Latin filenames a reader can find by name. An entry with an empty
+  `canonical_target_form` falls back to its `source_form` so it still gets
+  a note.
+
+Either way, the frontmatter (`source_form`, `aliases: [source_form]`,
+`canonical_target_form`), the note's H1, and the wikilink display text are
+unchanged — only the filename stem moves. Collisions are handled by the
+existing `-<n>`-suffix dedupe (NFC+casefold key, #99): two entries sharing
+one stem, or differing only in case, still get two files. For example,
+two entries whose target forms are `Our Rebbe` and `our Rebbe` produce
+`Our Rebbe.md` and `our Rebbe-2.md` when the first entry's `source_form`
+sorts first (and `our Rebbe.md` plus `Our Rebbe-2.md` otherwise): the
+entry whose `source_form` sorts first keeps the bare name, which is a
+sort-order fact, not an identity claim.
+
+Markup-driven notes (below) keep their existing, label-based stem — this
+knob does not touch them. But canon notes and markup notes share ONE
+collision set, and canon notes are allocated first, so a markup label equal
+to a canon note's new target-form stem takes the `-<n>` suffix under this
+knob where it held the bare name under the default. So a markup note CAN
+be renamed by flipping this knob, even though its own stem rule is unchanged.
+
+Flipping this knob is outside `profile_semantics_hash`, so it re-translates
+nothing — but it CAN rename a canon entity note: every one whose target
+form sanitizes to a different stem than its source form moves, so a vault
+with an accepted render baseline needs one operator
+`diff_rendered_output.py --accept-baseline --force-accept-baseline`
+whenever any path changed (plain `--accept-baseline` is refused over an
+existing baseline).
+
 ## The wikilink rule
 
 **The asymmetry to hold onto:** the substring that actually appears in
 *translated* body text is `canonical_target_form`, never `source_form` — the
 wikilink's *display* text is what a reader sees, and its *target/identity*
 is `note_identity`, the entity note's own sanitized, folder-qualified
-relpath. `note_identity` is derived from the winning `source_form` but is a
+relpath. `note_identity` is derived from the entry's filename stem —
+`source_form` by default, or `canonical_target_form` under
+`entity_note_stem` (see "Entity-note filenames" above) — but is a
 distinct string from it, and only `note_identity` is ever safe to put
 inside `[[...]]`.
 
@@ -250,9 +297,10 @@ profile dict constructed outside the normal Step 0 validation path; it is
 not evidence that a schema-valid profile can carry `enabled: null`.)
 Through 1.9.x this was opt-in (default false) — see the CHANGELOG for the
 migration note (a rendered vault holding an accepted
-`diff_rendered_output.py` baseline needs one operator `--accept-baseline`
-re-accept once this lands, since `render_obsidian.py`'s own bytes changed;
-converged segments are never re-translated by this flip).
+`diff_rendered_output.py` baseline needs one operator
+`--accept-baseline --force-accept-baseline` re-accept once this lands,
+since `render_obsidian.py`'s own bytes changed; converged segments are
+never re-translated by this flip).
 The advisory `validate_backlinks.py` W9 gate (non-blocking) reports coverage;
 the aggregated `output.index` person-index page it once might have routed to
 is retired, not a later phase. `index_scope` is a different case and stays:
@@ -998,18 +1046,21 @@ allow-list precedent). This means the untrusted-input boundary this
 allow-list actually defends is the profile's own `folders` map — not
 `category`, which never reaches the join at all.
 
-Note *filenames*, derived from each entry's `source_form`, get the same
-fail-closed, allow-list-first posture applied to whatever filesystem-unsafe
-characters a raw name could contain (path separators, `..`, control/NUL
-bytes, a leading separator) — rejected/stripped before the file is written,
-never patched up after the fact with a denylist of specific bad substrings.
-Unlike `category`/`folders` (an English-ish open vocabulary the profile
-declares), `source_form` is often non-ASCII source-script text (Cyrillic,
-etc.) by design — see `SKILL.md`'s English-only-identifiers rule, which
-governs code identifiers, not this kind of data-derived filename — so the
-filename sanitizer's allowed character set is necessarily wider than
-`category`'s, while holding the same "positive allow-list, reject
-traversal/separators before any join" discipline.
+Note *filenames*, derived from each entry's filename stem (`source_form` by
+default, or `canonical_target_form` under `entity_note_stem` — see
+"Entity-note filenames" above; the target form passes through the same
+sanitizer), get the same fail-closed, allow-list-first posture applied to
+whatever filesystem-unsafe characters a raw name could contain (path
+separators, `..`, control/NUL bytes, a leading separator) —
+rejected/stripped before the file is written, never patched up after the
+fact with a denylist of specific bad substrings. Unlike `category`/`folders`
+(an English-ish open vocabulary the profile declares), `source_form` is
+often non-ASCII source-script text (Cyrillic, etc.) by design — see
+`SKILL.md`'s English-only-identifiers rule, which governs code identifiers,
+not this kind of data-derived filename — so the filename sanitizer's
+allowed character set is necessarily wider than `category`'s, while holding
+the same "positive allow-list, reject traversal/separators before any join"
+discipline.
 
 That set has three legs, and only the first is a plain character list:
 
