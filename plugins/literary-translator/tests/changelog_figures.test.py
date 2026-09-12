@@ -534,6 +534,13 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
+    # ROTATED TO 1.186.0 (#915 -- a run stopped by a signal left its codex
+    # app-server broker running, and the orphan named no durable root), per the
+    # maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed.
+    #
+    # The 1.177.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.177.0 (#930 -- a canon entity note's filename was always
     # the source-script canon key), per the maintenance contract above.
     #
@@ -1683,7 +1690,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.177.0"
+FIGURES_VERSION = "1.186.0"
 
 
 def _newest_entry():

@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.186.0 — 2026-09-12
+
+**A run stopped by a signal left its codex app-server broker running, and nobody could tell whose
+orphan it was (#915).** The broker teardown #789 shipped lives in `finalize()` / `__exit__`, which a
+signal with no handler never reaches. No driver installed one, so a run stopped with `kill` left its
+`app-server-broker.mjs` — and the `codex app-server` and platform binary it owns — running against a
+sandbox nobody would read again, until the machine rebooted.
+
+Measured from the companion's own per-sandbox state across four profiles before the fix: 20,651
+sandboxes dispatched, 16,607 of them recording a spawned broker, 520 (2.5%) whose owner never
+finalized, and 90 brokers still alive. So #789 works for 99.5% of brokers and the issue's "every
+dispatched segment leaves three processes behind" is refuted — what leaked was the never-finalized
+tail, and it leaked permanently.
+
+`codex_job.py`, `name_discovery.py` and `glossary_dispatch_driver.py` now install a SIGTERM and
+SIGHUP handler that reaps, settles briefly, reaps again from a freshly read registry, and only then
+restores `SIG_DFL` and dies by the original signal — so a parent's wait status is unchanged and an
+abort gains no durable consequence it did not have before. The restore and the self-signal sit in a
+`finally`, because a SIGINT landing during the settle otherwise skipped both. The signal path
+signals without waiting for broker exit: ordinary teardown's five-second per-sandbox poll, run
+twice over sixteen slots, would have made `kill` look hung for minutes and invited the SIGKILL this
+change exists to avoid. `name_discovery.py`, the only concurrent driver, keeps a live-sandbox set
+the handler snapshots rather than iterates, closes admission on the same flag so a queued worker
+cannot start new work mid-cleanup, and unregisters only as the last act of ordinary teardown.
+
+Sandboxes are now named `lt{cj,nd,gd}.p<proj8>.<label>`, where `proj8` is the first eight hex of
+sha256 over the durable root's real path. That is what makes a surviving orphan attributable:
+`references/gotchas.md` documents a sweep keyed to it, and `broker_sweep_recipe.test.py` executes
+the fence lifted from that doc rather than a retyped copy. The tag sits immediately after the family
+marker, the pattern pins it to the last path component, and the script name carries a left
+boundary — a segment id is `[A-Za-z0-9_]+`, so eight hex characters are a legal label, and a tag in
+the label position, on an ancestor directory, or a script merely ending in `app-server-broker.mjs`
+could otherwise be forged into matching another root's live broker. The documented fence also
+refuses to run at all when `DURABLE_ROOT` is unset, rather than hashing the current directory into a
+plausible-looking tag that matches nothing and reads as "no orphans".
+
+The pattern deliberately does NOT bind the tag to the broker's `--cwd` value, and `gotchas.md` says
+why: two attempts to express that binding each shipped a false all-clear on real paths — `[^ ]*`
+skipped every sandbox under a `TMPDIR` whose name contains a space, and `([^ ]| [^-])*` then skipped
+one containing a space followed by a hyphen. `pgrep -f` matches a flattened command line, where a
+space is both the argument separator and an ordinary path character, so no regular expression can
+separate the two. Missing one of the operator's own orphans is worse than the hypothetical the
+binding bought, so it was dropped and the residual is disclosed instead: if the companion is ever
+changed to pass a second sandbox-derived path in one command line, a sweep for one root could match
+another's broker, and the recipe's `pgrep -fl` look-first step is what shows it.
+
+**Known limitation, stated in `gotchas.md` rather than worked around:** SIGKILL, an out-of-memory
+kill and a machine crash still leak, as does a broker that first becomes visible after the handler's
+second pass — the companion's worker is not the driver's child and outlives it. Closing that last
+case would mean waiting for every in-flight codex turn before dying. The documented sweep is how
+those get collected.
+
 ## 1.177.0 — 2026-09-12
 
 **A canon entity note's filename was always the source-script canon key, so a book translated out

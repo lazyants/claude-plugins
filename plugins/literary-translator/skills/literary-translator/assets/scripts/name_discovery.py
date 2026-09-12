@@ -964,6 +964,179 @@ def read_sandbox_reply(path, label):
     return data
 
 
+# ---------------------------------------------------------------------------
+# Signal-driven broker reaping (#915). A run stopped with SIGTERM or SIGHUP
+# left every codex-companion broker running: `grep -n "signal.signal"` over
+# the shipped drivers found no installed handler anywhere, so `kill` and
+# `pkill` skipped straight past the ordinary teardown below.
+#
+# _LIVE_SANDBOXES is a module-level registry rather than a single reference
+# because THIS driver is concurrent -- main() runs a ThreadPoolExecutor whose
+# workers each enter and exit their own DispatchSandbox, so more than one
+# sandbox can be live when a signal arrives.
+# ---------------------------------------------------------------------------
+
+_LIVE_SANDBOXES = set()
+_SHUTTING_DOWN = False
+
+# NAME_MAX (255) minus mkdtemp's own 8-byte random suffix minus the fixed
+# "ltnd.p<8 hex>.." shape leaves comfortable room; 214 is the one budget the
+# whole change set uses (see codex_job.py, where 255 is reached exactly), so
+# the label is truncated to it here too rather than to a separately-derived
+# number.
+SANDBOX_LABEL_CAP_BYTES = 214
+
+
+def _proj8():
+    """The durable root's stable attribution tag: sha256 of its REALPATH, so
+    a trailing slash or a symlink spelling of the same root hashes to the
+    same tag (#915). A digest, never the book's directory name -- a name
+    published into TMPDIR is readable by other uids on a shared /tmp (see
+    this module's hash-impact note near the top)."""
+    return hashlib.sha256(
+        os.path.realpath(os.fspath(DURABLE_ROOT)).encode()).hexdigest()[:8]
+
+
+def _broker_pids_for(path):
+    """As `DispatchSandbox._broker_pids`, but for a bare path rather than an
+    instance: the shutdown handler below reaps a snapshot of live sandbox
+    PATHS, not DispatchSandbox objects, so it has no `self` to call that
+    method on. Logs once when the SEARCH itself fails (pgrep exiting >=2, or
+    a timeout) -- until now that was indistinguishable from "no broker
+    found"."""
+    pattern = "app-server-broker\\.mjs .*--cwd %s( |$)" % _ere_escape(str(path))
+    try:
+        proc = subprocess.run(["pgrep", "-f", pattern], capture_output=True,
+                              text=True, timeout=BROKER_TEARDOWN_TIMEOUT_SEC)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        log(f"{path}: the broker search itself failed ({exc!r}), which is not "
+            f"the same as finding no broker -- one here could go unreaped")
+        return None
+    # pgrep: 0 = matched, 1 = nothing matched, >=2 = pgrep itself failed. Only
+    # 0 carries pids; >=2 is now logged rather than folded into "no match".
+    if proc.returncode >= 2:
+        log(f"{path}: pgrep exited {proc.returncode} searching for a broker -- "
+            f"the search itself failed, which is not the same as finding none")
+        return None
+    if proc.returncode != 0:
+        return []
+    own = os.getpid()
+    pids = []
+    for field in (proc.stdout or "").split():
+        try:
+            pid = int(field)
+        except ValueError:
+            continue
+        if pid <= 1 or pid == own:
+            continue
+        pids.append(pid)
+    return pids
+
+
+def _shutdown_broker_for(path, label):
+    """As `DispatchSandbox._shutdown_broker`, but for a bare path (see
+    `_broker_pids_for` for why). The SIGTERM itself is `_signal_broker_for`'s;
+    what this adds -- and what the signal path must NOT have -- is the wait
+    for the broker to actually exit before the sandbox is removed."""
+    if not _signal_broker_for(path):
+        return
+    deadline = time.monotonic() + BROKER_EXIT_POLL_SEC
+    while time.monotonic() < deadline:
+        remaining = _broker_pids_for(path)
+        if not remaining:
+            return
+        time.sleep(0.2)
+    remaining = _broker_pids_for(path)
+    if remaining:
+        log(f"{label}: broker pid(s) {remaining} did not exit within "
+            f"{BROKER_EXIT_POLL_SEC}s of SIGTERM; the sandbox is being removed "
+            f"anyway, so they can only write into a directory nobody consumes from")
+
+
+def _signal_broker_for(path):
+    """SIGTERMs every broker matched to `path` and returns immediately, with
+    NO poll for exit (#915 round 2 MINOR). `_shutdown_broker_for` waits up to
+    BROKER_EXIT_POLL_SEC per sandbox because ordinary per-launch teardown
+    needs to know the broker is gone before it rmtree's the sandbox; the
+    signal handler never touches the sandbox directory or the registry, so it
+    has no such need, and waiting there is actively harmful: at
+    BROKER_EXIT_POLL_SEC=5s per sandbox, two passes at the default 6-way
+    parallelism would take up to a minute before the process dies -- long
+    enough that an impatient operator sends SIGKILL, producing exactly the
+    unreaped orphan this change exists to prevent.
+
+    Returns True when at least one broker was signalled -- the one thing
+    `_shutdown_broker_for` needs in order to decide whether entering that
+    wait is worth anything at all."""
+    pids = _broker_pids_for(path)
+    if not pids:
+        return False
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    return True
+
+
+def _reap_live_sandboxes_once():
+    """One best-effort, NON-WAITING pass over a SNAPSHOT of live sandboxes.
+    Never a direct iteration of `_LIVE_SANDBOXES`: `DispatchSandbox._teardown`
+    releases the GIL inside `subprocess.run` and `time.sleep`, so a worker
+    thread can mutate the set while this runs, and iterating it directly
+    would raise RuntimeError. `tuple(...)` freezes membership at the instant
+    it is taken, which is what lets the caller take a second, FRESH snapshot
+    after a settle and catch anything registered in between (#915)."""
+    for path in tuple(_LIVE_SANDBOXES):
+        try:
+            _signal_broker_for(path)
+        except BaseException:
+            pass
+
+
+def _handle_shutdown_signal(signum, frame):
+    """SIGTERM/SIGHUP: reap every live sandbox's broker, then die by the
+    original signal.
+
+    ONE SHOT: the first thing this does is set `_SHUTTING_DOWN`, so a second
+    signal arriving while this handler is still running sees it already set
+    and returns immediately, instead of starting a second reap over state
+    the first reap is still using.
+
+    TWO PASSES, the second over a FRESH snapshot taken after a bounded
+    settle: a sandbox that becomes live between the handler firing and the
+    first pass finishing is exactly what the second pass is for.
+    Unregistration is left entirely to ordinary teardown
+    (`DispatchSandbox._teardown`), which discards it as ITS last act -- this
+    handler never touches `_LIVE_SANDBOXES` itself.
+
+    THE RESTORE AND SELF-SIGNAL ALWAYS RUN, via `finally` (#915 round 1
+    MAJOR): `time.sleep(0.5)` between the two passes raises KeyboardInterrupt
+    if a SIGINT lands during the settle, and without this `finally` that
+    skipped both the second pass AND the self-signal, leaving the process
+    alive with no handler doing anything further. SIG_DFL is still restored
+    ONLY at the very end, immediately before the self-signal: restoring it
+    earlier would let a second, impatient `kill` take the process down by
+    default disposition while cleanup is still in flight."""
+    global _SHUTTING_DOWN
+    if _SHUTTING_DOWN:
+        return
+    _SHUTTING_DOWN = True
+    try:
+        _reap_live_sandboxes_once()
+        time.sleep(0.5)
+        _reap_live_sandboxes_once()
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+
+def install_shutdown_handlers():
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    signal.signal(signal.SIGHUP, _handle_shutdown_signal)
+
+
 class DispatchSandbox:
     """One launch's write-confined directory, as a context manager.
 
@@ -1008,8 +1181,20 @@ class DispatchSandbox:
         self.path = None
 
     def __enter__(self):
+        # The proj8 tag sits immediately after the family marker, not after
+        # the label (#915): a label matching [A-Za-z0-9_.-] could otherwise
+        # forge it, and the documented sweep in gotchas.md matches on the
+        # anchored position. proj8 is a digest of the durable root's
+        # REALPATH, so a trailing slash or a symlink spelling of the same
+        # root produces the same tag. No digest of the (possibly truncated)
+        # label: mkdtemp's own random suffix already makes two same-prefix
+        # sandboxes distinct. The truncation below is a CHARACTER slice and
+        # equals the BYTE cap only because the substitution leaves one-byte
+        # characters only -- widening that character class means switching to
+        # a byte slice, as codex_job.py's own _cap_sandbox_label() does.
+        sanitized = re.sub(r"[^A-Za-z0-9_.-]", "_", self.label)[:SANDBOX_LABEL_CAP_BYTES]
         try:
-            raw = tempfile.mkdtemp(prefix="ltnd.%s." % re.sub(r"[^A-Za-z0-9_.-]", "_", self.label))
+            raw = tempfile.mkdtemp(prefix="ltnd.p%s.%s." % (_proj8(), sanitized))
         except OSError as exc:
             fatal(f"could not create a dispatch sandbox for {self.label}: {exc!r}",
                   label=self.label)
@@ -1030,6 +1215,10 @@ class DispatchSandbox:
                 "git working tree and re-run -- nothing about this run has been "
                 "recorded, so the re-run resumes exactly where this one stopped.",
                 label=self.label, sandbox_probe=outcome)
+        # Registered only AFTER the confinement probe succeeds (#915): the
+        # shutdown handler must never see -- and try to reap a broker
+        # inside -- a sandbox this driver never actually confined.
+        _LIVE_SANDBOXES.add(self.path)
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -1048,6 +1237,11 @@ class DispatchSandbox:
         if self.path.exists():
             log(f"{self.label}: sandbox {self.path} could not be removed and is left "
                 f"on disk; remove it by hand")
+        # LAST act, deliberately (#915): discarding earlier would let a
+        # signal arriving while this teardown is still blocked (inside
+        # _shutdown_broker's subprocess.run or its poll sleep) snapshot
+        # nothing and then kill the worker before its own cleanup finished.
+        _LIVE_SANDBOXES.discard(self.path)
         self.path = None
 
     def _broker_pids(self):
@@ -1058,49 +1252,13 @@ class DispatchSandbox:
         every broker that exists. The match cannot hit anything else: the
         sandbox path is a single-use mkdtemp path reaching the broker's argv
         verbatim, the pattern additionally requires app-server-broker.mjs, and
-        the path is anchored so a longer sibling path cannot match."""
-        pattern = "app-server-broker\\.mjs .*--cwd %s( |$)" % _ere_escape(str(self.path))
-        try:
-            proc = subprocess.run(["pgrep", "-f", pattern], capture_output=True,
-                                  text=True, timeout=BROKER_TEARDOWN_TIMEOUT_SEC)
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            return None
-        # pgrep: 0 = matched, 1 = nothing matched, >=2 = pgrep itself failed.
-        # Only 0 carries pids.
-        if proc.returncode != 0:
-            return []
-        own = os.getpid()
-        pids = []
-        for field in (proc.stdout or "").split():
-            try:
-                pid = int(field)
-            except ValueError:
-                continue
-            if pid <= 1 or pid == own:
-                continue
-            pids.append(pid)
-        return pids
+        the path is anchored so a longer sibling path cannot match. Delegates
+        to `_broker_pids_for` (#915), which the shutdown handler also calls
+        for sandbox paths that have no owning instance at hand."""
+        return _broker_pids_for(self.path)
 
     def _shutdown_broker(self):
-        pids = self._broker_pids()
-        if not pids:
-            return
-        for pid in pids:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
-        deadline = time.monotonic() + BROKER_EXIT_POLL_SEC
-        while time.monotonic() < deadline:
-            remaining = self._broker_pids()
-            if not remaining:
-                return
-            time.sleep(0.2)
-        remaining = self._broker_pids()
-        if remaining:
-            log(f"{self.label}: broker pid(s) {remaining} did not exit within "
-                f"{BROKER_EXIT_POLL_SEC}s of SIGTERM; the sandbox is being removed "
-                f"anyway, so they can only write into a directory nobody consumes from")
+        _shutdown_broker_for(self.path, self.label)
 
 
 def resolve_companion(node_bin):
@@ -1446,6 +1604,16 @@ def launch_one(*, companion, node_bin, unit_text, effort, model, deadline_sec, l
         if model:
             argv += ["--model", model]
         argv += ["--cwd", str(sandbox.path), "--prompt-file", str(prompt_file)]
+        # Admission check 2 of 2 (#915), immediately before the launch: time
+        # has passed since check 1 in `one()` (creating this sandbox, writing
+        # the prompt), which is exactly the window a shutdown signal can
+        # arrive in. No lock, no wait -- seeing the flag set here just means
+        # not launching; DispatchSandbox's own __exit__ still tears this
+        # sandbox down normally.
+        if _SHUTTING_DOWN:
+            raise NameDiscoveryError(
+                f"{label}: not launched -- a shutdown signal is being handled",
+                label=label)
         try:
             proc = subprocess.run(argv, capture_output=True, text=True,
                                   timeout=LAUNCH_TIMEOUT_SEC)
@@ -1602,6 +1770,14 @@ def cmd_dispatch(args):
     def one(slot):
         unit_id, pass_index, expected, path = slot
         label = f"{unit_id}.{pass_index}"
+        # Admission check 1 of 2 (#915): a slot a pool worker is about to
+        # start, checked before anything for this slot happens, so a QUEUED
+        # slot cannot start new work while the shutdown handler is blocked
+        # reaping in pgrep.
+        if _SHUTTING_DOWN:
+            raise NameDiscoveryError(
+                f"{label}: not launched -- a shutdown signal is being handled",
+                label=label)
         forms = launch_one(
             companion=companion, node_bin=node_bin, unit_text=text_by_unit[unit_id],
             effort=run_manifest["effort"], model=run_manifest["model"],
@@ -2294,6 +2470,11 @@ def build_arg_parser():
 
 
 def main(argv=None):
+    # Armed unconditionally and first (#915): --fold and --verify-inventory
+    # never register a sandbox, so a signal during either finds nothing to
+    # reap and dies by the original signal after one no-op pass; --dispatch
+    # is the path this actually protects.
+    install_shutdown_handlers()
     args = build_arg_parser().parse_args(argv)
 
     if args.resume_plan:

@@ -137,7 +137,7 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 # write on the DIRECTORY can unlink and recreate any of them whatever the file mode says.
 # What 0o600 does bound is who can read the joblog's BODY; at a 0755 segdir any uid can
 # still LIST the directory and read the nonce straight out of the filenames. And
-# _setup_sandbox()'s mkdtemp(prefix="ltcj.<seg>.<inv>.") publishes the same nonce into
+# _setup_sandbox()'s mkdtemp(prefix="ltcj.p<proj8>.<seg>.<inv>.") publishes the same nonce into
 # TMPDIR, which on a shared /tmp is a second discovery path that is not same-uid at all.
 #
 # Exactly ONE actor is excluded, and only it: the codex processes THIS DRIVER launches.
@@ -339,7 +339,7 @@ def _ere_escape(text):
 
 def _shutdown_sandbox_broker(sandbox_dir):
     """#789: SIGTERM the codex-companion app-server broker keyed to THIS invocation's
-    sandbox, called from finalize() immediately before that sandbox is rmtree'd.
+    sandbox, called from finalize() and, since #915, from the SIGTERM/SIGHUP handler.
 
     codex-companion keys a PERSISTENT broker to whatever `--cwd` it is handed:
     `lib/broker-lifecycle.mjs`'s `ensureBrokerSession(cwd)` spawns
@@ -1518,7 +1518,7 @@ class CodexJob:
         sandbox is worse than no launch at all (strictness bias)."""
         ext = "draft" if self.kind == "translate" else "review"
         try:
-            raw = tempfile.mkdtemp(prefix="ltcj.%s.%s." % (self.seg, self.inv))
+            raw = tempfile.mkdtemp(prefix="ltcj.p%s.%s.%s." % (_proj8(self.root), _cap_sandbox_label(self.seg), self.inv))
         except OSError:
             return False
         # Pin ONE canonical form now -- macOS's /tmp -> /private/tmp symlink otherwise
@@ -1529,7 +1529,7 @@ class CodexJob:
         if not self._sandbox_is_confined(self.sandbox_dir):
             return False
         self.sandbox_attempt = os.path.join(self.sandbox_dir, "attempt.%s.json" % ext)
-        return True
+        return _register_active_sandbox(self.sandbox_dir)
 
     def _write_final_prompt(self):
         """Write the frozen prompt INSIDE the sandbox (its only other content besides the
@@ -2455,7 +2455,7 @@ class CodexJob:
             # best-effort cancel can then only write into a directory nobody will ever
             # consume from again -- this rmtree is the "neutralised by the isolation
             # itself" half of #409, not a courtesy cleanup.
-            shutil.rmtree(self.sandbox_dir, ignore_errors=True)
+            _finish_sandbox_teardown(self.sandbox_dir)
         _silent_remove(self.prompt_file)
         # Terminal hygiene joblog ONLY IF we hold the lease (a lease-loser must never clobber
         # the live holder's control state -- HIGH-3 r8).
@@ -3064,6 +3064,11 @@ def main(argv=None):
         return 2
 
     poll_sec = args.poll_sec if args.poll_sec > 0 else 15
+    # #915: installed here, right before the CodexJob that might own a sandbox is even
+    # constructed -- nothing earlier in main() (arg parsing/validation) can leak a
+    # broker, so default disposition is exactly correct for a signal arriving before
+    # this point.
+    _install_reap_handler()
     job = CodexJob(
         kind=args.kind, seg=args.seg, tok=args.expect_token, disp=args.disp, root=args.cwd,
         companion=args.companion, prompt_text=prompt_text, prompt_file=args.prompt_file,
@@ -3071,6 +3076,146 @@ def main(argv=None):
         model=args.model, plugin_root=resolved_plugin_root, run_id=args.run_id,
     )
     return job.run()
+
+
+# ---- #915: reap this invocation's own broker on SIGTERM/SIGHUP -------------
+# Neither signal unwinds finalize()'s `finally:` around run() -- a signal is delivered
+# asynchronously, not by raising at a `finally` boundary -- and `grep -n "signal.signal"`
+# over this file found nothing before this change, so `kill`/`pkill` (both default to
+# SIGTERM) left this invocation's broker running forever, exactly like the SIGKILL/OOM/
+# crash case gotchas.md documents as still unreachable from here. SIGINT is unaffected:
+# `segment_dispatch_driver.py` launches this file with `start_new_session=True`, so a
+# terminal Ctrl-C never reaches it at all.
+#
+# Exactly ONE live sandbox exists per process -- this file drives ONE CodexJob per
+# invocation -- so the state below is a single reference, never a registry.
+_ACTIVE_SANDBOX = None
+_REAPING = False
+
+
+def _register_active_sandbox(sandbox_dir):
+    """Publish `sandbox_dir` as this process's one live sandbox. Called ONLY from
+    _setup_sandbox()'s own success return, after _sandbox_is_confined() has already
+    passed -- a failed setup registered nothing to begin with. Returns True so the
+    caller can `return _register_active_sandbox(...)` as its own success return without
+    adding a line."""
+    global _ACTIVE_SANDBOX
+    _ACTIVE_SANDBOX = sandbox_dir
+    return True
+
+
+def _clear_active_sandbox():
+    """The LAST act of ORDINARY sandbox teardown (see _finish_sandbox_teardown() below)
+    -- never called from the signal handler itself. Discarding the reference any earlier
+    would create the exact omission this exists to prevent: a signal arriving while
+    ordinary teardown is still blocked would then find nothing registered and reap
+    nothing, even though the sandbox and its broker are both still alive at that
+    instant."""
+    global _ACTIVE_SANDBOX
+    _ACTIVE_SANDBOX = None
+
+
+def _finish_sandbox_teardown(sandbox_dir):
+    """finalize()'s own rmtree, plus clearing the active-sandbox reference immediately
+    after it -- kept as one call so the ordering (broker already stopped by the caller,
+    directory removed, THEN the reference cleared) cannot drift apart at the call site."""
+    shutil.rmtree(sandbox_dir, ignore_errors=True)
+    _clear_active_sandbox()
+
+
+def _proj8(root):
+    """An 8-hex-char digest of `root`'s CANONICAL path, stamped into every sandbox
+    prefix (see _setup_sandbox()) so a surviving orphan is attributable to one durable
+    root without publishing the root's own directory name into a shared, other-uid-
+    readable TMPDIR. realpath()s its own argument -- self.root is already realpath()'d
+    by __init__, so this is idempotent for every caller inside this file -- and that is
+    what keeps this producing the SAME digest the documented `gotchas.md` sweep computes
+    for any spelling of the same root (a trailing slash, or a symlink), since that sweep
+    realpath()s inside the same `python3 -c` call that hashes."""
+    return hashlib.sha256(os.path.realpath(root).encode()).hexdigest()[:8]
+
+
+# Byte budget for the SEGMENT LABEL inside a sandbox basename -- LOCAL to that basename
+# only. self.seg itself, and every deterministic durable filename built from it, stay
+# exactly as they are; a segment id is otherwise unbounded (see _SEG_ID_RE above), and
+# at 216 characters today's basename is already past NAME_MAX. Arithmetic, not a guess:
+# the ltcj basename is "ltcj" (4) + "." (1) + "p"+proj8 (9) + "." (1) + L + "." (1) +
+# inv (16) + "." (1) + mkdtemp's own 8-byte random suffix (8) = 41 + L bytes, and
+# NAME_MAX is 255, so L = 214 lands exactly on the limit. One number for every driver
+# that stamps this tag; the shorter ltnd/ltgd labels clear it with room to spare.
+_SANDBOX_LABEL_CAP = 214
+
+
+def _cap_sandbox_label(label):
+    """Truncate `label` to `_SANDBOX_LABEL_CAP` bytes for use in a sandbox basename
+    ONLY -- the caller's own attribute (self.seg) is never touched. No digest of the
+    truncated remainder: mkdtemp's own random suffix, plus self.inv already in the same
+    basename, already make two same-prefix sandboxes distinct."""
+    encoded = label.encode("utf-8", "surrogateescape")
+    if len(encoded) <= _SANDBOX_LABEL_CAP:
+        return label
+    return encoded[:_SANDBOX_LABEL_CAP].decode("utf-8", "ignore")
+
+
+def _reap_signal_handler(signum, frame):
+    """#915: installed for SIGTERM and SIGHUP only (see _install_reap_handler()). Kills
+    this invocation's own broker before the process dies by the signal it received,
+    since nothing else in this file ever will.
+
+    One shot, and the handlers stay installed while it runs: a re-entering second
+    signal sees `_REAPING` already set and returns immediately, rather than racing the
+    first invocation's own sweep. `SIG_DFL` is restored ONLY at the very end, right
+    before this handler re-signals itself -- restoring it any earlier would let a second
+    `kill` (exactly what an impatient operator sends) finish the process by default
+    disposition while this handler is still blocked reaping, and the second pass below
+    would then never run.
+
+    Reap, settle briefly, reap again -- and the second pass re-reads `_ACTIVE_SANDBOX`
+    fresh rather than closing over the first pass's value, so a sandbox that becomes the
+    active one WHILE this handler sleeps is still caught.
+
+    Deliberately does not route through finalize(): that also writes a fail sentinel,
+    relocates a preserved attempt and rmtree's the sandbox, which would give an
+    interrupted job durable consequences an ordinary abort does not have, and would
+    destroy the only post-mortem evidence a killed job leaves behind.
+
+    Best-effort: each reap is wrapped so a broken pgrep or an unexpected exception can
+    never stop this handler from restoring the default disposition and re-raising the
+    signal it exists to handle.
+
+    The restore-and-self-signal is in an outer `finally:`, not just at the textual end
+    of a straight-line function: `time.sleep(0.5)` is a real interruption point, and a
+    SIGINT arriving during it raises `KeyboardInterrupt` right there. Without the
+    `finally:`, that exception would skip BOTH the second reap and the self-signal,
+    leaving the process to die by SIGINT's own default disposition (returncode -2)
+    instead of the signal this handler was invoked for -- reproduced with real signals
+    in review. Mirrors `glossary_dispatch_driver.py`'s own SIGTERM/SIGHUP handler."""
+    global _REAPING
+    if _REAPING:
+        return
+    _REAPING = True
+    try:
+        try:
+            _shutdown_sandbox_broker(_ACTIVE_SANDBOX)
+        except BaseException:
+            pass
+        time.sleep(0.5)
+        try:
+            _shutdown_sandbox_broker(_ACTIVE_SANDBOX)
+        except BaseException:
+            pass
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+
+def _install_reap_handler():
+    """Installed once from main(), right before the CodexJob that might own a sandbox
+    is even constructed -- a signal arriving any earlier has nothing to reap yet, and
+    default disposition is exactly correct for it."""
+    signal.signal(signal.SIGTERM, _reap_signal_handler)
+    signal.signal(signal.SIGHUP, _reap_signal_handler)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ positive test alone.
 
 import importlib.util
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -71,6 +72,19 @@ def _spawn_decoy(cwd_arg, *, script_name="app-server-broker.mjs"):
     return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _kill_and_reap(procs):
+    """Both fixtures below guarantee their subprocesses are gone when a test ends,
+    whatever it asserted -- a leaked decoy or harness would otherwise be matched by a
+    LATER test's pgrep."""
+    for proc in procs:
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=REAP_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:  # pragma: no cover - a killed process reaps
+            pass
+
+
 @pytest.fixture
 def decoys():
     """Spawns decoys and guarantees every one is gone when the test ends, whatever it
@@ -84,13 +98,7 @@ def decoys():
         return proc
 
     yield factory
-    for proc in spawned:
-        if proc.poll() is None:
-            proc.kill()
-        try:
-            proc.wait(timeout=REAP_TIMEOUT_SEC)
-        except subprocess.TimeoutExpired:  # pragma: no cover - a killed process reaps
-            pass
+    _kill_and_reap(spawned)
 
 
 def _await_visible_to_pgrep(proc):
@@ -148,6 +156,20 @@ def test_ordinary_characters_are_left_alone():
 @skip_no_pgrep
 def test_broker_for_this_sandbox_is_terminated(tmp_path, decoys):
     sandbox = tmp_path / "ltcj.seg07.a1b2c3d4.Xy9Zq0Wv"
+    sandbox.mkdir()
+    proc = decoys(sandbox)
+
+    codex_job._shutdown_sandbox_broker(str(sandbox))
+
+    _assert_terminated(proc)
+
+
+@skip_no_pgrep
+def test_broker_for_a_new_shaped_sandbox_is_terminated(tmp_path, decoys):
+    """#915: the prefix gained a proj8 tag (`ltcj.p<proj8>.<seg>.<inv>.`) -- the argv
+    matcher never parses the basename, so it must still match verbatim against the new
+    shape exactly as it did against the old one."""
+    sandbox = tmp_path / "ltcj.pdeadbeef.seg07.a1b2c3d4.Xy9Zq0Wv"
     sandbox.mkdir()
     proc = decoys(sandbox)
 
@@ -283,7 +305,7 @@ def test_this_process_is_never_signalled(tmp_path, monkeypatch):
 # where finalize() calls it
 # --------------------------------------------------------------------------- #
 
-def _mk_job(tmp_path):
+def _mk_job(tmp_path, seg="seg07"):
     root = tmp_path / "durable"
     (root / "segments").mkdir(parents=True, exist_ok=True)
     companion = tmp_path / "codex-companion.mjs"
@@ -291,7 +313,7 @@ def _mk_job(tmp_path):
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("prompt\n", encoding="utf-8")
     return codex_job.CodexJob(
-        kind="translate", seg="seg07", tok="t0", disp="d0", root=str(root),
+        kind="translate", seg=seg, tok="t0", disp="d0", root=str(root),
         companion=str(companion), prompt_text="prompt", prompt_file=str(prompt_file),
         deadline_sec=100, poll_sec=1, effort="high", node="node")
 
@@ -325,3 +347,252 @@ def test_finalize_without_a_sandbox_does_not_call_it(tmp_path, monkeypatch, caps
 
     job.finalize()
     capsys.readouterr()
+
+
+def test_finalize_clears_the_active_sandbox_reference(tmp_path, monkeypatch, capsys):
+    """#915: finalize()'s LAST act on the sandbox, after the broker is stopped and the
+    directory removed -- the module-level reference the signal handler reads must not
+    still point at a sandbox that finalize() has already torn down."""
+    job = _mk_job(tmp_path)
+    sandbox = tmp_path / "ltcj.pdeadbeef.seg07.a1b2c3d4.Xy9Zq0Wv"
+    sandbox.mkdir()
+    job.sandbox_dir = str(sandbox)
+    codex_job._register_active_sandbox(str(sandbox))
+    monkeypatch.setattr(codex_job, "_shutdown_sandbox_broker", lambda path: None)
+
+    job.finalize()
+    capsys.readouterr()
+
+    assert codex_job._ACTIVE_SANDBOX is None
+
+
+# --------------------------------------------------------------------------- #
+# #915: SIGTERM/SIGHUP reap the process's own broker before it dies
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture(autouse=True)
+def _reset_module_signal_state():
+    """Every test above this point in the file runs in THIS process and shares the one
+    `codex_job` module object imported at collection time -- so a test that registers a
+    sandbox in-process must not leak that registration into the next one."""
+    yield
+    codex_job._ACTIVE_SANDBOX = None
+    codex_job._REAPING = False
+
+
+# The handler tests below drive a REAL child process and REAL signals -- same posture as
+# the rest of this file, and for the same reason: a mocked `signal.signal` call proves
+# nothing about whether the handler is actually installed and actually reached by a
+# delivered signal. The child is a `python -c` script (this driver has no separate
+# harness file to invoke) that loads codex_job.py the same way this test module does,
+# registers a sandbox (immediately, or from a background thread after a delay -- see
+# CJ_SANDBOX2/CJ_LATE_DELAY), optionally slows down `_shutdown_sandbox_broker` so a
+# second signal can be sent while the first is still "in" its reap (CJ_SLOW_REAP), or
+# replaces it with one that raises (CJ_BROKEN_REAP), installs the real handler, and
+# sleeps until signalled.
+_CHILD_SCRIPT = """
+import os, sys, threading, time, importlib.util
+spec = importlib.util.spec_from_file_location("codex_job_child", os.environ["CJ_DRIVER_SRC"])
+codex_job = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(codex_job)
+
+if os.environ.get("CJ_BROKEN_REAP"):
+    def _boom(path):
+        raise RuntimeError("simulated pgrep/kill failure")
+    codex_job._shutdown_sandbox_broker = _boom
+elif os.environ.get("CJ_SLOW_REAP"):
+    _real = codex_job._shutdown_sandbox_broker
+    _delay = float(os.environ["CJ_SLOW_REAP"])
+    def _slow(path):
+        time.sleep(_delay)
+        return _real(path)
+    codex_job._shutdown_sandbox_broker = _slow
+
+sandbox1 = os.environ.get("CJ_SANDBOX1") or None
+if sandbox1:
+    codex_job._register_active_sandbox(sandbox1)
+
+sandbox2 = os.environ.get("CJ_SANDBOX2") or None
+late_delay = os.environ.get("CJ_LATE_DELAY") or None
+if sandbox2 and late_delay:
+    def _register_late():
+        time.sleep(float(late_delay))
+        codex_job._register_active_sandbox(sandbox2)
+    threading.Thread(target=_register_late, daemon=True).start()
+
+codex_job._install_reap_handler()
+sys.stdout.write("ready\\n")
+sys.stdout.flush()
+time.sleep(30)
+"""
+
+
+def _spawn_child(env_overrides):
+    env = dict(os.environ)
+    env["CJ_DRIVER_SRC"] = str(DRIVER_SRC)
+    env.update(env_overrides)
+    return subprocess.Popen([sys.executable, "-c", _CHILD_SCRIPT], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+
+
+def _await_child_ready(proc):
+    """Bounded wait for the child's "ready" line. A plain `proc.stdout.readline()` has
+    no timeout, so a child that crashes or hangs before printing it would block this
+    call forever -- the caller registers `proc` with the cleanup fixture BEFORE calling
+    this, precisely so a timeout here still gets the process killed and waited on
+    teardown instead of leaking for the rest of the suite."""
+    ready, _, _ = select.select([proc.stdout], [], [], REAP_TIMEOUT_SEC)
+    if not ready:
+        raise AssertionError("child never reached its ready line within %ss" % REAP_TIMEOUT_SEC)
+    line = proc.stdout.readline()
+    assert line == "ready\n", "child did not reach its ready line: %r" % (line,)
+
+
+@pytest.fixture
+def child():
+    """Spawns the signal-test child and guarantees it is gone when the test ends,
+    whatever it asserted -- via the same `_kill_and_reap` finalizer the `decoys`
+    fixture uses. The Popen is registered for cleanup IMMEDIATELY after spawning,
+    before the (bounded) readiness read -- never after -- so a child that never
+    becomes ready is still killed and waited on teardown rather than leaked."""
+    spawned = []
+
+    def factory(**env_overrides):
+        proc = _spawn_child(env_overrides)
+        spawned.append(proc)
+        _await_child_ready(proc)
+        return proc
+
+    yield factory
+    _kill_and_reap(spawned)
+
+
+@skip_no_pgrep
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
+def test_signal_reaps_the_registered_sandbox_and_dies_by_that_signal(tmp_path, decoys, child, sig):
+    sandbox = tmp_path / "ltcj.pdeadbeef.seg07.a1b2c3d4.Xy9Zq0Wv"
+    sandbox.mkdir()
+    decoy = decoys(sandbox)
+    proc = child(CJ_SANDBOX1=str(sandbox))
+
+    proc.send_signal(sig)
+    proc.wait(timeout=REAP_TIMEOUT_SEC)
+
+    assert proc.returncode == -sig, "expected death by %r, got %r" % (sig, proc.returncode)
+    _assert_terminated(decoy)
+
+
+@skip_no_pgrep
+def test_a_second_signal_during_reap_does_not_cut_cleanup_short(tmp_path, decoys, child):
+    """The handler is still "in" its first reap (simulated by a slowed
+    `_shutdown_sandbox_broker`) when the second SIGTERM arrives. A handler that restored
+    `SIG_DFL` before reaping would die right here, on the second signal, before the
+    decoy is ever touched."""
+    sandbox = tmp_path / "ltcj.pdeadbeef.seg07.a1b2c3d4.Xy9Zq0Wv"
+    sandbox.mkdir()
+    decoy = decoys(sandbox)
+    proc = child(CJ_SANDBOX1=str(sandbox), CJ_SLOW_REAP="1.0")
+
+    proc.send_signal(signal.SIGTERM)
+    time.sleep(0.2)
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=REAP_TIMEOUT_SEC)
+
+    assert proc.returncode == -signal.SIGTERM
+    _assert_terminated(decoy)
+
+
+@skip_no_pgrep
+def test_a_sigint_during_the_settle_does_not_prevent_death_by_the_original_signal(tmp_path, decoys, child):
+    """#915 review round 1: `time.sleep(0.5)` is a real interruption point, and a SIGINT
+    landing there raises `KeyboardInterrupt`. Without an enclosing `finally:` around the
+    settle and the second reap, that exception skips both the second reap and the
+    self-signal, so the process dies by SIGINT's own default disposition (-2) instead of
+    the signal this handler was invoked for -- reproduced with real signals in review.
+    The decoy here is already reaped by the FIRST pass, before the SIGINT ever lands, so
+    its staying reaped is the sanity check; the exit code is the load-bearing assertion."""
+    sandbox = tmp_path / "ltcj.pdeadbeef.seg07.a1b2c3d4.Xy9Zq0Wv"
+    sandbox.mkdir()
+    decoy = decoys(sandbox)
+    proc = child(CJ_SANDBOX1=str(sandbox))
+
+    proc.send_signal(signal.SIGTERM)
+    time.sleep(0.2)
+    proc.send_signal(signal.SIGINT)
+    proc.wait(timeout=REAP_TIMEOUT_SEC)
+
+    assert proc.returncode == -signal.SIGTERM, (
+        "expected death by SIGTERM despite the SIGINT, got %r" % (proc.returncode,))
+    _assert_terminated(decoy)
+
+
+@skip_no_pgrep
+def test_a_sandbox_registered_between_the_two_passes_is_still_reaped(tmp_path, decoys, child):
+    """Nothing is registered at signal time (the first pass reaps nothing), and a
+    background thread registers the decoy's sandbox 0.2s into the handler's 0.5s settle
+    sleep -- well before the second pass fires. Only a second pass that RE-READS the
+    reference, rather than reusing the first pass's (empty) snapshot, can catch this."""
+    sandbox = tmp_path / "ltcj.pdeadbeef.seg08.e5f6a7b8.Mn3Kp1Rt"
+    sandbox.mkdir()
+    decoy = decoys(sandbox)
+    proc = child(CJ_SANDBOX2=str(sandbox), CJ_LATE_DELAY="0.2")
+
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=REAP_TIMEOUT_SEC)
+
+    assert proc.returncode == -signal.SIGTERM
+    _assert_terminated(decoy)
+
+
+def test_a_reap_that_raises_still_dies_by_signal(tmp_path, child):
+    """Best-effort: an exception out of `_shutdown_sandbox_broker` must not leave the
+    handler stuck mid-cleanup, or escape it and kill the process some other way."""
+    sandbox = tmp_path / "ltcj.pdeadbeef.seg07.a1b2c3d4.Xy9Zq0Wv"
+    proc = child(CJ_SANDBOX1=str(sandbox), CJ_BROKEN_REAP="1")
+
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=REAP_TIMEOUT_SEC)
+
+    assert proc.returncode == -signal.SIGTERM
+
+
+# --------------------------------------------------------------------------- #
+# #915: proj8 attribution and the sandbox-basename byte budget
+# --------------------------------------------------------------------------- #
+
+def test_proj8_matches_across_root_spellings(tmp_path):
+    root = tmp_path / "durable"
+    root.mkdir()
+    link = tmp_path / "durable-link"
+    link.symlink_to(root)
+
+    base = codex_job._proj8(str(root))
+    assert codex_job._proj8(str(root) + "/") == base
+    assert codex_job._proj8(str(link)) == base
+
+
+def test_proj8_differs_for_a_different_root(tmp_path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    assert codex_job._proj8(str(a)) != codex_job._proj8(str(b))
+
+
+@pytest.mark.parametrize("label_len", [
+    pytest.param(codex_job._SANDBOX_LABEL_CAP, id="at-cap"),
+    pytest.param(codex_job._SANDBOX_LABEL_CAP + 1, id="cap-plus-one"),
+])
+def test_sandbox_basename_never_exceeds_name_max(tmp_path, label_len):
+    """Asserts the RESULTING BASENAME length that `_setup_sandbox()` actually produces
+    on a real mkdtemp() call -- not the truncated label length -- at the cap and at
+    cap+1, the one place an off-by-one in the budget arithmetic would show up."""
+    job = _mk_job(tmp_path, seg="s" * label_len)
+
+    assert job._setup_sandbox() is True
+    try:
+        basename = os.path.basename(job.sandbox_dir)
+        assert len(basename.encode("utf-8")) <= 255
+        assert basename.startswith("ltcj.p")
+    finally:
+        shutil.rmtree(job.sandbox_dir, ignore_errors=True)

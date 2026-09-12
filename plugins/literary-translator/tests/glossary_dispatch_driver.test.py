@@ -18,11 +18,17 @@ Each of those is tested here by outcome. Node is required: these builders are
 JavaScript, and a green run that executed none of them is a false pass.
 """
 
+import hashlib
 import importlib.util
 import json
 import os
+import queue
 import shutil
+import signal
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -1033,6 +1039,386 @@ def test_11b_a_valid_in_range_position_is_admitted_without_incrementing_attempt(
         "current hash -- this is what advance_until_blocked() re-verifies "
         "before honouring the signal")
     assert st["rejection_reason"] == "the source for Alpha is a JS shell"
+
+
+# ---------------------------------------------------------------------------
+# #915: reaping the broker on SIGTERM/SIGHUP, and the durable-root tag that
+# makes a surviving orphan attributable.
+#
+# The signal tests drive a REAL subprocess and REAL signals rather than
+# asserting on a mocked delivery -- this driver installs the handler in
+# `main()`, and a handler that is registered but never actually reached by a
+# real SIGTERM would pass a mocked test while leaking every broker in
+# production. Each also spawns a REAL decoy with the exact argv SHAPE a
+# broker has, for the same reason `sandbox_broker_teardown.test.py` (the
+# codex_job.py sibling of this file's suite) gives: a matcher that stops
+# matching a real broker must fail here too.
+# ---------------------------------------------------------------------------
+
+skip_no_pgrep = pytest.mark.skipif(shutil.which("pgrep") is None,
+                                   reason="pgrep unavailable")
+
+DECOY_LIFETIME_SEC = 60
+REAP_TIMEOUT_SEC = 15
+DECOY_MARKER = "gdd915-decoy"
+# Comfortably inside the handler's 0.5 s settle sleep, so a signal or a
+# registry swap sent after this delay is deterministically DURING that sleep
+# rather than racing pass 1's own (sub-millisecond, on an idle decoy) reap.
+MID_SETTLE_SEC = 0.15
+
+
+def _spawn_decoy(cwd_arg):
+    """A process whose argv has the same SHAPE `_reap_broker_for_path`'s
+    pattern matches, with `cwd_arg` in the `--cwd` slot."""
+    argv = [
+        sys.executable, "-c", "import time; time.sleep(%d)" % DECOY_LIFETIME_SEC,
+        "/plugins/cache/openai-codex/codex/1.0.6/scripts/app-server-broker.mjs",
+        "serve", "--endpoint", "unix:/tmp/%s/broker.sock" % DECOY_MARKER,
+        "--cwd", str(cwd_arg),
+        "--pid-file", "/tmp/%s/broker.pid" % DECOY_MARKER,
+    ]
+    return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _await_visible_to_pgrep(pid):
+    """`Popen` returns before the kernel necessarily publishes the new argv,
+    so a positive test could otherwise pass or fail on scheduling."""
+    deadline = time.monotonic() + REAP_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        found = subprocess.run(["pgrep", "-f", DECOY_MARKER],
+                               capture_output=True, text=True, timeout=10)
+        if str(pid) in (found.stdout or "").split():
+            return
+        time.sleep(0.05)
+    raise AssertionError("decoy pid %d never became visible to pgrep" % pid)
+
+
+@pytest.fixture
+def decoys():
+    """Spawns decoys and guarantees every one is gone when the test ends,
+    whatever it asserted -- a leaked sleeper would be matched by a LATER
+    test's pgrep."""
+    spawned = []
+
+    def factory(cwd_arg):
+        proc = _spawn_decoy(cwd_arg)
+        spawned.append(proc)
+        _await_visible_to_pgrep(proc.pid)
+        return proc
+
+    yield factory
+    for proc in spawned:
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=REAP_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:  # pragma: no cover - a killed process reaps
+            pass
+
+
+def _assert_terminated(proc, sig):
+    proc.wait(timeout=REAP_TIMEOUT_SEC)
+    assert proc.returncode == -sig, (
+        "expected death by %r, got returncode %r" % (sig, proc.returncode))
+
+
+def _stage_driver(tmp_path):
+    """Copies the driver plus its one hard sibling dependency
+    (`json_stdout.py`, loaded by exact path at import time) into a scratch
+    `scripts/` dir, mirroring the `mod` fixture's own staging -- but without
+    importing in THIS process, since the signal tests need a SEPARATE
+    interpreter to install real SIGTERM/SIGHUP handlers in."""
+    scripts = tmp_path / "staged" / "scripts"
+    scripts.mkdir(parents=True)
+    target = scripts / "glossary_dispatch_driver.py"
+    shutil.copy2(DRIVER, target)
+    shutil.copy2(JSON_STDOUT, target.parent / "json_stdout.py")
+    return target
+
+
+def _write_harness(tmp_path, driver_path, sandbox_a, *, sandbox_b=None,
+                   swap_delay=MID_SETTLE_SEC):
+    """A tiny standalone script that loads the staged driver, marks
+    `sandbox_a` as the one active sandbox, installs the #915 handler, and
+    then sleeps -- so the test can signal it like an operator's `kill` would.
+    `sandbox_b`, when given, is registered as the active sandbox from a
+    background thread partway through the harness's sleep, standing in for
+    "a sandbox became active between the handler's two reap passes" without
+    needing this (single-threaded) driver to race itself for real."""
+    swap_code = "pass"
+    if sandbox_b is not None:
+        swap_code = (
+            "def _swap():\n"
+            "    time.sleep(%r)\n"
+            "    mod._ACTIVE_SANDBOX_PATH = Path(%r)\n"
+            "threading.Thread(target=_swap, daemon=True).start()"
+            % (swap_delay, str(sandbox_b)))
+    content = (
+        "import importlib.util, threading, time\n"
+        "from pathlib import Path\n"
+        "spec = importlib.util.spec_from_file_location('gdd_signal_harness', %r)\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "mod._ACTIVE_SANDBOX_PATH = Path(%r)\n"
+        "mod.install_signal_handlers()\n"
+        "%s\n"
+        "print('READY', flush=True)\n"
+        "time.sleep(60)\n"
+    ) % (str(driver_path), str(sandbox_a), swap_code)
+    harness_path = tmp_path / "harness.py"
+    harness_path.write_text(content, encoding="utf-8")
+    return harness_path
+
+
+def _launch_harness(harness_path):
+    return subprocess.Popen([sys.executable, str(harness_path)],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True)
+
+
+def _read_ready_or_die(proc, timeout=10):
+    """Blocks until the harness prints its READY line, off the main thread so
+    a harness that never starts up cannot hang the whole test session."""
+    q = queue.Queue()
+    threading.Thread(target=lambda: q.put(proc.stdout.readline()),
+                     daemon=True).start()
+    try:
+        line = q.get(timeout=timeout)
+    except queue.Empty:
+        raise AssertionError("harness never printed READY within %ss" % timeout)
+    assert "READY" in line, "harness printed %r instead of READY" % (line,)
+
+
+@pytest.fixture
+def harness(tmp_path):
+    """Guarantees the harness subprocess is gone when the test ends, whatever
+    it asserted."""
+    procs = []
+
+    def factory(*a, **kw):
+        proc = _launch_harness(_write_harness(tmp_path, *a, **kw))
+        procs.append(proc)
+        _read_ready_or_die(proc)
+        return proc
+
+    yield factory
+    for proc in procs:
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=REAP_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:  # pragma: no cover - a killed process reaps
+            pass
+
+
+@skip_no_pgrep
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
+def test_the_signal_reaps_the_active_sandboxs_broker(tmp_path, decoys, harness, sig):
+    """The one case the whole handler exists for: a driver killed with `kill`
+    (SIGTERM, the default) or `-HUP` must not leave its broker running."""
+    driver = _stage_driver(tmp_path)
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    decoy = decoys(sandbox)
+    proc = harness(driver, sandbox)
+
+    os.kill(proc.pid, sig)
+
+    _assert_terminated(proc, sig)
+    # The BROKER is always reaped with SIGTERM (its own handler's shutdown
+    # signal), whatever signal killed the driver itself.
+    _assert_terminated(decoy, signal.SIGTERM)
+
+
+def _harness_with_a_late_second_sandbox(tmp_path, decoys, harness):
+    """Two real decoys, and a harness whose active sandbox SWAPS from A to B
+    partway through the handler's settle sleep. Both tests below need exactly
+    this state and differ only in the signals they then deliver."""
+    driver = _stage_driver(tmp_path)
+    sandbox_a = tmp_path / "sandbox_a"
+    sandbox_a.mkdir()
+    sandbox_b = tmp_path / "sandbox_b"
+    sandbox_b.mkdir()
+    decoy_a = decoys(sandbox_a)
+    decoy_b = decoys(sandbox_b)
+    proc = harness(driver, sandbox_a, sandbox_b=sandbox_b)
+    return proc, decoy_a, decoy_b
+
+
+@skip_no_pgrep
+def test_a_second_signal_while_reaping_does_not_cut_cleanup_short(tmp_path, decoys, harness):
+    """Sent while the first invocation is inside its 0.5 s settle sleep -- by
+    then pass 1 has already run, so this is a genuine RE-ENTRANT delivery
+    (the OS-level trampoline that sets Python's pending-signal flag has long
+    since returned), not a coalesced duplicate of the first. If SIG_DFL were
+    restored before the handler finishes (v2's bug, per #915's plan), this
+    second `kill` would end the process by default disposition before the
+    settle sleep and second pass ever run.
+
+    TWO decoys, not one: sandbox A's decoy is already dead by the time the
+    second signal is sent (pass 1 killed it before the settle sleep even
+    started), so asserting only on it would pass whether or not the second
+    signal cut cleanup short -- the exact regression this test is named for
+    would go undetected. Sandbox B only becomes active DURING the settle
+    sleep (the same swap `test_a_sandbox_registered_between_the_two_passes_
+    is_still_reaped` uses) and is confirmed running by `decoys()` before
+    either signal is sent, so its death can only come from pass 2 -- which
+    only runs if the second signal did NOT cut cleanup short."""
+    proc, decoy_a, decoy_b = _harness_with_a_late_second_sandbox(
+        tmp_path, decoys, harness)
+
+    os.kill(proc.pid, signal.SIGTERM)
+    # Comfortably after the swap (MID_SETTLE_SEC) fires, still comfortably
+    # inside the 0.5 s settle sleep -- sandbox B is active by now, and pass 2
+    # has not run yet.
+    time.sleep(MID_SETTLE_SEC + 0.05)
+    os.kill(proc.pid, signal.SIGTERM)
+
+    _assert_terminated(proc, signal.SIGTERM)
+    _assert_terminated(decoy_a, signal.SIGTERM)
+    _assert_terminated(decoy_b, signal.SIGTERM)
+
+
+@skip_no_pgrep
+def test_a_sandbox_registered_between_the_two_passes_is_still_reaped(tmp_path, decoys, harness):
+    """Proves the second pass reads `_ACTIVE_SANDBOX_PATH` FRESH rather than a
+    value captured before the settle sleep: sandbox B only becomes active
+    partway through that sleep, after pass 1 has already reaped sandbox A's
+    decoy, yet pass 2 must still find and reap it."""
+    proc, decoy_a, decoy_b = _harness_with_a_late_second_sandbox(
+        tmp_path, decoys, harness)
+
+    os.kill(proc.pid, signal.SIGTERM)
+
+    _assert_terminated(proc, signal.SIGTERM)
+    _assert_terminated(decoy_a, signal.SIGTERM)
+    _assert_terminated(decoy_b, signal.SIGTERM)
+
+
+@skip_no_pgrep
+def test_matcher_still_matches_a_decoy_under_the_new_shaped_prefix(mod, tmp_path, decoys):
+    """The prefix grew a `p<proj8>` component (#915); the argv matcher itself
+    is untouched, and must still find a broker under the new shape."""
+    sandbox = tmp_path / ("ltgd.p%s.dispatch-0-0.abcdefgh" % mod._DURABLE_ROOT_PROJ8)
+    sandbox.mkdir()
+    decoy = decoys(sandbox)
+
+    mod._reap_broker_for_path(sandbox)
+
+    _assert_terminated(decoy, signal.SIGTERM)
+
+
+# --- the matcher's own failure must not read as "no broker found" ----------
+
+def test_reap_broker_for_path_none_is_a_silent_no_op(mod, monkeypatch):
+    def explode(*a, **kw):  # pragma: no cover - the point is that it is not reached
+        raise AssertionError("pgrep must not run without a sandbox path")
+
+    monkeypatch.setattr(mod.subprocess, "run", explode)
+    mod._reap_broker_for_path(None)
+
+
+def test_a_clean_miss_logs_nothing(mod, monkeypatch, capsys):
+    monkeypatch.setattr(
+        mod.subprocess, "run",
+        lambda *a, **kw: subprocess.CompletedProcess(a[0] if a else [], 1,
+                                                     stdout="", stderr=""))
+    mod._reap_broker_for_path(Path("/tmp/nowhere"))
+    assert capsys.readouterr().err == ""
+
+
+def test_a_broken_search_logs_one_line(mod, monkeypatch, capsys):
+    """#915 round 1: pgrep exit >= 2 is the search itself failing, and must
+    not be silently indistinguishable from exit 1 (nothing matched)."""
+    monkeypatch.setattr(
+        mod.subprocess, "run",
+        lambda *a, **kw: subprocess.CompletedProcess(a[0] if a else [], 2,
+                                                     stdout="", stderr=""))
+    mod._reap_broker_for_path(Path("/tmp/nowhere"))
+    assert capsys.readouterr().err.strip() != ""
+
+
+def test_a_search_timeout_logs_one_line(mod, monkeypatch, capsys):
+    def raiser(*a, **kw):
+        raise subprocess.TimeoutExpired("pgrep", 5)
+
+    monkeypatch.setattr(mod.subprocess, "run", raiser)
+    mod._reap_broker_for_path(Path("/tmp/nowhere"))
+    assert capsys.readouterr().err.strip() != ""
+
+
+# --- proj8: identical for every spelling of the same root ------------------
+
+def test_proj8_matches_the_documented_formula(mod, tmp_path):
+    root = tmp_path / "book"
+    root.mkdir()
+    expected = hashlib.sha256(os.path.realpath(str(root)).encode()).hexdigest()[:8]
+    assert mod._proj8_for_root(root) == expected
+
+
+def test_proj8_identical_for_a_root_and_its_trailing_slash(mod, tmp_path):
+    root = tmp_path / "book"
+    root.mkdir()
+    assert mod._proj8_for_root(root) == mod._proj8_for_root(str(root) + "/")
+
+
+def test_proj8_identical_for_a_symlinked_spelling(mod, tmp_path):
+    real = tmp_path / "real_book"
+    real.mkdir()
+    link = tmp_path / "book_via_symlink"
+    link.symlink_to(real)
+    assert mod._proj8_for_root(link) == mod._proj8_for_root(real), (
+        "a symlinked spelling must hash the same as the real path it "
+        "resolves to, or a sweep run against one spelling misses sandboxes "
+        "tagged from the other")
+
+
+def test_proj8_differs_for_different_roots(mod, tmp_path):
+    a = tmp_path / "book_a"
+    a.mkdir()
+    b = tmp_path / "book_b"
+    b.mkdir()
+    assert mod._proj8_for_root(a) != mod._proj8_for_root(b)
+
+
+def test_sandbox_prefix_carries_the_durable_roots_proj8(mod):
+    with mod.DispatchSandbox("dispatch-0-0") as sandbox:
+        assert sandbox.path.name.startswith("ltgd.p%s." % mod._DURABLE_ROOT_PROJ8)
+
+
+# --- the shared 214-byte label budget ---------------------------------------
+
+def test_the_shared_label_cap_is_214_bytes(mod):
+    """214 = NAME_MAX(255) - codex_job.py's `ltcj.<seg>.<inv>.` basename
+    shape at its own 8-byte mkdtemp suffix -- the TIGHTEST of the three
+    #915 drivers. Round 3 of #915's plan uses this one number everywhere so a
+    label copied between drivers cannot silently pass in one and overflow in
+    another; this file's own `ltgd.p########.` shape stays comfortably under
+    it."""
+    assert mod._SANDBOX_LABEL_CAP_BYTES == 214
+
+
+def test_cap_sandbox_label_leaves_a_short_label_alone(mod):
+    assert mod._cap_sandbox_label("dispatch-3-0") == "dispatch-3-0"
+
+
+def test_cap_sandbox_label_truncates_at_the_shared_budget(mod):
+    label = "y" * 300
+    capped = mod._cap_sandbox_label(label)
+    assert capped == "y" * mod._SANDBOX_LABEL_CAP_BYTES
+    assert len(capped.encode("utf-8")) == mod._SANDBOX_LABEL_CAP_BYTES
+
+
+@pytest.mark.parametrize("label_len", [214, 215])
+def test_sandbox_basename_never_exceeds_name_max(mod, label_len):
+    """Asserts the resulting BASENAME length, not the truncated label length
+    -- a cap that is right but wired to the wrong string would still pass a
+    test that only checked `_cap_sandbox_label`'s own output."""
+    label = "x" * label_len
+    with mod.DispatchSandbox(label) as sandbox:
+        basename = sandbox.path.name
+        assert len(basename.encode("utf-8")) <= 255, (
+            "basename %r exceeds NAME_MAX at label_len=%d" % (basename, label_len))
 
 
 if __name__ == "__main__":
