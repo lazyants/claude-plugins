@@ -19,7 +19,7 @@ itself is never invoked (the exact R2 BLOCKER the shared contract calls
 out). So this file greps the shipped docs directly and asserts:
 
   1. In ``SKILL.md``, both W3-rejoin branches -- the
-     ``{"no_new_candidates": true, "batches": []}`` SKIP path and the
+     ``no_new_candidates: true`` SKIP path and the
      "Otherwise run the codex-glossary-pass" path -- are described BEFORE
      the mandatory gate's literal invocation, which itself appears BEFORE
      the "W3a Segpack generation" heading. Both branches converge on one
@@ -64,7 +64,15 @@ ORCHESTRATION_PATH = (
 assert SKILL_PATH.is_file(), f"SKILL.md not found at {SKILL_PATH}"
 assert ORCHESTRATION_PATH.is_file(), f"orchestration-and-batching.md not found at {ORCHESTRATION_PATH}"
 
-NO_NEW_CANDIDATES_MARKER = '{"no_new_candidates": true, "batches": []}'
+# #912 rewrote SKILL.md's SKIP-branch marker from an exact two-key JSON
+# literal to semantic prose (`excluded_below_floor` now always rides the
+# line, so no fixed literal describes it) -- this matches the stable
+# substring of the branch's OWN description (the same anchor
+# canon_init_zero_candidate_bootstrap.test.py uses), which sits well before
+# the mandatory gate's own summary paragraph -- never that summary
+# paragraph itself, which would make the "described before" ordering below
+# vacuous.
+NO_NEW_CANDIDATES_MARKER = "no_new_candidates` is `true`"
 GLOSSARY_PASS_BRANCH_MARKER = "Otherwise run the codex-glossary-pass"
 W3A_HEADING_MARKER = "W3a Segpack generation"
 MANDATORY_COMMAND_MARKER = "canon_adjudication_audit.py --check"
@@ -433,7 +441,9 @@ def _assert_mandatory_gate_paragraph_enumerates_all_three_branches(text: str) ->
         "glossary.enabled: false disabled branch as one of the THREE "
         f"W3-rejoin branches it runs after; got:\n{paragraph}"
     )
-    assert '{"no_new_candidates": true, "batches": []}' in paragraph, (
+    # #912 rewrote this paragraph's own SKIP-branch mention from the exact
+    # two-key JSON literal to semantic prose -- match the new substring.
+    assert "no_new_candidates: true" in paragraph, (
         "the mandatory gate's own enumeration paragraph must still name the "
         f"no_new_candidates SKIP branch; got:\n{paragraph}"
     )

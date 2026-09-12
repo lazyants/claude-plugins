@@ -143,12 +143,12 @@
    ],
    "claim": "sha of the `_RENDER_VERSION_FILES` tuple = **`render_obsidian.py` + `diff_rendered_output.py`** (`diff_rendered_output.py:194`, hashed `:335`, stale-check `:599`). Editing either flips it. On the next `assemble.py` run the render diff-gate writes a fresh candidate and reports a **mismatch** against the"
   },
-  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"glossary_batch_plan.py:752-756\", 0]": {
+  "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"glossary_batch_plan.py:786-793\", 0]": {
    "anchors": [
     "if not included:",
-    "print(dumps_line({\"no_new_candidates\": True, \"batches\": []}))"
+    "\"no_new_candidates\": True, \"batches\": [],"
    ],
-   "claim": "glossary pass alone** for a fully-converged project (canon frozen, **zero unresolved glossary candidates**). The ONLY writer of `canon.json`'s `derivation_bundle_hash` was glossary **MERGE** mode (`_stamp_write_verify`, `canon_validate.py:2537-2543`; callers `run_merge` / `run_merge_batches` / `run_init` / `run_restamp_derivation`). The glossary pass **SKIPS entirely** when there are no candidates (`glossary_batch_plan.py:752-756`, a *tested* supported state, prints `{\"no_new_candidates\": true, \"batches\": []}`) → canon was never restamped → segpack rebuild copies the stale hash **verbatim, never recomputed** (`segpack.py:798-809`) → `select_segments` stayed `blocked_needs_regeneration`."
+   "claim": "glossary pass alone** for a fully-converged project (canon frozen, **zero unresolved glossary candidates**). The ONLY writer of `canon.json`'s `derivation_bundle_hash` was glossary **MERGE** mode (`_stamp_write_verify`, `canon_validate.py:2537-2543`; callers `run_merge` / `run_merge_batches` / `run_init` / `run_restamp_derivation`). The glossary pass **SKIPS entirely** when there are no candidates (`glossary_batch_plan.py:786-793`, a *tested* supported state, prints a line whose `no_new_candidates` is `true`) → canon was never restamped → segpack rebuild copies the stale hash **verbatim, never recomputed** (`segpack.py:798-809`) → `select_segments` stayed `blocked_needs_regeneration`."
   },
   "[\".claude/skills/literary-translator-ops/references/hash-migration-impact.md\", \"ledger_merge.py:368-422\", 0]": {
    "anchors": [

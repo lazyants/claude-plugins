@@ -2812,7 +2812,7 @@ def run_init(
 ) -> dict:
     """--init: bootstrap an EMPTY but fully stamped canon.json for a project
     whose glossary pass has nothing to research -- `glossary_batch_plan.py`
-    printed `{"no_new_candidates": true, "batches": []}`, so SKILL.md's W3
+    printed a line whose `no_new_candidates` is true, so SKILL.md's W3
     SKIP branch runs no merge, and the merge is the only writer of
     canon.json (#290). Reuses `_stamp_write_verify` unchanged, so the
     bootstrap canon carries genuine cache_key.py-computed generation_hashes

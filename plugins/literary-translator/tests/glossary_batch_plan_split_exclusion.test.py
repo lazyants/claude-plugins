@@ -262,7 +262,12 @@ def test_split_exclusion_retry_emits_non_overridable_note(tmp_path):
     senses = write_senses(tmp_path, {"Jean": split_entry("s1", "s2")})
     proc = run(nc, canon, "--senses-path", str(senses), "--retry", "Jean")
     assert proc.returncode == 0
-    assert json.loads(proc.stdout) == {"no_new_candidates": True, "batches": []}
+    # Jean is excluded at step (1) (the split, not the floor), so the floor's
+    # own count stays 0 even though the empty marker fires.
+    assert json.loads(proc.stdout) == {
+        "no_new_candidates": True, "batches": [],
+        "excluded_below_floor": {"count": 0, "min_candidate_freq": 2},
+    }
     assert "Jean" in proc.stderr
     assert "cannot be overridden by --retry" in proc.stderr
 
@@ -280,7 +285,7 @@ def test_split_exclusion_leaves_non_split_candidates_alone(tmp_path):
 
 # ---------------------------------------------------------------------------
 # --senses-path path-state policy (contract §10 / §11b, mirrors --canon's
-# explicit-vs-default split at glossary_batch_plan.py:707)
+# explicit-vs-default split at glossary_batch_plan.py:727)
 # ---------------------------------------------------------------------------
 
 
@@ -300,7 +305,7 @@ def test_explicit_missing_senses_path_fails(tmp_path):
     """(§10.2) An explicit --senses-path that does not exist is a caller
     error -> BLOCK (allow_absent=False), proving
     `senses_explicit = args.senses_path is not None` mirrors
-    `canon_explicit` at glossary_batch_plan.py:707 exactly. A silently-empty
+    `canon_explicit` at glossary_batch_plan.py:727 exactly. A silently-empty
     result here would let a typo'd --senses-path bypass the exclusion
     entirely."""
     nc, canon = write_inputs(tmp_path, [cand("Alice", freq=20)])

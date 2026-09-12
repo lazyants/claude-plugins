@@ -113,28 +113,28 @@ Output (one JSON line to stdout):
   * eligible candidates present ->
       {"no_new_candidates": false,
        "args":    [{"index": 0, "candidates": [<row>, ...]}, ...],
-       "batches": [{"index": 0, "names":      ["Name", ...]},  ...]}
-    `args` is the EXACT shape glossary-pass-wf.template.js expects (each
-    candidate row passed through VERBATIM from name_candidates.json).
-    `batches` is the names-only projection resume_setup.py's payload needs.
-    The two projections always carry identical name sets, batch for batch.
-  * eligible list legitimately empty ->
-      {"no_new_candidates": true, "batches": []}
-    The orchestrating session, on this marker, skips resume_setup.py and the
-    Workflow dispatch entirely -- nothing to do this run. (resume_setup.py
-    rejects an empty `batches` list, which is why the marker exists rather
-    than an empty batch payload.)
+       "batches": [{"index": 0, "names":      ["Name", ...]},  ...],
+       "excluded_below_floor": {"count": N, "min_candidate_freq": M}}
+    `args` is the EXACT shape glossary-pass-wf.template.js expects (rows
+    passed through VERBATIM); `batches` is the names-only projection
+    resume_setup.py needs -- identical name sets, batch for batch.
+  * eligible list legitimately empty -> no `args`, `batches` empty:
+      {"no_new_candidates": true, "batches": [],
+       "excluded_below_floor": {"count": N, "min_candidate_freq": M}}
+    The orchestrating session, on this marker, skips resume_setup.py and
+    the Workflow entirely (resume_setup.py rejects an empty `batches`).
+`excluded_below_floor` (#912) rides BOTH shapes ALWAYS, `count: 0`
+included: the rows the FREQUENCY FLOOR removed -- survived step (1), not
+force-included, `likely_name` true, effective freq < min_candidate_freq.
+An absent key would read exactly like a run that dropped nothing, which
+is the silence #912 reports; a non-zero count also gets a stderr note.
 
-Exit 0 on success (including the no_new_candidates marker); exit non-zero,
-with an `error: ...` line on stderr, on any fatal condition (missing/
-malformed input, a stale --retry name). stdout carries only the JSON
-result -- errors never pollute it.
-
-Self-anchored: this script always lives at
+Exit 0 on success; exit non-zero, with an `error: ...` line on stderr, on
+any fatal condition (missing/malformed input, a stale --retry name).
+stdout carries only the JSON result. Self-anchored: this script lives at
 ${durable_root}/scripts/glossary_batch_plan.py, so parents[1] is the
-durable root. name_candidates.json and canon.json default to their
-durable-root locations; both can be overridden for a smoke/dry run. Never
-assumes cwd, never takes a --durable-root flag.
+durable root; name_candidates.json and canon.json default there and can
+be overridden for a smoke/dry run. Never assumes cwd, no --durable-root.
 """
 import argparse
 import json
@@ -388,8 +388,8 @@ def _int_field(row, key: str) -> int:
 
 
 def select_included(rows, entry_keys, queued, dismissed, retry, min_freq, senses):
-    """Apply the two-step precedence and return the ordered list of included
-    candidate rows (input order preserved). Pure -- no I/O.
+    """Apply the two-step precedence. Returns (included, below_floor): the
+    ordered included rows (input order) and #912's count. Pure -- no I/O.
 
     `dismissed` (#653) is a SEPARATE set from `queued` -- not folded together
     -- so diagnostics can tell an operator which of the two exclusions a name
@@ -426,13 +426,25 @@ def select_included(rows, entry_keys, queued, dismissed, retry, min_freq, senses
             force.add(target)
 
     included = []
+    # #912: the rows the FREQUENCY FLOOR removed, counted where the floor is
+    # applied -- a name row (`likely_name` true) that survived step (1) and was
+    # not force-included, whose EFFECTIVE freq is under the floor. `_int_field`
+    # is what the floor itself compares, so an absent or null `freq` counts as
+    # the 0 it is treated as. A row failing `likely_name` is dropped for a
+    # different reason and is NOT counted -- this number must mean the floor
+    # and nothing else, or raising the floor would not explain it. A count, not
+    # the rows: nothing downstream needs the rows, and a book can have thousands.
+    below_floor = 0
     for row in survivors:
         name = row["name"]
         if name in force:
             included.append(row)
-        elif row.get("likely_name") is True and _int_field(row, "freq") >= min_freq:
-            included.append(row)
-    return included
+        elif row.get("likely_name") is True:
+            if _int_field(row, "freq") >= min_freq:
+                included.append(row)
+            else:
+                below_floor += 1
+    return included, below_floor
 
 
 # ---------------------------------------------------------------------------
@@ -509,13 +521,21 @@ def chunk_batches(included, batch_size):
     return batches
 
 
-def build_result(batches):
+def excluded_below_floor(count, min_freq):
+    """#912's key, built in ONE place so both output shapes carry the identical
+    structure -- the empty-marker branch is the one where a silent floor matters
+    most, and a key built twice is a key that drifts on one branch."""
+    return {"count": count, "min_candidate_freq": min_freq}
+
+
+def build_result(batches, below_floor, min_freq):
     args = []
     batch_projection = []
     for index, rows in enumerate(batches):
         args.append({"index": index, "candidates": rows})
         batch_projection.append({"index": index, "names": [row["name"] for row in rows]})
-    return {"no_new_candidates": False, "args": args, "batches": batch_projection}
+    return {"no_new_candidates": False, "args": args, "batches": batch_projection,
+            "excluded_below_floor": excluded_below_floor(below_floor, min_freq)}
 
 
 def emit_retry_diagnostics(
@@ -730,7 +750,7 @@ def main(argv=None) -> int:
             + ", ".join(repr(n) for n in unknown_retry)
         )
 
-    included = select_included(
+    included, below_floor = select_included(
         rows, entry_keys, queued, dismissed, retry, args.min_candidate_freq, senses
     )
     included_names = {row["name"] for row in included}
@@ -749,14 +769,32 @@ def main(argv=None) -> int:
         senses=senses,
     )
 
+    # #912: the floor's own exclusion count, on stderr as well as in the JSON.
+    # emit_retry_diagnostics above reports the floor only for a name the
+    # operator ALREADY named to --retry -- i.e. only to someone who already
+    # suspected it. This note is the same fact for the operator who does not,
+    # and it goes out BEFORE either output branch so the empty-marker run --
+    # the one that reads as "nothing to do" -- carries it too.
+    if below_floor:
+        sys.stderr.write(
+            f"note: {below_floor} candidate(s) with likely_name true were excluded "
+            f"by --min-candidate-freq {args.min_candidate_freq} and are NOT in this "
+            "plan. Re-running at a lower floor dispatches the ones at or above it, "
+            "and 1 is the lowest floor this script accepts.\n"
+        )
+
     if not included:
         # Distinct, schema-shaped marker: the orchestrating session skips
         # resume_setup.py and the Workflow entirely on this run.
-        print(dumps_line({"no_new_candidates": True, "batches": []}))
+        print(dumps_line({
+            "no_new_candidates": True, "batches": [],
+            "excluded_below_floor": excluded_below_floor(
+                below_floor, args.min_candidate_freq),
+        }))
         return 0
 
     batches = chunk_batches(included, args.batch_size)
-    result = build_result(batches)
+    result = build_result(batches, below_floor, args.min_candidate_freq)
     print(dumps_line(result))
     return 0
 

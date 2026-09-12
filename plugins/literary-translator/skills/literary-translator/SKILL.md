@@ -1658,10 +1658,17 @@ non-retried dismissed `source_form` from `corrections[]` — the #101 filter,
 now enforced in code, not merely delegated as prose), curates the
 survivors by `likely_name`/`--min-candidate-freq` (the profile's
 `glossary.min_candidate_freq` when set, else 2), force-includes any
-`elision_ambiguous` pair for adjudication (#91), and prints one JSON line. If
-that line is `{"no_new_candidates": true, "batches": []}`, every candidate is
-already in canon — or, on an uncased-script source whose preset ships no
-`name_inventory`, there were never any candidates to begin with — so SKIP
+`elision_ambiguous` pair for adjudication (#91), and prints one JSON line
+carrying **#912's** `excluded_below_floor: {"count": N, "min_candidate_freq":
+M}` always, `count: 0` included — a non-zero `count` MUST be surfaced to the
+operator before this pass is dispatched: re-running at a lower
+`--min-candidate-freq` (1 is the lowest accepted) dispatches the names at or
+above the new floor, and that is the operator's call, not this pipeline's. If that
+line's `no_new_candidates` is `true`, NO candidate survived this run's
+exclusions and curation — they are already in canon, or the floor took them
+(the count says how many) or the `likely_name` test did, or, on an
+uncased-script source whose preset ships no `name_inventory`, there were never
+any candidates to begin with — so SKIP
 `resume_setup.py` and the glossary Workflow entirely this run, nothing to
 research. **#290:** that SKIP branch is the one GLOSSARY-ENABLED W3 path that
 never reaches the glossary merge — and apart from the bootstrap command below,
@@ -2508,7 +2515,7 @@ the categories-1-4 gate above, this invocation of the SAME
 `canon_adjudication_audit.py --check` is never opt-in and never waits for
 Deliver. Run it immediately after **all three** W3-rejoin branches above —
 the `glossary.enabled: false` disabled branch, the
-`{"no_new_candidates": true, "batches": []}` SKIP path, and the "Otherwise
+`no_new_candidates: true` SKIP path, and the "Otherwise
 run the codex-glossary-pass" path alike — and strictly before **W3a Segpack
 generation** below, on every project unconditionally:
 
@@ -2554,8 +2561,8 @@ enumerated-clean one.
 **Canon target-harmonisation read (always runs, advisory)** — every one of
 the three W3-rejoin branches above has already converged on the mandatory
 homonym-split evidence gate immediately above by the time this step runs —
-the `glossary.enabled: false` disabled branch, the `{"no_new_candidates":
-true, "batches": []}` SKIP path, and the "Otherwise run the
+the `glossary.enabled: false` disabled branch, the `no_new_candidates: true`
+SKIP path, and the "Otherwise run the
 codex-glossary-pass" path alike — so this step is reached by all three by
 construction, with no branch check of its own.
 

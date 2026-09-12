@@ -6,7 +6,8 @@ The route is the plugin's own designed uncased-script path (#177, enabled by
 the he.json preset from #195), and it is reached BY CONSTRUCTION, not as an
 edge case: he.json ships no `name_inventory`, so `bootstrap_names.py`'s
 `Lu`-gated candidate detector finds nothing in a Hebrew source,
-`glossary_batch_plan.py` prints `{"no_new_candidates": true, "batches": []}`,
+`glossary_batch_plan.py` prints the `no_new_candidates: true` empty marker
+(since #912, always carrying an `excluded_below_floor` count too),
 and SKILL.md's W3 tells the operator to SKIP `resume_setup.py` and the
 glossary Workflow entirely. But the glossary merge is the ONLY writer of
 canon.json, so following that instruction exactly left W3a's `segpack.py`
@@ -83,7 +84,12 @@ def walk_zero_candidate_path(root: Path):
 
     plan = run_batch_plan(root)
     assert plan.returncode == 0, f"glossary_batch_plan.py failed:\n{plan.stdout}\n{plan.stderr}"
-    assert json.loads(plan.stdout) == {"no_new_candidates": True, "batches": []}
+    # Zero candidates -- nothing ever reaches the floor check, so #912's
+    # count is 0 even though the empty marker fires.
+    assert json.loads(plan.stdout) == {
+        "no_new_candidates": True, "batches": [],
+        "excluded_below_floor": {"count": 0, "min_candidate_freq": 2},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +237,11 @@ def test_init_refuses_fragment_flags(tmp_path, extra):
 # 4. SKILL.md wiring -- the documented path must name the command
 # ---------------------------------------------------------------------------
 
-NO_NEW_CANDIDATES_MARKER = '{"no_new_candidates": true, "batches": []}'
+## #912 rewrote SKILL.md's SKIP-branch marker from an exact two-key JSON
+## literal to semantic prose (`excluded_below_floor` now always rides the
+## line, so no fixed literal describes it) -- this locator matches the
+## stable substring of that prose instead of the old object.
+NO_NEW_CANDIDATES_MARKER = "no_new_candidates` is `true`"
 INIT_COMMAND_FRAGMENT = "canon_validate.py"
 MANDATORY_GATE_HEADING = "**Mandatory homonym-split evidence gate"
 

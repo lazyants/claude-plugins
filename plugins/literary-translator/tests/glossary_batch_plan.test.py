@@ -601,7 +601,7 @@ def test_retry_of_resolved_entry_emits_note(tmp_path):
 
 
 def test_retry_diagnostic_prefers_entries_note_over_dismissal_note(tmp_path):
-    """#653 bot review P2 (PR #703, glossary_batch_plan.py:532-536): a name can
+    """#653 bot review P2 (PR #703, glossary_batch_plan.py:552-556): a name can
     legitimately be BOTH a resolved entries{} key AND carry a `dismiss`
     document in corrections[] -- the sanctioned dismiss -> --retry ->
     accepted-merge sequence produces exactly that overlap. If it is later
@@ -654,18 +654,29 @@ def test_empty_eligible_set_emits_no_new_candidates(tmp_path):
         entries={"Alice": {}, "Bob": {}},
     )
     result = run_ok(nc, canon)
-    assert result == {"no_new_candidates": True, "batches": []}
+    # #912: both entries{}-excluded rows fail at step (1), never reaching the
+    # floor check, so the count is 0 -- but the key still rides the marker.
+    assert result == {
+        "no_new_candidates": True, "batches": [],
+        "excluded_below_floor": {"count": 0, "min_candidate_freq": 2},
+    }
 
 
-def test_all_below_floor_emits_no_new_candidates(tmp_path):
+def test_all_step_2_ineligible_emits_no_new_candidates(tmp_path):
     """No entries/queue at all, but every survivor fails the step-2 predicate
-    -> still the empty marker (not an empty `batches` payload)."""
+    -> still the empty marker (not an empty `batches` payload). This row is
+    dropped for likely_name=False, a DIFFERENT reason than the freq floor
+    (#912's own docstring: only a likely_name-true row under the floor is
+    counted), so the count stays 0 even though the marker fires."""
     nc, canon = write_inputs(
         tmp_path,
         [cand("Alice", freq=1, likely_name=False, mid_sentence=0)],
     )
     result = run_ok(nc, canon, "--min-candidate-freq", "2")
-    assert result == {"no_new_candidates": True, "batches": []}
+    assert result == {
+        "no_new_candidates": True, "batches": [],
+        "excluded_below_floor": {"count": 0, "min_candidate_freq": 2},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +710,172 @@ def test_not_likely_name_excluded_even_above_floor(tmp_path):
     )
     result = run_ok(nc, canon, "--min-candidate-freq", "2")
     assert names_in_args(result) == {"Alice"}
+
+
+# ---------------------------------------------------------------------------
+# #912 -- excluded_below_floor accounting
+# ---------------------------------------------------------------------------
+
+
+def test_below_floor_count_nonzero_on_populated_shape(tmp_path):
+    """The dominant case: one survivor clears the floor, one doesn't. The
+    populated (`no_new_candidates: false`) shape must carry the exact count
+    and echo the floor actually applied."""
+    candidates = [
+        cand("Alice", freq=10, likely_name=True),
+        cand("Bob", freq=1, likely_name=True, mid_sentence=0),
+    ]
+    nc, canon = write_inputs(tmp_path, candidates)
+    result = run_ok(nc, canon, "--min-candidate-freq", "2")
+    assert names_in_args(result) == {"Alice"}
+    assert result["excluded_below_floor"] == {"count": 1, "min_candidate_freq": 2}
+
+
+def test_below_floor_count_zero_key_present_on_populated_shape(tmp_path):
+    """No candidate is below the floor -- the key must still ride the
+    populated shape with `count: 0`, not be omitted because there is
+    nothing to report."""
+    candidates = [cand("Alice", freq=10), cand("Carol", freq=5)]
+    nc, canon = write_inputs(tmp_path, candidates)
+    result = run_ok(nc, canon, "--min-candidate-freq", "2")
+    assert names_in_args(result) == {"Alice", "Carol"}
+    assert result["excluded_below_floor"] == {"count": 0, "min_candidate_freq": 2}
+
+
+def test_below_floor_count_nonzero_on_empty_marker_shape(tmp_path):
+    """THE important #912 case: every candidate is below the floor, so the
+    result is the empty `no_new_candidates: true` marker -- but that marker
+    must still carry the non-zero count. Before this, the empty branch was
+    built at a point in main() that had no access to the count at all, so a
+    silent floor was invisible on exactly the run that reads as "nothing to
+    do"."""
+    candidates = [
+        cand("Alice", freq=1, likely_name=True, mid_sentence=0),
+        cand("Bob", freq=1, likely_name=True, mid_sentence=0),
+    ]
+    nc, canon = write_inputs(tmp_path, candidates)
+    result = run_ok(nc, canon, "--min-candidate-freq", "2")
+    assert result == {
+        "no_new_candidates": True, "batches": [],
+        "excluded_below_floor": {"count": 2, "min_candidate_freq": 2},
+    }
+
+
+def test_force_included_elision_row_below_floor_not_counted(tmp_path):
+    """A force-included #91 elision pair bypasses the floor entirely -- it
+    must not be counted as EXCLUDED by it, even when both rows would
+    otherwise be below-floor and likely_name is true (unlike the dominant
+    #91 fixture elsewhere in this file, where likely_name is false and so
+    would never be counted for that reason alone)."""
+    candidates = [
+        cand(
+            "L'Un", freq=1, likely_name=True, mid_sentence=0,
+            elision_ambiguous=True, elision_stripped_form="Un",
+        ),
+        cand("Un", freq=1, likely_name=True, mid_sentence=0),
+    ]
+    nc, canon = write_inputs(tmp_path, candidates)
+    result = run_ok(nc, canon, "--min-candidate-freq", "5")
+    assert names_in_args(result) == {"L'Un", "Un"}
+    assert result["excluded_below_floor"] == {"count": 0, "min_candidate_freq": 5}
+
+
+def test_not_likely_name_low_freq_row_not_counted(tmp_path):
+    """A row dropped for likely_name=False is dropped for a DIFFERENT reason
+    than the floor and must not inflate #912's count -- only a genuinely
+    likely_name-true, under-floor row counts."""
+    candidates = [
+        cand("Alice", freq=1, likely_name=True, mid_sentence=0),  # counted
+        cand("Bonjour", freq=1, likely_name=False, mid_sentence=0),  # not counted
+    ]
+    nc, canon = write_inputs(tmp_path, candidates)
+    result = run_ok(nc, canon, "--min-candidate-freq", "2")
+    # Both rows end up excluded -- the empty marker shape, so compare it
+    # exactly rather than through names_in_args() (which assumes `args`).
+    assert result == {
+        "no_new_candidates": True, "batches": [],
+        "excluded_below_floor": {"count": 1, "min_candidate_freq": 2},
+    }
+
+
+def test_step1_excluded_row_also_below_floor_not_counted(tmp_path):
+    """A row already excluded at step (1) -- here, an entries{} key -- never
+    reaches the floor check at all, so it must not be counted even though
+    its own freq also sits under the floor."""
+    candidates = [
+        cand("Alice", freq=10, likely_name=True),
+        cand("Bob", freq=1, likely_name=True, mid_sentence=0),
+    ]
+    nc, canon = write_inputs(tmp_path, candidates, entries={"Bob": {}})
+    result = run_ok(nc, canon, "--min-candidate-freq", "5")
+    assert names_in_args(result) == {"Alice"}  # Alice clears the floor; Bob is gone at step (1)
+    assert result["excluded_below_floor"] == {"count": 0, "min_candidate_freq": 5}
+
+
+def test_absent_or_null_freq_row_is_counted(tmp_path):
+    """`_int_field` maps an absent or null `freq` to 0, and the floor's own
+    docstring says such a row IS counted -- proven here at
+    --min-candidate-freq 1, the lowest the CLI accepts, so there is no room
+    to blame a generously-high floor for the exclusion."""
+    absent_freq = cand("Alice", likely_name=True, mid_sentence=0)
+    del absent_freq["freq"]
+    null_freq = cand("Bob", freq=None, likely_name=True, mid_sentence=0)
+    nc, canon = write_inputs(tmp_path, [absent_freq, null_freq])
+    result = run_ok(nc, canon, "--min-candidate-freq", "1")
+    # Both rows end up excluded -- the empty marker shape, so compare it
+    # exactly rather than through names_in_args() (which assumes `args`).
+    assert result == {
+        "no_new_candidates": True, "batches": [],
+        "excluded_below_floor": {"count": 2, "min_candidate_freq": 1},
+    }
+
+
+def test_stderr_note_present_iff_count_nonzero(tmp_path):
+    """The operator-facing stderr note fires exactly when the count is
+    non-zero -- present on the run that silently dropped a candidate,
+    absent on the run that dropped nothing, so its presence alone is a
+    reliable signal without parsing the JSON."""
+    below_floor_note = "note: 1 candidate(s) with likely_name true were excluded by --min-candidate-freq"
+
+    candidates_with_drop = [
+        cand("Alice", freq=10, likely_name=True),
+        cand("Bob", freq=1, likely_name=True, mid_sentence=0),
+    ]
+    nc, canon = write_inputs(tmp_path, candidates_with_drop)
+    proc = run(nc, canon, "--min-candidate-freq", "2")
+    assert proc.returncode == 0
+    assert below_floor_note in proc.stderr
+
+    no_drop_dir = tmp_path / "no-drop"
+    no_drop_dir.mkdir()
+    candidates_without_drop = [cand("Alice", freq=10, likely_name=True)]
+    nc2, canon2 = write_inputs(no_drop_dir, candidates_without_drop)
+    proc2 = run(nc2, canon2, "--min-candidate-freq", "2")
+    assert proc2.returncode == 0
+    assert "note:" not in proc2.stderr
+
+
+def test_retry_lifting_step1_exclusion_still_below_floor_is_counted_once(tmp_path):
+    """--retry lifts Bob's review_queue exclusion (step 1), but Bob's freq
+    still fails the floor (step 2) -- Bob stays out of `args`, and the
+    count is exactly 1, never 2: a naive implementation counting once at
+    "was excluded before retry" and again at "still excluded after retry"
+    would double it."""
+    candidates = [
+        cand("Alice", freq=10, likely_name=True),
+        cand("Bob", freq=1, likely_name=True, mid_sentence=0),
+    ]
+    nc, canon = write_inputs(tmp_path, candidates, review_queue=[queued("Bob")])
+
+    # Control: without --retry, Bob is excluded at step (1) and never
+    # reaches the floor check, so the count is 0.
+    before = run_ok(nc, canon, "--min-candidate-freq", "2")
+    assert names_in_args(before) == {"Alice"}
+    assert before["excluded_below_floor"] == {"count": 0, "min_candidate_freq": 2}
+
+    after = run_ok(nc, canon, "--retry", "Bob", "--min-candidate-freq", "2")
+    assert names_in_args(after) == {"Alice"}
+    assert after["excluded_below_floor"] == {"count": 1, "min_candidate_freq": 2}
 
 
 # ---------------------------------------------------------------------------
