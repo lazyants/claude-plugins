@@ -680,7 +680,7 @@ FIGURES = [
     # This rotation RETIRED the previous entry's two rows, which pin phrases
     # that occur only in THAT entry -- the one this guard no longer reads.
     #
-    # ROTATED TO 1.157.0 (#919 -- an intermittent host refusal was read as a fact
+    # ROTATED TO 1.173.0 (#919 -- an intermittent host refusal was read as a fact
     # about the citation, so the repair ladder re-sourced against the same
     # refusing host on every rung), per the maintenance contract above.
     #
@@ -859,7 +859,7 @@ FIGURES = [
     # This rotation RETIRED 1.139.0's (empty) row set, kept below as its own
     # record.
     #
-    # ROTATED TO 1.139.0 (#926 -- the renderer counts entity-note labels that
+    # ROTATED TO 1.173.0 (#926 -- the renderer counts entity-note labels that
     # differ from another note's label only by a leading connective), per the
     # maintenance contract above.
     #
@@ -885,7 +885,7 @@ FIGURES = [
     # the maintenance contract above.
     #
     # ZERO rows, and the entry was walked completely rather than assumed. Its
-    # digit-runs are identifiers -- the version (1.134.0), the release date, the
+    # digit-runs are identifiers -- the version (1.173.0), the release date, the
     # issue and PR numbers (#924, #764, #768, #517), the release 1.73.0 -- or
     # measurements quoted FROM THE ISSUE about a book in another repository
     # ("three segments", "31-segment", "three consecutive rounds", "round 1"),
@@ -1733,7 +1733,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.188.0"
+FIGURES_VERSION = "1.201.0"
 
 
 def _newest_entry():

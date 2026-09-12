@@ -1622,9 +1622,9 @@ structurally closed, for four independent reasons:
    two already-frozen `canonical_target_form` values — and `_merge_batch`'s
    `review_queue` branch drops any submission whose `source_form` already
    keys `entries{}`, with no error at all: `if source_form in entries:
-   continue` (`canon_validate.py:2539-2544`).
+   continue` (`canon_validate.py:2544-2549`).
 2. **Refused by the whole-file invariant (#102).** `_assert_no_entries_review_queue_overlap`
-   (`canon_validate.py:2575-2601`) raises on any `source_form` present in
+   (`canon_validate.py:2599-2625`) raises on any `source_form` present in
    both `entries{}` and `review_queue[]`, and Pass 2 runs it on every write
    path — so even a proposal that somehow reached the queue would fail the
    very next validation.
@@ -1644,9 +1644,21 @@ structurally closed, for four independent reasons:
    blocker on any project that enabled that gate, the opposite of what an
    advisory read is for.
 
+A sibling whole-file invariant (#911) refuses two `entries{}` keys that are
+byte-different but the same string once folded to Unicode NFC — Hebrew points,
+Arabic harakat, and Latin NFD accents carry distinct combining-class orders, so
+one mark run written two ways is two keys that render identically, and each
+segpack freezes whichever one its extracted surface matched. The comparison is
+plain NFC, never `normalize_form()` (which also casefolds and would merge
+genuinely distinct strings), and a lone non-NFC key stays accepted — only the
+collision is refused. `--correct` is exempt from this check, because no
+disposition it applies can add a colliding key, so the way out of an existing
+collision is a `--correct` document with `disposition:"remove"` on one of the
+two keys, repeated once per group.
+
 A new top-level key in `canon.json` itself is rejected for the same reason
 `canon_link_groups.json` above is a sidecar and not a key: `_content_view`
-(`canon_validate.py:2620-2651`) treats any non-`generation_hashes` key as
+(`canon_validate.py:2908-2939`) treats any non-`generation_hashes` key as
 CONTENT, so adding one would force a `generation_hashes` re-stamp with
 nothing actually regenerated — the #291 hole this function's own docstring
 names.
@@ -1737,7 +1749,7 @@ three of `corpus`, `source_form` and `target_form` — not, as before, a
   draft observations — the class that was invisible before this corpus
   existed, because it never reached `canon.json` at all. Their route is
   NOT `--correct`, which refuses a `source_form` absent from canon
-  (`canon_validate.py:3159-3166`) and sends it to the ordinary glossary merge
+  (`canon_validate.py:3476-3483`) and sends it to the ordinary glossary merge
   instead — see `--report` below.
 - `multi_referent` is **exactly one member, total** — not one canon member
   plus whatever else, which counting only canon members would have

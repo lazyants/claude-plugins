@@ -1341,14 +1341,14 @@
       ],
       "claim": "# 9d-i (real filesystem, a dangling symlink): os.lstat() on the durable sidecar SUCCEEDS -- genuinely \"present\" at resolve_glossary_senses_arg()'s own definitive-stat layer (select_segments.py:4411-4502, branch 2: \"Present (of any kind lstat can see) -> pass --senses-path explicitly\")."
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2539-2544\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2544-2549\", 0]": {
       "anchors": [
         "elif disposition == \"review_queue\":",
         "if source_form in entries:"
       ],
       "claim": "keys `entries{}`, with no error at all: `if source_form in entries: continue` (`canon_validate.py:2539-2544`). 2. **Refused by the whole-file invariant (#102).*"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2575-2601\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2599-2625\", 0]": {
       "anchors": [
         "def _assert_no_entries_review_queue_overlap",
         "no source_form may be both a key",
@@ -1594,7 +1594,7 @@
       ],
       "claim": "draft matches\" branch (segment_dispatch_driver.py:5238, feeding the already_converged decision at :5265) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable"
     },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4518-4524\", 0]": {
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4521-4527\", 0]": {
       "anchors": [
         "Excluded from every bundle hash",
         "nor of `orchestration_bundle_hash`",
@@ -1617,7 +1617,7 @@
       "claim": "`blocked` (HUMAN_ESCALATION_STATUSES, select_segments.py:1172) or `converged` (WAS_CONVERGED_STATUSES, :1178) -- `blocked` in particular is a THIRD terminal shape alongside the more familiar",
       "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2620-2651\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2908-2939\", 0]": {
       "anchors": [
         "def _content_view",
         "everything except the stamp itself",
@@ -1652,14 +1652,14 @@
       ],
       "claim": "The interlock compares the whole new_entry against old_entry, so a same-target correction (confidence-only, here) is legal -- canon_correct_entry.test.py:767-771 already proves that, parametrizing confidence/note/category as fields a correction may move on its own."
     },
-    "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:4185-4225\", 0]": {
+    "[\"plugins/literary-translator/tests/canon_validate_plugin_root.test.py\", \"canon_validate.py:4504-4544\", 0]": {
       "anchors": [
         "elif args.restamp_derivation:",
         "elif args.batch is not None:"
       ],
       "claim": "# `resolve_cache_key_script`/`_stamp_generation_hash` are shared code, but # each of these three threads its OWN `plugin_root_str` parameter through # from `main()`'s dispatch (canon_validate.py:3970-4017) to its own # `_stamp_write_verify` call -- a regression in any one of those three # threading sites would not be caught by the `--init` test above."
     },
-    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:3159-3166\", 0]": {
+    "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:3476-3483\", 0]": {
       "anchors": [
         "if source_form not in entries:",
         "ordinary glossary-pass merge"

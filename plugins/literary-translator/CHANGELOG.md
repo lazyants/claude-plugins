@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.201.0 — 2026-09-12
+
+**A link group recorded after the book was assembled did nothing, silently — and the
+warning that asked for one named the file rather than the step that applies it
+(#928).** When two canon entries fold to the same `#238/#241` match key,
+`occurrence_targets.py` withholds every occurrence they both claim and warns, naming
+the remedy: record them as ONE referent in `canon_link_groups.json`. An operator who
+does exactly that, on a book already assembled, changes nothing. The map this module
+acts on is read from `nodestream["link_groups"]`, which `assemble.py` bakes in at
+assembly time; the sidecar is never re-read. Measured on the live he→en volume: nine
+groups added and the consuming pass re-run left **20 canon entries still uncredited**,
+including both spellings of one man, so the person registry would have judged him on a
+canon note instead of on the text. Re-running `assemble.py` first dropped it to 2.
+
+**The second half is subtler and has the same shape.** Crediting is decided per fold
+key, while a group is a set of forms for one REFERENT — and a referent's forms need
+not share a key. `רַבֵּנוּ זַ"ל` and `רַבֵּנוּ זִכְרוֹנוֹ לִבְרָכָה` fold differently, because
+`fold_match_key` keeps the honorific's letters. With the spelled-out form as `primary`,
+the abbreviated key had no primary inside it and stayed withheld — a correctly formed,
+semantically correct group that is mechanically inert. Both halves ended the same way:
+the operator does the documented thing, the tool accepts it without complaint, and the
+outcome is indistinguishable from not having edited the file.
+
+**Routing is unchanged; what changes is that the tool now says which condition
+failed.** `_group_credited_primary()` returns `(primary, reason)` instead of
+a bare primary — the reason derived inside the one function that owns the conditions, so
+nothing re-tests them — and the collision WARN comes in two forms. When the NodeStream's
+map names no member of the key, which is exactly the state a sidecar edit without a
+re-assembly produces, the WARN says that recording the group is not enough on its own
+and names `assemble.py`. When a ruling DID reach the run and still does not credit the
+key, the WARN carries the failed condition instead: a primary that does not share this
+match key (and the members it could be moved onto), members the ruling does not cover,
+members ruled to more than one primary, a `canon_senses.json` split, or a form outside
+the index-eligible group sharing the key. An operator who has already recorded a group
+is never told to record one again. What that branch describes is the ruling BAKED INTO
+THIS NODESTREAM, and it says so: if the sidecar has since been corrected, the baked map
+is simply stale and re-running `assemble.py` is the whole fix.
+
+Everything else is byte-identical. No occurrence changes route, no schema moves, no
+consumer changes, and a working ruling gains no new output — the whole change is the
+stderr text for a case that was already withheld. `occurrence_targets.py` is in no
+bundle tuple, so nothing re-stales and no segment is re-translated. The two facts an
+operator needs are now also in `references/canon-and-glossary.md`,
+`references/output-target-adapters/obsidian.md` and `SKILL.md`: editing
+`canon_link_groups.json` takes effect only after `assemble.py` runs again, and a group
+credits only the fold key its `primary` sits in.
+
+**Deliberately NOT done.** The issue also proposed baking the sidecar's digest into the
+NodeStream and refusing when it differs, the way `person_registry.py` guards
+`input_sha256`. Two reasons against: a refusal path contradicts the no-new-raise rule
+this module is built on — `validate_backlinks.py:1317-1325` turns any exception out of
+`build()` into a hard gate FATAL, which is why `_link_groups_from_nodestream()` is
+fail-closed and non-raising — and every NodeStream already on disk carries no digest, so
+the guard would have to treat "absent" as "pass", which is the state the defect produces.
+Auto-selecting a per-key primary was refused too: which member of a key owns its records
+is a choice the ruling does not contain, and a script never decides identity here.
+=======
+
 ## 1.188.0 — 2026-09-12
 
 **A link group recorded after the book was assembled did nothing, silently — and the
