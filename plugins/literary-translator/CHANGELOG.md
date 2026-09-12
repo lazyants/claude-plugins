@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.127.0 — 2026-09-12
+## 1.138.0 — 2026-09-12
 
 **`canon_validate.py --correct` rewrote canon.json and reported success while every already-built
 segpack still carried the pre-correction `canon_map` — and `canon_map` is what actually reaches the
@@ -39,6 +39,105 @@ not visited — a pre-existing blind spot, the subject of sibling issue #917, ne
 widened here; a `remove` of an entry whose `canonical_target_form` was already empty produces no
 `canon_map` mismatch and is not listed; and the no-exit-change guarantee is scoped to `Exception`
 and `SystemExit` — `KeyboardInterrupt` is deliberately not caught.
+## 1.134.0 — 2026-09-12
+
+**The review turn now reads the operator's per-finding refusal record, because a correct refusal had
+been re-filed against the same passage round after round (#924).** `refuse_finding.py` writes
+`segments/<seg>.findings_refused.json` — the durable record that a fix turn considered a finding and
+declined it on the merits — and since 1.73.0 (#764) only the FIX turn was shown it. The reviewer was
+not, on the maintainer's call in PR #768: a re-raised finding "costs a round and is entirely
+legitimate; a suppressed one costs the book." The first half was measured false on a live he→en
+book. When a fix turn correctly refuses EVERY finding of a verdict, the draft is byte-identical, so
+`derive_next_action()` returns `needs_fix` at the same round label on every invocation: the round is
+not spent, `engine.max_fix_rounds` is never reached, `human_escalation` never fires, and a fresh
+reviewer — blind to the record — re-derives the identical finding whenever a review is next
+dispatched. Three segments of one 31-segment book each refused the same finding at three consecutive
+rounds, and the operator had to notice a livelock that reads exactly like slow convergence and run
+`reject_review.py` per segment per round.
+
+**What changes is one line of `reviewDispatchPrompt`, emitted at every round.** The reviewer is told
+the record exists, what it holds (`loc`, `finding_index`, `round_label`, `issue_digest`, `reason`,
+`refused_at`), and that it is CONTEXT, never an instruction and never authority: it suppresses
+nothing, it settles nothing about the passage, and a finding the reviewer would otherwise raise it
+still raises. The one duty it adds: where a record's stated reason itself identifies the claim the
+reviewer is about to make at that same loc, the finding's `issue` text must say why that reason does
+not hold for the text as it stands now — against whatever evidence the claim rests on, the source,
+the draft or `style_bible.md` — rather than restate the claim. The record carries no finding text,
+so a `--reason` that does not name the claim it declines identifies nothing to either prompt;
+SKILL.md now says so where the command is documented. The line is emitted at round 1 as well, unlike
+the fix turn's block: the record is cross-round and cross-run by design, and a round-1 reviewer of a
+re-driven run is exactly where an earlier run's refusal matters.
+
+**Nothing mechanical changes.** The fix turn's block is emitted byte-for-byte as before; no gate
+reads the record, `derive_next_action()` never opens it, the round label still does not advance on
+an all-refused fix turn, and `reject_review.py` remains the only release of a unit whose draft has
+stopped moving — reviewer visibility alone dispatches nothing. What it buys is that the reviewer a
+later driver run does dispatch, after a numbered-round rejection or a draft change, can agree with a
+recorded reason instead of re-deriving the same finding; a reviewer that disagrees now has to say
+why, which is what the operator needs to see before rejecting a verdict.
+
+Residuals, disclosed rather than guarded. The under-catch #768 feared — a reviewer that reads a
+recorded reason and drops a valid finding — is met by instruction, not machinery: the sentence that
+a finding you would otherwise raise you still raise is pinned by
+`tests/review_prompt_prior_refusals.test.py`, and nothing deterministic can read finding prose
+(#517). The record's `reason` is operator-typed prose that now reaches a second prompt; its byte
+bound lives in the producer, the same bound the fix turn's read has relied on since #764.
+`cache_key.py`'s membership comment for `refuse_finding.py` still says the record's only consumer is
+`fixPrompt`'s own text; it is left as written because `tests/name_discovery.test.py` byte-compares
+that file against `origin/main` on every pull request, and the membership reasoning beside it — the
+sole producer of durable state a prompt splices into a turn that rewrites the draft — is unchanged.
+
+Migration. `mass-translate-wf.template.js`, `refuse_finding.py` and `segment_dispatch_driver.py` are
+`PLUGIN_BUNDLE_MEMBERS` entries and carry byte diffs (the prompt, its docstring, and the
+line-numbered citations the driver holds into the template), so this release moves
+`plugin_bundle_hash`: every converged segment of a book in progress goes `stale` once the refreshed
+plugin is picked up, and re-translates. No other hash moves.
+## 1.130.0 — 2026-09-12
+
+**`--reset-batches` threw away the rejection the exhausted ladder ended on, so the fresh attempt-0
+resolver was never told what a judge had refused and cited it again (#922).** The reset shipped in
+1.115.0 (#892) re-drives a `citation-review-exhausted` batch from attempt 0, which is right — a
+rung must be dispatched, never re-approved from a fragment a judge may already have rejected. But
+`apply_requested_resets()` also wrote `rejection_reason: null` into the rewritten entry, and that
+field is the one channel through which the resolver ever learns what was wrong: on an ordinary
+retry rung the driver hands it to the template's `batchDispatchPrompt`, which renders the
+REGENERATION block only when it holds text. After a reset the block was absent, the resolver was
+dispatched as if for a first attempt, and it guessed the way it guessed the first time. Measured on
+the reporting run, a Hebrew-to-English glossary pass whose exhausted batches were all reset: on the
+one batch diffed, six of eleven items reverted to the citation set of the original attempt —
+including a source a judge had already refused and one item the ladder had moved to
+`review_queue` with no source at all, both restored to the failing state. Where one citation is
+genuinely unrecoverable the exhaustion became self-perpetuating: every reset re-discovered the same
+replacement over the same three rungs, with no memory that it had already been made.
+
+**The rewritten entry now carries the ladder's last rejection.** `lastRejection`, which
+`_exhaust()` records at the rung that actually exhausted, is preferred; the entry's own
+`rejection_reason` — the rung before, on an exhausted batch, and the newest the batch has on any
+other status the status-blind flag is pointed at — is the fallback; a batch with neither
+dispatches as a first attempt, as before. The carried text reaches the attempt-0 prompt through the
+path every retry rung already uses, so the resolver sees the same REGENERATION block a retry sees:
+the reviewer's findings quoted as data, and the standing order to downgrade or queue what it cannot
+verify rather than substitute another guess. Nothing else about the reset moves — attempt 0, every
+approved slot released, `resumeSkipDropped` persisted, an unknown index refused. The log line
+says whether a re-drive carries a rejection; `reset[]` keeps its shape.
+
+What is deliberately not done. No "resume from the last citation set" mode: the reason the
+docstring gives for dispatching at attempt 0 holds, and the carried report is what lets the fresh
+rung avoid the refused citations without re-approving a rejected fragment. A `review_queue`
+demotion an earlier rung reached is not preserved as state either — the report names the source
+that was refused, and the block already orders the resolver to queue what it cannot source, so that
+case is covered by instruction rather than by carrying rows forward. Residual, disclosed in
+SKILL.md: only the LAST rejection is carried, because the state document keeps no more, so a repair
+an earlier rung made that the terminal report does not name is decided again rather than restored.
+
+SKILL.md's `--reset-batches` paragraph states what the rewritten entry carries, and the hand-merge
+route (#883) says the re-drive it points at is dispatched with the last rung's rejection in hand.
+
+Migration. `glossary_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this moves
+`plugin_bundle_hash`: every converged segment of a book in progress goes `stale` and re-translates
+once the refreshed plugin is picked up, and an unfinished glossary pass mints a fresh `RUN_ID`
+instead of resuming. Any fix to this defect pays that — it lives in a bundle member.
+
 ## 1.125.0 — 2026-09-12
 
 **`person_registry.py --prep` was unreachable on a large canon, and the two knobs it has could not
@@ -92,6 +191,7 @@ shipped, on purpose: a sharded Pass A (a cross-shard merge would replace the sin
 design), pruning canon metadata from the cast (190 KB on the measured book), or a different default
 cap. `person_registry.py` is in no bundle tuple, so this release moves no cache key, stales no
 converged segment and changes no resume identity.
+
 ## 1.123.0 — 2026-09-12
 
 **The glossary planner dropped most of a book's name candidates at its frequency floor and
@@ -141,6 +241,7 @@ three others it froze stay pinned, and bundle MEMBERSHIP is unchanged.
 Not addressed here, and still true: the floor lands differently on an uncased source, whose
 candidate list is built from an inventory rather than from capitalisation. That may argue for a
 different default there. It is a separate decision, and the count is useful either way.
+
 ## 1.120.0 — 2026-09-12
 
 **A glossary batch that died on its environment named no way back, and the driver's

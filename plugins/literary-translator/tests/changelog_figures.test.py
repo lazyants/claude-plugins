@@ -504,7 +504,7 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.127.0 (#910 -- --correct reported success while the
+    # ROTATED TO 1.138.0 (#910 -- --correct reported success while the
     # already-built segpacks still carried the pre-correction canon_map; #840
     # folded in), per the maintenance contract above.
     #
@@ -512,7 +512,7 @@ FIGURES = [
     # Every digit-run in it is an IDENTIFIER or a CITATION, never a figure
     # this tree can re-derive:
     #
-    #   1.127.0, 2026-09-12    the version and the release date
+    #   1.138.0, 2026-09-12    the version and the release date
     #   #910, #840, #826, #917 issue numbers
     #   W3a (twice)            a workflow step name, not a count
     #   "three"                SAFE_STALE_CARVEOUT_FIELDS, spelled as a word
@@ -538,8 +538,46 @@ FIGURES = [
     # `plugin_bundle_hash` are named, so no later release can rot this prose
     # by retuning a number.
     #
-    # This rotation RETIRED 1.125.0's rows, which belong to an entry that is
+    # This rotation RETIRED 1.134.0's rows, which belong to an entry that is
     # no longer the newest and which this guard therefore no longer reads.
+    #
+    # The 1.134.0 rotation this replaces, kept as its own record:
+    # ROTATED TO 1.134.0 (#924 -- the review turn reads the refusal record), per
+    # the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Its
+    # digit-runs are identifiers -- the version (1.134.0), the release date, the
+    # issue and PR numbers (#924, #764, #768, #517), the release 1.73.0 -- or
+    # measurements quoted FROM THE ISSUE about a book in another repository
+    # ("three segments", "31-segment", "three consecutive rounds", "round 1"),
+    # which this tree cannot re-derive. The tree-owned figures the entry could
+    # have quoted (the PLUGIN_BUNDLE_MEMBERS count, the number of citations the
+    # driver holds into the template) it deliberately names in words.
+    #
+    # This rotation RETIRED nothing: 1.130.0's list was already empty; its record
+    # is kept below, unchanged, as every earlier rotation's is.
+    #
+    # ------------------------------------------------------------------------
+    # The 1.130.0 rotation this replaces, kept as its own record:
+    # ROTATED TO 1.130.0 (#922 -- `--reset-batches` nulled the rejection the
+    # exhausted ladder ended on, so the fresh attempt-0 resolver re-cited what
+    # a judge had refused), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # digit-run in it is an IDENTIFIER: the version (1.130.0), the release
+    # date, the issue numbers (#922, #892, #883), the release the flag shipped
+    # in (1.115.0), and `attempt 0` / `attempt-0`, which name a rung rather
+    # than count one. The measurement behind #922 -- six of eleven items on one
+    # batch reverting, three rungs re-paid per reset -- is a fact about a
+    # glossary pass in ANOTHER repository, which no implementation in this tree
+    # can re-derive, so the entry spells those counts as words rather than
+    # quoting digits this guard would have to hold unverifiable. Everything the
+    # tree DOES own is stated by NAMING: `apply_requested_resets()`,
+    # `_exhaust()`, `lastRejection`, `rejection_reason`, `batchDispatchPrompt`,
+    # `resumeSkipDropped`, `reset[]`, `PLUGIN_BUNDLE_MEMBERS` and
+    # `plugin_bundle_hash` are named rather than counted.
+    #
+    # This rotation RETIRED nothing: 1.125.0's list was already empty.
     #
     # The 1.125.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.125.0 (#923 -- `person_registry.py --prep` was unreachable
@@ -598,7 +636,7 @@ FIGURES = [
     # kept below, unchanged.
     # 1.123.0's own row, RETIRED here rather than carried: it measured the
     # phrase "default 2" in THAT entry, and this guard only ever reads the
-    # NEWEST one. Left live it would be checked against the 1.127.0 entry,
+    # NEWEST one. Left live it would be checked against the 1.138.0 entry,
     # where the phrase does not occur -- a red that says nothing about
     # either release. The row itself was correct for its own entry and is
     # recorded in the 1.123.0 block below.
@@ -658,21 +696,6 @@ FIGURES = [
     # The 1.116.0 rotation, kept as its own record:
     # ROTATED TO 1.116.0 (#897 -- the editorial-bracket guard tested adjacency
     # rather than pairing), per the maintenance contract above.
-    #
-    # ZERO rows, and the entry was walked completely rather than assumed. Every
-    # digit-run in it is an IDENTIFIER: the version (1.116.0), the release date,
-    # the issue number (#897), and the `7` of the spec section `§7` this guard
-    # belongs to. There is no other digit in the entry at all.
-    #
-    # That is deliberate rather than lucky. The measurement behind #897 -- how
-    # many published links carried the defect -- is a fact about TWO DELIVERED
-    # BOOKS IN ANOTHER REPOSITORY, exactly the kind no implementation in this
-    # tree can re-derive, so the entry states it in words ("a single occurrence
-    # among all their published links") instead of quoting a count that would
-    # sit here unverifiable. Everything the tree DOES own is stated by NAMING:
-    # `_editorial_bracket_sides`, `_editorial_bracket_emit`, `brackets_escaped`
-    # and the terminators are named rather than counted, so no later release can
-    # rot this prose by retuning a number.
     #
     # This rotation RETIRED 1.115.0's rows, which belong to an entry that is now
     # the second-newest and which this guard therefore no longer reads.
@@ -1371,7 +1394,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.127.0"
+FIGURES_VERSION = "1.138.0"
 
 
 def _newest_entry():

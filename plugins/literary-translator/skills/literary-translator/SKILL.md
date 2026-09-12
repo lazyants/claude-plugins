@@ -2020,10 +2020,17 @@ climb different numbers of rungs.
 **`--reset-batches <i>[,<j>…]` — the ONE supported way to put a settled batch back on
 the ladder (1.115.0, #892).** Added to the command above, it sends each named batch
 back to attempt 0 BEFORE this invocation drives anything: it deletes that batch's
-approved snapshots at every rung and rewrites its state entry. Both halves are the
-operation — the snapshot is published create-once, so a state entry rewritten while
-the snapshots stay costs the batch a rung per rung on `approve-failed` and settles it
-again, recording a citation review that never happened. Every terminal `not_ready[]`
+approved snapshots at every rung and rewrites its state entry. The rewritten entry
+carries the rejection the ladder ended on — `lastRejection`, else the entry's own
+`rejection_reason` — as the attempt-0 dispatch's rejection reason, so the resolver
+regenerates told what the judge refused, exactly as any retry rung is (#922); a batch
+with no rejection on record dispatches as a first attempt. Only that last rejection
+is carried, because the state document keeps no more: a repair an earlier rung made
+that the terminal report does not name is not restored, and the fresh rung decides
+it again. Both halves are the operation — the snapshot is published create-once, so
+a state entry rewritten while the snapshots stay costs the batch a rung per rung on
+`approve-failed` and settles it again, recording a citation review that never
+happened. Every terminal `not_ready[]`
 entry now names its own recovery: the environmental failures name this flag, while
 `approval-record-write-failed` deliberately does not, since its recovery points at
 the hand route under **Recovering the ready batches when a sibling exhausted**
@@ -2407,7 +2414,8 @@ line; `{"verified": true}` is the only pass.
    rejects — and a fresh ladder from attempt 0 clears it. Under the driver that
    is `--reset-batches <i>` on the next invocation (the flag's own paragraph
    above), which releases the batch's approved snapshots as well as rewriting its
-   state entry. Do NOT hand-edit `pending.json` to revive an exhausted batch:
+   state entry, and dispatches attempt 0 with the last rung's rejection in hand
+   (#922). Do NOT hand-edit `pending.json` to revive an exhausted batch:
    deleting the `status` key crashes the next drive with `KeyError`, and
    rewriting the entry while those snapshots stay spends the whole ladder on
    `approve-failed`, settling the batch again under a reason that names a
@@ -3551,15 +3559,15 @@ python3 {durable_root}/scripts/refuse_finding.py SEG --finding-index N \
     --durable-root {durable_root} --plugin-root {plugin_root}
 ```
 
-The record lands at `segments/<seg>.findings_refused.json` and **releases
-nothing**: no gate reads it, `derive_next_action()` never opens it, the round
-still costs what it cost, and a re-raised finding stays entirely legitimate.
-The one thing it buys is that the NEXT fix turn's prompt can show the refusal
-and its reason, so an unapplied finding reads as considered rather than
-overlooked. Re-running the same command is a no-op success, not a second
-record. It is deliberately NOT given to the next REVIEWER — see `#529`: the
-artifact under review is never the authority it is reviewed against, and a
-fixer-authored "do not raise this" list would suppress valid findings.
+The record lands at `segments/<seg>.findings_refused.json` and **releases nothing**: no gate reads
+it, `derive_next_action()` never opens it, and an all-refused fix turn leaves the round label frozen
+(`reject_review.py` remains the only release). What it buys: BOTH later prompts read it as context.
+The next fix turn sees an unapplied finding as considered, not overlooked; since `#924` the next
+reviewer sees the claim was already answered and must say, in the finding's own issue text, why the
+recorded reason does not hold now — reversing `#764`'s cut, which assumed a re-raised finding costs
+a round (false when every finding is refused). So `--reason` must be SELF-CONTAINED, naming the
+declined claim, not only the ground: the record holds no finding text, so a reason that names only
+the ground identifies nothing to either prompt. Re-running the same command is a no-op success.
 
 **When the WHOLE VERDICT is wrong (#461) — rejecting it instead of
 applying it.** A refusal recorded above is still a report about ONE finding; it
