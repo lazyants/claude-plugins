@@ -504,6 +504,27 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
+    # ROTATED TO 1.130.0 (#922 -- `--reset-batches` nulled the rejection the
+    # exhausted ladder ended on, so the fresh attempt-0 resolver re-cited what
+    # a judge had refused), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # digit-run in it is an IDENTIFIER: the version (1.130.0), the release
+    # date, the issue numbers (#922, #892, #883), the release the flag shipped
+    # in (1.115.0), and `attempt 0` / `attempt-0`, which name a rung rather
+    # than count one. The measurement behind #922 -- six of eleven items on one
+    # batch reverting, three rungs re-paid per reset -- is a fact about a
+    # glossary pass in ANOTHER repository, which no implementation in this tree
+    # can re-derive, so the entry spells those counts as words rather than
+    # quoting digits this guard would have to hold unverifiable. Everything the
+    # tree DOES own is stated by NAMING: `apply_requested_resets()`,
+    # `_exhaust()`, `lastRejection`, `rejection_reason`, `batchDispatchPrompt`,
+    # `resumeSkipDropped`, `reset[]`, `PLUGIN_BUNDLE_MEMBERS` and
+    # `plugin_bundle_hash` are named rather than counted.
+    #
+    # This rotation RETIRED nothing: 1.125.0's list was already empty.
+    #
+    # The 1.125.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.125.0 (#923 -- `person_registry.py --prep` was unreachable
     # on a large canon), per the maintenance contract above.
     #
@@ -1327,7 +1348,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.125.0"
+FIGURES_VERSION = "1.130.0"
 
 
 def _newest_entry():

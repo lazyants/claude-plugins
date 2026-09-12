@@ -2101,7 +2101,7 @@ def test_a_resets_dropped_resume_skip_survives_a_kill(bed):
 # citation-review-exhausted for a cause that was never citation review.
 # ---------------------------------------------------------------------------
 
-def _exhaust_batch_zero(bed, *extra):
+def _exhaust_batch_zero(bed, *extra, finding=None, batches=BATCHES):
     """Drives batch 0 to `citation-review-exhausted` the way a live run reaches
     it: a content rejection at every rung of the ladder. Returns the driver's
     last output. Every rung's approved snapshot is left on disk, exactly as a
@@ -2111,16 +2111,30 @@ def _exhaust_batch_zero(bed, *extra):
     `extra` is passed to EVERY invocation, so a caller can exhaust the batch
     under the same flags its own case is about -- `--resumed-batch-indices`
     means "resume_setup.py checked this batch", and a run that carried it on
-    only some of the four invocations would not be the run the operator has."""
-    out, _ = run_driver(bed, *extra)
+    only some of the four invocations would not be the run the operator has.
+
+    `finding` (#922) lets a caller give each rung a DISTINCT rejection body --
+    a format string taking `{attempt}` -- so a later assertion can tell which
+    rung's text survived. Left at the default, every rung gets today's own
+    "source 1 is not attested." unchanged: `.format()` on a string with no
+    placeholder is a no-op, so every caller that predates #922 sees the same
+    bytes it always has.
+
+    `batches` (#922) is forwarded to every invocation rather than defaulting
+    silently: `parse_reset_batches()` refuses an index the run does not hold,
+    so a caller exhausting batch 0 inside a multi-batch run (TWO_BATCHES) must
+    pass that same list here, or the record-verdicts calls run against a run
+    that never dispatched the other batch at all."""
+    out, _ = run_driver(bed, *extra, batches=batches)
     verdicts = bed["session"] / "v.json"
     for attempt in (0, 1, 2):
-        entry = out["needs_judge"][0]
+        entry = next(e for e in out["needs_judge"] if e["batch"] == 0)
+        body = (finding or "source 1 is not attested.").format(attempt=attempt)
         verdicts.write_text(json.dumps([{
             "batch": 0, "attempt": attempt, "nonce": entry["nonce"],
-            "reply": f"source 1 is not attested.\nCITATIONS_REJECTED 0 ATTEMPT {attempt}"}]))
+            "reply": f"{body}\nCITATIONS_REJECTED 0 ATTEMPT {attempt}"}]))
         out, _ = run_driver(bed, *extra, "--record-verdicts", str(verdicts),
-                            expect=1 if attempt == 2 else 0)
+                            expect=1 if attempt == 2 else 0, batches=batches)
     assert out["not_ready"][0]["reason"] == "citation-review-exhausted"
     return out
 
@@ -2219,6 +2233,73 @@ def test_a_requested_reset_batch_stops_counting_as_resumed(bed):
     assert state["batches"]["0"].get("resumeSkipDropped") is True, (
         "the drop must be PERSISTED, so a relaunch that repeats the operator's "
         f"original --resumed-batch-indices does not re-skip it: {state}")
+
+
+def test_a_requested_reset_carries_the_ladders_last_rejection_into_its_dispatch(bed):
+    """#922. Before this fix, `apply_requested_resets()` wrote `rejection_reason:
+    None` into the fresh attempt-0 entry it built, so the template's
+    REGENERATION block -- rendered only when a rejection is present -- never
+    appeared in the re-drive's dispatch prompt. The resolver was handed the
+    same candidates with no memory that a judge had already rejected sources
+    for them, and was free to reproduce the very citation set that exhausted
+    the batch in the first place (measured on the reporting run: six of eleven
+    items reverted on one batch).
+
+    The fix carries the ladder's TERMINAL rejection -- `lastRejection`, the one
+    the judge actually exhausted the batch on -- into the reset entry, not
+    whichever text `rejection_reason` happens to hold (that field lags one rung
+    behind on an exhausted batch; see apply_requested_resets()'s own
+    docstring). Three DISTINCT per-rung rejection bodies pin this down: the
+    assertion below fails if the carried text is an earlier rung's rather than
+    the terminal one's.
+
+    Batch 1 rides along in the same run (TWO_BATCHES) and the same reset call,
+    to prove the None path still exists: awaiting its first judge with no
+    rejection ever recorded, its reset entry must carry nothing, and its fresh
+    dispatch must not render the REGENERATION block either."""
+    _exhaust_batch_zero(bed, finding="rung {attempt} cited a rejected source",
+                        batches=TWO_BATCHES)
+
+    # Control: the ORIGINAL attempt-0 dispatch, made before any reset existed,
+    # never rendered the REGENERATION block -- there was nothing yet to carry
+    # into it. Without this the assertion below would prove nothing about what
+    # the reset changed.
+    original_prompt = rendered_prompt_for(bed, "out_0_attempt_0.json")
+    assert "THIS IS A REGENERATION" not in original_prompt, (
+        f"the control must be an ordinary first dispatch: {original_prompt}")
+
+    out, _ = run_driver(bed, "--reset-batches", "0,1", batches=TWO_BATCHES)
+    assert out["reset"] and {e["batch"] for e in out["reset"]} == {0, 1}, (
+        f"both batches must be reported reset: {out['reset']}")
+
+    reset_prompt_0 = rendered_prompt_for(bed, "out_0_attempt_0.json")
+    assert "THIS IS A REGENERATION" in reset_prompt_0, (
+        "THE assertion for the exhausted batch. The reset's fresh attempt-0 "
+        f"dispatch must render the REGENERATION block: {reset_prompt_0}")
+    assert "rung 2 cited a rejected source" in reset_prompt_0, (
+        "the TERMINAL rung's rejection -- the one the batch actually "
+        f"exhausted on -- must be the text carried into the fresh dispatch: "
+        f"{reset_prompt_0}")
+    assert "rung 0 cited a rejected source" not in reset_prompt_0, (
+        "an earlier rung's rejection must not survive into the reset -- this "
+        f"batch did not exhaust on rung 0's finding: {reset_prompt_0}")
+    assert "rung 1 cited a rejected source" not in reset_prompt_0, (
+        "nor on rung 1's -- only the terminal rung's rejection is what the "
+        f"state document has left to carry: {reset_prompt_0}")
+
+    reset_prompt_1 = rendered_prompt_for(bed, "out_1_attempt_0.json")
+    assert "THIS IS A REGENERATION" not in reset_prompt_1, (
+        "batch 1 never had a rejection recorded before this reset -- the "
+        "None path of the same fix must still render an ordinary dispatch: "
+        f"{reset_prompt_1}")
+
+    state = json.loads((bed["session"] / "pending.json").read_text())
+    assert state["batches"]["0"]["rejection_reason"] == \
+        "rung 2 cited a rejected source", (
+        "what a RELAUNCH of the same command would read back must be the "
+        f"terminal rung's text, persisted: {state['batches']['0']}")
+    assert state["batches"]["1"]["rejection_reason"] is None, (
+        f"batch 1's entry must carry nothing: {state['batches']['1']}")
 
 
 def test_a_reset_index_this_run_does_not_have_is_refused(bed):

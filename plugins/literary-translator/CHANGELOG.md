@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.130.0 — 2026-09-12
+
+**`--reset-batches` threw away the rejection the exhausted ladder ended on, so the fresh attempt-0
+resolver was never told what a judge had refused and cited it again (#922).** The reset shipped in
+1.115.0 (#892) re-drives a `citation-review-exhausted` batch from attempt 0, which is right — a
+rung must be dispatched, never re-approved from a fragment a judge may already have rejected. But
+`apply_requested_resets()` also wrote `rejection_reason: null` into the rewritten entry, and that
+field is the one channel through which the resolver ever learns what was wrong: on an ordinary
+retry rung the driver hands it to the template's `batchDispatchPrompt`, which renders the
+REGENERATION block only when it holds text. After a reset the block was absent, the resolver was
+dispatched as if for a first attempt, and it guessed the way it guessed the first time. Measured on
+the reporting run, a Hebrew-to-English glossary pass whose exhausted batches were all reset: on the
+one batch diffed, six of eleven items reverted to the citation set of the original attempt —
+including a source a judge had already refused and one item the ladder had moved to
+`review_queue` with no source at all, both restored to the failing state. Where one citation is
+genuinely unrecoverable the exhaustion became self-perpetuating: every reset re-discovered the same
+replacement over the same three rungs, with no memory that it had already been made.
+
+**The rewritten entry now carries the ladder's last rejection.** `lastRejection`, which
+`_exhaust()` records at the rung that actually exhausted, is preferred; the entry's own
+`rejection_reason` — the rung before, on an exhausted batch, and the newest the batch has on any
+other status the status-blind flag is pointed at — is the fallback; a batch with neither
+dispatches as a first attempt, as before. The carried text reaches the attempt-0 prompt through the
+path every retry rung already uses, so the resolver sees the same REGENERATION block a retry sees:
+the reviewer's findings quoted as data, and the standing order to downgrade or queue what it cannot
+verify rather than substitute another guess. Nothing else about the reset moves — attempt 0, every
+approved slot released, `resumeSkipDropped` persisted, an unknown index refused. The log line
+says whether a re-drive carries a rejection; `reset[]` keeps its shape.
+
+What is deliberately not done. No "resume from the last citation set" mode: the reason the
+docstring gives for dispatching at attempt 0 holds, and the carried report is what lets the fresh
+rung avoid the refused citations without re-approving a rejected fragment. A `review_queue`
+demotion an earlier rung reached is not preserved as state either — the report names the source
+that was refused, and the block already orders the resolver to queue what it cannot source, so that
+case is covered by instruction rather than by carrying rows forward. Residual, disclosed in
+SKILL.md: only the LAST rejection is carried, because the state document keeps no more, so a repair
+an earlier rung made that the terminal report does not name is decided again rather than restored.
+
+SKILL.md's `--reset-batches` paragraph states what the rewritten entry carries, and the hand-merge
+route (#883) says the re-drive it points at is dispatched with the last rung's rejection in hand.
+
+Migration. `glossary_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this moves
+`plugin_bundle_hash`: every converged segment of a book in progress goes `stale` and re-translates
+once the refreshed plugin is picked up, and an unfinished glossary pass mints a fresh `RUN_ID`
+instead of resuming. Any fix to this defect pays that — it lives in a bundle member.
+
 ## 1.125.0 — 2026-09-12
 
 **`person_registry.py --prep` was unreachable on a large canon, and the two knobs it has could not
@@ -53,6 +99,7 @@ shipped, on purpose: a sharded Pass A (a cross-shard merge would replace the sin
 design), pruning canon metadata from the cast (190 KB on the measured book), or a different default
 cap. `person_registry.py` is in no bundle tuple, so this release moves no cache key, stales no
 converged segment and changes no resume identity.
+
 ## 1.123.0 — 2026-09-12
 
 **The glossary planner dropped most of a book's name candidates at its frequency floor and
@@ -102,6 +149,7 @@ three others it froze stay pinned, and bundle MEMBERSHIP is unchanged.
 Not addressed here, and still true: the floor lands differently on an uncased source, whose
 candidate list is built from an inventory rather than from capitalisation. That may argue for a
 different default there. It is a separate decision, and the count is useful either way.
+
 ## 1.120.0 — 2026-09-12
 
 **A glossary batch that died on its environment named no way back, and the driver's

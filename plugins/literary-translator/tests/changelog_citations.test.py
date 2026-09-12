@@ -152,6 +152,23 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
+    # ROTATED TO 1.130.0 (#922 -- `--reset-batches` nulled the rejection the
+    # exhausted ladder ended on), and EMPTY ON PURPOSE, for the reason the
+    # records below give: the entry names its subjects by FILE and SYMBOL --
+    # `apply_requested_resets()`, `_exhaust()`, `lastRejection`,
+    # `rejection_reason`, `batchDispatchPrompt`, `resumeSkipDropped`,
+    # `reset[]`, `PLUGIN_BUNDLE_MEMBERS` -- and states no `file.ext:NNN`
+    # citation at all, which is the shape this guard reads. Measured against
+    # the entry rather than asserted: a scan of its slice for that pattern
+    # returns zero matches.
+    #
+    # This release inserts lines into `SKILL.md` above the one live citation
+    # aimed below them (`orchestration_hash_resume_gating.test.py`'s
+    # `SKILL.md` range), which is repointed to its re-measured lines in both
+    # the citing tuple and the anchor-map key; `tools/citation_audit.py check`
+    # is OK on the result.
+    #
+    # The 1.125.0 record this replaces, kept as its own:
     # ROTATED TO 1.125.0 (#923 -- `person_registry.py --prep` was unreachable
     # on a large canon), and EMPTY ON PURPOSE: the entry names its subjects by
     # FILE, FLAG, GATE and SYMBOL -- `registry_cast.json`,
