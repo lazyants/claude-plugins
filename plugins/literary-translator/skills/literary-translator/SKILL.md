@@ -3213,13 +3213,13 @@ rendered prompt out as `needs_fix` and truncates the template before every
 top-level preflight, so no audit call site exists on this route. Say what
 that check actually is, because "the fix turn is unaudited" understates it:
 it is a COPY-FIDELITY comparison of every file Step 0a copied into the
-durable root against the plugin bytes it came from — 53 scripts, the three
-workflow templates, 26 schemas and the 6 language files, 88 artifacts — run
+durable root against the plugin bytes it came from — 54 scripts, the three
+workflow templates, 26 schemas and the 6 language files, 89 artifacts — run
 after every dispatched fix call on the fallback. What the default path has
 in its place is the #396 rule below: `scaffold_setup.py --verify` before
 each driver launch, which compares the two BUNDLES — 22 scripts plus
 `mass-translate-wf.template.js` and `glossary-pass-wf.template.js`, 24
-members. So 64 copied artifacts have no byte comparison on this path,
+members. So 65 copied artifacts have no byte comparison on this path,
 including every durable schema, every language preset,
 `skeptic-pass-wf.template.js`, and the W7/W8 entry points `final_audit.py`
 and `assemble.py` — and `final_audit.py` is in NO bundle hash by design (see
@@ -4743,6 +4743,34 @@ script calls, the two model passes between them, why `--plugin-root` is
 mandatory and what the pass does NOT do are in
 `references/person-registry.md` — read it in full before the first call, and
 do not reconstruct the chain from this paragraph.
+
+**Stale-record report — OPT-IN, after a class correction of converged drafts,
+before their re-review (#931).** A draft's `names[]` and `notes[]` record the
+translator's decisions about the prose beside them; correcting a class of
+renderings across converged drafts leaves every record that described the old
+rendering false, and the reviewer, seeing one segment per job, surfaces them a
+handful per round. `scripts/stale_records_report.py` enumerates them, report-only:
+it gates nothing, exits 0 with findings, moves no hash. Population: every
+`runs/ledger.d/<seg>.json` with `status: converged`, by status alone — the
+fragment's `reviewed_draft_sha1` is NOT compared, since the drafts were just
+hand-edited. Four steps, in the operator session, before the #438 re-review:
+(1) copy `${LT}/assets/templates/stale_notes_TASK.template.md` to
+`${durable_root}/stale_notes_TASK.md` once, guarded on absence (not in Step 0a's
+list); (2) `python3 ${durable_root}/scripts/stale_records_report.py --prep` —
+`stale_records/prep.json` (each segment's draft content hash) and
+`names_report.json`, the deterministic half: a `names[]` entry is flagged when a
+capitalised token of its target form is not a whole token of the segment's
+`blocks`, `unverifiable` when it has no such token; (3) per segment in
+`prep.json`, ONE `literary-translator:stale-notes-judge` dispatch (`tools: Read`)
+naming the seg id and `stale_notes_TASK.md`; it returns a verdict JSON carrying
+that hash, which the session writes verbatim to `stale_records/verdicts/<seg>.json`
+— the judge says only whether each note still matches the prose (`stale` /
+`provenance` / `current`), never whether a rendering is right; (4) `--build`
+rebinds every verdict to the draft on disk, refuses a missing, stale, incomplete
+or self-contradictory one by name (exit 1, nothing written), and writes
+`stale_records/STALE_RECORDS.md` + `stale_records_report.json`, each row carrying
+the original note text. A note that deliberately names a retired form is what
+`provenance` is for; no gate fails it.
 
 ## Reference docs
 

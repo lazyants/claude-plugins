@@ -152,6 +152,22 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
+    # ROTATED TO 1.220.0 (#931 -- correcting a class in the prose silently
+    # invalidated every notes[]/names[] record describing it), and EMPTY ON
+    # PURPOSE: the entry names its subjects by FILE, FLAG, AGENT and SYMBOL --
+    # `stale_records_report.py`, `--prep`, `--build`, `prep.json`,
+    # `names_report.json`, `stale_notes_TASK.template.md`,
+    # `literary-translator:stale-notes-judge`, `STALE_RECORDS.md`, the
+    # verdict words `stale` / `provenance` / `current` -- and states no
+    # `file.ext:NNN` citation at all. Measured against the entry rather than
+    # asserted: a scan of its slice for that pattern returns zero matches.
+    #
+    # This release adds files and inserts one paragraph into SKILL.md BELOW
+    # every live citation into that file, so no existing declaration in
+    # `tools/citation-anchors/literary-translator.json` moves, and
+    # `tools/citation_audit.py check` is OK on the result.
+    #
+    # The 1.211.0 record this replaces, kept as its own:
     # ROTATED TO 1.211.0 (#932 -- whether a canon target may be marked up was
     # decided at W3 and first reported by the W7 render refusal), and EMPTY ON
     # PURPOSE: the entry names its subjects by FILE, FUNCTION and FIELD --

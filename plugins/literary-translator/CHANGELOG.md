@@ -1,7 +1,69 @@
 # Changelog
 
+## 1.220.0 — 2026-09-12
 
-=======
+**Correcting a class in the prose silently invalidated every `notes[]`/`names[]` record describing
+it, and nothing enumerated them (#931).** A draft's `names[]` and `notes[]` are the translator's
+record of decisions about the prose in the same file. On one he→en book of 31 converged segments,
+an operator-enumerated correction of 89 `<place>` spans over 15 towns left 164 of those records
+false across 24 segments — each describing a town rendering the draft no longer used — and the
+review pass reported 8 of them, not because a `NOTE:n` finding is the wrong shape but because a
+reviewer sees one segment per job and cannot know a class exists. The rest were rewritten by hand
+from an index the operator had to build.
+
+**`stale_records_report.py` enumerates them, report-only.** It gates nothing, exits 0 with
+findings, is in no bundle tuple and moves no hash. Its population is every `runs/ledger.d`
+fragment whose `status` is `converged`, selected by status alone: the fragment's
+`reviewed_draft_sha1` is deliberately not compared, because the drafts were just hand-edited and a
+mismatch is the expected state, not an exclusion. A converged fragment with no draft, a fragment
+that is not an object or carries no string status, an unlistable `ledger.d` and a population of
+zero are each a fatal exit 2 naming the offender — a loop that ran zero times must not print what
+a clean one prints.
+
+The two record kinds are handled by two different readers, and the split was measured before it
+was chosen. The book's own history holds both states: the prose after the correction paired with
+the records before it is exactly the situation the issue describes, and 92 `notes[]` plus 85
+`names[]` entries changed between them. For `names[]` the check is deterministic — `--prep` flags
+an entry when a capitalised token of its target form is not a whole token of the segment's
+`blocks` (NFC on both sides; whole tokens, because a retired form is often a prefix of its
+replacement — "Odes" beside "Odessa" — and a substring reading found 72 of the 85) and counts an
+entry with no such token `unverifiable` rather than clean: that predicate found 84 of the 85 stale
+entries and flagged 14 of 4 675 on the corrected book, where the whole-form substring the issue
+proposed flagged 1 751, because a target form here is usually a descriptive phrase ("our teacher
+R. Noson, of blessed memory") and not a literal rendering. For `notes[]` no deterministic reading survived measurement: the best token
+heuristic found 74 of 92 while flagging 370 of 3 623 clean notes, worse than the problem it would
+report. So `notes[]` are judged per segment by a model — `literary-translator:stale-notes-judge`,
+a `tools: Read` agent dispatched per `stale_notes_TASK.template.md`, which answers only whether
+each note still matches the prose beside it (`stale`, `provenance` for a note that deliberately
+names a retired form while stating the current one, or `current`) and never whether a rendering
+is right. The judge cannot write; the operator session writes the returned JSON to
+`stale_records/verdicts/<seg>.json`.
+
+**`--build` merges what the judge said into what the script measured, and refuses what it cannot
+bind.** Every verdict carries the `draft_sha1` it copied from `prep.json` — the draft content
+hash `draft_sha1.py` owns, which ignores key order and the dispatch token; the build recomputes it
+from the draft on disk and refuses a verdict over other content. It also refuses, each by name
+and each before anything is written: a verdict for a segment outside the population or in a file
+not named for its segment, a document of the wrong shape or with keys the contract does not name,
+a note index missing or listed twice, a `stale` or `provenance` row without a reason, a reason or
+quoted form spanning a line, a quoted form that does not occur in the note it is about, a `stale`
+row quoting a form the blocks still contain, and a selected segment with no verdict at all — the
+report is a complete list or nothing, and the `names[]` half is already on disk from `--prep` for
+an operator who wants only that. What it writes is `stale_records/STALE_RECORDS.md` and
+`stale_records_report.json`: per segment, each flagged `names[]` row with its missing tokens, and
+each non-current note with its verdict, reason and the ORIGINAL note text copied from the
+hash-bound draft — the record a human must judge is in the report, not behind a draft open. Every
+value that lands on a Markdown line goes through one renderer that folds line breaks, since draft
+strings are schema-unconstrained and a newline inside a flagged target form would otherwise open a
+heading the generator never wrote.
+
+**What this does not do.** It does not fix a record: that goes through the #438 re-review route.
+It does not gate on a finding, because 8 of the 164 rewritten notes on the measured book
+legitimately name the old form for provenance, and a gate would fail exactly those. And it does
+not read footnotes or verses: the corpus a record is checked against is the segment's `blocks`,
+on every side — the names predicate, the judge's brief and the build's contradiction check —
+so the three cannot disagree about what "present" means.
+
 ## 1.211.0 — 2026-09-12
 
 **Whether a canon target may be marked up is now reported when the canon freezes, not first at the

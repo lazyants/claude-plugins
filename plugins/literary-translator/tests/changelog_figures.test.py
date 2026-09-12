@@ -534,6 +534,32 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
+    # ROTATED TO 1.220.0 (#931 -- correcting a class in the prose silently
+    # invalidated every notes[]/names[] record describing it), per the
+    # maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # figure it quotes is a measurement taken on ONE DELIVERED BOOK IN ANOTHER
+    # REPOSITORY (the he->en volume of the `breslov-he-en` series): the 31
+    # segments, the 89 spans over 15 towns, the 164 stale records across 24
+    # segments and the 8 the review pass reported, the 92 + 85 records that
+    # changed between the book's two commits, and the predicate rates -- 84 of
+    # 85, 72 of 85, 14 of 4 675, 1 751, 74 of 92, 370 of 3 623, the 8
+    # provenance notes. No implementation in this tree can re-derive any of
+    # them, so no row can call the authoritative implementation and none is
+    # declared. What the tree DOES own is stated by NAMING --
+    # `stale_records_report.py`, `--prep`, `--build`,
+    # `stale_notes_TASK.template.md`, `literary-translator:stale-notes-judge`,
+    # `STALE_RECORDS.md`, the verdict words -- rather than by counting. The
+    # remaining numerals are identifiers: the version, the release date, the
+    # issue numbers (#931, #438) and the exit codes 0 / 1 / 2, which are the
+    # script's documented contract and are pinned executably by
+    # `tests/stale_records_report.test.py`.
+    #
+    # This rotation RETIRED nothing: the 1.211.0 rotation it replaces also
+    # declared zero rows. Its record is kept below, unchanged.
+    #
+    # The 1.211.0 record this replaces, kept as its own:
     # ROTATED TO 1.211.0 (#932 -- whether a canon target may be marked up was
     # decided at W3 and first reported by the W7 render refusal), per the
     # maintenance contract above.
@@ -1792,7 +1818,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.211.0"
+FIGURES_VERSION = "1.220.0"
 
 
 def _newest_entry():
