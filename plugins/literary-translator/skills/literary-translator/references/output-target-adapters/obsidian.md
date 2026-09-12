@@ -592,6 +592,29 @@ how a credited non-primary member (`fold_group_credited_to_link_group_primary`
 — a resolved routing decision) is told apart from a genuine collision or a
 homonym split, both of which are still asking you for an answer.
 
+**A group edited after assembly does nothing until `assemble.py` runs again,
+and the tool used to say so only by implication (#928).** `assemble.py` bakes
+the `{member: primary}` projection into the NodeStream; every consumer reads
+it from there and never re-reads the sidecar, which is what keeps the
+persisted mentions, a `validate_backlinks.py` rebuild and the rendered
+sections one identical universe. So adding or editing a group and re-running
+only the consuming pass changes nothing at all. Measured on the live he→en
+volume: nine groups added, 20 canon entries still uncredited; re-running
+`assemble.py` first dropped it to 2. Since 1.188.0 the collision WARN names
+that step.
+
+**Crediting is decided PER FOLD KEY, and a group is per REFERENT (#928).** The
+two are not the same set. A referent's spellings can sit in two different fold
+keys — `רַבֵּנוּ זַ"ל` and `רַבֵּנוּ זִכְרוֹנוֹ לִבְרָכָה` fold differently, because
+`fold_match_key` keeps the honorific's letters — and one group legitimately
+holds all of them. The ruling then credits only the key its `primary` is in;
+the other key has no primary inside it, so it stays withheld. That is the
+"primary outside the group" case above, reached by a group that is correctly
+formed and semantically right. The fix is to move `primary` onto a member of
+the withheld key, or to record that key's forms as their own group. Since
+1.188.0 the WARN says which of the conditions above a recorded ruling failed,
+instead of telling you to record a group you have already recorded.
+
 Two limits worth knowing before you rely on this:
 
 - It is `output.target: obsidian` only. The sidecar projection is attached to

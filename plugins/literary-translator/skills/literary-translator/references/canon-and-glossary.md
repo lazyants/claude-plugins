@@ -1515,6 +1515,29 @@ source-anchored `## Mentions` occurrences are credited to the group's
 gate reporting zero warnings. The crediting is all-or-nothing over the whole
 fold key and never touches a form outside a collision.
 
+**Two things about that effect an operator has to know up front, because a
+group can be correctly formed and still do nothing (#928).**
+
+1. **Editing this file takes effect only after `assemble.py` runs again.**
+   `assemble.py` bakes the `{member: primary}` projection into the NodeStream,
+   and every consumer reads it from there — never re-reading the sidecar, which
+   is what keeps the persisted mentions, a `validate_backlinks.py` rebuild and
+   the rendered sections one identical universe. Add a group and re-run only a
+   consuming pass and nothing changes, silently. Measured on the live he→en
+   volume: nine groups added, 20 canon entries still uncredited; re-running
+   `assemble.py` first dropped it to 2.
+2. **Crediting is per fold key; a group is per referent.** Those are not the
+   same set. `רַבֵּנוּ זַ"ל` and `רַבֵּנוּ זִכְרוֹנוֹ לִבְרָכָה` are one man and two
+   fold keys — `fold_match_key` keeps the honorific's letters — and one group
+   legitimately holds both spellings. The ruling then credits only the key its
+   `primary` sits in; the other key has no primary inside it and stays
+   withheld. Move `primary` onto a member of the withheld key, or record that
+   key's forms as their own group.
+
+Since 1.188.0 the collision WARN names `assemble.py` when no ruling reached the
+run at all, and names the condition a recorded ruling failed when one did — so
+it no longer tells an operator to record a group they have already recorded.
+
 **Why this is a sidecar and not a canon field.** `cache_key.compute_used_terms_hash`
 hashes the WHOLE referenced canon ENTRY object, so adding any field to
 `canon['entries'][name]` **re-stales** every converged segment that
