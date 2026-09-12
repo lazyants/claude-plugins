@@ -504,6 +504,28 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
+    # ROTATED TO 1.139.0 (#926 -- the renderer counts entity-note labels that
+    # differ from another note's label only by a leading connective), per the
+    # maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # figure it quotes -- 50 labels over 53 notes, the 22/24 and 28/29 split,
+    # five labels and twelve notes for one town, 230 index rows for 140 places,
+    # 43 of 90 hand-written folds, the next-largest book's 32, eight of fifteen
+    # books at zero -- is a measurement taken on DELIVERED BOOKS IN ANOTHER
+    # REPOSITORY (the `breslov-he-en` and `ssk-he-en` series) through the
+    # shipped `_build_connective_candidates`, the kind no implementation in
+    # this tree can re-derive without those books. The one thing the tree
+    # OWNS, the connective list, the entry states by ENUMERATING its members
+    # (`in`, `at`, `from`, `to`, `of`, `and to`, `and from`, `and in`,
+    # `and at`) and never as a count, so there is no number to pin against
+    # `LEADING_CONNECTIVES`. The remaining numerals are identifiers: the
+    # version numbers, the release date and the issue numbers (#926, #823,
+    # #871, #929).
+    #
+    # This rotation RETIRED nothing: 1.134.0's list was already empty.
+    #
+    # The 1.134.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.134.0 (#924 -- the review turn reads the refusal record), per
     # the maintenance contract above.
     #
@@ -1350,7 +1372,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.134.0"
+FIGURES_VERSION = "1.139.0"
 
 
 def _newest_entry():

@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.139.0 — 2026-09-12
+
+**The renderer counts the entity notes whose labels differ from another note's label only by a
+leading connective (#926).** The vault carries one note per canon entry and one per markup
+identity, and nothing compared any two of those labels to each other. A Hebrew source fuses its
+prepositions onto the name — `מקרעמינטשאג` is "from Kremenchug" in one token — so the candidate
+extractor hands the glossary pass the fused form as its own candidate, the pass freezes it as
+`from Kremenchug`, and the vault then ships that town under `Kremenchug`, `from Kremenchug`,
+`in Kremenchug`, `to Kremenchug` and `and to Kremenchug`: five labels, twelve notes, one place,
+and every gate green.
+The whole-canon harmonisation pass (#823) had flagged the family; the operator harmonised the
+spelling and kept the prefixes, because nothing said a prefixed target is a second note. Measured
+on the delivered book that reported it: **50 such labels standing over 53 notes** — 22 labels (24
+notes) whose remainder is another canon target, and 28 (29 notes) whose fused-preposition entry
+stands beside a bare form canon never entered and the translator marked in the prose (`to
+Akkerman` beside `<place>Akkerman</place>`) — of a place index that ran to 230 rows for 140
+places. The next-largest local book reports 32 labels; eight of fifteen report zero.
+
+`render()` now returns `connective_candidates` — every emitted note label that is one of a fixed
+list of leading connectives (`in`, `at`, `from`, `to`, `of`, `and to`, `and from`, `and in`,
+`and at`) plus another emitted note's label, with the owners behind a canon label, the label it
+reduces to and whether that remainder is currently linkable — and prints one stderr `WARN` whenever
+the count is non-zero. It rides out on `assemble.py`'s stdout as `adapter_result.connective_candidates`,
+beside `delink_cost`, and for the same reason that block lives in the renderer rather than the W9
+gate: `validate_backlinks.py` short-circuits when the Mentions appendix is off, which is the
+configuration the measured vault ran under.
+
+**A row is a structural fact about two labels, never an identity claim, and the WARN names no
+canon command.** Whether `from Kremenchug` and `Kremenchug` are one town is the operator's call —
+or the harmonisation pass's — and folding two notes into one index row is downstream work the
+report now feeds; the issue's own count was that 43 of the 90 hand-written folds on that book
+were exactly this class. `references/canon-and-glossary.md`'s "What a group CANNOT do" (#871) is
+the shipped decision for one referent under two targets — leave the two notes — and this release
+does not reopen it: a `canon_link_groups.json` group re-routes inline links and keeps every note,
+and a canon correction re-stales the carriers of the corrected form, so neither is offered as a
+remedy. Two non-blank categories that disagree are not a candidate: `of Orleans` (a person) beside
+`Orleans` (a place) is two entities by the canon's own word, and the lookup takes the first
+COMPATIBLE identity rather than the first existing one, so a canon `Jordan` frozen as a person
+does not hide a place/place pair the translator marked.
+
+The issue's other two remedies were measured and not taken. Folding the connective-prefixed
+MARKUP labels outright at render time: across the eleven local books that carry entity markup
+not one marked label begins with a connective — every row on every local book has a CANON label
+on its left-hand side — so that machinery would never fire. Surfacing the improvised spellings
+(`Krimintshak`, `Kromintshag`, …) as candidates: the render layer holds no source form for a
+marked span, so it can only list what the manifest's `entity_markup.notes` already counts; the
+join that makes the spelling class adjudicable — the printed label against the source token in
+the same block — is #929's report and is owned there.
+
+Residuals, disclosed in `references/output-target-adapters/obsidian.md`: the connective list is
+English, so a target language whose connectives are other words reports zero, and that zero is not
+evidence; a canon entry with a blank `canonical_target_form` is headed by its source form and is
+not compared; a label whose remainder is no emitted note (`from Odes` with no `Odes`) is the
+spelling class, not this one.
+
 ## 1.134.0 — 2026-09-12
 
 **The review turn now reads the operator's per-finding refusal record, because a correct refusal had
