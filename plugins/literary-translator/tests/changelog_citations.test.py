@@ -152,6 +152,31 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
+    # ROTATED TO 1.210.0 (#916 -- a style-contract edit taken mid-book had no
+    # documented way back), and EMPTY ON PURPOSE, for the same reason the 1.115.0 and
+    # 1.114.0 records below gave: the entry names its subjects by FILE and SYMBOL
+    # rather than by line -- `refuse_run_over_foreign_drafts()`, `restore_note`,
+    # `cause`, `resumed`, `style_contract_hash`, `input_digest`, `input.digest`,
+    # `.ever_converged`, `validation.admit_contract_only_stale`,
+    # `backfill_resume_gate_ack.py`, `PLUGIN_BUNDLE_MEMBERS`, `STYLE_CONTRACT_BEGIN`/
+    # `END` -- and states no `file.ext:NNN` citation at all, which is the shape this
+    # guard reads. Measured against the entry rather than asserted: a scan of its
+    # slice for that pattern returns zero matches.
+    #
+    # This release inserts NO lines into any cited file, which is why no live citation
+    # is repointed here. The driver edit is line-count NEUTRAL by construction -- the
+    # edited function's f-strings and comments were rewrapped to wider lines rather
+    # than grown -- because four declared anchors in
+    # tools/citation-anchors/literary-translator.json and three changelog ranges all
+    # aim BELOW the edited function, and a single inserted line would have moved every
+    # one of them. `tools/citation_audit.py check` is what holds that, and it is OK on
+    # the result: it verifies every declared anchor against the live file, so it catches
+    # a moved anchor directly. A line-count pin test was drafted for this release and
+    # then dropped -- it checked the same thing by proxy while taxing every later release
+    # that legitimately grows this file with a rotation of an unrelated number.
+    # The style bible template took the added prose instead: it is in no hash bundle
+    # and no citation anywhere names its line numbers, both verified.
+    #
     # ROTATED TO 1.188.0 (#928 -- a link group recorded after assembly was
     # silently inert, and the warning named the sidecar rather than the step
     # that applies it). The entry states ONE `file.ext:NNN` citation, declared
@@ -177,12 +202,10 @@ CITATION_ANCHORS = {
     # and `tools/citation_audit.py check` is OK on the result.
     #
     # This rotation RETIRED 1.154.0's list, which was already empty.
-    "validate_backlinks.py:1317-1325": (
-        "aggregate = occurrence_targets.build(",
-        "except Exception as exc:",
-        "never a silently empty report.",
-        "occurrence_targets.build() failed:",
-    ),
+    # No live anchor: the 1.210.0 entry above states no `file.ext:NNN` citation at all,
+    # so there is nothing for this map to declare. The inherited entry's own anchor went
+    # with it -- this guard reads the NEWEST entry only, and declaring an anchor that
+    # entry does not cite is itself a failure.
     #
     # ------------------------------------------------------------------------
     # The 1.177.0 rotation this replaces, kept as its own record:

@@ -588,15 +588,6 @@
       ],
       "claim": "# Exactly final_audit._fold_source_marks()'s own range (final_audit.py:696). # A mark OUTSIDE it -- an Arabic fatha, a Devanagari matra -- deliberately # ENDS a run instead of joining it, so a mixed-script corruption stays visible # as two short runs rather than being folded away as a mark difference."
     },
-    "[\"plugins/literary-translator/tests/changelog_citations.test.py\", \"validate_backlinks.py:1317-1325\", 0]": {
-      "anchors": [
-        "aggregate = occurrence_targets.build(",
-        "except Exception as exc:",
-        "never a silently empty report.",
-        "occurrence_targets.build() failed:"
-      ],
-      "claim": "The 1.188.0 changelog entry refuses a digest-and-refuse guard BECAUSE this range turns any exception out of occurrence_targets.build() into a hard gate FATAL (exit 2). The key is the CITATION_ANCHORS map key that pins that entry's own citation; this declaration pins the same range for the repo-wide audit."
-    },
     "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/verbatim_census.py\", \"occurrence_targets.py:214-262\", 0]": {
       "anchors": [
         "from bootstrap_names import extract_candidate_spans",

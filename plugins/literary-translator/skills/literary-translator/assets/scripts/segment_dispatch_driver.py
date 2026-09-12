@@ -3187,23 +3187,23 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
         payload["resume_from_run_ids"] = [pinned_run_id]
         result = _call_resume_setup(script, payload, dirs, durable_root_str, plugin_root_str)
         if not result.get("resume"):
-            # The operator named a run. resume_setup.py answered that this
-            # invocation's inputs do not match it, and (having been offered
-            # no other candidate) minted a fresh id. PROCEEDING under that
-            # fresh id is precisely the measured #458 harm -- every named
-            # segment claimed under a run nobody asked for -- and it is
-            # worse here than on the unpinned path, because here the
-            # operator made an explicit statement this outcome contradicts.
-            # The fresh runs/<id>/ directory resume_setup.py just wrote is
-            # left behind; that orphan is the same cost every claim-path
-            # refusal already pays (see run()'s own note).
+            # The operator named a run. resume_setup.py answered that this invocation's inputs do not match it, and (having been offered no
+            # other candidate) minted a fresh id. PROCEEDING under that fresh id is precisely the measured #458 harm -- every named segment
+            # claimed under a run nobody asked for -- and it is worse here than on the unpinned path, because here the operator made an
+            # explicit statement this outcome contradicts. The fresh runs/<id>/ directory resume_setup.py just wrote is left behind; that
+            # orphan is the same cost every claim-path refusal already pays (see run()'s own note). #916: the restore route prints HERE too,
+            # because resolve_run_id() runs BEFORE the foreign-draft gate, so an operator who pins the draft's owner after editing a
+            # hashed input lands on THIS refusal and never reaches that gate's copy of the advice.
             minted = result.get("effectiveRunId")
             fatal(
                 f"--resume-from-run-id {pinned_run_id!r}: this invocation's input digest does "
                 f"NOT match that run's own recorded digest, so it cannot be resumed. "
                 f"resume_setup.py minted a fresh RUN_ID {minted!r} instead; refusing to dispatch "
-                f"under a run you did not ask for. Nothing was dispatched. If the inputs really "
-                f"did change, re-run without --resume-from-run-id to accept the fresh run.",
+                f"under a run you did not ask for. Nothing was dispatched. If the inputs really did change, re-run without --resume-from-run-id "
+                f"to accept the fresh run. But if what moved was a HASHED INPUT you can put back -- style_bible.md's marked span being the usual "
+                f"one -- you do not have to drop the pin at all: put every changed input back to its exact prior bytes and this invocation's "
+                f"digest returns to the value {pinned_run_id!r} recorded, so this pin stops refusing. Restoring un-does that edit, so the "
+                f"rule it carried still has to land before the first dispatch or after the selection converges.",
                 exit_code=1,
                 pinned_run_id=pinned_run_id,
                 minted_run_id=minted,
@@ -4187,81 +4187,81 @@ def refuse_run_over_foreign_drafts(
     if not foreign:
         return
     detail = ", ".join(f"{seg} (stamped for {owner})" for seg, owner in foreign)
-    # Built once for the same reason `detail` and `common` are: the two
-    # fatal() calls below carry a payload key two tests assert on by name,
-    # and a rename applied to one branch only is exactly the drift a single
-    # local prevents.
+    # Built once for the same reason `detail` and `common` are: the two fatal() calls below
+    # carry a payload key two tests assert on by name, and a rename applied to one branch
+    # only is exactly the drift a single local prevents.
     foreign_payload = [{"seg": seg, "run_id": owner} for seg, owner in foreign]
     common = (
-        f"{len(foreign)} selected segment(s) carry a draft stamped for a DIFFERENT run: "
-        f"{detail}. Dispatching them under {run_id!r} would retranslate those drafts and "
-        f"discard whatever they hold, because a draft whose dispatch_token names another "
-        f"run fails this driver's own token gate and falls through to translate. Nothing "
-        f"was dispatched."
+        f"{len(foreign)} selected segment(s) carry a draft stamped for a DIFFERENT run: {detail}. Dispatching them under {run_id!r} would "
+        f"retranslate those drafts and discard whatever they hold, because a draft whose dispatch_token names another run fails this driver's own "
+        f"token gate and falls through to translate. Nothing was dispatched."
     )
     if pinned:
-        # ped-ant, P2: "re-run without --resume-from-run-id" was an unqualified
-        # remedy for as long as the unpinned path had no gate of its own. #742
-        # gave it one, so dropping the pin now reaches this SAME comparison --
-        # and refuses again whenever ordinary resolution lands on any run other
-        # than the draft's owner, which includes the ordinary case of the pinned
-        # run being the newest digest-matching candidate. Offering a guaranteed
-        # second refusal as the FIRST action after a refusal is worse than
-        # offering nothing, so the route is qualified where it is printed.
+        # ped-ant, P2: "re-run without --resume-from-run-id" was an unqualified remedy for
+        # as long as the unpinned path had no gate of its own. #742 gave it one, so dropping
+        # the pin now reaches this SAME comparison -- and refuses again whenever ordinary
+        # resolution lands on any run other than the draft's owner, which includes the
+        # ordinary case of the pinned run being the newest digest-matching candidate.
+        # Offering a guaranteed second refusal as the FIRST action after a refusal is worse
+        # than offering nothing, so the route is qualified where it is printed. #916 adds a
+        # second qualified route below, worded as how this pin's own digest precondition
+        # gets satisfied, not as an independent fourth remedy.
         fatal(
-            f"--resume-from-run-id {run_id!r}: {common} Name only the ids that belong to "
-            f"this run with --only-segs. Re-running WITHOUT --resume-from-run-id helps only "
-            f"if ordinary resolution then lands on the run that owns these drafts -- since "
-            f"#742 the unpinned path runs this same comparison, so if it resolves any other "
-            f"run it refuses again. Otherwise decide per segment, as the unpinned refusal "
-            f"spells out: delete the draft to accept the retranslation, or re-stamp its "
-            f"dispatch_token (only if the draft then passes draft_ready.py AND "
-            f"validate_draft.py).",
+            f"--resume-from-run-id {run_id!r}: {common} Name only the ids that belong to this run with --only-segs. Re-running WITHOUT "
+            f"--resume-from-run-id helps only if ordinary resolution then lands on the run that owns these drafts -- since #742 the unpinned path "
+            f"runs this same comparison, so if it resolves any other run it refuses again. Otherwise decide per segment, as the unpinned refusal "
+            f"spells out: delete the draft to accept the retranslation, or re-stamp its dispatch_token (only if the draft then passes draft_ready.py "
+            f"AND validate_draft.py). #916: that same digest precondition is also how a restored hashed input helps here -- put a changed input such "
+            f"as style_bible.md's marked span back byte for byte and ordinary resolution CAN land on the run that owns these drafts, satisfying the "
+            f"qualifier above; restoring does not by itself make that run win over a newer one sharing its digest.",
             exit_code=1,
             pinned_run_id=run_id,
             foreign_drafts=foreign_payload,
         )
-    # #742. Every clause below has to be TRUE on every path it can print on,
-    # which is why the cause is READ from `resumed` rather than inferred: a
-    # foreign draft does NOT prove a fresh id was minted. resolve_run_id()
-    # returns the NEWEST digest-matching candidate, so a draft naming an
-    # OLDER run reaches this gate on a perfectly ordinary resume, and a
-    # message that announced a mint there would be diagnosing the wrong
-    # thing.
+    # #742. Every clause below has to be TRUE on every path it can print on, which is why the cause
+    # is READ from `resumed` rather than inferred: a foreign draft does NOT prove a fresh id was
+    # minted. resolve_run_id() returns the NEWEST digest-matching candidate, so a draft naming an
+    # OLDER run reaches this gate on a perfectly ordinary resume, and a message that announced a
+    # mint there would be diagnosing the wrong thing.
     cause = (
-        f"This invocation RESUMED run {run_id!r}, and these drafts name another one -- "
-        f"not necessarily an earlier one: the first digest-MATCHING candidate wins, so a "
-        f"run created after the one resumed here can still own a draft."
+        f"This invocation RESUMED run {run_id!r}, and these drafts name another one -- not necessarily an earlier one: the first digest-MATCHING "
+        f"candidate wins, so a run created after the one resumed here can still own a draft."
         if resumed
         else (
-            f"This invocation MINTED a fresh RUN_ID {run_id!r}, because its inputs matched "
-            f"no eligible resume candidate."
+            f"This invocation MINTED a fresh RUN_ID {run_id!r}, because its inputs matched no eligible resume candidate."
         )
     )
-    # The remedies are each qualified rather than merely listed, because an
-    # unqualified one is a dead end the operator only discovers by running
-    # it: --only-segs does not RECOVER anything (the named ids hit this same
-    # gate); a pin alone still refuses over a SECOND owner in the same
-    # selection, and refuses anyway if the inputs have moved; and re-stamping
-    # an invalid draft does not resume its review -- validate_draft.py fails
-    # and derivation then either halts the segment as invalid_post_fix_draft
-    # or retranslates it, and WHICH of the two depends on state the operator
-    # is not looking at, so this must not promise either.
+    # #916 round 2: prints on BOTH branches now, worded as a CONDITIONAL rather than asserting THIS
+    # call minted -- an ordinary resume inheriting an OLDER foreign draft never edited a hashed
+    # input, and claiming it did would be the wrong-cause mistake the comment above forbids. It
+    # also names no run id in the digest sentence: on a resume `run_id` above need not be the run
+    # whose digest a restore recovers -- the OWNING run is.
+    restore_note = (
+        f" A fourth route exists if these drafts were orphaned by editing a hashed input such as style_bible.md's STYLE_CONTRACT_BEGIN/END "
+        f"span, whether this call minted a run or an earlier one did: put every changed input back to its exact prior bytes and this "
+        f"invocation's digest returns to the value the owning run recorded, which makes that run ELIGIBLE to be resumed again -- not "
+        f"guaranteed to: resolution still returns the first digest-matching candidate, newest first, so a run sharing that digest can "
+        f"still win, and restoring must then be combined with remedy (2) above. That route needs runs/<owner>/input.digest to still be a "
+        f"regular file; an owner acknowledged only by backfill_resume_gate_ack.py's .resume_gate_ack carries no digest and cannot be "
+        f"recovered this way. And the drafts above are REFUSED here, never retranslated, so restoring repairs nothing by itself -- the "
+        f"edit the input carried still has to land again, either before the first dispatch or after this selection converges."
+    )
+    # The remedies are each qualified rather than merely listed, because an unqualified one is a dead end the operator only discovers by
+    # running it: --only-segs does not RECOVER anything (the named ids hit this same gate); a pin alone still refuses over a SECOND owner
+    # in the same selection, and refuses anyway if the inputs have moved; and re-stamping an invalid draft does not resume its review --
+    # validate_draft.py fails and derivation then either halts the segment as invalid_post_fix_draft or retranslates it, and WHICH of the
+    # two depends on state the operator is not looking at, so this must not promise either. #916: restore_note says the owning run becomes
+    # ELIGIBLE on EITHER branch, never that it RESOLVES or that the drafts are ADOPTED -- ordinary resolution still returns the first
+    # digest-matching candidate, newest first, so another run sharing that digest can still win.
     fatal(
-        f"{common} {cause} Nothing here is repaired automatically -- re-stamping a draft "
-        f"on your behalf is the same silent mutation this refusal exists to stop. What "
-        f"you can do, per remedy: (1) re-run with --only-segs naming only the UNAFFECTED "
-        f"ids -- that CONTINUES the rest, it does not recover the ids above, which hit "
-        f"this same gate; (2) re-run with --resume-from-run-id <owner> TOGETHER WITH "
-        f"--only-segs naming only the ids that run owns -- the pin alone is not enough, "
-        f"because this gate still checks every selected segment and would refuse over a "
-        f"second owner, and it refuses anyway unless that run's input digest still "
-        f"matches this invocation; (3) decide per segment by hand -- DELETE the draft to "
-        f"accept the retranslation (which is also how an unfinished draft picks up a "
-        f"style-bible or canon edit), or re-stamp its dispatch_token to {run_id!r} to "
-        f"keep the work, which preserves it only if the draft then passes draft_ready.py "
-        f"AND validate_draft.py. Back up before re-stamping: a draft that fails "
-        f"validate_draft.py is not resumed into review.",
+        f"{common} {cause} Nothing here is repaired automatically -- re-stamping a draft on your behalf is the same silent mutation this refusal "
+        f"exists to stop. What you can do, per remedy: (1) re-run with --only-segs naming only the UNAFFECTED ids -- that CONTINUES the rest, it "
+        f"does not recover the ids above, which hit this same gate; (2) re-run with --resume-from-run-id <owner> TOGETHER WITH --only-segs naming "
+        f"only the ids that run owns -- the pin alone is not enough, because this gate still checks every selected segment and would refuse over a "
+        f"second owner, and it refuses anyway unless that run's input digest still matches this invocation; (3) decide per segment by hand -- DELETE "
+        f"the draft to accept the retranslation (which is also how an unfinished draft picks up a style-bible or canon edit), or re-stamp its "
+        f"dispatch_token to {run_id!r} to keep the work, which preserves it only if the draft then passes draft_ready.py AND validate_draft.py. Back "
+        f"up before re-stamping: a draft that fails validate_draft.py is not resumed into review." + restore_note,
         exit_code=1,
         resolved_run_id=run_id,
         resumed=resumed,

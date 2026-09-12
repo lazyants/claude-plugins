@@ -3674,6 +3674,73 @@ def test_pinning_the_older_of_two_identical_digest_runs_resumes_it(tmp_path):
     assert pinned.get("resume") is True, pinned
 
 
+def test_the_restore_remedy_says_eligible_never_resolved_or_adopted(tmp_path):
+    """#916: the restore-hashed-input remedy must say the owning run becomes
+    ELIGIBLE to be resumed again, and must NOT claim it WILL resolve or that
+    the drafts are ADOPTED -- ordinary resolution returns the first
+    digest-matching candidate, newest first, so another run sharing that
+    digest can still win.
+
+    Also pins the round-2 fix to a SEPARATE defect the bot found: the digest
+    sentence must name no run id at all -- it must say the digest "returns
+    to the value the owning run recorded", never "the value {run_id!r}
+    recorded", because on this call `run_id` is the run the gate is
+    comparing AGAINST, not necessarily the foreign draft's owner whose
+    digest a restore actually recovers.
+
+    Grounded in the SAME two-real-run, identical-digest fixture
+    test_pinning_the_older_of_two_identical_digest_runs_resumes_it already
+    uses, rather than a hand-forged digest collision: it re-proves, in this
+    test, that the unpinned call resolves the NEWER of two runs sharing a
+    digest, which is exactly the "can still win" case the remedy's wording
+    has to leave open. refuse_run_over_foreign_drafts() is called directly
+    (unpinned, resumed=False) the same way other tests in this file reach
+    DriverError in-process, so this test does not depend on separately
+    engineering a real mint -- the both-branches property itself is pinned
+    separately, in test_the_unpinned_refusal_explains_the_run_id_it_actually_resolved
+    and in the two-invocation mint-then-retry test below."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+    older_id, newer_id = _two_identical_digest_runs(driver_mod, dirs, translate_cfg)
+
+    # Re-proves the fixture's own property in THIS test: with two runs
+    # sharing a digest, unpinned resolution lands on the newer one -- so a
+    # message promising the OLDER (owning) run will "resolve" would be
+    # making a claim that is sometimes false on its own terms.
+    unpinned = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    assert unpinned["effectiveRunId"] == newer_id, unpinned
+
+    _foreign_draft(root, "seg01", older_id, "hand-fixed")
+
+    with pytest.raises(driver_mod.DriverError) as exc_info:
+        driver_mod.refuse_run_over_foreign_drafts(
+            ["seg01"], newer_id, dirs["durable_root"] / "segments",
+            pinned=False, resumed=False,
+        )
+    message = exc_info.value.args[0]
+    assert "run ELIGIBLE to be resumed again -- not guaranteed" in message, message
+    assert "run sharing that digest can still win" in message, message
+    assert "will resolve" not in message, message
+    assert "adopted" not in message.lower(), message
+    # #916 review round 1: `restore_note` is appended after remedy (2), so an
+    # operator reading top to bottom meets (2) BEFORE restore_note -- "remedy
+    # (2) below" pointed the wrong way. Pinned positively so the direction
+    # cannot silently flip back, and negatively so the wrong-direction wording
+    # cannot quietly return alongside it.
+    assert "combined with remedy (2) above" in message, message
+    assert "combined with remedy (2) below" not in message, message
+    # #916 review round 2: the digest sentence must name the OWNING run's
+    # digest, never THIS call's run_id -- on this call `newer_id` is the run
+    # being compared against, not the foreign draft's owner (`older_id`).
+    assert "invocation's digest returns to the value the owning run recorded" in message, message
+    assert f"digest returns to the value {newer_id!r} recorded" not in message, message
+    assert f"digest returns to the value {older_id!r} recorded" not in message, message
+
+
 def test_pinned_run_id_with_no_input_digest_refuses_exit_1_naming_the_path(tmp_path):
     root = phase2_project(tmp_path, n=1)
     pinned_id = "20260101T000000Z"
@@ -3759,6 +3826,67 @@ def test_pinned_digest_mismatch_refuses_exit_1_naming_both_ids(tmp_path):
     assert (root / "runs" / mismatched_id / "input.digest").read_text(
         encoding="utf-8"
     ).strip() == wrong_digest
+
+    # #916 round 3. This refusal -- not the foreign-draft gate's -- is where an
+    # operator who edited a hashed input and then pinned the draft's owner
+    # actually lands, because resolve_run_id() runs first. Before this release
+    # it offered only "drop the pin and accept the fresh run" and never
+    # mentioned that putting the input back makes the pin work, so the one free
+    # recovery was unreachable for exactly the person it was written for.
+    assert "put every changed input back to its exact prior bytes" in str(exc), str(exc)
+    assert "HASHED INPUT you can put back" in str(exc), str(exc)
+    # The pin's OWN id is the right one to name here, unlike on the
+    # foreign-draft branch where the resolved run need not be the draft's
+    # owner: a restore has to return the digest to what THIS pinned run
+    # recorded, which is the value that is being compared.
+    assert f"returns to the value {mismatched_id!r} recorded" in str(exc), str(exc)
+    assert "still has to land before the first dispatch" in str(exc), str(exc)
+    # This refusal fires BEFORE the foreign-draft gate, so the operator has not
+    # been shown that gate's numbered remedies. Numbering the restore as a
+    # "fourth route" here would point at a list they never received, and would
+    # contradict this site's own contract: restoring is how the pin's digest
+    # precondition gets satisfied, not an independent remedy. Negative rather
+    # than positive, because the drift this catches is the later gate's
+    # enumeration creeping back into the earlier message.
+    for borrowed in ("fourth route", "remedy (", "per remedy"):
+        assert borrowed not in str(exc), (
+            f"{borrowed!r} belongs to refuse_run_over_foreign_drafts()'s numbered "
+            f"remedy list, which this earlier refusal has not printed: {exc}"
+        )
+
+
+def test_the_restore_route_is_worded_the_same_way_at_every_refusal_that_offers_it(tmp_path):
+    """Three refusals now carry the restore route: this pinned digest mismatch,
+    and both branches of refuse_run_over_foreign_drafts(). Round 3 of #916's
+    review was the third finding in a row about which sites say it and whether
+    what they say is true, so the shared claim is pinned here rather than left
+    to three independently maintained strings. The wording is read out of the
+    driver's own source, so this fails if any site drifts.
+
+    The phrase deliberately EXCLUDES the run-id clause, which legitimately
+    differs per site -- the pinned branch names its own pinned id, the
+    foreign-draft branch names no id at all."""
+    root = phase2_project(tmp_path, n=1)
+    src = (
+        root / "scripts" / "segment_dispatch_driver.py"
+    ).read_text(encoding="utf-8")
+
+    shared = "put every changed input back to its exact prior bytes"
+    occurrences = src.count(shared)
+    assert occurrences == 2, (
+        f"expected the shared restore phrase at exactly 2 source sites (the pinned "
+        f"digest-mismatch fatal in resolve_run_id() and restore_note in "
+        f"refuse_run_over_foreign_drafts()), found {occurrences}. A third copy means a "
+        f"site was added without reading this test; fewer means one dropped the route."
+    )
+    # The qualification that must travel with it everywhere: eligible, never
+    # resolved, and never a promise that the drafts are adopted.
+    assert "ELIGIBLE to be resumed again" in src, src[:0]
+    for forbidden in ("will resolve to the owning run", "the drafts are adopted"):
+        assert forbidden not in src, (
+            f"{forbidden!r} promises more than resolution gives: the first "
+            f"digest-matching candidate wins, newest first"
+        )
 
 
 def test_unpinned_mint_warns_naming_the_fresh_id_and_the_offered_candidate_count(tmp_path):
@@ -4088,6 +4216,13 @@ def test_pinned_run_refuses_before_dispatch_when_a_selected_segment_draft_belong
         payload["error"]
     ), payload
     assert "or re-run without --resume-from-run-id." not in payload["error"], payload
+    # #916: the pinned sentence presents restoring a moved hashed input as
+    # how THIS pin's own digest precondition gets satisfied, not as a
+    # separate fourth remedy that keeps the current pin.
+    assert (
+        "that same digest precondition is also how a restored hashed input helps here"
+        in payload["error"]
+    ), payload
     assert "resolved_run_id" not in payload, (
         "the pinned refusal carries pinned_run_id, never the unpinned payload's keys: "
         f"{payload}"
@@ -4251,10 +4386,70 @@ def test_the_unpinned_refusal_explains_the_run_id_it_actually_resolved(tmp_path,
         # false chronology is restored beside it.
         assert "not necessarily an earlier one" in payload["error"], payload
         assert "these drafts name an earlier one" not in payload["error"], payload
+        # #916 round 2: the bot found that a MINTED-only restore remedy
+        # defeats itself on a RETRY -- invocation 1 mints and refuses with
+        # the remedy, invocation 2 then RESUMES that same minted run (its
+        # inputs are unchanged) and refuses again for the identical draft,
+        # with the remedy now suppressed on the branch the retrying operator
+        # actually hits. The fix worded the remedy as a CONDITIONAL ("if
+        # these drafts were orphaned ... whether this call minted a run or
+        # an earlier one did") so it is true, and therefore printable, on
+        # EITHER branch -- pinned here as a POSITIVE assertion on the
+        # RESUMED branch, mirroring the positive assertion already pinned
+        # below on the MINTED branch. The two-invocation mint-then-retry
+        # test pins the end-to-end sequence this unit-level check cannot.
+        assert "A fourth route exists if these drafts were orphaned" in payload["error"], payload
     else:
         assert "MINTED a fresh RUN_ID" in payload["error"], payload
         assert "RESUMED run" not in payload["error"], payload
+        # #916: a MINTED refusal must offer the restore remedy too.
+        assert "A fourth route exists if these drafts were orphaned" in payload["error"], payload
     assert read_argv_log(root) == [], payload
+
+
+def test_the_restore_remedy_survives_a_mint_then_retry(tmp_path):
+    """#916 round 2, the bot's MAJOR finding: resume_setup.py writes the
+    freshly minted run's runs/<id>/input.digest BEFORE this gate runs, and
+    the driver leaves that directory behind when it refuses. So a MINTED-
+    only remedy defeats itself on exactly the retry it is meant to help:
+
+    - invocation 1: no candidate exists yet, a run is MINTED, the foreign
+      draft above refuses it, and the remedy prints. Good.
+    - invocation 2, nothing else changed: ordinary resolution now MATCHES
+      the run invocation 1 just minted (its own digest is on disk), so this
+      invocation RESUMES it and refuses again for the identical draft -- and
+      a MINTED-only remedy would go silent here, leaving the retrying
+      operator worse off than the operator who only ran once.
+
+    Both invocations must refuse with the remedy present, and invocation 2
+    must resume the EXACT run invocation 1 minted (proving this is a real
+    retry of the same run, not two unrelated mints)."""
+    root = phase2_project(tmp_path, n=1)
+    foreign_owner = "20200101T000000Z"
+    _foreign_draft(root, "seg01", foreign_owner, "hand-fixed")
+    write_fragment(root, "seg01", {"timestamp": "2026-01-01T00:00:00Z", "status": "in_progress"})
+
+    proc1 = run_driver(root, timeout=90)
+    assert proc1.returncode == 1, f"stdout={proc1.stdout!r} stderr={proc1.stderr!r}"
+    payload1 = parse_stdout(proc1)
+    assert payload1.get("resumed") is False, payload1
+    assert "MINTED a fresh RUN_ID" in payload1["error"], payload1
+    assert "A fourth route exists if these drafts were orphaned" in payload1["error"], payload1
+    minted_run_id = payload1["resolved_run_id"]
+
+    proc2 = run_driver(root, timeout=90)
+    assert proc2.returncode == 1, f"stdout={proc2.stdout!r} stderr={proc2.stderr!r}"
+    payload2 = parse_stdout(proc2)
+    assert payload2.get("resolved_run_id") == minted_run_id, (
+        "invocation 2 must RESUME the exact run invocation 1 minted -- nothing about "
+        f"the project changed between the two calls: {payload1} / {payload2}"
+    )
+    assert payload2.get("resumed") is True, payload2
+    assert "RESUMED run" in payload2["error"], payload2
+    # The one assertion that actually proves the MAJOR finding is closed:
+    # the remedy must survive the retry, not just the first attempt.
+    assert "A fourth route exists if these drafts were orphaned" in payload2["error"], payload2
+    assert read_argv_log(root) == [], (payload1, payload2)
 
 
 @pytest.mark.parametrize(
