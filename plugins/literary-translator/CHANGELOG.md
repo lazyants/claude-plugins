@@ -39,6 +39,55 @@ not visited — a pre-existing blind spot, the subject of sibling issue #917, ne
 widened here; a `remove` of an entry whose `canonical_target_form` was already empty produces no
 `canon_map` mismatch and is not listed; and the no-exit-change guarantee is scoped to `Exception`
 and `SystemExit` — `KeyboardInterrupt` is deliberately not caught.
+## 1.123.0 — 2026-09-12
+
+**The glossary planner dropped most of a book's name candidates at its frequency floor and
+reported no count of them (#912).** `glossary_batch_plan.py` excludes every non-force-included
+`likely_name` candidate whose `freq` is under `--min-candidate-freq` (default 2). The exclusion is deliberate
+and documented; its silence was not. `build_result()` emitted `no_new_candidates`, `args` and
+`batches` and nothing else, and the floor was named as a reason only inside
+`emit_retry_diagnostics()` — that is, only for a name the operator had already passed to
+`--retry`, only to someone who already suspected the name was gone. So the plan said "20 batches,
+295 names", which was true, while the same run had set aside twice that many candidates.
+
+**Both output shapes now carry `excluded_below_floor`.** The populated result and the
+`no_new_candidates` marker each gain
+`{"count": N, "min_candidate_freq": M}`, built by one helper so the two branches cannot drift
+apart, and the key is present even at `count: 0` — an absent key would read exactly like a run
+that dropped nothing, which is the silence being fixed. A non-zero count also writes one note to
+stderr, the channel this script already uses for its `--retry` diagnostics, so the number reaches
+an operator reading the run as well as the session parsing the line. The marker branch is the one
+that matters most: "nothing to do this run" printed while the floor removed several hundred names
+is the worst form of this failure.
+
+Nothing about WHICH candidates are dispatched changed, and the floor and its default are
+untouched. The count is taken where the floor is applied, so it means the floor and nothing else:
+a row is counted when it survived the canon/queue/dismissal/split exclusions, was not
+force-included as an elision-ambiguous pair, has `likely_name` true, and has an effective
+frequency under the floor. `_int_field` is what the floor itself compares, so a row whose `freq`
+is absent or `null` counts as the zero it is treated as. A row failing `likely_name` is dropped
+for a different reason and is deliberately not counted — otherwise raising the floor would not
+explain the number.
+
+Measured by the reporting operator on two live Hebrew-to-English books: 614 of 909 `likely_name`
+rows below the default floor on one, and on the other 1,632 of 2,853 candidates, of which 1,163
+were full personal names carrying a patronymic or a surname. A person named once is how a book
+names an ancestor, so on a genealogical source the tail below the floor is not noise. The floor is
+still the right default for the head of a frequency-ranked list; what was missing was any way to
+learn what it cost on a given book. An operator who wants those names back re-runs the planner at
+a lower `--min-candidate-freq`, which is now an informed decision rather than a guess. One floor
+reaches nothing: 1 is the lowest the script accepts, so a row whose `freq` is absent or `null` —
+counted here as the zero it is already treated as — has to be corrected at its source instead.
+
+`glossary_batch_plan.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this release moves
+`plugin_bundle_hash` and every converged segment stales at the next Step 0a refresh. There is no
+version of this fix that avoids it — the count can only be computed where the floor is applied.
+For the same reason `name_discovery.test.py`'s d28 byte guard no longer pins this one file; the
+three others it froze stay pinned, and bundle MEMBERSHIP is unchanged.
+
+Not addressed here, and still true: the floor lands differently on an uncased source, whose
+candidate list is built from an inventory rather than from capitalisation. That may argue for a
+different default there. It is a separate decision, and the count is useful either way.
 ## 1.120.0 — 2026-09-12
 
 **A glossary batch that died on its environment named no way back, and the driver's

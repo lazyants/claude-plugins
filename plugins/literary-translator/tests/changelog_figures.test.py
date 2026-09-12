@@ -539,9 +539,50 @@ FIGURES = [
     # `plugin_bundle_hash` are named, so no later release can rot this prose
     # by retuning a number.
     #
-    # This rotation RETIRED 1.120.0's rows, which belong to an entry that is
+    # This rotation RETIRED 1.123.0's rows, which belong to an entry that is
     # no longer the newest and which this guard therefore no longer reads.
     #
+    # The 1.123.0 rotation this replaces, kept as its own record:
+    # ROTATED TO 1.123.0 (#912 -- the glossary planner reported no count of the
+    # candidates its frequency floor removed), per the maintenance contract
+    # above.
+    #
+    # ONE row, and the entry was walked completely rather than assumed. The row
+    # is the planner's DEFAULT FLOOR: the entry states it as a number, and the
+    # tree owns that number as `DEFAULT_MIN_CANDIDATE_FREQ`, so a release that
+    # retunes the default must move this prose with it -- which is the whole
+    # point, since the entry argues the default should STAY.
+    #
+    # Every other digit-run in the entry is an IDENTIFIER or a measurement taken
+    # OUTSIDE this tree. The identifiers: the version, the release date, the
+    # issue number (#912), the `0a` of the Step 0a refresh, and the `28` of the
+    # d28 guard. The `0` in `count: 0` is a JSON literal being quoted -- it
+    # shows the key's SHAPE, and the entry's claim about it ("present even at
+    # `count: 0`") is pinned executably by the zero-count case in
+    # `tests/glossary_batch_plan.test.py`, not by a number this file could
+    # re-derive.
+    #
+    # The measurements: 614 of 909 and 1,632 of 2,853 candidates below the floor
+    # on two live Hebrew-to-English books, 1,163 of those multiword, and the
+    # "20 batches, 295 names" the entry quotes as what such a plan reports.
+    # Those are facts about book projects in ANOTHER REPOSITORY -- the same
+    # class the 1.108.0 and 1.99.1 rotations below name for theirs -- so a row
+    # would have to hardcode its own answer, the `lambda: 17` failure this
+    # file's docstring calls the row that guards nothing.
+    #
+    # This rotation RETIRED 1.120.0's rows, which belong to an entry that is now
+    # the second-newest and which this guard therefore no longer reads. #912,
+    # #914 and #921 landed the same day; each earlier rotation's own record is
+    # kept below, unchanged.
+    # 1.123.0's own row, RETIRED here rather than carried: it measured the
+    # phrase "default 2" in THAT entry, and this guard only ever reads the
+    # NEWEST one. Left live it would be checked against the 1.127.0 entry,
+    # where the phrase does not occur -- a red that says nothing about
+    # either release. The row itself was correct for its own entry and is
+    # recorded in the 1.123.0 block below.
+    #
+    #
+    # ------------------------------------------------------------------------
     # The 1.120.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.120.0 (#914 -- a glossary batch that died on its environment
     # named no way back, and the driver's result carried no top-level `reason`

@@ -184,8 +184,8 @@ glossary pass alone** for a fully-converged project (canon frozen, **zero unreso
 candidates**). The ONLY writer of `canon.json`'s `derivation_bundle_hash` was glossary **MERGE** mode
 (`_stamp_write_verify`, `canon_validate.py:2691-2696`; callers `run_merge` / `run_merge_batches` /
 `run_init` / `run_restamp_derivation`). The glossary pass **SKIPS entirely** when there are no candidates
-(`glossary_batch_plan.py:752-756`, a *tested* supported state, prints `{"no_new_candidates": true,
-"batches": []}`) → canon was never restamped → segpack rebuild copies the stale hash **verbatim, never
+(`glossary_batch_plan.py:786-793`, a *tested* supported state, prints a line whose `no_new_candidates`
+is `true`) → canon was never restamped → segpack rebuild copies the stale hash **verbatim, never
 recomputed** (`segpack.py:798-809`) → `select_segments` stayed `blocked_needs_regeneration`.
 
 **The sanctioned escape: `canon_validate.py --restamp-derivation`, then rerun `segpack.py`.**

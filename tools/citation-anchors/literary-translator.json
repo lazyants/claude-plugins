@@ -906,12 +906,12 @@
       ],
       "claim": "Standalone-script loader mirrors tests/occ_index.test.py:1-45 / tests/suspicion_scan.test.py's own ``_load_module`` (suspicion_scan.py does top-level ``from X import ...`` for its sibling scripts, so SCRIPTS_DIR must be on sys.path around its load; canon_senses.py has no sibling imports and needs no such scaffolding, mirroring tests/canon_senses.test.py's own"
     },
-    "[\"plugins/literary-translator/tests/glossary_batch_plan.test.py\", \"glossary_batch_plan.py:532-536\", 0]": {
+    "[\"plugins/literary-translator/tests/glossary_batch_plan.test.py\", \"glossary_batch_plan.py:552-556\", 0]": {
       "anchors": [
         "Branch order: `entry_keys` is checked FIRST",
         "the sanctioned dismiss -> --retry -> accepted-merge"
       ],
-      "claim": "def test_retry_diagnostic_prefers_entries_note_over_dismissal_note(tmp_path): \"\"\"#653 bot review P2 (PR #703, glossary_batch_plan.py:532-536): a name can legitimately be BOTH a resolved entries{} key AND carry a `dismiss` document in corrections[] -- the sanctioned dismiss -> --retry -> accepted-merge sequence produces exactly that overlap. If it is later absent from name_candidates.json (an ordinary source re-extraction) and"
+      "claim": "def test_retry_diagnostic_prefers_entries_note_over_dismissal_note(tmp_path): \"\"\"#653 bot review P2 (PR #703, glossary_batch_plan.py:552-556): a name can legitimately be BOTH a resolved entries{} key AND carry a `dismiss` document in corrections[] -- the sanctioned dismiss -> --retry -> accepted-merge sequence produces exactly that overlap. If it is later absent from name_candidates.json (an ordinary source re-extraction) and"
     },
     "[\"plugins/literary-translator/tests/glossary_batch_plan_split_exclusion.test.py\", \"glossary-pass-wf.template.js:1148-1150\", 0]": {
       "anchors": [
@@ -920,17 +920,17 @@
       ],
       "claim": "# own self-anchored default path. Closes the gap the two sections above # cannot: a consumer coded as `if args.senses_path is None: senses = EMPTY` # passes every explicit-path test above while never loading the real # default -- exactly how the Workflow invokes this script in production # (glossary-pass-wf.template.js:1148-1150/1395/1421 call --check-batch with no # override). Each test uses `make_durable_root` so the default sidecar is # written to a private root, never the shared plugin tree."
     },
-    "[\"plugins/literary-translator/tests/glossary_batch_plan_split_exclusion.test.py\", \"glossary_batch_plan.py:707\", 0]": {
+    "[\"plugins/literary-translator/tests/glossary_batch_plan_split_exclusion.test.py\", \"glossary_batch_plan.py:727\", 0]": {
       "anchors": [
         "canon_explicit = args.canon is not None"
       ],
-      "claim": "# --------------------------------------------------------------------------- # --senses-path path-state policy (contract §10 / §11b, mirrors --canon's # explicit-vs-default split at glossary_batch_plan.py:707) # ---------------------------------------------------------------------------"
+      "claim": "# --------------------------------------------------------------------------- # --senses-path path-state policy (contract §10 / §11b, mirrors --canon's # explicit-vs-default split at glossary_batch_plan.py:727) # ---------------------------------------------------------------------------"
     },
-    "[\"plugins/literary-translator/tests/glossary_batch_plan_split_exclusion.test.py\", \"glossary_batch_plan.py:707\", 1]": {
+    "[\"plugins/literary-translator/tests/glossary_batch_plan_split_exclusion.test.py\", \"glossary_batch_plan.py:727\", 1]": {
       "anchors": [
         "canon_explicit = args.canon is not None"
       ],
-      "claim": "\"\"\"(§10.2) An explicit --senses-path that does not exist is a caller error -> BLOCK (allow_absent=False), proving `senses_explicit = args.senses_path is not None` mirrors `canon_explicit` at glossary_batch_plan.py:707 exactly. A silently-empty result here would let a typo'd --senses-path bypass the exclusion entirely.\"\"\" nc, canon = write_inputs(tmp_path, [cand(\"Alice\", freq=20)]) proc = run(nc, canon, \"--senses-path\", str(tmp_path / \"nope-canon-senses.json\"))"
+      "claim": "\"\"\"(§10.2) An explicit --senses-path that does not exist is a caller error -> BLOCK (allow_absent=False), proving `senses_explicit = args.senses_path is not None` mirrors `canon_explicit` at glossary_batch_plan.py:727 exactly. A silently-empty result here would let a typo'd --senses-path bypass the exclusion entirely.\"\"\" nc, canon = write_inputs(tmp_path, [cand(\"Alice\", freq=20)]) proc = run(nc, canon, \"--senses-path\", str(tmp_path / \"nope-canon-senses.json\"))"
     },
     "[\"plugins/literary-translator/tests/heading_level_outline.test.py\", \"assemble.py:2322\", 0]": {
       "anchors": [
@@ -1596,7 +1596,7 @@
       ],
       "claim": "(\"cache_key.py:129\", CACHE_KEY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"review_ready.py:74\", REVIEW_READY_SCRIPT, \"orchestration_bundle_hash's diagnostic-only bucket\"), (\"draft_ready.py:12\", DRAFT_READY_SCRIPT, \"which is diagnostic-only\"), (\"SKILL.md:512\", SKILL_MD, \"sibling, non-gating\"), (\"SKILL.md:514\", SKILL_MD, \"provenance-only for W8 reporting\"), (\"SKILL.md:4021-4027\", SKILL_MD, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:607\", LEDGER_DOC, \"non-gating `orchestration_bundle_hash` instead\"), (\"ledger:719\", LEDGER_DOC, \"purely diagnostic/provenance\"), (\"schema_literal_drift.test.py:556-558\", SCHEMA_LITERAL_DRIFT_TEST, \"purely diagnostic/provenance\"),"
     },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4491-4497\", 0]": {
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4498-4504\", 0]": {
       "anchors": [
         "Excluded from every bundle hash",
         "nor of `orchestration_bundle_hash`",

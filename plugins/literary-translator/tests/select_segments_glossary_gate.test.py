@@ -398,7 +398,9 @@ def test_1_refuses_when_run_dir_exists_and_candidates_are_outstanding(tmp_path):
 
 def test_2_admits_when_planner_reports_no_new_candidates(tmp_path):
     root = make_full_project(tmp_path)
-    write_name_candidates(root, [])  # -> {"no_new_candidates": true, "batches": []}
+    # -> {"no_new_candidates": true, "batches": [],
+    #     "excluded_below_floor": {"count": 0, "min_candidate_freq": 2}} (#912)
+    write_name_candidates(root, [])
     run_dir = make_glossary_run(root, "R")
     # CONDITION 3 (see the #820 follow-up block below test 11) requires
     # every run dir to carry a merge marker before admitting -- without
