@@ -504,6 +504,35 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
+    # ROTATED TO 1.144.0 (#927 -- a pointed Hebrew name absorbed an unrelated
+    # word's occurrences because the fold key drops every vowel and
+    # cantillation mark), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Every
+    # digit-run in it is an IDENTIFIER: the version (1.144.0), the release
+    # date, the issue number (#927), the two fold-key precedents it cites
+    # (#238, #241), the link-group precedent (#497), and the `3` inside
+    # `W3`/`W3a`, the derivation-bundle pass names the entry mentions. There is
+    # no other digit in the entry at all.
+    #
+    # That is deliberate rather than lucky. Every measured figure behind #927
+    # -- three thousand and one credited spans, one hundred eighty-three of
+    # them on thirty-five forms, and the roughly-thirty-two /
+    # one-hundred-forty / thirteen split across the three kinds of
+    # contradiction -- is a count over ONE REPORTING OPERATOR'S BOOK, exactly
+    # the kind no implementation in this tree can re-derive, so the entry
+    # spells every one of them as a WORD rather than a digit, and `_TOKEN`
+    # matches digits only. Everything the tree DOES own is stated by NAMING:
+    # `occ_index.pointing_conflicts`, `pointing_verdict`, `attributable_spans`
+    # and `occurrence_targets.attribution_group` are named rather than sized,
+    # so no later release can rot this prose by retuning a number.
+    #
+    # This rotation RETIRED nothing: 1.143.0's list was already empty; its
+    # record is kept below, unchanged, as every earlier rotation's is.
+    # #912, #914, #921, #922, #923, #924, #925, #926 and #927 landed the same day.
+    #
+    # ------------------------------------------------------------------------
+    # The 1.143.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.143.0 (#925 -- a markup-minted entity note was headed with
     # its ref slug), per the maintenance contract above.
     #
@@ -1390,7 +1419,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.143.0"
+FIGURES_VERSION = "1.144.0"
 
 
 def _newest_entry():

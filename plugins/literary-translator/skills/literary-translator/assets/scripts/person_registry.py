@@ -647,7 +647,7 @@ def target_window(text, canonical_target_form, context_chars):
 
 
 def build_contexts(source_form, records, manifest, language_config, mods, max_contexts, context_chars,
-                   target_index=None, canonical_target_form=None):
+                   target_index=None, canonical_target_form=None, *, attribution_forms=None):
     """One bounded context per kept occurrence -- the source container's text
     windowed around that occurrence, PAIRED with the delivered target text of
     the same container.
@@ -683,7 +683,7 @@ def build_contexts(source_form, records, manifest, language_config, mods, max_co
             text, _ = resolve_container(manifest, locator)
         except RegistryError:
             continue
-        spans = mods["occ_index"].production_occurrences(source_form, text, language_config)
+        spans = mods["occ_index"].production_occurrences(source_form, text, language_config, attribution_forms=attribution_forms)
         if index < len(spans):
             start, end = spans[index][0], spans[index][1]
             lo = max(0, start - half)
@@ -808,7 +808,7 @@ def cmd_prep(args, durable_root: Path, schema_dir: Path) -> dict:
         homonym = unresolved.get(source_form)
         contexts, total, truncated = build_contexts(
             source_form, records, manifest, language_config, mods, args.max_contexts_per_form,
-            args.context_chars, target_index, entry.get("canonical_target_form"),
+            args.context_chars, target_index, entry.get("canonical_target_form"), attribution_forms=mods["occurrence_targets"].attribution_group(canon, source_form),
         )
         units.append(
             {

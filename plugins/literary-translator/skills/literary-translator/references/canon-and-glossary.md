@@ -1554,6 +1554,16 @@ share a `#238/#241` fold key. This pair does not share one — `fold_match_key`
 keeps the honorific's letters, so `X ז"ל` folds to strictly more match units
 than `X`.
 
+Since 1.144.0 (#927), sharing a fold key is necessary but no longer sufficient
+for that credit: a span is attributed to a spelling on the key only when its
+vowel points, shin/sin dot, and dagesh do not contradict that spelling's,
+checked against every index-eligible spelling of the key rather than one at a
+time. The consequence reaches evidence too — a stored `canon_senses.json`
+span citing an occurrence the pointing check now excludes fails
+`evidence_verify` on the next run with the existing "not a production match"
+reason; the span was never a genuine match, and this release is what makes
+the check say so.
+
 **Do not reach for the target instead.** Making the two targets equal so they
 collide, and grouping them, does work on the headings — and it is the wrong
 lever, because `canonical_target_form` is not only a routing key. It is the

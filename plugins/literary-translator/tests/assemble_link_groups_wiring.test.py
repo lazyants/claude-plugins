@@ -55,7 +55,7 @@ CANON_LINK_GROUPS_SRC = SCRIPTS_SRC_DIR / "canon_link_groups.py"
 # occurrence_targets.py lazily, and it in turn imports these two.
 MENTIONS_SRCS = tuple(
     SCRIPTS_SRC_DIR / name
-    for name in ("occurrence_targets.py", "bootstrap_names.py", "canon_senses.py")
+    for name in ("occurrence_targets.py", "bootstrap_names.py", "canon_senses.py", "occ_index.py")
 )
 # #492: assemble.py imports cache_key.py as a sibling, at module import time.
 CACHE_KEY_SRC = SCRIPTS_SRC_DIR / "cache_key.py"

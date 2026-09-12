@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.144.0 — 2026-09-12
+
+**A pointed Hebrew name absorbed an unrelated word's occurrences, because the match key drops
+every vowel and cantillation mark (#927).** `fold_match_key` exists so an unpointed canon entry
+finds pointed text and back again (#238/#241), and every attribution site — `occurrence_targets`'s
+three scanners, `occ_index.production_occurrences` and `index_manifest`, `evidence_verify`'s
+grouping, and `person_registry`'s context windows — looked a canon spelling up by that key alone.
+Two words that fold to the same bare letters but are pointed differently were indistinguishable to
+it: עֵשָׂו ("Esav") absorbed עָשׂוּ ("they did"), נָתָן ("Natan") absorbed נָתַן ("gave"), and
+קֹהֶלֶת ("Koheles") absorbed קְהִלַּת ("the community of"). The inflated counts reached
+`PEOPLE.md`, the rendered `## Mentions` appendix, and the sampled contexts a registry reader is
+shown.
+
+**Every one of those sites now refuses a span whose pointing contradicts every index-eligible
+canon spelling sharing its fold key.** Two different vowels on one letter, a shin dot against a
+sin dot, and a dagesh against a rafe are each a contradiction; `occ_index.pointing_conflicts` and
+its underlying three-valued `pointing_verdict` (conflict, compatible, or unaligned when the
+letters themselves differ) decide it, and `attributable_spans` / `occurrence_targets
+.attribution_group` apply the verdict at each site. An unpointed side, or a side carrying only
+marks that agree with the other, still matches exactly as before — the #238 guarantee is
+unchanged. A canon key the project already spells twice with different points — a fold-key
+collision, or a link-group credit under #497 — keeps every span retrievable and routed exactly as
+today: the new rule vouches a span against ANY index-eligible spelling sharing the key, never
+against one alone. A span no eligible spelling agrees with is withheld, and
+`occurrence_targets.build()` prints one stderr WARN per affected form, naming the withheld
+spellings and the remedy.
+
+`bootstrap_names.py` is untouched on purpose: it is a derivation-bundle member, and moving a byte
+there forces a W3/W3a regeneration — and a re-translation of every segment whose derived content
+actually changes — on every live book. The fold key itself, and name discovery's recall, are
+unchanged; the new comparison happens at lookup time in `occ_index.py`, which is also a
+`suspicion_scan` producer-closure member, so the next suspicion scan re-derives its worklist.
+
+Measured on the reporting operator's book: three thousand and one credited spans, one hundred
+eighty-three of them on thirty-five forms carrying points that contradicted the canon spelling.
+About thirty-two of those were a genuinely different word — the issue's own class. About one
+hundred forty belonged to a key the canon already spells twice, so they were already routed as a
+collision or a link-group credit. About thirteen were the same referent written with variant
+pointing; those are now withheld and WARNed, with the remedy being the existing
+canon-entry-plus-link-group route.
+
+Residuals, all disclosed in `references/output-target-adapters/obsidian.md`,
+`references/canon-and-glossary.md`, and `references/person-registry.md`: a same-pointing homograph
+(רַבֵּנוּ read as "our teacher" against the rebbe, or a pausal נָתָן meaning "gave") is still
+counted, and the route for it stays `canon_senses` split adjudication; a canon-side fold-key
+collision is not resolved by pointing, which is a separate design; presence-only marks (holam male
+against shuruq, a dagesh present or absent, cantillation, meteg) never conflict; a stored
+`canon_senses.json` evidence span citing a now-withheld occurrence fails evidence verification on
+the next run with the existing "not a production match" reason; and name discovery (W3 candidates)
+is unchanged.
 ## 1.143.0 — 2026-09-12
 
 **A markup-minted entity note was headed with its ref slug, so every index built from the notes
