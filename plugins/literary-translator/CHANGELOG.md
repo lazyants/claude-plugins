@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.152.0 — 2026-09-12
+## 1.156.0 — 2026-09-12
 
 **`canon_validate.py --correct` rewrote canon.json and reported success while every already-built
 segpack still carried the pre-correction `canon_map` — and `canon_map` is what actually reaches the
@@ -39,6 +39,147 @@ not visited — a pre-existing blind spot, the subject of sibling issue #917, ne
 widened here; a `remove` of an entry whose `canonical_target_form` was already empty produces no
 `canon_map` mismatch and is not listed; and the no-exit-change guarantee is scoped to `Exception`
 and `SystemExit` — `KeyboardInterrupt` is deliberately not caught.
+## 1.154.0 — 2026-09-12
+
+**Nothing compared a declared markup vocabulary against the style contract that has to ask for it,
+so a book whose index was supposed to come from inline marks shipped with none of it (#913).**
+`output.entity_markup` declares the element names this project's translator marks entities with,
+and `index_from: markup` says the vault index is built from those marks. Step 0 validated the block
+in isolation; `scaffold_validate.py` validated that `style_bible.md`'s STYLE_CONTRACT span is
+well-formed. Nothing compared the two. The translator is simply never told to mark, so the drafts
+carry no spans, `validate_draft.py` has nothing to check, and assembly accepts a zero-span book by
+design — every gate green, and the shortfall visible only to the reader.
+
+The consequence is not an empty vault, which is what made it hard to see. The obsidian index is a
+UNION: one entity note per `canon.json` entry always, plus one markup note per marked identity the
+canon has no entry for, only under `index_from: markup`. An unmarked book therefore ships a full,
+plausible, complete-looking index that is missing exactly the population the setting exists to
+capture. Measured across twelve books on one pinned plugin bundle: five carried `index_from: markup`
+with no tag rule in their style bible, and one of those five is a DELIVERED book. Causally proved,
+not correlated — one book had produced a single draft under the silent contract; the section was
+added, the same unit re-dispatched to the same model with everything else identical, and it came
+back with 9 person marks and 2 place marks where it had produced 0 and 0.
+
+**`validate_extraction.py`, the W2 managed post-extraction gate, now refuses a project whose
+contract never names the vocabulary it declared.** Under `index_from: markup` every declared tag
+must appear inside `style_bible.md`'s STYLE_CONTRACT span — the exact bytes
+`compute_style_contract_hash` hashes, which is why the rule has to sit inside the markers rather
+than beside them. The refusal names every missing tag, not the first. It is inert for a project in
+`canon` mode and for one that declares no block at all.
+
+That gate is an odd home for a style-contract check and the docstring says so: its subject is the
+extractor's own false green. It lives there because it is the earliest MANDATORY gate that holds
+both the profile and the durable root, it is PLUGIN-ONLY and never copied to `durable_root` so it
+cannot be hand-edited to silence it, and it precedes every LLM dispatch — the refusal costs no
+translation spend. The W1 gate was the first choice and was rejected in plan review: it is
+deliberately dependency-free and argument-free, it does not read `profile.yml`, and only the profile
+can say whether the block is declared at all.
+
+**The match requires a real delimiter after the tag name, and two review rounds were needed to get
+that right.** A plain `<person` substring reports success on `<person-title>`, because the schema's
+tag pattern is not prefix-free. The negative lookahead `assemble.py` uses for its own lexical guard
+is not enough either: declared tags are lowercase by schema, but `style_bible.md` is unrestricted
+text, so `(?![a-z0-9_-])` still accepts `<personTitle>`, `<person:name>` and `<personé>` as evidence
+that `person` was named. Only `>`, `/`, whitespace or the end of the span may follow. These are
+accepted tag-name boundaries for a presence check, never the assembler's token grammar, and whether
+the surrounding prose actually instructs the translator to mark is a question no matcher can answer
+— a deterministic reading of it would under-detect silently, which is a false PASS on a violating
+contract.
+
+**One-time upgrade action.** A project that already declares `index_from: markup` and passed W2
+under an earlier release never meets this gate: W2 runs once per book, a resumed W3–W9 session does
+not re-run it, and this gate is in no bundle hash, so nothing forces a re-run. Such a project must
+run the W2 gate once by hand before ANY subsequent W3–W9 action — not merely before the next
+dispatch, because a project that already finished W7 goes straight to W8/W9 delivery with no
+dispatch at all, and that is precisely the project that ships the empty index. The gate is stateless
+and read-only; re-running it changes nothing but the verdict.
+
+**Also documented, because the other half of this edge costs more than the first.** A contract that
+names the tags correctly can still describe a shape the assembler refuses. One book told the
+translator that a place inside a person's byname is tagged as a place AND stays inside the person
+tag; the translator obeyed, and 102 nested spans across 35 of 69 segments made `assemble.py` refuse
+the whole book at W9 (`entity_markup_malformed`) after the review loop had already converged
+111 → 39 → 12 → 7 → 0. The real price was not the 102: un-nesting moved every touched draft's sha1,
+so `reviewed_draft_sha1` forced a full re-review of 35 segments. `profile.example.yml` and
+`references/assembly-and-output.md` now carry the counter-example, and say what to do instead —
+promote the inner span to a sibling with its connective word, never drop it. In a rabbinical or
+Hasidic corpus the nested shape is the default sentence rather than an occasional slip: in one such
+book 25 distinct towns occur only inside a rabbi's byname and nowhere else, so dropping the inner
+span deletes exactly the place-anchored identities the translation exists to record.
+
+**This release moves no hash and re-translates nothing.** `validate_extraction.py` appears in none
+of the three membership tuples — not `PLUGIN_BUNDLE_MEMBERS`, not `ORCHESTRATION_BUNDLE_MEMBERS`,
+not `DERIVATION_BUNDLE_MEMBERS`; nothing computes a generation hash over it. The two STYLE_CONTRACT
+marker constants are restated locally rather than shared with `cache_key.py`, and the reason is
+worth stating precisely because the loose version of it is false: an IMPORT moves no hash, since
+`plugin_bundle_hash` is computed over `cache_key.py`'s own bytes and an importer is not one of them.
+What would move it is the refactor an import invites — hoisting the pair into a shared constant
+EDITS a `PLUGIN_BUNDLE_MEMBERS` file, and that reclassifies every converged segment in every project
+as stale. A drift test pins the local restatement equal to `cache_key.py`'s own instead.
+
+Not done, deliberately: the reporting issue also asked for a staleness-classifier clause naming
+"markup declared, draft converged, zero declared tags in it" as its own state instead of folding it
+into `stale`. Its trigger stops firing for every new book the moment this gate lands, and for the
+books already in that state the remedy is the one-time upgrade action above — a one-off operator
+step, not permanent machinery.
+
+## 1.150.0 — 2026-09-12
+
+**A stored review verdict carrying NO findings wedged `segment_dispatch_driver.py` permanently, and
+nothing shipped could release it (#920).** At a numbered round, `derive_next_action()` returned
+`needs_fix` whenever the draft still matched the review that judged it. When that review's `findings`
+list is EMPTY there is nothing for a fix turn to apply: the turn correctly leaves the draft
+byte-identical, the draft's content hash keeps matching, and the same branch returns the same thing on
+every later invocation, for good. `reject_review.py` is no escape — its own gate refuses any review
+whose `clean` is not `False`, and the verdict measured on a live Hebrew-to-English book was
+`clean: true` with `coverage_ok: false`. No shipped script writes or removes a `*.review.json` either,
+so the only exit was moving a pipeline artifact aside by hand.
+
+**Such a verdict is now re-reviewed once at the SAME round label, and a second unusable verdict stops
+the segment under `reason: "review-empty-findings"`.** The guard is keyed on the EMPTY FINDINGS LIST,
+not on the `clean`/`coverage_ok` pair the report happened to carry: `needs_fix` exists solely to hand
+findings to a fix turn, so an empty one is never legitimate, and the self-contradictory
+`clean: false` with no findings — refused nowhere upstream — has the identical shape. It fires only
+where the old code would have reached `needs_fix` (the draft matches the review, or either content
+hash is unknowable), so the ordinary "this draft already moved past a stale review" advance path is
+untouched. When the draft's own hash cannot be computed it raises instead, rather than spending a
+codex job judging a draft this process never read — the argument the mandatory-final branch already
+makes for the same condition.
+
+This is a NUMBERED-round outcome only. The mandatory `final` round still caps an empty-findings
+verdict, exactly as it caps any other non-clean one. The stop writes no terminal ledger entry of its
+own, so a segment that was default-eligible comes back on the next launch; a segment that already
+carried a cap or a block keeps it and stays `human_escalation`, reachable only by naming it back in.
+Releasing such a segment on the strength of an empty verdict is a warrant this change deliberately
+does not take — the existing un-escalation path validates a record's whole shape, audit trail and
+provenance first.
+
+`fabricated_loc_retries` becomes `unusable_verdict_retries`, shared by both causes. That is
+load-bearing rather than tidying: the per-segment loop reserves exactly one spare classification
+iteration, so two independent counters would let a fabricated-loc retry and an empty-findings retry
+each claim it, and the segment would exit under the generic `loop-exhausted-without-terminal-state`
+instead of a named reason. Both orders of the two causes are pinned at the schema's minimum
+`max_fix_rounds`, on the fresh and the claimed path.
+
+**The upstream cause was a path resolved against the wrong directory.** A RELATIVE
+`owner_profile_path` in the durable root's ownership marker resolved against the CALLER's working
+directory, so the deterministic gate a reviewer is told to run first exited with an environment
+failure inside its per-invocation sandbox while the operator, running the identical command from the
+durable root, saw `OK` — two different answers from one command, with neither party wrong. The
+reviewer then reported incomplete coverage, correctly, and the segment wedged. `validate_draft.py`,
+`select_segments.py` and the driver's own two config loaders now resolve that value against
+`durable_root`, which is what `cache_key.py` and `extract.py.template` always did.
+
+That last part is a migration rather than strict compatibility, and it is stated here because nothing
+in the plugin writes the marker. Every supported workflow runs from the durable root, where the join
+lands on the same path a bare read did, so no such project changes behaviour. A standalone invocation
+whose relative marker happened to resolve to an EXTERNAL profile from some other working directory
+now needs an absolute `owner_profile_path`, or one written relative to the durable root.
+
+`segment_dispatch_driver.py`, `validate_draft.py` and `select_segments.py` are all
+`PLUGIN_BUNDLE_MEMBERS`, so this release moves `plugin_bundle_hash` — the machinery-only carve-out.
+No converged segment needs re-translating or re-reviewing because of it.
+
 ## 1.144.0 — 2026-09-12
 
 **A pointed Hebrew name absorbed an unrelated word's occurrences, because the match key drops

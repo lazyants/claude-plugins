@@ -1105,23 +1105,23 @@ not just prose: `style_bible.template.md`/`PLAN.template.md` wrap their
 must-fill sections in `<!-- LT_REQUIRED_FILL_BEGIN: <id> -->`/
 `<!-- LT_REQUIRED_FILL_END -->` marker pairs containing the fixed sentinel
 `LT_PLACEHOLDER_UNFILLED`. `scripts/scaffold_validate.py` runs as a hard gate
-before W2 begins, with three independent checks: (1) FATALLY halts (naming
-file + marker id) if `LT_PLACEHOLDER_UNFILLED` survives inside any marker
-span across any scaffolded file — text outside marker spans is not scanned
-by *this* check; (2) separately, FATALLY rejects any of the six
-Step-0a-copied files (`PLAN.md`/`style_bible.md`/`consistency_issues.md`/
-`translate_TASK.md`/`review_TASK.md`/`glossary_TASK.md`) that still contain
-an unfilled inline bracket placeholder (`[SOURCE LANGUAGE]`, `[TARGET
-LANGUAGE]`, `[PROJECT TITLE / AUTHOR / PERIOD -- fill in]`), matched as a
-closed, exact list rather than a generic `[...]` shape so a translator's own
-legitimate editorial brackets are never blocked; (3) FATALLY rejects
-`translate_TASK.md`/`review_TASK.md` if the shipped illustrative era/domain
-trap example survives a copy-paste into a new project — checked two ways,
-an exact-substring match on the literal `guéridon=refrain-song` plus a
-co-occurrence check (scoped to the callout's own HTML comment) catching a
-separator-mangled or partially-deleted survivor the exact match alone would
-miss — deliberately not marker-gated (traps are discovered during the run,
-nothing to require at W1).
+before W2 begins, with four independent checks: (1) FATALLY halts (naming file +
+marker id) if `LT_PLACEHOLDER_UNFILLED` survives inside any marker span across
+any scaffolded file — text outside marker spans is not scanned by *this* check;
+(2) separately, FATALLY rejects any of the six Step-0a-copied files
+(`PLAN.md`/`style_bible.md`/`consistency_issues.md`/`translate_TASK.md`/
+`review_TASK.md`/`glossary_TASK.md`) that still contain an unfilled inline
+bracket placeholder (`[SOURCE LANGUAGE]`, `[TARGET LANGUAGE]`, `[PROJECT TITLE /
+AUTHOR / PERIOD -- fill in]`), matched as a closed, exact list rather than a
+generic `[...]` shape, so legitimate editorial brackets are never blocked; (3)
+FATALLY rejects `translate_TASK.md`/`review_TASK.md` if the shipped
+illustrative era/domain trap example survives a copy-paste — an exact-substring
+match on the literal `guéridon=refrain-song` plus a co-occurrence check (scoped
+to the callout's own HTML comment) catching a mangled or partial survivor the
+substring match alone would miss — not marker-gated (traps are discovered
+during the run); (4) FATALLY rejects a malformed STYLE_CONTRACT marker pair in
+`style_bible.md` (#129) — missing, duplicated, or reversed — the span W2's
+`entity_markup_style_contract` check (below) also depends on.
 
 **W2 Extract** — run the resolved source-format adapter's extractor
 (spine/footnote/verse detection per Step 0c). Currently that means either
@@ -1146,34 +1146,38 @@ python3 {{PLUGIN_ROOT}}/assets/scripts/validate_extraction.py --manifest ${durab
 ```
 
 from the plugin's own install path — never a durable-root copy (same
-exception class as `profile_validate.py`; it is deliberately not a bundle
-member and never adapted per-project). It independently RE-DERIVES the
-manifest-derivable invariants directly from `manifest.json` (so a hand-edited
-extractor that skips or fakes its own enforcement cannot manufacture a green
-manifest) and, for `gutenberg_epub`/`plain_text`, pins `extract.py`'s
-self-check region by hash. **For `custom`, the region-hash pin is SKIPPED**
-(not merely trivial): Step 0a copies `extract.py.template` to `extract.py`
-unconditionally even for `custom`, but that copy is never the real extractor
-(the co-designed one lives at `scripts/custom_extractors/<value>`), so
-pinning it would certify nothing — only the manifest-derivable
-re-derivation runs for `custom`, against the manifest the real extractor
-produced. See `references/source-format-adapters/custom.md` and
-`references/false-green-gate.md` for the full reconciliation. The pipeline
-advances to W3 ONLY on its exit `0` (see R2 / `references/false-green-gate.md`).
+exception class as `profile_validate.py`; not a bundle member, never adapted
+per-project). It independently RE-DERIVES the manifest-derivable invariants
+from `manifest.json`, so a hand-edited extractor cannot manufacture a green
+manifest by skipping or faking its own checks, and for
+`gutenberg_epub`/`plain_text` also pins `extract.py`'s self-check region by
+hash — **SKIPPED for `custom`**, whose on-disk `extract.py` is only the
+unadapted template, never the real extractor
+(`scripts/custom_extractors/<value>` is), so only re-derivation runs there. See
+`references/source-format-adapters/custom.md` and
+`references/false-green-gate.md` for the full reconciliation. Pipeline advances
+to W3 ONLY on exit `0` (see R2).
+**New in this release (#913):** the gate FATALs when `output.entity_markup`
+resolves to `index_from: markup` and a declared tag is missing from the
+STYLE_CONTRACT span (see `references/false-green-gate.md`). **Upgrading:** a
+project already in that mode that passed W2 earlier must re-run the command
+above once, by hand, before ANY subsequent W3-W9 action, not merely before the
+next dispatch — a project past W7 skips dispatch entirely. Re-running is free:
+the gate is stateless and read-only.
 
 ### Visual-order source — the advisory this gate may print (1.46.0, #489)
 
-The gate can also print, on stderr, a **`WARN visual_order_scan:`** line, and
-name the advisory count in its final status. It is REPORT-ONLY: it never
-changes the exit code in either direction.
+The gate can also print, on stderr, a **`WARN visual_order_scan:`** line and
+name the advisory count in its final status — REPORT-ONLY, it never changes
+the exit code either way.
 
 It means a source EPUB is probably in **visual order** rather than logical
-order — the usual result of a PDF-to-EPUB conversion. Extraction is
-byte-faithful and correct; the mangling is upstream. **Do not send a fix to
-the extraction stage.** The damage lands on the LLM turns instead, and on a
-live book it reached a converged draft a full review round had already called
-clean. `references/false-green-gate.md`'s "The visual-order advisory" section
-carries why no deterministic gate can catch this class.
+order, the usual result of a PDF-to-EPUB conversion. Extraction is
+byte-faithful and correct; the mangling is upstream, so **do not send a fix
+to the extraction stage** — the damage lands on the LLM turns instead, and on
+a live book it reached a converged draft a full review round had already
+called clean. `references/false-green-gate.md`'s "The visual-order advisory"
+section carries why no deterministic gate can catch this class.
 
 **The scan is a SCREEN, not a verdict**, and it is TWO screens — terminal
 punctuation leading an RTL token, and a combining mark with no letter behind
@@ -1192,17 +1196,17 @@ it. Neither is the word *reordering* that tears tokens. Adjudicate BOTH:
    style authority, and the fix turn reads it before editing.
 
 **Before pasting, know what it costs.** Editing `style_bible.md` moves
-`style_contract_hash`, which mechanically flips every unit ALREADY converged in
+`style_contract_hash`, mechanically flipping every unit ALREADY converged in
 that project to `stale`. R9 means the edit applies FORWARD — nothing needs
-re-reviewing — but with `validation.admit_contract_only_stale` false, W7 and W9
-will refuse until you set it. On a fresh project this costs nothing; on a
-partly-converged one, decide deliberately.
+re-reviewing — but with `validation.admit_contract_only_stale` false, W7 and
+W9 refuse until you set it. Free on a fresh project; decide deliberately on
+a partly-converged one.
 
 The clause is **not** shipped in `style_bible.template.md`, and this copy is
-**not operative** — it is text for the operator to paste after a positive
-adjudication, never an instruction to any turn. A book whose source is in
-ordinary logical order must never receive it: telling that project's reviewer to
-discount torn-token findings would suppress real defects.
+**not operative** — text for the operator to paste after a positive
+adjudication, never an instruction to any turn. A book in ordinary logical
+order must never receive it: telling its reviewer to discount torn-token
+findings would suppress real defects.
 
 The clause itself — a fenced `#### E-traps: visual-order source` block, ready to
 paste unaltered — is `references/gotchas.md` §15. Open it ONLY on a positive
@@ -1237,10 +1241,9 @@ rejected forever, and nothing said so until a paid translation job had run:
   to model reachability let the defect through.
 
 **What to do when one fires.** The gate names the offending block ids or
-footnote numbers. Adapt `${durable_root}/extract.py` so the node is not emitted
-as a content block (or the empty definition not emitted), then re-extract. Do
-NOT edit the check: the failure is real, and cheaper here than after a
-translation round.
+footnote numbers. Adapt `${durable_root}/extract.py` so the node (or empty
+definition) is not emitted, then re-extract — never edit the check: the failure
+is real, and cheaper here than after a translation round.
 
 ### Footnote emphasis reaches the translator in the source's own notation (#725)
 
@@ -1278,19 +1281,18 @@ writing any consumer of `footnotes[].source_text`, before proposing markdown
 `*...*` for this again (it records the three ways that design failed), and
 before touching `segpack.py`'s tag classifiers.
 
-**Name candidates are unaffected.** The candidate scan still reads the
-definition's `plain_text`, never the emphasis-carrying `source_text` — `>` is
-the `preceding_char` `tokenize()` records for the token after it and `WRAPPERS`
-does not skip it, so scanning the marked text would read a sentence-initial
-name as mid-sentence and promote it into `names[]` for the wrong reason.
+**Name candidates are unaffected.** The candidate scan reads only the
+definition's `plain_text`, never the emphasis-carrying `source_text`: `>` is
+the `preceding_char` `tokenize()` records after it, and `WRAPPERS` doesn't skip
+it, so scanning marked text would misread a sentence-initial name as
+mid-sentence and wrongly promote it into `names[]`.
 
-**Migration.** `segpack.py` is a `derivation_bundle_hash` member, so at the
-next Step 0a refresh existing segments are classified
-`blocked_needs_regeneration` and the mass-run resume digest moves. Regenerating
-the segpacks then moves `note_map_hash` for every segment whose emphasis was
-carried, and the `canon.json` restamp that clearing the derivation mismatch
-requires also moves the glossary resume digest and any existing skeptic /
-suspicion state. Cheapest for a project that has not started W5.
+**Migration.** `segpack.py` is a `derivation_bundle_hash` member, so the next
+Step 0a refresh classifies existing segments `blocked_needs_regeneration` and
+moves the mass-run resume digest. Regenerating then moves `note_map_hash` for
+every segment whose emphasis was carried, and the `canon.json` restamp that
+clearing the derivation mismatch requires also moves the glossary resume digest
+and any skeptic/suspicion state. Cheapest before W5 starts.
 
 ### Oversized source block — the census this gate always prints (#504)
 
@@ -1317,15 +1319,14 @@ Adjudicate a WARN the same way as the visual-order advisory above:
 
 1. Read the named block(s), in the manifest, against the printed source.
 2. **A genuinely long paragraph** — record nothing, carry on.
-3. **An extraction artifact** — the source block is not authoritative
-   structure, so this segment's translation may need to reflect the printed
-   book's real paragraphing rather than the extractor's block boundary. Record
-   that finding, with the census figures as evidence, in that segment's own
-   draft `notes[]` array (see `review_TASK.template.md`), never in the
-   manifest. At W2 no draft exists yet, and a `manifest.json` segment object is
-   `additionalProperties: false` with no `notes` field to write into — carry
-   the finding forward to the translate turn, which is where the draft, and its
-   `notes[]`, first exist.
+3. **An extraction artifact** — the block isn't authoritative structure, so
+   this segment's translation may need to reflect the printed book's real
+   paragraphing rather than the extractor's boundary. Record that finding, with
+   the census figures as evidence, in that segment's own draft `notes[]` (see
+   `review_TASK.template.md`), never the manifest — a `manifest.json`
+   segment object is `additionalProperties: false` with no `notes` field,
+   and no draft exists yet at W2, so carry the finding forward to the
+   translate turn, where the draft first exists.
 
 One exception to "always": if the census cannot be BUILT -- a malformed
 `blocks{}` the mandatory checks own, say -- no NOTE is printed and the failure
@@ -1438,14 +1439,13 @@ baseline content, a truncated/hollowed block, `reading_order_reversal`) are in
 **W3 OPENS with LLM name discovery, on an uncased source (#286).** After W2
 produces `manifest.json`, this is the FIRST thing W3 does — before the
 three-hash/smoke-test logic below and before either glossary branch — and its
-placement is load-bearing rather than stylistic. Placed after the smoke
-test, the report would certify a `particle_config` the fold then replaces;
-placed inside the `glossary.enabled: false` branch further down, a
-glossary-ENABLED project would take that branch's `Otherwise` clause and skip
-discovery entirely, reaching `bootstrap_names.py` (which has no discovery
-prerequisite and exits `0` over whatever it finds) and then the `#290` SKIP
-branch's empty-canon initializer — the exact degradation this step exists to
-prevent.
+placement is load-bearing rather than stylistic. Placed after the smoke test,
+the report would certify a `particle_config` the fold then replaces; placed
+inside the `glossary.enabled: false` branch further down, a glossary-ENABLED
+project would take that branch's `Otherwise` clause and skip discovery
+entirely, reaching `bootstrap_names.py` (which has no discovery prerequisite
+and exits `0` over whatever it finds) and then the `#290` SKIP branch's
+empty-canon initializer — the exact degradation this step exists to prevent.
 
 Applies when `glossary.name_discovery.enabled` is `true`. On an uncased source
 (Hebrew/Yiddish/Arabic) `bootstrap_names.py`'s candidate path yields a
@@ -3455,7 +3455,19 @@ not-clean, the driver stops at that segment and returns
 `outcome: "needs_fix"` — the round label, the findings, and the exact
 rendered fix prompt — then moves on/exits without fixing it (applying
 findings to a draft is a real LLM content-editing turn a plain Python process
-cannot perform). Someone — a human, or an orchestrating session — has to
+cannot perform). One shape is the exception, because no fix turn can act on
+it: a NUMBERED-round review whose `findings` list is EMPTY. There is nothing
+to apply, so a fix prompt rendered over it would leave the draft
+byte-identical and the driver would re-derive the same `needs_fix` on every
+later launch, forever. Since #920 that verdict is re-reviewed ONCE at the SAME
+round label instead, and a second unusable verdict stops the segment under
+`reason: "review-empty-findings"` — reported in `summary.failed`, and writing
+no terminal ledger entry of its own, so an id that was default-eligible before
+stays default-eligible. An id that already carried a cap or a block is
+untouched by this and stays `human_escalation`, reachable only by naming it
+back in. The mandatory `final` round is NOT covered: an empty-findings verdict
+there still caps, exactly as any other non-clean final verdict does.
+Someone — a human, or an orchestrating session — has to
 notice that: the only two channels it is ever announced on are the driver's
 own JSON output and its redirected log (`runs/driver.<SESSION_ID>.log`, per
 the launch command above), and what follows from reading either is the fix

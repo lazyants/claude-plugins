@@ -29,15 +29,23 @@ via a Claude `agent()` call today) -- a plain Python process has no
 equivalent capability, and PLAN.md's own step order defers redesigning fix
 as a codex_job.py dispatch to a LATER phase ("Шаг 5 (B)"), explicitly
 because it only pays off once this driver already exists. So when a
-segment's review comes back not-clean, `process_segment()` below stops at
-that segment and returns a `needs_fix` result carrying the round label,
-the findings, AND the exact fix prompt text (rendered the same
-executed-template way as every other prompt) -- the caller (today: the
-orchestrating Claude session running W5, exactly as PLAN.md's own step
-order anticipates) performs ONE Claude fix turn using that prompt, then
-re-invokes this driver, which re-derives the segment's state from durable
-disk facts (see `derive_next_action()`) and picks up at the next review
-round. This driver's OWN contribution is eliminating the WAIT-polling
+segment's review comes back not-clean WITH FINDINGS TO ACT ON,
+`process_segment()` below stops at that segment and returns a `needs_fix`
+result carrying the round label, the findings, AND the exact fix prompt
+text (rendered the same executed-template way as every other prompt) --
+the caller (today: the orchestrating Claude session running W5, exactly
+as PLAN.md's own step order anticipates) performs ONE Claude fix turn
+using that prompt, then re-invokes this driver, which re-derives the
+segment's state from durable disk facts (see `derive_next_action()`) and
+picks up at the next review round. A not-clean verdict with an EMPTY
+findings list at a NUMBERED round is a different case (#920): there is
+nothing for a fix turn to substantiate, so the driver re-reviews once
+instead of hedging a `needs_fix` no caller could act on, and reports a
+named failure if the reviewer does it twice in a row (see
+`derive_next_action()`'s own `cause: "empty_findings"` and
+`process_segment()`'s `unusable_verdict_retries`) -- at the mandatory
+final round the same empty verdict still caps, exactly as any other
+final verdict does. This driver's OWN contribution is eliminating the WAIT-polling
 agent() calls around translate/review (#348's chunking apparatus) -- "B
 only pays off after the driver removes the wait agents" is the project's
 own framing for exactly this split.
@@ -1420,11 +1428,14 @@ def codex_jobs_per_segment(max_fix_rounds: int) -> int:
     EXACT for mass-translate-wf.template.js, whose review retry re-reads
     the artifact codex already wrote instead of starting a second job; a
     FLOOR here, because `process_segment()` below may additionally spend
-    the fabricated-loc re-review, hard-capped at one per segment by its own
-    `fabricated_loc_retries` counter. That function's `max_iterations` is
-    sized off this one accordingly, so this driver's real per-invocation
-    ceiling is max_fix_rounds + 3 -- an overspend of at most one job per
-    segment against the cap this function feeds."""
+    ONE re-review of an unusable reviewer verdict -- a fabricated
+    line-of-context claim, or (#920) a `needs_fix`/`review` verdict
+    carrying no findings -- hard-capped at one per segment TOTAL by its
+    own `unusable_verdict_retries` counter, whichever cause reaches it
+    first. That function's `max_iterations` is sized off this one
+    accordingly, so this driver's real per-invocation ceiling is
+    max_fix_rounds + 3 -- an overspend of at most one job per segment
+    against the cap this function feeds."""
     return max_fix_rounds + 2
 
 
@@ -1564,9 +1575,17 @@ def load_engine_config(durable_root: Path) -> dict:
     owner_profile_path = marker.get("owner_profile_path") if isinstance(marker, dict) else None
     if not owner_profile_path:
         fatal(f"ownership marker at {marker_path} has no owner_profile_path", exit_code=2)
+    # #920: owner_profile_path is durable-root-relative, not cwd-relative --
+    # see validate_draft.py's load_profile() for the full argument.
     profile_path = Path(owner_profile_path)
+    if not profile_path.is_absolute():
+        profile_path = (durable_root / profile_path).resolve()
     if not profile_path.is_file():
-        fatal(f"profile.yml not found at {profile_path} (per {marker_path})", exit_code=2)
+        fatal(
+            f"profile.yml not found at {profile_path} (resolved from the "
+            f"ownership marker's owner_profile_path, per {marker_path})",
+            exit_code=2,
+        )
     try:
         profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
@@ -2588,9 +2607,17 @@ def load_translate_config(durable_root: Path) -> dict:
     owner_profile_path = marker.get("owner_profile_path") if isinstance(marker, dict) else None
     if not owner_profile_path:
         fatal(f"ownership marker at {marker_path} has no owner_profile_path", exit_code=2)
+    # #920: owner_profile_path is durable-root-relative, not cwd-relative --
+    # see validate_draft.py's load_profile() for the full argument.
     profile_path = Path(owner_profile_path)
+    if not profile_path.is_absolute():
+        profile_path = (durable_root / profile_path).resolve()
     if not profile_path.is_file():
-        fatal(f"profile.yml not found at {profile_path} (per {marker_path})", exit_code=2)
+        fatal(
+            f"profile.yml not found at {profile_path} (resolved from the "
+            f"ownership marker's owner_profile_path, per {marker_path})",
+            exit_code=2,
+        )
     try:
         profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
@@ -4923,6 +4950,17 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         fabricated (inauthentic) finding rather than a stale/absent
         review or a round advance -- see process_segment()'s own retry
         counter, which this marker exists for.
+      {"action": "review", "round_label": ..., "cause": "empty_findings"} -- #920:
+        a re-review at the SAME label, same as the row above, but caused
+        SPECIFICALLY by a stored non-clean verdict carrying an EMPTY
+        findings list. NUMBERED rounds only -- the matched_round_label ==
+        "final" branch above always returns before this guard is ever
+        reached, so a final-round empty-findings verdict still caps. A
+        `needs_fix` built from this would have nothing for a fix turn to
+        substantiate and would repeat forever, so this is reported
+        instead, sharing process_segment()'s own `unusable_verdict_
+        retries` budget with the fabricated_loc marker above rather than
+        a counter of its own.
       {"action": "review", "round_label": "final", "reopen_capped": True} -- a
         re-review of a segment a PRIOR invocation may already have capped
         terminally (#432). The marker tells process_segment() to make the
@@ -5569,12 +5607,63 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
             "cause": "rejected_findings",
         }
 
+    # #920: a `needs_fix` whose findings list is EMPTY is always a wedge,
+    # whatever verdict produced it -- `needs_fix` exists solely to hand
+    # findings to a fix turn (see process_segment()'s own needs_fix
+    # branch), and a fix turn given nothing to substantiate correctly
+    # leaves the draft byte-identical, so the tri-state guard right below
+    # would return the same needs_fix on every later invocation, forever.
+    # Checked here, covering all THREE of that guard's arms
+    # (draft_matches_review, current_sha1 is None, reviewed_sha1 is None)
+    # at once, rather than folding it into that guard: a
+    # `clean: false, findings: []` verdict is self-contradictory and
+    # refused nowhere upstream, so it must never reach needs_fix either,
+    # and this is the one place all three arms funnel through before that
+    # return.
+    #
+    # current_sha1 is None raises instead of re-reviewing, reusing the
+    # exact argument and mechanism the `matched_round_label == "final"`
+    # branch above already uses for the identical condition: the draft
+    # cannot be hashed, which is infrastructure, not content, and this
+    # driver's own draft_ok gate already passed on this segment moments
+    # earlier (see process_segment()'s pre-dispatch check), so spending a
+    # codex job judging a draft this process cannot even read would be
+    # the same cost that branch already refuses. current_sha1_error is
+    # the original DriverError captured above, interpolated verbatim
+    # (never a second, possibly differently-failing probe) -- see that
+    # capture site's own comment for why the exception object itself does
+    # not survive into fatal()'s new one.
+    #
+    # Same round label, never a new one: this is a re-check of a verdict
+    # that cannot be acted on, not a round spent -- the same reasoning the
+    # clean-but-stale branch above already gives for its own re-review.
+    # This guard only ever intercepts a case that would OTHERWISE reach
+    # needs_fix below (draft_matches_review, or either sha1 unknowable) --
+    # it must NOT fire when none of those three arms hold, because that is
+    # the ordinary "the draft already moved past this stale review" advance
+    # path (round advance, or a same-label re-review while a translate is
+    # in progress), which is correct regardless of whether findings happen
+    # to be empty: nothing here is being handed to a fix turn on that path
+    # in the first place. Gating on the tri-state condition, not just on
+    # empty findings, is what keeps that path untouched.
+    findings = review_obj.get("findings") or []
+    if not findings and (draft_matches_review or current_sha1 is None or reviewed_sha1 is None):
+        if current_sha1 is None:
+            fatal(
+                f"segment {seg!r}: a stored non-clean '{matched_round_label}' "
+                f"review carries no findings and the draft's own content "
+                f"sha1 could not be computed ({current_sha1_error}) -- "
+                f"refusing to hand an empty fix prompt to a caller and "
+                f"unable to re-review a draft this invocation never read"
+            )
+        return {"action": "review", "round_label": matched_round_label, "cause": "empty_findings"}
+
     # Not clean, not the mandatory final round -- a fix is needed before the
     # NEXT review round can be dispatched. Any ambiguity (can't compute
     # either sha1) stays conservative -- report needs_fix rather than
     # silently advancing.
     if draft_matches_review or current_sha1 is None or reviewed_sha1 is None:
-        return {"action": "needs_fix", "round_label": matched_round_label, "findings": review_obj.get("findings") or []}
+        return {"action": "needs_fix", "round_label": matched_round_label, "findings": findings}
 
     # RAW #7 (#441): the draft moved since this review, but that alone does
     # not prove a fix was applied -- a same-run RETRANSLATE moves it too,
@@ -6491,9 +6580,12 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
       outcome="failed", reason=
         "review-fabricated-loc"           -- a fabricated (inauthentic)
                                               finding recurred on the ONE
-                                              retry this driver allows (see
-                                              `fabricated_loc_retries`
-                                              below) -- terminates with the
+                                              retry this driver allows for
+                                              an unusable reviewer verdict
+                                              (see `unusable_verdict_
+                                              retries` below, shared with
+                                              the row right after this
+                                              one) -- terminates with the
                                               template's OWN reason string
                                               (mass-translate-wf.template.js's
                                               matchedVerdict()), never an
@@ -6505,6 +6597,31 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               "recoverable" next invocation
                                               exactly as the template's own
                                               runRound() leaves it.
+      outcome="failed", reason=
+        "review-empty-findings"           -- #920: derive_next_action()
+                                              returned {"action": "review",
+                                              "cause": "empty_findings"} a
+                                              SECOND time for this segment
+                                              -- a stored review verdict
+                                              carrying no findings recurred
+                                              on the ONE retry
+                                              `unusable_verdict_retries`
+                                              allows, shared with the
+                                              fabricated-loc row above
+                                              (same counter, same budget --
+                                              see that counter's own
+                                              comment for why two unusable
+                                              verdicts in a row from the
+                                              same reviewer, whichever two
+                                              causes they are, is the
+                                              terminal fact). Writing no
+                                              terminal ledger entry of its
+                                              own, so an id that was
+                                              default-eligible before stays
+                                              default-eligible; an id that
+                                              already carried a cap or a
+                                              block is untouched and stays
+                                              human_escalation.
       outcome="failed", reason=
         "invalid-post-fix-draft"          -- codex round-3 MAJOR: the
                                               draft failed draft_ready_
@@ -6613,13 +6730,33 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
     The iteration cap (this segment's own per-segment job count -- one
     translate plus every review round it could ever legitimately need, or
     for a CLAIMED segment the reviews alone, since #514 -- PLUS ONE, see
-    the codex round-4 MINOR fix below) bounds the LOOP overall; `fabricated_loc_retries` is a SEPARATE, narrower counter
-    (never reusing the loop's own iteration count) so an expected
-    condition (a reviewer emitting a fabricated finding, which the
-    template's own comment above AUTHENTIC_LOC_RE says a HEALTHY reviewer
-    can do) is bounded and reported on its OWN terms, one retry, rather
-    than silently spending the whole per-segment budget and then being
-    reported as if the defensive backstop itself had fired.
+    the codex round-4 MINOR fix below) bounds the LOOP overall;
+    `unusable_verdict_retries` is a SEPARATE, narrower counter (never
+    reusing the loop's own iteration count) so an expected condition -- a
+    reviewer emitting a fabricated finding (the template's own comment
+    above AUTHENTIC_LOC_RE says a HEALTHY reviewer can do this) or (#920)
+    emitting a verdict with no findings at all -- is bounded and reported
+    on its OWN terms, one retry, rather than silently spending the whole
+    per-segment budget and then being reported as if the defensive
+    backstop itself had fired.
+
+    #920: ONE counter for BOTH causes, not two independent ones, and this
+    is the cheaper design, not a shortcut. `max_iterations` above reserves
+    exactly ONE spare classification iteration (the `+1`; see the codex
+    round-4 MINOR paragraph below for why that spare is needed at all). A
+    fabricated-loc retry and an empty-findings retry each mean the same
+    thing -- the reviewer returned a verdict this driver cannot act on,
+    give it one more chance -- so a SECOND, independent counter would let
+    each cause claim that one spare iteration for itself: a fabricated-loc
+    retry followed by an empty-findings one would then exhaust the loop
+    and fall through to the generic "loop-exhausted-without-terminal-
+    state" reason instead of the named one either cause earns on its own.
+    One shared budget cannot do that -- the second unusable verdict, of
+    either cause, terminates during that same reserved classification
+    iteration without a further dispatch. The cost is that two unusable
+    verdicts of DIFFERENT causes in a row get no second chance either --
+    correct, not a loss: two unusable verdicts back to back from the same
+    reviewer is the terminal fact, whichever two causes they are.
 
     codex round-4 MINOR: the `+1` above is load-bearing, not padding.
     Recognizing "the one permitted retry ALSO came back fabricated" costs
@@ -6661,7 +6798,7 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
         else codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"])
     )
     max_iterations = per_segment_jobs + 1
-    fabricated_loc_retries = 0
+    unusable_verdict_retries = 0
     for _ in range(max_iterations):
         # codex round-3 BLOCKER, corrected after an initial fix was itself
         # wrong. The worker subtree below `derive_next_action()` (this
@@ -7032,17 +7169,27 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
 
             if action["action"] == "review":
                 round_label = action["round_label"]
-                if action.get("cause") == "fabricated_loc":
-                    if fabricated_loc_retries >= 1:
+                cause = action.get("cause")
+                if cause in ("fabricated_loc", "empty_findings"):
+                    if unusable_verdict_retries >= 1:
                         # Already retried once -- the reviewer is persistently
-                        # emitting fabricated locs (within its own documented
-                        # latitude, not a fault of its own). Terminate NOW,
-                        # never dispatch a third time: the template's own
-                        # reason, no ledger write (matches runRound()'s own
-                        # "blocked" -> recoverable-next-run handling).
+                        # returning a verdict this driver cannot act on
+                        # (within its own documented latitude, not a fault of
+                        # its own): a fabricated loc, or (#920) a verdict
+                        # carrying no findings at all. Terminate NOW, never
+                        # dispatch a third time -- a named reason (the
+                        # template's own for the fabricated-loc case, this
+                        # driver's own for the empty-findings case, see
+                        # `unusable_verdict_retries`'s own comment above for
+                        # why ONE counter covers both), writing no terminal
+                        # ledger entry of its own, so an id that was default-
+                        # eligible before stays default-eligible; an id that
+                        # already carried a cap or a block is untouched and
+                        # stays human_escalation.
                         return {"seg": seg, "converged": False, "outcome": "failed",
-                                "reason": "review-fabricated-loc"}
-                    fabricated_loc_retries += 1
+                                "reason": ("review-fabricated-loc" if cause == "fabricated_loc"
+                                           else "review-empty-findings")}
+                    unusable_verdict_retries += 1
                 if action.get("reopen_capped"):
                     # #432, second half. derive_next_action() decided to
                     # re-review a segment a PRIOR invocation may already

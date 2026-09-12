@@ -504,7 +504,7 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
-    # ROTATED TO 1.152.0 (#910 -- --correct reported success while the
+    # ROTATED TO 1.156.0 (#910 -- --correct reported success while the
     # already-built segpacks still carried the pre-correction canon_map; #840
     # folded in), per the maintenance contract above.
     #
@@ -512,7 +512,7 @@ FIGURES = [
     # Every digit-run in it is an IDENTIFIER or a CITATION, never a figure
     # this tree can re-derive:
     #
-    #   1.152.0, 2026-09-12    the version and the release date
+    #   1.156.0, 2026-09-12    the version and the release date
     #   #910, #840, #826, #917 issue numbers
     #   W3a (twice)            a workflow step name, not a count
     #   "three"                SAFE_STALE_CARVEOUT_FIELDS, spelled as a word
@@ -538,10 +538,63 @@ FIGURES = [
     # `plugin_bundle_hash` are named, so no later release can rot this prose
     # by retuning a number.
     #
-    # This rotation RETIRED 1.144.0's rows, which belong to an entry that is
+    # This rotation RETIRED 1.154.0's rows, which belong to an entry that is
     # no longer the newest and which this guard therefore no longer reads.
     #
     #
+    #
+    # The 1.154.0 rotation this replaces, kept as its own record:
+    # ROTATED TO 1.154.0 (#913 -- nothing compared a declared markup vocabulary
+    # against the style contract that has to ask for it), per the maintenance
+    # contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Its
+    # numerals are of exactly two kinds, and neither kind can have a row here.
+    #
+    # IDENTIFIERS: the version (1.154.0), the release date, and the issue
+    # number (#913).
+    #
+    # MEASUREMENTS OF BOOKS IN ANOTHER REPOSITORY, which is the same class the
+    # 1.116.0 rotation recorded and for the same reason -- no implementation in
+    # this tree can re-derive them, and `derive` MUST call an authoritative
+    # implementation rather than a lookalike. They are: the twelve books
+    # surveyed and the five of them carrying `index_from: markup` with no tag
+    # rule; the 9 person marks and 2 place marks a re-dispatch produced where
+    # the silent contract had produced none; the 102 nested spans across 35 of
+    # 69 segments and the 111 -> 39 -> 12 -> 7 -> 0 review-round sequence they
+    # survived; and the 25 towns occurring only inside a rabbi's byname.
+    #
+    # Everything this tree DOES own the entry states by NAMING instead of by
+    # counting: `validate_extraction.py`, `entity_markup_style_contract`,
+    # `compute_style_contract_hash`, `PLUGIN_BUNDLE_MEMBERS`,
+    # `ORCHESTRATION_BUNDLE_MEMBERS`, `DERIVATION_BUNDLE_MEMBERS`,
+    # `entity_markup_malformed`, `reviewed_draft_sha1` and the two regex forms
+    # it rejects. A name cannot rot into a wrong number.
+    #
+    # ---- records this rotation replaces, kept per the maintenance contract ----
+    # ROTATED TO 1.150.0 (#920 -- a review verdict carrying no findings
+    # wedged the dispatch driver), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed: every
+    # digit-run in it is an IDENTIFIER -- the version (1.150.0), the
+    # release date, and the issue number (#920). A regex over the whole entry
+    # returns those three and nothing else.
+    #
+    # That is deliberate rather than lucky, and it cost the entry one sentence
+    # each time. The retry budget is stated as "exactly one spare
+    # classification iteration" and "the schema's minimum `max_fix_rounds`"
+    # rather than as the numbers those resolve to, because both are facts the
+    # driver owns and would have to be derived from it here to mean anything.
+    # The reach of the marker defect -- how many durable roots on the reporting
+    # operator's machine carried a relative `owner_profile_path` -- is a fact
+    # about durable roots in ANOTHER tree, exactly the kind no implementation
+    # here can re-derive, so the entry does not quote a count at all. What the
+    # tree DOES own is stated by NAMING it: `PLUGIN_BUNDLE_MEMBERS`,
+    # `unusable_verdict_retries`, `review-empty-findings`, the readers of the
+    # ownership marker.
+    #
+    #
+    # ------------------------------------------------------------------------
     # The 1.144.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.144.0 (#927 -- a pointed Hebrew name absorbed an unrelated
     # word's occurrences because the fold key drops every vowel and
@@ -706,7 +759,7 @@ FIGURES = [
     # kept below, unchanged.
     # 1.123.0's own row, RETIRED here rather than carried: it measured the
     # phrase "default 2" in THAT entry, and this guard only ever reads the
-    # NEWEST one. Left live it would be checked against the 1.152.0 entry,
+    # NEWEST one. Left live it would be checked against the 1.156.0 entry,
     # where the phrase does not occur -- a red that says nothing about
     # either release. The row itself was correct for its own entry and is
     # recorded in the 1.123.0 block below.
@@ -1464,7 +1517,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.152.0"
+FIGURES_VERSION = "1.156.0"
 
 
 def _newest_entry():

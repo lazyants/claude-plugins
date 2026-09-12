@@ -3174,7 +3174,22 @@ def test_derive_next_action_ignores_a_rejection_over_a_clean_true_review(tmp_pat
     derive_next_action() must not trust it merely because the token and
     digest line up. clean:true + coverage_ok:false is used to reach the
     not-clean branch at all (clean:true + coverage_ok:true converges
-    before ever consulting a rejection)."""
+    before ever consulting a rejection).
+
+    #920 changed the EXPECTED ACTION here, not the point of the test. This
+    fixture's `findings: []` is exactly the empty-findings wedge shape
+    #920 fixes: with the forged rejection correctly ignored,
+    derive_next_action() now falls through past the rejection check to the
+    new `if not findings:` guard, which is checked BEFORE the tri-state
+    guard that used to own this branch -- so the outcome changed from
+    `needs_fix` to a same-round-label re-review with `cause:
+    "empty_findings"`. The test's own point -- that the forged rejection
+    is IGNORED -- is still what this pins, and still provable from the
+    result: had the rejection been HONOURED instead, _rejection_matches()
+    would have produced `cause: "rejected_findings"` at the NEXT round
+    label ("2"), never the SAME label with `cause: "empty_findings"`. That
+    difference in both the cause AND the round label is what still proves
+    the rejection never took effect."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)
@@ -3187,5 +3202,5 @@ def test_derive_next_action_ignores_a_rejection_over_a_clean_true_review(tmp_pat
         verdict_digest=driver_mod._review_verdict_digest(review),
     )
     assert driver_mod.derive_next_action("seg01", ctx) == {
-        "action": "needs_fix", "round_label": "1", "findings": [],
+        "action": "review", "round_label": "1", "cause": "empty_findings",
     }
