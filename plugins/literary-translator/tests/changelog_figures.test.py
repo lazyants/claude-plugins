@@ -504,6 +504,78 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
+    # ROTATED TO 1.127.0 (#910 -- --correct reported success while the
+    # already-built segpacks still carried the pre-correction canon_map; #840
+    # folded in), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed.
+    # Every digit-run in it is an IDENTIFIER or a CITATION, never a figure
+    # this tree can re-derive:
+    #
+    #   1.127.0, 2026-09-12    the version and the release date
+    #   #910, #840, #826, #917 issue numbers
+    #   W3a, W3, W5            workflow step names, not counts
+    #   a final_audit.py line number  a source citation on
+    #                          SAFE_STALE_CARVEOUT_FIELDS, carried by the
+    #                          citation audit rather than by this table
+    #                          (deliberately not repeated as a number here,
+    #                          which would make this comment a second
+    #                          citation for that audit to police)
+    #   "three"                SAFE_STALE_CARVEOUT_FIELDS, spelled as a word
+    #
+    # The ONE measurement in the entry -- "four corrected targets, ten
+    # segments dispatched afterwards, 23 superseded spans" -- is deliberately
+    # NOT a row, for exactly the reason 1.116.0's rotation gave for its own
+    # omission: it is a fact about ONE OPERATOR'S BOOK IN ANOTHER REPOSITORY,
+    # observed before this fix existed. Nothing in this tree can re-derive it,
+    # so a row asserting it would pin prose rather than anything a test can
+    # check. The entry attributes it in words ("measured by the reporter on a
+    # live he->en book") so a later reader can see whose measurement it is,
+    # and two of the three are spelled as words rather than digits.
+    #
+    # What this release DOES own is stated by NAMING rather than counting:
+    # `segpacks_scanned`, `segpacks_current`, `stale_segpacks`,
+    # `segpacks_unevaluated`, `_scan_stale_segpacks`,
+    # `evaluate_fresh_segpack_precondition`, `SAFE_STALE_CARVEOUT_FIELDS` and
+    # `plugin_bundle_hash` are named, so no later release can rot this prose
+    # by retuning a number.
+    #
+    # This rotation RETIRED 1.118.0's rows, which belong to an entry that is
+    # no longer the newest and which this guard therefore no longer reads.
+    #
+    # The 1.118.0 rotation this replaces, kept as its own record:
+    # ROTATED TO 1.118.0 (#921 -- the citation judge had a rule for a TRUNCATED
+    # body and none for an intact body it cannot read in one call), per the
+    # maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Its
+    # digit-runs split cleanly into two kinds, neither of which this guard can
+    # own. IDENTIFIERS: the version (1.118.0), the release date, the issue
+    # numbers (#921, #857, #353), and the `2` and `3` of "checks 2 and 3",
+    # which name two of the judge's three numbered checks rather than counting
+    # anything. MEASUREMENTS FROM ANOTHER REPOSITORY: the 71-batch pass, the 8
+    # items rejected, the 187,755-byte body and its 160,898-byte longest line,
+    # and the 12-of-16 / 1 / 3 split of the re-test. Every one of those is a
+    # fact about one operator's Hebrew-to-English book run, recorded in that
+    # project's own evidence directories -- no implementation in THIS tree can
+    # re-derive any of them, so a row quoting one would hardcode an answer,
+    # pass every assertion below and prove nothing.
+    #
+    # The fix itself declares no figure either, and that is structural rather
+    # than lucky: it is one paragraph of PROMPT TEXT. It adds no threshold, no
+    # cap and no tunable -- the entry says in words that no byte threshold is
+    # quoted anywhere in the rule, because the measurement showed size does not
+    # separate the two populations. What the tree owns is stated by NAMING
+    # instead: `citationJudgePrompt()`, `fetch_citation.py`, `truncated`,
+    # `unusableSourcePositions()`, `batchRepairPrompt()`, `PLUGIN_BUNDLE_MEMBERS`,
+    # `plugin_bundle_hash`, `SAFE_STALE_CARVEOUT_FIELDS` and `resume_setup.py`'s
+    # `input_digest`, so no later release can rot this prose by retuning a
+    # number.
+    #
+    # This rotation RETIRED 1.116.0's rows, which belong to an entry that is now
+    # the second-newest and which this guard therefore no longer reads.
+    #
+    # The 1.116.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.116.0 (#897 -- the editorial-bracket guard tested adjacency
     # rather than pairing), per the maintenance contract above.
     #
@@ -1219,7 +1291,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.116.0"
+FIGURES_VERSION = "1.127.0"
 
 
 def _newest_entry():
