@@ -152,6 +152,27 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
+    # ROTATED TO 1.211.0 (#932 -- whether a canon target may be marked up was
+    # decided at W3 and first reported by the W7 render refusal), and EMPTY ON
+    # PURPOSE: the entry names its subjects by FILE, FUNCTION and FIELD --
+    # `entity_markup_untaggable.py`, `entity_markup_untaggable.json`,
+    # `_entity_markup_config`, `_entity_markup_mode`, `_canon_collision_conflicts`,
+    # `_owners_by_target`, `_link_decision`, `_category_compatible`,
+    # `load_link_groups`, `atomic_write_text`, `translatePrompt`,
+    # `reviewDispatchPrompt`, `fixPrompt` -- and states no `file.ext:NNN`
+    # citation at all. Measured against the entry rather than asserted: a scan
+    # of its slice for that pattern returns zero matches.
+    #
+    # This release DOES insert passages into `SKILL.md` (the W3a untaggable-
+    # target step and the seventh WARN in the W7 block) and into
+    # `references/output-target-adapters/obsidian.md`, which drifts every live
+    # citation aimed below them. Each is re-measured and repointed in this
+    # release -- in the citing file and in the anchor-map key -- and
+    # `tools/citation_audit.py check` is OK on the result.
+    #
+    # The record this replaces, kept as its own (releases between it and this
+    # one that cite no `file.ext:NNN` shipped without rotating this map, which
+    # the guard permits):
     # ROTATED TO 1.210.0 (#916 -- a style-contract edit taken mid-book had no
     # documented way back), and EMPTY ON PURPOSE, for the same reason the 1.115.0 and
     # 1.114.0 records below gave: the entry names its subjects by FILE and SYMBOL
