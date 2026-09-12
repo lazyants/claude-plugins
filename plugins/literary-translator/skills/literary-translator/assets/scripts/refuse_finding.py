@@ -30,9 +30,10 @@ driver reads it and routes on it (derive_next_action()'s rejected_findings
 branch). Rejecting a mixed verdict to set aside one unsound finding would
 discard the sound ones with it, and at the mandatory final round it would
 converge the unit over them. This record is the opposite kind of thing --
-NOTHING READS IT BUT A PROMPT. derive_next_action() never opens this path, no
-gate consults it, and a re-raised finding stays entirely legitimate. It buys
-one thing: the next fix agent can tell a refusal from an oversight.
+NOTHING READS IT BUT TWO PROMPTS: derive_next_action() never opens it, no gate
+consults it, a re-raised finding stays legitimate. It buys this: the next fix
+agent can tell a refusal from an oversight; since #924 the next reviewer, where
+a stored reason identifies its claim, must say why that reason fails.
 
 WHY THE OPERATOR RUNS THIS AND THE FIX TURN DOES NOT. fixPrompt gives the fix
 turn exactly ONE write target ("Change nothing else on disk"), and says in the

@@ -671,25 +671,31 @@ RETIRED = [
         BASELINE_PRE_1_63_0, MASS_TRANSLATE_TEMPLATE,
         "still costs a round and still stands in review.json, which the next "
         "// reviewer reads.",
-        "It does NOT reach the next REVIEWER -- this // function's read list is "
-        "review_TASK.md, style_bible.md, the segpack and the // draft", 1,
-        "the claim that a refused finding reaches the NEXT reviewer. It does not: "
-        "reviewDispatchPrompt's read list is review_TASK.md, style_bible.md, the "
-        "segpack and the draft, render_review_prompt builds the reviewer's prompt "
-        "from that function verbatim, and the canonical review.json is overwritten "
-        "per round. The successor keeps the true half -- the verdict stands and the "
-        "unit does not converge until the round advances, an operator rejection "
-        "lands or the cap fires",
+        "Its VERDICT does NOT reach the next REVIEWER -- nothing puts a prior "
+        "// review in front of this function (corrected in 1.63.0, #526; the 1.40.0 "
+        "// CHANGELOG entry still carries the superseded sentence as the record of "
+        "what // that release claimed).", 1,
+        "the claim that a refused finding reaches the NEXT reviewer. The VERDICT "
+        "does not: reviewDispatchPrompt's read list is review_TASK.md, "
+        "style_bible.md, the segpack and the draft, and nothing puts a prior "
+        "review in front of it. Since #924 the operator's per-finding refusal "
+        "RECORD does reach it, but strictly as CONTEXT, never authority -- a "
+        "separate block below covers that record on its own",
     ),
     (
         BASELINE_PRE_1_63_0, ENGINE_LOOP_DOC,
         "still costs a round and still stands in `review.json`, where the next "
         "reviewer reads it.",
-        "It does **not** reach the next REVIEWER \u2014 `reviewDispatchPrompt`'s read "
-        "list is `review_TASK.md`, `style_bible.md`, the segpack and the draft", 1,
+        "That VERDICT does **not** reach the next REVIEWER \u2014 "
+        "`reviewDispatchPrompt`'s read list is `review_TASK.md`, `style_bible.md`, "
+        "the segpack and the draft, and nothing puts a prior review in front of it "
+        "(corrected in 1.63.0/#526; the 1.40.0 CHANGELOG entry still carries the "
+        "superseded sentence, as the record of what that release claimed).", 1,
         "the same false claim as the row above, in the shipped reference doc rather "
         "than in a template comment. Retired in the same release for the same "
-        "reason, and separately because the two files have independent editors",
+        "reason, and separately because the two files have independent editors. "
+        "The VERDICT still does not reach the reviewer; since #924 the operator's "
+        "refusal RECORD does, strictly as context",
     ),
     # -- 1.77.1 (#825): SKILL.md -----------------------------------------
     # On BASELINE_825, the immediate pre-fix tree -- see that constant for why
