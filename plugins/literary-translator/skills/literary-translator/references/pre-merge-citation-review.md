@@ -326,6 +326,64 @@ wait, and a resumed, never-reviewed fragment is precisely the case this whole
 stage exists for. Prepare sits at that convergence point, so both entry
 points get a snapshot and evidence alike.
 
+#### The oversized-line state (#921)
+
+A third state needed naming because neither of the two rules that already
+cover a body the judge cannot use reaches it. Those two are the
+unusable-source signal above (a body that is not the document the URL
+names) and the truncation rule, which lives in the judge's prompt rather
+than in this document: `citationJudgePrompt()` tells the judge that a check
+it cannot satisfy from the bytes it was given FAILS, and that
+`truncated:true` is the reason to give. Reviewers were each inventing their
+own answer for the third state. The index records `outcome: "fetched"` and
+`truncated: false` — the retrieval boundary handed the judge every byte it
+read, and cut nothing — and yet the page's entire served text is packed
+onto ONE physical line, long enough that a naive read of that line delivers
+far more at once than a judge can weigh in one pass. Measured on one
+71-batch Hebrew-to-English glossary pass: 8 items were rejected for this,
+and the SAME page at the SAME size (`sefaria.org`, 187,755 bytes, its
+longest line 160,898 bytes) was opened and quoted by one judge while
+another declared it beyond its per-read limit. Size does not separate the
+two populations — bodies inside batches that were approved run to the same
+length on one line — so no byte threshold is quoted anywhere in this rule;
+the shape, not the size, is what triggers it.
+
+This is deliberately NOT truncation: `truncated` is present and false, so a
+judge may never give truncation as the reason for declining such an item.
+It is also NOT, by itself, the unusable-source class from #857 above — how a
+server lays its bytes out across lines is a fact about formatting, not about
+content. If the bytes actually read independently show the body to be an
+application shell or a bootstrap page, that still routes to #857's signal
+unchanged, packed onto one line or not; what a judge may never do is infer
+the #857 class from the packing alone.
+
+The disposition is fixed and singular, not a menu: open the evidence file
+the index names and judge the bytes actually handed over. The length of a
+line is never by itself a reason to decline an item, and support that sits
+on an ordinary line is judged on that line however long some other line in
+the same file happens to be. If, having read it, the support for checks 2
+and 3 (about the right entity, supports the claimed form) is not in the
+bytes handed over, the item FAILS exactly as any other unsupported item
+does, and the judge's reason names the packed-single-line state — precisely
+as naming `truncated:true` does elsewhere — so the next attempt is sent
+looking for a smaller or more specific page instead of re-litigating a
+source nobody has shown to be at fault. Both improvisations this rule ends
+are forbidden by name: approving an item because the page probably says so
+somewhere in the part that was not read, and declining to look at all
+because the file is large.
+
+This is a prompt-only change, and it does not close the underlying gap, only
+makes the outcome from it consistent and correctly explained. The judge's
+tool allowlist is still exactly `Read` (`agents/citation-judge.md` — #353
+removed its `Bash` tool on purpose, because every body it reads is authored
+by whoever controls the cited site), so a judge still cannot reach past the
+bytes it was already handed; nothing here promises that every previously
+rejected item now passes. No fetch-side flag was added, `fetch_citation.py`
+is untouched, no new machine-parsed signal token exists, and routing is
+unchanged: `unusableSourcePositions()`, `batchRepairPrompt()`'s cause values,
+and the per-item repair rung all behave exactly as they did before this
+entry.
+
 #### What the approved snapshot guarantees, and the preconditions it rests on
 
 This is the canonical statement of the property, and the only place its

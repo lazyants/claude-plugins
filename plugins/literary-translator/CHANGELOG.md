@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.118.0 — 2026-09-12
+
+**The citation judge had no rule for a citation body that arrived whole but packed onto one
+oversized physical line, so each judge invented its own answer for it (#921).** The index can record
+`outcome: "fetched"` and `truncated: false` — every byte read, nothing cut — while the page's entire
+served text sits on a single line long enough that a naive read delivers far more at once than a
+judge can weigh. Measured on one 71-batch Hebrew-to-English glossary pass: 8 items were rejected for
+this, and the same page at the same size (`sefaria.org`, 187,755 bytes, longest line 160,898 bytes)
+was opened and quoted by one judge and declared beyond its per-read limit by another in the same
+pass. Size does not separate the two populations — bodies inside approved batches ran to the same
+length on one line. On re-test with the English target form included and niqqud folded out of the
+haystack, 12 of 16 same-shaped forms had their only attestation inside that oversized line; 1 sat on
+an ordinary readable line and was declined anyway; 3 were genuinely absent. The cost lands on the
+book's reader, and by two different routes. A rejected item spends a rung on the citation ladder, and
+every regeneration tells the producer to downgrade an item it cannot verify from basis `established`
+to `transliterated` — so the term keeps its rendering but loses its external attestation. If the
+ladder runs out with the batch still rejected, nothing is downgraded at all: the run returns
+`citation-review-exhausted` and the all-or-nothing merge lands no batch. (#921's own report states
+this cost as a downgrade AT exhaustion; the code splits it as described here.)
+
+**`citationJudgePrompt()` now states the state and its one disposition.** It names what the state is
+not — not truncation (the flag is present and false), and not by itself the unusable-source class
+from #857 (how bytes are laid out across lines is formatting, not content; a body that independently
+reads as an application shell still routes to #857 unchanged) — and fixes one disposition: open the
+evidence file and judge the bytes actually handed over. The length of a line is never by itself a
+reason to decline; support on an ordinary line is judged on that line however long some other line
+in the same file is; and if the support for checks 2 and 3 is not in the bytes handed over, the item
+fails with the packed-single-line state given as the reason, which sends the next attempt looking for
+a smaller or more specific page. Both observed improvisations — approving on the assumption the page
+probably says so further in, and declining to look at all because the file is large — are forbidden
+by name.
+
+**What did not change:** the judge's tool allowlist is still exactly `Read` (#353 removed its `Bash`
+tool on purpose — every body it reads is authored by whoever controls the cited site), so a judge
+still cannot reach past the bytes it was handed; this is an accepted limit, not a hidden one, and
+nothing here promises all 12 items now pass. No fetch-side flag was added, `fetch_citation.py` is
+untouched, no new machine-parsed signal token exists, and routing is unchanged:
+`unusableSourcePositions()`, `batchRepairPrompt()`'s cause values, and the per-item repair rung are
+exactly as before.
+
+**Bundle-hash cost.** `glossary-pass-wf.template.js` is a `PLUGIN_BUNDLE_MEMBERS` entry
+(`cache_key.py`), so editing it moves `plugin_bundle_hash`. Re-translation is NOT forced: that field
+is inside `assemble.py`'s `SAFE_STALE_CARVEOUT_FIELDS`, the set of fields that cannot change what the
+prose should say. Resume identity DOES move, unconditionally — `resume_setup.py` folds the
+`runs/.plugin_bundle_hash` marker into its `input_digest`, so a run resumed across this upgrade is
+treated as a different input.
+
 ## 1.116.0 — 2026-09-07
 
 **The §7 editorial-bracket guard tested adjacency, not pairing, so a bracketed aside that opens with
