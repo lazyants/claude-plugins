@@ -335,7 +335,7 @@ def test_explicit_malformed_senses_path_fails(tmp_path):
 # cannot: a consumer coded as `if args.senses_path is None: senses = EMPTY`
 # passes every explicit-path test above while never loading the real
 # default -- exactly how the Workflow invokes this script in production
-# (glossary-pass-wf.template.js:1148-1150/1395/1421 call --check-batch with no
+# (glossary-pass-wf.template.js:1148-1150/1431/1457 call --check-batch with no
 # override). Each test uses `make_durable_root` so the default sidecar is
 # written to a private root, never the shared plugin tree.
 # ---------------------------------------------------------------------------

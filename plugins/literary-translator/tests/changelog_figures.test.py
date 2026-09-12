@@ -503,7 +503,73 @@ def _fetch_retry_delay(position):
     return module._FETCH_RETRY_DELAYS_SEC[position]
 
 
+def _advisory_host_limit():
+    """The glossary driver's own default bound on how many HISTORICAL hosts the
+    repair advisory may name -- read off `repair_advisory_hosts`'s signature,
+    which is the authoritative implementation, rather than regexed or restated.
+    The hosts of the CURRENT repair are deliberately NOT subject to it, so this
+    number bounds run history alone and the 1.157.0 entry says exactly that."""
+    import inspect
+    path = SCRIPTS / "glossary_dispatch_driver.py"
+    spec = importlib.util.spec_from_file_location(
+        f"gdd_advisory_limit_{{abs(hash(str(path)))}}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return inspect.signature(module.repair_advisory_hosts).parameters["limit"].default
+
+
+def _fetch_retry_ladder_span():
+    """The whole wall-clock span of the glossary driver's fetch retry ladder --
+    `sum(_FETCH_RETRY_DELAYS_SEC)` -- read off the module rather than written
+    here, for the same reason `_fetch_retry_delay` reads its members: the tuple
+    IS the ladder, and the 1.157.0 entry quotes that span as the reason the issue's
+    second candidate fix was cut. A release that retunes the ladder moves this
+    number and must move the sentence with it."""
+    path = SCRIPTS / "glossary_dispatch_driver.py"
+    spec = importlib.util.spec_from_file_location(
+        f"gdd_ladder_span_{{abs(hash(str(path)))}}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return int(sum(module._FETCH_RETRY_DELAYS_SEC))
+
+
 FIGURES = [
+    # ROTATED TO 1.157.0 (#919 -- an intermittent host refusal was read as a fact
+    # about the citation, so the repair ladder re-sourced against the same
+    # refusing host on every rung), per the maintenance contract above.
+    #
+    # TWO rows, and the entry was walked completely rather than assumed. Its
+    # other digit-runs fall in three groups, none of which this tree can
+    # re-derive or should pretend to:
+    #
+    #   * IDENTIFIERS -- the version, the release date, the issue numbers
+    #     (#919, #892, #857, #347), the HTTP status codes and families
+    #     (403, 429, 5xx, 4xx), and the IPv6 scope spellings %1, %01 and %001.
+    #     A status code is a name, not a measurement.
+    #   * FIELD MEASUREMENTS FROM A CORPUS OUTSIDE THIS REPOSITORY -- the 41
+    #     batches of one live glossary pass, the six that exhausted, seven of
+    #     ten final-attempt failures, about 47 successful fetches of the same
+    #     host, three of six on a fresh ladder, 13 refusals, nine of 41 batches,
+    #     and a peer book's 58 of 70. Every one is a fact about durable roots on
+    #     an operator's machine. No implementation here can reach them, and a
+    #     derivation that pretended to would be the `lambda: 17` failure this
+    #     file's docstring names. They are the accepted residual, recorded here
+    #     rather than implied away.
+    #   * The ROW COUNT of this rotation itself, which nothing in the entry
+    #     states.
+    #
+    # Both rows below are watched failing by mutating the TREE -- the cap
+    # default and the retry tuple -- never by mutating the row.
+    Figure(
+        "capped at 10 further hosts",
+        10,
+        lambda: _advisory_host_limit(),
+    ),
+    Figure(
+        "roughly 75 seconds",
+        75,
+        _fetch_retry_ladder_span,
+    ),
     # ROTATED TO 1.154.0 (#913 -- nothing compared a declared markup vocabulary
     # against the style contract that has to ask for it), per the maintenance
     # contract above.
@@ -1471,7 +1537,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.154.0"
+FIGURES_VERSION = "1.157.0"
 
 
 def _newest_entry():

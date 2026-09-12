@@ -258,7 +258,13 @@ def test_a_failed_fetch_command_short_circuits(mod):
 
     result = mod.fetch_until_stable(run_fetch, read_pairs, load_established,
                                     sleep=_fake_sleep([]))
-    assert result == {"ok": False, "passes": 1}
+    # Whole-dict equality, still, rather than three key lookups: this is the
+    # ONE place the failed-fetch return shape is pinned, and a key appearing
+    # here that the caller does not expect is exactly what it must catch.
+    # `host_refusals` joined it for #919 -- the tally EARLIER passes
+    # already produced survives a later pass's command failure, and on this
+    # first-pass failure there is nothing to carry, so it is empty.
+    assert result == {"ok": False, "passes": 1, "host_refusals": {}}
     assert calls["run_fetch"] == 1
     assert calls["read_pairs"] == 0
 
