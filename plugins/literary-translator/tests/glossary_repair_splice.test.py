@@ -252,5 +252,273 @@ def test_the_snapshot_is_the_base_even_when_the_attempt_fragment_reordered(mod):
     assert sorted(r["source_form"] for r in correct) == ["A", "B", "C"]
 
 
+# ---------------------------------------------------------------------------
+# 3. #918 -- a body that DID retrieve, and came back identical to another URL's
+#
+# The retrieval boundary records `unusable:duplicate-body` for it. Two things
+# must hold and both fail silently: the row has to reach the repair gate at all
+# (it is a failure, even though nothing failed to retrieve), and the repair
+# prompt has to be told which rows are which, because the set is mixed more
+# often than not and the two facts cannot share one sentence.
+# ---------------------------------------------------------------------------
+
+DUPLICATE_BODY = "unusable:duplicate-body"
+
+
+def test_a_duplicate_body_row_lands_in_repairable_with_no_branch_for_it(mod):
+    """PINNED, NOT SPECIAL-CASED. `classify_outcomes()` gets no new case: the
+    token is not the success value and not a shared-budget one, so the existing
+    catch-all already puts it here. This test exists so that stays true -- a
+    later reader adding an explicit branch, or tightening the catch-all into a
+    list of known failures, would drop the row into nothing at all and the batch
+    would go to a judge with a dead shell as its evidence."""
+    pairs = [{"item_index": 0, "outcome": DUPLICATE_BODY}]
+    out = mod.classify_outcomes(pairs, {0})
+    assert out == {"budget_failed": [], "repairable": [0]}
+
+
+def test_duplicate_body_indices_names_the_rows_the_boundary_flagged(mod):
+    pairs = [{"item_index": 0, "outcome": DUPLICATE_BODY},
+             {"item_index": 1, "outcome": "http_error:404"},
+             {"item_index": 2, "outcome": DUPLICATE_BODY}]
+    assert mod.duplicate_body_indices(pairs, {0, 1, 2}) == [0, 2]
+
+
+def test_duplicate_body_indices_is_empty_when_nothing_repeated(mod):
+    """The empty answer is what keeps the ordinary retrieval-failure path
+    byte-identical to before #918: no duplicates, no cause, no new argument."""
+    pairs = [{"item_index": 0, "outcome": "http_error:404"},
+             {"item_index": 1, "outcome": "refused:content-type-not-allowed"}]
+    assert mod.duplicate_body_indices(pairs, {0, 1}) == []
+
+
+def test_duplicate_body_indices_answers_only_about_the_set_it_was_given(mod):
+    """The second argument is `eligible_indices`, NOT the established set, and
+    the repair gate really does hand it something else: the REPAIRABLE set, by
+    which point `classify_outcomes()` has already applied the established
+    restriction once.
+
+    The two sets give the same answer for this token -- a duplicate-body row is
+    never the success value and never a shared-budget outcome, so it is in
+    `repairable` exactly when it is established -- so no test can tell them
+    apart by their result. What this one pins instead is the property that
+    matters either way: a row outside the set it was handed is not reported."""
+    pairs = [{"item_index": 0, "outcome": DUPLICATE_BODY},
+             {"item_index": 1, "outcome": DUPLICATE_BODY}]
+    assert mod.duplicate_body_indices(pairs, {1}) == [1]
+
+
+def test_the_token_is_matched_whole_and_never_by_prefix(mod):
+    """The outcome vocabulary is closed. A neighbouring `unusable:` token this
+    driver has not been taught is NOT a duplicate body, and must not borrow the
+    paragraph that says the bytes repeated another URL's."""
+    pairs = [{"item_index": 0, "outcome": "unusable:duplicate-body-ish"},
+             {"item_index": 1, "outcome": "unusable:something-else"}]
+    assert mod.duplicate_body_indices(pairs, {0, 1}) == []
+    assert mod.classify_outcomes(pairs, {0, 1})["repairable"] == [0, 1], (
+        "an unknown failure token still has to reach the repair gate -- only "
+        "the CAUSE it is given may differ")
+
+
+# ---------------------------------------------------------------------------
+# 3b. The cause the gate hands the repair prompt
+# ---------------------------------------------------------------------------
+
+class _FakeCtx:
+    """Only the surface `prepare_and_hand_back()` actually touches.
+
+    `build()` answers with the paths this test wrote, so the template is never
+    executed here: what is under test is which cause the gate NAMES, and the
+    prompt those causes render is pinned separately, against the real template,
+    in tests/glossary_dispatch_driver.test.py."""
+
+    def __init__(self, approved, index, durable_root):
+        self.durable_root = durable_root
+        self.subst = {"run_id": "runX"}
+        self._paths = {"approve": "true", "approved": str(approved),
+                       "fetch": "true", "index": str(index), "judge": "JUDGE"}
+
+    def build(self, calls):
+        return {c["key"]: self._paths[c["key"]] for c in calls}
+
+
+def _gate(mod, monkeypatch, tmp_path, rows, outcomes):
+    """Drives the REAL gate over a real snapshot and a real evidence index.
+
+    `outcomes[i]` is the outcome recorded for snapshot position i. Nothing is
+    stubbed but the two shell commands -- the snapshot is read by load_rows()
+    and the index by read_outcome_pairs(), both unmodified."""
+    approved = tmp_path / "approved.json"
+    approved.write_text(json.dumps(rows), encoding="utf-8")
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"entries": [
+        {"item_index": i, "outcome": o} for i, o in enumerate(outcomes)]}),
+        encoding="utf-8")
+    monkeypatch.setattr(mod, "run_template_cmd",
+                        lambda cmd, timeout=600: (0, "", ""))
+    ctx = _FakeCtx(approved, index, tmp_path)
+    return mod.prepare_and_hand_back(ctx, {"index": 0}, 0, tmp_path / "frag.json")
+
+
+def test_every_repairable_row_duplicate_names_the_duplicate_body_cause(mod, monkeypatch, tmp_path):
+    out = _gate(mod, monkeypatch, tmp_path, [row("A"), row("B")],
+                [DUPLICATE_BODY, DUPLICATE_BODY])
+    assert out["state"] == "needs_repair"
+    assert out["failedPositions"] == [0, 1]
+    assert out["cause"] == "duplicate-body"
+    assert out["duplicatePositions"] == [0, 1]
+
+
+def test_no_duplicate_row_leaves_the_result_exactly_as_it_was_before(mod, monkeypatch, tmp_path):
+    """The unchanged path, asserted as a WHOLE dict. run_repair() defaults to
+    "unretrievable" on a missing key, so an extra key here -- a cause of
+    "unretrievable" spelled out, an empty duplicatePositions list -- would be a
+    silent change to the one path #918 promised to leave alone."""
+    out = _gate(mod, monkeypatch, tmp_path, [row("A"), row("B")],
+                ["http_error:404", "fetched"])
+    assert out == {"state": "needs_repair", "batchIndex": 0, "attempt": 0,
+                   "failedPositions": [0],
+                   "snapshotPath": str(tmp_path / "approved.json")}
+
+
+def test_a_mixed_repair_set_still_names_the_duplicate_body_cause(mod, monkeypatch, tmp_path):
+    """WHENEVER ANY, not only when all -- and the measured majority of flagged
+    batches are mixed. One list goes to the gate and one prompt goes to the
+    agent, so an all-or-nothing cause would give most of these batches a
+    paragraph that is false about half their rows. The positions travel with the
+    cause precisely so the prompt can split them."""
+    out = _gate(mod, monkeypatch, tmp_path,
+                [row("A"), row("B"), row("C")],
+                [DUPLICATE_BODY, "http_error:404", "fetched"])
+    assert out["cause"] == "duplicate-body"
+    assert out["failedPositions"] == [0, 1]
+    assert out["duplicatePositions"] == [0]
+
+
+def test_a_duplicate_body_row_never_reaches_a_judge(mod, monkeypatch, tmp_path):
+    """The whole point of catching this at the boundary: a judge spent on a dead
+    application shell rejects for want of content, and that rejection is then
+    read as a content rejection of the fragment."""
+    out = _gate(mod, monkeypatch, tmp_path, [row("A")], [DUPLICATE_BODY])
+    assert out["state"] == "needs_repair"
+    assert "judgePrompt" not in out
+
+
+def test_a_shared_budget_row_still_wins_over_a_duplicate_body_one(mod, monkeypatch, tmp_path):
+    """Step 6a returns first, deliberately and unchanged: a run that ran out of
+    time or bytes is an environment fault, and a hostile server able to spend
+    that budget must not be able to steer which rows get repaired."""
+    out = _gate(mod, monkeypatch, tmp_path, [row("A"), row("B")],
+                [DUPLICATE_BODY, "refused:batch-deadline"])
+    assert out["state"] == "evidence_failed"
+    assert out["reason"] == "fetch-budget-exhausted"
+
+
+# ---------------------------------------------------------------------------
+# 3c. The ordinals run_repair() computes out of those positions
+# ---------------------------------------------------------------------------
+
+class _FakeSandbox:
+    """Stands in for DispatchSandbox, whose confinement probe and broker
+    teardown are tested on their own and are not what this section is about."""
+
+    def __init__(self, label):
+        self.label = label
+        self.path = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def artifact(self, name):
+        return Path("/private/tmp/ltgd.fake") / name
+
+
+class _RecordingCtx:
+    """Records the arguments every builder call is made with."""
+
+    def __init__(self, tmp_path):
+        self.calls = []
+        self.companion = "companion.mjs"
+        self.node_bin = "node"
+        self.effort = "high"
+        self.tmpdir = str(tmp_path)
+        self._paths = {
+            "repairpath": str(tmp_path / "repair.json"),
+            "nextfragment": str(tmp_path / "next.json"),
+            "nextcheck": "true",
+        }
+
+    def build(self, calls):
+        self.calls.extend(calls)
+        out = {}
+        for c in calls:
+            out[c["key"]] = self._paths.get(c["key"], "--background\nPROMPT")
+        return out
+
+    def repair_args(self):
+        for c in self.calls:
+            if c["fn"] == "batchRepairPrompt":
+                return c["args"]
+        raise AssertionError("batchRepairPrompt was never built")
+
+
+def _run_repair(mod, monkeypatch, tmp_path, snapshot_rows, failed_positions,
+                cause, duplicate_positions):
+    snapshot = tmp_path / "snap.json"
+    snapshot.write_text(json.dumps(snapshot_rows), encoding="utf-8")
+    monkeypatch.setattr(mod, "DispatchSandbox", _FakeSandbox)
+    monkeypatch.setattr(mod, "launch_codex", lambda **kw: "job-1")
+    monkeypatch.setattr(mod, "wait_for_artifact", lambda *a, **kw: {
+        "ready": False, "jobStatus": "completed", "jobDetail": None})
+    ctx = _RecordingCtx(tmp_path)
+    out = mod.run_repair(ctx, {"index": 0}, 0, failed_positions, snapshot,
+                         cause=cause, duplicate_positions=duplicate_positions)
+    assert out["state"] == "repair_invalid", out
+    return ctx.repair_args()
+
+
+def test_the_ordinals_index_the_list_the_agent_is_shown_not_the_snapshot(mod, monkeypatch, tmp_path):
+    """THE WHOLE REASON ORDINALS EXIST. `failed_rows` is a SUBSET of the
+    snapshot, in snapshot order, and it is the only list the agent ever sees. A
+    snapshot position handed straight to the prompt would name a row that is not
+    in that list at all -- here, snapshot position 3 is the SECOND item shown."""
+    rows = [row("A"), row("B"), row("C"), row("D")]
+    args = _run_repair(mod, monkeypatch, tmp_path, rows, [1, 3],
+                       "duplicate-body", [3])
+    assert args[4] == "duplicate-body"
+    assert args[6] == [2], "1-based ordinal of snapshot position 3 within [1, 3]"
+
+
+def test_the_ordinals_are_positions_and_never_source_forms(mod, monkeypatch, tmp_path):
+    """A MEASURED HAZARD, not a hypothetical. canon-batch.schema.json permits two
+    queued established rows to carry ONE source_form with different sources, and
+    canon_validate.py's coverage check compares source-form SETS. So a prompt
+    that named the duplicate rows by form would point the agent at a row whose
+    URL retrieved perfectly well -- and at a repair rung, a row named is a row
+    replaced or downgraded."""
+    rows = [row("Twin", source="https://shell.test/a"),
+            row("Twin", source="https://real.test/b")]
+    args = _run_repair(mod, monkeypatch, tmp_path, rows, [0, 1],
+                       "duplicate-body", [0])
+    assert args[6] == [1]
+    assert [r["source"] for r in args[2]] == ["https://shell.test/a",
+                                              "https://real.test/b"], (
+        "both rows share one source_form, so only their POSITION separates them")
+
+
+def test_an_unretrievable_repair_passes_an_empty_ordinal_list(mod, monkeypatch, tmp_path):
+    """The default path carries no duplicate rows, so there is nothing to name.
+    The builder renders byte-identically either way -- pinned as a complete
+    string in tests/glossary_dispatch_driver.test.py -- and this asserts the
+    driver's own half of that: it invents no ordinals it was not given."""
+    args = _run_repair(mod, monkeypatch, tmp_path, [row("A")], [0],
+                       "unretrievable", None)
+    assert args[4] == "unretrievable"
+    assert args[6] == []
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

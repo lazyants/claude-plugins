@@ -534,7 +534,7 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
-    # ROTATED TO 1.172.0 (#910 -- --correct reported success while the
+    # ROTATED TO 1.174.0 (#910 -- --correct reported success while the
     # already-built segpacks still carried the pre-correction canon_map; #840
     # folded in), per the maintenance contract above.
     #
@@ -542,7 +542,7 @@ FIGURES = [
     # Every digit-run in it is an IDENTIFIER or a CITATION, never a figure
     # this tree can re-derive:
     #
-    #   1.172.0, 2026-09-12    the version and the release date
+    #   1.174.0, 2026-09-12    the version and the release date
     #   #910, #840, #826, #917 issue numbers
     #   W3a (twice)            a workflow step name, not a count
     #   "three"                SAFE_STALE_CARVEOUT_FIELDS, spelled as a word
@@ -568,7 +568,7 @@ FIGURES = [
     # `plugin_bundle_hash` are named, so no later release can rot this prose
     # by retuning a number.
     #
-    # This rotation RETIRED 1.170.0's rows, which belong to an entry that is
+    # This rotation RETIRED 1.172.0's rows, which belong to an entry that is
     # no longer the newest and which this guard therefore no longer reads.
     #
     #
@@ -576,6 +576,43 @@ FIGURES = [
     # The 1.154.0 rotation this replaces, kept as its own record:
     #
     # The 1.170.0 rotation this replaces, kept as its own record:
+    #
+    # The 1.172.0 rotation this replaces, kept as its own record:
+    # ROTATED TO 1.172.0 (#918 -- the citation fetcher recorded `fetched` for a
+    # body byte-identical to another URL's in the same batch), per the
+    # maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked digit-run by digit-run rather than
+    # assumed. The entry is unusually number-heavy, and every number in it falls
+    # into one of two classes, neither of which this tree can or should
+    # re-derive:
+    #
+    # IDENTIFIERS -- the version (1.172.0), the release date, the issue numbers
+    # (#918, #857), and the outcome and count names quoted as literals.
+    #
+    # MEASUREMENTS OF A CORPUS OUTSIDE THIS REPOSITORY -- 795 evidence
+    # directories, 5 542 retrieved bodies, 5 495 of them `basis: "established"`,
+    # the three distinct duplicate bodies, 171 established rows that retrieved a
+    # shell, the 143 this catches, the 47 non-established bodies, and the
+    # 643-byte and 30 960-byte page sizes. Every one is a fact about durable
+    # roots on an operator's machine, not about this tree: no implementation
+    # here can reach them, so a row quoting one would sit here permanently
+    # unverifiable, which is the exact shape this guard exists to keep out.
+    #
+    # TWO NUMBERS WERE DELIBERATELY REMOVED from the entry while writing it,
+    # because the tree DOES own them and the contract prefers naming to
+    # counting: the size of `SAFE_STALE_CARVEOUT_FIELDS` (now "a member of"),
+    # and how many fetch-time classifiers `TEXT_DECODABLE_PREFIXES`' comment
+    # records as refused (now unquantified). Either would have rotted the prose
+    # the next time that set or that comment changed.
+    #
+    # The remaining "two or more" is the RULE the entry describes, not a figure
+    # quoted about the tree; "2 MB" restates MAX_BYTES in the units the prose
+    # reads in, as an order of magnitude rather than as the constant.
+    #
+    # This rotation RETIRED the previous entry's two rows, which pin phrases
+    # that occur only in THAT entry -- the one this guard no longer reads.
+    #
     # ROTATED TO 1.157.0 (#919 -- an intermittent host refusal was read as a fact
     # about the citation, so the repair ladder re-sourced against the same
     # refusing host on every rung), per the maintenance contract above.
@@ -607,7 +644,7 @@ FIGURES = [
     #     Figure("capped at 10 further hosts", 10, lambda: _advisory_host_limit()),
     #     Figure("roughly 75 seconds", 75, _fetch_retry_ladder_span),
     # They measured phrases in THAT entry, and this guard only ever reads the
-    # NEWEST one -- left live they are checked against the 1.172.0 entry, where
+    # NEWEST one -- left live they are checked against the 1.174.0 entry, where
     # neither phrase occurs, which is a red that says nothing about either
     # release. Both were correct for their own entry and are recorded here.
     # ROTATED TO 1.162.0 (#917 -- a name the canon has frozen is no longer
@@ -871,7 +908,7 @@ FIGURES = [
     # kept below, unchanged.
     # 1.123.0's own row, RETIRED here rather than carried: it measured the
     # phrase "default 2" in THAT entry, and this guard only ever reads the
-    # NEWEST one. Left live it would be checked against the 1.172.0 entry,
+    # NEWEST one. Left live it would be checked against the 1.174.0 entry,
     # where the phrase does not occur -- a red that says nothing about
     # either release. The row itself was correct for its own entry and is
     # recorded in the 1.123.0 block below.
@@ -1629,7 +1666,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.172.0"
+FIGURES_VERSION = "1.174.0"
 
 
 def _newest_entry():

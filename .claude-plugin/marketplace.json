@@ -57,7 +57,7 @@
     {
       "name": "obsidian-project-vault",
       "source": "./plugins/obsidian-project-vault",
-      "description": "Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki \u2014 a persistent, compounding knowledge base maintained by Claude Code.",
+      "description": "Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code.",
       "version": "1.0.0",
       "author": {
         "name": "Lazy Ants"
@@ -77,7 +77,7 @@
     {
       "name": "enduser-handbook",
       "source": "./plugins/enduser-handbook",
-      "description": "Generate and maintain a Di\u00e1taxis-structured end-user handbook for any project from a per-project profile, with live screenshot capture and ongoing completeness audits; ships Obsidian-vault and static-Markdown publish adapters.",
+      "description": "Generate and maintain a Diátaxis-structured end-user handbook for any project from a per-project profile, with live screenshot capture and ongoing completeness audits; ships Obsidian-vault and static-Markdown publish adapters.",
       "version": "1.18.3",
       "author": {
         "name": "Lazy Ants"
@@ -97,7 +97,7 @@
     {
       "name": "cc-usage-coach",
       "source": "./plugins/cc-usage-coach",
-      "description": "Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer \u2014 computed entirely from your local session logs. Python measures; Claude concludes.",
+      "description": "Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes.",
       "version": "1.0.1",
       "author": {
         "name": "Lazy Ants"
@@ -116,7 +116,7 @@
       "name": "literary-translator",
       "source": "./plugins/literary-translator",
       "description": "High-fidelity literary book translation from a Gutenberg EPUB source (expert-mode `custom` extractor also supported), run to convergence through a codex-translate -> false-green gate -> codex-review -> Claude-fix loop over a frozen name/realia canon, with configurable verse policy, ledger resumability, and optional assembly into a rendered Obsidian glossary-wiki.",
-      "version": "1.172.0",
+      "version": "1.174.0",
       "author": {
         "name": "Lazy Ants"
       },

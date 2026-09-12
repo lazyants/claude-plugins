@@ -1620,20 +1620,6 @@
       "claim": "`blocked` (HUMAN_ESCALATION_STATUSES, select_segments.py:1172) or `converged` (WAS_CONVERGED_STATUSES, :1178) -- `blocked` in particular is a THIRD terminal shape alongside the more familiar",
       "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/glossary_dispatch_driver.py\", \"fetch_citation.py:833-847\", 0]": {
-      "anchors": [
-        "host = host.lower()",
-        "host = host.rstrip(\".\")"
-      ],
-      "claim": "3. the trailing-dot-then-lowercase normalisation matches fetch_citation.py's own (fetch_citation.py:833-847), so `https://example.com./x` counts under the same host that script fetched. (#919 -- _safe_host must fold a host exactly as the fetcher did, or one host's refusal tally splits in two.)"
-    },
-    "[\"plugins/literary-translator/tests/glossary_host_refusal_advisory.test.py\", \"fetch_citation.py:833-847\", 0]": {
-      "anchors": [
-        "host = host.lower()",
-        "host = host.rstrip(\".\")"
-      ],
-      "claim": "fetch_citation.py:833-847 strips a trailing dot before comparing hosts; counting the un-stripped form would silently split one host's tally in two."
-    },
     "[\"plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md\", \"canon_validate.py:2620-2651\", 0]": {
       "anchors": [
         "def _content_view",
@@ -1688,6 +1674,20 @@
         "if len(segpack_mismatches) == 1 and \"error\" in segpack_mismatches[0]:"
       ],
       "claim": "Read the producer's error sentinel exactly as its ONE other caller does (select_segments.py:3050). An exact-key-set test is stricter and degrades worse: an error dict that ever gained a second key would fall through to the mismatch arm and raise KeyError."
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/glossary_dispatch_driver.py\", \"fetch_citation.py:835-849\", 0]": {
+      "anchors": [
+        "host = host.lower()",
+        "host = host.rstrip(\".\")"
+      ],
+      "claim": "3. the trailing-dot-then-lowercase normalisation matches fetch_citation.py's own (fetch_citation.py:835-849), so `https://example.com./x` counts under the same host that script fetched. (#919 -- _safe_host must fold a host exactly as the fetcher did, or one host's refusal tally splits in two.)"
+    },
+    "[\"plugins/literary-translator/tests/glossary_host_refusal_advisory.test.py\", \"fetch_citation.py:835-849\", 0]": {
+      "anchors": [
+        "host = host.lower()",
+        "host = host.rstrip(\".\")"
+      ],
+      "claim": "fetch_citation.py:835-849 strips a trailing dot before comparing hosts; counting the un-stripped form would silently split one host's tally in two."
     }
   },
   "exemptions": {

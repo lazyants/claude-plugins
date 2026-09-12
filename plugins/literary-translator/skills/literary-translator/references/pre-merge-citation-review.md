@@ -101,7 +101,9 @@ records that item's outcome as `fetched` and the body is the reference page
 itself — not a 404, a parked domain, a content-hiding login wall, or plainly
 a different page than the URL promised; an outcome of `refused:<reason>` or
 `http_error:<code>` FAILS this check, because nothing was retrieved and so
-nothing supports the claim); it is ABOUT THE RIGHT ENTITY (not merely a
+nothing supports the claim, and so does `unusable:duplicate-body`, where
+something was retrieved but the boundary itself established it is not this
+URL's own page — see the next section); it is ABOUT THE RIGHT ENTITY (not merely a
 same-named bearer); and it SUPPORTS THE CLAIMED FORM — the page actually
 attests the `canonical_target_form` as an established target-language
 rendering. That third one is the common failure: a page proving only that
@@ -125,10 +127,11 @@ The per-batch verdict above still applies exactly as stated — the judge
 still rejects the whole fragment, and there is still no partial approval.
 What changed is what regeneration does with that rejection.
 `fetch_citation.py` records `outcome: "fetched"` for any response it can
-decode, with no test of whether the decoded body carries any of the cited
-content; a URL that serves a JavaScript application shell, a bootstrap page,
-or any other body naming none of the reference it claims to be therefore
-resolves and reaches the judge exactly as a genuine page would. Before this
+decode, and — apart from the one structural case the next section describes —
+makes no test of whether the decoded body carries any of the cited content; a
+URL that serves a JavaScript application shell, a bootstrap page, or any other
+body naming none of the reference it claims to be therefore resolves and
+reaches the judge exactly as a genuine page would. Before this
 signal, the judge's only recourse was the ordinary reject: the whole
 fragment regenerated, and the resolver — reading only the judge's prose —
 would as often as not re-pick the same dead host.
@@ -179,9 +182,9 @@ The class this line marks is narrow and deliberately excludes everything
 that already has its own handling: it is for a `fetched` item whose body is
 not the document the URL names at all — not for a real page that simply
 fails to attest the claimed form, is about a different bearer, or is a
-404/parked/login-wall page, and not for a `refused:`/`http_error:` item,
-where nothing was retrieved and `classify_outcomes()` already routes the
-row. If any rejected item in the batch fails for a different reason, the
+404/parked/login-wall page, and not for a `refused:`/`http_error:` or
+`unusable:duplicate-body` item, which `classify_outcomes()` already routes
+without a judge. If any rejected item in the batch fails for a different reason, the
 judge omits the line: a mixed batch still needs the whole fragment
 regenerated, because a per-item repair would leave the genuinely wrong rows
 in place.
@@ -383,6 +386,53 @@ is untouched, no new machine-parsed signal token exists, and routing is
 unchanged: `unusableSourcePositions()`, `batchRepairPrompt()`'s cause values,
 and the per-item repair rung all behave exactly as they did before this
 entry.
+
+#### The duplicate-body outcome (#918)
+
+The unusable-source signal (#857) is the JUDGE's, and it costs a judge
+dispatch to raise. One
+narrow slice of the same class the retrieval boundary can settle on its own,
+without reading a single word of any body: when two citations in ONE batch
+name DIFFERENT URLs and the bytes that come back are IDENTICAL, neither body
+can be the page its own URL names. A site that serves one application shell
+for every address produces exactly that, and nothing else observed in this
+project's real evidence ever has.
+
+`fetch_citation.py` therefore records `outcome: "unusable:duplicate-body"` for
+every member of such a group, in place of `fetched`, and adds an `unusable`
+count beside `fetched`/`refused`/`http_error`. Two citations naming the SAME
+URL are untouched — identical bodies there are expected and prove nothing.
+The evidence file, `bytes`, `truncated` and `content_type` all stay on the
+entry: the body really was retrieved, and the record says so.
+
+This is a STRUCTURAL observation, not a content classifier. Nothing reads what
+a body says; the fact recorded is that two responses this batch actually
+received are the same bytes. That distinction is why it is allowed here at all
+— `TEXT_DECODABLE_PREFIXES`' comment in that file records two fetch-time
+classifiers of what a body IS, both refused in review, with the reason that a
+classifier is wrong in both directions.
+
+WHAT IT BUYS. The token is not `fetched` and is not a shared-budget outcome,
+so `classify_outcomes()` places it in `repairable` and the driver reaches its
+per-item repair rung with NO judge dispatched and no whole-fragment
+regeneration. The repair prompt is told the truth about those rows by a third
+`cause`, `duplicate-body`, which names which items in the list are the
+duplicates: their URL did retrieve, and the boundary saw another URL in the
+same batch return the same bytes. It deliberately does NOT reuse the
+`unusable-source` cause, whose paragraph vouches that an independent reviewer
+read the body — on this path nobody did.
+
+WHAT IT DOES NOT COVER, measured rather than estimated. Over 795 evidence
+directories from this project's real runs — 5 542 retrieved bodies, 5 495 of
+them `basis: "established"` — exactly three distinct bodies ever appeared
+under two or more different URLs inside one directory, and all three were dead
+application shells, with no real page among them. 171 established rows had
+retrieved one of those shells; this catches 143 of them. The other 28 sat
+ALONE in their evidence directory, where byte identity has nothing to compare
+against, and the judge catches them exactly as it did before. A batch that
+also hit the shared time or byte budget keeps today's behaviour as well: the
+budget branch runs first, by design, because a fresh URL cannot fix a run that
+ran out of budget.
 
 #### What the approved snapshot guarantees, and the preconditions it rests on
 
