@@ -64,8 +64,9 @@ currency" below for why that matters.
 ```
 LT=<the literary-translator skill directory>   # holds assets/schemas/registry/
 python3 scripts/person_registry.py --prep   --plugin-root "$LT"
-#           -> registry/registry_input.json
-#   Pass A: one call over the whole cast, per registry_TASK.md
+#           -> registry/registry_input.json (the full, digest-bound prep)
+#           -> registry/registry_cast.json  (what Pass A actually reads)
+#   Pass A: one call over the cast, per registry_TASK.md
 #           -> registry/registry_verdicts.json
 python3 scripts/person_registry.py --claims --plugin-root "$LT"
 #           -> registry/registry_claims.json
@@ -115,6 +116,35 @@ genealogy registry exists for. When a form has senses, only its per-sense units
 are emitted; a coexisting `review_queue` row survives as a refusal-only unit
 carrying all its notes, because the project's own record that a third referent
 is unresolved must not vanish behind a two-sense resolution.
+
+**`--prep` writes a second document, `registry/registry_cast.json`, and that
+is what Pass A actually reads (#923).** It is a pure projection of the prep:
+`schema_version`, both digests, `counts` and `input_sha256` copied verbatim, a
+`cast_units` count added, `excluded_by_canon_declaration` left out (only
+`--build` reads it), and `units[]` cut down to the
+`canon_entry` and `canon_senses` populations only, each without `mentions` and
+without the now-constant `refusal_only`. Two things are dropped, each for a
+reason that has nothing to do with model capacity. `mentions` is `--build`'s
+own concern — it is copied straight into `person_registry.json` and no pass
+ever reads it to make a judgement. And a `canon_review_queue` unit's verdict
+is not Pass A's to make: the build gate already permits only one place for it,
+`refusals[]`, so showing it to the model would spend input restating a
+decision the project already recorded. Measured across the three registries
+completed on real books, that restatement is pure boilerplate: 775/775,
+166/166 and 551/551 review-queue units carried one identical refusal reason
+each. `--build` now writes that row itself, from the project's own note, for
+every review-queue unit the verdict omits.
+
+Splitting the document adds no digest and no new gate, because the cast needs
+neither. A stale cast still carries an old `input_sha256`, so gate P2 refuses
+the verdict exactly as it would for a stale `registry_input.json`. A cast
+edited to hide a unit still trips P3's coverage check. And no affirmed
+person, relation, place, date or printed surface reaches the artifact without
+Pass B re-adjudicating it from evidence `--claims` projects out of
+`registry_input.json` — never out of the cast, which `--claims` does not
+read. What an edited cast CAN change is a Pass A refusal and its reason,
+which the registry already labels `refused_by: pass_a` — the accepted
+refusal sink described below.
 
 Each unit's contexts are **one per physical occurrence, paired with the
 delivered text of the same container**. Two occurrences in one block arrive as
@@ -173,7 +203,7 @@ unchecked assertion.
 | P2 | a verdict whose `input_sha256` is not the prep on disk |
 | P2a | a NodeStream whose bytes are not the ones `--prep` read |
 | P2b | a `manifest.json` whose bytes are not the ones `--prep` read |
-| P3 | a unit claimed by nobody, or by two people; a refusal-only unit anywhere but `refusals[]` |
+| P3 | a cast unit missing from, or repeated across, the three buckets; a review-queue unit anywhere but `refusals[]` |
 | P4 | a unit the prep input does not contain |
 | P5 | a quote absent from the container its locator names; a surface containing an assembly sentinel |
 | B1 | an adjudication set bound to a different prep, verdict or claims document |
@@ -418,30 +448,49 @@ quote must stay verbatim in the JSON to remain checkable against its container.
   its *provenance* is source-side.
 - **One project, one registry.** No cross-volume or series consolidation.
 - **Both input caps are blunt.** `--max-input-chars` refuses a silently huge
-  prep document and `--max-claims-chars` a silently huge claims one; neither is
-  a model-capacity check, because the plugin does not know the dispatched
-  model's context window. The second is not the first restated: the projection
-  re-embeds a person's evidence into every one of that person's claims, so the
-  ratio grows with claims per person — a prep well under its own cap can
-  project a document no adjudicator will read whole, and a truncated Pass B is
-  an unchecked Pass A. Both measure the bytes that are WRITTEN and then write
-  exactly those — the compact digest serialization is smaller than the file, so
-  a guard measuring it is a guard on bytes nobody reads.
+  cast document (`registry_cast.json`, what Pass A actually reads — #923) and
+  `--max-claims-chars` a silently huge claims one; neither is a model-capacity
+  check, because the plugin does not know the dispatched model's context
+  window. The second is not the first restated: the projection re-embeds a
+  person's evidence into every one of that person's claims, so the ratio
+  grows with claims per person — a cast well under its own cap can still
+  project a claims document no adjudicator will read whole, and a truncated
+  Pass B is an unchecked Pass A. Both measure the bytes that are WRITTEN and
+  then write exactly those — the compact digest serialization is smaller than
+  the file, so a guard measuring it is a guard on bytes nobody reads.
 - **Neither cap is a knob problem, and the refusals no longer pretend it is**
   (#896). `--max-contexts-per-form`/`--context-chars` reach the per-unit
   `contexts` blocks and, apart from the truncation flags that record the
-  trimming and their aggregate count, nothing else: a review-queue unit has
-  none at all, a
-  homonym-split unit's source context is cut from stored evidence offsets, a
-  matched window always keeps its own occurrence, and the `mentions` list and
-  the canon `note` are outside both. So each refusal now measures instead of
-  advising — `--prep` reports how many of the emitted bytes those blocks
-  occupy, and `--claims` re-projects the same verdicts at
-  `--max-contexts-per-form 1 --context-chars 1` and reports what that would
-  actually emit. Neither number is offered as a minimum: at `max_windows=1` a
-  `printed_surface` question takes its longer, truncated branch, so a middling
-  setting can emit fewer bytes than the aggressive one. At `--claims` the knobs
-  re-cut only the target-occurrence windows anyway — the source contexts are
-  copied from `registry_input.json`, so shrinking them means re-running
-  `--prep`, whose moved `input_sha256` sends gate P2 to refuse the existing
-  verdicts and costs a Pass A re-dispatch.
+  trimming and their aggregate count, nothing else: a matched window always
+  keeps its own occurrence, and a homonym-split unit's source context is cut
+  from stored evidence offsets. The canon `note` and each unit's own fields
+  are outside both knobs. So each refusal now measures instead of advising —
+  `--prep` reports how many of the cast's emitted bytes those blocks occupy,
+  and `--claims` re-projects the same verdicts at `--max-contexts-per-form 1
+  --context-chars 1` and reports what that would actually emit. Neither
+  number is offered as a minimum: at `max_windows=1` a `printed_surface`
+  question takes its longer, truncated branch, so a middling setting can emit
+  fewer bytes than the aggressive one. At `--claims` the knobs re-cut only the
+  target-occurrence windows anyway — the source contexts are copied from
+  `registry_input.json`, so shrinking them means re-running `--prep`, whose
+  moved `input_sha256` sends gate P2 to refuse the existing verdicts and
+  costs a Pass A re-dispatch.
+- **A large canon is over the default cap by construction (#923).** On
+  `alim-letrufa` (1,066 canon entries, 1,754 review-queue rows, 197,842
+  words), today's `registry_input.json` is 5,749,601 bytes at the default
+  knobs (8 contexts / 400 chars); `registry_cast.json` is 3,900,585 — still
+  9.75× the 400 000-char default `--max-input-chars`. Tightening the knobs
+  does not close the gap: `registry_input.json` is 3,189,216 bytes at
+  `1/150`, `registry_cast.json` 1,340,200 (of which `contexts` is 740,266). A
+  1,066-unit cast at one 150-character context pair per unit cannot go below
+  roughly 1 MB, so the route on a book this size is to raise the cap
+  deliberately — to roughly 1.4–1.9 MB — and dispatch to a model whose
+  context window holds it, at 1–2 contexts per unit; Pass A then returns
+  1,066 verdict rows instead of 2,820. The issue's own proposed remedy,
+  `--max-mentions-per-unit` plus `--drop-canon-note`, is refuted by the same
+  measurement that motivated it: those two fields are 873 KB of the 2.45 MB
+  the #896 knobs cannot reach, and the note is not dead weight — it is
+  evidence the model reads (chayey-moharan's shard findings cite it
+  verbatim). Sharding Pass A into multiple calls is not offered either: a
+  cross-shard merge step would replace the single-verdict design this pass
+  is built on.

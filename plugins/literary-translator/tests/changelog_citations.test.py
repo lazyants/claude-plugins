@@ -152,6 +152,23 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
+    # ROTATED TO 1.125.0 (#923 -- `person_registry.py --prep` was unreachable
+    # on a large canon), and EMPTY ON PURPOSE: the entry names its subjects by
+    # FILE, FLAG, GATE and SYMBOL -- `registry_cast.json`,
+    # `registry_input.json`, `--max-input-chars`, `--max-contexts-per-form`,
+    # `--context-chars`, P2, P3, `refusal_only_misplaced`, `refused_by` -- and
+    # states no `file.ext:NNN` citation at all. Measured against the entry
+    # rather than asserted: a scan of its slice for that pattern returns zero
+    # matches.
+    #
+    # This release DOES move lines in `person_registry.py` (a projection
+    # function after `cmd_prep`, two clauses in gate P3, a synthesis loop in
+    # `cmd_build`), which drifts the live citations `canon-and-glossary.md`
+    # and `canon_dismiss_queued.test.py` aim at that file. Each is re-measured
+    # and repointed in this release, and `tools/citation_audit.py check` is OK
+    # on the result.
+    #
+    # The 1.115.0 record this replaces, kept as its own:
     # ROTATED TO 1.115.0 (#892 -- a citation-exhausted glossary batch had no
     # transition out), and EMPTY ON PURPOSE, for the reason the records below
     # give: the entry names its subjects by FILE and SYMBOL rather than by line

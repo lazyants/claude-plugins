@@ -737,8 +737,8 @@ Two turns can still reach one, both deliberately: a FIX turn is told to settle
 an unresolvable canon claim against `canon.json` itself
 (`mass-translate-wf.template.js`'s fix prompt), so it may read a note in
 passing though nothing asks it to act on one; and the opt-in W9r registry prep
-projects `review_queue` notes into its own model input
-(`person_registry.py --prep`). A queued note reaches nothing else —
+carries `review_queue` notes in `registry_input.json` for the refusal rows
+`--build` writes (not in the cast the model reads; #923). Nothing else reads one —
 `glossary_batch_plan.py`'s selection excludes a queued `source_form` from every
 later pass unless `--retry` names it. **#653:** a DISMISSED name's note is
 different again — the row it lived on is gone from `review_queue[]`, and
@@ -1009,7 +1009,7 @@ that a human adjudicated it.
   argued away: `person_registry.py` turns every DICT-shaped `review_queue[]`
   row into a refusal-only unit (`person_registry.py:899-933`,
   `refusal_only: True`) and emits it in `refusals[]`
-  (`person_registry.py:2035-2045`, `refused_by: "canon_review_queue"`); it
+  (`person_registry.py:2086-2124`, `refused_by: "canon_review_queue"`); it
   never reads `corrections[]`. So a dismissed name stops appearing as a
   `canon_review_queue` refusal in a later W9r registry run — that is the
   intended meaning of the decision, not a side effect to suppress: the

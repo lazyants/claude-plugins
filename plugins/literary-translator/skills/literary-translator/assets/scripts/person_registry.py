@@ -61,7 +61,7 @@ that.
 ## Three modes, two model calls between them
 
     python3 person_registry.py --prep    [--durable-root PATH] [--plugin-root PATH]
-    #   -> registry/registry_input.json      (the whole cast, with evidence)
+    #   -> registry/registry_input.json + registry_cast.json (the cast Pass A reads)
     #   ... Pass A: one model call over the whole cast
     #   -> registry/registry_verdicts.json   (written by the model)
     python3 person_registry.py --claims  [...]
@@ -961,39 +961,84 @@ def cmd_prep(args, durable_root: Path, schema_dir: Path) -> dict:
 
     text = emitted_json_text(doc)
     size = len(text.encode("utf-8"))
-    if size > args.max_input_chars:
-        # What the two knobs actually weigh here, measured on the document just
+
+    # Pass A never reads `doc` -- it reads the cast (`cast_document`, below).
+    # The cap is checked against `cast_size`, not `size`: measuring the full
+    # prep document is what made this guard unreachable on a large canon
+    # (#923) while reporting a size nobody ever dispatches.
+    cast = cast_document(doc)
+    cast_text = emitted_json_text(cast)
+    cast_size = len(cast_text.encode("utf-8"))
+    if cast_size > args.max_input_chars:
+        # What the two knobs actually weigh here, measured on the CAST just
         # built rather than argued: the same emission with every `contexts`
         # list empty, subtracted. Reported as composition and nothing more --
         # it is NOT an amount either knob can recover, because a window never
-        # shrinks past its own occurrence and two of the three populations are
-        # outside their reach entirely. #896: the old advice named both knobs
-        # as the remedy, so an operator thinned the evidence each unit carries,
-        # was refused again, and had traded quality for nothing.
-        without_contexts = dict(doc)
-        without_contexts["units"] = [{**u, "contexts": []} for u in doc["units"]]
-        context_bytes = size - len(emitted_json_text(without_contexts).encode("utf-8"))
+        # shrinks past its own occurrence. #896's old advice named both knobs
+        # as the remedy on a document that also carried the mentions lists
+        # and the review-queue units the cast no longer does (#923) -- an
+        # operator thinned the evidence each unit carries, was refused again,
+        # and had traded quality for nothing.
+        without_contexts = dict(cast)
+        without_contexts["units"] = [{**u, "contexts": []} for u in cast["units"]]
+        context_bytes = cast_size - len(emitted_json_text(without_contexts).encode("utf-8"))
         raise RegistryError(
             "input_too_large",
-            f"registry_input.json would be {size} bytes, over --max-input-chars {args.max_input_chars}; "
-            f"{context_bytes} of those bytes are the per-unit contexts blocks -- the only part of "
-            f"this document --max-contexts-per-form/--context-chars trim, apart from the "
-            f"truncation flags that record the trimming and their aggregate count -- and they do "
-            f"not reach all of that "
-            f"either: a matched window always keeps its own occurrence, a homonym-split unit's "
-            f"source context is cut from stored evidence offsets, and a review-queue unit carries "
-            f"no contexts at all. The mentions list and the canon note are outside both knobs. "
-            f"Raise the cap deliberately -- this pass never truncates its own input silently",
+            f"registry_cast.json would be {cast_size} bytes, over --max-input-chars "
+            f"{args.max_input_chars}; {context_bytes} of those bytes are the per-unit contexts "
+            f"blocks -- the only part of this document --max-contexts-per-form/--context-chars "
+            f"trim, apart from the truncation flags that record the trimming and their aggregate "
+            f"count -- and they do not reach all of that either: a matched window always keeps "
+            f"its own occurrence, and a homonym-split unit's source context is cut from stored "
+            f"evidence offsets. The canon note and each unit's own fields are outside both knobs; "
+            f"the mentions lists and the review-queue units are not in this document at all "
+            f"(registry_input.json carries them for --build). Raise the cap deliberately -- this "
+            f"pass never truncates its own input silently",
             code=2,
         )
 
     write_text(durable_root / "registry" / "registry_input.json", text)
+    write_text(durable_root / "registry" / "registry_cast.json", cast_text)
     return {
         "success": True,
         "mode": "prep",
         "input_sha256": digest,
         "bytes": size,
+        "cast_bytes": cast_size,
+        "cast_units": cast["cast_units"],
         **body["counts"],
+    }
+
+
+def cast_document(doc: dict) -> dict:
+    """The document Pass A actually reads, projected out of the full prep.
+
+    Two things are dropped because no model call needs them: `mentions`
+    is never read by a model at all -- `--build` copies it out of
+    `registry_input.json` on disk when it computes occurrence counts, never
+    out of a verdict -- and a `refusal_only` unit's only legal verdict is
+    already dictated by gate `refusal_only_misplaced` (it may only appear in
+    `refusals[]`), so showing Pass A the unit at all only buys a boilerplate
+    refusal it was never free to withhold. Measured on the book that made
+    `--prep` unreachable (#923): 1,754 review-queue units and 4,285 mentions
+    lists were 1.3 MB + 419 KB of a 5.75 MB document, all of it spent on a
+    question the script had already answered. `--claims` still projects its
+    evidence from `registry_input.json`, never from this file, so nothing
+    here can widen what a person is affirmed on.
+    """
+    units = [
+        {k: v for k, v in unit.items() if k not in ("mentions", "refusal_only")}
+        for unit in doc["units"]
+        if not unit.get("refusal_only")
+    ]
+    return {
+        "schema_version": doc["schema_version"],
+        "nodestream_sha256": doc["nodestream_sha256"],
+        "manifest_sha256": doc["manifest_sha256"],
+        "units": units,
+        "cast_units": len(units),
+        "counts": doc["counts"],
+        "input_sha256": doc["input_sha256"],
     }
 
 
@@ -1066,6 +1111,13 @@ def load_prep(durable_root: Path):
     return doc, recomputed
 
 
+def unit_sort_key(k):
+    """Sort key for a unit key. `sense_id` is a string or None, so a bare sort
+    over the tuples compares str with None and raises. The tag keeps a total
+    order without inventing one between the two kinds."""
+    return (k[0], k[1] is not None, k[1] or "")
+
+
 def run_pre_claims_gates(prep: dict, prep_digest: str, verdicts: dict, manifest: dict) -> dict:
     """P1 is the caller's (schema validation). P2-P5 here.
 
@@ -1103,12 +1155,6 @@ def run_pre_claims_gates(prep: dict, prep_digest: str, verdicts: dict, manifest:
 
     # --- P4 no invented units (checked before coverage is reported, so an
     # invented unit is never mistaken for a duplicate) -------------------
-    # `sense_id` is a string or None, so a bare sort over the tuples compares
-    # str with None and raises. The tag keeps a total order without inventing
-    # one between the two kinds.
-    def unit_sort_key(k):
-        return (k[0], k[1] is not None, k[1] or "")
-
     invented = sorted((k for k in seen if k not in by_key), key=unit_sort_key)
     if invented:
         raise RegistryError(
@@ -1117,7 +1163,12 @@ def run_pre_claims_gates(prep: dict, prep_digest: str, verdicts: dict, manifest:
             + ", ".join(f"{f!r}/{s!r}" for f, s in invented[:10]),
         )
 
-    missing = sorted((k for k in by_key if k not in seen), key=unit_sort_key)
+    # A refusal_only unit is never in the cast Pass A read (#923's
+    # `cast_document` drops it), so its absence from `seen` is not "never
+    # claimed" -- it is the ONLY legal shape for that unit now. `--build`
+    # synthesises its refusal row unconditionally, whether or not the
+    # verdict happened to list it.
+    missing = sorted((k for k in by_key if k not in seen and k not in refusal_only), key=unit_sort_key)
     duplicated = sorted((k for k, v in seen.items() if len(v) > 1), key=unit_sort_key)
     if missing or duplicated:
         parts = []
@@ -1127,11 +1178,13 @@ def run_pre_claims_gates(prep: dict, prep_digest: str, verdicts: dict, manifest:
             parts.append("claimed more than once: " + ", ".join(f"{f!r}/{s!r}" for f, s in duplicated[:10]))
         raise RegistryError(
             "coverage_violation",
-            "every prep unit must appear exactly once across people[].units, non_person_forms[] and "
+            "every registry_cast.json unit must appear exactly once across people[].units, non_person_forms[] and "
             "refusals[] -- " + "; ".join(parts),
         )
 
-    misplaced = sorted(k for k in refusal_only if seen[k][0][0] != "refusals")
+    # Only a refusal_only key the verdict DID mention can be misplaced -- one
+    # it never saw is not in `seen` at all, and indexing it would KeyError.
+    misplaced = sorted(k for k in refusal_only if k in seen and seen[k][0][0] != "refusals")
     if misplaced:
         raise RegistryError(
             "refusal_only_misplaced",
@@ -2031,16 +2084,40 @@ def cmd_build(args, durable_root: Path, schema_dir: Path) -> dict:
                 "split, a fold-key collision, or a form the occurrence engine does not index"
             )
 
-    # Anything Pass A refused, plus every review_queue row, joins refusals[].
+    # Anything Pass A refused, plus every LISTED review_queue row, joins
+    # refusals[]. A refusal_only unit is tracked separately (`refusal_only_listed`)
+    # so the loop below can tell which ones the verdict never mentioned.
+    refusal_only_listed = set()
     for row in verdicts.get("refusals") or []:
         key = unit_key(row["unit"]["source_form"], row["unit"]["sense_id"])
         prep_unit = by_key[key]
+        if prep_unit.get("refusal_only"):
+            refusal_only_listed.add(key)
         refusals.append(
             {
                 "unit": unit_obj(key),
                 "reason": row["reason"] if not prep_unit.get("refusal_only") else
                 (prep_unit.get("note") or row["reason"]),
                 "refused_by": "canon_review_queue" if prep_unit.get("refusal_only") else "pass_a",
+            }
+        )
+
+    # #923: Pass A's cast never shows it a review-queue unit, so P3 no longer
+    # requires the verdict to list one. Synthesise its refusal row here so
+    # the registry comes out identical whether or not the verdict echoed
+    # it -- a note-bearing unit gets its note, exactly as the branch above;
+    # canon permits an empty note (prep filters only falsey ones out of the
+    # coalesce), and an empty string is not a reason a genealogy reader
+    # should see, so it gets a fixed sentence instead.
+    review_queue_no_note_reason = "recorded as unresolved in the project's canon review_queue, without a note"
+    unlisted_refusal_only = sorted(index["refusal_only"] - refusal_only_listed, key=unit_sort_key)
+    for key in unlisted_refusal_only:
+        prep_unit = by_key[key]
+        refusals.append(
+            {
+                "unit": unit_obj(key),
+                "reason": prep_unit.get("note") or review_queue_no_note_reason,
+                "refused_by": "canon_review_queue",
             }
         )
 
@@ -2164,7 +2241,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--prep", action="store_true",
-                      help="read the pipeline's artifacts and emit registry/registry_input.json")
+                      help="read the pipeline's artifacts and emit registry/registry_input.json "
+                           "plus registry/registry_cast.json, the document Pass A reads")
     mode.add_argument("--claims", action="store_true",
                       help="gate Pass A's verdict and project it into registry/registry_claims.json, "
                            "one independently judgeable entry per judgement")
@@ -2186,9 +2264,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--context-chars", type=int, default=400,
                    help="approximate width of one source context window (default 400)")
     p.add_argument("--max-input-chars", type=int, default=400000,
-                   help="refuse to emit a prep document larger than this (default 400000). A blunt "
-                        "guard against a silently huge input, not a model-capacity check -- this "
-                        "plugin does not know the dispatched model's context window.")
+                   help="refuse to emit a Pass A document (registry/registry_cast.json) larger than "
+                        "this (default 400000). A blunt guard against a silently huge input, not a "
+                        "model-capacity check -- this plugin does not know the dispatched model's "
+                        "context window. registry_input.json, which only --claims and --build read, "
+                        "is not capped.")
     p.add_argument("--max-claims-chars", type=int, default=1500000,
                    help="refuse to emit a claims document larger than this (default 1500000). Pass B "
                         "reads it whole; like --max-input-chars this is a blunt guard against a "

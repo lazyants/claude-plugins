@@ -109,12 +109,17 @@ def test_stale_verdict_is_refused(prepped):
 
 
 def test_unit_claimed_by_nobody_is_refused(prepped):
+    """Bernard is refusal_only and, since #923, may legally be omitted
+    entirely -- emptying `refusals[]` no longer reproduces this failure (see
+    `test_a_review_queue_unit_the_verdict_omits_is_refused_by_the_script`).
+    Tulle is an ordinary canon_entry unit, so dropping it from
+    `non_person_forms[]` still leaves it claimed nowhere."""
     verdict = fx.verdict_doc(prepped)
-    verdict["refusals"] = []          # Bernard now appears nowhere
+    verdict["non_person_forms"] = []          # Tulle now appears nowhere
     code, payload = _through_claims(prepped, verdict)
     assert code == 1
     assert payload["reason"] == "coverage_violation"
-    assert "Bernard" in payload["error"]
+    assert "Tulle" in payload["error"]
 
 
 def test_unit_claimed_twice_is_refused(prepped):
@@ -146,6 +151,72 @@ def test_review_queue_form_may_not_become_a_person(prepped):
     code, payload = _through_claims(prepped, verdict)
     assert code == 1
     assert payload["reason"] == "refusal_only_misplaced"
+
+
+def test_a_review_queue_unit_the_verdict_omits_is_refused_by_the_script(prepped):
+    """#923: Pass A's cast never shows it a review-queue unit at all, so P3 no
+    longer demands the verdict list one -- omitting Bernard entirely (rather
+    than listing him in refusals[], as every other verdict here does) must
+    still pass, and `--build` must synthesise exactly the refusal row a
+    verdict that DID list him would have produced."""
+    omitted = fx.verdict_doc(prepped)
+    omitted["refusals"] = []          # Bernard nowhere in the verdict
+    code, payload = _through_claims(prepped, omitted)
+    assert code == 0, payload
+
+    fx.write_adjudications(prepped, refuse_person_ids=())
+    code, payload = fx.run(prepped, "--build")
+    assert code == 0, payload
+    reg_omitted = fx.registry(prepped)
+
+    bernard = next(r for r in reg_omitted["refusals"] if r["unit"]["source_form"] == "Bernard")
+    assert bernard["refused_by"] == "canon_review_queue"
+    assert bernard["reason"] == "two bearers in the source, unresolved | SOURCE_UNAVAILABLE: no citable form"
+    people_md = (prepped / "registry" / "PEOPLE.md").read_text(encoding="utf-8")
+    assert "`Bernard`" in people_md.split("## Refused", 1)[1]
+
+    # A build whose verdict LISTED Bernard must produce the identical
+    # refusals[] and summary{} -- only provenance.verdicts_sha256 legitimately
+    # differs between the two verdict documents.
+    listed = fx.verdict_doc(prepped)
+    fx.write_verdict(prepped, listed)
+    assert fx.run(prepped, "--claims")[0] == 0
+    fx.write_adjudications(prepped, refuse_person_ids=())
+    code, payload = fx.run(prepped, "--build")
+    assert code == 0, payload
+    reg_listed = fx.registry(prepped)
+
+    assert reg_omitted["refusals"] == reg_listed["refusals"]
+    assert reg_omitted["summary"] == reg_listed["summary"]
+
+
+def test_a_review_queue_row_without_a_note_gets_the_fixed_reason(tmp_path):
+    """Canon permits an empty note -- `--prep`'s coalesce keeps only the
+    truthy ones, so an all-empty queue row survives as `note: ""`. An empty
+    string is not a reason a genealogy reader should see stand in for one, so
+    the synthesised row falls back to a fixed sentence instead."""
+    root = fx.build_root(tmp_path)
+    canon_path = root / "canon.json"
+    canon = json.loads(canon_path.read_text(encoding="utf-8"))
+    canon["review_queue"].append(
+        {"source_form": "Cyprien", "is_proper_name": True, "disposition": "review_queue", "note": ""}
+    )
+    canon_path.write_text(json.dumps(canon, ensure_ascii=False), encoding="utf-8")
+
+    code, payload = fx.run(root, "--prep")
+    assert code == 0, payload
+
+    verdict = fx.verdict_doc(root)   # Cyprien, like Bernard, is nowhere in it
+    fx.write_verdict(root, verdict)
+    assert fx.run(root, "--claims")[0] == 0
+    fx.write_adjudications(root, refuse_person_ids=())
+    code, payload = fx.run(root, "--build")
+    assert code == 0, payload
+
+    reg = fx.registry(root)
+    cyprien = next(r for r in reg["refusals"] if r["unit"]["source_form"] == "Cyprien")
+    assert cyprien["refused_by"] == "canon_review_queue"
+    assert cyprien["reason"] == "recorded as unresolved in the project's canon review_queue, without a note"
 
 
 def test_quote_absent_from_its_container_is_refused(prepped):

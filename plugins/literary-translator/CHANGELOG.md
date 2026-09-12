@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.125.0 — 2026-09-12
+
+**`person_registry.py --prep` was unreachable on a large canon, and the two knobs it has could not
+reach the weight (#923).** On a 1 066-entry canon with 1 754 `review_queue` rows the prep document
+was 5 749 601 bytes at the defaults and still 3 189 216 at the measured `1`/`150` setting —
+eight times `--max-input-chars` — with 2 448 950 bytes outside both knobs. Both books in the series
+that reached this point routed around the pass: one refused, the other sharded Pass A by hand with
+ten ad-hoc scripts. The issue proposed bounding the `mentions` list and dropping the canon `note`.
+Measured on that book, those two fields are 873 436 of the 2 448 950 bytes; with both gone and the
+knobs at `1`/`150` the document is still 2.3 MB. The weight the issue did not see is the
+review-queue population: 1 754 units, 1 305 194 bytes at the defaults, 41% of the document at
+`1`/`150` — units whose only legal verdict the script already dictates (`refusal_only_misplaced`
+refuses them anywhere but `refusals[]`), so Pass A was reading 1.3 MB and writing 1 754 rows to say
+what the gate knew. Across the three registries completed on real books, 775 of 775, 166 of 166 and
+551 of 551 review-queue units carried one identical boilerplate reason each. The `mentions` list is
+the same kind of passenger: no model reads it; `--build` copies it into `person_registry.json`.
+
+**`--prep` now writes what the model judges separately from what the script carries.**
+`registry/registry_input.json` is unchanged — the full, digest-bound prep that `--claims` and
+`--build` read. Beside it, `registry/registry_cast.json` is the document Pass A reads: the same
+digests and `input_sha256`, and every unit that is not refusal-only, each without `mentions` and
+without the constant `refusal_only`. `--max-input-chars` measures the cast, since that is the file a
+model receives; the flag keeps its name and default. On the same book the cast is 3 900 585 bytes at
+the defaults, 1 853 457 at `--max-contexts-per-form 2 --context-chars 200` and 1 340 200 at `1`/`150`
+— against 5 749 601, 3 702 473 and 3 189 216 — and Pass A returns 1 066 verdict rows instead of
+2 820. A cast that size is still over the default guard by construction (one 150-character context
+pair per unit is ~1 MB on its own), so the route on such a book is the one the guard always named:
+raise the cap deliberately, now to a size a model can actually be handed.
+
+**Gate P3 and `--build` absorb the units the model no longer sees.** A review-queue unit absent from
+the verdict is not "never claimed" — a unit the model was never shown cannot be — and `--build`
+writes its refusal row itself: `refused_by: canon_review_queue`, `reason` the queue row's own note
+(both notes, as before, when a form was queued twice), or a fixed sentence when the queue row had
+none. A verdict that still lists such a unit in `refusals[]` — every verdict on disk does — is
+accepted exactly as before; listing it anywhere else is still `refusal_only_misplaced`, and that
+check now looks only at units the verdict mentions rather than indexing a key it may not hold.
+
+**The cast needs no digest of its own.** It is a pure projection of the input: a stale cast
+carries an old `input_sha256`, so P2 refuses the verdict; a cast edited to hide a unit trips P3;
+and no affirmed person, relation, place, date or printed surface reaches the artifact without Pass
+B re-adjudicating it from evidence that `--claims` projects out of `registry_input.json`, never out
+of the cast. What an edited cast can change is a Pass A refusal and its reason, which the registry
+already labels `refused_by: pass_a`.
+
+The #896 refusal keeps measuring: it reports the cast's `contexts` bytes and names what the knobs
+cannot reach — a matched window keeps its own occurrence, a split unit's context is cut from
+evidence offsets, the canon note and each unit's own fields — and says that the mentions lists and
+the review-queue units are not in this document at all. `registry_TASK.template.md`, the verdict
+schema's descriptions and `references/person-registry.md` name the cast as Pass A's input. Not
+shipped, on purpose: a sharded Pass A (a cross-shard merge would replace the single-verdict
+design), pruning canon metadata from the cast (190 KB on the measured book), or a different default
+cap. `person_registry.py` is in no bundle tuple, so this release moves no cache key, stales no
+converged segment and changes no resume identity.
 ## 1.123.0 — 2026-09-12
 
 **The glossary planner dropped most of a book's name candidates at its frequency floor and

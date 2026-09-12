@@ -50,9 +50,9 @@ say why.
 
 ## Input
 
-`registry/registry_input.json`, produced by `scripts/person_registry.py --prep`.
-Its `units[]` are the whole cast, each one a `(source_form, sense_id)` pair
-drawn from three populations:
+`registry/registry_cast.json`, produced by `scripts/person_registry.py --prep`
+beside `registry/registry_input.json`. Its `units[]` are the whole cast, each
+one a `(source_form, sense_id)` pair drawn from TWO populations:
 
 - `canon_entry` — a frozen canon entry, with its `canonical_target_form` and
   its source-anchored occurrence records;
@@ -60,10 +60,13 @@ drawn from three populations:
   deliberately absent from `canon.json` and each sense carries a
   `disambiguator` written by whoever adjudicated the split. **Two senses of one
   form are two people until proven otherwise** — that is what the split
-  recorded;
-- `canon_review_queue` — a candidate the project itself recorded as
-  unresolved, with the reason. You may describe it; you may not resolve it.
-  It belongs in `refusals[]`.
+  recorded.
+
+A third population, the project's own `canon_review_queue`, is not in your
+document at all. Those forms are candidates the project itself already
+recorded as unresolved; the script refuses them on your behalf and lists them
+in the registry under the project's own note. You never see them and you never
+list them.
 
 Each unit carries up to `--max-contexts-per-form` contexts, chosen as an even
 spread across the whole book rather than the first few, plus
@@ -83,13 +86,13 @@ what `printed_surfaces[]` is for.
 
 Write `registry/registry_verdicts.json` against
 `assets/schemas/registry/registry-verdicts.schema.json`. Copy `input_sha256`
-from the input verbatim.
+from `registry_cast.json` verbatim.
 
-**Every unit must appear exactly once**, across `people[].units`,
-`non_person_forms[]` and `refusals[]`. A unit you leave out is a person the
-registry silently loses; a unit in two places is a merge conflict. Both are
-refused by the build gate, so neither is a way to avoid a decision — the way to
-avoid a decision is `refusals[]`, with a reason.
+**Every unit of `registry_cast.json` must appear exactly once**, across
+`people[].units`, `non_person_forms[]` and `refusals[]`. A unit you leave out
+is a person the registry silently loses; a unit in two places is a merge
+conflict. Both are refused by the build gate, so neither is a way to avoid a
+decision — the way to avoid a decision is `refusals[]`, with a reason.
 
 - **`people[]`** — one record per human being. `units[]` lists every form you
   judge to be that person. `display_name` is how you would name them in an
