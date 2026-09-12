@@ -25,7 +25,9 @@ tests depend on those checks having run.
 import hashlib
 import json
 import os
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -2150,6 +2152,462 @@ def test_b17_an_over_bound_reply_is_a_failed_slot_not_a_thin_one(bed, shim):
     assert "over the" in err
     harvest = bed / "runs" / "name-discovery" / "d4" / "harvest"
     assert not harvest.exists() or not list(harvest.glob("*.json"))
+
+
+# ===========================================================================
+# E31-E37 -- #915: a run stopped with SIGTERM or SIGHUP must not leave a
+# codex-companion broker behind.
+#
+# E31 drives the shutdown handler DIRECTLY, through a small harness process
+# (HANDLER_HARNESS below) that builds the exact registry state the real
+# dispatch path builds -- real decoy brokers, real paths added to
+# `_LIVE_SANDBOXES` -- then blocks so this test can deliver a REAL SIGTERM or
+# SIGHUP with `Popen.send_signal`. No mocked signal delivery anywhere: the OS
+# delivers the signal and the module's own registered handler runs. Racing
+# the handler against a concurrent mutation of the registry (E31's
+# discard-mid-reap and register-between-passes modes) is done with a
+# background THREAD inside the harness process watching `_SHUTTING_DOWN`,
+# which is test orchestration, not a mocked signal.
+# ===========================================================================
+
+HANDLER_HARNESS = r'''#!/usr/bin/env python3
+"""#915 test harness: loads the shipped name_discovery.py, arms its shutdown
+handler, registers N real decoy brokers exactly as DispatchSandbox.__enter__
+would, then blocks so the parent test can deliver a real signal."""
+import importlib.util
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import threading
+import time
+
+nd_path, record_path, mode, n, base_dir = sys.argv[1:6]
+n = int(n)
+record = pathlib.Path(record_path)
+base = pathlib.Path(base_dir)
+base.mkdir(parents=True, exist_ok=True)
+
+spec = importlib.util.spec_from_file_location("nd_handler_harness", nd_path)
+nd = importlib.util.module_from_spec(spec)
+sys.path.insert(0, str(pathlib.Path(nd_path).parent))  # sibling language_smoke_report.py
+spec.loader.exec_module(nd)
+
+broker_src = base / "app-server-broker.mjs"
+broker_src.write_text("import time\ntime.sleep(600)\n", encoding="utf-8")
+
+
+def spawn_decoy(tag):
+    d = pathlib.Path(os.path.realpath(str(base / ("box-%s" % tag))))
+    d.mkdir(parents=True, exist_ok=True)
+    child = subprocess.Popen(
+        [sys.executable, str(broker_src), "serve", "--cwd", str(d)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    pattern = "app-server-broker\\.mjs .*--cwd %s( |$)" % str(d).replace(".", "\\.")
+    deadline = time.monotonic() + 20
+    visible = False
+    while time.monotonic() < deadline:
+        probe = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
+        if probe.returncode == 0 and str(child.pid) in probe.stdout.split():
+            visible = True
+            break
+        time.sleep(0.05)
+    return {"sandbox": str(d), "broker_pid": child.pid, "visible": visible}
+
+
+records = [spawn_decoy(str(i)) for i in range(n)]
+extra = {}
+
+
+def write_record():
+    payload = {"records": records}
+    if extra:
+        payload["extra"] = extra
+    record.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def discard_mid_reap():
+    """Mimics a worker's OWN _teardown() racing the handler: kills that
+    sandbox's decoy and discards it from the registry itself, concurrently
+    with the handler's loop over its frozen snapshot -- the exact race that
+    made a direct (non-tuple) iteration of _LIVE_SANDBOXES a BLOCKER."""
+    while not nd._SHUTTING_DOWN:
+        time.sleep(0.005)
+    victim = records[0]
+    try:
+        os.kill(victim["broker_pid"], 15)
+    except OSError:
+        pass
+    nd._LIVE_SANDBOXES.discard(pathlib.Path(victim["sandbox"]))
+    extra["discarded"] = victim["sandbox"]
+    write_record()
+
+
+def register_between_passes():
+    """Registers a NEW sandbox during the handler's mandatory 0.5s inter-pass
+    settle -- proving the second pass takes a FRESH snapshot rather than
+    reusing the first."""
+    while not nd._SHUTTING_DOWN:
+        time.sleep(0.005)
+    time.sleep(0.1)
+    late = spawn_decoy("late")
+    nd._LIVE_SANDBOXES.add(pathlib.Path(late["sandbox"]))
+    extra["late"] = late
+    write_record()
+
+
+for path in records:
+    nd._LIVE_SANDBOXES.add(pathlib.Path(path["sandbox"]))
+
+if mode == "discard-mid-reap":
+    threading.Thread(target=discard_mid_reap, daemon=True).start()
+elif mode == "register-between-passes":
+    threading.Thread(target=register_between_passes, daemon=True).start()
+
+nd.install_shutdown_handlers()
+write_record()
+print("READY", flush=True)
+
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline:
+    time.sleep(0.05)
+'''
+
+
+_HARNESS_CLEANUP_REAP_TIMEOUT_SEC = 15
+
+
+@pytest.fixture
+def harness_cleanup():
+    """#915 review round 1 MINOR: E31's harness spawns detached, 600-second,
+    broker-shaped decoys. If the regression under test is actually present,
+    the first failed assertion must not leave those running for the rest of
+    the suite -- track every harness Popen and its own sandbox base
+    directory here, and sweep both in the finalizer no matter how the test
+    ends."""
+    state = {"procs": [], "base_dirs": []}
+    yield state
+    for proc in state["procs"]:
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+    for base_dir in state["base_dirs"]:
+        try:
+            subprocess.run(["pkill", "-f", base_dir], capture_output=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        # `pkill` returning only means the pkill UTILITY exited, not that the
+        # detached decoys it signalled are actually gone (#915 fix-verification
+        # round). Poll the SAME marker -- never widened -- until nothing
+        # matches, so this finalizer returns only once the decoys are truly
+        # dead, not merely signalled.
+        deadline = time.monotonic() + _HARNESS_CLEANUP_REAP_TIMEOUT_SEC
+        gone = False
+        while time.monotonic() < deadline:
+            try:
+                probe = subprocess.run(["pgrep", "-f", base_dir], capture_output=True,
+                                       text=True, timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                break
+            if probe.returncode != 0:  # 1 = no match, >=2 = pgrep itself failed
+                gone = True
+                break
+            time.sleep(0.2)
+        if not gone:
+            print(f"harness_cleanup: a decoy under {base_dir} is STILL visible to "
+                  f"pgrep after {_HARNESS_CLEANUP_REAP_TIMEOUT_SEC}s -- leaked past "
+                  f"this test", file=sys.stderr)
+
+
+def _read_available(stream, timeout=2.0):
+    """A bounded, non-blocking drain (#915 review round 1 MINOR): unlike
+    `stream.read()`, this never blocks waiting for the process to exit and
+    close the pipe -- needed because a harness whose READY line never
+    arrives may still be alive."""
+    if stream is None:
+        return ""
+    chunks = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([stream], [], [], 0.1)
+        if not ready:
+            break
+        chunk = os.read(stream.fileno(), 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", "replace")
+
+
+def _spawn_harness(tmp_path, harness_cleanup, mode="plain", n=3):
+    record = tmp_path / "harness-record.json"
+    base_dir = tmp_path / "harness-sandboxes"
+    harness_cleanup["base_dirs"].append(str(base_dir))
+    proc = subprocess.Popen(
+        [sys.executable, "-c", HANDLER_HARNESS, str(SCRIPTS_SRC / SCRIPT),
+         str(record), mode, str(n), str(base_dir)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    harness_cleanup["procs"].append(proc)
+    deadline = time.monotonic() + 20
+    line = ""
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([proc.stdout], [], [], 0.1)
+        if ready:
+            line = proc.stdout.readline()
+            break
+        if proc.poll() is not None:
+            break
+    assert line.strip() == "READY", (
+        f"harness did not report READY (exit={proc.poll()}): stdout={line!r} "
+        f"stderr={_read_available(proc.stderr)!r}")
+    return proc, json.loads(record.read_text(encoding="utf-8"))["records"], record
+
+
+def _wait_dead(pid, timeout=15):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and _alive(pid):
+        time.sleep(0.1)
+    return not _alive(pid)
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
+def test_e31_a_signal_reaps_every_live_sandbox_and_the_process_dies_by_it(
+        tmp_path, harness_cleanup, sig):
+    proc, records, _record = _spawn_harness(tmp_path, harness_cleanup, mode="plain", n=3)
+    proc.send_signal(sig)
+    rc = proc.wait(timeout=20)
+    assert rc == -sig, f"expected death by {sig!r}, got returncode {rc}: {proc.stderr.read()}"
+    for rec in records:
+        assert _wait_dead(rec["broker_pid"]), f"broker {rec} outlived the signal"
+
+
+def test_e31_a_slot_exiting_during_the_reap_does_not_crash_the_handler(
+        tmp_path, harness_cleanup):
+    proc, records, record = _spawn_harness(tmp_path, harness_cleanup, mode="discard-mid-reap",
+                                           n=3)
+    proc.send_signal(signal.SIGTERM)
+    rc = proc.wait(timeout=20)
+    err = proc.stderr.read()
+    # A direct (non-tuple) iteration of _LIVE_SANDBOXES would raise
+    # RuntimeError from inside the handler, which is an UNCAUGHT exception in
+    # ordinary Python code (not a signal death) -- so the harness would exit
+    # via Python's normal traceback path, not die by SIGTERM. That
+    # differential is what this assertion actually catches.
+    assert rc == -signal.SIGTERM, f"handler crashed instead of dying by signal: {err}"
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    assert payload.get("extra", {}).get("discarded") == records[0]["sandbox"], (
+        "the background thread never raced the handler -- this test proves nothing")
+    for rec in records:
+        assert _wait_dead(rec["broker_pid"]), f"broker {rec} outlived the signal"
+
+
+def test_e31_a_second_sigterm_during_cleanup_does_not_cut_it_short(tmp_path, harness_cleanup):
+    proc, records, _record = _spawn_harness(tmp_path, harness_cleanup, mode="plain", n=3)
+    proc.send_signal(signal.SIGTERM)
+    time.sleep(0.05)
+    proc.send_signal(signal.SIGTERM)  # arrives while the first is still cleaning up
+    rc = proc.wait(timeout=20)
+    assert rc == -signal.SIGTERM, (
+        f"a second SIGTERM must not kill the process by default disposition "
+        f"before cleanup finishes: got {rc}: {proc.stderr.read()}")
+    for rec in records:
+        assert _wait_dead(rec["broker_pid"]), (
+            f"broker {rec} survived -- the second signal cut cleanup short")
+
+
+def test_e31_a_sigint_during_the_settle_still_dies_by_the_original_signal(
+        tmp_path, harness_cleanup):
+    """#915 review round 1 MAJOR: `time.sleep(0.5)` between the handler's two
+    reap passes raises KeyboardInterrupt if a SIGINT lands during it. Without
+    the handler's `finally`, that skips BOTH the second pass AND the
+    SIG_DFL-restore-plus-self-signal, leaving the process alive with the
+    original SIGTERM never actually delivered."""
+    proc, records, _record = _spawn_harness(tmp_path, harness_cleanup, mode="plain", n=3)
+    proc.send_signal(signal.SIGTERM)
+    time.sleep(0.1)  # inside the handler's 0.5s inter-pass settle
+    proc.send_signal(signal.SIGINT)
+    rc = proc.wait(timeout=20)
+    assert rc == -signal.SIGTERM, (
+        f"a SIGINT during the settle must not skip the restore-and-self-signal "
+        f"finally: got {rc}: {proc.stderr.read()}")
+    for rec in records:
+        assert _wait_dead(rec["broker_pid"]), f"broker {rec} outlived the signal"
+
+
+def test_e31_a_sandbox_registered_between_the_two_passes_is_still_reaped(
+        tmp_path, harness_cleanup):
+    proc, records, record = _spawn_harness(tmp_path, harness_cleanup,
+                                           mode="register-between-passes", n=2)
+    proc.send_signal(signal.SIGTERM)
+    rc = proc.wait(timeout=20)
+    assert rc == -signal.SIGTERM, proc.stderr.read()
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    late = payload.get("extra", {}).get("late")
+    assert late is not None, (
+        "the background thread never registered a late sandbox -- this test "
+        "proves nothing")
+    assert late["visible"], "the late decoy never became visible to pgrep"
+    for rec in records + [late]:
+        assert _wait_dead(rec["broker_pid"]), (
+            f"broker {rec} outlived the signal -- a sandbox registered between "
+            f"the two passes must still be reaped by the fresh second snapshot")
+
+
+def test_e32_launch_one_refuses_to_launch_once_shutting_down(bed):
+    nd = load_module(bed)
+    nd._SHUTTING_DOWN = True
+    try:
+        with pytest.raises(nd.NameDiscoveryError) as excinfo:
+            nd.launch_one(companion="unused", node_bin="/definitely/does/not/exist/node",
+                          unit_text="x", effort=None, model=None, deadline_sec=5,
+                          label="probe.1")
+    finally:
+        nd._SHUTTING_DOWN = False
+    # If the admission check were missing, this would instead be "codex
+    # launch failed" from trying (and failing) to exec a nonexistent node --
+    # a different message, which is exactly why node_bin is bogus here.
+    assert "not launched" in str(excinfo.value), str(excinfo.value)
+
+
+def test_e33_the_worker_and_launch_one_both_check_shutting_down(bed):
+    """AST-level wiring check, in this file's existing d26/d27 style: `one()`
+    (nested in cmd_dispatch) must test `_SHUTTING_DOWN` before it ever calls
+    `launch_one`, and `launch_one` must test it again after `argv` is fully
+    built but before the companion is actually launched (#915's two
+    admission checks)."""
+    import ast
+    tree = ast.parse((SCRIPTS_SRC / SCRIPT).read_text(encoding="utf-8"))
+
+    def find(name, within=None):
+        scope = ast.walk(within) if within is not None else ast.walk(tree)
+        for node in scope:
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        return None
+
+    def shutting_down_check_lineno(fn):
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+                    and node.test.id == "_SHUTTING_DOWN"):
+                return node.lineno
+        return None
+
+    def call_lineno(fn, callee_name):
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == callee_name):
+                return node.lineno
+        return None
+
+    cmd_dispatch = find("cmd_dispatch")
+    assert cmd_dispatch is not None, "cmd_dispatch not found"
+    one_fn = find("one", within=cmd_dispatch)
+    assert one_fn is not None, "the nested one() closure was not found"
+    one_check = shutting_down_check_lineno(one_fn)
+    one_launch_call = call_lineno(one_fn, "launch_one")
+    assert one_check is not None, "one() never checks _SHUTTING_DOWN"
+    assert one_launch_call is not None, "one() never calls launch_one"
+    assert one_check < one_launch_call, (
+        "one() must check _SHUTTING_DOWN before calling launch_one, not after")
+
+    launch_one_fn = find("launch_one")
+    assert launch_one_fn is not None
+    launch_check = shutting_down_check_lineno(launch_one_fn)
+    assert launch_check is not None, "launch_one() never checks _SHUTTING_DOWN"
+    run_call = None
+    for node in ast.walk(launch_one_fn):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run" and node.args
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == "argv"):
+            run_call = node.lineno
+            break
+    assert run_call is not None, "launch_one() never calls subprocess.run(argv, ...)"
+    assert launch_check < run_call, (
+        "launch_one()'s _SHUTTING_DOWN check must sit before the companion launch")
+
+
+def test_e34_proj8_is_identical_across_trailing_slash_and_symlink_spellings(bed, tmp_path,
+                                                                            monkeypatch):
+    nd = load_module(bed)
+    target = tmp_path / "book"
+    target.mkdir()
+    link = tmp_path / "book-link"
+    link.symlink_to(target)
+    tags = []
+    for spelling in (target, Path(str(target) + "/"), link):
+        monkeypatch.setattr(nd, "DURABLE_ROOT", spelling)
+        tags.append(nd._proj8())
+    assert len(set(tags)) == 1, f"proj8 differs across root spellings: {tags}"
+    assert len(tags[0]) == 8 and all(c in "0123456789abcdef" for c in tags[0])
+
+
+@pytest.mark.parametrize("label_len", [214, 215])
+def test_e35_a_label_at_the_cap_and_cap_plus_one_keeps_the_basename_at_or_under_name_max(
+        bed, label_len):
+    nd = load_module(bed)
+    with nd.DispatchSandbox("x" * label_len) as sandbox:
+        basename = sandbox.path.name
+        assert len(basename.encode("utf-8")) <= 255, (
+            f"basename ({len(basename)} bytes) exceeds NAME_MAX for "
+            f"label_len={label_len}: {basename}")
+        assert basename.startswith("ltnd.p%s." % nd._proj8())
+
+
+def test_e36_the_new_prefix_carries_proj8_and_the_teardown_pattern_still_matches(bed):
+    nd = load_module(bed)
+    with nd.DispatchSandbox("seg01.1") as sandbox:
+        assert sandbox.path.name.startswith("ltnd.p%s.seg01.1." % nd._proj8()), (
+            f"unexpected sandbox basename: {sandbox.path.name}")
+        broker_src = sandbox.path.parent / "app-server-broker.mjs"
+        broker_src.write_text("import time\ntime.sleep(600)\n", encoding="utf-8")
+        child = subprocess.Popen(
+            [sys.executable, str(broker_src), "serve", "--cwd", str(sandbox.path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic() + 15
+        visible = False
+        while time.monotonic() < deadline:
+            if child.pid in (sandbox._broker_pids() or []):
+                visible = True
+                break
+            time.sleep(0.1)
+        assert visible, "the teardown matcher never saw the decoy under the new prefix shape"
+    # __exit__ above ran _teardown(), which must have SIGTERMed it. `child` is
+    # OUR direct child (unlike the harness-spawned decoys elsewhere in this
+    # file, whose parent is a short-lived subprocess reaped by init), so a
+    # dead-but-unreaped decoy would still pass an os.kill(pid, 0) check --
+    # child.wait() is what actually confirms it has exited.
+    rc = child.wait(timeout=15)
+    assert rc == -signal.SIGTERM, f"the decoy did not die by SIGTERM (rc={rc})"
+
+
+@pytest.mark.parametrize("failure", ["broken-search", "timeout"])
+def test_e37_a_broken_broker_search_is_logged_not_folded_into_no_broker_found(
+        bed, tmp_path, monkeypatch, capsys, failure):
+    nd = load_module(bed)
+
+    class FakeCompleted:
+        def __init__(self, returncode):
+            self.returncode = returncode
+            self.stdout = ""
+
+    def fake_run(argv, **kwargs):
+        if failure == "timeout":
+            raise nd.subprocess.TimeoutExpired(cmd=argv, timeout=1)
+        return FakeCompleted(2)  # pgrep's own "I failed" exit code
+
+    monkeypatch.setattr(nd.subprocess, "run", fake_run)
+    result = nd._broker_pids_for(tmp_path / "somewhere")
+    assert result is None, "a broken search must not be reported as pids=[] (no broker)"
+    err = capsys.readouterr().err
+    assert "search itself failed" in err, (
+        f"a broken matcher must be logged as distinct from 'no broker found': {err!r}")
 
 
 if __name__ == "__main__":

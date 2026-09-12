@@ -148,6 +148,22 @@ SCRIPTS_DIR = Path(__file__).absolute().parent
 DURABLE_ROOT = SCRIPTS_DIR.parent
 RESOLVE_COMPANION_SCRIPT = SCRIPTS_DIR / "resolve_codex_companion.py"
 
+
+def _proj8_for_root(root) -> str:
+    """sha256 of the CANONICAL durable root, truncated to 8 hex chars (#915) --
+    tags every sandbox this driver creates so a surviving orphan is
+    attributable to one book. Canonicalises HERE, at the one call site that
+    needs it, rather than by changing what DURABLE_ROOT itself returns above:
+    that value is deliberately `.absolute()`, which keeps a symlink spelling,
+    for every OTHER use in this file. `/example/book` and `/example/book/`
+    must hash identically, which `.absolute()` alone does not guarantee."""
+    return hashlib.sha256(
+        os.path.realpath(os.fspath(root)).encode()).hexdigest()[:8]
+
+
+# Computed once: DURABLE_ROOT does not change for the life of this process.
+_DURABLE_ROOT_PROJ8 = _proj8_for_root(DURABLE_ROOT)
+
 TEMPLATE_NAME = "glossary-pass-wf.template.js"
 
 # The template's ten substitution tokens and how each is spliced. Read off the
@@ -1435,6 +1451,151 @@ def probe_enclosing_repo(path: Path) -> str:
     return _PROBE_ENCLOSED if proc.returncode == 0 else _PROBE_STANDALONE
 
 
+# --------------------------------------------------------------------------- #
+# #915: reaping a broker on SIGTERM/SIGHUP, and tagging every sandbox so a
+# surviving orphan is attributable to one durable root.
+#
+# THIS DRIVER IS SEQUENTIAL. Round 1 of #915's plan verified there is no
+# thread or executor path here (both DispatchSandbox call sites -- the
+# dispatch in advance_batch() and the repair in repair_batch() -- run one at a
+# time inside drive_all()'s own serial `for batch in batches:` loop), so a
+# single reference is enough. name_discovery.py, which IS concurrent, needs a
+# registry; this file never does.
+_ACTIVE_SANDBOX_PATH = None  # the one open sandbox's Path, or None
+
+# Set by the signal handler as its very FIRST act, before any reap runs. A
+# second SIGTERM/SIGHUP delivered while the first is still blocked in pgrep or
+# in the settle sleep re-enters this same handler (Python signal delivery is
+# not deferred merely because a handler is already Python-side running); it
+# sees this flag set and returns immediately rather than racing the first
+# invocation's own cleanup or its later self-signal.
+_SIGNAL_HANDLING = False
+
+# One number for every driver that stamps a #915 sandbox tag, so a label copied
+# between drivers cannot silently pass here and fail there. 214 is derived from
+# codex_job.py's tighter `ltcj.p<proj8>.<seg>.<inv>.` basename, which reaches
+# NAME_MAX(255) exactly; this file's own `ltgd.p<proj8>.<label>.` shape stays
+# comfortably under it.
+_SANDBOX_LABEL_CAP_BYTES = 214
+
+
+def _cap_sandbox_label(label: str) -> str:
+    """Truncates a sandbox label to `_SANDBOX_LABEL_CAP_BYTES` so no label can
+    push a sandbox basename past NAME_MAX and make `mkdtemp` fail (#915). Cuts
+    at a UTF-8 boundary; no digest of the truncated tail -- `mkdtemp`'s own
+    random suffix already makes two same-prefix sandboxes distinct. Not
+    otherwise sanitised: this driver's labels are its own literals
+    (`dispatch-<idx>-<attempt>`, `repair-<idx>-<attempt>`), not attacker
+    input, so nothing here needs stripping the way name_discovery's does."""
+    encoded = label.encode("utf-8")
+    if len(encoded) <= _SANDBOX_LABEL_CAP_BYTES:
+        return label
+    return encoded[:_SANDBOX_LABEL_CAP_BYTES].decode("utf-8", errors="ignore")
+
+
+def _reap_broker_for_path(path) -> None:
+    """Kills any broker whose argv `--cwd` matches `path`, via the same argv
+    match `DispatchSandbox._shutdown_broker` builds -- factored out here so
+    the #915 signal handler can reap the driver's one active sandbox without
+    a live `DispatchSandbox` instance: by the time a signal arrives, `self`
+    may already be mid-teardown, or the sandbox may not exist at all (`path`
+    is `None` before the first one opens and after the last one closes).
+
+    LOGS, rather than staying silent, when the SEARCH itself failed (pgrep
+    exit >= 2, or the timeout) -- #915 round 1's finding that a broken search
+    is today indistinguishable from "no broker found". A clean miss (exit 1)
+    stays silent; that is the ordinary, common case."""
+    if path is None:
+        return
+    pattern = "app-server-broker\\.mjs .*--cwd %s( |$)" % _ere_escape(str(path))
+    try:
+        proc = subprocess.run(["pgrep", "-f", pattern], capture_output=True,
+                              text=True, timeout=BROKER_TEARDOWN_TIMEOUT_SEC)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        log(f"broker search for {path} did not complete ({exc!r}); a broker "
+            f"there may survive and go unreaped")
+        return
+    # pgrep: 0 = matched, 1 = nothing matched, >=2 = pgrep itself failed. Only
+    # 0 carries pids; >=2 is a broken search, not an empty one, and must not
+    # read the same as a clean miss.
+    if proc.returncode >= 2:
+        log(f"broker search for {path} failed (pgrep exit {proc.returncode}); "
+            f"a broker there may survive and go unreaped")
+        return
+    if proc.returncode != 0:
+        return
+    own = os.getpid()
+    for field in (proc.stdout or "").split():
+        try:
+            pid = int(field)
+        except ValueError:
+            continue
+        if pid <= 1 or pid == own:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+
+_REAP_SETTLE_SEC = 0.5
+
+
+def _handle_terminating_signal(signum, frame) -> None:
+    """SIGTERM/SIGHUP handler (#915): reap the active sandbox's broker, then
+    die by the same signal. Deliberately NOT routed through
+    `raise KeyboardInterrupt` so the ordinary `with DispatchSandbox(...)`
+    `finally` runs -- this driver's own PUBLISH and state-save steps write
+    durable records a killed run must not gain, and this handler must give an
+    abort no consequence it does not already have.
+
+    ONE SHOT, and the handlers stay installed while it runs: `_SIGNAL_HANDLING`
+    is set FIRST, so a second SIGTERM -- what an impatient operator sends next
+    -- re-enters this function, sees the flag and returns immediately. `SIG_DFL`
+    is restored only at the very end, immediately before the self-signal, so
+    that second delivery cannot kill this process by default disposition while
+    the first invocation is still blocked in a reap.
+
+    TWO PASSES, settled by a bounded sleep, and the SECOND reads
+    `_ACTIVE_SANDBOX_PATH` FRESH rather than a value captured before the sleep
+    -- a sandbox that becomes active between the passes is exactly what the
+    second pass is for; it is also the accepted residual disclosed in
+    gotchas.md for the case this cannot cover (a broker that appears only
+    after the second pass).
+
+    Never raises: every reap is best-effort, because cleanup on the way out of
+    a killed process must not itself hang or crash the shutdown it is part
+    of."""
+    global _SIGNAL_HANDLING
+    if _SIGNAL_HANDLING:
+        return
+    _SIGNAL_HANDLING = True
+    try:
+        try:
+            _reap_broker_for_path(_ACTIVE_SANDBOX_PATH)
+        except BaseException:
+            pass
+        time.sleep(_REAP_SETTLE_SEC)
+        try:
+            _reap_broker_for_path(_ACTIVE_SANDBOX_PATH)
+        except BaseException:
+            pass
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+
+def install_signal_handlers() -> None:
+    """Installs the #915 reap-then-die handler for SIGTERM and SIGHUP -- the
+    two deaths that do not unwind this file's `with DispatchSandbox(...)`
+    blocks (SIGINT does, via `KeyboardInterrupt`; SIGKILL and OOM cannot be
+    handled at all -- see gotchas.md's documented sweep for that residue).
+    Call once, from `main()`, before any batch is driven."""
+    signal.signal(signal.SIGTERM, _handle_terminating_signal)
+    signal.signal(signal.SIGHUP, _handle_terminating_signal)
+
+
 class DispatchSandbox:
     """One launch's write-confined directory, as a context manager.
 
@@ -1480,7 +1641,9 @@ class DispatchSandbox:
         # Neither condition is a fact about this batch, and neither can be
         # answered by advancing the ladder, so no state may be written about it.
         try:
-            raw = tempfile.mkdtemp(prefix="ltgd.%s." % self.label)
+            raw = tempfile.mkdtemp(
+                prefix="ltgd.p%s.%s." % (_DURABLE_ROOT_PROJ8,
+                                         _cap_sandbox_label(self.label)))
         except OSError as exc:
             fatal(f"could not create a dispatch sandbox for {self.label}: {exc!r}",
                   exit_code=2, label=self.label)
@@ -1503,6 +1666,12 @@ class DispatchSandbox:
                 "is kept, and the re-run continues from the last saved batch state.",
                 exit_code=2, label=self.label, sandbox_probe=outcome)
         log(f"{self.label}: codex write root confined to {self.path} (probe={outcome})")
+        # Published only NOW, after confinement is proven -- the #915 signal
+        # handler must never reap a directory this driver has not itself
+        # vouched for. See _handle_terminating_signal() and _teardown() below
+        # for the other end of this reference's life.
+        global _ACTIVE_SANDBOX_PATH
+        _ACTIVE_SANDBOX_PATH = self.path
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -1529,6 +1698,14 @@ class DispatchSandbox:
         if self.path.exists():
             log(f"{self.label}: sandbox {self.path} could not be removed and is "
                 f"left on disk; remove it by hand")
+        # Cleared LAST, after the broker is down and the directory is handled
+        # -- never at teardown entry. A signal arriving while teardown is
+        # blocked above must still find this sandbox registered, so the
+        # handler's own reap has something to act on; only ORDINARY teardown
+        # clears it, and the signal handler itself never does (#915).
+        global _ACTIVE_SANDBOX_PATH
+        if _ACTIVE_SANDBOX_PATH == self.path:
+            _ACTIVE_SANDBOX_PATH = None
         self.path = None
 
     def _shutdown_broker(self) -> None:
@@ -1540,29 +1717,12 @@ class DispatchSandbox:
         one. The match cannot hit anything else: the sandbox path is a
         single-use mkdtemp path and it reaches the broker's own argv verbatim,
         the pattern additionally requires app-server-broker.mjs, and the path is
-        anchored so a longer sibling path cannot match."""
-        pattern = "app-server-broker\\.mjs .*--cwd %s( |$)" % _ere_escape(str(self.path))
-        try:
-            proc = subprocess.run(["pgrep", "-f", pattern], capture_output=True,
-                                  text=True, timeout=BROKER_TEARDOWN_TIMEOUT_SEC)
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            return
-        # pgrep: 0 = matched, 1 = nothing matched, >=2 = pgrep itself failed.
-        # Only 0 carries pids.
-        if proc.returncode != 0:
-            return
-        own = os.getpid()
-        for field in (proc.stdout or "").split():
-            try:
-                pid = int(field)
-            except ValueError:
-                continue
-            if pid <= 1 or pid == own:
-                continue
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
+        anchored so a longer sibling path cannot match.
+
+        Delegates to `_reap_broker_for_path()`, the same free function the
+        #915 signal handler calls against `_ACTIVE_SANDBOX_PATH` -- one
+        matcher, used by both the ordinary and the signalled teardown path."""
+        _reap_broker_for_path(self.path)
 
 
 def read_sandbox_artifact(path: Path, label: str) -> bytes:
@@ -3940,6 +4100,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # Before any batch is driven, so a sandbox opened in the first dispatch is
+    # never reachable without the handler already installed (#915).
+    install_signal_handlers()
     args = build_arg_parser().parse_args(argv)
 
     problem = validate_run_id(args.run_id or "")

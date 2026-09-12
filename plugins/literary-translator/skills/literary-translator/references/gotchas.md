@@ -620,3 +620,109 @@ so its figures are a floor.
 - [`false-green-gate.md`](./false-green-gate.md) — `validate_draft.py`,
   the deterministic gate the review-artifact gate (§9) is *not* the same
   mechanism as.
+
+## 16. Orphaned codex app-server brokers — what they are and how to sweep only your own
+
+A dispatch (`codex_job.py`, `name_discovery.py`, `glossary_dispatch_driver.py`) opens a
+sandbox and spawns a `codex app-server` broker to run the turn inside it. When the
+dispatch finishes normally the broker is shut down as part of teardown. But if the
+process running the dispatch dies without unwinding — killed by `SIGKILL`, an
+out-of-memory kill, or a machine crash — the broker is never told to stop. It gets
+reparented to `init` and keeps running, along with the platform binary it launched,
+until the machine reboots. Nothing else on the box will stop it on its own.
+
+**Do not run `pkill codex`.** Other Claude Code sessions and other projects on this
+machine run their own `codex app-server` brokers for their own live, paid turns. A bare
+name-based kill takes those down too, mid-turn, with no way to tell whose work you just
+destroyed.
+
+Every sandbox path now carries a short tag derived from the book's `durable_root`, right
+after the family marker (`ltcj`, `ltnd` or `ltgd`). That tag lets you sweep brokers that
+belong to one specific book and nothing else:
+
+First LOOK. This fence kills nothing, and it is deliberately a separate block so that
+pasting it cannot:
+
+```sh
+: "${DURABLE_ROOT:?set this to the durable_root path first}"
+proj8=$(python3 -c 'import hashlib,os,sys;print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest()[:8])' "$DURABLE_ROOT")
+pat="[ /]app-server-broker\.mjs .*/lt(cj|nd|gd)\.p$proj8\.[^/ ]*( |$)"
+pids=$(pgrep -f "$pat")
+[ -n "$pids" ] && ps -ww -o pid=,args= -p "$(echo $pids | tr ' ' ',')" || echo "no orphaned broker carries the tag p$proj8"
+```
+
+Read every line it prints and satisfy yourself that each `--cwd` really is a sandbox of
+the book you mean to sweep. Two details of that one line are load-bearing:
+
+- `ps -o pid=,args=` rather than `pgrep -l`, because `pgrep`'s long form is not portable
+  in the way that matters here: on BSD/macOS `pgrep -fl` prints the whole command line,
+  but on Linux/procps `-l` prints only the process NAME, so the preview would read
+  `python3` or `node` for every hit and show you nothing to decide on (procps spells the
+  argv form `-a`, which BSD does not have). `ps` prints the argv on both.
+- `-ww`, because `ps` otherwise truncates `args` to the output width — to the terminal's
+  columns when you run it interactively, and to 80 columns on procps even through a pipe.
+  A broker's command line is longer than that, and the part that gets cut is the END:
+  the `app-server-broker.mjs` and the `--cwd` you are supposed to be checking. `-ww`
+  means unlimited width and is accepted by both procps and BSD/macOS.
+
+Only then SWEEP, in the same shell, so `$pat` is still the pattern you just reviewed:
+
+```sh
+pkill -TERM -f "$pat"
+```
+
+Set `DURABLE_ROOT` first — the fence's first line refuses to run without it. Leaving it
+unset is not a safe no-op: `os.path.realpath('')` resolves to whatever directory you
+happen to be standing in, so an unset variable would silently compute a plausible-looking
+tag for the wrong book and hand back an empty, falsely reassuring preview, on the one
+command meant to be run right after a crash.
+
+Run the LOOK fence first, read what it would kill, then run the `pkill` fence. Always
+send `-TERM`, never `-9`: the broker's own signal handler shuts its children down when it
+receives `SIGTERM`, so a normal kill leaves nothing behind. `SIGKILL` on the broker skips
+that handler and leaks exactly the same children this section is about — one level down.
+
+Three parts of the pattern matter, and dropping any one turns a safe sweep into a
+dangerous one:
+
+- `[ /]app-server-broker\.mjs` requires a space or a path separator right before the
+  script name, not a bare substring match. Without that boundary, a decoy or an
+  unrelated tool named e.g. `not-app-server-broker.mjs` would match too — the boundary
+  is what makes "this is a broker" mean the broker's actual filename, not any command
+  line that happens to contain that text as a suffix.
+- `lt(cj|nd|gd)\.p$proj8\.` anchors the tag right after the family marker. A sandbox's
+  free-form label can be any short identifier, including one that happens to spell out
+  another book's digest — anchoring to the marker means a label can never forge the tag
+  and get swept by mistake.
+- `[^/ ]*( |$)` pins the tagged component to the LAST segment of the path, not any
+  segment. Without this, a `TMPDIR` that happens to sit inside an older, differently
+  tagged sandbox directory would let this pattern match a live broker belonging to a
+  different book, through that ancestor directory — and kill someone else's paid turn.
+
+**What the pattern deliberately does NOT check, and why.** It does not try to prove that
+the tagged path is the broker's `--cwd` value rather than some later argument. Two attempts
+to express that both failed on real paths: binding it with `[^ ]*` silently skipped every
+sandbox under a `TMPDIR` whose name contains a space, and `([^ ]| [^-])*` then skipped one
+containing a space followed by a hyphen. The reason is structural, not a matter of finding
+a cleverer class — `pgrep -f` matches a FLATTENED command line, where a space is both the
+argument separator and an ordinary character inside a path, so no regular expression can
+reliably tell those two apart. Each tightening bought a hypothetical protection and paid
+for it with a real false all-clear, which is the one answer this recipe must never give.
+
+The residual that buys: if the companion is ever changed to pass a SECOND sandbox-derived
+path in the same command line (a `--pid-file` or `--endpoint` under a tagged directory), a
+sweep for one root could match a broker whose `--cwd` belongs to another. Today it passes
+exactly one such path — the `--cwd` — so the case does not arise, and the LOOK fence is
+what would show it if it ever did. Read that output before running the `pkill` fence.
+
+This sweep does not make orphans impossible, only collectible. Two cases still leak,
+and this command is how you clean them up after the fact, by hand, when you choose to:
+
+- A dispatch killed with `SIGKILL`, an out-of-memory kill, or a machine crash — nothing
+  in-process can react to any of those.
+- A broker whose launch was already in flight when a `SIGTERM`/`SIGHUP` handler ran its
+  reap: the handler sweeps live sandboxes twice, a short pause apart, but a broker that
+  first becomes visible after that second pass is not caught by the handler itself.
+
+Neither case is silent forever — both leave the tagged sandbox path in a live process's
+`--cwd`, so the sweep above finds them whenever you choose to run it.
