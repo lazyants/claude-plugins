@@ -39,6 +39,41 @@ not visited — a pre-existing blind spot, the subject of sibling issue #917, ne
 widened here; a `remove` of an entry whose `canonical_target_form` was already empty produces no
 `canon_map` mismatch and is not listed; and the no-exit-change guarantee is scoped to `Exception`
 and `SystemExit` — `KeyboardInterrupt` is deliberately not caught.
+## 1.120.0 — 2026-09-12
+
+**A glossary batch that died on its environment named no way back, and the driver's
+result carried no top-level `reason` when batches failed (#914).** Until now exactly
+one terminal `not_ready[]` entry pointed to a fix: `citation-review-exhausted`, via
+its own `recovery` field. Every other terminal record — an ordinary job failure, a
+failed repair, and a `DriverError` caught in `drive_all()` — settled `status:
+"failed"` naming no move at all, so an operator reading only that entry had nothing
+to act on. The motivating run had every batch die because the Codex account's own
+usage quota had run out, and the driver reported that the same way it reports any
+other job failure.
+
+**`_settle_failed()` now stamps all three of those sites with
+`ENVIRONMENTAL_RECOVERY`, which names `--reset-batches` as the way back** — the
+batch failed on its environment, not on its candidates, so nothing about its rows
+was decided here and a re-drive from attempt 0 is safe. `approval-record-write-failed`
+gets its own `APPROVAL_RECORD_RECOVERY` instead: that batch's judge approval is
+attested and its snapshot survives, so resetting it would throw the approval away;
+its recovery points at the hand route SKILL.md already documents under "Recovering
+the ready batches when a sibling exhausted".
+
+**The result also gains a top-level `reason` and `notReadyDetail`.**
+`summarize_not_ready()` reads the one failure message the most failures share and
+reports it once, with the batches that carry it, instead of making a session open
+every entry to find the same cause; `reason: "batches-failed"` marks a run with
+failures and nothing awaiting a judge, while a run that ALSO has `needs_judge` keeps
+`awaiting-more-verdicts`. A session that captures only stdout — the documented way
+to consume this driver — now sees the real cause without a second look.
+
+SKILL.md documents the widened `recovery` contract and the two new result fields.
+
+Migration. `glossary_dispatch_driver.py` is a `PLUGIN_BUNDLE_MEMBERS` entry, so this
+moves `plugin_bundle_hash`: every converged segment of a book in progress goes
+`stale` and re-translates once the refreshed plugin is picked up, and an unfinished
+glossary pass mints a fresh `RUN_ID` instead of resuming.
 
 ## 1.118.0 — 2026-09-12
 
