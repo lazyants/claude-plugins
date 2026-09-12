@@ -4637,8 +4637,11 @@ NodeStream into `registry_input.json`'s digest).
 (1.34.0, #550). For a book translated *for genealogy* rather than for the
 translation, `scripts/person_registry.py` consolidates what the pipeline
 already produced into a person-keyed registry under
-`${durable_root}/registry/`. It is in none of the three bundle tuples and
-moves no cache key, and there is deliberately no `profile.yml` knob. Run it
+`${durable_root}/registry/`. `--prep` writes `registry_input.json` (the full,
+digest-bound prep that `--claims`/`--build` read) and `registry_cast.json`
+(the document Pass A reads -- no `mentions`, no review-queue units; #923). It
+is in none of the three bundle tuples and moves no cache key, and there is
+deliberately no `profile.yml` knob. Run it
 **immediately after the W9 chain (`references/assembly-and-output.md`, "W9
 Assemble — the run order, gate by gate"), in the same session**. The three
 script calls, the two model passes between them, why `--plugin-root` is

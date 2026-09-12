@@ -515,12 +515,11 @@ FIGURES = [
     #   1.127.0, 2026-09-12    the version and the release date
     #   #910, #840, #826, #917 issue numbers
     #   W3a (twice)            a workflow step name, not a count
+    #   "three"                SAFE_STALE_CARVEOUT_FIELDS, spelled as a word
     #
     # The entry states NO `file.ext:NNN` citation at all: it names
     # `final_audit.py` and `SAFE_STALE_CARVEOUT_FIELDS` by file and symbol,
-    # the way the four preceding rotations did, so no line number in it can
-    # drift.
-    #   "three"                SAFE_STALE_CARVEOUT_FIELDS, spelled as a word
+    # the way the preceding rotations did, so no line number in it can drift.
     #
     # The ONE measurement in the entry -- "four corrected targets, ten
     # segments dispatched afterwards, 23 superseded spans" -- is deliberately
@@ -539,8 +538,31 @@ FIGURES = [
     # `plugin_bundle_hash` are named, so no later release can rot this prose
     # by retuning a number.
     #
-    # This rotation RETIRED 1.123.0's rows, which belong to an entry that is
+    # This rotation RETIRED 1.125.0's rows, which belong to an entry that is
     # no longer the newest and which this guard therefore no longer reads.
+    #
+    # The 1.125.0 rotation this replaces, kept as its own record:
+    # ROTATED TO 1.125.0 (#923 -- `person_registry.py --prep` was unreachable
+    # on a large canon), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. It
+    # quotes MANY figures -- document sizes at five knob settings, the bytes of
+    # four parts of the document, unit and row counts, three registries'
+    # refusal tallies -- and every one of them is a measurement taken on
+    # DELIVERED BOOKS IN ANOTHER REPOSITORY (the `breslov-he-en` series), the
+    # kind no implementation in this tree can re-derive, so no row can call the
+    # authoritative implementation for them and none is declared. The entry
+    # states them as what they are: numbers measured on one book, dated. What
+    # the tree DOES own is stated by NAMING -- `registry_cast.json`,
+    # `refusal_only_misplaced`, `--max-input-chars`, `refused_by:
+    # canon_review_queue` -- rather than by counting. The remaining numerals are
+    # identifiers: the version numbers, the release date, the issue numbers
+    # (#923, #896) and the gate names (P2, P3, Pass A, Pass B).
+    #
+    # This rotation RETIRED 1.123.0's one row (`default 2`, the
+    # `DEFAULT_MIN_CANDIDATE_FREQ` constant), which belongs to an entry that is
+    # now the second-newest and which this guard therefore no longer reads;
+    # the row is kept below as a comment inside that release's own record.
     #
     # The 1.123.0 rotation this replaces, kept as its own record:
     # ROTATED TO 1.123.0 (#912 -- the glossary planner reported no count of the
@@ -580,6 +602,9 @@ FIGURES = [
     # where the phrase does not occur -- a red that says nothing about
     # either release. The row itself was correct for its own entry and is
     # recorded in the 1.123.0 block below.
+    #   Figure("default 2", 2,
+    #          lambda: _int_constant("glossary_batch_plan.py",
+    #                                "DEFAULT_MIN_CANDIDATE_FREQ")),
     #
     #
     # ------------------------------------------------------------------------
