@@ -534,6 +534,30 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
+    # ROTATED TO 1.211.0 (#932 -- whether a canon target may be marked up was
+    # decided at W3 and first reported by the W7 render refusal), per the
+    # maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Its
+    # figures are all measurements taken on ONE DELIVERED BOOK IN ANOTHER
+    # REPOSITORY, quoted from the issue -- thirty-one converged segments,
+    # three review rounds, six spans, five re-reviewed segments, two targets --
+    # none of which any implementation in this tree can re-derive, so no row
+    # can call the authoritative implementation for them and none is declared.
+    # What the tree DOES own is stated by NAMING -- `entity_markup_untaggable.py`,
+    # `entity_markup_untaggable.json`, `_canon_collision_conflicts`,
+    # `_owners_by_target`, `_link_decision`, `_category_compatible`,
+    # `atomic_write_text` -- rather than by counting. "Seventh WARN-only check"
+    # is the one tree-derivable figure the entry states, and it is checked by
+    # tests/final_audit_untaggable_warn.test.py driving the real script rather
+    # than by a row here: a count of WARN lanes has no single constant to call.
+    # The remaining numerals are identifiers: the version numbers, the release
+    # date, the issue numbers (#932, #837, #910), the file mode 0600 and exit
+    # code 2.
+    #
+    # This rotation RETIRED nothing: the record below was already empty.
+    #
+    # The record this replaces, kept as its own:
     # ROTATED TO 1.210.0 (#916 -- a style-contract edit taken mid-book had no
     # documented way back), per the maintenance contract above.
     #
@@ -1768,7 +1792,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.210.0"
+FIGURES_VERSION = "1.211.0"
 
 
 def _newest_entry():

@@ -762,6 +762,30 @@ an all-`sense_translated` collision costs none, so it appears in neither the WAR
 nor `delinked_owners_by_target`, exactly as before. The refusal above is the one
 place that shape IS reported, and only when its label is marked.
 
+**Knowing it before W7 (#932).** Everything the refusal decides is fixed the
+moment the canon freezes — which targets have two or more owners, whether a
+group re-links them, whether an owner is `sense_translated` — yet the first
+thing that said so was this refusal, after the whole book had been translated
+and reviewed. On one book that cost three review rounds arguing, at a new site
+each time, that a fixed epithet was untagged while its single-owner sibling was
+tagged, and then a full re-review of five segments to untag the six spans the
+render refused. `scripts/entity_markup_untaggable.py` (W3a's last step) now
+applies `_canon_collision_conflicts`'s own predicate to EVERY canon target
+rather than to marked spans — through `_owners_by_target`, `_link_decision` and
+`_category_compatible` themselves, never a copy — and writes
+`${durable_root}/entity_markup_untaggable.json`: each such target, the tags it is
+untaggable under, every owner, and the `sense_translated` owners that rule a link
+group out. The translate, review and fix prompts name that file: a translator
+leaves a listed form untagged and invents no `ref` to escape the list; a reviewer
+raises no finding asking for the tag and reads the untagged form beside a tagged
+sibling as the list's ruling, not an inconsistency; a fixer refuses a finding
+that asks for one. All three speak of the span's LABEL, `ref` else tagged text,
+NFC-normalized — the same thing this refusal keys on — so a `ref` naming a
+different identity under the project's own convention is untouched. W7's
+`final_audit.py` recomputes the list live and WARNs, once per target, and once
+more when the file is absent or stale. Report-only throughout: an untaggable
+target is not an error, and a book may legitimately have dozens.
+
 **Every marked span becomes a wikilink — every occurrence, every node kind,
 headings included.** This is not a stylistic choice, it is what keeps the two
 indexes from interfering. An emitted `[[…]]` is a protected span, so the

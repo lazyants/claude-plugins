@@ -2,6 +2,86 @@
 
 
 =======
+## 1.211.0 — 2026-09-12
+
+**Whether a canon target may be marked up is now reported when the canon freezes, not first at the
+W7 render (#932).** Under `output.entity_markup.index_from: markup`, `assemble.py` refuses a render
+whose marked span names a canon target that collision de-linking removed for having two or more
+owners — the #837 refusal, and correct. What it decided was fixed at W3: which targets have several
+owners, whether a `canon_link_groups.json` group re-links them, whether an owner is
+`sense_translated`. Nothing told the translator or the reviewer, and on one `he -> en` book of
+thirty-one converged segments that silence cost three review rounds — the reviewer raising, at a
+new site each time, that two fixed epithets were untagged while their single-owner bare sibling was
+tagged, an inconsistency it was reading off the book correctly — then a whole-render refusal once
+the six spans were tagged, and a full re-review of five segments to untag them, because both
+remedies the refusal offers were closed (every owner was `sense_translated`, and a distinct `ref`
+contradicted the book's own settled rule).
+
+**`entity_markup_untaggable.py`, W3a's last step.** A new report script, in no bundle tuple. It
+resolves the block through `assemble.py`'s own `_entity_markup_config` / `_entity_markup_mode` —
+so it refuses exactly the configurations assembly refuses and is a no-op under `strip`, `off` or
+an absent block — and, under `index` mode, applies `_canon_collision_conflicts`'s own predicate to
+every canon target rather than to marked spans, through `render_obsidian.py`'s `_owners_by_target`,
+`_link_decision` and `_category_compatible` and `canon_link_groups.load_link_groups`, never a copy of
+them. It writes `${durable_root}/entity_markup_untaggable.json`: each untaggable target, the
+declared tags it is untaggable under, every owner (a link group has to name them all), and the
+`sense_translated` owners that rule a link group out. The file carries no timestamp, so it is a pure
+function of `canon.json`, `canon_link_groups.json` and the profile. Stdout is the one-line envelope
+— outcome, mode, tags, path and the count, never the rows, which stay in the file that is the
+record. Publication follows
+the same discipline as `scaffold_setup.py`'s `atomic_write_text` (a directory pinned
+`O_DIRECTORY|O_NOFOLLOW`, a symlink at the destination refused, an unguessable `O_EXCL|O_NOFOLLOW`
+temp at mode 0600, write loop, fsync, inode-and-size check, `os.replace`), copied rather than
+imported because that script is plugin-path-only and never present beside a durable root's scripts.
+Every failure before publication — an invalid block, an unsupported target, a malformed
+`canon.json` value the renderer's helpers cannot read, a lone surrogate that cannot be encoded, a
+broken sidecar, a missing or unreadable sibling — exits 2 with a `reason` and writes nothing; none
+escapes as a traceback.
+
+**The translate, review and fix prompts name the file.** `mass-translate-wf.template.js`'s
+`translatePrompt`, `reviewDispatchPrompt` and `fixPrompt` each gain one clause, appended inside an
+existing line so no line number in the file moves: a translator leaves a listed form untagged and
+invents no `ref` to escape the list; a reviewer raises no finding asking for the tag and reads the
+untagged form beside a tagged sibling as the list's ruling, not an inconsistency — a span whose
+label IS a listed form is still a valid finding; a fixer refuses a finding that asks for one. All
+three speak of the span's label — its `ref` if present, else the tagged text, NFC-normalized — which
+is what the refusal keys on, so a `ref` naming a different identity under the project's own stated
+convention is untouched. Each clause says what an absent file means (nothing is excluded), so a
+project without entity markup, or one that has not run the step, behaves exactly as before.
+
+**W7 `final_audit.py` gains a seventh WARN-only check, untaggable-target.** Only on a project whose
+`output.entity_markup` block is declared — an undeclared project imports nothing and reports
+nothing, so every existing audit fixture keeps its warning count — it recomputes the list live
+through the script's own resolver, reports each target once with its owners and which remedy is
+open, and adds one line when `entity_markup_untaggable.json` is absent (in index mode, whether or
+not the live list is empty — an absent file means no turn was told anything), unreadable (a symlink
+or a non-object counts as unreadable, classified with `lstat`, never followed) or stale against the
+current canon and sidecar; the line names the absolute re-run command. A resolver or import
+failure is one WARN line, never an aborted audit. The exit code is untouched. The count-word inventories that said six — SKILL.md's W7 block,
+`final-audit-summary.schema.json`'s descriptions, `references/assembly-and-output.md` and
+`consistency_issues.template.md` — say seven.
+
+**Not shipped, on purpose.** No segpack field: `segpack.py` is a `derivation_bundle_hash` member
+and `segpack.schema.json` a `schema_hash` member, so a per-segment field would route every
+converged segment to `blocked_needs_regeneration` for a report; the book-wide file costs the
+`plugin_bundle_hash` move every template edit already pays. No `select_segments.py` surface. No
+draft scan predicting which spans would trip the refusal — `assemble.py` names them precisely
+already. The list is frozen when written: SKILL.md's W3a step says to run it after the last planned
+canon correction (a later `canon_validate.py --correct` keeps its existing obligations — validate,
+regenerate the affected segpacks — and then this report, before any dispatch; a
+`canon_link_groups.json`-only edit needs only the report), and the W7 WARN names a stale file.
+
+**Migration.** `mass-translate-wf.template.js` is a `plugin_bundle_hash` member, so on the next
+Step 0a refresh every converged segment classifies `stale` on that field alone — machinery-only,
+carved out of the W7 completeness verdict as before — and, because the bundle marker is folded into
+`resume_setup.py`'s `input_digest`, an INTERRUPTED mass run resumes as a fresh run after the
+refresh: its non-converged `recoverable`/`human_escalation` drafts are re-translated, reviewed fixes
+included (the resume digest's own `schemas` component moves too, since it hashes every
+`*.schema.json` and this release edits `final-audit-summary.schema.json`'s descriptions — the
+cache key's `schema_hash` reads only its three schemas and does not). Finish or converge an
+in-flight run before refreshing. `final_audit.py` and the new script are in no bundle; no
+derivation, cache-key schema or prompt hash moves.
+
 ## 1.210.0 — 2026-09-12
 
 **A style-contract edit taken mid-book had no documented way back, and the one recovery that costs

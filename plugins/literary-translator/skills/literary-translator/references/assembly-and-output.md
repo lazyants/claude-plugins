@@ -54,15 +54,19 @@ W7 runs `final_audit.py` over every converged segment. `coverage_failures`
 are hard failures from re-running `validate_draft.py` against each current
 converged draft. `stale_review_failures` are hard failures where the current
 draft sha1 no longer matches that segment's ledger `reviewed_draft_sha1`.
-`warnings` counts the six WARN-only advisory checks: glossary-diff,
+`warnings` counts the seven WARN-only advisory checks: glossary-diff,
 link-graph, foreign-remainder scan, verse-structure, forbidden-pattern
 (the project's own `validation.forbidden_patterns` declarations, #520 — the
 plugin ships none), and term-consistency (the project's own
 `validation.terms` pins for recurring COMMON-NOUN terms of art, #199 — the
 plugin ships none either; canon.json is proper-name-only, so glossary-diff
 above cannot see such a term, and the count is per CARRIER so one correct
-occurrence cannot mask a drifted one beside it). WARN findings are for
-human review; they are never auto-fixed by guessing.
+occurrence cannot mask a drifted one beside it), and untaggable-target (#932 —
+only on a project declaring `output.entity_markup`: every canon target the
+`entity_markup_canon_collision` refusal below would name if a span carried it,
+reported once each, plus one line when `entity_markup_untaggable.json` is
+absent or stale). WARN findings are for human review; they are never
+auto-fixed by guessing.
 
 `completeness_counts` uses exactly `not_started`, `recoverable`, `stale`,
 `blocked_needs_regeneration`, and `human_escalation`. `human_escalation` is the

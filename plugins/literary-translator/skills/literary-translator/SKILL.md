@@ -2792,6 +2792,32 @@ translate-decision `FRONTBACK:{id}` elements alike (both are first-class
 a FATAL preflight error here, naming the offending segment(s) — never
 discovered later mid-dispatch.
 
+**W3a, last step — the untaggable-target report (#932).** Once the canon is
+frozen and the segpacks exist, run `scripts/entity_markup_untaggable.py` (no
+arguments; self-anchored like `final_audit.py`). It is a no-op — prints
+`applicable: false` and writes nothing — unless `output.entity_markup` resolves
+to `index_from: markup` under `output.target: obsidian`. Under that mode it
+writes `${durable_root}/entity_markup_untaggable.json`: every canon
+`canonical_target_form` that two or more `entries{}` rows own and that no
+`canon_link_groups.json` group re-links, under each declared tag with two or
+more category-compatible owners — exactly the population `assemble.py`'s
+`entity_markup_canon_collision` refusal would name at W7 if a marked span's
+label (its `ref`, else its tagged text, NFC-normalized) were that form. Every
+translate, review and fix turn is told to consult the file, so a reviewer stops
+asking for a tag the render cannot accept and a translator stops emitting it —
+on one book the W7 refusal cost three review rounds arguing that class plus a
+full re-review of five segments, all of it knowable the moment the canon froze.
+The script's one-line envelope carries the outcome, the mode, the path, the
+declared tags and the count, never the rows; the file is the record, open it. Ordering,
+because the report is frozen when written: run it AFTER the last planned canon
+correction — a later `canon_validate.py --correct` requires the existing
+sequence (validation, then regenerating the affected segpacks, as the W6
+promotion rules below state — since #910, `--correct` itself names the segpacks
+still carrying the pre-correction `canon_map`) and THEN this report, all
+before any selection or dispatch; a `canon_link_groups.json`-only edit needs only
+this report re-run, since no segpack carries link groups. W7's audit recomputes
+the list live and WARNs when the file is absent or stale.
+
 **W4 Stress-gate** — run the full per-segment pipeline on the highest-risk
 segment actually available among this book's own features: choose the
 longest body segment, plus whichever of footnotes/verse/front-back-translate
@@ -3187,13 +3213,13 @@ rendered prompt out as `needs_fix` and truncates the template before every
 top-level preflight, so no audit call site exists on this route. Say what
 that check actually is, because "the fix turn is unaudited" understates it:
 it is a COPY-FIDELITY comparison of every file Step 0a copied into the
-durable root against the plugin bytes it came from — 52 scripts, the three
-workflow templates, 26 schemas and the 6 language files, 87 artifacts — run
+durable root against the plugin bytes it came from — 53 scripts, the three
+workflow templates, 26 schemas and the 6 language files, 88 artifacts — run
 after every dispatched fix call on the fallback. What the default path has
 in its place is the #396 rule below: `scaffold_setup.py --verify` before
 each driver launch, which compares the two BUNDLES — 22 scripts plus
 `mass-translate-wf.template.js` and `glossary-pass-wf.template.js`, 24
-members. So 63 copied artifacts have no byte comparison on this path,
+members. So 64 copied artifacts have no byte comparison on this path,
 including every durable schema, every language preset,
 `skeptic-pass-wf.template.js`, and the W7/W8 entry points `final_audit.py`
 and `assemble.py` — and `final_audit.py` is in NO bundle hash by design (see
@@ -4420,9 +4446,10 @@ Runs at W7 over every converged segment:
   but silently substitutes prose the reviewer never saw. Counted separately
   from check 1, both roll into `hard_failures` for backward-compat
   reporting.
-- **Six WARN-only, advisory, whole-book checks** — four generalized from the
+- **Seven WARN-only, advisory, whole-book checks** — four generalized from the
   real reference's A1/A3/A4/A5 (the real `main()` only ever gates on coverage),
-  plus (5) and (6), whose content the project itself supplies:
+  plus (5) and (6), whose content the project itself supplies, and (7), a
+  declaration-level check the canon itself supplies:
   (1) glossary-diff — cross-segment name-form drift + `canon.json`
   self-consistency using each draft's `names[]`; (2) link-graph —
   `⟦FNREF_N⟧`/`⟦VERSE_...⟧` sentinel bijection on the translated draft,
@@ -4468,8 +4495,16 @@ Runs at W7 over every converged segment:
   are never compared (`preserve_source` footnotes, `skip` verses, a standalone verse's
   placeholder-only block), and the run always prints how many terms it checked,
   so an absent list cannot read as a pass. The plugin ships no terms and
-  hardcodes none. Prints every WARN as free text for human eyeballing — never
-  auto-"fixed."
+  hardcodes none; (7) untaggable-target (#932) — only on a project whose
+  `output.entity_markup` block is declared: recomputes, through
+  `entity_markup_untaggable.py`'s own resolver, every canon target that
+  collision de-linking removes while two or more owners could answer for a
+  declared tag — the set `assemble.py` refuses a marked span for — and reports
+  each once, plus one line when `entity_markup_untaggable.json` (the file the
+  translate/review/fix turns were told to read) is absent, unreadable or stale
+  against the current `canon.json`/`canon_link_groups.json`. A project without
+  the block imports nothing and reports nothing. Prints every WARN as free text
+  for human eyeballing — never auto-"fixed."
 - **Whole-project completeness gate** (a third gate, distinct from the two
   hard checks which only ever cover segments already converged): shells out
   to `scripts/select_segments.py` one final time, over the full

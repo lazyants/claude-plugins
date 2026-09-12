@@ -25,7 +25,7 @@ Two HARD checks, each counted separately, both rolling into `hard_failures`
      structurally valid but silently substitutes prose the reviewer never
      saw.
 
-Six WARN-only, advisory, non-gating checks -- four generalized from the
+Seven WARN-only, advisory, non-gating checks -- four generalized from the
 real reference's A1/A3/A4/A5 (the real `main()` only ever gated on coverage),
 plus two whose content the PROJECT supplies:
 
@@ -51,24 +51,24 @@ plus two whose content the PROJECT supplies:
                            all -- a citation would be empty).
   (5) forbidden-pattern  -- the PROJECT's own deterministic style bans,
                            declared as profile.yml's
-                           `validation.forbidden_patterns` (#520). The plugin
-                           ships no patterns and hardcodes none; a project's
-                           codepoint-decidable style_bible rules are the only
-                           thing this check knows. Scans every string leaf of
-                           blocks/footnotes/verses exactly as written.
+                           `validation.forbidden_patterns` (#520); the plugin
+                           ships and hardcodes none. Scans every string leaf
+                           of blocks/footnotes/verses exactly as written.
   (6) term-consistency   -- the PROJECT's own pinned common-noun TERMS OF ART
                            (an office title, a recurring institutional realia),
                            declared as profile.yml's `validation.terms` (#199).
-                           `canon.json` is a proper-name glossary by
-                           construction and cannot hold such a term, and WARN 1
-                           above keys on canon entries and per-draft `names[]`
-                           -- both proper-name channels -- so a recurring common
-                           noun renders two ways with nothing noticing. This
-                           check compares each SOURCE-BEARING CARRIER against
-                           its own translated counterpart and reports a carrier
-                           whose source carries the term while its draft carries
-                           no occurrence of the pinned target form. The plugin
-                           ships no terms and hardcodes none.
+                           `canon.json` cannot hold such a term (WARN 1 above
+                           keys only on proper-name channels), so a recurring
+                           common noun renders two ways with nothing noticing.
+                           Compares each SOURCE-BEARING CARRIER against its own
+                           translated counterpart. The plugin ships none.
+  (7) untaggable-target  -- canon targets no marked span may ever carry as
+                           its LABEL: two or more canon entries own the same
+                           `canonical_target_form` and no `canon_link_groups.json`
+                           group resolves the tie (`assemble.py`'s own
+                           collision-refusal predicate, applied to every target).
+                           Computed LIVE via `entity_markup_untaggable.py`; also
+                           WARNs when the on-disk file is absent or stale (#932).
 
 A third, distinct gate -- the **whole-project completeness gate** -- shells
 out to `select_segments.py` one final time, over the FULL `manifest.json`
@@ -76,7 +76,7 @@ with no `--only-segs` restriction, and folds its classification report into
 `completeness_counts`/`project_complete`. This is NOT the same population as
 the two hard checks above: the hard checks only ever look at segments
 ALREADY converged; the completeness gate looks at the whole book, converged
-or not. Unlike the six WARN-only checks below, this gate DOES affect the
+or not. Unlike the seven WARN-only checks below, this gate DOES affect the
 exit code -- a project that is not yet complete exits `3` (below `1`
 priority) rather than `0`, so `select_segments.py`'s W5 delivery-refusal
 rule holds on this default path too.
@@ -2312,6 +2312,156 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# ---------------------------------------------------------------------------
+# WARN (7) untaggable-target -- #932. Reports the same predicate
+# `assemble.py` enforces at W7 (`entity_markup_canon_collision`), computed
+# LIVE against the current canon rather than only discovered at the render
+# that refuses it -- see the module docstring's WARN-check enumeration above.
+# ---------------------------------------------------------------------------
+
+
+def warn_untaggable_targets(profile):
+    """WARN (7): canon targets `assemble.py` will refuse as an entity-markup
+    span's LABEL, surfaced here rather than only at the W7 render (#932).
+
+    THE NO-IMPORT GATE COMES FIRST, before any import at all. A project that
+    never declared `output.entity_markup` has nothing this check could ever
+    warn about, and returning here is what keeps every EXISTING
+    `tests/final_audit.test.py` fixture -- whose `SCRIPTS_TO_COPY` holds
+    neither `entity_markup_untaggable.py` nor `render_obsidian.py` -- at its
+    already-pinned `warnings` count: those fixtures never declare the block,
+    so this function never needs either sibling on that path. The gate is on
+    the KEY being absent, never on the value being a mapping: a present but
+    malformed declaration (`entity_markup: person`, a hand edit after Step 0)
+    is exactly what `assemble.py` refuses as `entity_markup_config_invalid`,
+    so it must reach the resolver below and surface as that WARN rather than
+    read as "nothing declared".
+
+    THE LIVE RECOMPUTE, not the on-disk file, is what produces the per-row
+    WARN lines: `entity_markup_untaggable.py`'s own `resolve_untaggable()` is
+    called fresh every run (never a reimplementation of its predicate), so a
+    canon edit made since the file was last written is reported this run,
+    not only once someone notices a stale file. The on-disk file is then
+    checked SEPARATELY, because it is what a translate/review turn actually
+    reads (`mass-translate-wf.template.js`) -- whether IT saw this run's
+    list is a distinct fact from whether the live list is currently
+    non-empty.
+
+    `os.lstat`, never `Path.exists()`: the latter follows a live symlink and
+    reports a dangling one as plain absence, either of which would let a
+    tampered or broken entry read as "fine" or "never written". Exactly one
+    WARN comes out of the file-check block per run: absent -- UNCONDITIONALLY
+    in index mode, even when the live list is currently empty, because
+    SKILL.md tells the operator to run this step at W3a regardless and
+    obsidian.md documents an unconditional absence WARN: an absent file means
+    no translate/review turn was told ANYTHING, which is true whether or not
+    today's canon happens to collide -- unreadable (a symlink, a non-regular
+    entry, a read/decode failure, or a decoded value that is not a JSON
+    object), or STALE (a regular, readable, well-shaped file whose
+    `untaggable` list no longer equals the live one).
+
+    Never affects the exit code -- see the module docstring's WARN/hard
+    split; a broken sibling script or an unresolvable profile surfaces here
+    as a WARN line, never a crash of this whole audit.
+    """
+    output_block = (profile or {}).get("output")
+    if not isinstance(output_block, dict) or "entity_markup" not in output_block:
+        return []
+
+    try:
+        import entity_markup_untaggable as emu
+    except (ImportError, SystemExit, OSError) as exc:
+        # OSError alongside ImportError/SystemExit: a sibling that EXISTS
+        # but cannot be read (permissions, a broken mount) raises
+        # PermissionError/OSError at import time, not ImportError -- and
+        # that must land on the same "check skipped" WARN, not an
+        # unhandled crash of this whole audit.
+        return [
+            f"UNTAGGABLE-TARGET check skipped: could not import "
+            f"entity_markup_untaggable.py ({exc})"
+        ]
+
+    try:
+        res = emu.resolve_untaggable(profile, DURABLE_ROOT)
+    except emu.UntaggableError as exc:
+        return [f"UNTAGGABLE-TARGET could not resolve: {exc} (reason={exc.reason})"]
+
+    if res.mode != "index":
+        return []
+
+    warns = []
+    for row in res.rows:
+        sense_owners = row.get("sense_translated_owners") or []
+        if sense_owners:
+            remedy = (
+                f"no canon_link_groups.json group can re-link it: "
+                f"owner(s) {sense_owners} are sense_translated"
+            )
+        else:
+            remedy = (
+                "a canon_link_groups.json group naming every owner would "
+                "re-link it"
+            )
+        warns.append(
+            f"UNTAGGABLE-TARGET {row['target']!r} under "
+            f"<{','.join(row['tags'])}>: owned by {row['owners']!r} -- a "
+            f"marked span whose label is this form makes assemble.py "
+            f"refuse the render (entity_markup_canon_collision); {remedy}"
+        )
+
+    # File check, classified with os.lstat (never Path.exists -- see this
+    # function's own docstring). Exactly one WARN comes out of this block.
+    # Self-anchored, absolute, matching this whole script's own convention
+    # (see the module docstring's "#412" note): final_audit.py may be run
+    # from any cwd, so a bare relative "scripts/entity_markup_untaggable.py"
+    # in a WARN line would be wrong wherever the operator's shell happens to
+    # be sitting.
+    rerun_cmd = f"python3 {DURABLE_ROOT}/scripts/entity_markup_untaggable.py"
+
+    def unreadable(detail):
+        # The one "unreadable" WARN, whatever made the file unreadable.
+        warns.append(
+            f"UNTAGGABLE-TARGET {emu.OUTPUT_NAME} is unreadable: {detail} -- "
+            f"re-run {rerun_cmd}"
+        )
+        return warns
+
+    path = res.path
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        # UNCONDITIONAL, even when res.rows is empty -- see this function's
+        # own docstring on why an absent file is always worth a WARN.
+        warns.append(
+            f"UNTAGGABLE-TARGET {emu.OUTPUT_NAME} is absent -- no "
+            f"translate/review turn was told; run {rerun_cmd}"
+        )
+        return warns
+    except OSError as exc:
+        return unreadable(exc)
+
+    if not stat.S_ISREG(st.st_mode):
+        # A symlink (lstat never follows the final component) or any other
+        # non-regular entry -- never distinguished further, and never read.
+        return unreadable("the entry is not a regular file")
+
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return unreadable(exc)
+
+    if not isinstance(doc, dict):
+        return unreadable("decoded value is not a JSON object")
+
+    if doc.get("untaggable") != res.rows:
+        warns.append(
+            f"UNTAGGABLE-TARGET {emu.OUTPUT_NAME} is STALE against the "
+            f"current canon.json/canon_link_groups.json -- re-run {rerun_cmd}"
+        )
+
+    return warns
+
+
 def main():
     args = build_arg_parser().parse_args()
 
@@ -2384,6 +2534,11 @@ def main():
     # counted in `warnings_count`, which is what makes it visible to the
     # summary JSON rather than only to a human reading stderr.
     warn_details.extend(term_pin_overlaps(term_check.terms))
+
+    # #932. Declaration-level like the two lanes above: whether a canon
+    # target is untaggable is a property of canon.json/canon_link_groups.json
+    # for the whole project, not of any one converged segment.
+    warn_details.extend(warn_untaggable_targets(operator_profile))
 
     for seg in sorted(converged):
         warn_details.extend(warn_link_graph(seg))
