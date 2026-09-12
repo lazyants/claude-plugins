@@ -1456,9 +1456,13 @@ inside it:
   (the profile's optional `glossary.min_candidate_freq`, else 2); (3)
   force-includes any `elision_ambiguous` row and its `elision_stripped_form`
   target for adjudication (#91), co-locating the pair in one batch. On the
-  all-resolved case it prints `{"no_new_candidates": true, "batches": []}` and
-  the orchestrating session skips `resume_setup.py` and this Workflow entirely
-  — see `references/canon-and-glossary.md`'s Citation-cache section.
+  all-resolved case it prints a line whose `no_new_candidates` is `true` and
+  `batches` is `[]`, and the orchestrating session skips `resume_setup.py`
+  and this Workflow entirely — see `references/canon-and-glossary.md`'s
+  Citation-cache section. **#912:** every printed line, either shape, also
+  carries `excluded_below_floor: {"count": N, "min_candidate_freq": M}`,
+  `count: 0` included — the operator's signal to re-run at a lower floor, which
+  dispatches the names at or above it; 1 is the lowest the script accepts.
 - **Preflight cost cap** (mirroring W5's estimator): right after
   `const BATCHES = ...`, before dispatching anything, the template computes
   `estimatedCalls = perBatchCalls * BATCHES.length + 2` (the `+ 2` is the

@@ -45,9 +45,9 @@ SCRIPT = "name_discovery.py"
 # Every script the staged copy self-anchors to or imports. Deliberately NOT
 # glossary_batch_plan.py: it is a canon_senses consumer, and a copy of one
 # staged without canon_senses.py beside it is exactly what
-# tests/senses_fixture_guard.test.py exists to refuse. Nothing here loads it --
-# the one test that names that file (d28) blob-compares it in its REAL location
-# against origin/main and never touches the bed.
+# tests/senses_fixture_guard.test.py exists to refuse. Nothing here loads it,
+# and since #912 d28 no longer blob-compares it either -- that file is now
+# simply outside this suite's reach, in the bed and on origin/main alike.
 STAGED_SCRIPTS = (
     SCRIPT,
     "language_smoke_report.py",
@@ -1697,8 +1697,7 @@ def test_d27_a_missing_census_dependency_is_this_scripts_own_named_fatal(bed):
     assert "no fallback census" in err
 
 
-@pytest.mark.parametrize("path", ["bootstrap_names.py", "segpack.py", "cache_key.py",
-                                  "glossary_batch_plan.py"])
+@pytest.mark.parametrize("path", ["bootstrap_names.py", "segpack.py", "cache_key.py"])
 def test_d28_the_files_this_change_must_not_touch_are_unmodified(path):
     """A REAL blob comparison against origin/main, not a tuple-membership proxy:
     tuple equality says nothing about whether either file's BYTES changed, and
@@ -1707,6 +1706,18 @@ def test_d28_the_files_this_change_must_not_touch_are_unmodified(path):
     Skips loudly when origin/main cannot be resolved, and FAILS if that skip
     fires in CI -- where full history is checked out and origin/main always
     resolves -- so it can never be a silent pass.
+
+    #912 removed `glossary_batch_plan.py` from this list, deliberately and once.
+    The list is what the NAME-DISCOVERY feature must not touch, and it had
+    become a repo-wide freeze only because this file runs on every PR: no PR
+    between #888 and #912 happened to need one of the four. #912's whole
+    requested outcome is a new field in that planner's OUTPUT, which can only be
+    computed where the floor is applied, so there is no conforming fix outside
+    the file. That release pays the `plugin_bundle_hash` move its own CHANGELOG
+    entry discloses. The other three stay pinned, and
+    `test_d28_no_bundle_membership_was_changed` below is untouched -- MEMBERSHIP
+    did not change, only bytes. A future change wanting one of the remaining
+    three owes the same explicit argument, not a quiet edit to this list.
     """
     rel = f"plugins/literary-translator/skills/literary-translator/assets/scripts/{path}"
     repo = PLUGIN_ROOT.parent.parent
@@ -1726,7 +1737,10 @@ def test_d28_the_files_this_change_must_not_touch_are_unmodified(path):
         f"{path} differs from origin/main. This feature must not edit it: "
         f"bootstrap_names.py and segpack.py are the DERIVATION_BUNDLE_MEMBERS "
         f"(editing either re-stales every project's converged segments) and "
-        f"cache_key.py / glossary_batch_plan.py are PLUGIN_BUNDLE_MEMBERS.")
+        f"cache_key.py is a PLUGIN_BUNDLE_MEMBERS entry. Editing one of these "
+        f"is a release-level decision that owes a CHANGELOG disclosure and an "
+        f"argument in this docstring, the way #912 did for the file it removed "
+        f"from this list -- it is not something a feature does in passing.")
 
 
 def test_d28_no_bundle_membership_was_changed():

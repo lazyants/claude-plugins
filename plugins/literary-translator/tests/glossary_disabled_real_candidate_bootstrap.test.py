@@ -239,7 +239,8 @@ def test_real_candidate_is_admitted_by_bootstrap_and_default_frequency_planner(t
     # mirroring the documented first-glossary-run state on the ENABLED path.
     entry_keys, queued, dismissed = glossary_batch_plan.load_canon(root / "canon.json", False)
     senses = glossary_batch_plan.load_senses_sidecar(root / "canon_senses.json", False)
-    included = glossary_batch_plan.select_included(
+    # #912: select_included() now returns (included, below_floor).
+    included, below_floor = glossary_batch_plan.select_included(
         result["candidates"],
         entry_keys,
         queued,

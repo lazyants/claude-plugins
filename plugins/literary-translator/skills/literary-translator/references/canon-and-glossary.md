@@ -191,7 +191,15 @@ Canon population is not "paste the whole book into context and ask for a glossar
    (`tests/glossary_batch_plan.test.py::test_retry_dropped_by_curation_emits_note`
    pins it for the queued case; a
    dismissed name inherits it unchanged). No force-inclusion path exists
-   past that curation step for either kind of retried name.
+   past that curation step for either kind of retried name. **#912:** the
+   frequency floor's own exclusions are counted on EVERY run, not only a
+   retried one — the plan line always carries `excluded_below_floor:
+   {"count": N, "min_candidate_freq": M}`, `count: 0` included, and a
+   non-zero count also gets a stderr note. Re-running at a lower
+   `--min-candidate-freq` dispatches the names at or above the new floor; 1 is the
+   lowest floor the script accepts, so a row whose `freq` is absent or `null`
+   (counted as the 0 it is treated as) needs its candidate row corrected
+   instead.
 4. **Hash stamping.** The merge step records `generation_hashes.particle_config_hash`
    AND `generation_hashes.derivation_bundle_hash` into `canon.json` at the moment of
    merge, via `cache_key.py --field particle_config_hash` / `--field
@@ -1338,11 +1346,13 @@ re-run (a second book sharing recurring historical names, or simply re-running
 the mass-translate step after an interruption) would re-research already-settled
 names, wasting research effort and risking a genuinely different citation
 surfacing on a later run for a name the canon had already frozen. When the
-curated list is legitimately empty (every candidate already resolved),
-`glossary_batch_plan.py` emits `{"no_new_candidates": true, "batches": []}` and
-the orchestrating session skips `resume_setup.py` and the Workflow dispatch
-entirely — nothing to research this run (`resume_setup.py` rejects an empty
-`batches` list, which is why the marker exists). The same marker is also the
+curated list is legitimately empty (no candidate survived the exclusions and
+the curation — already resolved, or dropped by `likely_name` or the frequency
+floor, whose own count the same line reports),
+`glossary_batch_plan.py` emits a line whose `no_new_candidates` is `true` and
+`batches` is `[]`, and the orchestrating session skips `resume_setup.py` and
+the Workflow dispatch entirely — nothing to research this run (`resume_setup.py`
+rejects an empty `batches` list, which is why the marker exists). The same marker is also the
 NORMAL first-run outcome on an uncased-script source whose preset ships no
 `name_inventory` — `bootstrap_names.py`'s `Lu`-gated detector has nothing to
 find there, so the curated list is empty because there were never candidates,
