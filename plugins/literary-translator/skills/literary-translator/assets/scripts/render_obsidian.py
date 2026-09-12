@@ -48,11 +48,11 @@ real output.
   under obsidian.md's "Editorial brackets": the outer editorial `[`/`]` around
   ANY emitted wikilink (canon links included) is now escaped, and a heading
   whose source text literally contains an `⟦ENT_n⟧`-shaped token has those
-  tokens removed and its internal whitespace collapsed. See the
-  "Declared entity markup"
-  section further down for the whole feature: assemble.py records what the
-  translator marked, and one pre-pass here turns every recorded span into a
-  wikilink to either the canon note or a minted markup note.
+  tokens removed and its internal whitespace collapsed. The heading is
+  `# {label}` unless ruled otherwise in `markup_display.json` (#925). See the
+  "Declared entity markup" section further down for the whole feature:
+  assemble.py records what the translator marked, and one pre-pass here turns
+  every recorded span into a wikilink to either the canon note or a minted markup note.
 
 Canon terms occurring in rendered text (narrative prose/headings, verse
 content, and footnote definitions alike) are wikilinked -- see
@@ -1735,32 +1735,31 @@ def _entity_markup_canon_collision_preflight(
 
 
 def _markup_note_records(spans, canon_composition):
-    """`{(tag, label): {"aliases": [...], "ref": label or None}}` for every
-    span identity that needs a note of its OWN -- i.e. every one absent from
-    `_canon_composition` (those link the canon note and mint nothing, so canon
-    stays the authority wherever it has actually spoken).
-
-    `aliases` is every DISTINCT PRINTED payload seen for this identity,
-    sorted and deduped: two spans `<person ref="B">Reb Noson</person>` and
-    `<person ref="B">R. Noson</person>` are one man with two printed forms.
-    `ref` is present only when the label came from a `ref` attribute -- in
-    which case it IS the label, since the identity is NFC-keyed and the raw
-    pre-normalization spelling is not what any consumer resolves against.
-    Nothing else goes in the frontmatter: `basis`, `confidence` and `source`
-    are canon fields, and inventing them here would be a fabrication."""
+    """`{(tag, label): {"aliases": [...], "ref": label or None, "counts":
+    {payload: n}}}` for every span identity that needs a note of its OWN, i.e.
+    every one absent from `_canon_composition` (those link canon's own note).
+    `aliases` is every DISTINCT PRINTED payload seen for this identity, sorted
+    and deduped: `<person ref="B">Reb Noson</person>` and `<person ref="B">R.
+    Noson</person>` are one man with two printed forms. `counts` (#925) is the
+    per-payload occurrence count over EVERY span -- the deterministic signal
+    the W9 turn reads off `entity_markup.identities` to RULE a display form;
+    this function only counts, it never picks (`_validate_markup_display`).
+    `ref` is present only when the label came from a `ref` attribute -- then
+    it IS the label: the identity is NFC-keyed, and the raw pre-normalization
+    spelling is not what any consumer resolves against. Nothing else goes in
+    the frontmatter: `basis`/`confidence`/`source` are canon's, a fabrication here."""
     records = {}
     for span in spans.values():
         tag, label = _entity_markup_identity(span)
         if (tag, label) in canon_composition:
             continue
-        record = records.setdefault((tag, label), {"aliases": set(), "ref": None})
-        record["aliases"].add(span.get("payload") or "")
-        ref = span.get("ref")
-        if isinstance(ref, str) and ref:
+        record = records.setdefault((tag, label), {"ref": None, "counts": Counter()})
+        record["counts"][span.get("payload") or ""] += 1  # aliases = its keys
+        if isinstance(span.get("ref"), str) and span.get("ref"):
             record["ref"] = label
     return {
-        identity: {"aliases": sorted(record["aliases"]), "ref": record["ref"]}
-        for identity, record in records.items()
+        identity: {"aliases": sorted(r["counts"]), "ref": r["ref"], "counts": dict(r["counts"])}
+        for identity, r in records.items()
     }
 
 
@@ -2004,22 +2003,23 @@ def _flatten_wikilinks(text):
     return text.replace("\\[", "[").replace("\\]", "]")
 
 
-def _render_markup_note(tag, label, aliases, ref, is_rtl):
-    """#795 §6.6. Frontmatter carries only what is TRUE of a marked entity:
-    the printed forms seen, the label, the tag as `category`, the `ref` when
-    the label came from one, and `direction`. No `basis`/`confidence`/
-    `source` -- those are canon's, and a markup note has no canon entry
-    behind it by construction.
-
-    No `## Mentions` section either: that index is source-anchored and
-    canon-keyed, and `validate_backlinks.py` derives the notes it parses from
-    canon alone -- markup notes are invisible to it, which is why that gate
-    needs no change."""
+def _render_markup_note(tag, label, aliases, ref, is_rtl, display=None):
+    """#795 §6.6, extended by #925. Frontmatter carries only what is TRUE of
+    a marked entity: the printed forms seen, the label, the tag as `category`,
+    the `ref` when the label came from one, the `display` when the operator
+    has RULED one (`_validate_markup_display` admits it from
+    `markup_display.json`; this function prints it and never chooses), and
+    `direction` -- no `basis`/`confidence`/`source`, those are canon's. With
+    `display=None` the note is BYTE-IDENTICAL to before #925; no `## Mentions`
+    section, since `validate_backlinks.py` derives its notes from canon alone."""
     frontmatter = {"aliases": aliases, "name": label, "category": tag}
     if ref is not None:
         frontmatter["ref"] = ref
+    if display is not None:
+        frontmatter["display"] = display
     frontmatter["direction"] = "rtl" if is_rtl else "ltr"
-    return "\n".join([_yaml_frontmatter(frontmatter), "", f"# {label}"]) + "\n"
+    heading = f"# {label if display is None else display}"
+    return "\n".join([_yaml_frontmatter(frontmatter), "", heading]) + "\n"
 
 
 def _reject_residual_entity_tokens(rel_path, note_text):
@@ -2392,6 +2392,308 @@ def _segment_title(seg_nodes, seg, flatten_wikilinks=False):
             if text:
                 return text
     return seg
+
+
+# ---------------------------------------------------------------------------
+# Display-form sidecar (#925) -- the operator's ruling for which printed
+# form of a markup-minted identity labels its note. `_markup_note_records`
+# above computes the deterministic candidate signal (per-alias occurrence
+# counts); the CHOICE among them is an editorial judgement over fuzzy
+# content, so it is made by a Claude turn in the operator's own W9 session
+# (SKILL.md), recorded here, and only ENFORCED by this renderer -- the same
+# division of labour `canon_link_groups.json` already establishes for
+# collision re-linking, and `_read_json`/`load_link_groups` there is this
+# section's direct precedent (duplicate-key rejection, dangling-symlink
+# handling, bounded nesting depth).
+#
+# Accepted tradeoff, stated in full because a half-stated one cannot be
+# followed: this sidecar is a FIFTH input the 4-positional-arg `render()`
+# contract does not name, resolved from `MARKUP_DISPLAY_PATH` -- this
+# script's own self-anchored location -- exactly like every other
+# self-anchored path in this file (`CANON_PATH`, `NODESTREAM_PATH`). A
+# direct in-process caller that imports this module from the plugin SOURCE
+# tree (rather than a staged `durable_root` copy) reads
+# `assets/markup_display.json`, which does not exist and is never tracked;
+# such a caller sees no rulings, exactly as if none had been made.
+# ---------------------------------------------------------------------------
+
+# Where render() looks for the ruling -- the #795 section's `#925` sub-
+# feature. Defined here -- below every line of this file another document
+# cites by number -- rather than beside `CANON_PATH`/`NODESTREAM_PATH` at the
+# top, so those citations stay where their anchors are.
+MARKUP_DISPLAY_PATH = DURABLE_ROOT / "markup_display.json"
+
+# A real markup_display.json is fixed-depth and shallow (root object ->
+# displays[] -> entry -> string, i.e. depth 4). Small on purpose: unlike
+# canon_link_groups.json this document has no nested "members" list, so a
+# document that reaches this ceiling is already pathological.
+_MARKUP_DISPLAY_MAX_DEPTH = 4
+
+
+class _MarkupDisplayDuplicateKey(ValueError):
+    """Internal: raised by `_reject_duplicate_markup_display_keys` inside
+    `_load_markup_display`'s `json.loads` call, and re-labelled there into a
+    `RenderError` -- mirrors `canon_link_groups.py`'s own `_DuplicateKey`/
+    `_reject_duplicate_keys` pair. A `ValueError` so a stray one still lands
+    in the same `except ValueError` net as any other malformed document."""
+
+
+def _reject_duplicate_markup_display_keys(pairs):
+    """`json.loads`'s `object_pairs_hook` for `markup_display.json` --
+    refuses a repeated member name in ANY object in the document instead of
+    silently keeping the last value, the identical rule
+    `canon_link_groups._reject_duplicate_keys` applies to
+    `canon_link_groups.json` and for the identical reason: plain
+    `json.loads` would collapse `{"tag": "a", "tag": "b"}` to `{"tag": "b"}`
+    before this function ever sees it, and the operator reading their own
+    file back would never see which value won."""
+    seen = set()
+    for key, _value in pairs:
+        if key in seen:
+            raise _MarkupDisplayDuplicateKey(key)
+        seen.add(key)
+    return dict(pairs)
+
+
+def _markup_display_exceeds_depth(obj, limit):
+    """True if `obj` nests deeper than `limit`. ITERATIVE, mirroring
+    `canon_link_groups._exceeds_depth`: a recursive probe would blow the
+    stack on the very document it exists to reject, and this file has no
+    coupling to that module (or any other script) to import the helper
+    from -- house style keeps every script here self-contained."""
+    stack = [(obj, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > limit:
+            return True
+        if isinstance(node, dict):
+            for value in node.values():
+                stack.append((value, depth + 1))
+        elif isinstance(node, list):
+            for value in node:
+                stack.append((value, depth + 1))
+    return False
+
+
+def _load_markup_display(path):
+    """Reads and PARSES -- but does not validate against a render's own
+    minted identities, see `_validate_markup_display` for that half -- the
+    operator-authored sidecar at `path`. Returns the raw parsed document, or
+    `None` when the sidecar is genuinely absent.
+
+    Absence is `not path.exists() and not path.is_symlink()` ONLY -- a
+    dangling symlink is a broken sidecar the operator meant to have, never
+    an absent one, and is refused below like any other non-regular path
+    (`canon_link_groups.py`'s own rule for `canon_link_groups.json`).
+    Duplicate JSON member names are refused rather than silently collapsed
+    to the last value, and the document's nesting is bounded before
+    `_validate_markup_display` walks it -- both mirroring
+    `canon_link_groups._read_json`.
+
+    `path` is `MARKUP_DISPLAY_PATH` in production -- the fifth, unnamed
+    `render()` input whose accepted tradeoff (an in-process caller on the
+    plugin SOURCE tree reads no rulings, never an error) the section header
+    above states in full."""
+    if not path.exists() and not path.is_symlink():
+        return None
+    if not path.is_file():
+        raise RenderError(
+            "markup_display_invalid",
+            f"{path} is not a regular file (a directory or a dangling "
+            "symlink) -- markup_display.json must be a plain JSON file or "
+            "absent entirely; fix or remove it.",
+        )
+    try:
+        content = path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RenderError(
+            "markup_display_invalid",
+            f"{path} is not valid UTF-8 ({exc}) -- markup_display.json must "
+            "be fixed.",
+        )
+    try:
+        doc = json.loads(content, object_pairs_hook=_reject_duplicate_markup_display_keys)
+    except _MarkupDisplayDuplicateKey as exc:
+        raise RenderError(
+            "markup_display_invalid",
+            f"{path} repeats the object key {exc.args[0]!r} -- a duplicate "
+            "key silently keeps only the LAST value, which would rule a "
+            "display the file does not visibly show; markup_display.json "
+            "must be fixed to have each key exactly once.",
+        )
+    except RecursionError as exc:
+        # The depth bound below runs on the PARSED document; a document
+        # nested past the interpreter's own limit never gets that far, and
+        # would otherwise escape as a reasonless generic failure.
+        raise RenderError(
+            "markup_display_invalid",
+            f"{path} is nested too deeply to parse ({exc}) -- "
+            "markup_display.json must be fixed.",
+        )
+    except ValueError as exc:
+        raise RenderError(
+            "markup_display_invalid",
+            f"{path} is not valid JSON ({exc}) -- markup_display.json must "
+            "be fixed.",
+        )
+    if _markup_display_exceeds_depth(doc, _MARKUP_DISPLAY_MAX_DEPTH):
+        raise RenderError(
+            "markup_display_invalid",
+            f"{path} nests deeper than {_MARKUP_DISPLAY_MAX_DEPTH} levels -- "
+            "markup_display.json must be fixed.",
+        )
+    return doc
+
+
+def _validate_markup_display(doc, markup_records):
+    """`{(tag, NFC(label)): display}` for every ruling in `doc` -- the raw
+    parsed document `_load_markup_display` returned, or `None` for an
+    absent sidecar, in which case this returns `{}` (no rulings; today's
+    byte-identical output). `markup_records` is THIS render's own
+    `_markup_note_records` output -- a ruling is checked against what this
+    render actually minted and actually prints, never against a stale
+    listing from an earlier render.
+
+    #925: the display form is an editorial choice a Claude turn makes in
+    the operator's W9 session, reading `entity_markup.identities` off a
+    prior render's manifest, and records in `markup_display.json` -- this
+    function only enforces that the ruling is well-formed, names a real
+    minted identity, and names a form the CURRENT render actually prints.
+    It never invents or guesses a display itself.
+
+    Each `displays[]` entry must be an object with EXACTLY the three keys
+    `tag`, `label`, `display`, every value a non-empty string (`display`
+    non-empty after `.strip()`); a `display` may not contain a
+    `_MENTIONS_LINE_BREAK_CHARS` character, the reserved Mentions token
+    (`_MENTIONS_RESERVED_TOKEN`), or an entity-markup sentinel
+    (`_ENT_TOKEN_RE`) -- checked HERE, before the vault is cleaned, since
+    `_reject_residual_entity_tokens` only runs on the note text AFTER the
+    existing vault is gone -- and must be strictly UTF-8 encodable (JSON
+    itself accepts an escaped lone surrogate such as `"\\ud800"`, and the
+    note's own strict `write_text` would otherwise raise only after the
+    clean). All of these raise `RenderError("markup_display_invalid", ...)`.
+
+    The identity key is `(tag, NFC(label))` -- the same key
+    `_entity_markup_identity` produces -- so an NFC row and an NFD row of
+    one label collide as ONE identity; a repeat raises
+    `markup_display_invalid` (duplicates are defined in identity space, not
+    two rulings). A key absent from `markup_records` (unknown, or an
+    identity canon already owns and therefore mints nothing) raises
+    `RenderError("markup_display_unknown_identity", ...)`. A `display`
+    whose NFC form does not equal the NFC form of at least one of that
+    identity's CURRENT `aliases` raises `RenderError(
+    "markup_display_not_printed", ...)` -- the ruling picks among what the
+    translation actually prints, so a form a re-translation no longer
+    prints is refused like any other, never silently carried over. The
+    `display` VALUE itself is stored UNNORMALIZED, exactly as ruled."""
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        raise RenderError(
+            "markup_display_invalid",
+            f"{MARKUP_DISPLAY_PATH} must be a JSON object with a top-level "
+            f'"displays" list, got {type(doc).__name__} -- '
+            "markup_display.json must be fixed.",
+        )
+    raw_entries = doc.get("displays")
+    if not isinstance(raw_entries, list):
+        got = type(raw_entries).__name__ if "displays" in doc else "nothing"
+        raise RenderError(
+            "markup_display_invalid",
+            f'{MARKUP_DISPLAY_PATH}\'s "displays" key must be a list, got '
+            f"{got} -- markup_display.json must be fixed.",
+        )
+    result = {}
+    for index, entry in enumerate(raw_entries):
+        if not isinstance(entry, dict):
+            raise RenderError(
+                "markup_display_invalid",
+                f"{MARKUP_DISPLAY_PATH}'s displays[{index}] must be an "
+                f"object, got {type(entry).__name__} -- markup_display.json "
+                "must be fixed.",
+            )
+        if set(entry) != {"tag", "label", "display"}:
+            raise RenderError(
+                "markup_display_invalid",
+                f"{MARKUP_DISPLAY_PATH}'s displays[{index}] must have "
+                'exactly the keys "tag", "label" and "display", got '
+                f"{sorted(entry)} -- markup_display.json must be fixed.",
+            )
+        tag, label, display = entry["tag"], entry["label"], entry["display"]
+        for field_name, value in (("tag", tag), ("label", label), ("display", display)):
+            if not isinstance(value, str) or not value.strip():
+                raise RenderError(
+                    "markup_display_invalid",
+                    f"{MARKUP_DISPLAY_PATH}'s displays[{index}].{field_name} "
+                    "must be a non-empty string -- markup_display.json must "
+                    "be fixed.",
+                )
+        if any(ch in _MENTIONS_LINE_BREAK_CHARS for ch in display):
+            raise RenderError(
+                "markup_display_invalid",
+                f"{MARKUP_DISPLAY_PATH}'s displays[{index}].display contains "
+                "a line-break character -- it becomes a raw Markdown "
+                "heading, and a newline there could inject a forged extra "
+                "line disguised as a fresh heading; markup_display.json "
+                "must be fixed.",
+            )
+        if _MENTIONS_RESERVED_TOKEN in display:
+            raise RenderError(
+                "markup_display_invalid",
+                f"{MARKUP_DISPLAY_PATH}'s displays[{index}].display contains "
+                f"the reserved Mentions-marker token "
+                f"{_MENTIONS_RESERVED_TOKEN!r} -- markup_display.json must "
+                "be fixed.",
+            )
+        if _ENT_TOKEN_RE.search(display):
+            raise RenderError(
+                "markup_display_invalid",
+                f"{MARKUP_DISPLAY_PATH}'s displays[{index}].display "
+                "contains an entity-markup sentinel -- a machine token must "
+                "never reach a reader; markup_display.json must be fixed.",
+            )
+        try:
+            display.encode("utf-8")
+        except UnicodeEncodeError:
+            raise RenderError(
+                "markup_display_invalid",
+                f"{MARKUP_DISPLAY_PATH}'s displays[{index}].display is not "
+                "strictly UTF-8 encodable (an escaped lone surrogate) -- "
+                "markup_display.json must be fixed.",
+            )
+        identity = (tag, unicodedata.normalize("NFC", label))
+        if identity in result:
+            raise RenderError(
+                "markup_display_invalid",
+                f"{MARKUP_DISPLAY_PATH}'s displays[{index}] repeats the "
+                f"identity {identity!r} (labels normalize to the same NFC "
+                "form) -- markup_display.json must be fixed to rule each "
+                "identity once.",
+            )
+        if identity not in markup_records:
+            raise RenderError(
+                "markup_display_unknown_identity",
+                f"{MARKUP_DISPLAY_PATH}'s displays[{index}] rules a display "
+                f"for tag {tag!r}, label {label!r}, but this render minted "
+                "no such markup note -- either the identity does not exist "
+                "or canon already owns it. Fix or remove the ruling in "
+                "markup_display.json.",
+            )
+        aliases = markup_records[identity]["aliases"]
+        display_nfc = unicodedata.normalize("NFC", display)
+        if not any(display_nfc == unicodedata.normalize("NFC", alias) for alias in aliases):
+            raise RenderError(
+                "markup_display_not_printed",
+                f"{MARKUP_DISPLAY_PATH}'s displays[{index}] rules "
+                f"{display!r} for tag {tag!r}, label {label!r}, but this "
+                f"render's translation currently prints only {aliases!r} "
+                "for that identity -- a display must be one of the forms "
+                "the CURRENT translation actually prints (a form a "
+                "re-translation no longer prints is a stale ruling). Fix "
+                "or remove the ruling in markup_display.json.",
+            )
+        result[identity] = display
+    return result
 
 
 def _render_segment_note(seg, seg_nodes, footnote_text_by_n, linker, is_rtl,
@@ -3442,24 +3744,6 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
             entity_spans, entries, collision_delink, primary_by_source_form
         )
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _clean_vault_content(out_dir)  # marker-gated; raises RenderError if unmanaged -- review round 1+2
-    # #588: re-stamp the ownership marker WITHOUT a measurement the moment
-    # the old vault is gone. The marker is a preserved dotfile, so a render
-    # that is killed (or fails) partway would otherwise leave the PREVIOUS
-    # render's `delink_cost` standing over notes it no longer describes --
-    # and `validate_backlinks.py` republishes that block as the vault's own
-    # number. An unmeasured marker is honest about an incomplete vault; the
-    # measured one is stamped LAST, only on success.
-    _stamp_vault_marker(out_dir)
-    written = []
-
-    if mentions_enabled:
-        # Fail-closed, before any note is written: no canon field may
-        # already carry the reserved marker token or an unsafe line-break
-        # (D1, codex R5/R6 -- see the function's own docstring).
-        _validate_mentions_safe_canon(entries)
-
     # D3 (#206/#207): collision de-linking is de-coupled from the `##
     # Mentions` appendix `enabled` flag -- a >=2-owner canonical_target_form
     # is not inline-linked on ANY real obsidian render, appendix on or off,
@@ -3473,6 +3757,15 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # merely recoverable (via the `## Mentions` appendix or a manual
     # search), so ambiguity always resolves toward the safer failure. See
     # build_entity_index's own docstring.
+    #
+    # Moved up here (#925, was after the clean below): computing the link
+    # index and the markup identities touches no disk, the sidecar READ that
+    # follows them is the one deliberate new input, and a REJECTED
+    # `markup_display.json` must never cost the operator the vault already
+    # on disk -- the exact invariant
+    # `_validate_link_groups` and the two preflights just above already
+    # hold. `_apply_entity_markup` (the pre-pass that actually rewrites the
+    # nodestream text) stays below, after the clean, where it always was.
     pattern, target_to_entity = build_entity_index(
         entries, note_identity_by_source_form,
         collision_delink=collision_delink,
@@ -3492,17 +3785,17 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
         delinked_targets=set(delinked_owners),
     )
 
-    # #795 §6.2/§6.3: resolve every recorded span to a wikilink, in ONE
-    # pre-pass, BEFORE any renderer helper reads the text. Ordered here and
-    # not earlier because it needs two things that only exist by now:
-    # `target_to_entity` (which `_canon_composition` reduces to the identities
-    # canon actually owns -- those link the canon note and mint nothing) and
-    # `linker` (whose `global_seen` the
-    # pre-pass shares, so `parenthetical_originals: first_occurrence` shows
-    # its gloss once book-wide across BOTH mechanisms, and whose
-    # `links_emitted` keeps counting every inline link this render inserted).
+    # #795 §6.2/§6.3 setup, and #925's display ruling: both need
+    # `target_to_entity` (which `_canon_composition` reduces to the
+    # identities canon actually owns -- those link the canon note and mint
+    # nothing) and nothing else disk-side, so both run here, before the
+    # clean. `_apply_entity_markup` itself (which needs `linker` and
+    # `markup_note_identity`, both already available here) stays after the
+    # clean, in its original position.
     markup_records = {}
     markup_note_relpath = {}
+    markup_note_identity = {}
+    markup_display = {}
     entity_markup_report = None
     if entity_markup_active:
         canon_composition = _canon_composition(entity_spans, target_to_entity, entries)
@@ -3514,6 +3807,44 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
             identity: relpath[: -len(".md")] if relpath.endswith(".md") else relpath
             for identity, relpath in markup_note_relpath.items()
         }
+        # #925: the operator's display-form ruling, read from this script's
+        # own self-anchored location and validated against the identities
+        # THIS render just minted -- fail-closed, here, for the same reason
+        # as everything else in this window: the clean below empties the
+        # existing vault, and a rejected ruling must not cost the operator
+        # that vault.
+        markup_display = _validate_markup_display(
+            _load_markup_display(MARKUP_DISPLAY_PATH), markup_records
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _clean_vault_content(out_dir)  # marker-gated; raises RenderError if unmanaged -- review round 1+2
+    # #588: re-stamp the ownership marker WITHOUT a measurement the moment
+    # the old vault is gone. The marker is a preserved dotfile, so a render
+    # that is killed (or fails) partway would otherwise leave the PREVIOUS
+    # render's `delink_cost` standing over notes it no longer describes --
+    # and `validate_backlinks.py` republishes that block as the vault's own
+    # number. An unmeasured marker is honest about an incomplete vault; the
+    # measured one is stamped LAST, only on success.
+    _stamp_vault_marker(out_dir)
+    written = []
+
+    if mentions_enabled:
+        # Fail-closed, before any note is written: no canon field may
+        # already carry the reserved marker token or an unsafe line-break
+        # (D1, codex R5/R6 -- see the function's own docstring).
+        _validate_mentions_safe_canon(entries)
+
+    # #795 §6.2/§6.3: resolve every recorded span to a wikilink, in ONE
+    # pre-pass, BEFORE any renderer helper reads the text. `target_to_entity`,
+    # `canon_composition` and `markup_note_identity` were all computed
+    # earlier in this function, before the clean (#925) -- only the actual
+    # nodestream rewrite needs to happen here, after the vault is gone, and
+    # it needs `linker`'s `global_seen` so `parenthetical_originals:
+    # first_occurrence` shows its gloss once book-wide across BOTH
+    # mechanisms, and `linker`'s `links_emitted` keeps counting every
+    # inline link this render inserted.
+    if entity_markup_active:
         markup_counts = _apply_entity_markup(
             nodestream, entity_spans, canon_composition, markup_note_identity, linker
         )
@@ -3533,10 +3864,35 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
                 f"nodestream.entity_markup.spans records {len(entity_spans)} -- "
                 "every recorded span must resolve to exactly one wikilink.",
             )
+        # #925: the listing a W9 Claude turn reads to rule a display form.
+        # `displays` is a VISIBLE zero -- "0 of 409 named" must read
+        # differently from "all named", so an entity_markup block with no
+        # rulings yet still carries the key rather than omitting it.
+        # `identities` sorts by `(tag, label)` (this render's own identity
+        # key) and each identity's `aliases` by occurrence count descending,
+        # form ascending on a tie -- the same order an operator would want
+        # to scan when picking the commonest printed form.
+        identity_rows = []
+        for identity in sorted(markup_records):
+            tag, label = identity
+            record = markup_records[identity]
+            identity_rows.append({
+                "tag": tag,
+                "label": label,
+                "ref": record["ref"],
+                "note": markup_note_identity[identity],
+                "display": markup_display.get(identity),
+                "aliases": sorted(
+                    ({"form": form, "count": count} for form, count in record["counts"].items()),
+                    key=lambda alias: (-alias["count"], alias["form"]),
+                ),
+            })
         entity_markup_report = {
             "spans": len(entity_spans),
             "notes": len(markup_note_relpath),
             "links": markup_counts["links"],
+            "displays": len(markup_display),
+            "identities": identity_rows,
         }
 
     footnote_text_by_n = {fn["n"]: fn.get("text", "") for fn in (nodestream.get("footnotes") or [])}
@@ -3615,7 +3971,8 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
         tag, label = identity
         record = markup_records[identity]
         note_text = _render_markup_note(
-            tag, label, record["aliases"], record["ref"], is_rtl
+            tag, label, record["aliases"], record["ref"], is_rtl,
+            display=markup_display.get(identity),  # #925: the operator's ruling, or None
         )
         _reject_residual_entity_tokens(rel_path, note_text)  # §6.5 post-condition 2
         _write_note(out_dir, rel_path, note_text)
