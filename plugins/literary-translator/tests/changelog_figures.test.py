@@ -504,6 +504,24 @@ def _fetch_retry_delay(position):
 
 
 FIGURES = [
+    # ROTATED TO 1.143.0 (#925 -- a markup-minted entity note was headed with
+    # its ref slug), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Its
+    # digit-runs are: the version (1.143.0), the release date, the issue
+    # numbers (#925, #930), the identifiers `H1` and `W9` (twice), and four
+    # numerals in two phrases about ONE DELIVERED BOOK IN ANOTHER REPOSITORY
+    # -- "279 of 356 person rows" (the measured defect) and "0 of 409 named"
+    # (the visible-zero example the `displays` count exists for) -- none of
+    # which any implementation in this tree can re-derive.
+    # Everything the tree owns is stated by NAMING: the sidecar, its three
+    # refusal reasons, the manifest keys and the moved computations are named,
+    # never counted, so no later release can rot this prose by retuning a
+    # number.
+    #
+    # This rotation RETIRED 1.139.0's (empty) row set, kept below as its own
+    # record.
+    #
     # ROTATED TO 1.139.0 (#926 -- the renderer counts entity-note labels that
     # differ from another note's label only by a leading connective), per the
     # maintenance contract above.
@@ -1372,7 +1390,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.139.0"
+FIGURES_VERSION = "1.143.0"
 
 
 def _newest_entry():

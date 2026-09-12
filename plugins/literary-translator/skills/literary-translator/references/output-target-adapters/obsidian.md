@@ -680,12 +680,92 @@ silent.
 
 **A markup note carries only what is true**: `aliases` (every distinct
 printed payload seen for that identity, sorted), `name`, `category` (the
-tag), `ref` when the label came from one, and `direction`. It carries no
-`basis`, `confidence` or `source` — those are canon's, and inventing them
-here would be fabrication. It carries no `## Mentions` section either: that
-appendix is source-anchored and canon-keyed, and `validate_backlinks.py`
-derives the notes it parses from canon alone, so markup notes are invisible
-to it and it needs no change.
+tag), `ref` when the label came from one, `display` when the operator has
+ruled one (below), and `direction`. It carries no `basis`, `confidence` or
+`source` — those are canon's, and inventing them here would be fabrication.
+It carries no `## Mentions` section either: that appendix is source-anchored
+and canon-keyed, and `validate_backlinks.py` derives the notes it parses from
+canon alone, so markup notes are invisible to it and it needs no change.
+
+**Display forms — `markup_display.json` (#925).** The note's `# H1` is its
+label, and the label is whatever the translator put in the `ref` attribute.
+A translator that writes slug refs (`ref="r-nachman-noson"`) therefore ships
+a note headed `# r-nachman-noson`, and any index built from the headings
+lists internal identifiers: measured at 279 of 356 person rows on a delivered
+he→en book whose own index header promised "alphabetical by the name the
+translation prints". The note already holds the material for a human label —
+`aliases` is every form the translation printed for that ref — and what was
+missing was a RULING on which one. That ruling is the operator's, recorded in
+`${durable_root}/markup_display.json` beside `canon.json`, exactly as
+`canon_link_groups.json` records a link-routing call:
+
+```json
+{"displays": [
+  {"tag": "person", "label": "r-nachman-noson", "display": "R. Nachman Noson"}
+]}
+```
+
+The renderer never chooses. Choosing "the name the book prints" out of the
+aliases is a judgement over prose — the two obvious rules were tried on that
+book and both failed: the commonest payload is the anaphor (*the Rav* is said
+far more often than *R. Aharon*), and the shortest naming form is the rare
+spelling (*Lvov*, once, over *Lemberg*, thirty-seven times). So the renderer
+computes the deterministic signal — a per-alias occurrence count — and
+publishes it on the manifest as `entity_markup.identities` (one record per
+minted identity: `tag`, `label`, `ref`, `note`, the current `display` or
+`null`, and `aliases` as `{form, count}` pairs, commonest first), riding out
+on `assemble.py`'s stdout as `adapter_result.entity_markup.identities`. The
+W9 turn reads that listing, rules, writes the sidecar and re-renders
+(SKILL.md, W9). `entity_markup.displays` counts the identities that have a
+ruling, so "0 of 409 named" is a visible number rather than something
+indistinguishable from "all named".
+
+A ruling changes the LABEL only: the heading becomes `# R. Nachman Noson`
+and the frontmatter gains `display: R. Nachman Noson` after `ref`. `name`,
+`ref`, `aliases`, the filename and every emitted wikilink target are exactly
+what they were, so nothing that keys on the note's path moves. An identity
+without a ruling keeps its label as the heading — for a figure the book never
+names by a proper name, the ref's own words are the only honest label, and
+the listing is where that absence is visible.
+
+The sidecar is read at RENDER time from the script's own `durable_root`, not
+attached to the NodeStream by `assemble.py` the way `canon_link_groups.json`
+is: a ruling added after assembly takes effect on the next render, with no
+re-assembly. That makes it a fifth input the four-argument `render()`
+contract does not name, resolved from the module's location like every other
+self-anchored path here; an in-process import from the plugin source tree
+reads `assets/markup_display.json`, which does not exist and is never
+tracked.
+
+It is validated before the vault is destroyed, in the same window as the
+link-group and span-table checks above, so a rejected sidecar never costs the
+operator the vault already on disk. `markup_display_invalid`: the path is
+present but not a regular file (a dangling symlink is present, not absent);
+the document is not an object with a `displays` list of objects carrying
+exactly `tag`, `label` and `display`, each a non-empty string; a JSON object
+repeats a member name (`json.loads` would keep the last one silently); a
+display carries a line break, the reserved Mentions token or an entity
+sentinel, or is not strictly UTF-8 encodable (JSON accepts an escaped lone
+surrogate, and the note's write would otherwise fail only after the clean);
+or two entries name one identity — `(tag, NFC(label))`, the same key the
+spans are minted under, so an NFC row and an NFD row of one label are a
+duplicate, not two rulings. `markup_display_unknown_identity`: the identity
+mints no note this render — unknown, or one canon owns and therefore
+composes. `markup_display_not_printed`: the display is not one of that
+identity's CURRENT printed forms. The last two are what make a stale ruling
+refused rather than silently inert: after a re-translation that stops
+printing the ruled form, or drops the ref, the render halts naming the entry,
+and the operator re-rules. The display value is written exactly as ruled,
+unnormalized; the comparison against the aliases is NFC on both sides.
+
+One residual, accepted: `aliases` and the counts are gathered over every
+recorded span, including a span in a footnote definition no node references
+— the gap "What the coverage guarantee is, and is not" describes below, a
+span resolved but never delivered. A display ruled from such a form passes
+`markup_display_not_printed`. Closing it would mean re-deriving each
+segment's footnote selection before the clean, for a case that needs a
+naming form to occur ONLY in an undelivered footnote and then to be chosen
+over the delivered forms; the counts already steer the ruling away from it.
 
 **Headings.** A heading's spans link like any other, and the frontmatter
 `title:` and the filename slug are derived from the FLATTENED text — the

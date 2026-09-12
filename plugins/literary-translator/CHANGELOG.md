@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.143.0 — 2026-09-12
+
+**A markup-minted entity note was headed with its ref slug, so every index built from the notes
+listed internal identifiers (#925).** Under `output.entity_markup.index_from: markup` the renderer
+mints one note per marked identity and writes the LABEL — the translator's `ref` attribute — as the
+note's `# H1`. A translator that writes slug refs (`ref="r-nachman-noson"`) therefore ships
+`# r-nachman-noson`, and a back-of-book index built from the headings labels its rows with the slug:
+measured at **279 of 356 person rows** on a delivered he→en book whose own index header promised
+"alphabetical by the name the translation prints". Both halves were correct in isolation — the
+renderer held no display form, and the index builder was right to trust the heading — and nothing
+downstream inspects a label, so the defect was visible only to a person reading the published file.
+
+**The operator now records the printed name in `${durable_root}/markup_display.json`, and the
+renderer applies it — it never chooses.** Picking "the name the book prints" out of a note's
+`aliases` is a judgement over prose, and the two obvious rules both failed on that book: the
+commonest payload is the anaphor (*the Rav* over *R. Aharon*), the shortest naming form is the rare
+spelling (*Lvov*, once, over *Lemberg*, thirty-seven times). So the renderer computes the
+deterministic signal and publishes it: `adapter_result.entity_markup.identities` lists every minted
+identity with its `aliases` as `{form, count}` pairs, commonest first, and `entity_markup.displays`
+counts the identities that have a ruling — "0 of 409 named" is a visible number. The W9 turn reads
+the listing, rules, writes `{"displays": [{"tag", "label", "display"}, …]}` and re-renders
+(SKILL.md, W9). A ruling changes the heading and adds `display:` to the frontmatter after `ref`;
+`name`, `ref`, `aliases`, the filename and every wikilink target are byte-identical to before, so
+nothing keyed on a note's path moves. Without a ruling the note renders exactly as it did — for a
+figure the book never names, the ref's own words are the only honest label.
+
+The sidecar is read at render time from the script's own `durable_root`, not attached to the
+NodeStream by `assemble.py` as `canon_link_groups.json` is, so a ruling added after assembly takes
+effect on the next render. It is validated BEFORE the vault is cleaned, in the same window as the
+link-group and span-table checks, so a rejected sidecar never costs the operator the vault on disk:
+`markup_display_invalid` for a malformed document (a non-regular path, a repeated JSON member name,
+an entry not exactly `tag`/`label`/`display` as non-empty strings, a display carrying a line break,
+the reserved Mentions token, an entity sentinel or a lone surrogate, two entries for one
+`(tag, NFC(label))` identity), `markup_display_unknown_identity` for an identity this render mints
+no note for (unknown, or one canon owns), and `markup_display_not_printed` for a display that is not
+one of the identity's current printed forms. The last two are what make a stale ruling refused
+rather than silently inert: after a re-translation stops printing the ruled form or drops the ref,
+the render halts naming the entry. To make that check possible the pure index/composition
+computations in `render()` now run before the clean; nothing they do touches disk.
+
+`render_obsidian.py` changed, so `render_version` moves: a project's next `diff_rendered_output.py`
+run mismatches until the baseline is re-accepted (`--accept-baseline --force-accept-baseline`) — a
+render-baseline re-accept, not a re-translation.
+
+Residuals, disclosed in `references/output-target-adapters/obsidian.md`, "Display forms": `aliases`
+and their counts are gathered over every recorded span, including one in a footnote definition no
+node references (the documented resolved-but-undelivered gap), so a display ruled from such a form
+passes; and a ruling names a label only — a markup note's filename is still its label's slug, which
+is #930's question, not this one's.
 ## 1.139.0 — 2026-09-12
 
 **The renderer counts the entity notes whose labels differ from another note's label only by a

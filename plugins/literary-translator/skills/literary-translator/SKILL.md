@@ -4641,6 +4641,37 @@ only target the sidecar projection is attached under. An in-flight W9r registry
 run must restart when a group is adopted (`person_registry.py` binds the whole
 NodeStream into `registry_input.json`'s digest).
 
+**Under `index_from: markup`, name the minted notes — `markup_display.json`
+(#925).** A markup-minted note is headed with its LABEL, which is the `ref`
+the translator wrote; slug refs ship `# r-nachman-noson` as the heading, and
+every index built from the headings lists identifiers (279 of 356 person rows
+on one delivered book). After the first W9 run, read
+`adapter_result.entity_markup.identities` from `assemble.py`'s stdout line:
+one record per minted note with its `aliases` as `{form, count}` pairs,
+commonest first, and `display: null` until ruled. For every identity whose
+label is not the name the translation prints, write
+`${durable_root}/markup_display.json` —
+`{"displays": [{"tag", "label", "display"}, …]}` — then re-run the W9 chain.
+The renderer refuses the sidecar rather than guessing, so the ruling has to
+be one of the listed `aliases` forms (compared NFC-normalized, written out
+exactly as you ruled it), and it is yours to make, not a count's: take the proper-name form the book prints most (`count` is the
+signal, not the rule — the commonest payload is usually an anaphor, *the Rav*,
+*the Rebbe*, *Mother*, and those are never the name); never a rare spelling
+over the common one (*Lvov* once against *Lemberg* thirty-seven times); on a
+tie between naming forms, the shorter, without the honorific chain. A figure
+the book never names by a proper name gets NO entry — its ref's own words are
+the only honest label, and `entity_markup.displays` against `notes` keeps
+that count visible. A ruling changes the heading and adds `display:` to the
+frontmatter, nothing else: filename, `ref`, `name` and every link target stay.
+After a re-translation the render halts on a ruling whose form the book no
+longer prints (`markup_display_not_printed`) or whose ref is gone
+(`markup_display_unknown_identity`) — re-rule it; the halt is before the
+vault is cleaned, so nothing on disk is lost. Adopting a ruling re-translates
+nothing, but it changes the rendered notes, so `diff_rendered_output.py`
+mismatches until the baseline is re-accepted, as with a link group. Full
+semantics and the refusal list: `references/output-target-adapters/obsidian.md`,
+"Display forms".
+
 **W9r Person registry — OPT-IN, and opt-in means the operator runs it**
 (1.34.0, #550). For a book translated *for genealogy* rather than for the
 translation, `scripts/person_registry.py` consolidates what the pipeline
