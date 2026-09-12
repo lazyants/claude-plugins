@@ -293,5 +293,68 @@ def test_the_snapshot_is_read_once_however_many_passes_run(mod):
     assert not loads["before_first_fetch"], "never before the first fetch returns"
 
 
+# ---------------------------------------------------------------------------
+# 5. #918 -- the duplicate-body outcome, and the pairs this function hands back
+# ---------------------------------------------------------------------------
+
+DUPLICATE_BODY = "unusable:duplicate-body"
+
+
+def test_a_duplicate_body_outcome_is_not_transient(mod):
+    """PINNED RATHER THAN BRANCHED. `is_transient_fetch_outcome()` gets no new
+    case for this token and must not need one: the body came back, so re-running
+    the same fetch over the same URL would return the same bytes for ever. A
+    branch added here later would turn one repair rung into three fetch passes
+    that settle nothing."""
+    assert mod.is_transient_fetch_outcome(DUPLICATE_BODY) is False
+
+
+def test_a_duplicate_body_row_does_not_spend_a_retry_pass(mod):
+    """The property the assertion above is FOR, asserted where it is paid: one
+    pass, not three. A ladder that retried it would look identical in every
+    return field except this call count."""
+    run_fetch, read_pairs, calls = _scripted([
+        [{"item_index": 0, "outcome": DUPLICATE_BODY}],
+    ])
+    delays = []
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0},
+                                    sleep=_fake_sleep(delays))
+    assert calls["run_fetch"] == 1
+    assert delays == []
+    assert result["classified"] == {"budget_failed": [], "repairable": [0]}
+
+
+def test_the_last_pass_pairs_come_back_with_the_classification(mod):
+    """#918: the caller names WHY a row is repairable from these pairs, so it
+    never opens index.json a second time -- that read is deliberately once-only
+    and a second one could see a different file. The pairs must be the LAST
+    pass's own, not the first: a row that failed transiently and then came back
+    as a duplicate body would otherwise be described by an outcome that has
+    since been superseded."""
+    run_fetch, read_pairs, calls = _scripted([
+        [{"item_index": 0, "outcome": "refused:connect-timeout"}],
+        [{"item_index": 0, "outcome": DUPLICATE_BODY}],
+    ])
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0},
+                                    sleep=_fake_sleep([]))
+    assert calls["run_fetch"] == 2
+    assert result["pairs"] == [{"item_index": 0, "outcome": DUPLICATE_BODY}]
+
+
+def test_a_failed_fetch_command_hands_back_no_pairs_at_all(mod):
+    """The non-zero-exit short circuit returns before any pass is read, and its
+    return shape is asserted whole elsewhere in this file. Stated again here so
+    a caller cannot come to assume the key is always present."""
+    def run_fetch():
+        return False
+
+    def read_pairs():
+        raise AssertionError("no pass was read, so there are no pairs to hand back")
+
+    result = mod.fetch_until_stable(run_fetch, read_pairs, lambda: {0},
+                                    sleep=_fake_sleep([]))
+    assert "pairs" not in result
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

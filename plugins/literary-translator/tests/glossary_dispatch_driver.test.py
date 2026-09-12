@@ -458,10 +458,20 @@ _RETRIEVAL_SENTENCE = "COULD NOT BE RETRIEVED AT ALL"
 _DEFAULT_REPAIR_PROMPT_BASELINE = '--background\nEffort: high. Citation REPAIR for one already-decided canon batch in a he -> en literary translation project, batch 0, attempt 0.\nRead in full, in this order: /durable/glossary_TASK.md (the canonicalization rules and the exact per-item output contract) and /durable/canon.json (the entries already frozen there). Never re-decide or override any source_form already present in canon.json\'s own entries{}.\nresearch_mode = live.\nTHIS IS NOT A REGENERATION. The rest of this batch was decided, its citations were retrieved successfully, and those rows are NOT yours to touch -- they are not even shown to you. Exactly the items below had a source URL that COULD NOT BE RETRIEVED AT ALL when it was fetched through the project\'s own retrieval boundary: the host answered with an error, or the address did not resolve, or the response was refused for its content type. That is a fact about the URL, established locally by the fetcher, not a judgment about your reasoning.\nEach item below is exactly as you previously decided it, including the source URL that failed:\n[\n {\n  "source_form": "Alpha",\n  "basis": "established",\n  "disposition": "accepted",\n  "source": "https://dead.test/a"\n }\n]\nFor EACH item above, in the SAME order, produce exactly one replacement canon-batch item, keeping its source_form EXACTLY as given -- the source_form is the key this repair is spliced back on, so changing, reordering, adding or dropping one makes the whole repair unusable and it will be refused.\n- If you can supply a DIFFERENT, genuinely citable reference URL that you have actually verified resolves and actually documents THAT source_form\'s claimed canonical_target_form, keep basis:"established" and give that URL as source. Not a plausible-looking URL, not a search-results page, not a site\'s front page, and not a link reconstructed from memory of what its address ought to be.\n- If you cannot, DO NOT substitute another unverified URL and do not keep the established claim. Downgrade that one item to basis:"transliterated" where the fixed practical-transcription rule in /durable/style_bible.md (section C-translit), read with section C\'s naming rule, settles the form -- including a widely-used target-language form for a place or person that already has one, where that rule prefers it, since basis:"transliterated" carries whatever those rules settle and is never a letter-by-letter obligation overriding them -- or to basis:"sense_translated" where the speaking-name rule applies and a clean sense-rendering exists, or set disposition:"review_queue" with a note explaining exactly what could not be sourced. An honest downgrade is the CORRECT outcome here and is always preferred to a second unverifiable URL -- a fabricated citation that reaches the merge is frozen for the life of the project.\n- Leave canonical_target_form as it was unless the basis change itself requires a different rendering; this step exists to fix citations, not to re-open resolutions.\nWrite this exact JSON array, holding EXACTLY these 1 item(s) in this exact order and nothing else, to /private/tmp/ltgd.x/repair_0_attempt_0.json ATOMICALLY: write it first to a fresh temp file in the SAME directory (for example a dot-prefixed name alongside the target, holding your own process id), then rename that temp file into place at exactly /private/tmp/ltgd.x/repair_0_attempt_0.json -- so a partially-written file is never visible at that path. A plain JSON array of objects, no markdown code fence, no comment, nothing else in the file.\nDo NOT write, move or delete any other file in that directory: the rest of this batch is already approved and is not yours to touch.\nOnce written, return exactly the line: REPAIR 0 ATTEMPT 0'
 
 
-def repair_prompt(mod, *, cause=None):
-    args = [BATCH, 0, _REPAIR_ROW, "/private/tmp/ltgd.x/repair_0_attempt_0.json"]
+def repair_prompt(mod, *, cause=None, ordinals=None, rows=None):
+    args = [BATCH, 0, rows if rows is not None else _REPAIR_ROW,
+            "/private/tmp/ltgd.x/repair_0_attempt_0.json"]
     if cause is not None:
         args.append(cause)
+    if ordinals is not None:
+        # The bridge spreads the argument list, so the ordinals can only be
+        # appended after a cause -- exactly as run_repair() passes them. #919
+        # took the sixth slot for `hostAdvisory`, so a placeholder goes in
+        # first: the ordinals are the SEVENTH argument, and appending them
+        # straight after the cause would silently deliver them as the advisory.
+        assert cause is not None, "ordinals are meaningless without a cause"
+        args.append(None)
+        args.append(ordinals)
     out = mod.call_template_functions(
         TEMPLATE, subst(), [BATCH],
         [{"key": "p", "fn": "batchRepairPrompt", "args": args}], NODE)
@@ -505,6 +515,15 @@ def test_14_the_pin_actually_fails_on_drift_the_substring_check_would_have_misse
         "check -- that is exactly what let the mutation slip through before")
 
 
+# THE SECOND BYTE-PARITY PIN (#918). Captured the same way, from the same call
+# shape, with cause="unusable-source". Until #918 this paragraph was held only
+# by the loose substring assertions below, so an edit to the ternary that
+# selects it could have drifted this wording while every test stayed green --
+# exactly the hole the default baseline above was added to close. Captured
+# BEFORE #918 touched the ternary, so it pins the bytes that already shipped.
+_UNUSABLE_SOURCE_REPAIR_PROMPT_BASELINE = '--background\nEffort: high. Citation REPAIR for one already-decided canon batch in a he -> en literary translation project, batch 0, attempt 0.\nRead in full, in this order: /durable/glossary_TASK.md (the canonicalization rules and the exact per-item output contract) and /durable/canon.json (the entries already frozen there). Never re-decide or override any source_form already present in canon.json\'s own entries{}.\nresearch_mode = live.\nTHIS IS NOT A REGENERATION. The rest of this batch was decided, its citations were retrieved successfully, and those rows are NOT yours to touch -- they are not even shown to you. Exactly the items below had a source URL that DID retrieve when it was fetched through the project\'s own retrieval boundary, but an independent citation reviewer -- reading the body that actually came back, not just the URL -- found that body is not the document the URL names at all: an application shell, a bootstrap page, or otherwise a body carrying none of the cited content. That review is a judgment about what the page actually contains, not about your original reasoning, but a source that attests nothing must be replaced exactly like one that never retrieved at all.\nEach item below is exactly as you previously decided it, including the source URL that failed:\n[\n {\n  "source_form": "Alpha",\n  "basis": "established",\n  "disposition": "accepted",\n  "source": "https://dead.test/a"\n }\n]\nFor EACH item above, in the SAME order, produce exactly one replacement canon-batch item, keeping its source_form EXACTLY as given -- the source_form is the key this repair is spliced back on, so changing, reordering, adding or dropping one makes the whole repair unusable and it will be refused.\n- If you can supply a DIFFERENT, genuinely citable reference URL that you have actually verified resolves and actually documents THAT source_form\'s claimed canonical_target_form, keep basis:"established" and give that URL as source. Not a plausible-looking URL, not a search-results page, not a site\'s front page, and not a link reconstructed from memory of what its address ought to be.\n- If you cannot, DO NOT substitute another unverified URL and do not keep the established claim. Downgrade that one item to basis:"transliterated" where the fixed practical-transcription rule in /durable/style_bible.md (section C-translit), read with section C\'s naming rule, settles the form -- including a widely-used target-language form for a place or person that already has one, where that rule prefers it, since basis:"transliterated" carries whatever those rules settle and is never a letter-by-letter obligation overriding them -- or to basis:"sense_translated" where the speaking-name rule applies and a clean sense-rendering exists, or set disposition:"review_queue" with a note explaining exactly what could not be sourced. An honest downgrade is the CORRECT outcome here and is always preferred to a second unverifiable URL -- a fabricated citation that reaches the merge is frozen for the life of the project.\n- Leave canonical_target_form as it was unless the basis change itself requires a different rendering; this step exists to fix citations, not to re-open resolutions.\nWrite this exact JSON array, holding EXACTLY these 1 item(s) in this exact order and nothing else, to /private/tmp/ltgd.x/repair_0_attempt_0.json ATOMICALLY: write it first to a fresh temp file in the SAME directory (for example a dot-prefixed name alongside the target, holding your own process id), then rename that temp file into place at exactly /private/tmp/ltgd.x/repair_0_attempt_0.json -- so a partially-written file is never visible at that path. A plain JSON array of objects, no markdown code fence, no comment, nothing else in the file.\nDo NOT write, move or delete any other file in that directory: the rest of this batch is already approved and is not yours to touch.\nOnce written, return exactly the line: REPAIR 0 ATTEMPT 0'
+
+
 @pytest.mark.skipif(NODE is None, reason="node required")
 def test_14_the_unusable_source_cause_renders_the_retrieved_but_unusable_wording(mod):
     prompt = repair_prompt(mod, cause="unusable-source")
@@ -516,6 +535,134 @@ def test_14_the_unusable_source_cause_renders_the_retrieved_but_unusable_wording
         "application shell" in prompt.lower(), (
         "the unusable-source wording must say the source was retrieved but "
         "found worthless, not that retrieval failed; got:\n" + prompt)
+
+
+@pytest.mark.skipif(NODE is None, reason="node required")
+def test_14_the_unusable_source_wording_is_byte_identical_to_its_pin(mod):
+    """#918 widens the cause ternary from two branches to three. The
+    unusable-source paragraph must come through that edit unchanged, and only a
+    full-string comparison can say so -- the substring checks above pass on any
+    prompt that merely still contains those phrases somewhere."""
+    assert repair_prompt(mod, cause="unusable-source") == \
+        _UNUSABLE_SOURCE_REPAIR_PROMPT_BASELINE
+
+
+# ---------------------------------------------------------------------------
+# #918 test 15 -- the THIRD cause, "duplicate-body". The body DID come back, and
+# the retrieval boundary itself -- not a reviewer, nobody who read the page --
+# observed that its bytes repeat a different URL's. So neither shipped paragraph
+# is true of it: one says nothing was retrieved, the other quotes a review that
+# never happened. The set is usually MIXED, so the new paragraph names WHICH
+# rows it is about rather than hedging across all of them.
+# ---------------------------------------------------------------------------
+
+_REVIEWER_ATTRIBUTION = "an independent citation reviewer"
+_DUPLICATE_ROWS = [
+    {"source_form": "Alpha", "basis": "established",
+     "disposition": "accepted", "source": "https://shell.test/a"},
+    {"source_form": "Beta", "basis": "established",
+     "disposition": "accepted", "source": "https://dead.test/b"},
+]
+
+
+@pytest.mark.skipif(NODE is None, reason="node required")
+def test_15_a_wholly_duplicate_set_says_what_happened_and_nothing_that_did_not(mod):
+    """Two negatives and three positives over ONE rendered prompt -- the same
+    arguments rendered twice would be two node spawns for one string.
+
+    THE NEGATIVES. The sentence the default paragraph is built around is FALSE
+    here: every row in this set answered. A prompt that still carried it would
+    send the agent to replace a URL on a fact about that URL that is not true,
+    which is precisely the cost this cause exists to avoid. And nobody read this
+    body -- the retrieval boundary compared bytes -- so no review may be quoted
+    to the agent either.
+
+    THE POSITIVES. What is left has to actually say what was observed, or the
+    paragraph is merely inoffensive rather than useful: the URL did retrieve,
+    the bytes repeat a different URL's in this same batch, and that is the
+    signature of one application shell served for every address."""
+    prompt = repair_prompt(mod, cause="duplicate-body", ordinals=[1])
+    assert _RETRIEVAL_SENTENCE not in prompt, (
+        "no row here failed to retrieve, so the blanket retrieval sentence "
+        "must not appear at all; got:\n" + prompt)
+    assert _REVIEWER_ATTRIBUTION not in prompt, (
+        "nobody read this body -- the retrieval boundary compared bytes -- so "
+        "no review may be quoted to the agent; got:\n" + prompt)
+    assert "DID retrieve" in prompt
+    assert "identical to the bytes a DIFFERENT URL returned in this same batch" \
+        in prompt
+    assert "one application shell for every address" in prompt
+
+
+@pytest.mark.skipif(NODE is None, reason="node required")
+def test_15_the_rows_are_named_by_ordinal_and_the_base_is_stated(mod):
+    """`source_form` is not unique (canon-batch.schema.json permits two queued
+    established rows to share one), so the rows are named by their position in
+    the list the agent is shown. A position is useless unless the prompt says
+    where the count starts."""
+    prompt = repair_prompt(mod, cause="duplicate-body", ordinals=[1, 2],
+                           rows=_DUPLICATE_ROWS)
+    assert "Positions below are counted from 1: the first item in the list of " \
+           "items further down is item 1." in prompt
+    assert "The item(s) at position(s) [1,2] each had a source URL that DID " \
+           "retrieve" in prompt
+
+
+@pytest.mark.skipif(NODE is None, reason="node required")
+def test_15_a_mixed_set_gives_each_half_its_own_true_sentence(mod):
+    """THE MAJORITY CASE, measured: 23 of the 45 flagged evidence directories
+    also hold a row that failed for an ordinary reason. Both facts appear, each
+    bounded to the rows it is true of -- never one hedge covering both."""
+    prompt = repair_prompt(mod, cause="duplicate-body", ordinals=[1],
+                           rows=_DUPLICATE_ROWS)
+    assert "The item(s) at position(s) [1] each had a source URL that DID " \
+           "retrieve" in prompt
+    assert "The item(s) at position(s) [2] are here for the other reason " \
+           "instead: that source URL " + _RETRIEVAL_SENTENCE in prompt
+    assert _REVIEWER_ATTRIBUTION not in prompt
+
+
+@pytest.mark.skipif(NODE is None, reason="node required")
+def test_15_no_remainder_means_no_remainder_sentence(mod):
+    """Both shapes have to read correctly. With every row duplicated there is no
+    second half, and a sentence naming an empty list of positions would be one
+    the agent cannot act on."""
+    prompt = repair_prompt(mod, cause="duplicate-body", ordinals=[1, 2],
+                           rows=_DUPLICATE_ROWS)
+    assert "position(s) []" not in prompt
+    assert "are here for the other reason" not in prompt
+
+
+@pytest.mark.skipif(NODE is None, reason="node required")
+def test_15_the_ordinals_are_rendered_as_json_never_interpolated_raw(mod):
+    """The list reaches the prompt through JSON.stringify. Nothing here is
+    attacker-authored today, but a builder that pasted a value in raw would be
+    the wrong shape to hand any future caller's data to."""
+    prompt = repair_prompt(mod, cause="duplicate-body", ordinals=[2, 1],
+                           rows=_DUPLICATE_ROWS)
+    assert "position(s) [2,1]" in prompt, (
+        "the list is rendered exactly as JSON, in the order it was given")
+
+
+@pytest.mark.skipif(NODE is None, reason="node required")
+def test_15_an_absent_ordinal_list_still_renders_a_true_prompt(mod):
+    """DEGRADES HONESTLY. The driver never sends this cause without at least one
+    ordinal, but a builder is not the place to rely on that: with nothing named,
+    every row falls to the other half, and that sentence is the one that has
+    always shipped. No row is described by a fact nobody established."""
+    prompt = repair_prompt(mod, cause="duplicate-body", ordinals=[],
+                           rows=_DUPLICATE_ROWS)
+    assert "each had a source URL that DID retrieve" not in prompt
+    assert "The item(s) at position(s) [1,2] are here for the other reason " \
+           "instead: that source URL " + _RETRIEVAL_SENTENCE in prompt
+
+
+@pytest.mark.skipif(NODE is None, reason="node required")
+def test_15_an_unknown_cause_still_falls_back_to_the_shipped_default(mod):
+    """The ternary's else arm. A cause this builder has not been taught must
+    render the paragraph that has always shipped rather than nothing at all."""
+    assert repair_prompt(mod, cause="something-nobody-added-yet") == \
+        _DEFAULT_REPAIR_PROMPT_BASELINE
 
 
 # ---------------------------------------------------------------------------

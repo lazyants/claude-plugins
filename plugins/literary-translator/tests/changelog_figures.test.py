@@ -534,6 +534,41 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
+    # ROTATED TO 1.172.0 (#918 -- the citation fetcher recorded `fetched` for a
+    # body byte-identical to another URL's in the same batch), per the
+    # maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked digit-run by digit-run rather than
+    # assumed. The entry is unusually number-heavy, and every number in it falls
+    # into one of two classes, neither of which this tree can or should
+    # re-derive:
+    #
+    # IDENTIFIERS -- the version (1.172.0), the release date, the issue numbers
+    # (#918, #857), and the outcome and count names quoted as literals.
+    #
+    # MEASUREMENTS OF A CORPUS OUTSIDE THIS REPOSITORY -- 795 evidence
+    # directories, 5 542 retrieved bodies, 5 495 of them `basis: "established"`,
+    # the three distinct duplicate bodies, 171 established rows that retrieved a
+    # shell, the 143 this catches, the 47 non-established bodies, and the
+    # 643-byte and 30 960-byte page sizes. Every one is a fact about durable
+    # roots on an operator's machine, not about this tree: no implementation
+    # here can reach them, so a row quoting one would sit here permanently
+    # unverifiable, which is the exact shape this guard exists to keep out.
+    #
+    # TWO NUMBERS WERE DELIBERATELY REMOVED from the entry while writing it,
+    # because the tree DOES own them and the contract prefers naming to
+    # counting: the size of `SAFE_STALE_CARVEOUT_FIELDS` (now "a member of"),
+    # and how many fetch-time classifiers `TEXT_DECODABLE_PREFIXES`' comment
+    # records as refused (now unquantified). Either would have rotted the prose
+    # the next time that set or that comment changed.
+    #
+    # The remaining "two or more" is the RULE the entry describes, not a figure
+    # quoted about the tree; "2 MB" restates MAX_BYTES in the units the prose
+    # reads in, as an order of magnitude rather than as the constant.
+    #
+    # This rotation RETIRED the previous entry's two rows, which pin phrases
+    # that occur only in THAT entry -- the one this guard no longer reads.
+    #
     # ROTATED TO 1.157.0 (#919 -- an intermittent host refusal was read as a fact
     # about the citation, so the repair ladder re-sourced against the same
     # refusing host on every rung), per the maintenance contract above.
@@ -560,16 +595,6 @@ FIGURES = [
     #
     # Both rows below are watched failing by mutating the TREE -- the cap
     # default and the retry tuple -- never by mutating the row.
-    Figure(
-        "capped at 10 further hosts",
-        10,
-        lambda: _advisory_host_limit(),
-    ),
-    Figure(
-        "roughly 75 seconds",
-        75,
-        _fetch_retry_ladder_span,
-    ),
     # ROTATED TO 1.162.0 (#917 -- a name the canon has frozen is no longer
     # withheld from the segment pack), per the maintenance contract above.
     #
@@ -1583,7 +1608,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.170.0"
+FIGURES_VERSION = "1.172.0"
 
 
 def _newest_entry():

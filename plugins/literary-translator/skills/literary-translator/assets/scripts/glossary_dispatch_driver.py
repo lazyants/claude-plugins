@@ -210,7 +210,12 @@ TEMPLATE_EXPORTED_FUNCTIONS = (
 _ROUTING_LINE = "--background"
 
 # `fetch_citation.py`'s own success value. Everything else is a failure, and its
-# vocabulary is that script's own (`http_error:<status>`, `refused:<...>`).
+# vocabulary is that script's own: `http_error:<status>`, `refused:<...>`, and
+# `unusable:<...>`. Only the first two are RETRIEVAL failures. An `unusable:...`
+# outcome (#918) says the opposite: a body did come back, and the retrieval
+# boundary itself found that body cannot stand as evidence for the URL it was
+# asked for. It is a failure here all the same -- a citation nobody can check --
+# but nothing downstream may describe it as a URL that did not answer.
 _FETCH_OK = "fetched"
 
 # Failures that are about THIS RUN's shared budget rather than about a citation.
@@ -2148,13 +2153,54 @@ def transient_indices(pairs: "list[dict]", established_indices: "set[int]") -> "
                   and is_transient_fetch_outcome(pair["outcome"]))
 
 
+# `fetch_citation.py`'s outcome (#918) for a body it DID retrieve whose bytes are
+# identical to the bytes a DIFFERENT url returned in the same batch -- the
+# signature of a host that serves one application shell for every address. The
+# token is closed, with no variable tail, like every other boundary-generated
+# outcome, so it is compared by equality and never by prefix.
+_DUPLICATE_BODY_OUTCOME = "unusable:duplicate-body"
+
+
+def duplicate_body_indices(pairs: "list[dict]", eligible_indices: "set[int]") -> "list[int]":
+    """The rows, among `eligible_indices`, whose body came back identical to
+    another URL's.
+
+    NOT `established_indices`, and the difference is deliberate even though it
+    is invisible today. Its two siblings one screen away -- `classify_outcomes`
+    and `transient_indices` -- really are handed the ESTABLISHED set, because
+    they decide which rows a failure may be about at all. The repair gate calls
+    THIS one with the REPAIRABLE set instead: by then the established
+    restriction has already been applied once, in `classify_outcomes`, and
+    applying it twice would mean reading the approved snapshot a second time.
+
+    The two sets happen to give the same answer for this token, which is exactly
+    why the wrong name would never have gone red. A duplicate-body row is never
+    the success value and never a shared-budget outcome, so it is in `repairable`
+    precisely when it is established. That coincidence is a property of today's
+    vocabulary, not a contract, so the parameter is named for what the caller
+    actually passes.
+
+    Computed here rather than as a third key on `classify_outcomes`: that
+    function's two-key return is consumed by the repair gate and is asserted
+    exhaustive, and a duplicate-body row is not a third destination -- it is a
+    repairable row that can say WHY, which only the repair prompt needs."""
+    return sorted(pair["item_index"] for pair in pairs
+                  if pair["item_index"] in eligible_indices
+                  and pair["outcome"] == _DUPLICATE_BODY_OUTCOME)
+
+
 def fetch_until_stable(run_fetch, read_pairs, load_established,
                        *, sleep=time.sleep, on_retry=None,
                        load_rows=None) -> dict:
     """Runs the citation fetch until no established row is failing at the
     TRANSPORT layer, or until the retry ladder is spent. Returns
-    `{"ok": bool, "passes": int, "classified": {...}}` -- `classified` absent
-    when a pass exited non-zero, which the caller reports as it always has.
+    `{"ok": bool, "passes": int, "classified": {...}, "pairs": [...]}` --
+    `classified` and `pairs` both absent when a pass exited non-zero, which the
+    caller reports as it always has. `pairs` is the LAST pass's own
+    `read_outcome_pairs()` list, the very rows `classified` was computed from,
+    and it is returned (#918) so the caller can name WHY a row is repairable
+    without opening `index.json` a second time -- that read is deliberately
+    once-only, and a second one could see a different file.
     Also returns `"host_refusals": {...}` (#919, see below) on BOTH paths --
     round-2 MINOR, admitted: a tally accumulated on an earlier pass must not
     be thrown away just because a LATER pass's fetch command itself failed
@@ -2216,6 +2262,7 @@ def fetch_until_stable(run_fetch, read_pairs, load_established,
     classified = None
     established = None
     host_refusals: dict = {}
+    pairs = None
     for delay in (None,) + _FETCH_RETRY_DELAYS_SEC:
         if delay is not None:
             sleep(delay)
@@ -2237,7 +2284,7 @@ def fetch_until_stable(run_fetch, read_pairs, load_established,
         if on_retry is not None and passes <= len(_FETCH_RETRY_DELAYS_SEC):
             on_retry(len(transient), passes)
     return {"ok": True, "passes": passes, "classified": classified,
-            "host_refusals": host_refusals}
+            "pairs": pairs, "host_refusals": host_refusals}
 
 
 # ---------------------------------------------------------------------------
@@ -2678,16 +2725,41 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
                 "reason": "fetch-budget-exhausted",
                 "budgetFailed": classified["budget_failed"]}
 
-    # 6b. Repairable retrieval failures -- handled by the caller, which owns the
-    #     rung accounting.
+    # 6b. Repairable citation failures -- handled by the caller, which owns the
+    #     rung accounting. NOT ALL OF THEM ARE RETRIEVAL FAILURES (#918): a body
+    #     the boundary did retrieve, but whose bytes are identical to a DIFFERENT
+    #     url's bytes in this same batch, is recorded `unusable:duplicate-body`
+    #     and lands in exactly this set. So the cause is NAMED here rather than
+    #     assumed downstream -- the repair prompt has to tell the agent the truth
+    #     about each row, and "this URL did not answer" is false for those.
+    #
+    #     WHENEVER ANY, not only when all. Measured over 795 real evidence
+    #     directories: of the 45 this check would flag, 23 ALSO hold an
+    #     established row failing for an ordinary reason (404s, refused content
+    #     types, TLS/DNS/timeouts) against 22 that are purely duplicate-body.
+    #     `classify_outcomes()` returns ONE list and `run_repair()` sends ONE
+    #     prompt, so an all-or-nothing cause would hand the majority of them a
+    #     paragraph that is false about half their rows. The positions travel
+    #     with the cause so the prompt can say WHICH rows are which.
+    #
+    #     The repairable set is already the established rows minus the ones that
+    #     retrieved and minus the shared-budget ones, so restricting the scan to
+    #     it IS the established restriction -- applied once, in one place.
     if classified["repairable"]:
-        return {"state": "needs_repair", "batchIndex": idx, "attempt": attempt,
-                "failedPositions": classified["repairable"],
-                "snapshotPath": str(approved_path)}
+        duplicates = duplicate_body_indices(fetch_state["pairs"],
+                                            set(classified["repairable"]))
+        result = {"state": "needs_repair", "batchIndex": idx, "attempt": attempt,
+                  "failedPositions": classified["repairable"],
+                  "snapshotPath": str(approved_path)}
+        if duplicates:
+            result["cause"] = "duplicate-body"
+            result["duplicatePositions"] = duplicates
+        return result
 
-    # 6c. Every established citation retrieved. This is the ONLY branch that
-    #     reaches a judge, which is what makes a rejection from here necessarily a
-    #     CONTENT rejection rather than a retrieval one.
+    # 6c. Every established citation retrieved, and every retrieved body is the
+    #     boundary's own to vouch for as a distinct response. This is the ONLY
+    #     branch that reaches a judge, which is what makes a rejection from here
+    #     necessarily a CONTENT rejection rather than a retrieval one.
     nonce = new_nonce()
     entry = {
         "durable_root": str(ctx.durable_root),
@@ -2707,7 +2779,8 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
 
 def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]",
                snapshot_path: Path, cause: str = "unretrievable",
-               host_advisory: "list | None" = None) -> dict:
+               host_advisory: "list | None" = None,
+               duplicate_positions: "list[int] | None" = None) -> dict:
     """Repairs the failed rows into the RESERVED rung attempt+1.
 
     RUNG ACCOUNTING, stated because "consumes a rung" is ambiguous at both ends.
@@ -2717,13 +2790,26 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
     regenerates into that SAME reserved rung, never attempt+2, so a malformed
     repair costs the batch nothing beyond the rung it already reserved.
 
-    `cause` (#857) is forwarded to batchRepairPrompt() verbatim and decides which
-    of its two "why this row is here" paragraphs the repair agent reads: the
-    default "unretrievable" for a row classify_outcomes() found never fetched at
-    all, or "unusable-source" for a row an independent judge rejected because the
-    body it fetched was not the cited document. This function does not itself
+    `cause` (#857, widened by #918) is forwarded to batchRepairPrompt() verbatim
+    and decides which of its THREE "why this row is here" paragraphs the repair
+    agent reads: the default "unretrievable" for a row classify_outcomes() found
+    never fetched at all; "unusable-source" for a row an independent judge
+    rejected because the body it fetched was not the cited document; and
+    "duplicate-body" for a batch in which at least one row DID retrieve but came
+    back byte-identical to a different URL's body, which the retrieval boundary
+    observed for itself and no reviewer read. This function does not itself
     decide which is true -- the caller names it, because the caller is the one
-    that knows which of the two callers reached this function.
+    that knows which of the callers reached this function.
+
+    `duplicate_positions` (#918) carries the SNAPSHOT positions of exactly those
+    duplicate-body rows, and is meaningful only with cause "duplicate-body". A
+    duplicate-body batch may be MIXED -- the measured majority are -- so the
+    prompt must name which rows the duplicate paragraph is about. It names them
+    by their ORDINAL in `failed_rows`, the very array the agent is shown,
+    computed here. Not by `source_form`: canon-batch.schema.json permits two
+    queued established rows to share one source_form with different sources, and
+    canon_validate.py's coverage compares SETS, so a form could point at a row
+    that retrieved perfectly well.
 
     `host_advisory` (#919) is likewise forwarded verbatim, as the SIXTH argument
     of batchRepairPrompt(). It arrives here already built by the caller (see
@@ -2739,6 +2825,11 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
     snapshot_rows = load_rows(snapshot_path)
     failed_rows = [snapshot_rows[p] for p in failed_positions]
     expected_forms = [r.get("source_form") for r in failed_rows]
+    # 1-BASED, and the prompt says so in as many words: the agent counts items in
+    # a rendered list, and "item 1" is what a reader of that list will reach for.
+    duplicate_set = set(duplicate_positions or ())
+    duplicate_ordinals = [i + 1 for i, pos in enumerate(failed_positions)
+                          if pos in duplicate_set]
 
     built = ctx.build([
         {"key": "repairpath", "fn": "repairFragmentPath", "args": [idx, attempt]},
@@ -2747,8 +2838,21 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
     ])
     next_fragment = Path(built["nextfragment"])
 
-    log(f"batch {idx}: repairing {len(failed_positions)} unretrievable citation(s) "
-        f"into rung {attempt + 1}")
+    # The line names what is actually being repaired. A duplicate-body set is
+    # usually mixed, and calling every row in it unretrievable -- as this line
+    # did for every cause before #918 -- puts a false fact in the run log, which
+    # is where an operator looks first when a batch keeps coming back.
+    if cause == "duplicate-body":
+        others = len(failed_positions) - len(duplicate_ordinals)
+        what = (f"{len(duplicate_ordinals)} citation(s) whose body repeated "
+                f"another URL's")
+        if others:
+            what += f" and {others} that did not retrieve"
+    elif cause == "unusable-source":
+        what = f"{len(failed_positions)} unusable-source citation(s)"
+    else:
+        what = f"{len(failed_positions)} unretrievable citation(s)"
+    log(f"batch {idx}: repairing {what} into rung {attempt + 1}")
     # #806: same confinement as the ordinary dispatch. The repair artifact is
     # never published -- the driver reads the repaired rows here and writes the
     # SPLICED whole fragment itself -- so the sandbox is the only place it ever
@@ -2761,7 +2865,7 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
         repair = ctx.build([
             {"key": "prompt", "fn": "batchRepairPrompt",
              "args": [batch, attempt, failed_rows, str(repair_path), cause,
-                      host_advisory]},
+                      host_advisory, duplicate_ordinals]},
         ])
         job_id = launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
                               prompt=strip_routing_line(repair["prompt"]),
@@ -3336,9 +3440,17 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
             # dispatched and the batch exhausts here. Dispatching one would create
             # an attempt outside the ladder and break the judge cap.
             if attempt >= ctx.max_citation_retries:
+                # #918: the sentence is cause-aware because a duplicate-body
+                # row DID retrieve. Saying it never retrieved here would put a
+                # false fact into the rejection prose the terminal regeneration
+                # reads, which is the one thing this feature exists to avoid.
                 return _exhaust(
                     st, attempt,
-                    "citations did not retrieve at the final attempt: "
+                    ("citations could not be used at the final attempt -- at "
+                     "least one body came back identical to a different URL's "
+                     "body in the same batch: "
+                     if result.get("cause") == "duplicate-body"
+                     else "citations did not retrieve at the final attempt: ")
                     + repr(result["failedPositions"]),
                     attempts_used=attempt + 1)
             # #919: the advisory list is built HERE, at the state-owning
@@ -3355,7 +3467,9 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
             repaired = run_repair(ctx, batch, attempt, result["failedPositions"],
                                   Path(result["snapshotPath"]),
                                   cause=result.get("cause", "unretrievable"),
-                                  host_advisory=host_advisory)
+                                  host_advisory=host_advisory,
+                                  duplicate_positions=result.get(
+                                      "duplicatePositions"))
             if repaired["state"] == "failed":
                 # A job codex-companion recorded failed/cancelled during repair
                 # settles the batch at its CURRENT rung -- the one whose repair
@@ -3383,6 +3497,16 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
                         str(rejection_reason) +
                         " (a per-item repair for this could not be applied: " +
                         str(repaired.get("reason")) + ")")
+                elif result.get("cause") == "duplicate-body":
+                    # #918: same composition as the retrieval-failure case below
+                    # -- there is no judge finding to preserve here, the boundary
+                    # classified this itself -- but the sentence must stop
+                    # claiming the citation never retrieved, because it did.
+                    rejection_reason = (
+                        "the previous attempt's citations could not be used -- at "
+                        "least one body came back identical to a different URL's "
+                        "body in the same batch -- and a per-item repair could not "
+                        "be applied (" + str(repaired.get("reason")) + ")")
                 else:
                     rejection_reason = (
                         "the previous attempt's citations could not be retrieved and a "

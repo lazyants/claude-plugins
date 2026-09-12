@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.172.0 — 2026-09-12
+
+**A citation whose host serves one application shell for every address was recorded as `fetched`,
+and cost a judge dispatch and often a whole-fragment regeneration to discover (#918).** The
+retrieval boundary tested that a response decoded, never that the body was this URL's own page, so
+`encyclopedia.yivo.org`'s 643-byte React shell and `bigenc.ru`'s 30 960-byte bootstrap both resolved
+and reached the citation judge exactly as a real reference page would. The judge classified them
+correctly every time — this was never a missed detection — but by then the batch had spent a rung,
+and #857's per-item repair signal is suppressed whenever the rejection is mixed, so in most cases the
+whole fragment was regenerated and the resolver, told nothing about which source was dead, re-emitted
+the same URL.
+
+`fetch_citation.py` now reconciles one batch's retrieved bodies before it writes `index.json`: when
+two or more `basis: "established"` items caused DIFFERENT requests and the RAW response bytes that
+came back are IDENTICAL, every member of that group is recorded `outcome: "unusable:duplicate-body"`
+instead of `fetched`, and an `unusable` count is added beside `fetched`/`refused`/`http_error`. The
+evidence file and its `bytes`, `truncated` and `content_type` stay on the entry; the body really was
+retrieved and the record says so.
+
+Four deliberate narrowings, each of which the review found the first draft getting wrong. The digest
+is of the RAW bytes, taken before the charset decode — hashing the stored evidence instead made
+`\xff` and `\xfe` look identical (both decode to one U+FFFD) while the same `\xe9` served as
+windows-1252 and as UTF-8 looked different. A body truncated at the size cap is excluded: identity
+past the cap is unknowable, and no application shell is 2 MB. Only `established` rows form a group,
+so a `transliterated` row whose unrelated URL happened to return the same bytes can no longer send a
+valid citation to repair. And "different" means the request the fetcher actually SENT to the terminal
+hop — the same `wire_authority()` string its `Host` header carries, so two Unicode spellings of one
+non-ASCII hostname are one request rather than two — not the source string: `#section-a` and `#section-b` on one page issue the SAME
+request, two names attested by two sections of one reference page is ordinary, and two addresses that
+redirect to one final page are aliases whose identical bodies prove nothing. The token is not `fetched` and is not a shared-budget outcome, so `classify_outcomes()` already
+places it in `repairable` and the driver reaches its per-item repair rung with **no judge
+dispatched** — neither that function nor `is_transient_fetch_outcome()` needed a new branch, and both
+are now pinned by tests against exactly that.
+
+This is a STRUCTURAL observation, not a content classifier: nothing reads what a body says, only that
+two responses this batch actually received are the same bytes. That is why it is admissible in a file
+whose `TEXT_DECODABLE_PREFIXES` comment records the fetch-time classifiers of what a body IS that
+were refused in review, because a classifier is wrong in both directions. The issue's own visible-text-ratio
+signal was retracted by its author for that reason and is deliberately not implemented.
+
+The repair prompt is told the truth about those rows by a third `cause`, `duplicate-body`, which
+names which items in the list it is describing: their URL did retrieve, and the boundary saw another
+URL in the same batch return the same bytes. It does not reuse `unusable-source`, whose paragraph
+vouches that an independent reviewer read the body — on this path nobody did. Both pre-existing
+repair paragraphs are byte-identical and are now each pinned by a full-string baseline.
+
+Measured over 795 evidence directories from this project's real runs — 5 542 retrieved bodies, 5 495
+of them `basis: "established"` — exactly three distinct bodies ever appeared under two or more
+different URLs inside one directory, and all three were dead application shells: **zero false
+positives**. 171 established rows had retrieved one of them and this catches 143. The other 28 sat
+alone in their evidence directory, where byte identity has nothing to compare against; the judge
+still catches those, as before. A batch that also hit the shared time or byte budget keeps today's
+behaviour — that branch runs first by design, because a fresh URL cannot fix a run that ran out of
+budget.
+
+**Migration.** `fetch_citation.py`, `glossary_dispatch_driver.py` and `glossary-pass-wf.template.js`
+are all `PLUGIN_BUNDLE_MEMBERS`, so this release moves `plugin_bundle_hash` and every converged
+segment in every project reads `stale` after the upgrade. It forces no re-translation:
+`plugin_bundle_hash` is a member of `SAFE_STALE_CARVEOUT_FIELDS`, so a previously-converged
+segment whose only moved field is machinery stays deliverable. What does change is resume identity —
+the next run in a refreshed root is a fresh `RUN_ID` with `resume: false`.
+
 ## 1.170.0 — 2026-09-12
 
 **A host that rate-limits was read as a fact about the citation, so the repair ladder re-sourced

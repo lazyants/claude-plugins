@@ -1152,7 +1152,14 @@ def test_batch_processes_every_item_carrying_a_source(tmp_path, monkeypatch, cap
     still pass Pass 1 -- narrowing the sweep to the accepted/established corner
     would leave exactly that item unfetched and unaudited.
     """
-    FakeNet(monkeypatch)
+    # Distinct bodies per item, deliberately: #918's duplicate-body check would
+    # otherwise flag all three fetched items as one shell shared across three
+    # URLs, which is not what this fixture models -- three distinct pages.
+    FakeNet(monkeypatch, routes={
+        "/1": http_response(200, {"Content-Type": "text/html"}, b"<p>alpha</p>"),
+        "/2": http_response(200, {"Content-Type": "text/html"}, b"<p>beta</p>"),
+        "/3": http_response(200, {"Content-Type": "text/html"}, b"<p>gamma</p>"),
+    })
     snapshot = [
         accepted("Alpha", "https://a.example/1"),                       # 0: the obvious case
         queued("Beta", "https://b.example/2"),                          # 1: review_queue + source
@@ -1272,6 +1279,331 @@ def test_batch_index_names_the_evidence_file_and_matches_its_bytes(tmp_path, mon
 
 
 # --------------------------------------------------------------------------- #
+# #918: the duplicate-body reconciliation pass in run_batch(). A site serving
+# one identical application shell under two or more distinct URLs must not be
+# recorded as separate successful citations -- see the reconciliation
+# comment in run_batch() itself for the measured population this closes (143
+# of 171 established rows that had retrieved one of three measured dead
+# shells, ZERO false positives across 5 495 established retrievals).
+# --------------------------------------------------------------------------- #
+def test_two_distinct_urls_with_an_identical_body_are_both_flagged_unusable(tmp_path, monkeypatch, capsys):
+    FakeNet(monkeypatch, default=HTML_OK)   # one shell, served at every host/path
+    snapshot = [accepted("Alpha", "https://a.example/1"),
+                accepted("Beta", "https://b.example/2")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    outcomes = {e["item_index"]: e["outcome"] for e in index["entries"]}
+    assert outcomes == {0: "unusable:duplicate-body", 1: "unusable:duplicate-body"}
+    # ALL members flagged, not only the second onward -- leaving the first as
+    # "fetched" would still send the batch to a judge and buy nothing.
+    assert index["counts"] == {"fetched": 0, "refused": 0, "http_error": 0, "unusable": 2}
+
+
+def test_two_citations_naming_the_same_url_keep_fetched(tmp_path, monkeypatch, capsys):
+    """Identical bodies under the SAME url are expected and prove nothing about
+    a shared shell -- it is simply one page cited twice."""
+    FakeNet(monkeypatch, default=HTML_OK)
+    snapshot = [accepted("Alpha", "https://a.example/1"),
+                accepted("Beta", "https://a.example/1")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    outcomes = {e["item_index"]: e["outcome"] for e in index["entries"]}
+    assert outcomes == {0: "fetched", 1: "fetched"}
+    assert index["counts"] == {"fetched": 2, "refused": 0, "http_error": 0}, (
+        "no cross-URL duplicate group formed -- the three-key dict must be exact")
+
+
+def test_exactly_two_of_three_sharing_a_body_are_flagged(tmp_path, monkeypatch, capsys):
+    FakeNet(monkeypatch, routes={
+        "/1": HTML_OK,
+        "/2": HTML_OK,
+        "/3": http_response(200, {"Content-Type": "text/html"}, b"<p>different</p>"),
+    })
+    snapshot = [accepted("Alpha", "https://a.example/1"),
+                accepted("Beta", "https://b.example/2"),
+                accepted("Gamma", "https://c.example/3")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    outcomes = {e["item_index"]: e["outcome"] for e in index["entries"]}
+    assert outcomes == {0: "unusable:duplicate-body", 1: "unusable:duplicate-body",
+                         2: "fetched"}
+    assert index["counts"] == {"fetched": 1, "refused": 0, "http_error": 0, "unusable": 2}
+
+
+def test_a_batch_with_no_duplicates_keeps_the_exact_three_key_counts_dict(tmp_path, monkeypatch, capsys):
+    """Proves the LAZY insertion: `counts["unusable"]` must not appear at all
+    when no group is actually flagged, so a batch with no duplicates keeps the
+    exact byte-identical dict this file emits today."""
+    FakeNet(monkeypatch, routes={
+        "/1": http_response(200, {"Content-Type": "text/html"}, b"<p>alpha</p>"),
+        "/2": http_response(200, {"Content-Type": "text/html"}, b"<p>beta</p>"),
+    })
+    snapshot = [accepted("Alpha", "https://a.example/1"),
+                accepted("Beta", "https://b.example/2")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    assert index["counts"] == {"fetched": 2, "refused": 0, "http_error": 0}
+    assert "unusable" not in index["counts"]
+
+
+def test_bodies_differing_by_one_byte_are_not_flagged(tmp_path, monkeypatch, capsys):
+    FakeNet(monkeypatch, routes={
+        "/1": http_response(200, {"Content-Type": "text/html"}, b"<p>cited</p>"),
+        "/2": http_response(200, {"Content-Type": "text/html"}, b"<p>citee</p>"),
+    })
+    snapshot = [accepted("Alpha", "https://a.example/1"),
+                accepted("Beta", "https://b.example/2")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    outcomes = {e["item_index"]: e["outcome"] for e in index["entries"]}
+    assert outcomes == {0: "fetched", 1: "fetched"}
+
+
+def test_flagged_entries_keep_evidence_file_bytes_truncated_and_content_type(tmp_path, monkeypatch, capsys):
+    """The body really was retrieved; hiding it would make the record less
+    honest, and the repair path reads neither -- but every one of these
+    fields must survive the reconciliation rewrite untouched."""
+    FakeNet(monkeypatch, default=HTML_OK)
+    snapshot = [accepted("Alpha", "https://a.example/1"),
+                accepted("Beta", "https://b.example/2")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    for entry in index["entries"]:
+        assert entry["outcome"] == "unusable:duplicate-body"
+        assert entry["evidence_file"] == f"citation-{entry['item_index']:03d}.txt"
+        assert (out / entry["evidence_file"]).read_text(encoding="utf-8") == "<p>cited</p>"
+        assert entry["bytes"] == len("<p>cited</p>".encode("utf-8"))
+        assert entry["truncated"] is False
+        assert entry["content_type"] == "text/"
+
+
+def test_a_duplicate_group_survives_source_field_truncation(tmp_path, monkeypatch, capsys):
+    """Regression test for keying the digest map off `request_identity`
+    (the request fetch_one actually sent) rather than `entry["source"]`:
+    `_recorded()` caps that field at MAX_RECORDED_FIELD_CHARS["source"] == 2048
+    characters, so two distinct URLs sharing a long-enough prefix truncate to
+    the SAME recorded string while remaining distinct as fetched. Keying off
+    entry["source"] would then read this as one URL cited twice (the
+    same-request exemption) and silently UNDER-flag a real duplicate-body
+    group.
+    """
+    long_prefix = "a" * 2100          # past the 2048-char cap
+    url_1 = f"https://a.example/{long_prefix}-one"
+    url_2 = f"https://a.example/{long_prefix}-two"
+    assert fc._recorded("source", url_1) == fc._recorded("source", url_2), (
+        "the fixture must actually collide after truncation, or this test proves nothing")
+
+    FakeNet(monkeypatch, default=HTML_OK)
+    snapshot = [accepted("Alpha", url_1), accepted("Beta", url_2)]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    outcomes = {e["item_index"]: e["outcome"] for e in index["entries"]}
+    assert outcomes == {0: "unusable:duplicate-body", 1: "unusable:duplicate-body"}, (
+        "the two raw URLs are distinct even though their recorded `source` "
+        "field collides after truncation -- the group must still be flagged")
+
+
+# --------------------------------------------------------------------------- #
+# #918 round 2: three admitted MAJORs on WHAT THE DIGEST IS COMPUTED OVER and
+# WHICH ROWS MAY FORM A GROUP.
+# --------------------------------------------------------------------------- #
+def test_raw_byte_identity_not_decoded_identity_avoids_a_false_flag(tmp_path, monkeypatch, capsys):
+    """MAJOR 1, direction one: hashing the DECODED-and-re-encoded body (the
+    first version of this check) is a FALSE FLAG here. b"\\xff" and b"\\xfe",
+    both declared UTF-8, each decode (errors="replace") to one U+FFFD and
+    re-encode to the identical 3 UTF-8 bytes, so a version keyed on the
+    written bytes would flag these as one shared shell though the responses
+    genuinely differ."""
+    FakeNet(monkeypatch, routes={
+        "/1": http_response(200, {"Content-Type": "text/plain; charset=utf-8"}, b"\xff"),
+        "/2": http_response(200, {"Content-Type": "text/plain; charset=utf-8"}, b"\xfe"),
+    })
+    snapshot = [accepted("Alpha", "https://a.example/1"),
+                accepted("Beta", "https://b.example/2")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    outcomes = {e["item_index"]: e["outcome"] for e in index["entries"]}
+    assert outcomes == {0: "fetched", 1: "fetched"}
+
+
+def test_identical_raw_bytes_under_different_declared_charsets_are_flagged(tmp_path, monkeypatch, capsys):
+    """MAJOR 1, direction two: the SAME raw byte b"\\xe9" served once declared
+    windows-1252 and once declared UTF-8 decodes to two different code points
+    and writes two different byte sequences to disk, so a version keyed on
+    the written bytes would MISS a real duplicate -- the two responses ARE
+    byte-identical on the wire, which is the fact this check claims to
+    record."""
+    FakeNet(monkeypatch, routes={
+        "/1": http_response(200, {"Content-Type": "text/plain; charset=windows-1252"}, b"\xe9"),
+        "/2": http_response(200, {"Content-Type": "text/plain; charset=utf-8"}, b"\xe9"),
+    })
+    snapshot = [accepted("Alpha", "https://a.example/1"),
+                accepted("Beta", "https://b.example/2")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    outcomes = {e["item_index"]: e["outcome"] for e in index["entries"]}
+    assert outcomes == {0: "unusable:duplicate-body", 1: "unusable:duplicate-body"}
+
+
+def test_bodies_truncated_at_the_cap_are_excluded_from_the_check(tmp_path, monkeypatch, capsys):
+    """MAJOR 1, third case: two genuinely different pages that are both cut at
+    MAX_BYTES can share their whole ON-DISK prefix while their complete
+    bodies differ -- identity of a capped body is unknowable, so a truncated
+    row must never enter a digest group, on either side of a comparison."""
+    monkeypatch.setattr(fc, "MAX_BYTES", 10)
+    FakeNet(monkeypatch, routes={
+        "/1": http_response(200, {"Content-Type": "text/plain"}, b"a" * 10 + b"XXXX"),
+        "/2": http_response(200, {"Content-Type": "text/plain"}, b"a" * 10 + b"YYYY"),
+    })
+    snapshot = [accepted("Alpha", "https://a.example/1"),
+                accepted("Beta", "https://b.example/2")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    entries = {e["item_index"]: e for e in index["entries"]}
+    assert entries[0]["truncated"] is True and entries[1]["truncated"] is True, (
+        "the fixture must actually hit the cap, or this test proves nothing")
+    assert entries[0]["outcome"] == "fetched"
+    assert entries[1]["outcome"] == "fetched"
+
+
+def test_a_transliterated_row_cannot_flag_an_established_citation(tmp_path, monkeypatch, capsys):
+    """MAJOR 2: the index covers every source-bearing row, so an unrelated
+    `basis: "transliterated"` row returning the same bytes must not drag a
+    genuine `established` citation into unusable:duplicate-body -- the driver
+    ignores non-established outcomes, so only the established row would ever
+    reach repair, on the strength of a row no judge looks at."""
+    FakeNet(monkeypatch, default=HTML_OK)
+    snapshot = [accepted("Alpha", "https://a.example/1", basis="established"),
+                accepted("Beta", "https://b.example/2", basis="transliterated")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    outcomes = {e["item_index"]: e["outcome"] for e in index["entries"]}
+    assert outcomes == {0: "fetched", 1: "fetched"}
+    assert "unusable" not in index["counts"]
+
+
+def test_two_urls_differing_only_by_fragment_are_not_flagged(tmp_path, monkeypatch, capsys):
+    """MAJOR 3: `validate_url` strips the fragment, so `...#section-a` and
+    `...#section-b` issue the IDENTICAL request -- two glossary names attested
+    by two sections of one reference page is ordinary, not a shared shell.
+    The request log proves the fixture actually sends one request twice, not
+    two different ones that happen to return the same body."""
+    net = FakeNet(monkeypatch, routes={"/1": HTML_OK})
+    snapshot = [accepted("Alpha", "https://a.example/1#section-a"),
+                accepted("Beta", "https://a.example/1#section-b")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    assert [r["path"] for r in net.requests] == ["/1", "/1"], (
+        "the fixture must actually send the identical request twice, or this test proves nothing")
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    outcomes = {e["item_index"]: e["outcome"] for e in index["entries"]}
+    assert outcomes == {0: "fetched", 1: "fetched"}
+
+
+def test_two_urls_redirecting_to_the_same_final_url_are_not_flagged(tmp_path, monkeypatch, capsys):
+    """The identity key is the TERMINAL successful hop, not the first one a
+    redirect chain started from -- see _fetch_hop_inner's own comment on
+    `request_identity`, beside `quoted_path`. Two source URLs that both
+    redirect to the SAME final address are an ALIAS PAIR, not two independent
+    requests: identical bytes are then expected and prove nothing about a
+    shared shell, and keying on the first hop instead would flag this pair as
+    one. The chain length is asserted first, so this test cannot pass just
+    because the fixture happened to serve one URL twice under two names."""
+    FakeNet(monkeypatch, routes={
+        ("a.example", "/1"): redirect_response("https://shared.example/final"),
+        ("b.example", "/2"): redirect_response("https://shared.example/final"),
+        ("shared.example", "/final"): HTML_OK,
+    })
+    snapshot = [accepted("Alpha", "https://a.example/1"),
+                accepted("Beta", "https://b.example/2")]
+    path = write_snapshot(tmp_path, snapshot)
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    entries = {e["item_index"]: e for e in index["entries"]}
+    assert len(entries[0]["chain"]) > 1 and len(entries[1]["chain"]) > 1, (
+        "the fixture must actually redirect both items, or this test proves nothing")
+    assert entries[0]["outcome"] == "fetched"
+    assert entries[1]["outcome"] == "fetched"
+
+
+def test_two_unicode_spellings_of_one_host_are_one_request_and_not_flagged(
+        tmp_path, monkeypatch, capsys):
+    """The identity is the authority actually SENT, not the display form.
+
+    Found by review on the shipped branch. `chain[-1]["origin"]` keeps the
+    Unicode display spelling of the host, while the request carries the A-label
+    that `wire_authority()` builds. Those are not one-to-one: a composed
+    U+00E9 and a decomposed "e" + U+0301 spelling of the same hostname are one
+    host, send one identical `Host: xn--...` and one identical request-target
+    -- and the first version of this check built two different identities from
+    them, so ONE request made twice was classified as two different URLs
+    returning the same bytes. That is exactly the same-request case the
+    exemption exists to preserve, and a non-ASCII citation URL is ordinary in
+    the languages this plugin translates.
+
+    The recorded requests are asserted IDENTICAL first. Without that this test
+    could pass because the fixture quietly served two different hosts.
+    """
+    net = FakeNet(monkeypatch, default=HTML_OK)
+    composed = "https://\u00e9xample.com/article"          # é as one code point
+    decomposed = "https://e\u0301xample.com/article"       # e + combining acute
+    assert composed != decomposed, "the two spellings must differ as strings"
+    path = write_snapshot(tmp_path, [accepted("Alpha", composed),
+                                     accepted("Beta", decomposed)])
+    out = tmp_path / "evidence"
+    assert fc.run_batch(path, out) == 0
+    capsys.readouterr()
+
+    sent = {(r.get("host"), r.get("path")) for r in net.requests}
+    assert len(sent) == 1, (
+        f"the fixture must send ONE identical request twice, got {sent!r} -- "
+        "otherwise this test proves nothing about the identity key")
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    outcomes = [e["outcome"] for e in index["entries"]]
+    assert outcomes == ["fetched", "fetched"], (
+        "one request made twice is not two URLs returning identical bytes")
+    assert "unusable" not in index["counts"]
+
+
+# --------------------------------------------------------------------------- #
 # 1.16.1 round-2 review findings. Round 1 closed the Content-Type channel into
 # index.json but was scoped to a FIELD when the property is about the whole FILE:
 # a redirect Location is equally server-supplied and reached final_url and
@@ -1371,8 +1703,15 @@ def test_batch_stops_admitting_work_once_the_byte_budget_is_spent(tmp_path, monk
     negative and refuse item 1 outright. This coupling is a trap for the next
     person patching either constant alone.
     """
-    body = b"a" * 500                             # ASCII: written bytes == received bytes
-    FakeNet(monkeypatch, default=http_response(200, {"Content-Type": "text/plain"}, body))
+    # ASCII: written bytes == received bytes. Each item gets a FIXED-WIDTH,
+    # per-index suffix (still 500 bytes total) rather than one shared body --
+    # #918's duplicate-body check would otherwise flag the admitted items as
+    # one shell shared across distinct URLs, and the fixed width keeps the
+    # byte arithmetic this test pins from moving.
+    routes = {f"/{i}": http_response(200, {"Content-Type": "text/plain"},
+                                      b"a" * 497 + f"{i:03d}".encode())
+              for i in range(6)}
+    FakeNet(monkeypatch, routes=routes)
     monkeypatch.setattr(fc, "MAX_BYTES", 500)
     monkeypatch.setattr(fc, "BATCH_MAX_TOTAL_BYTES", 2500)
     items = [accepted(f"N{i}", f"https://example.com/{i}") for i in range(6)]
@@ -1459,9 +1798,17 @@ def test_the_ceiling_holds_even_when_the_last_admitted_item_is_worst_case(tmp_pa
     reaches 1200 against the 1000 ceiling -- a 200-byte overshoot, within the
     "up to 3 * MAX_BYTES" (300) this fix closes.
     """
-    ordinary = http_response(200, {"Content-Type": "text/plain"}, b"a" * 100)
+    # Each ordinary item gets a FIXED-WIDTH, per-index suffix (still 100 bytes
+    # total) rather than one shared body -- #918's duplicate-body check would
+    # otherwise flag all six as one shell shared across six URLs, and the
+    # fixed width keeps the byte arithmetic this test pins from moving. The
+    # two invalid-UTF-8 items stay identical: only ONE of them is ever
+    # admitted below the byte budget, so there is never a second admitted
+    # member to form a duplicate group.
     invalid = http_response(200, {"Content-Type": "text/plain"}, b"\xff" * 100)
-    routes = {f"/ord{i}": ordinary for i in range(6)}
+    routes = {f"/ord{i}": http_response(200, {"Content-Type": "text/plain"},
+                                         b"a" * 99 + str(i).encode())
+              for i in range(6)}
     routes["/inv0"] = invalid
     routes["/inv1"] = invalid
     FakeNet(monkeypatch, routes=routes)
@@ -1495,7 +1842,13 @@ def test_an_ordinary_batch_does_not_exhaust_the_byte_budget(tmp_path, monkeypatc
     """Control at the SHIPPED constant. Renamed from an earlier
     'spends_nothing_of', which was false -- ordinary items DO spend against the
     budget. The assertion is non-exhaustion, not non-spending."""
-    FakeNet(monkeypatch, default=HTML_OK)
+    # Distinct, FIXED-WIDTH (still 12 bytes, matching HTML_OK's body) bodies
+    # per item -- #918's duplicate-body check would otherwise flag all five as
+    # one shell shared across five URLs, which this fixture never intended.
+    routes = {f"/{i}": http_response(200, {"Content-Type": "text/html; charset=utf-8"},
+                                      f"<p>cite{i}</p>".encode())
+              for i in range(5)}
+    FakeNet(monkeypatch, routes=routes)
     items = [accepted(f"N{i}", f"https://example.com/{i}") for i in range(5)]
     path = write_snapshot(tmp_path, items)
     out = tmp_path / "evidence"
@@ -1992,6 +2345,12 @@ OUTCOME_RE = re.compile(
     r"\A(?:"
     r"fetched"
     r"|http_error:\d{3}"
+    # #918: closed, no variable tail -- never passed to _refuse(), so it is
+    # invisible to _emitted_refusal_reasons()'s AST walk below. Checked
+    # directly instead, in test_the_documented_outcome_vocabulary_...:
+    # a literal search over the module source, so this branch can never
+    # go on documenting a token the module has stopped emitting.
+    r"|unusable:duplicate-body"
     r"|refused:(?:"
     r"total-timeout|batch-deadline|batch-byte-budget|read-timeout|unparseable-url"
     r"|embedded-credentials|no-host"
@@ -2078,8 +2437,19 @@ def test_the_documented_outcome_vocabulary_matches_what_the_module_emits():
     composed_elsewhere = {"batch-deadline", "batch-byte-budget", "internal-error"}
     for outcome in ("fetched", "http_error:404", "refused:batch-deadline",
                     "refused:batch-byte-budget",
-                    "refused:internal-error:MemoryError"):
+                    "refused:internal-error:MemoryError",
+                    "unusable:duplicate-body"):
         assert OUTCOME_RE.match(outcome), f"OUTCOME_RE rejects {outcome!r}"
+
+    # #918's "unusable:duplicate-body" is a fourth top-level branch, closed
+    # with no variable tail, so it is never passed to _refuse() and therefore
+    # invisible to _emitted_refusal_reasons()'s AST walk above -- neither
+    # direction checked so far touches it. Checked directly instead: the
+    # module source must still emit the literal, so this regex can never go
+    # on documenting a token the module has stopped producing.
+    assert '"unusable:duplicate-body"' in FETCH_SRC.read_text(encoding="utf-8"), (
+        "OUTCOME_RE documents unusable:duplicate-body but fetch_citation.py "
+        "no longer emits that literal")
 
     # THE OTHER DIRECTION, which this test lacked until round 6. Checking only
     # "everything emitted is admitted" catches a reason the module GAINS and
