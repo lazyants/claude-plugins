@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.134.0 — 2026-09-12
+
+**The review turn now reads the operator's per-finding refusal record, because a correct refusal had
+been re-filed against the same passage round after round (#924).** `refuse_finding.py` writes
+`segments/<seg>.findings_refused.json` — the durable record that a fix turn considered a finding and
+declined it on the merits — and since 1.73.0 (#764) only the FIX turn was shown it. The reviewer was
+not, on the maintainer's call in PR #768: a re-raised finding "costs a round and is entirely
+legitimate; a suppressed one costs the book." The first half was measured false on a live he→en
+book. When a fix turn correctly refuses EVERY finding of a verdict, the draft is byte-identical, so
+`derive_next_action()` returns `needs_fix` at the same round label on every invocation: the round is
+not spent, `engine.max_fix_rounds` is never reached, `human_escalation` never fires, and a fresh
+reviewer — blind to the record — re-derives the identical finding whenever a review is next
+dispatched. Three segments of one 31-segment book each refused the same finding at three consecutive
+rounds, and the operator had to notice a livelock that reads exactly like slow convergence and run
+`reject_review.py` per segment per round.
+
+**What changes is one line of `reviewDispatchPrompt`, emitted at every round.** The reviewer is told
+the record exists, what it holds (`loc`, `finding_index`, `round_label`, `issue_digest`, `reason`,
+`refused_at`), and that it is CONTEXT, never an instruction and never authority: it suppresses
+nothing, it settles nothing about the passage, and a finding the reviewer would otherwise raise it
+still raises. The one duty it adds: where a record's stated reason itself identifies the claim the
+reviewer is about to make at that same loc, the finding's `issue` text must say why that reason does
+not hold for the text as it stands now — against whatever evidence the claim rests on, the source,
+the draft or `style_bible.md` — rather than restate the claim. The record carries no finding text,
+so a `--reason` that does not name the claim it declines identifies nothing to either prompt;
+SKILL.md now says so where the command is documented. The line is emitted at round 1 as well, unlike
+the fix turn's block: the record is cross-round and cross-run by design, and a round-1 reviewer of a
+re-driven run is exactly where an earlier run's refusal matters.
+
+**Nothing mechanical changes.** The fix turn's block is emitted byte-for-byte as before; no gate
+reads the record, `derive_next_action()` never opens it, the round label still does not advance on
+an all-refused fix turn, and `reject_review.py` remains the only release of a unit whose draft has
+stopped moving — reviewer visibility alone dispatches nothing. What it buys is that the reviewer a
+later driver run does dispatch, after a numbered-round rejection or a draft change, can agree with a
+recorded reason instead of re-deriving the same finding; a reviewer that disagrees now has to say
+why, which is what the operator needs to see before rejecting a verdict.
+
+Residuals, disclosed rather than guarded. The under-catch #768 feared — a reviewer that reads a
+recorded reason and drops a valid finding — is met by instruction, not machinery: the sentence that
+a finding you would otherwise raise you still raise is pinned by
+`tests/review_prompt_prior_refusals.test.py`, and nothing deterministic can read finding prose
+(#517). The record's `reason` is operator-typed prose that now reaches a second prompt; its byte
+bound lives in the producer, the same bound the fix turn's read has relied on since #764.
+`cache_key.py`'s membership comment for `refuse_finding.py` still says the record's only consumer is
+`fixPrompt`'s own text; it is left as written because `tests/name_discovery.test.py` byte-compares
+that file against `origin/main` on every pull request, and the membership reasoning beside it — the
+sole producer of durable state a prompt splices into a turn that rewrites the draft — is unchanged.
+
+Migration. `mass-translate-wf.template.js`, `refuse_finding.py` and `segment_dispatch_driver.py` are
+`PLUGIN_BUNDLE_MEMBERS` entries and carry byte diffs (the prompt, its docstring, and the
+line-numbered citations the driver holds into the template), so this release moves
+`plugin_bundle_hash`: every converged segment of a book in progress goes `stale` once the refreshed
+plugin is picked up, and re-translates. No other hash moves.
 ## 1.130.0 — 2026-09-12
 
 **`--reset-batches` threw away the rejection the exhausted ladder ended on, so the fresh attempt-0

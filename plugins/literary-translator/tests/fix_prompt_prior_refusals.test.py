@@ -30,15 +30,13 @@ satisfied it" -- so the staleness sentence is pinned too.
   pinned in the producer's own file.
 - Any judgement about translation content.
 
-## The reviewer-side control
+## The reviewer-side block
 
-#764's scope cut is that the REVIEWER never sees refusals (#529: the artifact
-under review is not the authority it is reviewed against; a fixer-authored
-"do not raise this" list suppresses valid findings). A cut is only durable if
-something fails when it is undone, so
-test_the_reviewer_is_never_told_about_refusals drives the REAL
-reviewDispatchPrompt through the same harness and asserts the artifact is
-absent from it. Without that, the cut is a comment.
+#924 reversed #764's scope cut on measured evidence: a fix turn that
+correctly refuses every finding leaves the draft byte-identical, so the
+round label never advances and a blind reviewer re-derives the same finding.
+The reviewer's own block is pinned in tests/review_prompt_prior_refusals.test.py,
+and the two roles' sentences are kept distinct there.
 
 Self-contained per this plugin's no-shared-lib convention, and it runs the REAL
 shipped fixPrompt() under node -- never a hand-typed copy of the prompt text.
@@ -111,9 +109,9 @@ def _instantiate_and_slice():
 
 def _probe(tmp_path, name, fn, args):
     """Call one REAL instantiated template function under node and return what
-    it returned. Both the fix-side probe and the reviewer-side control below go
-    through here, so the control cannot drift from the thing it is a control
-    for."""
+    it returned. Every fix-side probe in this file goes through here; the
+    reviewer-side block has its own copy of this helper in
+    tests/review_prompt_prior_refusals.test.py (self-contained by convention)."""
     footer = ("\nvar __out = %s(%s);\nconsole.log(JSON.stringify(__out));\n"
               % (fn, ", ".join(json.dumps(a) for a in args)))
     script_path = tmp_path / ("%s_probe.js" % name)
@@ -495,27 +493,3 @@ def test_reversing_the_sentinel_prohibition_turns_that_assertion_red(tmp_path):
         "the shipped assertion must REJECT the reversed sentence; if it accepts "
         "it, the prohibition is pinned by a phrase the reversal preserves"
     )
-
-
-# ---------------------------------------------------------------------------
-# The scope cut, pinned so that undoing it fails
-# ---------------------------------------------------------------------------
-
-def test_the_reviewer_is_never_told_about_refusals(tmp_path):
-    """#764's user-approved scope cut, and the reason is #529's authority
-    direction: the artifact under review is never the authority it is reviewed
-    against. A refusal record is written from the fixer's own unchecked prose
-    about the very draft the reviewer is judging, so handing the reviewer a list
-    of claims not to raise would suppress VALID findings -- a silent
-    under-catch, the same class #764 is about.
-
-    Driven through the same harness as the fix-side probes, against the REAL
-    reviewDispatchPrompt, at both a numbered and the final round."""
-    for round_label in ("1", "2", "final"):
-        prompt = _probe(tmp_path, "review_%s" % round_label, "reviewDispatchPrompt",
-                        [_SEG, round_label])
-        assert _ARTIFACT not in prompt, (
-            f"reviewDispatchPrompt at round {round_label!r} names the refusal "
-            f"record. That is the scope cut #764 made deliberately -- if it is "
-            f"being undone, revisit the #529 authority-direction argument first."
-        )

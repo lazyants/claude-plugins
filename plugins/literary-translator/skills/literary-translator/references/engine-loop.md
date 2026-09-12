@@ -299,15 +299,17 @@ steps below:
      form resolves in neither the segment's `canon_map` nor `canon.json` is refused —
      and this is the RAISE-side half of the same property, in the vocabulary of the
      only turn that files a finding. The two halves are independent on purpose: a
-     finding refused at the fix turn still costs a round, and its verdict still stands
-     in `review.json`, so the unit does not converge until the round advances, an
-     operator rejection lands or the cap fires. It does **not** reach the next
-     REVIEWER — `reviewDispatchPrompt`'s read list is `review_TASK.md`,
+     finding refused at the fix turn leaves its verdict still standing in
+     `review.json`, so the unit does not converge until the round advances, an
+     operator rejection lands or the cap fires. That VERDICT does **not** reach the
+     next REVIEWER — `reviewDispatchPrompt`'s read list is `review_TASK.md`,
      `style_bible.md`, the segpack and the draft, and nothing puts a prior review in
      front of it (corrected in 1.63.0/#526; the 1.40.0 CHANGELOG entry still carries
-     the superseded sentence, as the record of what that release claimed). Not
-     detected, and stated rather than implied: a reviewer that simply omits the quote
-     it was told to give — no deterministic machinery interprets finding prose (#517).
+     the superseded sentence, as the record of what that release claimed). Since
+     `#924`, the operator's per-finding refusal RECORD does reach it, but strictly as
+     CONTEXT, never authority — see below. Not detected, and stated rather than
+     implied: a reviewer that simply omits the quote it was told to give — no
+     deterministic machinery interprets finding prose (#517).
    - **Book-scoped rules** (1.63.0, #526): the style contract carries rules whose
      predicate spans the whole book — *gloss at its first occurrence only*, *identify
      on first mention*, *the Common Era equivalent at its first mention*, *the
@@ -571,6 +573,12 @@ silently:
   as "reviewed again, still not clean" when what happened is "not looked at". The
   tell is the `round_label` in that entry: it does not advance between rounds
   while every other unit's does.
+- Since `#924`, the reviewer reads the refusal record too, but reviewer visibility
+  alone dispatches nothing: no reviewer runs while the unit keeps re-serving the
+  same fix prompt. Only a later driver run — after a numbered-round
+  `reject_review.py` rejection or a draft change — dispatches one (a final-round
+  rejection converges instead), and that reviewer may then agree instead of
+  re-deriving the same finding.
 
 **The release is `reject_review.py`, and it is the ONLY release.** This is the
 loop #461 was filed about — `derive_next_action()` cannot tell "the draft is
@@ -606,12 +614,17 @@ round nor converge a unit — everything above about releasing a live-lock remai
 different hole in the same loop: a refusal changes no file, so one round later
 it is byte-for-byte indistinguishable from an oversight, and the next fix agent
 reads the unapplied finding as dropped and applies it. That record is read by
-`fixPrompt` at round ≥ 2, as CONTEXT that explains the gap — never as authority,
-and deliberately never by the next REVIEWER (#529: the artifact under review is
-not the authority it is reviewed against). Note how the stale-artifact warning
-below binds it: a refusal recorded rounds ago describes a draft that may since
-have changed, which is exactly why the prompt makes the fixer re-substantiate
-rather than defer to the record.
+`fixPrompt` at round ≥ 2 and, since `#924`, by `reviewDispatchPrompt` at every
+round, both strictly as CONTEXT, never authority: the reviewer must answer a
+recorded reason that identifies its own claim, in the finding's own issue text.
+`#764` had withheld the record from the reviewer on `#529`'s authority
+direction; `#924` reversed that on measured evidence — a fix turn that
+correctly refuses EVERY finding leaves the draft byte-identical, so the round
+label never advances and a blind reviewer re-derives the same finding whenever
+a review is next dispatched. Note how the stale-artifact
+warning below binds it: a refusal recorded rounds ago describes a draft that
+may since have changed, which is exactly why the prompt makes the fixer
+re-substantiate rather than defer to the record.
 
 **Do NOT release it by writing a refusal marker into the draft.** `fixPrompt`
 forbids exactly that, and the reason is the one that matters here: `notes[]` is

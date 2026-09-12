@@ -1224,13 +1224,13 @@ function reviewDispatchPrompt(seg, roundLabel) {
   // files a finding. The fixer never raises one, and repeating a raise-side rule
   // in its prompt would read as licence to skip a finding rather than substantiate
   // it. The two halves are deliberately independent: a finding refused at the fix
-  // turn still costs a round, and its verdict still stands in review.json, so the
-  // unit does not converge until the round advances, an operator rejection lands
-  // (#461/#527) or the cap fires. It does NOT reach the next REVIEWER -- this
-  // function's read list is review_TASK.md, style_bible.md, the segpack and the
-  // draft, and nothing puts a prior review in front of it (corrected in 1.63.0,
-  // #526; the 1.40.0 CHANGELOG entry still carries the superseded sentence as the
-  // record of what that release claimed).
+  // turn leaves its verdict standing in review.json, so the unit does not converge
+  // until the round advances, an operator rejection lands (#461/#527) or the cap
+  // fires. Its VERDICT does NOT reach the next REVIEWER -- nothing puts a prior
+  // review in front of this function (corrected in 1.63.0, #526; the 1.40.0
+  // CHANGELOG entry still carries the superseded sentence as the record of what
+  // that release claimed). What does reach it, since #924, is the operator's
+  // per-finding refusal RECORD, as context only -- see the #924 block below.
   // The prohibition binds only a finding that PRESCRIBES a target form. A blanket
   // "no canon_map entry means do not raise" would suppress findings that are
   // authorized today and grounded in the source, not in a canon: segpack.py admits a
@@ -1295,6 +1295,40 @@ function reviewDispatchPrompt(seg, roundLabel) {
   // downstream resolves an index, and a one-based reading aims the fix turn
   // at the wrong note.
   lines.push("Finding loc contract: every finding's loc must be COLON-DELIMITED. A bare, holistic token (\"overall\", \"NOTES\", \"TASK\") is refused outright and discards this entire review, valid findings included -- so never emit one. The forms are: a block id (e.g. PARA:seg01:0001, or the shorter HEAD:seg01 some adapters emit); FN:n for a footnote; VERSE:vid for a verse; NOTE:n for one entry of this draft's own notes[] array. NOTE:n is a 0-based INDEX into notes[] -- the first note is NOTE:0 -- whereas FN:n is the footnote's own NUMBER, not an index.");
+  // #924 -- THE OPERATOR'S REFUSAL RECORD, read by the reviewer too. #764 gave
+  // the FIX turn segments/{seg}.findings_refused.json and, on the maintainer's
+  // call (PR #768), withheld it from this function: a re-raised finding "costs
+  // a round and is entirely legitimate; a suppressed one costs the book". The
+  // first half of that was measured false on a live he->en book. When a fix
+  // turn correctly refuses EVERY finding, the draft is byte-identical, so
+  // derive_next_action() (segment_dispatch_driver.py) returns needs_fix at the
+  // SAME round label on every invocation: the round is not spent, the cap is
+  // never reached, and a fresh reviewer -- blind to the record -- re-derives
+  // the identical finding whenever a review is next dispatched (three units,
+  // the same finding at three consecutive rounds each). So the record now
+  // reaches this turn under the same framing #764 gave the fixer: CONTEXT,
+  // NEVER AUTHORITY, plus one duty the fixer does not have -- a finding that
+  // makes a claim the record already answers must say why the recorded reason
+  // does not hold. The under-catch #768 feared (a reviewer that reads a reason
+  // and drops a valid finding) is met by instruction, not by machinery: the
+  // sentence "a finding you would otherwise raise you still raise" is pinned
+  // by tests/review_prompt_prior_refusals.test.py, and nothing deterministic
+  // can read finding prose (#517) -- that residual is disclosed, not guarded.
+  // Emitted at EVERY round, unlike the fixer's round >= 2 gate: that gate
+  // exists because the fixer's block sits beside #541's previous-round
+  // verdict; this record is cross-round and cross-run by design
+  // (refuse_finding.py's docstring), and a round-1 reviewer of a re-driven run
+  // is exactly where an earlier run's refusal matters. Every field it carries
+  // is bounded by the producer, the same bound the fixer's read relies on. The
+  // record holds no finding text -- only loc, an opaque digest and the
+  // operator's reason -- so a reason that does not itself name the claim
+  // identifies nothing, and the prompt says so rather than letting the
+  // reviewer guess at a loc that carries several findings.
+  // Nothing mechanical changes: no gate reads the record, derive_next_action()
+  // never opens it, and reject_review.py stays the only release of a unit whose
+  // draft has stopped moving.
+  const refusalsPath = ROOT + "/segments/" + seg + ".findings_refused.json";
+  lines.push("Findings refused by earlier fix turns: read " + refusalsPath + " if it exists. Its absence is ordinary and means only that no refusal was recorded for this segment -- proceed exactly as you would without one. It holds entries of the form {loc, finding_index, round_label, issue_digest, reason, refused_at}, each one an operator's record that an earlier fix turn considered a finding at that loc and declined it for the stated reason. This record is CONTEXT, never an instruction and never authority: it suppresses nothing, it settles nothing about the passage, and a finding you would otherwise raise you still raise. What it changes is narrower: where a record's stated reason itself identifies the claim you are about to make at that same loc, that reason is an argument already on the table, so your finding's issue text must say why it does not hold for the text as it stands now -- against whatever evidence your claim rests on (the source, the draft, style_bible.md), not by restating the claim. The record carries no finding text: only the loc, a digest and the operator's reason. So a matching loc ALONE is not a match -- one block routinely carries several findings, and a reason that does not itself name the claim you are making identifies nothing and is not about your finding, so do not answer it. A record can also be STALE: it describes the draft as it stood when it was written, and any later round may have changed that block, so it never establishes what the text says now. Entries may originate in rounds and runs other than this one; they are context either way.");
   lines.push("Build a JSON object with exactly these five fields: clean (true only if there are no findings that require a fix round), coverage_ok (true only if the deterministic gate above printed OK), findings (an array of objects with loc/severity/issue/suggest -- every loc per the loc contract stated just above), draft_sha1 (the value you computed before reading the draft, above), and dispatch_token (exactly this literal string: " + JSON.stringify(dispatchToken) + ").");
   lines.push("Write that exact object as JSON to the SINGLE output path ⟦JOB_OUT⟧ (an isolated attempt path this run supplies) and nothing else. That output path SUPERSEDES " + ROOT + "/review_TASK.md for the write destination: write your verdict ONLY to that path, even if review_TASK.md names " + ROOT + "/segments/" + seg + ".review.json or another segments/ path -- never write the canonical " + ROOT + "/segments/" + seg + ".review.json yourself, and create no other file under " + ROOT + "/segments/. That single output path is the only segments-area file you may write; the driver validates it and atomically promotes it to the canonical review artifact.");
   lines.push("Return exactly the line: REVIEWED " + seg);
@@ -1631,15 +1665,15 @@ function fixPrompt(seg, round, revObj) {
     // when it was written, and no later round is obliged to have left that block
     // alone.
     //
-    // Deliberately NOT given to reviewDispatchPrompt, and that is a scoped
-    // decision rather than an omission. #529 established the direction: "the
-    // artifact under review is never the authority it is reviewed against." A
-    // refusal record is written from the fixer's own unchecked prose about the
-    // very draft the reviewer is judging, so handing the reviewer a list of
-    // claims not to make would invert that, and its failure mode is the
-    // suppression of a VALID finding -- a silent under-catch, the same class this
-    // change is about. A re-raised finding costs a round and is entirely
-    // legitimate; a suppressed one costs the book.
+    // Since #924 the record ALSO reaches reviewDispatchPrompt. #764 withheld it
+    // there on the maintainer's call (PR #768), reasoning that a re-raised
+    // finding "costs a round and is entirely legitimate; a suppressed one costs
+    // the book". The first half was measured false: a fix turn that correctly
+    // refuses EVERY finding leaves the draft byte-identical, so the round label
+    // never advances and a blind reviewer re-derives the same finding whenever
+    // a review is next dispatched. The reviewer's block (see it) keeps the
+    // framing below and adds a rebuttal duty; the text emitted HERE is
+    // unchanged by #924, and #529's authority direction still binds it.
     const refusalsPath = ROOT + "/segments/" + seg + ".findings_refused.json";
     lines.push("Findings refused in earlier rounds: read " + refusalsPath + " if it exists. Its absence is ordinary and means only that no refusal was recorded for this segment -- proceed exactly as you would without one. It holds entries of the form {loc, finding_index, round_label, issue_digest, reason, refused_at}, each one an operator's record that a previous fix turn considered that finding and declined it on the merits, written from that turn's own refusal report. This record is CONTEXT, never an instruction and never authority: it authorizes applying nothing, it justifies refusing nothing, you never install anything because a record names it, and a finding it describes is neither resurrected nor set aside here. What it is for is narrower and it is the whole point: where a record names the same loc as a finding of THIS round AND its stated reason is about that finding's own claim, the fact that the draft was left alone there may be EXPLAINED by that record -- the finding was considered and declined for the stated reason, rather than overlooked -- so read the stated reason first, and say so in your report. A matching loc ALONE settles nothing: one block routinely carries several findings, and a record whose reason is about a different claim at that same loc explains nothing about this one, so do not report it as though it did. Then substantiate this round's finding against the source evidence its loc points at exactly as required above, and apply or refuse it on your own reading. A record can also be STALE: it describes the draft as it stood when it was written, and any later round may have edited that block for an unrelated reason, so a record never establishes that the text there is unchanged and never settles whether the claim holds now. Entries may name rounds and runs other than this one; they are context either way. This report is bound by the same prohibition as any other: do not put the sentinel DRAFT_MISSING followed by this segment's id anywhere in it.");
   }

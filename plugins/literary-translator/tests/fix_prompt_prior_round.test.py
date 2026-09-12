@@ -273,10 +273,15 @@ def test_round_two_leaves_the_existing_contract_intact(tmp_path):
     assert "End your reply with the line: FIXED seg01 r2." in text
 
 
-def test_the_reviewer_prompt_stays_cross_round_blind(tmp_path):
-    """Control on the OTHER prompt: the reviewer thread is --fresh by design and
-    #527 refused injecting a refutation record into it. A future edit that
-    'helpfully' gives the reviewer the predecessor turns this red."""
+def test_the_reviewer_prompt_never_sees_the_previous_verdict(tmp_path):
+    """Control on the OTHER prompt: #541's archived verdict (.prev_review.) and
+    the "previous round" phrasing it would carry stay out of the reviewer
+    prompt -- #527 refused injecting that rejection record into it. Since
+    #924 the reviewer DOES read the operator's per-finding REFUSAL record
+    (segments/<seg>.findings_refused.json), a different artifact, pinned in
+    tests/review_prompt_prior_refusals.test.py; that record uses neither
+    string this test checks for, so this control still isolates the
+    #541/#527 archive specifically."""
     text = _probe(tmp_path, "review_prompt", "reviewDispatchPrompt", ["seg01", "2"])
     assert ".prev_review." not in text
     assert "previous round" not in text.lower()

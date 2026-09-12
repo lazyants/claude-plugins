@@ -3559,15 +3559,15 @@ python3 {durable_root}/scripts/refuse_finding.py SEG --finding-index N \
     --durable-root {durable_root} --plugin-root {plugin_root}
 ```
 
-The record lands at `segments/<seg>.findings_refused.json` and **releases
-nothing**: no gate reads it, `derive_next_action()` never opens it, the round
-still costs what it cost, and a re-raised finding stays entirely legitimate.
-The one thing it buys is that the NEXT fix turn's prompt can show the refusal
-and its reason, so an unapplied finding reads as considered rather than
-overlooked. Re-running the same command is a no-op success, not a second
-record. It is deliberately NOT given to the next REVIEWER — see `#529`: the
-artifact under review is never the authority it is reviewed against, and a
-fixer-authored "do not raise this" list would suppress valid findings.
+The record lands at `segments/<seg>.findings_refused.json` and **releases nothing**: no gate reads
+it, `derive_next_action()` never opens it, and an all-refused fix turn leaves the round label frozen
+(`reject_review.py` remains the only release). What it buys: BOTH later prompts read it as context.
+The next fix turn sees an unapplied finding as considered, not overlooked; since `#924` the next
+reviewer sees the claim was already answered and must say, in the finding's own issue text, why the
+recorded reason does not hold now — reversing `#764`'s cut, which assumed a re-raised finding costs
+a round (false when every finding is refused). So `--reason` must be SELF-CONTAINED, naming the
+declined claim, not only the ground: the record holds no finding text, so a reason that names only
+the ground identifies nothing to either prompt. Re-running the same command is a no-op success.
 
 **When the WHOLE VERDICT is wrong (#461) — rejecting it instead of
 applying it.** A refusal recorded above is still a report about ONE finding; it
