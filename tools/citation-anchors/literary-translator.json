@@ -1638,6 +1638,20 @@
     "elif args.batch is not None:"
    ],
    "claim": "# `resolve_cache_key_script`/`_stamp_generation_hash` are shared code, but # each of these three threads its OWN `plugin_root_str` parameter through # from `main()`'s dispatch (canon_validate.py:3970-4017) to its own # `_stamp_write_verify` call -- a regression in any one of those three # threading sites would not be caught by the `--init` test above."
+  },
+  "[\"plugins/literary-translator/tests/canon_correct_stale_segpacks.test.py\", \"select_segments.py:316-322\", 0]": {
+   "anchors": [
+    "except (ImportError, OSError) as _json_stdout_exc",
+    "sys.exit("
+   ],
+   "claim": "select_segments.py present but its MODULE BODY raises SystemExit -- mirroring select_segments.py's own real json_stdout.py loader, which calls sys.exit() when ITS sibling is missing (select_segments.py:316-322)."
+  },
+  "[\"plugins/literary-translator/tests/canon_correct_stale_segpacks.test.py\", \"canon_correct_entry.test.py:767-771\", 0]": {
+   "anchors": [
+    "(\"confidence\", \"medium\")",
+    "ids=[\"confidence\", \"note\", \"category\"]"
+   ],
+   "claim": "The interlock compares the whole new_entry against old_entry, so a same-target correction (confidence-only, here) is legal -- canon_correct_entry.test.py:767-771 already proves that, parametrizing confidence/note/category as fields a correction may move on its own."
   }
  },
  "exemptions": {

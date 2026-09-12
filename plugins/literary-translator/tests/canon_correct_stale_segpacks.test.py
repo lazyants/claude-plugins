@@ -256,7 +256,15 @@ def test_correction_reports_the_pack_it_leaves_stale(tmp_path):
     stale = payload.get("stale_segpacks")
     assert stale and [item["seg"] for item in stale] == ["seg01"], payload
     assert NAME_A in stale[0]["names"], payload
-    assert payload.get("note"), "the note key must always be present" + repr(payload)
+    note = payload.get("note", "")
+    assert "segpack.py --all" in note, ("the note must name the remedy: " + repr(payload))
+    # The changelog claims the note disclaims a validity verdict. Assert the
+    # SENTENCE, not merely that a note exists: a non-empty check would pass
+    # for a note reading "all packs are valid", which is the exact claim this
+    # report must never make.
+    assert "not a validity check on the segpacks" in note, (
+        "the stale note must disclaim a validity verdict: " + repr(payload)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +276,7 @@ def test_same_target_correction_is_not_flagged_stale(tmp_path):
     """A pack that is genuinely CURRENT for the corrected name must not be
     flagged just because it carries that name. The interlock compares the
     whole new_entry against old_entry, so a same-target correction
-    (confidence-only, here) is legal -- canon_correct_entry.test.py:767
+    (confidence-only, here) is legal -- canon_correct_entry.test.py:767-771
     already proves that. Without this test, an implementation that flags
     every pack containing the corrected source_form (rather than one whose
     canon_map target actually disagrees) would pass every other test here
@@ -509,9 +517,19 @@ def test_lone_surrogate_in_pack_names_does_not_break_the_report(tmp_path):
     canon_map = dict(pack.get("canon_map", {}))
     canon_map[surrogate] = "Some Target"
     pack["canon_map"] = canon_map
-    raw = json.dumps(pack, ensure_ascii=False)
+    # ensure_ascii=True IS THE POINT, and getting this wrong makes the test
+    # vacuous. Written with ensure_ascii=False the surrogate goes to disk as
+    # the raw bytes ED A0 80, which are not valid UTF-8 at all: the pack then
+    # fails at READ time inside select_segments.py's own reader and is
+    # classified unevaluated, so the hostile string never reaches the
+    # serializer and G2 is never exercised. Written as the ASCII escape the
+    # file is valid UTF-8, json.loads hands back the lone surrogate IN MEMORY,
+    # it flows into the report, and dumps_line(...).encode("utf-8") is what
+    # raises -- which is the path this test exists for.
+    raw = json.dumps(pack, ensure_ascii=True)
+    assert b"\\ud800" in raw.encode("utf-8"), "fixture premise: the escape, not raw bytes"
     assert json.loads(raw)["names"][-1] == surrogate, "fixture premise: pack must stay JSON-valid"
-    write_segpack(root, "seg01", pack, errors="surrogatepass")
+    (root / "segments" / "segpack_seg01.json").write_text(raw, encoding="utf-8")
 
     doc = correction_doc(
         NAME_A, old_entry=_entry(NAME_A, NAME_A), new_entry=_entry(NAME_A, "Jean Valljean")
@@ -526,7 +544,15 @@ def test_lone_surrogate_in_pack_names_does_not_break_the_report(tmp_path):
     proc.stdout.encode("utf-8")
 
     payload = payload_of(proc)
-    assert payload.get("segpacks_scanned") == 1, payload
+    # G2 fires: the fragment cannot be serialised, so the whole scan degrades
+    # to the scan_error shape rather than printing a half-encodable line. The
+    # counts are zeroed and the bucket balance holds trivially.
+    assert "scan_error" in payload, payload
+    assert payload.get("segpacks_scanned") == 0, payload
+    assert payload.get("segpacks_current") == 0, payload
+    assert payload.get("stale_segpacks") == [], payload
+    assert payload.get("segpacks_unevaluated") == [], payload
+    assert "segpack.py --all" in payload.get("note", ""), payload
     assert read_canon(root)["entries"][NAME_A]["canonical_target_form"] == "Jean Valljean", (
         "the correction must still be on disk"
     )
@@ -548,8 +574,9 @@ def test_scan_module_load_failure_does_not_fail_the_correction(tmp_path):
 
     (b) select_segments.py present but its MODULE BODY raises SystemExit --
     mirroring select_segments.py's own real json_stdout.py loader, which
-    calls sys.exit() when ITS sibling is missing (select_segments.py:304,
-    317). Only this case actually discriminates: `except Exception` alone
+    calls sys.exit() when ITS sibling is missing
+    (select_segments.py:316-322). Only this case actually discriminates:
+    `except Exception` alone
     does NOT catch SystemExit, since SystemExit is a BaseException sibling,
     not an Exception subclass.
     """
@@ -674,7 +701,7 @@ def test_orphaned_canon_map_key_reads_as_current_a_disclosed_boundary(tmp_path):
     assert payload.get("segpacks_current") == 1, payload
     assert payload.get("segpacks_scanned") == 1, payload
     assert bucket_balance_holds(payload), payload
-    assert payload.get("note"), (
+    assert "not a validity check on the segpacks" in payload.get("note", ""), (
         "the note must name the scope of the check, so a reader does not "
         f"take 'current' as a validity claim on the pack: {payload}"
     )

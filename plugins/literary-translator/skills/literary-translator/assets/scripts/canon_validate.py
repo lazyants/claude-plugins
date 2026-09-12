@@ -4250,8 +4250,11 @@ def main(argv=None) -> int:
 
 def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
     """#910 (folds #840's retired sentence, see the `--correct` docstring
-    above). `--correct`'s one write leaves canon.json ahead of every
-    already-built segpack's frozen `canon_map`, and nothing on the ordinary
+    above). `--correct`'s one write CAN leave canon.json ahead of an
+    already-built segpack's frozen `canon_map` -- not always: a same-target
+    correction and a dismissal both leave a current pack current, which is
+    exactly why this reports a measured list rather than a blanket warning
+    -- and nothing on the ordinary
     dispatch path notices: `used_terms_hash` is written only on the
     convergence path, so a `not_started` segment has no cache key to
     disagree with, and this call deliberately does not restamp
@@ -4393,7 +4396,9 @@ def _scan_stale_segpacks(canon_path: Path, on_disk: dict) -> dict:
             note = (
                 f"{len(stale)} of {scanned} segpack(s) carry a canon_map "
                 "that canon.json no longer agrees with; run "
-                "python3 scripts/segpack.py --all before dispatching."
+                "python3 scripts/segpack.py --all before dispatching. "
+                "This is not a validity check on the segpacks -- "
+                "segpack.py's W3a gate owns that."
             )
             if unevaluated:
                 note += (
