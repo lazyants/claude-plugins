@@ -119,6 +119,7 @@ import errno
 import fcntl
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -135,6 +136,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
+from urllib.parse import urlsplit
 
 # ---------------------------------------------------------------------------
 # Self-anchored paths. A deployed copy under ${durable_root}/scripts/ can go
@@ -1727,12 +1729,31 @@ def read_outcome_pairs(index_path: Path) -> "list[dict]":
     Read ONCE, immediately after the fetch, and never again: every PREPARE
     rewrites index.json wholesale, so the pairs are captured at the one moment
     they are known to describe THIS fetch. (Since #806 a dispatched codex job is
-    not among the writers that could reach it -- the pass's own turns are.)"""
+    not among the writers that could reach it -- the pass's own turns are.)
+
+    Two pre-existing shapes, both newly consequential since #919 started
+    reading `item_index` to key into the approved snapshot's rows for a
+    host, not merely to sort a repair position (round-4 P3, admitted):
+      * the root must be a `dict` before `.get()` runs. A syntactically
+        valid JSON document whose root is a list, `null`, a number or a
+        string used to reach `.get()` anyway and raise a bare
+        `AttributeError` that escapes this function's own `DriverError`
+        contract -- refused explicitly here instead, in the same shape as
+        every other refusal in this function.
+      * `isinstance(idx, int)` is also true for a `bool` in Python, so a
+        forged `"item_index": true` used to be silently ACCEPTED as `1`.
+        That was harmless when `item_index` only sorted a repair position;
+        it is not harmless now that it indexes into the snapshot's rows to
+        read a HOST off row 1 -- a row that entry may have nothing to do
+        with. Rejected explicitly."""
     try:
         with open(index_path, "r", encoding="utf-8") as fh:
             obj = json.load(fh)
     except (OSError, ValueError) as exc:
         raise DriverError(f"could not read the citation evidence index: {exc!r}",
+                          index_path=str(index_path))
+    if not isinstance(obj, dict):
+        raise DriverError("the citation evidence index is not a JSON object",
                           index_path=str(index_path))
     entries = obj.get("entries")
     if not isinstance(entries, list):
@@ -1743,7 +1764,8 @@ def read_outcome_pairs(index_path: Path) -> "list[dict]":
         if not isinstance(entry, dict):
             continue
         idx, outcome = entry.get("item_index"), entry.get("outcome")
-        if isinstance(idx, int) and isinstance(outcome, str):
+        if (isinstance(idx, int) and not isinstance(idx, bool)
+                and isinstance(outcome, str)):
             pairs.append({"item_index": idx, "outcome": outcome})
     return pairs
 
@@ -1776,6 +1798,344 @@ def classify_outcomes(pairs: "list[dict]", established_indices: "set[int]") -> d
     return {"budget_failed": sorted(budget), "repairable": sorted(failed)}
 
 
+# ---------------------------------------------------------------------------
+# #919 -- an ADVISORY, run-scoped host-refusal tally for the repair prompt.
+#
+# The repair agent picking a replacement URL is never told what happened to
+# any OTHER row in the run, so a host that is rate-limiting right now gets
+# re-picked rung after rung: measured on one live pass, 13 `http_error:403`
+# against ~47 successes on the same host, 9 of 41 batches blocked. This tally
+# states the observed fact -- a host, a status, a count -- and leaves the
+# judgment about whether to use it entirely to the model reading the prompt.
+# It is advisory only: no gate, no refusal, no retry-policy change, and the
+# #347 retrieve/read boundary above is unmoved -- every function below reads
+# only `item_index`/`outcome` (already bounded by read_outcome_pairs) and the
+# approved snapshot's own `source` field, never the server's `final_origin`,
+# `chain`, or a retrieved body.
+# ---------------------------------------------------------------------------
+
+def _is_reported_refusal_status(status: int) -> bool:
+    """True for the HTTP statuses worth telling the repair agent about: 403,
+    429, and every 5xx. Every other 4xx (400, 401, 404, 410, 451, ...) names
+    THIS resource or THIS resource's access policy, where a sibling URL on the
+    same host is still a sensible repair, so it is not reported. This decides
+    what is REPORTED, not what is true -- the judgment about whether another
+    URL on the same host will also fail stays with the repair agent (see
+    repair_advisory_hosts)."""
+    return status in (403, 429) or 500 <= status <= 599
+
+
+_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+
+
+def _safe_host(url) -> "str | None":
+    """Bounds the SYNTAX and SIZE of a model-authored string that is about to
+    be interpolated into ANOTHER model's prompt. It establishes NO TRUST --
+    the prompt frames the resulting list as untrusted evidence, never as an
+    instruction (see batchRepairPrompt in the template) -- this only keeps a
+    malformed or oversized value from ever reaching that prompt.
+
+    The accepted set is "what fetch_citation.py could actually have
+    fetched", not "an ordinary DNS name" (round-2 MAJOR, admitted): that
+    script accepts internationalized domain names and global IP literals, so
+    a source on `bücher.de`, `8.8.8.8` or `[2606:4700:4700::1111]` is a real
+    host a citation can 403 from, and rejecting those three shapes made the
+    advisory under-cover exactly the case it exists for -- a 403 from such a
+    host would never reach the repair prompt at all.
+
+    An IPv6 return value is BRACKET-LESS (`2606:4700:4700::1111`, matching
+    what `.hostname` itself hands back), not a URL authority -- a caller that
+    re-parses it as one must bracket it first (`sanitize_host_refusals`,
+    below, needs exactly this when it validates a stored key). Do not
+    "simplify" this back to a plain `"https://" + host`-style comparison
+    without accounting for that.
+
+    Order matters:
+      1. a control character is rejected BEFORE urlsplit() runs, because
+         urlsplit() silently STRIPS a bare LF/CR/TAB from a URL and would
+         otherwise hide exactly the input this check exists to catch.
+      2. urlsplit() itself raises ValueError on a malformed IPv6 literal.
+      3. the trailing-dot-then-lowercase normalisation matches
+         fetch_citation.py's own (fetch_citation.py:833-847), so
+         `https://example.com./x` counts under the same host that script
+         fetched.
+      4. an IP literal -- IPv4, or IPv6 already bracket-stripped by
+         `.hostname` (e.g. `::1`) -- is ACCEPTED here, not dropped: it is
+         reduced to `ipaddress`'s own canonical string form (so
+         `08.8.8.8`-style non-canonical spellings and `2606:4700:4700:0:0:
+         0:0:1111`-style expanded ones collapse to one spelling). Using the
+         stdlib parser rather than a hand-rolled dotted-quad pattern also
+         means the zero-padded and non-decimal IPv4 forms `ipaddress` itself
+         refuses are refused here too, instead of a regex having to know
+         about them separately. THIS BRANCH IS NOT AN EXEMPTION from the
+         ASCII/length bound in step 6 (round-3 MAJOR, admitted, closing
+         exactly the hole an earlier version of this function opened by
+         `return`-ing the canonical form straight out of this branch):
+         `ipaddress` accepts an arbitrary IPv6 SCOPE ID after `%`, and that
+         id is neither restricted to printable ASCII nor bounded in length --
+         a scope id of U+2028 (LINE SEPARATOR, invisible to the
+         pre-`urlsplit` control-character check because it sits above
+         U+007F) reaches `JSON.stringify` in the template and then the
+         harness's own `splitlines()`-based read of the job's last stdout
+         line, splitting it and making the whole invocation fatal; a scope
+         id of a few hundred kilobytes can approach `ARG_MAX`. The canonical
+         string is therefore held in a LOCAL and put through the same
+         ASCII-and-length gate as every other candidate before it is ever
+         returned. A NON-EMPTY scope id is rejected outright before that
+         gate even runs (round-4 P3, admitted) rather than bounded like the
+         rest of the branch: closed at the class, since `%1` and `%01` are
+         two tally keys for the one endpoint `getaddrinfo` treats as
+         identical, and a scoped (link-local) address is one
+         fetch_citation.py refuses before ever fetching it -- see the
+         inline comment for why that makes the rejection free.
+      5. a host that is not ASCII (an IDN) is IDNA-encoded to its punycode
+         spelling -- `bücher.de` becomes `xn--bcher-kva.de` -- so every
+         comparison downstream (the prompt's list, a stored tally's keys)
+         works on the SAME spelling regardless of which one the fetcher's
+         own URL happened to use. A string IDNA cannot encode is dropped.
+         The trailing-dot strip in step 3 runs AGAIN after this step
+         (round-3 MINOR, admitted): IDNA maps several Unicode "full stop"
+         look-alikes (`fetch_citation.py` and this function's own step 3
+         only ever strip the ASCII one) -- U+3002 IDEOGRAPHIC FULL STOP
+         among them -- onto an ASCII `.`, so `bücher.de。/entry` (a URL
+         `canon_validate` accepts and `fetch_citation.validate_url` fetches
+         as authority `xn--bcher-kva.de.`) encodes to `xn--bcher-kva.de.`
+         with the dot reintroduced AFTER the one strip already ran. Left
+         alone, that trailing dot makes the FINAL label empty and step 6
+         below would reject a host the fetcher genuinely used.
+      6. the length and label-shape check accepts an ordinary (now
+         ASCII-only, by construction) DNS hostname and rejects an empty
+         label. A dropped host costs only its own advisory line; nothing
+         else changes."""
+    if not isinstance(url, str) or url == "":
+        return None
+    if any(ch < " " or ch == "\x7f" for ch in url):
+        return None
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return None
+    if not host:
+        return None
+    host = host.rstrip(".").lower()
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        # A non-empty IPv6 scope id is REJECTED outright, not merely bounded
+        # (round-4 P3, admitted: the same shape as the round-2 MAJOR, closed
+        # here at the class rather than re-bounded one step further in).
+        # `ipaddress` accepts a printable scope id verbatim, so `%1`, `%01`
+        # and `%001` are three different tally KEYS for the one endpoint
+        # `getaddrinfo` resolves them all to, and a scope id can carry
+        # punctuation no DNS label may. The rejection is cheap by
+        # construction, not a guess: a scoped address is link-local, and
+        # fetch_citation.py refuses to fetch a link-local address before it
+        # ever reaches the network, so this can only ever have cost an
+        # advisory line for a host that was never fetched in the first place.
+        if getattr(parsed, "scope_id", None):
+            return None
+        # NOT an exemption from the bound just below -- see step 4 above.
+        canonical = str(parsed)
+        if canonical.isascii() and 1 <= len(canonical) <= 253:
+            return canonical
+        return None
+    if not host.isascii():
+        try:
+            host = host.encode("idna").decode("ascii")
+        except (UnicodeError, ValueError):
+            return None
+        # IDNA can re-introduce exactly the trailing dot the strip above
+        # already removed -- see step 5 above -- so it runs again here.
+        host = host.rstrip(".")
+    if not (1 <= len(host) <= 253):
+        return None
+    labels = host.split(".")
+    if not all(1 <= len(label) <= 63 and _HOST_LABEL_RE.match(label)
+               for label in labels):
+        return None
+    return host
+
+
+# One to three ASCII digits, not an unbounded run: that is the whole closed
+# spelling fetch_citation.py ever writes (`f"http_error:{status}"` off an HTTP
+# status int), and a longer tail could never name a status
+# _is_reported_refusal_status accepts anyway, so bounding it drops nothing that
+# was ever reported. What it DOES drop is the only way the `int()` on the tail
+# below can raise: Python refuses to convert a digit string past its
+# integer-conversion length limit, and index.json is a file on disk that a
+# corrupted write or an operator's hand could leave holding one. `drive_all`
+# catches only `DriverError`, so that `ValueError` would have killed the whole
+# invocation. Same reasoning, same closed-spelling answer, as
+# `_REPORTED_STATUS_RE` below.
+_HTTP_ERROR_RE = re.compile(r"^http_error:([0-9]{1,3})$")
+
+
+def host_refusals_from(pairs: "list[dict]", rows: list,
+                       established: "set[int]") -> dict:
+    """Per-host, per-status counts of a REPORTED refusal on an established
+    row: `{host: {"<status>": count}}`.
+
+    Restricted to `established` for the same reason classify_outcomes() is: a
+    non-established row carries no citation claim, so a failure on it is not
+    evidence about any host the repair agent might re-pick. The host is read
+    off the APPROVED SNAPSHOT's own `source` field (via `rows`, which the
+    caller already loaded with load_rows()) -- never off the index's
+    `final_origin`/`chain`, which is the server's own claim about where a
+    redirect ended, and never off a retrieved body. Skips, WITHOUT skipping
+    its siblings, an out-of-range item_index, a non-dict row, an unsafe host,
+    or an `http_error:` outcome whose tail is not one to three ASCII digits --
+    non-numeric, empty, or longer than any status can be (see
+    `_HTTP_ERROR_RE`)."""
+    tally: dict = {}
+    for pair in pairs:
+        idx = pair["item_index"]
+        if idx not in established:
+            continue
+        match = _HTTP_ERROR_RE.match(pair["outcome"])
+        if not match:
+            continue
+        status = int(match.group(1))
+        if not _is_reported_refusal_status(status):
+            continue
+        if idx < 0 or idx >= len(rows) or not isinstance(rows[idx], dict):
+            continue
+        host = _safe_host(rows[idx].get("source"))
+        if host is None:
+            continue
+        # Keyed by the STRING status, because this tally is written straight
+        # into the JSON state document, where an object key is a string either
+        # way -- spelling it once here keeps the in-memory shape and the
+        # persisted one identical, which is what lets sanitize_host_refusals()
+        # read back exactly what merge_host_refusals() wrote.
+        key = str(status)
+        by_status = tally.setdefault(host, {})
+        by_status[key] = by_status.get(key, 0) + 1
+    return tally
+
+
+def merge_host_refusals(base: dict, extra: dict) -> dict:
+    """Returns a NEW dict; counts for the same host+status add. Never mutates
+    either input -- `base` is often the run's persisted tally and `extra` is
+    one pass's or one batch's fresh count, and a caller must be free to
+    discard either afterwards without having corrupted the other."""
+    merged = {host: dict(statuses) for host, statuses in base.items()}
+    for host, statuses in extra.items():
+        merged_statuses = merged.setdefault(host, {})
+        for status, count in statuses.items():
+            merged_statuses[status] = merged_statuses.get(status, 0) + count
+    return merged
+
+
+# The exact ASCII spelling this release ever WRITES as a status key --
+# str(status) off an int this module itself computed via
+# _is_reported_refusal_status, so always "403", "429", or "5" plus
+# exactly two ASCII digits, never leading-zero-padded. A regex against this
+# closed spelling, not `str.isdigit()` + `int()`, is what
+# sanitize_host_refusals() below validates a stored key against (see its
+# docstring for why: `int()` accepts strings `isdigit()` accepts but this
+# module never writes, and used to raise on some of them).
+_REPORTED_STATUS_RE = re.compile(r"^(?:403|429|5[0-9]{2})$")
+
+
+def sanitize_host_refusals(value) -> dict:
+    """Fail-safe read of whatever the state document holds under
+    `hostRefusals`. NEVER raises: an operator can edit that document by hand
+    and a release before this one wrote no such key at all, so this drops
+    anything that does not match the shape this release writes and returns
+    whatever survives, `{}` at the limit. A count of `True`/`False` is
+    rejected even though `bool` is a subclass of `int` in Python -- neither is
+    a count.
+
+    A KEY is validated as a BARE HOST with the exact rules `_safe_host`
+    applies to a URL, by calling it on `"https://" + key` and requiring the
+    result equal `key` back -- `_safe_host` takes a URL, and a bare host has
+    no scheme of its own to strip first. An IPv6 KEY additionally needs the
+    BRACKETED form tried too (round-2 MAJOR, admitted): `_safe_host` returns
+    an IPv6 address bracket-LESS (see its docstring), so
+    `"https://" + "2606:4700:4700::1111"` parses as host `2606` and a bogus
+    port, not as that address -- the bare-form check alone would silently
+    drop every IPv6 host from the tally on the very next load, a SILENT loss
+    rather than a crash. Trying `"https://[" + key + "]"` as well recovers
+    exactly the IPv6 case (`_safe_host` rejects the bracketed form for an
+    ordinary hostname or an IPv4 literal -- both are invalid inside `[...]` --
+    so this never widens what a NON-IPv6 key can be); either spelling
+    returning the key back is accepted.
+
+    A STATUS key is validated against `_REPORTED_STATUS_RE`'s closed ASCII
+    spelling rather than converted with `int()` (round-2 MAJOR, admitted):
+    `str.isdigit()` is true for strings `int()` refuses -- a superscript or
+    other Unicode decimal-digit character, or a digit string long enough to
+    hit Python's integer-conversion length limit -- so the old
+    `isdigit()` + `int()` + `_is_reported_refusal_status()` path could RAISE
+    on a hand-edited or corrupted state document, and this function's own
+    docstring promises it never does. `drive_all` catches only `DriverError`,
+    so an uncaught `ValueError` here would have killed the whole invocation
+    on the very state document this function exists to read safely. Matching
+    the closed spelling directly needs no conversion at all, so there is
+    nothing left that can raise."""
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for host, statuses in value.items():
+        if not isinstance(host, str):
+            continue
+        if _safe_host("https://" + host) != host and \
+                _safe_host("https://[" + host + "]") != host:
+            continue
+        if not isinstance(statuses, dict):
+            continue
+        clean = {}
+        for status, count in statuses.items():
+            if not isinstance(status, str) or not _REPORTED_STATUS_RE.match(status):
+                continue
+            if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+                continue
+            clean[status] = count
+        if clean:
+            out[host] = clean
+    return out
+
+
+def repair_advisory_hosts(tally: dict, failed_rows: "list[dict]",
+                          limit: int = 10) -> list:
+    """Orders the sanitised tally into what ONE repair prompt is allowed to
+    see: an ORDERED `[{"host": str, "statuses": {status: count}}, ...]`.
+
+    FIRST, uncapped: every host in `tally` that some row in THIS repair's own
+    `failed_rows` resolves to via `_safe_host`. A repair can legitimately
+    carry more distinct failing hosts than `limit` -- a batch is dozens of
+    candidates and every failed established row goes to ONE repair -- and the
+    host refusing RIGHT NOW is the one the agent is about to re-pick, so it is
+    never truncated away. Order among them: total count descending, then host
+    name ascending.
+
+    THEN at most `limit` further hosts from `tally`, same ordering, excluding
+    any host already listed. `[]` when the tally is empty."""
+    def _sort_key(host: str) -> tuple:
+        return (-sum(tally[host].values()), host)
+
+    current_hosts = set()
+    for row in failed_rows:
+        if not isinstance(row, dict):
+            continue
+        host = _safe_host(row.get("source"))
+        if host is not None and host in tally:
+            current_hosts.add(host)
+
+    ordered_current = sorted(current_hosts, key=_sort_key)
+    ordered_rest = sorted((h for h in tally if h not in current_hosts),
+                          key=_sort_key)
+    ordered = ordered_current + ordered_rest[:limit]
+    # dict(...) copies (round-2 NIT, admitted): `tally` outlives this call --
+    # it is a caller's local built fresh each time here, but nothing about
+    # this function's contract says a future caller couldn't hold onto it --
+    # and a returned advisory must not change under whoever holds it if the
+    # tally it came from is mutated afterwards.
+    return [{"host": host, "statuses": dict(tally[host])} for host in ordered]
+
+
 def transient_indices(pairs: "list[dict]", established_indices: "set[int]") -> "list[int]":
     """The established rows whose failure is about the link, not the citation.
 
@@ -1789,11 +2149,18 @@ def transient_indices(pairs: "list[dict]", established_indices: "set[int]") -> "
 
 
 def fetch_until_stable(run_fetch, read_pairs, load_established,
-                       *, sleep=time.sleep, on_retry=None) -> dict:
+                       *, sleep=time.sleep, on_retry=None,
+                       load_rows=None) -> dict:
     """Runs the citation fetch until no established row is failing at the
     TRANSPORT layer, or until the retry ladder is spent. Returns
     `{"ok": bool, "passes": int, "classified": {...}}` -- `classified` absent
     when a pass exited non-zero, which the caller reports as it always has.
+    Also returns `"host_refusals": {...}` (#919, see below) on BOTH paths --
+    round-2 MINOR, admitted: a tally accumulated on an earlier pass must not
+    be thrown away just because a LATER pass's fetch command itself failed
+    to run. It carries only what earlier passes already observed; a pass
+    that never ran contributes nothing, because there is no index to read
+    for it.
 
     A RETRY, NOT A RUNG (#853). This spends no attempt, launches no codex job and
     changes no URL: it re-runs the SAME command over the SAME pinned snapshot.
@@ -1829,10 +2196,26 @@ def fetch_until_stable(run_fetch, read_pairs, load_established,
     snapshot is create-once, so a later pass cannot see different rows.
 
     Injected `run_fetch` / `read_pairs` / `sleep` so the ladder is testable
-    without a process, a network or a wall clock."""
+    without a process, a network or a wall clock.
+
+    `load_rows` (#919) is an OPTIONAL, keyword-only, zero-argument callable
+    returning the approved snapshot's rows -- `None` reproduces exactly
+    today's behaviour, which is what keeps every existing injected fake in
+    tests/glossary_transient_fetch_retry.test.py passing untouched. When given,
+    it feeds `host_refusals_from()` on EVERY pass, and the per-pass tallies are
+    MERGED rather than replaced: a 403 seen on pass 1 whose row then succeeds
+    on pass 2 is exactly the measured pattern this exists to report (13
+    refusals against ~47 successes on one host), so the pass that retried it
+    must not erase the earlier one. `classified` still describes the LAST pass
+    only, unchanged -- the two answer different questions. `classified`
+    decides what THIS attempt does next; `host_refusals` is a record of what
+    was OBSERVED across every pass this attempt ran, for a prompt a later
+    repair may read. `host_refusals` is `{}` when `load_rows` is `None` or
+    nothing qualified."""
     passes = 0
     classified = None
     established = None
+    host_refusals: dict = {}
     for delay in (None,) + _FETCH_RETRY_DELAYS_SEC:
         if delay is not None:
             sleep(delay)
@@ -1840,17 +2223,21 @@ def fetch_until_stable(run_fetch, read_pairs, load_established,
         # the number of the pass that ran, failed or not.
         passes += 1
         if not run_fetch():
-            return {"ok": False, "passes": passes}
+            return {"ok": False, "passes": passes, "host_refusals": host_refusals}
         if established is None:
             established = load_established()
         pairs = read_pairs()
         classified = classify_outcomes(pairs, established)
+        if load_rows is not None:
+            host_refusals = merge_host_refusals(
+                host_refusals, host_refusals_from(pairs, load_rows(), established))
         transient = transient_indices(pairs, established)
         if not transient:
             break
         if on_retry is not None and passes <= len(_FETCH_RETRY_DELAYS_SEC):
             on_retry(len(transient), passes)
-    return {"ok": True, "passes": passes, "classified": classified}
+    return {"ok": True, "passes": passes, "classified": classified,
+            "host_refusals": host_refusals}
 
 
 # ---------------------------------------------------------------------------
@@ -2068,7 +2455,8 @@ def _job_failed(outcome: dict) -> bool:
 
 
 def advance_batch(ctx: Ctx, batch: dict, attempt: int, resumed: bool,
-                  rejection_reason: "str | None") -> dict:
+                  rejection_reason: "str | None",
+                  state: "dict | None" = None) -> dict:
     """Drives ONE batch from dispatch up to the point a judge is needed, or to a
     terminal state. Never dispatches a judge itself -- that is the session's job.
 
@@ -2076,7 +2464,10 @@ def advance_batch(ctx: Ctx, batch: dict, attempt: int, resumed: bool,
       {"state": "awaiting_judge", ...}  -- pending entry written, judge prompt ready
       {"state": "ready", ...}           -- offline only; no review is owed
       {"state": "failed", "reason": ...}
-    """
+
+    `state` (#919) is forwarded to prepare_and_hand_back() untouched -- see
+    that function for what it does with it. This function reads it for
+    nothing else."""
     idx = batch["index"]
     built = ctx.build([
         {"key": "fragment", "fn": "fragmentPath", "args": [idx, attempt]},
@@ -2159,12 +2550,22 @@ def advance_batch(ctx: Ctx, batch: dict, attempt: int, resumed: bool,
                 "mergePath": str(fragment_path),
                 "citationReview": "skipped-offline"}
 
-    return prepare_and_hand_back(ctx, batch, attempt, fragment_path)
+    return prepare_and_hand_back(ctx, batch, attempt, fragment_path, state)
 
 
 def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
-                          fragment_path: Path) -> dict:
-    """APPROVE -> FETCH -> repair gate -> pending entry. Live mode only."""
+                          fragment_path: Path,
+                          state: "dict | None" = None) -> dict:
+    """APPROVE -> FETCH -> repair gate -> pending entry. Live mode only.
+
+    `state` (#919) is the run's state document. OPTIONAL and mutated in
+    place: when given, the fetch's per-run host-refusal tally (see
+    fetch_until_stable) is merged into `state["hostRefusals"]` so the
+    EXISTING save_state() call the caller already makes (drive_all, after
+    advance_until_blocked returns) persists it -- this function never calls
+    save_state itself. `None` reproduces exactly today's behaviour and is
+    what keeps the direct calls in tests/glossary_dispatch_driver.test.py
+    (which predate this key and pass four positional arguments) unchanged."""
     idx = batch["index"]
     built = ctx.build([
         {"key": "approve", "fn": "approveBatchCmd", "args": [idx, attempt]},
@@ -2224,9 +2625,38 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
             f"on fetch pass {done} of {total_passes}; re-running the same fetch "
             f"over the same snapshot -- no rung spent, no source changed")
 
+    # The approved snapshot is read ONCE and cached in this closure (#919):
+    # `established_indices()` needs only the positions, `host_refusals_from()`
+    # (via fetch_until_stable's `load_rows`) needs the rows themselves to
+    # resolve a citation's host, and both must derive from the SAME read
+    # rather than two separate calls to load_rows(approved_path) -- the
+    # snapshot is create-once, so a second read could only ever return the
+    # same bytes at the cost of a second file open for no benefit.
+    _snapshot_rows: "list | None" = None
+
+    def _cached_snapshot_rows() -> list:
+        nonlocal _snapshot_rows
+        if _snapshot_rows is None:
+            _snapshot_rows = load_rows(approved_path)
+        return _snapshot_rows
+
     fetch_state = fetch_until_stable(
         _run_fetch, lambda: read_outcome_pairs(index_path),
-        lambda: established_indices(load_rows(approved_path)), on_retry=_on_retry)
+        lambda: established_indices(_cached_snapshot_rows()),
+        load_rows=_cached_snapshot_rows, on_retry=_on_retry)
+    if state is not None:
+        # Merged BEFORE branching on "ok" (round-2 MINOR, admitted): a tally
+        # accumulated on an earlier, SUCCESSFUL pass must survive even when a
+        # later pass's fetch command itself fails to run -- fetch_until_stable
+        # carries that history on both its return paths for exactly this.
+        # Additive merge into the run's persisted tally (see
+        # sanitize_host_refusals for why a fail-safe read, never a raise, is
+        # right here): the caller's existing save_state() call, made after
+        # this function returns, is what actually persists this -- see the
+        # docstring above for why this function must not call it itself.
+        state["hostRefusals"] = merge_host_refusals(
+            sanitize_host_refusals(state.get("hostRefusals")),
+            fetch_state.get("host_refusals", {}))
     if not fetch_state["ok"]:
         return {"state": "evidence_failed", "batchIndex": idx, "attempt": attempt,
                 "reason": "fetch-failed"}
@@ -2276,7 +2706,8 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
 
 
 def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]",
-               snapshot_path: Path, cause: str = "unretrievable") -> dict:
+               snapshot_path: Path, cause: str = "unretrievable",
+               host_advisory: "list | None" = None) -> dict:
     """Repairs the failed rows into the RESERVED rung attempt+1.
 
     RUNG ACCOUNTING, stated because "consumes a rung" is ambiguous at both ends.
@@ -2292,7 +2723,18 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
     all, or "unusable-source" for a row an independent judge rejected because the
     body it fetched was not the cited document. This function does not itself
     decide which is true -- the caller names it, because the caller is the one
-    that knows which of the two callers reached this function."""
+    that knows which of the two callers reached this function.
+
+    `host_advisory` (#919) is likewise forwarded verbatim, as the SIXTH argument
+    of batchRepairPrompt(). It arrives here already built by the caller (see
+    advance_until_blocked, the only call site) via
+    `repair_advisory_hosts(sanitize_host_refusals(state.get("hostRefusals")),
+    failed_rows)` -- an ORDERED, size-bounded list, never the raw run state.
+    This function does not read `state`, sanitise anything, or decide what is
+    worth reporting; it only passes the list through, exactly like `cause`.
+    `None` (the default) reaches the template as `null`, which
+    batchRepairPrompt() treats identically to an absent or empty list --
+    emitting no advisory paragraph at all."""
     idx = batch["index"]
     snapshot_rows = load_rows(snapshot_path)
     failed_rows = [snapshot_rows[p] for p in failed_positions]
@@ -2318,7 +2760,8 @@ def run_repair(ctx: Ctx, batch: dict, attempt: int, failed_positions: "list[int]
         repair_path = sandbox.artifact(Path(built["repairpath"]).name)
         repair = ctx.build([
             {"key": "prompt", "fn": "batchRepairPrompt",
-             "args": [batch, attempt, failed_rows, str(repair_path), cause]},
+             "args": [batch, attempt, failed_rows, str(repair_path), cause,
+                      host_advisory]},
         ])
         job_id = launch_codex(companion=ctx.companion, node_bin=ctx.node_bin,
                               prompt=strip_routing_line(repair["prompt"]),
@@ -2860,12 +3303,13 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
                      "snapshotPath": pending_snapshot, "cause": "unusable-source"}
             pending_unusable = None
         elif prepared_fragment is not None:
-            result = prepare_and_hand_back(ctx, batch, attempt, prepared_fragment)
+            result = prepare_and_hand_back(ctx, batch, attempt, prepared_fragment,
+                                           state)
             prepared_fragment = None
         else:
             result = advance_batch(ctx, batch, attempt,
                                    resumed=idx in resumed_indices,
-                                   rejection_reason=rejection_reason)
+                                   rejection_reason=rejection_reason, state=state)
         kind = result["state"]
 
         if kind == "awaiting_judge":
@@ -2897,9 +3341,21 @@ def advance_until_blocked(ctx: Ctx, batch: dict, state: dict,
                     "citations did not retrieve at the final attempt: "
                     + repr(result["failedPositions"]),
                     attempts_used=attempt + 1)
+            # #919: the advisory list is built HERE, at the state-owning
+            # caller, and just forwarded by run_repair() -- so run_repair()
+            # itself never needs to know about `state`, sanitisation, or the
+            # persisted tally at all. `failed_rows` is loaded once for this;
+            # run_repair() loads it again for its own splice bookkeeping, a
+            # tiny redundant read of the same pinned snapshot rather than a
+            # second responsibility for either function.
+            snapshot_rows = load_rows(Path(result["snapshotPath"]))
+            failed_rows = [snapshot_rows[p] for p in result["failedPositions"]]
+            host_advisory = repair_advisory_hosts(
+                sanitize_host_refusals(state.get("hostRefusals")), failed_rows)
             repaired = run_repair(ctx, batch, attempt, result["failedPositions"],
                                   Path(result["snapshotPath"]),
-                                  cause=result.get("cause", "unretrievable"))
+                                  cause=result.get("cause", "unretrievable"),
+                                  host_advisory=host_advisory)
             if repaired["state"] == "failed":
                 # A job codex-companion recorded failed/cancelled during repair
                 # settles the batch at its CURRENT rung -- the one whose repair

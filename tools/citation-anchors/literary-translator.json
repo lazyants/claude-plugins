@@ -1641,6 +1641,20 @@
       ],
       "claim": "`blocked` (HUMAN_ESCALATION_STATUSES, select_segments.py:1172) or `converged` (WAS_CONVERGED_STATUSES, :1178) -- `blocked` in particular is a THIRD terminal shape alongside the more familiar",
       "target": "plugins/literary-translator/skills/literary-translator/assets/scripts/select_segments.py"
+    },
+    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/glossary_dispatch_driver.py\", \"fetch_citation.py:833-847\", 0]": {
+      "anchors": [
+        "host = host.lower()",
+        "host = host.rstrip(\".\")"
+      ],
+      "claim": "3. the trailing-dot-then-lowercase normalisation matches fetch_citation.py's own (fetch_citation.py:833-847), so `https://example.com./x` counts under the same host that script fetched. (#919 -- _safe_host must fold a host exactly as the fetcher did, or one host's refusal tally splits in two.)"
+    },
+    "[\"plugins/literary-translator/tests/glossary_host_refusal_advisory.test.py\", \"fetch_citation.py:833-847\", 0]": {
+      "anchors": [
+        "host = host.lower()",
+        "host = host.rstrip(\".\")"
+      ],
+      "claim": "fetch_citation.py:833-847 strips a trailing dot before comparing hosts; counting the un-stripped form would silently split one host's tally in two."
     }
   },
   "exemptions": {
