@@ -560,10 +560,13 @@ def test_markup_note_colliding_with_a_canon_note_is_deduped_and_canon_keeps_its_
 
 
 def test_resolve_entity_notes_two_argument_call_is_unchanged(tmp_path):
-    """`validate_backlinks.py:860` calls this with TWO arguments and
-    immediately `.items()` the result. The added `used_paths` parameter must
-    stay optional and the return shape must stay a dict, or that gate breaks
-    after a successful render."""
+    """A bare two-argument call -- `used_paths` and `stem_field` both left
+    at their defaults -- must still return a plain dict, immediately
+    `.items()`-able, byte-identical to a pre-#795/#930 render. Real callers
+    (`validate_backlinks.py`'s `_entity_maps`, since #930) now pass
+    `stem_field=` explicitly, but this two-argument shape is the
+    compatibility surface `_resolve_entity_notes`'s own docstring promises
+    stays valid, and this test pins it directly."""
     entries = {"John": canon_entry("John", "Jonathan"),
                "Jean": canon_entry("Jean", "Jean")}
     result = render_obsidian._resolve_entity_notes(entries, FOLDERS)

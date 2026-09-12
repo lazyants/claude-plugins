@@ -854,10 +854,10 @@ def _entity_maps(canon, profile, supplied_note_map=None):
     entries = render_obsidian._canon_entries(canon)
     if supplied_note_map is None:
         output_cfg = (profile or {}).get("output") or {}
-        folders_map = (
-            ((output_cfg.get("adapter_config") or {}).get("obsidian") or {}).get("folders") or {}
-        )
-        relpath_by_source_form = render_obsidian._resolve_entity_notes(entries, folders_map)
+        folders_map = (((output_cfg.get("adapter_config") or {}).get("obsidian") or {}).get("folders") or {})
+        try: stem_field = render_obsidian._entity_note_stem_field(profile)  # #930; one line, :1317-1325 is cited
+        except render_obsidian.RenderError as exc: _fatal(str(exc))  # ERROR line + exit 2, never a traceback
+        relpath_by_source_form = render_obsidian._resolve_entity_notes(entries, folders_map, stem_field=stem_field)
     else:
         relpath_by_source_form = dict(supplied_note_map)
     note_identity_by_source_form = {

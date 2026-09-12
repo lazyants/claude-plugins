@@ -1770,15 +1770,15 @@ def _resolve_markup_notes(identities, folders_map, used_paths):
     Canon resolves FIRST and this runs second, on purpose: every canon
     relpath then stays byte-identical to what it was before this feature
     existed, so `validate_backlinks.py`'s own INDEPENDENT re-derivation
-    (`_resolve_entity_notes(entries, folders_map)`, two arguments, its own
-    fresh set) still matches the vault. A markup note can therefore never
-    take or overwrite a canon note's path -- only ever get deduped away from
-    one.
+    (`_resolve_entity_notes(entries, folders_map, stem_field=...)`, still
+    no `used_paths`) still matches the vault. A markup note can therefore
+    never take or overwrite a canon note's path -- only ever get deduped
+    away from one.
 
     The fallback stem is prefixed `markup-` rather than `entity-` so a
-    sanitized-to-nothing markup label and a sanitized-to-nothing canon
-    `source_form` do not silently resolve to the same name; `_dedupe_path`
-    would separate them anyway, but the reader can see which is which."""
+    sanitized-to-nothing markup label and a sanitized-to-nothing canon stem
+    (`source_form`, or `canonical_target_form` under #930's knob) never
+    share a name; `_dedupe_path` would separate them anyway, but the reader can see which is which."""
     relpath_by_identity = {}
     for identity in sorted(identities):
         tag, label = identity
@@ -2910,13 +2910,50 @@ def _dedupe_path(base_path, used_paths):
         n += 1
 
 
-def _entity_note_relpath(source_form, entry, folders_map, used_paths):
+ENTITY_NOTE_STEM_FIELDS = ("source_form", "canonical_target_form")
+DEFAULT_ENTITY_NOTE_STEM = "source_form"
+
+
+def _entity_note_stem_field(profile):
+    """The canon field an entity note's filename stem is taken from --
+    `output.adapter_config.obsidian.entity_note_stem` (#930), resolved
+    here and ONLY here so render() and validate_backlinks.py cannot
+    disagree. Absent -> "source_form" (the schema's `default` is
+    documentation only, like mentions_section.enabled's). Any other
+    value is a RenderError: profile_validate.py's enum already rejects
+    it at Step 0, and a hand-edited profile must not silently fall back
+    to a stem the operator did not ask for -- so a PRESENT key holding an
+    explicit `null` is refused too, not read as absent."""
+    obsidian_cfg = (((profile or {}).get("output") or {}).get("adapter_config") or {}).get("obsidian") or {}
+    value = obsidian_cfg.get("entity_note_stem", DEFAULT_ENTITY_NOTE_STEM)
+    if value not in ENTITY_NOTE_STEM_FIELDS:
+        raise RenderError(
+            "entity_note_stem_invalid",
+            f"output.adapter_config.obsidian.entity_note_stem must be one "
+            f"of {ENTITY_NOTE_STEM_FIELDS}; got {value!r}",
+        )
+    return value
+
+
+def _entity_note_relpath(source_form, entry, folders_map, used_paths, stem_field=DEFAULT_ENTITY_NOTE_STEM):
+    """The relpath (folder/stem.md) for one canon entry's note. `stem_field`
+    (#930) picks which canon field the filename stem is taken from:
+    `source_form` (the default, byte-identical to every pre-#930 render) or
+    `canonical_target_form`. A `canonical_target_form` that is absent,
+    empty, blank (whitespace-only), or not a string falls back to
+    `source_form` so every entry still gets a note; the fallback digest
+    (`_stable_fallback_name`) is taken from the same label the stem is, so
+    the two never disagree on which entry they name."""
     folder = _resolve_folder(entry.get("category"), folders_map)
-    stem = sanitize_filename_component(source_form, _stable_fallback_name(source_form, "entity"))
+    label = source_form
+    if stem_field == "canonical_target_form":
+        target = entry.get("canonical_target_form")
+        label = target if isinstance(target, str) and target.strip() else source_form
+    stem = sanitize_filename_component(label, _stable_fallback_name(label, "entity"))
     return _dedupe_path(f"{folder}/{stem}.md", used_paths)
 
 
-def _resolve_entity_notes(entries, folders_map, used_paths=None):
+def _resolve_entity_notes(entries, folders_map, used_paths=None, stem_field=DEFAULT_ENTITY_NOTE_STEM):
     """Resolves every entry's note relpath (folder/stem.md) UP FRONT, in
     the same `sorted(entries)` order the entity-note-writing loop uses --
     so the wikilink identity used while rendering narrative pages (via
@@ -2930,11 +2967,16 @@ def _resolve_entity_notes(entries, folders_map, used_paths=None):
     `used_paths` (#795 §6.1) is an OPTIONAL, caller-owned collision set, so
     `render()` can resolve the entity-markup notes afterwards through the
     SAME set and a markup note can never take or overwrite a canon note's
-    path. Absent -- which is how `validate_backlinks.py:860` calls this, with
-    two arguments, immediately `.items()`-ing the dict it returns -- a fresh
-    set is used and every canon relpath is byte-identical to what it was
-    before #795 existed. Canon MUST be resolved first for that to hold; see
-    `_resolve_markup_notes`."""
+    path. Absent -- which is how `validate_backlinks.py` calls this, passing
+    `stem_field=` (resolved once, via `_entity_note_stem_field`, so the two
+    callers can never disagree) and still no `used_paths` -- a fresh set is
+    used and every canon relpath is byte-identical to what it was before
+    #795 existed. Canon MUST be resolved first for that to hold; see
+    `_resolve_markup_notes`.
+
+    `stem_field` (#930) is `source_form` by default or
+    `canonical_target_form` under the profile's `entity_note_stem` knob;
+    see `_entity_note_stem_field`'s docstring for who resolves it."""
     if used_paths is None:
         used_paths = set()
     relpath_by_source_form = {}
@@ -2942,7 +2984,9 @@ def _resolve_entity_notes(entries, folders_map, used_paths=None):
         entry = entries[source_form]
         if not isinstance(entry, dict):
             continue
-        relpath_by_source_form[source_form] = _entity_note_relpath(source_form, entry, folders_map, used_paths)
+        relpath_by_source_form[source_form] = _entity_note_relpath(
+            source_form, entry, folders_map, used_paths, stem_field=stem_field
+        )
     return relpath_by_source_form
 
 
@@ -3665,6 +3709,10 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     output_cfg = (profile or {}).get("output") or {}
     parenthetical_mode = (output_cfg.get("name_display") or {}).get("parenthetical_originals") or "never"
     folders_map = ((output_cfg.get("adapter_config") or {}).get("obsidian") or {}).get("folders") or {}
+    # #930: resolved ONCE, here, so every _resolve_entity_notes call this
+    # render() makes -- and validate_backlinks.py's own independent one --
+    # agree on which canon field names a note's filename stem.
+    entity_note_stem = _entity_note_stem_field(profile)
 
     # D1/D4: computed ONCE, fresh, from this call's own `profile` -- gates
     # the Mentions section and the canon reserved-field rejections below.
@@ -3695,7 +3743,7 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # a pre-#795 render, which is what keeps `validate_backlinks.py`'s own
     # independent re-derivation correct.
     used_note_paths = set()
-    relpath_by_source_form = _resolve_entity_notes(entries, folders_map, used_note_paths)
+    relpath_by_source_form = _resolve_entity_notes(entries, folders_map, used_note_paths, stem_field=entity_note_stem)
     # The wikilink identity is the FOLDER-QUALIFIED relpath (minus ".md"),
     # e.g. "People/Ivan" -- NOT the bare stem (review round 2, [important]).
     # `_dedupe_path`'s `used_paths` set is shared across ALL entities for

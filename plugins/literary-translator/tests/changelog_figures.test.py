@@ -534,6 +534,23 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
+    # ROTATED TO 1.177.0 (#930 -- a canon entity note's filename was always
+    # the source-script canon key), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed. Its
+    # digit-runs are identifiers -- the version (1.177.0), the release date,
+    # the issue number (#930), the sibling issue named for the dedupe it
+    # reuses (#99) -- or measurements quoted FROM THE ISSUE about a delivered
+    # series in another repository (1440 of 5128 entity notes, 28%, 289 notes
+    # in 132 groups, six case-only pairs), which this tree cannot re-derive.
+    # The tree-owned facts the entry states (that `render_obsidian.py` is in
+    # none of the three hashed bundle tuples, that the knob sits outside
+    # `profile_semantics_hash`) it deliberately names in words, not counts.
+    #
+    # This rotation RETIRED nothing: 1.174.0's list was already empty; its
+    # record is kept below, unchanged, as every earlier rotation's is.
+    #
+    # The 1.174.0 record this replaces, kept as its own:
     # ROTATED TO 1.174.0 (#910 -- --correct reported success while the
     # already-built segpacks still carried the pre-correction canon_map; #840
     # folded in), per the maintenance contract above.
@@ -1666,7 +1683,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.174.0"
+FIGURES_VERSION = "1.177.0"
 
 
 def _newest_entry():

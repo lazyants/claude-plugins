@@ -1313,18 +1313,6 @@
       ],
       "claim": "`validate_backlinks.py:780` reconstructs each segment note's filename by calling `_segment_title` against the PERSISTED nodestream.json"
     },
-    "[\"plugins/literary-translator/skills/literary-translator/assets/scripts/render_obsidian.py\", \"validate_backlinks.py:860\", 0]": {
-      "anchors": [
-        "render_obsidian._resolve_entity_notes(entries, folders_map)"
-      ],
-      "claim": "Absent -- which is how `validate_backlinks.py:860` calls this, with two arguments, immediately `.items()`-ing the dict it returns -- a fresh set is used"
-    },
-    "[\"plugins/literary-translator/tests/entity_markup_render.test.py\", \"validate_backlinks.py:860\", 0]": {
-      "anchors": [
-        "render_obsidian._resolve_entity_notes(entries, folders_map)"
-      ],
-      "claim": "the two-argument `_resolve_entity_notes(entries, folders_map)` call `validate_backlinks.py:860` makes must keep returning a dict"
-    },
     "[\"plugins/literary-translator/tests/entity_markup_render.test.py\", \"validate_backlinks.py:780\", 0]": {
       "anchors": [
         "render_obsidian._segment_title(seg_nodes, seg)"

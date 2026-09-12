@@ -711,6 +711,15 @@ output:
           # render and is NOT governed by this flag. Set to false to opt out of the "## Mentions" section only
           # (byte-identical to pre-1.10.0 output except homonym collisions, which stay de-linked either
           # way). See references/output-target-adapters/obsidian.md.
+      entity_note_stem: source_form
+        # source_form (this default, byte-identical to every earlier render) or
+        # canonical_target_form -- the canon field a note's FILE stem is taken
+        # from; frontmatter/H1/wikilink stay the same either way. Entries sharing
+        # one target form, or case only, get two files (-<n> suffix, #99); a
+        # markup note takes that suffix too if its span label collides with a
+        # canon note's new stem (canon allocated first). Only a note whose target
+        # sanitizes to a DIFFERENT stem than its source moves -- then
+        # diff_rendered_output.py --accept-baseline --force-accept-baseline.
     epub: null
     custom:
       renderer_path: null

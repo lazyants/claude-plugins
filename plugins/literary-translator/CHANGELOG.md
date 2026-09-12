@@ -1,6 +1,60 @@
 # Changelog
 
+## 1.177.0 — 2026-09-12
+
+**A canon entity note's filename was always the source-script canon key, so a book translated out
+of a non-Latin script shipped a third of its notes unfindable by name (#930).** Measured on a
+delivered eight-volume Hebrew→English series (another repository, not this tree): 1440 of 5128
+entity notes, 28%, with the displayed alias staying Latin the whole time — nothing looked wrong
+until a reader searched the note tree instead of the index. The project's own workaround, in the
+wild on two of the eight volumes, re-keyed the canon by `canonical_target_form` before calling
+`render()` and patched the true identity back into frontmatter afterwards.
+
+**`output.adapter_config.obsidian.entity_note_stem` is a knob, not a re-key, and the default does
+not move.** `source_form` (today's behavior, byte-identical) or `canonical_target_form` — either
+way the frontmatter, the H1 and the wikilink display text are unchanged; only the filename stem
+moves. `render_obsidian.py`'s `_entity_note_stem_field` resolves the key once from the profile, and
+`validate_backlinks.py` calls the same helper so the two can never compute a different path for the
+same entry. A re-key of the canon itself was rejected: the canon's `entries{}` key is the
+source-script identity the whole pipeline hashes, resumes and ledgers against, and only the
+wrapper's after-the-fact frontmatter patch made a re-key look safe. The default stays `source_form`
+because flipping it CAN rename a canon entity note: every note whose target form sanitizes to a
+different stem than its source form moves, in every existing vault, breaking every hand-kept link
+into one that moves — six of eight volumes in the reporting series shipped under the current
+default without anyone asking for a rename.
+
+**Collisions get worse in the target script, and the existing dedupe already covers it.** The same
+corpus measured 289 notes in 132 target-form groups, six of them differing only in case. The
+`-<n>`-suffix dedupe (NFC+casefold key, #99) already produces two files for two entries sharing a
+stem or differing only in case; it needed no change. Markup-driven notes keep their existing,
+label-based stem — this knob does not touch how they are named — but canon notes and markup notes
+share one collision set, and canon notes are allocated first, so a markup label equal to a canon
+note's new target-form stem now takes the `-<n>` suffix where it held the bare name under the
+default. That is disclosed in the schema description and
+`references/output-target-adapters/obsidian.md`'s new "Entity-note filenames" section, not
+prevented.
+
+**Two operator costs, both disclosed rather than hidden.** Flipping the knob is outside
+`profile_semantics_hash`, so nothing re-translates — but it CAN rename a note: every one whose
+target form sanitizes to a different stem than its source form moves, so a vault holding an
+accepted render baseline needs one operator `diff_rendered_output.py --accept-baseline
+--force-accept-baseline` whenever any path changed (plain `--accept-baseline` is refused over an
+existing baseline). Separately, the schema addition
+changes bytes that
+`resume_setup.py`'s schema-directory hash folds into every mass/glossary run's input digest, so a
+project that refreshes its `durable_root` onto this release gets a fresh run id on its next run;
+every converged segment and its cache key are untouched, but an in-flight run does not resume under
+its old digest — refresh between runs, never mid-run, the same class as every earlier schema edit.
+
+`mentions_section.enabled`'s own schema description named a re-accept command (a bare
+`--accept-baseline`) that `diff_rendered_output.py` refuses over an existing baseline, and had done
+so since the description was written; fixed in place, no other wording in that block moved.
+
+`render_obsidian.py` is in none of the three hashed bundle tuples, so this release moves no
+`plugin_bundle_hash` and stales no converged segment on that account.
+
 ## 1.174.0 — 2026-09-12
+
 **`canon_validate.py --correct` rewrote canon.json and reported success while every already-built
 segpack still carried the pre-correction `canon_map` — and `canon_map` is what actually reaches the
 translate/review prompt (#910).** Nothing reported it: the per-segment `used_terms_hash` re-stale
