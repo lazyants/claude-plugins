@@ -503,8 +503,38 @@ def _fetch_retry_delay(position):
     return module._FETCH_RETRY_DELAYS_SEC[position]
 
 
+def _advisory_host_limit():
+    """The glossary driver's own default bound on how many HISTORICAL hosts the
+    repair advisory may name -- read off `repair_advisory_hosts`'s signature,
+    which is the authoritative implementation, rather than regexed or restated.
+    The hosts of the CURRENT repair are deliberately NOT subject to it, so this
+    number bounds run history alone and the 1.157.0 entry says exactly that."""
+    import inspect
+    path = SCRIPTS / "glossary_dispatch_driver.py"
+    spec = importlib.util.spec_from_file_location(
+        f"gdd_advisory_limit_{{abs(hash(str(path)))}}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return inspect.signature(module.repair_advisory_hosts).parameters["limit"].default
+
+
+def _fetch_retry_ladder_span():
+    """The whole wall-clock span of the glossary driver's fetch retry ladder --
+    `sum(_FETCH_RETRY_DELAYS_SEC)` -- read off the module rather than written
+    here, for the same reason `_fetch_retry_delay` reads its members: the tuple
+    IS the ladder, and the 1.157.0 entry quotes that span as the reason the issue's
+    second candidate fix was cut. A release that retunes the ladder moves this
+    number and must move the sentence with it."""
+    path = SCRIPTS / "glossary_dispatch_driver.py"
+    spec = importlib.util.spec_from_file_location(
+        f"gdd_ladder_span_{{abs(hash(str(path)))}}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return int(sum(module._FETCH_RETRY_DELAYS_SEC))
+
+
 FIGURES = [
-    # ROTATED TO 1.156.0 (#910 -- --correct reported success while the
+    # ROTATED TO 1.172.0 (#910 -- --correct reported success while the
     # already-built segpacks still carried the pre-correction canon_map; #840
     # folded in), per the maintenance contract above.
     #
@@ -512,7 +542,7 @@ FIGURES = [
     # Every digit-run in it is an IDENTIFIER or a CITATION, never a figure
     # this tree can re-derive:
     #
-    #   1.156.0, 2026-09-12    the version and the release date
+    #   1.172.0, 2026-09-12    the version and the release date
     #   #910, #840, #826, #917 issue numbers
     #   W3a (twice)            a workflow step name, not a count
     #   "three"                SAFE_STALE_CARVEOUT_FIELDS, spelled as a word
@@ -538,12 +568,94 @@ FIGURES = [
     # `plugin_bundle_hash` are named, so no later release can rot this prose
     # by retuning a number.
     #
-    # This rotation RETIRED 1.154.0's rows, which belong to an entry that is
+    # This rotation RETIRED 1.170.0's rows, which belong to an entry that is
     # no longer the newest and which this guard therefore no longer reads.
     #
     #
     #
     # The 1.154.0 rotation this replaces, kept as its own record:
+    #
+    # The 1.170.0 rotation this replaces, kept as its own record:
+    # ROTATED TO 1.157.0 (#919 -- an intermittent host refusal was read as a fact
+    # about the citation, so the repair ladder re-sourced against the same
+    # refusing host on every rung), per the maintenance contract above.
+    #
+    # TWO rows, and the entry was walked completely rather than assumed. Its
+    # other digit-runs fall in three groups, none of which this tree can
+    # re-derive or should pretend to:
+    #
+    #   * IDENTIFIERS -- the version, the release date, the issue numbers
+    #     (#919, #892, #857, #347), the HTTP status codes and families
+    #     (403, 429, 5xx, 4xx), and the IPv6 scope spellings %1, %01 and %001.
+    #     A status code is a name, not a measurement.
+    #   * FIELD MEASUREMENTS FROM A CORPUS OUTSIDE THIS REPOSITORY -- the 41
+    #     batches of one live glossary pass, the six that exhausted, seven of
+    #     ten final-attempt failures, about 47 successful fetches of the same
+    #     host, three of six on a fresh ladder, 13 refusals, nine of 41 batches,
+    #     and a peer book's 58 of 70. Every one is a fact about durable roots on
+    #     an operator's machine. No implementation here can reach them, and a
+    #     derivation that pretended to would be the `lambda: 17` failure this
+    #     file's docstring names. They are the accepted residual, recorded here
+    #     rather than implied away.
+    #   * The ROW COUNT of this rotation itself, which nothing in the entry
+    #     states.
+    #
+    # Both rows below are watched failing by mutating the TREE -- the cap
+    # default and the retry tuple -- never by mutating the row.
+    # The two rows of the rotation this one replaces, RETIRED rather than
+    # carried:
+    #     Figure("capped at 10 further hosts", 10, lambda: _advisory_host_limit()),
+    #     Figure("roughly 75 seconds", 75, _fetch_retry_ladder_span),
+    # They measured phrases in THAT entry, and this guard only ever reads the
+    # NEWEST one -- left live they are checked against the 1.172.0 entry, where
+    # neither phrase occurs, which is a red that says nothing about either
+    # release. Both were correct for their own entry and are recorded here.
+    # ROTATED TO 1.162.0 (#917 -- a name the canon has frozen is no longer
+    # withheld from the segment pack), per the maintenance contract above.
+    #
+    # ZERO rows, and the entry was walked completely rather than assumed: every
+    # digit-run in it was enumerated and classified, and all of them fall into
+    # two kinds this guard cannot own.
+    #
+    # IDENTIFIERS: the version (1.162.0), the release date, the issue numbers
+    # (#917, #912), the `d28` in the guard's own test name, and the four
+    # precedent versions the cost section cites (1.16.2, 1.45.0, 1.69.0,
+    # 1.70.0). Those four ARE resolvable against this file's own headings, but
+    # they are version identifiers naming which releases already paid a
+    # bundle-hash cost -- not quantities, and a row asserting they exist would
+    # be checking a cross-reference, which is the citations guard's job and not
+    # this one's.
+    #
+    # MEASUREMENTS FROM ANOTHER REPOSITORY, which is every remaining number:
+    # 1 of 308 segments on the Hebrew book and 96 of 359 across five French
+    # volumes losing a canonized name; the 83 candidates the issue's own remedy
+    # would have admitted, of which 1 is in the canon and 82 are not; the 112 of
+    # 308 segments that remedy would have re-translated; and the 2 087 canon
+    # entries over six books in which entries declaring themselves not a name,
+    # and single-character source forms, both number 0. Every one of those is a
+    # fact about operator-owned durable roots that are NOT in this repository --
+    # two live book projects -- so no derivation here could re-check any of
+    # them however it were phrased, and a row quoting one would hardcode an
+    # answer, pass every assertion below and prove nothing.
+    #
+    # The two ZEROES deserve their own sentence, because a zero is the shape
+    # most likely to be mistaken for something this tree owns. They are counts
+    # over those same out-of-repo canon files, and the entry states plainly what
+    # they are for: they make the terminal-decision half of this release SAFE
+    # rather than valuable, since that half repairs no existing segment. A row
+    # asserting "0" against anything in this tree would be true for the wrong
+    # reason -- there are no canon.json files here to count.
+    #
+    # What the tree DOES own, the entry states by NAMING rather than counting:
+    # `DERIVATION_BUNDLE_MEMBERS`, `is_proper_name`, `basis`, `canon_names`,
+    # `canon_map`, `split_names`, `used_terms_hash`, `derivation_bundle_hash`
+    # and the d28 guard. None of those is a figure, which is why this rotation
+    # is empty rather than thin.
+    #
+    # The 1.120.0 rotation this replaces, kept as its own record, and the 1.118.0
+    # one below it. This branch was rebased twice while sibling releases landed, so
+    # the sentence names what it actually sits on rather than what it sat on when
+    # it was written.
     # ROTATED TO 1.154.0 (#913 -- nothing compared a declared markup vocabulary
     # against the style contract that has to ask for it), per the maintenance
     # contract above.
@@ -759,7 +871,7 @@ FIGURES = [
     # kept below, unchanged.
     # 1.123.0's own row, RETIRED here rather than carried: it measured the
     # phrase "default 2" in THAT entry, and this guard only ever reads the
-    # NEWEST one. Left live it would be checked against the 1.156.0 entry,
+    # NEWEST one. Left live it would be checked against the 1.172.0 entry,
     # where the phrase does not occur -- a red that says nothing about
     # either release. The row itself was correct for its own entry and is
     # recorded in the 1.123.0 block below.
@@ -1517,7 +1629,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.156.0"
+FIGURES_VERSION = "1.172.0"
 
 
 def _newest_entry():
