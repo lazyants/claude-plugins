@@ -1870,3 +1870,175 @@ change, no render version, no `FROZEN_INPUT_SPECS` member. Drafts,
 gather, never written, and importing `final_audit.py` for its two
 functions puts `canon_harmonisation.py` in no bundle — bundle membership
 is by explicit tuple, not by import.
+
+## `printed_label_audit.py` — sites, verdicts and the folded `--report` (#929)
+
+A converged draft can PRINT an entity label — the payload inside a `<person>`/`<place>` tag —
+that re-spells a name `canon.json` has already frozen under a DIFFERENT
+`canonical_target_form`, and no shipped gate reports it: `final_audit.py`'s GLOSSARY-DIFF keys
+on a draft's `names[]`, never on its printed markup, and `render_obsidian.py`'s own index-mode
+lookup only fires when a payload MISSES the canon-target index — it does not report a payload
+that hits some OTHER target than the one its own block's source form owns. `printed_label_audit.py`
+closes that read. **It is report-only** — see "What this script never does" below before
+reading further.
+
+Unlike `canon_harmonisation.json` above, there is **no persisted sidecar at all**. That sidecar
+exists because a LATER, decoupled `--report [--harmonisation PATH]` call can re-render it
+standalone, long after the `--check` that approved it ran. This script has no such later
+moment: nothing in W7, W8 or W9 reads a verdict, a human reads the rendered report once and
+decides by hand, and validation and rendering happen in the SAME call. So the two modes that a
+sidecar-shaped design would make three (`--build-corpus`, `--check --approve-to`, `--report`)
+fold to two: `--build-corpus`, and a single `--report` that validates AND renders. No envelope,
+no approved-artifact directory, and no provenance question, because the only thing that can
+ever be rendered is what was just validated in the same process.
+
+### `--build-corpus --durable-root DIR [--out PATH]` — one corpus file, two disjoint site lists
+
+Walks every currently-converged draft's marked spans across all three carrier kinds a draft can
+PRINT a label in — node text, footnote-definition text, and each delivered verse's `rendered`
+and `literal_gloss` — pairing each with its segpack source the way `final_audit.py`'s own
+`term_carriers` traversal already does, never a second implementation. Gathering is fail-closed
+the same way `canon_harmonisation.py`'s draft corpus is (above): `ledger_merge.py::_read_fragments`
+for which fragments exist (any errno but ENOENT/ENOTDIR fatal), the `reviewed_draft_sha1` vs
+current `draft_content_sha1` comparison for which drafts still count (a stale-review draft is
+EXCLUDED and counted, never silently folded into an empty corpus), and a malformed span is
+FATAL here — `assemble.py` already refuses it at W8, so a corpus that silently dropped it would
+understate the population.
+
+**Accepted tradeoff.** One helper does NOT reuse that traversal: `_carriers_dropped_for_missing_source()`
+mirrors `final_audit.term_carriers()`'s own logic rather than importing it. The two agree today;
+sharing them would mean editing a widely-cited shared file for a duplication this small, judged
+out of proportion. Watch for the two drifting apart in a future change to either.
+
+Every well-formed marked span becomes exactly one **site** — never one per `(tag, label)` pair,
+since one printed form can denote several distinct referents. There is no off-canon prefilter: a
+site whose label already IS some canon target is still a site, because with canon `X -> Aaron` /
+`Y -> Bob`, a block printing `<person>Bob</person>` while carrying `X` is a real defect a
+prefilter would silently drop.
+
+Each site carries: a stable `site_id`, the tag, the printed `label` (NFC), the segment, the
+carrier kind and locator, the carrier's source and translated text (bounded, next paragraph),
+and the canon rows `(source_form, canonical_target_form)` whose `source_form` occurs in that
+carrier's source text. A site may legitimately carry ZERO canon rows — an empty canon, or a
+name canon does not own — and that is an ordinary state, not a gap.
+
+The corpus splits every site into exactly one of two lists, because "refused and counted" and
+"every dispatchable site gets exactly one verdict" cannot both hold of one list:
+`dispatchable_sites` go to the judge; `unavailable_sites` — a site whose anchor fields alone
+exceed the per-site byte budget, or which has more matching canon rows than the cap — carry
+their locator and a named reason, are never sharded, and never carry a verdict. `--report`
+renders `unavailable_sites` with their totals too, so a book that has them can never read as
+fully audited.
+
+Anchor fields — the printed `label`, `source_form` and `canonical_target_form` — are byte-exact
+always and never truncated: they are what validation binds and what the render displays.
+Context fields — the carrier's source and translated excerpts — are the only truncatable ones,
+each a window CENTRED on the printed span and on each matched `source_form` occurrence, with an
+explicit truncation marker the schema itself declares. Sharding is deterministic and
+reproducible, measured over the complete serialized prompt object for a shard (metadata
+included, not the site list alone); every cap is a named constant a test asserts at its
+boundary. `--build-corpus` WRITES that exact object, one file per shard, beside the corpus
+file — it never merely measures a payload some later step reassembles. The refusal is
+TWO-SIDED: the build computes every shard's real bytes and refuses outright, before writing
+anything, if one would exceed the cap; then, after writing, it RE-READS every emitted file's
+size from disk and refuses again if any is over. Nothing is published in either case — the
+on-disk re-check is what makes the guarantee about bytes that EXIST, never merely bytes that
+were intended. The serialization itself is PINNED and load-bearing — `ensure_ascii=False,
+sort_keys=True, separators=(",", ":")` — with one function both sizing and writing under
+exactly those options: Python's default `json.dumps` escaping inflates this corpus's Hebrew
+content by roughly 2.5×, which would silently breach the cap, so these are not a style
+preference and a future edit must not "tidy" them. That is what makes the byte budget
+meaningful: the bytes measured are the bytes written are the bytes dispatched, never a second
+serialization a consumer builds afterward. Each dispatchable site additionally carries its own
+`shard_id`, and the corpus file's own top-level `shards` key maps each `shard_id` to a DIGEST
+(a sha256 over that shard's sorted site_ids) — never to a list of member sites, and never to
+the payload itself. A consumer never constructs a shard's payload: it reads the emitted FILE —
+named `<corpus stem>.shard_NNNN.json`, e.g. `corpus_<timestamp>_<hex>.shard_0001.json`,
+`.shard_0002.json`, and so on, inside the directory `shard_dir` names — and dispatches its
+bytes verbatim, using `shards[shard_id]` only to confirm the digest — from the file, never
+from stdout.
+
+Prints one stdout JSON line: `corpus_path`, `corpus_sha256`, `canon_sha256`, the
+`dispatchable_sites`/`unavailable_sites` counts, `entity_markup_mode` (`"off"` only when
+`output.entity_markup` is absent — a default `strip` block and an `index_from: markup` block
+are both scanned in full), `shards` (a COUNT only, not the map above), `shard_dir` (the
+directory holding the emitted per-shard payload files), and `should_dispatch`. Every
+participating draft's `draft_content_sha1` lives in the CORPUS FILE, never on this stdout line
+— `--report` re-checks it there against disk. `mode` on this line is the script's own operating
+mode, the literal `"build-corpus"`, never the entity-markup state.
+
+### `--report --corpus PATH --expect-corpus-sha256 HEX --attempt PATH [--attempt PATH ...]` — validate, then render, one call
+
+Every check is mechanical, never an identity call. `--expect-corpus-sha256` is the same TRUSTED
+CHANNEL `canon_harmonisation.py --check` uses and for the same reason: the corpus sits in the
+writable durable root, so a digest recomputed from disk alone would prove only
+self-consistency, never that it matches what the build step produced before any dispatch ran.
+The checks: schema validity; the corpus hash; anchoring scoped BY VERDICT KIND — a
+`matches_frozen_target` verdict anchors its full `(site_id, tag, label, source_form,
+canonical_target_form)` five-tuple byte-exactly, a `no_canon_match` verdict carries `(site_id,
+tag, label)` only and is REFUSED if it carries a source or target field at all; cardinality —
+exactly one verdict per dispatchable site, every dispatchable site answered; the shard set is
+complete and exact — the `shard_id`s present equal the set the corpus declared, and every
+shard's verdicts cover exactly the sites the corpus assigned it, so a site answered in the wrong
+shard is fatal; and `canon_sha256` plus every participating draft's `draft_content_sha1` still
+matching disk, so an ordinary edit during the dispatch invalidates the attempt rather than
+approving stale sites.
+
+**Only if every check passes** does the SAME invocation render the report — never a second
+call, never a file read back from disk. Every rendered field — counts, sites, the source token
+that settles a call — comes from the CORPUS the digest just authenticated, never from a
+verdict; a verdict contributes only its own kind and its anchor. Any check failing renders
+nothing and exits non-zero, naming the reason. It writes nothing to disk in either mode — the
+run is read-only by construction.
+
+### The verdict vocabulary is closed and two-valued
+
+`matches_frozen_target` (the full five-tuple) or `no_canon_match` (`site_id`, `tag`, `label`
+only). Requiring every verdict to anchor a `(source_form, canonical_target_form)` tuple would
+make a zero-canon-row site unanswerable and fail the artifact on cardinality alone, so a
+`no_canon_match` on a site that HAD canon rows is a legitimate answer, not a gap the checker
+should flag.
+
+### Migration cost — priced, not assumed
+
+`printed_label_audit.py` joins **no** bundle: `cache_key.py`'s `PLUGIN_BUNDLE_MEMBERS` and
+`DERIVATION_BUNDLE_MEMBERS`, and `scaffold_setup.py`'s `ORCHESTRATION_BUNDLE_MEMBERS`, are
+explicit tuples and none is edited by this feature — importing `assemble.py` and
+`final_audit.py` for their functions puts it in no bundle, since membership is by tuple, not by
+import. **Zero re-translation**: no cache-key field moves, `schema_hash` covers only the three
+translation schemas, and `used_terms_hash` projects `entries{}` only. The one surface that DOES
+move: the new `printed-label-audit.schema.json` lands in `schemas/`, and both
+`resume_setup.py::_schemas_dir_hash()` and `skeptic_setup.py`'s separate duplicate consume every
+top-level `*.schema.json` — the FIRST Step 0a refresh after this ships moves the resume digest
+and the skeptic input digest, so an interrupted mass-translate, glossary or skeptic run cannot
+resume across it; converged segments stay reusable. Identical to the price
+`canon_harmonisation.json` above paid.
+
+### What this script never does
+
+Decide that a printed label and a frozen target denote the same referent — the judge's output
+is a proposal a human reads, and validation gates the artifact's SHAPE, never its correctness,
+the same posture `canon_harmonisation.json` ships. Edit `canon.json`, any draft, or any rendered
+output. Block W7, W8 or W9 — nothing here can refuse a delivery; a book can still ship a
+re-spelled name, what changes is that it is reported first. Acting on a proposal is the existing
+operator-driven `canon_validate.py --correct` route, or a draft edit the operator makes, same as
+above.
+
+**The DATA-not-instructions framing on the dispatch is FRAMING, not a guarantee.** SKILL.md's
+dispatch step tells the judge the shard payload — labels, excerpts, canon forms — is material
+to be judged, never a directive, because a printed label is TRANSLATION OUTPUT from an earlier
+dispatched model, not operator-authored text, so a poisoned source can reach this prompt. That
+framing lowers the odds a compromised payload is followed as an instruction; it does not prove
+one cannot be. What actually bounds the damage if it is followed anyway is the iron rule just
+above: this pass is report-only, and no verdict — compromised or not — can edit `canon.json`, a
+draft, or any rendered output. The worst a poisoned payload can do here is print a wrong or
+fabricated line in a report a human reads before acting.
+
+**Accepted scope limits.** The dispatch cost is real: tens of thousands of sites across the
+local book corpus, unevenly distributed, sharded into HUNDREDS of dispatched jobs on a large
+book — sharding bounds each call, not the total, and the exact count is a property of the
+corpus and the serializer, not of the design, so it is left unstated here rather than pinned to
+a number that goes stale at the next measurement. A book whose markup
+uses a `ref` slug prints the payload, which this DOES read; the slug-as-note-title defect is
+**#925**'s and is not addressed here. The prepositional/connective split (`from Kremenchug`) is
+**#926**'s and is not addressed here.

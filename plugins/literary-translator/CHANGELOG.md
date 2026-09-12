@@ -1,5 +1,64 @@
 # Changelog
 
+## 1.221.0 — 2026-09-12
+
+**Nothing compared the entity labels a draft PRINTS against the frozen `canonical_target_form`s in
+`canon.json`, so a settled name shipped re-transliterated and every gate passed (#929).** The two
+channels are independent: the translator emits a `<place>` element in the prose AND a `names[]`
+entry, and nothing joined them. `validate_draft.py`, `validate_assembled.py`,
+`review_artifact_check.py` and `draft_ready.py` never mention `canonical_target_form` at all;
+`final_audit.py`'s `warn_glossary_diff` is the near miss, comparing the draft's CLAIMS about names
+rather than the names in the prose. The reviewer cannot see it either — it holds one segment, and
+that segment's own `canon_map` resolves only the forms literally present, so a variant spelling
+looks to it like an ordinary new name. This is the other half of the incident the previous release
+enumerates (#931): the hand-built index an operator had to make before anything could be repaired.
+
+**The issue's own remedy was refuted by measurement, and the shape it asked for is not what
+shipped.** It proposed a purely structural report — every printed label that is no canon target,
+beside the canon source forms in the same carrier. Driving this plugin's own
+`_compile_entity_markup`, `_entity_markup_scan` and `_carrier_source_text` over every local book
+that declares `output.entity_markup`, that report runs to six figures of rows, and the three
+progressively tighter structural variants tried after it are still dominated by spurious pairs —
+a frozen month name beside an unrelated printed person, joined only by sharing a block. Against a
+real defect population in the dozens, an operator skips a report of that shape. The root cause is
+that "present in the same carrier" is far too coarse a join, and whether a printed label re-spells
+a frozen source term is a language judgement, which the iron rule forbids a script from making.
+
+**`printed_label_audit.py`, report-only, two modes.** `--build-corpus` gathers one SITE per
+well-formed marked span — blocks, footnotes and delivered verses alike, with no label-based
+prefilter, since excluding a span because its label is *some* canon target is itself the identity
+shortcut — attaches the canon rows whose `source_form` occurs in that carrier's source, shards the
+result to a byte budget and writes the corpus plus one file per shard. A dispatched pass judges
+which printed labels re-spell a frozen target. `--report` validates those shard outputs and
+renders for a human in ONE invocation, writing nothing: there is deliberately no separate check
+mode, no `--approve-to` and no approved sidecar, because nothing automated consumes a verdict —
+a human reads the report once and no later step reads anything this pass writes. Folding
+validation and rendering removes the whole question of whether a rendered artifact was the one
+that passed. `_serialize_shard_payload` is the single function that both SIZES and WRITES a
+shard's bytes with pinned serialization; the build refuses before publishing anything if a shard
+is over budget, and again after writing by re-reading every emitted file from disk. Anchor fields
+— the printed label, `source_form`, `canonical_target_form` — are never truncated; only context
+excerpts are, and a site that cannot fit is reported as unavailable rather than trimmed or
+dropped. Every cap is a named constant a test pins as a literal, each raised from a guessed value
+to a measured one after the first two refused a large share of ordinary sites on real books.
+
+**Migration cost: no re-translation.** The script is in no bundle tuple, so no cache-key field,
+no `used_terms_hash` and no render version moves. The one surface that does move is the schemas
+directory, which `resume_setup.py`'s `_schemas_dir_hash` and `skeptic_setup.py`'s separate
+duplicate both consume: the first Step 0a refresh after this ships gives the next mass-translate,
+glossary and skeptic runs a fresh `RUN_ID`. Converged segments stay reusable. Wired at W7 after
+`final_audit.py` as an always-runs advisory read that gates nothing — a corpus failure, a
+dispatch timeout or a validation refusal each print an unavailable line and continue forward to
+W8.
+
+**Accepted, and disclosed rather than closed.** `_carriers_dropped_for_missing_source` mirrors
+`final_audit.py`'s `term_carriers` traversal instead of importing it; the two agree today, and
+each carrier branch is pinned by its own test, but a future change to one is not automatically
+seen by the other. The judge is framed in the dispatch step to treat its payload as data and
+never as instructions, which is framing and not a guarantee — what actually bounds the damage is
+that the pass is report-only. Related: the connective split is #926's and the ref-slug note title
+is #925's; the sidecar contract this copies is #823's.
+
 ## 1.220.0 — 2026-09-12
 
 **Correcting a class in the prose silently invalidated every `notes[]`/`names[]` record describing

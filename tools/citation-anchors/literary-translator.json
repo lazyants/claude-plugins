@@ -1585,7 +1585,7 @@
       ],
       "claim": "draft matches\" branch (segment_dispatch_driver.py:5238, feeding the already_converged decision at :5265) hash the draft using the TRUSTED plugin tree's draft_sha1.py under --plugin-root, never the durable"
     },
-    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4556-4562\", 0]": {
+    "[\"plugins/literary-translator/tests/orchestration_hash_resume_gating.test.py\", \"SKILL.md:4652-4658\", 0]": {
       "anchors": [
         "Excluded from every bundle hash",
         "nor of `orchestration_bundle_hash`",
