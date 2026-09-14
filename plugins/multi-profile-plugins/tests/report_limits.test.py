@@ -463,6 +463,14 @@ def run(args, root: Any = None, stub_mode="ok", stub_result=None, timeout=90,
     done.https_requests = ([json.loads(line) for line in
                             https_log.read_text(encoding="utf-8").splitlines() if line.strip()]
                            if https_log.exists() else [])
+    # LOUD, not a `check()`: a `check()` failure is recorded and the suite carries on running
+    # every case after it, each one a further subprocess that may -- unstubbed -- reach the real
+    # api.anthropic.com. This is the ONE place that would happen, so it stops the run outright
+    # rather than let a broken stub burn through the rest of the suite silently offline or not.
+    if str(SCRIPT) not in done.https_marker:
+        raise RuntimeError(
+            f"the HTTPS stub did not load in the report script's own interpreter for "
+            f"{[sys.executable, str(SCRIPT)] + args} -- marker held {done.https_marker!r}")
     RENDERED_TOKENS.update(re.findall(r"\[([a-z-]+)\]", done.stdout))
     return done, record, transcript
 
@@ -1862,7 +1870,7 @@ with tempfile.TemporaryDirectory() as tmp:
     forged_lines = [ln for ln in done.stdout.splitlines()
                     if "Claude Code trusted: checked" in ln]
     check("39 the injected text never forms a line of its own",
-          bool(forged_lines)
+          len(forged_lines) == 2
           and all(ln.strip().startswith(".claudeX") for ln in forged_lines),
           str(forged_lines))
     check("39 the name is escaped rather than dropped, so the profile is still named",
