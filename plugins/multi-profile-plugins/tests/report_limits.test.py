@@ -2,10 +2,15 @@
 """Drive report_limits.py as a subprocess against fixture profiles, homes and a stub app-server.
 
 Every case runs the SCRIPT, not its helpers, so a short-circuit added ahead of a check or a wiring
-line deleted from main() has to show up here. The two transport-safety cases are the deliberate
-exception: they import the module to substitute its connection class, because there is no way to
-reach an HTTPS stub from a subprocess without giving production code an origin override, and an
-origin override is the defect those cases exist to prevent.
+line deleted from main() has to show up here. Every subprocess that runs the script has
+`http.client.HTTPSConnection` stubbed by a `sitecustomize.py` planted on its `PYTHONPATH` (see
+`stub_network`) -- required now that the script reads Claude Code live FIRST by default, so a
+fixture planting a valid token would otherwise reach the real api.anthropic.com on every run. A
+few cases (22/23/35 and the 21d/21f/21h keychain fallbacks) still import the module and substitute
+its connection class directly: what they assert on is the EXACT bytes handed to the class -- a
+header value, an exact request count -- and the subprocess-visible stub deliberately logs only a
+host/method/path/bearer-present line, never anything an unauthorized reader could use, so only an
+in-process substitution can see more than that.
 
 The Codex stub is an executable named `codex` on a fixture PATH. Production code therefore needs no
 test hook at all, and CI never needs the real binary.
@@ -146,6 +151,112 @@ sys.stdout.flush()
 sys.exit(0)
 '''
 
+SITECUSTOMIZE = '''"""Stub http.client.HTTPSConnection for every Python interpreter this suite spawns.
+
+Loaded automatically at interpreter start via PYTHONPATH -- before report_limits.py binds its own
+module-level `HTTPSConnection = http.client.HTTPSConnection` alias, so the alias already names
+this stub. That is what keeps a subprocess run of the script off the real api.anthropic.com now
+that it reads Claude Code live FIRST by default: a fixture planting a valid token would otherwise
+authenticate for real. A request is answered from STUB_HTTPS_STATUS/STUB_HTTPS_BODY when both are
+set; otherwise it raises OSError, which the script reads as `http-error` without a socket ever
+being opened. The `security` and `codex` fixture stubs are themselves Python interpreters that
+inherit this same PYTHONPATH, so they load this module too and append their own argv[0] to the
+same marker -- matching on the exact report-script path is what keeps one of THEM from satisfying
+the marker check.
+"""
+import http.client
+import json
+import os
+import sys
+
+
+class _StubHTTPSResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+
+    def read(self):
+        return self._body
+
+
+class _StubHTTPSConnection:
+    def __init__(self, host, timeout=None, **kwargs):
+        self._host = host
+
+    def request(self, method, path, body=None, headers=None):
+        # Nothing derived from the bearer -- only whether one was sent.
+        bearer_present = any(
+            str(name).lower() == "authorization" and str(value).startswith("Bearer ")
+            for name, value in (headers or {}).items())
+        log_path = os.environ.get("STUB_HTTPS_LOG")
+        if log_path:
+            with open(log_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"host": self._host, "method": method, "path": path,
+                                         "bearer_present": bearer_present}) + "\\n")
+
+    def getresponse(self):
+        status = os.environ.get("STUB_HTTPS_STATUS")
+        if status is None:
+            raise OSError("stub: no live answer configured -- refusing the real network")
+        body = os.environ.get("STUB_HTTPS_BODY", "").encode("utf-8")
+        return _StubHTTPSResponse(int(status), body)
+
+    def close(self):
+        pass
+
+
+http.client.HTTPSConnection = _StubHTTPSConnection
+
+_marker = os.environ.get("STUB_HTTPS_LOADED")
+if _marker:
+    with open(_marker, "a", encoding="utf-8") as _handle:
+        _handle.write(sys.argv[0] + "\\n")
+'''
+
+
+def stub_network(root: Path, env: dict) -> tuple[Path, Path]:
+    """Install the HTTPS stub for one subprocess; return its (marker, log) paths, both FRESH.
+
+    Applied to every subprocess that runs the report script -- `run()` below and the pty-driven
+    colour case are the only two spawn sites (`grep -n 'subprocess.run\\|Popen'` finds no others;
+    the `R.subprocess.run`/`R.HTTPSConnection` substitutions elsewhere are in-process). Without
+    this, a fixture that plants a valid sentinel bearer reaches api.anthropic.com for real on
+    every default-mode run, because the script now reads Claude Code live for every candidate.
+
+    MARKER holds one argv[0] line per Python interpreter that loaded the stub; the caller checks
+    that the report script's own path is among them. LOG holds one JSON line per HTTPS request
+    the stub was asked to make. Both are unlinked before the spawn so a case reading them after
+    `run()` sees only its OWN invocation, not an earlier call's leftovers from a shared root.
+    """
+    sitedir = root / "sitecustomize"
+    site_file = sitedir / "sitecustomize.py"
+    if not site_file.exists():
+        sitedir.mkdir(parents=True, exist_ok=True)
+        site_file.write_text(SITECUSTOMIZE, encoding="utf-8")
+    marker = root / "https-loaded.txt"
+    log = root / "https-log.jsonl"
+    for path in (marker, log):
+        path.unlink(missing_ok=True)
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(sitedir) + (os.pathsep + existing if existing else "")
+    env["STUB_HTTPS_LOADED"] = str(marker)
+    env["STUB_HTTPS_LOG"] = str(log)
+    return marker, log
+
+
+def require_stub_loaded(marker_lines: list[str], argv: list) -> None:
+    """Raise LOUDLY if the report script's own interpreter did not load the HTTPS stub.
+
+    Not a `check()`: a `check()` failure is recorded and the suite carries on running every case
+    after it, each one a further subprocess that may -- unstubbed -- reach the real
+    api.anthropic.com. This is the one place that would happen, so it stops the run outright
+    rather than let a broken stub burn through the rest of the suite silently offline or not.
+    """
+    if str(SCRIPT) not in marker_lines:
+        raise RuntimeError(
+            f"the HTTPS stub did not load in the report script's own interpreter for "
+            f"{argv!r} -- marker held {marker_lines!r}")
+
 
 def voucher_band(stdout: str) -> list[str]:
     """The rows of the RESET VOUCHERS band, which is a block above the table rather than a row
@@ -219,13 +330,14 @@ def make_claude(root: Path, name: str, blob, token: bool = True) -> Path:
     profile.mkdir(parents=True, exist_ok=True)
     if blob is not None:
         (profile / ".claude.json").write_text(json.dumps(blob), encoding="utf-8")
-    # Planted in every profile: the script reads this file on the --live path.
+    # Planted in every profile: the script reads this file LIVE by default now, for every
+    # candidate, not only under --live.
     #
-    # `token=False` withholds it, and every STALE fixture uses that. Default mode retries a
-    # cached window whose reset has passed against the API, so a stale fixture holding a usable
-    # credential would send this suite's sentinel bearer to the real api.anthropic.com -- on
-    # every developer machine and every CI run. Withheld, the retry stops at `token-absent`,
-    # before any socket, which is also the only outcome an offline runner could agree on.
+    # `token=False` withholds it for a fixture that wants to pin the NO-CREDENTIAL path
+    # specifically (keychain-denied, offline). It is no longer what keeps this suite off the
+    # real network -- `run()`'s HTTPS stub (`stub_network`) does that for every subprocess now,
+    # by design, because withholding a token from every fixture that does not need one would
+    # leave the credentialed path this report exists to exercise untested.
     if token:
         (profile / ".credentials.json").write_text(json.dumps({
             "claudeAiOauth": {"accessToken": SENTINEL_TOKEN, "expiresAt": now_ms(24)}
@@ -318,7 +430,8 @@ DEFAULT_RESULT = {
 
 
 def run(args, root: Any = None, stub_mode="ok", stub_result=None, timeout=90,
-        extra_env: Any = None, cwd: Any = None):
+        extra_env: Any = None, cwd: Any = None, https_status: Any = None,
+        https_body: Any = None):
     env = dict(os.environ)
     env.pop("HTTPS_PROXY", None)
     # Confine discovery. Without this, a case that passes no explicit candidate falls back to the
@@ -344,8 +457,26 @@ def run(args, root: Any = None, stub_mode="ok", stub_result=None, timeout=90,
     env["STUB_MODE"] = stub_mode
     env["STUB_RESULT"] = json.dumps(DEFAULT_RESULT if stub_result is None else stub_result)
     env["STUB_SECURITY_MARKER"] = str(root / "security-called.txt")
+    # ALSO always, and for the same reason as the PATH stub above: the script now reads Claude
+    # live FIRST in default mode, so any fixture planting a valid token would otherwise reach
+    # api.anthropic.com for real. Leaving STUB_HTTPS_STATUS unset (the default here) makes the
+    # stub raise, which the script reads as `http-error` -- the same answer an offline machine
+    # gets, and no socket is ever opened either way.
+    https_marker, https_log = stub_network(root, env)
+    if https_status is not None:
+        env["STUB_HTTPS_STATUS"] = str(https_status)
+    if https_body is not None:
+        env["STUB_HTTPS_BODY"] = https_body
     done = subprocess.run([sys.executable, str(SCRIPT)] + args, capture_output=True, text=True,
                           env=env, timeout=timeout, cwd=None if cwd is None else str(cwd))
+    # Attached rather than returned as extra tuple elements, so the ~90 existing
+    # `done, record, transcript = run(...)` call sites need no change.
+    done.https_marker = (https_marker.read_text(encoding="utf-8").splitlines()
+                         if https_marker.exists() else [])
+    done.https_requests = ([json.loads(line) for line in
+                            https_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+                           if https_log.exists() else [])
+    require_stub_loaded(done.https_marker, [sys.executable, str(SCRIPT)] + args)
     RENDERED_TOKENS.update(re.findall(r"\[([a-z-]+)\]", done.stdout))
     return done, record, transcript
 
@@ -419,14 +550,21 @@ with tempfile.TemporaryDirectory() as tmp:
                       "--claude-profile", str(empty / ".claudeB"),
                       "--claude-profile", str(empty / ".claudeC"),
                       "--codex-home", str(clean_codex)], root=empty)
-    check("7 absent cache is no-usage-cache, not 0%", "[no-usage-cache]" in done.stdout, done.stdout)
+    # A valid sentinel token (make_claude's default) means the live read is attempted and fails
+    # against the stub, and the cache then has no-usage-cache to offer either -- neither source
+    # answered, so this is now a GAP naming BOTH failures, not the cache's bracketed code alone.
+    check("7 absent cache combines with the failed live read into one gap, not 0%",
+          "the on-disk cache had nothing to fall back on -- no-usage-cache" in done.stdout,
+          done.stdout)
     check("8 the flag never renames the absence",
           "[no-subscription]" not in done.stdout, done.stdout)
-    check("9 all three profiles land in that one state",
-          done.stdout.count("[no-usage-cache]") == 3, done.stdout)
-    check("7/8 the absence state does not gap the run", done.returncode == 0,
-          f"rc={done.returncode}\n{done.stdout}")
-    check("7/8 and no warning is emitted for them", "warnings" not in done.stdout, done.stdout)
+    check("9 all three profiles land in that one combined state",
+          done.stdout.count("the on-disk cache had nothing to fall back on -- no-usage-cache")
+          == 3, done.stdout)
+    check("7/8 the absence state gaps the run now -- neither source supplied usage",
+          done.returncode == 1, f"rc={done.returncode}\n{done.stdout}")
+    check("7/8 and each profile is named in the warnings",
+          done.stdout.count("NOT checked -- http-error") == 3, done.stdout)
 
     # 10 / 11 -- the two container shapes.
     shapes = root / "shapes"
@@ -445,13 +583,21 @@ with tempfile.TemporaryDirectory() as tmp:
     # the vendor produces, since `session` and `weekly_all` ship beside it. Putting it back was a
     # substitution like any other: the report would print the pool it was told to hide and call
     # the run clean. It gaps instead, visibly.
+    # The live read fails first (http-error against the stub), so the final bracketed note
+    # carries THAT code; the cache's own payload-malformed now names the combined note instead.
     check("10 a profile whose only entry is the hidden pool gaps",
-          ".claudeD" in done.stdout and "[payload-malformed]" in done.stdout, done.stdout)
+          ".claudeD" in done.stdout
+          and "the on-disk cache had nothing to fall back on -- payload-malformed" in done.stdout,
+          done.stdout)
     check("10 and the hidden pool is not put back on the page",
           "Fable" not in done.stdout and "19%" not in done.stdout, done.stdout)
-    flat = [ln for ln in done.stdout.splitlines() if ".claudeE" in ln]
+    # Matched on "(flat)" too, not just the candidate name: default mode's live-first read fails
+    # against the stub and falls back to this cache, so `.claudeE` also appears on the new
+    # fallback note's own line now -- the note carries no "(flat)" text, so this stays the ONE
+    # table row.
+    flat = [ln for ln in done.stdout.splitlines() if ".claudeE" in ln and "(flat)" in ln]
     check("11 the flat fallback says which container shape answered",
-          len(flat) == 1 and "(flat)" in flat[0], str(flat))
+          len(flat) == 1, str(flat))
     check("11 and reports both of its windows on that one row",
           bool(flat) and "11%" in flat[0] and "22%" in flat[0], str(flat))
 
@@ -468,8 +614,12 @@ with tempfile.TemporaryDirectory() as tmp:
         make_claude(box, ".claudeX", blob)
         done, _, _ = run(["--claude-profile", str(box / ".claudeX"),
                           "--codex-home", str(box / ".nope")])
+        # The live read fails first (http-error), so the bracketed candidate note carries THAT
+        # code now; the cache's payload-malformed names the combined note instead.
         check(f"12 container {label} -> payload-malformed",
-              done.stdout.count("[payload-malformed]") == 1, done.stdout)
+              done.stdout.count(
+                  "the on-disk cache had nothing to fall back on -- payload-malformed") == 1,
+              done.stdout)
         check(f"12 container {label} -> the CLAUDE candidate is what gapped",
               ".claudeX" in done.stdout.split("warnings")[-1], done.stdout)
 
@@ -600,8 +750,11 @@ with tempfile.TemporaryDirectory() as tmp:
     done, _, _ = run([], root=cred_root)
     check("16b a credentials-only profile is discovered",
           ".claudeCredOnly" in done.stdout, done.stdout)
+    # Live fails first (http-error), so no-usage-cache now names the combined note rather than
+    # standing alone as the candidate's own bracketed code.
     check("16b and reports no-usage-cache rather than vanishing",
-          "[no-usage-cache]" in done.stdout, done.stdout)
+          "the on-disk cache had nothing to fall back on -- no-usage-cache" in done.stdout,
+          done.stdout)
     assert_no_secret("16b credentials-only discovery", done.stdout, done.stderr)
 
     bare = root / "bare"
@@ -833,12 +986,18 @@ with tempfile.TemporaryDirectory() as tmp:
         make_claude(drift, ".claudeS", {"hasAvailableSubscription": junk})
         done, _, _ = run(["--claude-profile", str(drift / ".claudeS"),
                           "--codex-home", str(make_codex_home(drift, ".codexClean"))], root=drift)
-        check(f"27 flag {junk!r} still reads no-usage-cache", "[no-usage-cache]" in done.stdout,
+        # Live fails first (http-error, no cache read yet to consult), so no-usage-cache now
+        # names the combined note rather than the candidate's own bracketed code; and the run
+        # gaps -- neither source supplied usage -- where it used to read clean off the cache
+        # alone.
+        check(f"27 flag {junk!r} still reads no-usage-cache",
+              "the on-disk cache had nothing to fall back on -- no-usage-cache" in done.stdout,
               done.stdout)
         check(f"27 flag {junk!r} claims nothing about a subscription",
               "[no-subscription]" not in done.stdout and "[field-malformed]" not in done.stdout,
               done.stdout)
-        check(f"27 flag {junk!r} exits 0", done.returncode == 0, f"rc={done.returncode}")
+        check(f"27 flag {junk!r} gaps -- neither source answered", done.returncode == 1,
+              f"rc={done.returncode}")
 
     # 28 -- the coupon count is one of the things this report exists to print, so a response that
     # omits the container has not answered the question and must not print nothing and pass.
@@ -1233,8 +1392,11 @@ with tempfile.TemporaryDirectory() as tmp:
     assert_no_secret("21g absent file token, expired keychain", done.stdout, done.stderr)
 
 
-# --- 22 / 23: transport safety. These import the module, deliberately, because reaching an HTTPS
-# stub from a subprocess would need a production origin override -- the very defect they prevent.
+# --- 22 / 23: transport safety. These import the module, deliberately, because the assertions
+# here are on the EXACT connection object -- how many times it was opened, the exact host, the
+# exact header text a raised ValueError would carry -- and the subprocess-visible stub logs only
+# a host/method/path/bearer-present line, never enough to state these. Only substituting the
+# connection class inside THIS interpreter can see the rest.
 sys.path.insert(0, str(SCRIPT.parent))
 import contextlib  # noqa: E402
 import io  # noqa: E402
@@ -1364,7 +1526,7 @@ with tempfile.TemporaryDirectory() as tmp:
             # secret can reach stdout, and only what actually prints can answer that.
             R._render([("Claude Code", "/tmp/read/.claudeRead", ".claudeRead", produced)], [],
                       datetime.datetime.now(datetime.timezone.utc), R.Paint(False),
-                      live=True, codex_examined=False)
+                      codex_examined=False)
     finally:
         R.HTTPSConnection = original
 
@@ -1402,8 +1564,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # defects sat underneath it: `security ... -w` writes the whole stored credential OBJECT, and
     # returning its stdout put that object -- refresh token included -- into the Authorization
     # header, so no Keychain-backed profile could ever authenticate. Driven in-process because
-    # the assertion that matters is on the header, and reaching a stub from a subprocess would
-    # need a production origin override.
+    # the assertion that matters is on the header's EXACT value -- the sentinel token, not merely
+    # that a bearer was sent -- and the subprocess-visible stub deliberately logs only the latter.
     keyroot = root / "keychain"
     bindir = install_stub(keyroot)
     keyprofile = keyroot / ".claudeK"
@@ -1731,11 +1893,15 @@ with tempfile.TemporaryDirectory() as tmp:
     check("39 no forged warnings heading is printed",
           chr(10) + "warnings" not in done.stdout, done.stdout)
     # The text still occurs -- inside the escaped name, which is the point. What must not
-    # happen is it occupying a LINE of its own, where it reads as report output.
+    # happen is it occupying a LINE of its own, where it reads as report output. It legitimately
+    # appears TWICE now: once in the table row, and once in the "the live read did not answer"
+    # fallback note this profile's token=True plants (default mode reads live first and fails
+    # against the stub, so every candidate gets that note) -- both carry the same escaped name.
     forged_lines = [ln for ln in done.stdout.splitlines()
                     if "Claude Code trusted: checked" in ln]
     check("39 the injected text never forms a line of its own",
-          len(forged_lines) == 1 and forged_lines[0].strip().startswith(".claudeX"),
+          len(forged_lines) == 2
+          and all(ln.strip().startswith(".claudeX") for ln in forged_lines),
           str(forged_lines))
     check("39 the name is escaped rather than dropped, so the profile is still named",
           ".claudeX" + chr(92) + "n" in done.stdout, done.stdout)
@@ -1749,8 +1915,12 @@ with tempfile.TemporaryDirectory() as tmp:
     make_claude(forged2, evil2, {"cachedUsageUtilization": []})      # gaps: payload-malformed
     done, _, _ = run(["--claude-profile", str(forged2 / evil2),
                       "--codex-home", str(make_codex_home(forged2, ".codexClean"))], root=forged2)
+    # The live read fails first (http-error), so the bracketed candidate note carries THAT code
+    # now; the cache's own payload-malformed names the combined note instead.
     check("39b the run gaps, so a warnings section is genuinely printed",
-          done.returncode == 1 and "[payload-malformed]" in done.stdout, done.stdout)
+          done.returncode == 1
+          and "the on-disk cache had nothing to fall back on -- payload-malformed" in done.stdout,
+          done.stdout)
     check("39b exactly ONE warnings heading exists -- the real one",
           done.stdout.count(chr(10) + "warnings") == 1, done.stdout)
     # Found by its line marker, NOT by splitting on the word "warnings": this name CONTAINS
@@ -1800,7 +1970,10 @@ with tempfile.TemporaryDirectory() as tmp:
               scope={"model": {"id": None, "display_name": "Fable"}, "surface": None}),
     ]))
     done, _, _ = run(["--claude-profile", str(ordered)], root=root)
-    rows = [ln for ln in done.stdout.splitlines() if ".claudeOrd" in ln]
+    # Matched on "%" too: default mode's live-first read fails against the stub and falls back
+    # to this cache, so `.claudeOrd` also names the new fallback note's own line now -- a note
+    # with no percentage in it, so this stays the ONE table row.
+    rows = [ln for ln in done.stdout.splitlines() if ".claudeOrd" in ln and "%" in ln]
     check("40 one account's windows share one row", len(rows) == 1, str(rows))
     check("40 and every figure it shows is on that row",
           bool(rows) and all(f"{p}%" in rows[0] for p in (12, 91)), str(rows))
@@ -1936,6 +2109,10 @@ with tempfile.TemporaryDirectory() as tmp:
     env["STUB_MODE"] = "ok"
     env["STUB_RESULT"] = json.dumps(DEFAULT_RESULT)
     env["STUB_SECURITY_MARKER"] = str(root / "sec.txt")
+    # `.claudeCol` plants a valid sentinel bearer (see `coloured` above), so this run also needs
+    # the HTTPS stub -- without it, this is the one spawn site in the suite that would reach the
+    # real api.anthropic.com.
+    pty_marker, _pty_log = stub_network(root, env)
     env.pop("NO_COLOR", None)
     subprocess.run([sys.executable, str(SCRIPT), "--claude-profile", str(coloured)],
                    stdout=follower, stderr=subprocess.DEVNULL, env=env, timeout=90)
@@ -1944,6 +2121,12 @@ with tempfile.TemporaryDirectory() as tmp:
     os.close(controller)
     seen = b"".join(seen_chunks)
     check("42 auto AT A TERMINAL turns colour on", b"\x1b[" in seen, repr(seen[:200]))
+    # Aborts rather than a soft check, consistent with `run()` -- this spawn also plants a valid
+    # sentinel bearer and could otherwise reach the real network unstubbed.
+    pty_marker_lines = (pty_marker.read_text(encoding="utf-8").splitlines()
+                        if pty_marker.exists() else [])
+    require_stub_loaded(pty_marker_lines,
+                        [sys.executable, str(SCRIPT), "--claude-profile", str(coloured)])
 
     env["NO_COLOR"] = "1"
     done_no, _, _ = run(["--claude-profile", str(coloured)], root=root,
@@ -2055,8 +2238,12 @@ with tempfile.TemporaryDirectory() as tmp:
     (unreadable / ".claude.json").write_text("{ not json", encoding="utf-8")
     done, _, _ = run(["--claude-profile", str(unreadable)], root=root)
     body = done.stdout.split("warnings")[0]
+    # No credential here, so the live read fails at keychain-denied before any cache is opened;
+    # the cache's own payload-malformed then names the combined note, not a bracketed code of
+    # its own.
     check("46 the candidate's diagnostic token reaches the report body, not just the warning",
-          "[payload-malformed]" in body, done.stdout)
+          "the on-disk cache had nothing to fall back on -- payload-malformed" in body,
+          done.stdout)
     check("46 and the run gaps", done.returncode == 1, f"rc={done.returncode}")
 
 # --- 47 -- column arithmetic is measured in terminal columns, not code points -------------------
@@ -2110,7 +2297,7 @@ with tempfile.TemporaryDirectory() as tmp:
     with contextlib.redirect_stdout(out):
         R._render([(R.CLAUDE_GROUP, "/tmp/dup/.dup", ".dup", [live_row])], [],
                   datetime.datetime.now(datetime.timezone.utc), R.Paint(False),
-                  live=False, codex_examined=False)
+                  codex_examined=False)
     check("48 and the renderer prints it, so the vendor is recoverable from the row",
           " api" in out.getvalue(), out.getvalue())
 
@@ -2470,8 +2657,11 @@ with tempfile.TemporaryDirectory() as tmp:
     bare = make_claude(root, ".claudeBare", {"hasAvailableSubscription": False})
     done, _, _ = run(["--claude-profile", str(bare),
                       "--codex-home", str(root / ".codexSpent")], root=root)
+    # Live fails first (http-error), so no-usage-cache now names the combined note, and neither
+    # source answered -- the run gaps where it used to read clean off the cache alone.
     check("56 an absent cache under a false flag reads no-usage-cache",
-          "[no-usage-cache]" in done.stdout and done.returncode == 0, done.stdout)
+          "the on-disk cache had nothing to fall back on -- no-usage-cache" in done.stdout
+          and done.returncode == 1, done.stdout)
     check("56 and the report never claims the account is unsubscribed",
           "[no-subscription]" not in done.stdout, done.stdout)
 
@@ -2523,39 +2713,43 @@ with tempfile.TemporaryDirectory() as tmp:
     check("57 and it does not gap the home",
           done.returncode == 0 and "4%" in done.stdout, done.stdout)
 
-# --- 59 -- a cached window that is over is re-read live, because the file cannot answer ---------
+# --- 59 -- every Claude candidate is read live FIRST now; the cache answers only when live did not,
+# whatever the cache's own age says --------------------------------------------------------------
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     codex_r = make_codex_home(root, ".codexRefresh")
-    # Signing in does NOT refresh this: the CLI rewrites `.claude.json` at login and refreshes
-    # `cachedUsageUtilization` only after a request that carries usage back. So a profile can be
-    # freshly authenticated and still describe a window days gone -- with nothing on the page to
-    # suggest that signing in again was not the answer. No credential here, so the retry stops
-    # at the token and never opens a socket.
+    # Signing in does NOT refresh this on its own: the CLI rewrites `.claude.json` at login and
+    # refreshes `cachedUsageUtilization` only after a request that carries usage back. So a
+    # profile can be freshly authenticated and still describe a window days gone if the fallback
+    # below did not exist. No credential here, so the live read stops at the token and never
+    # opens a socket.
     stale = make_claude(root, ".claudeStale", cached(entries=[
         entry(kind="weekly_all", percent=71, resets=iso(-5))]), token=False)
     done, _, _ = run(["--claude-profile", str(stale), "--codex-home", str(codex_r)], root=root)
-    check("59 a stale cache is retried against the API",
-          "the cache describes a window that is over" in done.stdout, done.stdout)
-    check("59 the retry names why it could not answer",
+    check("59 a profile with no credential falls back to its cache",
+          "the live read did not answer" in done.stdout, done.stdout)
+    check("59 the fallback names why the live side could not answer",
           "token-absent" in done.stdout or "keychain-denied" in done.stdout, done.stdout)
-    # A failed retry may not COST anything. The cached figures are stale, which their own cells
-    # already say, and losing them to a failed network call would be the worse trade.
-    check("59 and the cached figures survive it",
-          any("71%" in line for _w, _p, line in pool_rows(done.stdout)), done.stdout)
-    check("59 the reason is a note, not a warning -- the default mode read what it promised to",
+    # A failed live read may not COST anything. The cached figures are stale, which their own
+    # cells already say, and losing them to a failed network call would be the worse trade.
+    check("59 and the cached figures survive it, stale legend included",
+          any("71%" in line for _w, _p, line in pool_rows(done.stdout))
+          and "stale-after-reset" in done.stdout, done.stdout)
+    check("59 the reason is a note, not a warning -- default mode read what it promised to",
           done.returncode == 0 and "warnings" not in done.stdout, done.stdout)
 
-    # The trigger is the window being OVER, not the cache being old: a current window is exactly
-    # what the file is for, and a report that phoned home on every run would be a different tool.
+    # The live read is attempted for EVERY candidate now, whatever the cache's age says: a
+    # profile with a VALID token and a cache whose window is still open still makes one request
+    # before the fallback answers -- unlike the retired rule, where an open window was never
+    # retried at all.
     fresh = make_claude(root, ".claudeFresh", cached(entries=[
-        entry(kind="weekly_all", percent=12, resets=iso(40))]), token=False)
+        entry(kind="weekly_all", percent=12, resets=iso(40))]))
     done, _, _ = run(["--claude-profile", str(fresh), "--codex-home", str(codex_r)], root=root)
-    check("59 a cache whose window is still open is not retried",
-          "the cache describes a window that is over" not in done.stdout, done.stdout)
-    check("59 and it reports from the file", "12%" in done.stdout and done.returncode == 0,
-          done.stdout)
+    check("59 a fresh, still-open cache's live read is attempted anyway",
+          len(done.https_requests) == 1, str(done.https_requests))
+    check("59 and it reports from the cache once that read fails",
+          "12%" in done.stdout and done.returncode == 0, done.stdout)
 
 # --- 60 -- the round-1 review fixes, each pinned where it would silently regress ---------------
 
@@ -2667,29 +2861,6 @@ with tempfile.TemporaryDirectory() as tmp:
           f"rc={done.returncode}")
 
 # --- 62 -- the three fixes a mutation could still have reverted unnoticed ----------------------
-
-# Fix 1, the refresh rule. Its live half cannot be reached from this suite without a socket, so
-# the DECISION is a function and the function is stated here: whatever the live read produced is
-# the answer whenever it produced anything, and the cache answers only when it produced nothing.
-# Restoring a per-window merge would have to change this.
-cached_two = [R.Record("session", R.NO_CURRENT, percent=88.0, freshness="cache 3d00h old",
-                       diagnostic="stale-after-reset", family="all", window="5h"),
-              R.Record("weekly_all", R.REPORTED, percent=40.0, freshness="cache 3d00h old",
-                       family="all", window="weekly")]
-live_partial = [R.Record("session", R.REPORTED, percent=2.0, freshness="live now",
-                         family="all", window="5h"),
-                R.Record("weekly_all", R.GAP, diagnostic="field-malformed",
-                         family="all", window="weekly")]
-state, records, code = R._refreshed((R.GAP, live_partial, ""), (R.NO_CURRENT, cached_two, ""))
-check("62 a live read that produced anything answers the row, whole",
-      records == live_partial and state == R.GAP, str([r.name for r in records]))
-check("62 so no cached cell can survive beside a live one",
-      not any(r.freshness.startswith("cache") for r in records),
-      str([r.freshness for r in records]))
-state, records, code = R._refreshed((R.GAP, [], "token-expired"),
-                                   (R.NO_CURRENT, cached_two, ""))
-check("62 while a live read that produced nothing leaves the cache untouched",
-      records == cached_two and state == R.NO_CURRENT and code == "", str(state))
 
 # Fix 3, the removed collision machinery, rests on one property: the selector yields AT MOST one
 # pool. Two ids can only ever share a label if that is false, so the property is what to pin.
@@ -2889,15 +3060,16 @@ with tempfile.TemporaryDirectory() as tmp:
                               token=False)
     foot_codex = make_codex_home(root, ".codexFoot")
 
-    # 66 -- the on-disk-cache hint is default-mode-only: under --live there is no cache being
-    # read instead of, so the line has nothing true left to say.
+    # 66 -- the retired `--live` footer hint is gone in BOTH modes: default mode now reads live
+    # first on its own, so the line describing --live as the way to get current numbers stopped
+    # being true the moment reading the cache stopped being the default at all.
     done_default, _, _ = run(["--claude-profile", str(foot_claude),
                               "--codex-home", str(foot_codex)], root=root)
-    check("66 default mode prints the --live footer hint",
-          "--live fetches current Claude numbers" in done_default.stdout, done_default.stdout)
+    check("66 default mode does not print the retired --live footer hint",
+          "--live fetches current Claude numbers" not in done_default.stdout, done_default.stdout)
     done_live, _, _ = run(["--live", "--claude-profile", str(foot_claude),
                            "--codex-home", str(foot_codex)], root=root)
-    check("66 --live mode does not print the --live footer hint",
+    check("66 --live mode does not print it either",
           "--live fetches current Claude numbers" not in done_live.stdout, done_live.stdout)
 
     # 67 -- the two Codex app-server lines are true only once a Codex candidate's producer has
@@ -2929,10 +3101,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("68 and not the retired `cache` wording",
           "the cache predates its reset" not in done_stale.stdout, done_stale.stdout)
 
-    # 69 -- the DEFAULT-mode retry hint: a cached window past its reset triggers a live retry:
-    # here that retry fails behind an expired credential file with a denying Keychain beside it,
-    # which is exactly the shape the hint exists for. The run still exits clean -- a failed retry
-    # is a note, not a warning -- and the stale row renders beside the note that explains it.
+    # 69 -- the DEFAULT-mode fallback hint: a live read that fails behind an expired credential
+    # file with a denying Keychain beside it is exactly the shape the hint exists for. The run
+    # still exits clean -- a failed live read is a note, not a warning -- and the stale row
+    # renders beside the note that explains it.
     retry_root = root / "retryhint"
     retry_profile = make_claude(retry_root, ".claudeRetry",
                                 cached(entries=[entry(resets=iso(-5), percent=67)],
@@ -2943,16 +3115,179 @@ with tempfile.TemporaryDirectory() as tmp:
     done_retry, _, _ = run(["--claude-profile", str(retry_profile),
                             "--codex-home", str(make_codex_home(retry_root, ".codexClean"))],
                            root=retry_root)
-    check("69 a stale window whose failing retry sits behind an expired credential exits clean",
+    check("69 a stale window behind an expired credential exits clean",
           done_retry.returncode == 0, f"rc={done_retry.returncode}\n{done_retry.stdout}")
     check("69 the stale cell still renders",
           "67%" in done_retry.stdout and "stale-after-reset" in done_retry.stdout,
           done_retry.stdout)
-    check("69 the retry note names token-expired with the sign-in-again hint",
-          "live retry did not answer" in done_retry.stdout
+    check("69 the fallback note names token-expired with the sign-in-again hint",
+          "the live read did not answer" in done_retry.stdout
           and "open Claude Code in that profile once" in done_retry.stdout,
           done_retry.stdout)
+    check("69 no HTTPS request was ever attempted -- the token check stopped it first",
+          done_retry.https_requests == [], str(done_retry.https_requests))
     assert_no_secret("69 default-mode retry hint", done_retry.stdout, done_retry.stderr)
+
+# --- 70 / 71: #958, a live read AND a cache that both answer nothing is a GAP, not a quiet read
+# off the cache's own (absent) answer -------------------------------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # A valid sentinel token (default) means the live read is attempted and fails against the
+    # unset stub; the cache has no `cachedUsageUtilization` key at all to fall back on either.
+    no_cache_profile = make_claude(root, ".claude958", {})
+    codex_958 = make_codex_home(root, ".codex958")
+    done_958, _, _ = run(["--claude-profile", str(no_cache_profile),
+                          "--codex-home", str(codex_958)], root=root)
+    check("70 neither source answering gaps the run",
+          done_958.returncode == 1, f"rc={done_958.returncode}\n{done_958.stdout}")
+    check("70 the warning names the live failure",
+          "NOT checked -- http-error" in done_958.stdout.split("warnings")[-1], done_958.stdout)
+    check("70 the combined note names the cache's own failure too",
+          "the on-disk cache had nothing to fall back on -- no-usage-cache" in done_958.stdout,
+          done_958.stdout)
+    check("70 no Claude usage row is printed for this profile",
+          not any(where == ".claude958" for where, _pool, _line in pool_rows(done_958.stdout)),
+          done_958.stdout)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # No credential at all this time -- the live read fails at the token/keychain stage before
+    # any HTTPS attempt -- AND no cache either.
+    no_cred_no_cache = make_claude(root, ".claude958b", {}, token=False)
+    codex_958b = make_codex_home(root, ".codex958b")
+    done_958b, _, _ = run(["--claude-profile", str(no_cred_no_cache),
+                           "--codex-home", str(codex_958b)], root=root)
+    check("71 no credential and no cache still gaps the run",
+          done_958b.returncode == 1, f"rc={done_958b.returncode}\n{done_958b.stdout}")
+    tail_958b = done_958b.stdout.split("warnings")[-1]
+    check("71 the warning names the live-side failure",
+          "NOT checked -- token-absent" in tail_958b
+          or "NOT checked -- keychain-denied" in tail_958b, done_958b.stdout)
+    check("71 the combined note names the cache's own failure too",
+          "the on-disk cache had nothing to fall back on -- no-usage-cache" in done_958b.stdout,
+          done_958b.stdout)
+    check("71 no Claude usage row is printed for this profile",
+          not any(where == ".claude958b" for where, _pool, _line in pool_rows(done_958b.stdout)),
+          done_958b.stdout)
+
+# --- T0 - T5: #957, code-limits reads Claude Code live by default -------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # No credential: the live read stops at the token, so this exercises the STUB itself rather
+    # than the network path T1/T2 cover, and it forces the `security` fixture stub -- a NESTED
+    # Python interpreter on the same PYTHONPATH -- to run too.
+    t0_claude = make_claude(root, ".claudeT0", cached(entries=[entry()]), token=False)
+    t0_codex = make_codex_home(root, ".codexT0")
+    done_t0, _, _ = run(["--claude-profile", str(t0_claude), "--codex-home", str(t0_codex)],
+                        root=root)
+    # `run()` already raised loudly if the report script's OWN interpreter had not loaded the
+    # stub, so that half needs no check here. What is worth pinning is that a NESTED fixture
+    # interpreter loaded it too -- proof the marker is not trivially satisfied by the one line
+    # `run()` requires.
+    check("T0 a nested fixture interpreter loaded the stub too",
+          len(done_t0.https_marker) > 1, str(done_t0.https_marker))
+    check("T0 no HTTPS request was made -- this profile never reached the network at all",
+          done_t0.https_requests == [], str(done_t0.https_requests))
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # A fresh cache -- 20h old, well inside its window -- that under the RETIRED rule would never
+    # have been retried at all. The live read now answers a DIFFERENT figure for the same window.
+    t1_profile = make_claude(root, ".claudeT1", cached(
+        entries=[entry(kind="weekly_all", percent=0, resets=iso(48))], fetched_ms=now_ms(-20)))
+    t1_codex = make_codex_home(root, ".codexT1")
+    t1_body = json.dumps({"limits": [
+        {"kind": "weekly_all", "percent": 21, "is_active": True, "resets_at": iso(48)}]})
+    done_t1, _, _ = run(["--claude-profile", str(t1_profile), "--codex-home", str(t1_codex)],
+                        root=root, https_status=200, https_body=t1_body)
+    t1_rows = [line for where, _pool, line in pool_rows(done_t1.stdout) if where == ".claudeT1"]
+    check("T1 the live figure wins over a fresh, still-in-window cache",
+          len(t1_rows) == 1 and "21%" in t1_rows[0], str(t1_rows))
+    check("T1 the cached figure for that window is nowhere on the row",
+          bool(t1_rows) and "0%" not in t1_rows[0], str(t1_rows))
+    check("T1 the row's SOURCE reads `api`",
+          bool(t1_rows) and t1_rows[0].rstrip().endswith(" api"), str(t1_rows))
+    check("T1 the run stays clean", done_t1.returncode == 0, done_t1.stdout)
+    check("T1 no fallback note was printed -- the live read answered",
+          "the live read did not answer" not in done_t1.stdout, done_t1.stdout)
+    check("T1 exactly one HTTPS request was made",
+          len(done_t1.https_requests) == 1, str(done_t1.https_requests))
+    check("T1 it was a GET to the pinned host and path, carrying a bearer",
+          done_t1.https_requests == [{"host": "api.anthropic.com", "method": "GET",
+                                      "path": "/api/oauth/usage", "bearer_present": True}],
+          str(done_t1.https_requests))
+    assert_no_secret("T1 live-wins run", done_t1.stdout, done_t1.stderr)
+    # Mutation check (run once locally, not committed): restoring the retired stale-only gating
+    # in main() -- retrying live only when `stale-after-reset` is already on the page -- makes
+    # the "T1 the live figure wins" assertion above fail, because this cache is fresh.
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # The same fresh cache as T1, but the stub is left unanswered -- the live read fails, and the
+    # cache from before this release is exactly what must still render.
+    t2_profile = make_claude(root, ".claudeT2", cached(
+        entries=[entry(kind="weekly_all", percent=0, resets=iso(48))], fetched_ms=now_ms(-20)))
+    t2_codex = make_codex_home(root, ".codexT2")
+    done_t2, _, _ = run(["--claude-profile", str(t2_profile), "--codex-home", str(t2_codex)],
+                        root=root)
+    t2_rows = [line for where, _pool, line in pool_rows(done_t2.stdout) if where == ".claudeT2"]
+    check("T2 the cached figure renders when the live read fails",
+          len(t2_rows) == 1 and "0%" in t2_rows[0], str(t2_rows))
+    check("T2 the row's SOURCE is the cache's age, not `api`",
+          bool(t2_rows) and not t2_rows[0].rstrip().endswith(" api"), str(t2_rows))
+    check("T2 the fallback note names why the live read did not answer",
+          ".claudeT2: the live read did not answer -- http-error" in done_t2.stdout,
+          done_t2.stdout)
+    check("T2 the run stays clean", done_t2.returncode == 0, done_t2.stdout)
+    check("T2 the stub log shows the request WAS attempted, just answered nothing",
+          len(done_t2.https_requests) == 1
+          and done_t2.https_requests[0]["path"] == "/api/oauth/usage", str(done_t2.https_requests))
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # A live read carrying one valid window and one malformed one, through main(): a live read
+    # that produced ANYTHING is the row, gaps included, and the cache is never even consulted.
+    t4_profile = make_claude(root, ".claudeT4", cached(
+        entries=[entry(kind="weekly_all", percent=0, resets=iso(48))]))
+    t4_codex = make_codex_home(root, ".codexT4")
+    t4_body = json.dumps({"limits": [
+        {"kind": "session", "percent": 5, "is_active": True, "resets_at": iso(3)},
+        {"kind": "weekly_all", "percent": "bad", "is_active": True, "resets_at": iso(48)}]})
+    done_t4, _, _ = run(["--claude-profile", str(t4_profile), "--codex-home", str(t4_codex)],
+                        root=root, https_status=200, https_body=t4_body)
+    t4_rows = [line for where, _pool, line in pool_rows(done_t4.stdout) if where == ".claudeT4"]
+    check("T4 the live read's valid window renders, SOURCE api",
+          len(t4_rows) == 1 and "5%" in t4_rows[0] and t4_rows[0].rstrip().endswith(" api"),
+          str(t4_rows))
+    check("T4 the live read's gap renders on the very same row",
+          bool(t4_rows) and "[field-malformed]" in t4_rows[0], str(t4_rows))
+    check("T4 the cached figure for the gapped window is nowhere on the page",
+          "0%" not in done_t4.stdout, done_t4.stdout)
+    check("T4 no fallback note was printed -- the live read produced records",
+          "the live read did not answer" not in done_t4.stdout, done_t4.stdout)
+    check("T4 the run exits 1 with the gap in warnings",
+          done_t4.returncode == 1
+          # Gapped entries are named by their PAYLOAD INDEX (`limits[1]`), not their kind -- the
+          # same rule case 26/60 pin for the cache path, unchanged here.
+          and "limits[1] [field-malformed]" in done_t4.stdout.split("warnings")[-1],
+          done_t4.stdout)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # --live is UNCHANGED: a fresh, perfectly good cache sits right beside a failing live read,
+    # and it must still never be read.
+    t5_profile = make_claude(root, ".claudeT5", cached(
+        entries=[entry(kind="weekly_all", percent=17, resets=iso(48))]))
+    t5_codex = make_codex_home(root, ".codexT5")
+    done_t5, _, _ = run(["--live", "--claude-profile", str(t5_profile),
+                         "--codex-home", str(t5_codex)], root=root)
+    check("T5 --live gaps on a failed live read",
+          "NOT checked -- http-error" in done_t5.stdout.split("warnings")[-1], done_t5.stdout)
+    check("T5 the run exits 1", done_t5.returncode == 1, f"rc={done_t5.returncode}")
+    check("T5 the cached figure never appears -- --live has no fallback",
+          "17%" not in done_t5.stdout, done_t5.stdout)
 
 print(f"ran {checks} checks")
 if failures:
@@ -2964,7 +3299,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 555
+MIN_CHECKS = 663
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

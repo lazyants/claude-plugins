@@ -2,6 +2,26 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.4.0] — 2026-09-14
+
+### Changed
+
+- **`code-limits` reads Claude Code usage live by default and falls back to the on-disk cache
+  only when the live read produces nothing (#957).** The previous default read the cache for
+  every profile and only re-read live once a cached window's own reset had already passed, so an
+  hours-old cache still inside its window printed as current. Measured on the authoring machine:
+  the default profile's cache was 19h52m old and printed weekly 0% with exit 0 and no note, while
+  `--live` printed 21% for the same account. Every Claude profile is now read live first; the
+  cache is read, and shown, only when that live read answers nothing, and the row then carries a
+  note naming why -- `"<profile>: the live read did not answer -- <reason>"`. The `SOURCE` column
+  keeps recording which happened: `api` for a live row, a cache age for a fallback row, and a
+  cache past its reset still renders its `... ago` cells and the `[stale-after-reset]` legend when
+  it is the fallback. `--live` is unchanged in meaning -- live only, never the cache -- but the
+  footer hint that told a default-mode run to try `--live` is gone, since default mode now makes
+  that call itself. When the cache has nothing either, a profile that used to exit 0 with no
+  cache now reads `NOT checked` and the run exits 1, the same as `--live` gives it. The test suite
+  runs every script subprocess behind a network stub, so no case in it can reach the real API.
+
 ## [multi-profile-plugins 1.3.3] — 2026-09-06
 
 ### Fixed

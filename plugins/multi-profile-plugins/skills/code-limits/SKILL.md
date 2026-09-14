@@ -8,7 +8,7 @@ description: >-
   Use when asked how much usage-limit budget is left, when a five-hour or weekly window resets,
   which profile or account is nearly out, or how many Codex "usage limit reset" vouchers remain.
   Ships `scripts/report_limits.py`, installable on PATH as `code-limit`, one table covering both
-  CLIs: Claude Code read from its on-disk usage cache by default (or live with `--live`) and Codex
+  CLIs: Claude Code read live by default, on-disk cache as fallback (`--live` skips it), and Codex
   read live over `codex app-server`'s `account/rateLimits/read` JSON-RPC call. Not the sibling
   `multi-profile-plugins` skill (plugin-store topology, `installLocation` errors) or
   `multi-profile-codex` (`CODEX_HOME` architecture, seeding, config pins) -- this one is only
@@ -91,23 +91,34 @@ move because some other account's window rolled over.
 ## Two sources, different in kind
 
 The Claude Code side and the Codex side are read differently, and every row says which in its
-last column: `live` for Codex, and the cache's age for Claude Code.
+last column: `live` for Codex, `api` for a Claude Code row the live read answered, and the
+cache's age for a Claude Code row that fell back to it.
 
-**Claude Code is a cache on disk.** `<profile>/.claude.json` carries `cachedUsageUtilization`, a
-snapshot taken at some past `fetchedAtMs`. Reading it costs nothing and needs no credential.
+**Claude Code is read live first, in default mode too.** Default mode makes the same
+`GET https://api.anthropic.com/api/oauth/usage` call `--live` makes (see below), for every
+discovered profile, before it opens the cache. If that read produced any records at all, those are
+the row -- gaps included, and its exit status with them.
 
-**Except when that snapshot's window is already over** -- then the file has nothing to say about
-the present, and the report re-reads that one profile live rather than printing a percentage
-about a window nobody is spending from. Signing in does not fix it on its own: the CLI rewrites
-`.claude.json` at login but refreshes `cachedUsageUtilization` only after a request that carries
-usage back, so a freshly authenticated profile can still be describing a window three days gone.
-A row comes from ONE read, whole. If the live re-read produced any records at all, those are the
-row -- gaps included, and its exit status with them. Only a retry that produced nothing keeps the
-cached rows, and it states its reason as a note rather than a warning: the default mode promised
-to read a cache and it read one. Merging the two per window looked strictly better and was worse
--- a live gap suppressed by a cached cell left nothing to gap the run, and the row rendered a
-cached figure under the live provenance its first cell carried. The `SOURCE` column is where to
-read which happened: `api` for a row that was refreshed, a cache age for one that was not.
+**The on-disk cache is read only when the live read comes back with nothing** -- no token, an
+expired login, a network failure, a malformed reply, any of it. `<profile>/.claude.json` carries
+`cachedUsageUtilization`, a snapshot taken at some past `fetchedAtMs`; reading it costs nothing
+and needs no credential, and the report reaches for it only after the live attempt answered
+nothing. Signing in does not fix a stale cache on its own: the CLI rewrites `.claude.json` at
+login but refreshes `cachedUsageUtilization` only after a request that carries usage back, so a
+freshly authenticated profile can still be describing a window three days gone -- which is exactly
+why the live read is tried first rather than trusted to a window check. A cache past its reset
+still renders its `... ago` cells and the `[stale-after-reset]` legend when it is the fallback;
+that rendering did not change. A row comes from ONE read, whole, whichever source answered. The
+`SOURCE` column says which happened: `api` for a row the live read answered, a cache age for one
+that fell back. A fallback row also carries a note, `"<profile>: the live read did not answer --
+<reason>"`, naming why the page is showing a cached figure at all. When the cache read also has
+nothing -- no `cachedUsageUtilization` at all, `no-usage-cache` -- the profile is no longer a clean
+run: it follows the same rule `--live` follows, gapping with the live read's diagnostic, a
+`NOT checked` warning, and exit 1, with one note naming both failures -- `"<profile>: the live
+read did not answer -- <reason>; the on-disk cache had nothing to fall back on -- <cache
+reason>"`. Merging the two per window
+looked strictly better and was worse -- a live gap suppressed by a cached cell left nothing to gap
+the run, and the row rendered a cached figure under the live provenance its first cell carried.
 
 The **default profile is the exception**: its config is `~/.claude.json`, beside `~/.claude`
 rather than inside it, because the path is `<CLAUDE_CONFIG_DIR or $HOME>/.claude.json` and that
@@ -132,16 +143,16 @@ A window whose `resets_at` (or `resetsAt`) has already passed describes the PREV
 neither current usage nor zero. The report never presents an expired window as current: the cell
 reads how long ago that window reset (`14h ago`) and is dimmed beside whatever current cells
 share its row. One legend line under the table carries the `[stale-after-reset]` token and names
-what the cell's age means; it is printed only when such a cell is actually on the page. The
-`--live` hint is a separate footer under the table, printed only in default mode -- a run that
-already used `--live` is not told to try `--live`. The two lines disclosing that reading Codex
-starts its app-server are their own footer too, printed only when a Codex home was actually
-examined this run.
+what the cell's age means; it is printed only when such a cell is actually on the page. The two
+lines disclosing that reading Codex starts its app-server are their own footer, printed only when
+a Codex home was actually examined this run.
 
-## `--live`, Claude Code side
+## Claude Code live reads: default mode and `--live`
 
-`--live` makes a Claude Code row call `GET https://api.anthropic.com/api/oauth/usage` instead of
-reading the cache. It reads the profile's OAuth token from `.credentials.json` when that file is
+Calling `GET https://api.anthropic.com/api/oauth/usage` is how a Claude Code row is read live, and
+that call happens in both modes now: default mode makes it first, before opening the cache at
+all, and `--live` makes the same call and never opens the cache. The token mechanics below are the
+same call either way. It reads the profile's OAuth token from `.credentials.json` when that file is
 present and parses; when the login it holds is absent or expired, the macOS Keychain item the
 profile's config directory maps to is consulted as well, and that keychain read prompts the
 user, because the process doing the reading is not `claude` itself. The file is the CLI's own
@@ -158,8 +169,13 @@ config directory uses a name suffixed with the first 8 hex of the SHA-256 of its
 A profile reached by a different spelling of the same directory, or through a separate
 secure-storage override, hashes to a name that simply is not there, so it gaps as `token-absent`
 rather than reading another account's item. A live call that fails is reported as a gap for that
-profile, with its diagnostic code -- it never falls back to the cache, because a live run that
-quietly degraded would print exactly what a successful one prints.
+profile, with its diagnostic code. Under `--live` that gap is the whole answer: it never falls
+back to the cache, because a live run that quietly degraded would print exactly what a successful
+one prints, so a failed `--live` read renders a `NOT checked` warning and the run exits 1. In
+default mode the same failure instead sends that profile on to the cache read described above,
+with the failure's diagnostic code folded into the fallback note rather than into a warning --
+unless that cache read also has nothing, in which case default mode gaps the profile too, with
+the same `NOT checked` warning and exit 1 `--live` would have given it.
 
 ## What the report touches
 
@@ -168,6 +184,11 @@ migrates its own state databases under each `CODEX_HOME` exactly as any other `c
 does. Measured around a single `account/rateLimits/read` call against one home: 5 516 files
 before, 5 521 after -- new `-wal`/`-shm` companions and migrated sqlite state. Contention with a
 Codex client running concurrently against the same home is an accepted, unmeasured risk.
+
+Every run, in default mode as well as under `--live`, also reads each Claude Code profile's login
+-- its `.credentials.json` or its Keychain item -- and, when it finds a usable one, sends that
+access token to `api.anthropic.com`: one request per profile, one after another, each with a
+15-second timeout.
 
 ## Absent and null, per the vendor's schema
 
@@ -229,8 +250,9 @@ python3 scripts/report_limits.py --claude-profile ~/.claude2 --codex-home ~/.cod
 python3 scripts/report_limits.py --color=always | less -R
 ```
 
-The script ships mode 644, so it is run through `python3`, never executed directly. `--live` opts
-the Claude Code side into the token path; the Codex side is always live. `--claude-profile PATH`
+The script ships mode 644, so it is run through `python3`, never executed directly. The Claude
+Code side is read live in both modes; `--live` differs only in never falling back to the on-disk
+cache when that read comes back empty. The Codex side is always live. `--claude-profile PATH`
 and `--codex-home PATH` are repeatable and, for whichever vendor at least one is given, replace
 auto-discovery entirely for that vendor -- a vendor left unspecified still auto-discovers.
 

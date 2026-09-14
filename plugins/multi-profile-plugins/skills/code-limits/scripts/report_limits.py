@@ -3,11 +3,14 @@
 
 Two sources that differ in kind, and every row says which one it came from.
 
-Claude Code keeps a CACHE on disk, `<profile>/.claude.json` -> `cachedUsageUtilization`, refreshed
-whenever Claude Code happens to fetch it. So it goes stale, and a window whose `resets_at` has
-already passed describes the PREVIOUS window -- not the current one, and not zero. Such a row
-renders as `stale-after-reset` and is never presented as current usage. `--live` fetches instead,
-which needs the profile's OAuth token.
+Claude Code is read LIVE by default: each profile's OAuth token authorizes a request to the
+vendor's own usage endpoint, and whatever that read produces -- gaps included -- is the row. Only
+when the live read produces nothing at all does this fall back to the CACHE Claude Code keeps on
+disk, `<profile>/.claude.json` -> `cachedUsageUtilization`, refreshed whenever Claude Code happens
+to fetch it. That cache goes stale between fetches, and a window whose `resets_at` has already
+passed describes the PREVIOUS window -- not the current one, and not zero -- so a fallback row can
+still render as `stale-after-reset`, never presented as current usage. `--live` is live ONLY: it
+never falls back, so a failed read gaps the profile instead of quietly reading the disk.
 
 Codex answers live: `codex app-server` exposes the read-only JSON-RPC method
 `account/rateLimits/read`. It is the only source carrying `rateLimitResetCredits` -- the "usage
@@ -402,9 +405,11 @@ def _source(freshness: str, group: str) -> str:
     is WHICH source and, for a cache, how old. Nothing is dropped that the header does not say.
     """
     if freshness.startswith("live"):
-        # `api` vs `live` also keeps the VENDOR readable off the row. Under --live both sides are
-        # live, and two candidates may share a directory basename, so without this the flat table
-        # can show two rows that are genuinely indistinguishable.
+        # `api` vs `live` also keeps the VENDOR readable off the row. A Claude row can be live in
+        # EITHER mode now -- default reads live first, `--live` reads live only -- and under
+        # `--live` both vendors are live together; two candidates may also share a directory
+        # basename, so without this the flat table can show two rows that are genuinely
+        # indistinguishable.
         return "api" if group == CLAUDE_GROUP else "live"
     if freshness.startswith("cache "):
         return freshness[len("cache "):].replace(" old", "")
@@ -507,7 +512,7 @@ class Row(NamedTuple):
 
 def _window_row(*, name: str, percent: float, resets: datetime.datetime, freshness: str,
                 now: datetime.datetime, family: str = "", window: str = "",
-                stale_note: str = "current window unknown without --live") -> Record:
+                stale_note: str = "current window unknown") -> Record:
     """A window with a reset time. What decides whether it is CURRENT is that time and nothing
     else -- past means the figure describes the previous window, future means it describes this
     one.
@@ -766,7 +771,7 @@ def _claude_cached(profile: Path, now: datetime.datetime) -> list[Record]:
         # suppressed exactly the account whose number mattered most, under a diagnostic that
         # exits 0, so nothing anywhere said a pool had gone unread. The third ships it beside
         # no cache at all, on the DEFAULT profile of a Claude Max 20x subscription whose pools
-        # the --live path reads without trouble -- and the report answered "where is this
+        # a live read reads without trouble -- and the report answered "where is this
         # account" with `no-subscription`, a claim about billing this module never verified and
         # has no way to verify. The flag's only surviving reading is "this says nothing".
         raise Malformed("no-usage-cache")
@@ -1603,7 +1608,7 @@ def _pool_table(pools: list[Pool], now: datetime.datetime, paint: Paint) -> None
 
 
 def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
-            now: datetime.datetime, paint: Paint, *, live: bool, codex_examined: bool) -> None:
+            now: datetime.datetime, paint: Paint, *, codex_examined: bool) -> None:
     """The whole report: a voucher band, then one table -- one line per allowance."""
     buckets: dict[str, list[Row]] = {"pool": [], "voucher": [], "info": []}
     for group, ident, where, records in groups:
@@ -1626,8 +1631,6 @@ def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
                          " predates its reset  [stale-after-reset]"]
     for note in notes:
         print(paint(f"  {note}", DIM))
-    if not live:
-        print(paint("  --live fetches current Claude numbers instead of the on-disk cache", DIM))
     if codex_examined:
         print(paint("  reading Codex starts its app-server, which migrates that home's own"
                     " state databases", DIM))
@@ -1635,28 +1638,10 @@ def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
                     DIM))
 
 
-def _refreshed(live: tuple[str, list[Record], str], cached: tuple[str, list[Record], str]):
-    """Which of the two reads answers this candidate, as one decision in one place.
-
-    A row comes from ONE read, whole -- gaps included. Merging the two per window looked strictly
-    better and was worse: with a live gap suppressed by a cached cell, nothing was left to gap the
-    run, and the row rendered a CACHED figure under the live provenance its first cell carried. A
-    stale number labelled `api`, no note, exit 0. So whatever the live read produced is the answer
-    whenever it produced anything at all, and the cache answers only when it produced nothing.
-
-    A function rather than three lines inline because the live half cannot be reached from a test
-    without a socket, and a rule that no test can state is a rule that quietly changes. Both
-    arguments are whole `(state, records, code)` triples, exactly as `_examine` returns them --
-    six interleaved positionals could not be read at a call site without the signature open
-    beside it.
-    """
-    return live if live[1] else cached
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Report Claude Code and Codex usage limits.")
     parser.add_argument("--live", action="store_true",
-                        help="fetch Claude usage instead of reading the on-disk cache")
+                        help="read Claude usage live only; never fall back to the on-disk cache")
     parser.add_argument("--claude-profile", action="append", default=[], metavar="PATH",
                         help="examine this Claude profile (repeatable; replaces discovery)")
     parser.add_argument("--codex-home", action="append", default=[], metavar="PATH",
@@ -1688,13 +1673,8 @@ def main(argv: list[str] | None = None) -> int:
     notes: list[str] = []
     groups: list[tuple[str, str, str, list[Record]]] = []
 
-    # Only the cached reader takes the run's clock: it dates rows from a file that was
-    # written before the run. The live readers time-stamp their own observation, because
-    # a keychain prompt or a stalled app-server can put minutes between run start and the
-    # answer they are describing.
-    claude_producer = _claude_live if args.live else (lambda profile: _claude_cached(profile, now))
-    for group, candidates, producer, refresh in (
-        (CLAUDE_GROUP, claude, claude_producer, not args.live),
+    for group, candidates, producer, cache_fallback in (
+        (CLAUDE_GROUP, claude, _claude_live, not args.live),
         (CODEX_GROUP, codex, _codex_records, False),
     ):
         if not candidates:
@@ -1707,27 +1687,55 @@ def main(argv: list[str] | None = None) -> int:
         for candidate in candidates:
             state, records, code = _examine(candidate, producer)
             where = _safe_name(candidate.path.name)
-            if refresh and any(record.diagnostic == "stale-after-reset" for record in records):
-                # The one case where reading the file again cannot help: its window is over, so
-                # no percentage in it is about the present, and the report goes and asks instead.
+            if cache_fallback and not records and not candidate.gap:
+                # The live read is the DEFAULT read now, tried for every candidate before the
+                # cache is even opened -- so this is not a retry, it is the first read failing.
+                # A candidate whose PATH is what is wrong (`candidate.gap`) is excluded: the
+                # cache would fail for the identical structural reason, and a second "the live
+                # read did not answer" note beside the one the path failure already prints would
+                # say the same thing twice.
                 #
-                # Logging in does NOT fix this, which is what makes it worth doing automatically.
-                # The CLI rewrites `.claude.json` at login but refreshes `cachedUsageUtilization`
-                # only after a request that carries usage back -- so a profile can be freshly
-                # authenticated and still be describing a window three days gone, with nothing on
-                # the page to suggest that signing in again was not the answer.
+                # Logging in does NOT make a stale cache current on its own, which is part of why
+                # reading live first is worth doing at all. The CLI rewrites `.claude.json` at
+                # login but refreshes `cachedUsageUtilization` only after a request that carries
+                # usage back -- so a profile can be freshly authenticated and still be describing
+                # a window three days gone if this fallback did not exist.
                 #
-                # A retry that fails keeps the cached rows exactly as they were. They are stale,
-                # which their cells already say, and losing them to a failed network call would
-                # be the worse trade. Its reason is a NOTE, deliberately not a warning: the
-                # default mode promised to read a cache and it read one.
-                live_state, live_records, live_code = _examine(candidate, _claude_live)
-                if not live_records:
-                    detail = _with_hint(live_code) or "the backend returned nothing to read"
-                    notes.append(f"{where}: the cache describes a window that is over, and the"
-                                 f" live retry did not answer -- {detail}")
-                state, records, code = _refreshed((live_state, live_records, live_code),
-                                                  (state, records, code))
+                # A live read that fails costs nothing WHEN the cache has something to say: the
+                # cache is read exactly as the old default did, and a NOTE explains why --
+                # deliberately not a warning, because default mode still read a value and
+                # reported it.
+                #
+                # Assigned directly rather than merged: a row comes from ONE read, whole -- gaps
+                # included. Merging the two per window looked strictly better and was worse: with
+                # a live gap suppressed by a cached cell, nothing was left to gap the run, and the
+                # row rendered a CACHED figure under the live provenance its first cell carried --
+                # a stale number labelled `api`, no note, exit 0. The `not records` guard above is
+                # exactly the condition under which the live read produced nothing to prefer, so
+                # what follows -- when the cache answers -- is always the cache's own triple,
+                # whole.
+                #
+                # Only the cached reader takes the run's clock here: it dates the row from a file
+                # written before the run, where the live readers elsewhere in this loop time-stamp
+                # their own observation, because a keychain prompt or a stalled app-server can put
+                # minutes between run start and the answer they are describing.
+                detail = _with_hint(code) or "the backend returned nothing to read"
+                cached_state, cached_records, cached_code = _examine(
+                    candidate, lambda profile: _claude_cached(profile, now))
+                if cached_records:
+                    notes.append(f"{where}: the live read did not answer -- {detail}")
+                    state, records, code = cached_state, cached_records, cached_code
+                else:
+                    # Neither source supplied usage -- the profile did not merely go unrefreshed,
+                    # nothing was read about it at all -- so this is a GAP, not a success. That is
+                    # the same rule `--live` already follows when ITS live read comes up empty; a
+                    # cache that also has nothing to say may not quietly turn that into exit 0.
+                    # `state`/`records`/`code` are left exactly as the live read set them above
+                    # (GAP, [], the live code) so the ordinary machinery below -- the candidate
+                    # note, the NOT-checked warning, the exit status -- fires unchanged; only the
+                    # note text is replaced, naming BOTH failures instead of just the live one.
+                    notes.append(f"{where}: the live read did not answer -- {detail}; the"
+                                 f" on-disk cache had nothing to fall back on -- {cached_code}")
             if code:
                 # A candidate-level outcome has no pool to hang a row on, so it becomes a note.
                 # It still decides the exit status below, exactly as before.
@@ -1739,7 +1747,7 @@ def main(argv: list[str] | None = None) -> int:
                 warnings.append(f"{group} {where}: NOT checked -- {detail}")
 
     codex_examined = any(candidate.gap == "" for candidate in codex)
-    _render(groups, notes, now, paint, live=args.live, codex_examined=codex_examined)
+    _render(groups, notes, now, paint, codex_examined=codex_examined)
 
     if warnings:
         print(paint("\nwarnings", RED))
