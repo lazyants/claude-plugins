@@ -550,14 +550,21 @@ with tempfile.TemporaryDirectory() as tmp:
                       "--claude-profile", str(empty / ".claudeB"),
                       "--claude-profile", str(empty / ".claudeC"),
                       "--codex-home", str(clean_codex)], root=empty)
-    check("7 absent cache is no-usage-cache, not 0%", "[no-usage-cache]" in done.stdout, done.stdout)
+    # A valid sentinel token (make_claude's default) means the live read is attempted and fails
+    # against the stub, and the cache then has no-usage-cache to offer either -- neither source
+    # answered, so this is now a GAP naming BOTH failures, not the cache's bracketed code alone.
+    check("7 absent cache combines with the failed live read into one gap, not 0%",
+          "the on-disk cache had nothing to fall back on -- no-usage-cache" in done.stdout,
+          done.stdout)
     check("8 the flag never renames the absence",
           "[no-subscription]" not in done.stdout, done.stdout)
-    check("9 all three profiles land in that one state",
-          done.stdout.count("[no-usage-cache]") == 3, done.stdout)
-    check("7/8 the absence state does not gap the run", done.returncode == 0,
-          f"rc={done.returncode}\n{done.stdout}")
-    check("7/8 and no warning is emitted for them", "warnings" not in done.stdout, done.stdout)
+    check("9 all three profiles land in that one combined state",
+          done.stdout.count("the on-disk cache had nothing to fall back on -- no-usage-cache")
+          == 3, done.stdout)
+    check("7/8 the absence state gaps the run now -- neither source supplied usage",
+          done.returncode == 1, f"rc={done.returncode}\n{done.stdout}")
+    check("7/8 and each profile is named in the warnings",
+          done.stdout.count("NOT checked -- http-error") == 3, done.stdout)
 
     # 10 / 11 -- the two container shapes.
     shapes = root / "shapes"
@@ -576,8 +583,12 @@ with tempfile.TemporaryDirectory() as tmp:
     # the vendor produces, since `session` and `weekly_all` ship beside it. Putting it back was a
     # substitution like any other: the report would print the pool it was told to hide and call
     # the run clean. It gaps instead, visibly.
+    # The live read fails first (http-error against the stub), so the final bracketed note
+    # carries THAT code; the cache's own payload-malformed now names the combined note instead.
     check("10 a profile whose only entry is the hidden pool gaps",
-          ".claudeD" in done.stdout and "[payload-malformed]" in done.stdout, done.stdout)
+          ".claudeD" in done.stdout
+          and "the on-disk cache had nothing to fall back on -- payload-malformed" in done.stdout,
+          done.stdout)
     check("10 and the hidden pool is not put back on the page",
           "Fable" not in done.stdout and "19%" not in done.stdout, done.stdout)
     # Matched on "(flat)" too, not just the candidate name: default mode's live-first read fails
@@ -603,8 +614,12 @@ with tempfile.TemporaryDirectory() as tmp:
         make_claude(box, ".claudeX", blob)
         done, _, _ = run(["--claude-profile", str(box / ".claudeX"),
                           "--codex-home", str(box / ".nope")])
+        # The live read fails first (http-error), so the bracketed candidate note carries THAT
+        # code now; the cache's payload-malformed names the combined note instead.
         check(f"12 container {label} -> payload-malformed",
-              done.stdout.count("[payload-malformed]") == 1, done.stdout)
+              done.stdout.count(
+                  "the on-disk cache had nothing to fall back on -- payload-malformed") == 1,
+              done.stdout)
         check(f"12 container {label} -> the CLAUDE candidate is what gapped",
               ".claudeX" in done.stdout.split("warnings")[-1], done.stdout)
 
@@ -735,8 +750,11 @@ with tempfile.TemporaryDirectory() as tmp:
     done, _, _ = run([], root=cred_root)
     check("16b a credentials-only profile is discovered",
           ".claudeCredOnly" in done.stdout, done.stdout)
+    # Live fails first (http-error), so no-usage-cache now names the combined note rather than
+    # standing alone as the candidate's own bracketed code.
     check("16b and reports no-usage-cache rather than vanishing",
-          "[no-usage-cache]" in done.stdout, done.stdout)
+          "the on-disk cache had nothing to fall back on -- no-usage-cache" in done.stdout,
+          done.stdout)
     assert_no_secret("16b credentials-only discovery", done.stdout, done.stderr)
 
     bare = root / "bare"
@@ -968,12 +986,18 @@ with tempfile.TemporaryDirectory() as tmp:
         make_claude(drift, ".claudeS", {"hasAvailableSubscription": junk})
         done, _, _ = run(["--claude-profile", str(drift / ".claudeS"),
                           "--codex-home", str(make_codex_home(drift, ".codexClean"))], root=drift)
-        check(f"27 flag {junk!r} still reads no-usage-cache", "[no-usage-cache]" in done.stdout,
+        # Live fails first (http-error, no cache read yet to consult), so no-usage-cache now
+        # names the combined note rather than the candidate's own bracketed code; and the run
+        # gaps -- neither source supplied usage -- where it used to read clean off the cache
+        # alone.
+        check(f"27 flag {junk!r} still reads no-usage-cache",
+              "the on-disk cache had nothing to fall back on -- no-usage-cache" in done.stdout,
               done.stdout)
         check(f"27 flag {junk!r} claims nothing about a subscription",
               "[no-subscription]" not in done.stdout and "[field-malformed]" not in done.stdout,
               done.stdout)
-        check(f"27 flag {junk!r} exits 0", done.returncode == 0, f"rc={done.returncode}")
+        check(f"27 flag {junk!r} gaps -- neither source answered", done.returncode == 1,
+              f"rc={done.returncode}")
 
     # 28 -- the coupon count is one of the things this report exists to print, so a response that
     # omits the container has not answered the question and must not print nothing and pass.
@@ -1891,8 +1915,12 @@ with tempfile.TemporaryDirectory() as tmp:
     make_claude(forged2, evil2, {"cachedUsageUtilization": []})      # gaps: payload-malformed
     done, _, _ = run(["--claude-profile", str(forged2 / evil2),
                       "--codex-home", str(make_codex_home(forged2, ".codexClean"))], root=forged2)
+    # The live read fails first (http-error), so the bracketed candidate note carries THAT code
+    # now; the cache's own payload-malformed names the combined note instead.
     check("39b the run gaps, so a warnings section is genuinely printed",
-          done.returncode == 1 and "[payload-malformed]" in done.stdout, done.stdout)
+          done.returncode == 1
+          and "the on-disk cache had nothing to fall back on -- payload-malformed" in done.stdout,
+          done.stdout)
     check("39b exactly ONE warnings heading exists -- the real one",
           done.stdout.count(chr(10) + "warnings") == 1, done.stdout)
     # Found by its line marker, NOT by splitting on the word "warnings": this name CONTAINS
@@ -2210,8 +2238,12 @@ with tempfile.TemporaryDirectory() as tmp:
     (unreadable / ".claude.json").write_text("{ not json", encoding="utf-8")
     done, _, _ = run(["--claude-profile", str(unreadable)], root=root)
     body = done.stdout.split("warnings")[0]
+    # No credential here, so the live read fails at keychain-denied before any cache is opened;
+    # the cache's own payload-malformed then names the combined note, not a bracketed code of
+    # its own.
     check("46 the candidate's diagnostic token reaches the report body, not just the warning",
-          "[payload-malformed]" in body, done.stdout)
+          "the on-disk cache had nothing to fall back on -- payload-malformed" in body,
+          done.stdout)
     check("46 and the run gaps", done.returncode == 1, f"rc={done.returncode}")
 
 # --- 47 -- column arithmetic is measured in terminal columns, not code points -------------------
@@ -2625,8 +2657,11 @@ with tempfile.TemporaryDirectory() as tmp:
     bare = make_claude(root, ".claudeBare", {"hasAvailableSubscription": False})
     done, _, _ = run(["--claude-profile", str(bare),
                       "--codex-home", str(root / ".codexSpent")], root=root)
+    # Live fails first (http-error), so no-usage-cache now names the combined note, and neither
+    # source answered -- the run gaps where it used to read clean off the cache alone.
     check("56 an absent cache under a false flag reads no-usage-cache",
-          "[no-usage-cache]" in done.stdout and done.returncode == 0, done.stdout)
+          "the on-disk cache had nothing to fall back on -- no-usage-cache" in done.stdout
+          and done.returncode == 1, done.stdout)
     check("56 and the report never claims the account is unsubscribed",
           "[no-subscription]" not in done.stdout, done.stdout)
 
@@ -3093,6 +3128,49 @@ with tempfile.TemporaryDirectory() as tmp:
           done_retry.https_requests == [], str(done_retry.https_requests))
     assert_no_secret("69 default-mode retry hint", done_retry.stdout, done_retry.stderr)
 
+# --- 70 / 71: #958, a live read AND a cache that both answer nothing is a GAP, not a quiet read
+# off the cache's own (absent) answer -------------------------------------------------------
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # A valid sentinel token (default) means the live read is attempted and fails against the
+    # unset stub; the cache has no `cachedUsageUtilization` key at all to fall back on either.
+    no_cache_profile = make_claude(root, ".claude958", {})
+    codex_958 = make_codex_home(root, ".codex958")
+    done_958, _, _ = run(["--claude-profile", str(no_cache_profile),
+                          "--codex-home", str(codex_958)], root=root)
+    check("70 neither source answering gaps the run",
+          done_958.returncode == 1, f"rc={done_958.returncode}\n{done_958.stdout}")
+    check("70 the warning names the live failure",
+          "NOT checked -- http-error" in done_958.stdout.split("warnings")[-1], done_958.stdout)
+    check("70 the combined note names the cache's own failure too",
+          "the on-disk cache had nothing to fall back on -- no-usage-cache" in done_958.stdout,
+          done_958.stdout)
+    check("70 no Claude usage row is printed for this profile",
+          not any(where == ".claude958" for where, _pool, _line in pool_rows(done_958.stdout)),
+          done_958.stdout)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    # No credential at all this time -- the live read fails at the token/keychain stage before
+    # any HTTPS attempt -- AND no cache either.
+    no_cred_no_cache = make_claude(root, ".claude958b", {}, token=False)
+    codex_958b = make_codex_home(root, ".codex958b")
+    done_958b, _, _ = run(["--claude-profile", str(no_cred_no_cache),
+                           "--codex-home", str(codex_958b)], root=root)
+    check("71 no credential and no cache still gaps the run",
+          done_958b.returncode == 1, f"rc={done_958b.returncode}\n{done_958b.stdout}")
+    tail_958b = done_958b.stdout.split("warnings")[-1]
+    check("71 the warning names the live-side failure",
+          "NOT checked -- token-absent" in tail_958b
+          or "NOT checked -- keychain-denied" in tail_958b, done_958b.stdout)
+    check("71 the combined note names the cache's own failure too",
+          "the on-disk cache had nothing to fall back on -- no-usage-cache" in done_958b.stdout,
+          done_958b.stdout)
+    check("71 no Claude usage row is printed for this profile",
+          not any(where == ".claude958b" for where, _pool, _line in pool_rows(done_958b.stdout)),
+          done_958b.stdout)
+
 # --- T0 - T5: #957, code-limits reads Claude Code live by default -------------------------------
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -3221,7 +3299,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 655
+MIN_CHECKS = 663
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

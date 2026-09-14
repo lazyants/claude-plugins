@@ -18,8 +18,9 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   cache past its reset still renders its `... ago` cells and the `[stale-after-reset]` legend when
   it is the fallback. `--live` is unchanged in meaning -- live only, never the cache -- but the
   footer hint that told a default-mode run to try `--live` is gone, since default mode now makes
-  that call itself. The test suite runs every script subprocess behind a network stub, so no case
-  in it can reach the real API.
+  that call itself. When the cache has nothing either, a profile that used to exit 0 with no
+  cache now reads `NOT checked` and the run exits 1, the same as `--live` gives it. The test suite
+  runs every script subprocess behind a network stub, so no case in it can reach the real API.
 
 ## [multi-profile-plugins 1.3.3] — 2026-09-06
 

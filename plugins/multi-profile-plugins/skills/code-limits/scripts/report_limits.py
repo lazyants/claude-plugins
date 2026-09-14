@@ -1701,9 +1701,10 @@ def main(argv: list[str] | None = None) -> int:
                 # usage back -- so a profile can be freshly authenticated and still be describing
                 # a window three days gone if this fallback did not exist.
                 #
-                # A live read that fails costs nothing: the cache is read exactly as the old
-                # default did, and a NOTE explains why -- deliberately not a warning, because
-                # default mode still read a value and reported it.
+                # A live read that fails costs nothing WHEN the cache has something to say: the
+                # cache is read exactly as the old default did, and a NOTE explains why --
+                # deliberately not a warning, because default mode still read a value and
+                # reported it.
                 #
                 # Assigned directly rather than merged: a row comes from ONE read, whole -- gaps
                 # included. Merging the two per window looked strictly better and was worse: with
@@ -1711,16 +1712,30 @@ def main(argv: list[str] | None = None) -> int:
                 # row rendered a CACHED figure under the live provenance its first cell carried --
                 # a stale number labelled `api`, no note, exit 0. The `not records` guard above is
                 # exactly the condition under which the live read produced nothing to prefer, so
-                # what follows is always the cache's own triple, whole.
+                # what follows -- when the cache answers -- is always the cache's own triple,
+                # whole.
                 #
                 # Only the cached reader takes the run's clock here: it dates the row from a file
                 # written before the run, where the live readers elsewhere in this loop time-stamp
                 # their own observation, because a keychain prompt or a stalled app-server can put
                 # minutes between run start and the answer they are describing.
                 detail = _with_hint(code) or "the backend returned nothing to read"
-                notes.append(f"{where}: the live read did not answer -- {detail}")
-                state, records, code = _examine(
+                cached_state, cached_records, cached_code = _examine(
                     candidate, lambda profile: _claude_cached(profile, now))
+                if cached_records:
+                    notes.append(f"{where}: the live read did not answer -- {detail}")
+                    state, records, code = cached_state, cached_records, cached_code
+                else:
+                    # Neither source supplied usage -- the profile did not merely go unrefreshed,
+                    # nothing was read about it at all -- so this is a GAP, not a success. That is
+                    # the same rule `--live` already follows when ITS live read comes up empty; a
+                    # cache that also has nothing to say may not quietly turn that into exit 0.
+                    # `state`/`records`/`code` are left exactly as the live read set them above
+                    # (GAP, [], the live code) so the ordinary machinery below -- the candidate
+                    # note, the NOT-checked warning, the exit status -- fires unchanged; only the
+                    # note text is replaced, naming BOTH failures instead of just the live one.
+                    notes.append(f"{where}: the live read did not answer -- {detail}; the"
+                                 f" on-disk cache had nothing to fall back on -- {cached_code}")
             if code:
                 # A candidate-level outcome has no pool to hang a row on, so it becomes a note.
                 # It still decides the exit status below, exactly as before.

@@ -111,7 +111,12 @@ still renders its `... ago` cells and the `[stale-after-reset]` legend when it i
 that rendering did not change. A row comes from ONE read, whole, whichever source answered. The
 `SOURCE` column says which happened: `api` for a row the live read answered, a cache age for one
 that fell back. A fallback row also carries a note, `"<profile>: the live read did not answer --
-<reason>"`, naming why the page is showing a cached figure at all. Merging the two per window
+<reason>"`, naming why the page is showing a cached figure at all. When the cache read also has
+nothing -- no `cachedUsageUtilization` at all, `no-usage-cache` -- the profile is no longer a clean
+run: it follows the same rule `--live` follows, gapping with the live read's diagnostic, a
+`NOT checked` warning, and exit 1, with one note naming both failures -- `"<profile>: the live
+read did not answer -- <reason>; the on-disk cache had nothing to fall back on -- <cache
+reason>"`. Merging the two per window
 looked strictly better and was worse -- a live gap suppressed by a cached cell left nothing to gap
 the run, and the row rendered a cached figure under the live provenance its first cell carried.
 
@@ -168,7 +173,9 @@ profile, with its diagnostic code. Under `--live` that gap is the whole answer: 
 back to the cache, because a live run that quietly degraded would print exactly what a successful
 one prints, so a failed `--live` read renders a `NOT checked` warning and the run exits 1. In
 default mode the same failure instead sends that profile on to the cache read described above,
-with the failure's diagnostic code folded into the fallback note rather than into a warning.
+with the failure's diagnostic code folded into the fallback note rather than into a warning --
+unless that cache read also has nothing, in which case default mode gaps the profile too, with
+the same `NOT checked` warning and exit 1 `--live` would have given it.
 
 ## What the report touches
 
