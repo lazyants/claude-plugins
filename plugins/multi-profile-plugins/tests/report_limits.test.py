@@ -236,13 +236,26 @@ def stub_network(root: Path, env: dict) -> tuple[Path, Path]:
     marker = root / "https-loaded.txt"
     log = root / "https-log.jsonl"
     for path in (marker, log):
-        if path.exists():
-            path.unlink()
+        path.unlink(missing_ok=True)
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(sitedir) + (os.pathsep + existing if existing else "")
     env["STUB_HTTPS_LOADED"] = str(marker)
     env["STUB_HTTPS_LOG"] = str(log)
     return marker, log
+
+
+def require_stub_loaded(marker_lines: list[str], argv: list) -> None:
+    """Raise LOUDLY if the report script's own interpreter did not load the HTTPS stub.
+
+    Not a `check()`: a `check()` failure is recorded and the suite carries on running every case
+    after it, each one a further subprocess that may -- unstubbed -- reach the real
+    api.anthropic.com. This is the one place that would happen, so it stops the run outright
+    rather than let a broken stub burn through the rest of the suite silently offline or not.
+    """
+    if str(SCRIPT) not in marker_lines:
+        raise RuntimeError(
+            f"the HTTPS stub did not load in the report script's own interpreter for "
+            f"{argv!r} -- marker held {marker_lines!r}")
 
 
 def voucher_band(stdout: str) -> list[str]:
@@ -463,14 +476,7 @@ def run(args, root: Any = None, stub_mode="ok", stub_result=None, timeout=90,
     done.https_requests = ([json.loads(line) for line in
                             https_log.read_text(encoding="utf-8").splitlines() if line.strip()]
                            if https_log.exists() else [])
-    # LOUD, not a `check()`: a `check()` failure is recorded and the suite carries on running
-    # every case after it, each one a further subprocess that may -- unstubbed -- reach the real
-    # api.anthropic.com. This is the ONE place that would happen, so it stops the run outright
-    # rather than let a broken stub burn through the rest of the suite silently offline or not.
-    if str(SCRIPT) not in done.https_marker:
-        raise RuntimeError(
-            f"the HTTPS stub did not load in the report script's own interpreter for "
-            f"{[sys.executable, str(SCRIPT)] + args} -- marker held {done.https_marker!r}")
+    require_stub_loaded(done.https_marker, [sys.executable, str(SCRIPT)] + args)
     RENDERED_TOKENS.update(re.findall(r"\[([a-z-]+)\]", done.stdout))
     return done, record, transcript
 
@@ -580,7 +586,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # table row.
     flat = [ln for ln in done.stdout.splitlines() if ".claudeE" in ln and "(flat)" in ln]
     check("11 the flat fallback says which container shape answered",
-          len(flat) == 1 and "(flat)" in flat[0], str(flat))
+          len(flat) == 1, str(flat))
     check("11 and reports both of its windows on that one row",
           bool(flat) and "11%" in flat[0] and "22%" in flat[0], str(flat))
 
@@ -2087,9 +2093,12 @@ with tempfile.TemporaryDirectory() as tmp:
     os.close(controller)
     seen = b"".join(seen_chunks)
     check("42 auto AT A TERMINAL turns colour on", b"\x1b[" in seen, repr(seen[:200]))
-    check("42 the HTTPS stub loaded in this spawn too",
-          pty_marker.exists() and str(SCRIPT) in pty_marker.read_text(encoding="utf-8"),
-          pty_marker.read_text(encoding="utf-8") if pty_marker.exists() else "no marker written")
+    # Aborts rather than a soft check, consistent with `run()` -- this spawn also plants a valid
+    # sentinel bearer and could otherwise reach the real network unstubbed.
+    pty_marker_lines = (pty_marker.read_text(encoding="utf-8").splitlines()
+                        if pty_marker.exists() else [])
+    require_stub_loaded(pty_marker_lines,
+                        [sys.executable, str(SCRIPT), "--claude-profile", str(coloured)])
 
     env["NO_COLOR"] = "1"
     done_no, _, _ = run(["--claude-profile", str(coloured)], root=root,
@@ -2818,30 +2827,6 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # --- 62 -- the three fixes a mutation could still have reverted unnoticed ----------------------
 
-# Fix 1, the refresh rule. `_refreshed` is exercised directly here for its two building-block
-# cases, and end-to-end through main() by T1/T2/T4 below (now reachable via the subprocess HTTPS
-# stub): whatever the live read produced is the answer whenever it produced anything, and the
-# cache answers only when it produced nothing. Restoring a per-window merge would have to change
-# both the direct cases and the T1/T2/T4 assertions running through the real script.
-cached_two = [R.Record("session", R.NO_CURRENT, percent=88.0, freshness="cache 3d00h old",
-                       diagnostic="stale-after-reset", family="all", window="5h"),
-              R.Record("weekly_all", R.REPORTED, percent=40.0, freshness="cache 3d00h old",
-                       family="all", window="weekly")]
-live_partial = [R.Record("session", R.REPORTED, percent=2.0, freshness="live now",
-                         family="all", window="5h"),
-                R.Record("weekly_all", R.GAP, diagnostic="field-malformed",
-                         family="all", window="weekly")]
-state, records, code = R._refreshed((R.GAP, live_partial, ""), (R.NO_CURRENT, cached_two, ""))
-check("62 a live read that produced anything answers the row, whole",
-      records == live_partial and state == R.GAP, str([r.name for r in records]))
-check("62 so no cached cell can survive beside a live one",
-      not any(r.freshness.startswith("cache") for r in records),
-      str([r.freshness for r in records]))
-state, records, code = R._refreshed((R.GAP, [], "token-expired"),
-                                   (R.NO_CURRENT, cached_two, ""))
-check("62 while a live read that produced nothing leaves the cache untouched",
-      records == cached_two and state == R.NO_CURRENT and code == "", str(state))
-
 # Fix 3, the removed collision machinery, rests on one property: the selector yields AT MOST one
 # pool. Two ids can only ever share a label if that is false, so the property is what to pin.
 WIN = {"usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1}
@@ -3119,9 +3104,11 @@ with tempfile.TemporaryDirectory() as tmp:
     t0_codex = make_codex_home(root, ".codexT0")
     done_t0, _, _ = run(["--claude-profile", str(t0_claude), "--codex-home", str(t0_codex)],
                         root=root)
-    check("T0 the HTTPS stub loaded in the report script's OWN interpreter",
-          str(SCRIPT) in done_t0.https_marker, str(done_t0.https_marker))
-    check("T0 a nested fixture interpreter loaded it too, so the match above is not vacuous",
+    # `run()` already raised loudly if the report script's OWN interpreter had not loaded the
+    # stub, so that half needs no check here. What is worth pinning is that a NESTED fixture
+    # interpreter loaded it too -- proof the marker is not trivially satisfied by the one line
+    # `run()` requires.
+    check("T0 a nested fixture interpreter loaded the stub too",
           len(done_t0.https_marker) > 1, str(done_t0.https_marker))
     check("T0 no HTTPS request was made -- this profile never reached the network at all",
           done_t0.https_requests == [], str(done_t0.https_requests))
@@ -3182,9 +3169,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
-    # A live read carrying one valid window and one malformed one -- states `_refreshed`'s rule
-    # through main() rather than only by a direct call: a live read that produced ANYTHING is the
-    # row, gaps included, and the cache is never even consulted.
+    # A live read carrying one valid window and one malformed one, through main(): a live read
+    # that produced ANYTHING is the row, gaps included, and the cache is never even consulted.
     t4_profile = make_claude(root, ".claudeT4", cached(
         entries=[entry(kind="weekly_all", percent=0, resets=iso(48))]))
     t4_codex = make_codex_home(root, ".codexT4")
@@ -3235,7 +3221,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 660
+MIN_CHECKS = 655
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

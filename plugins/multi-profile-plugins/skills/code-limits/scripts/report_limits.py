@@ -1638,23 +1638,6 @@ def _render(groups: list[tuple[str, str, str, list[Record]]], notes: list[str],
                     DIM))
 
 
-def _refreshed(live: tuple[str, list[Record], str], cached: tuple[str, list[Record], str]):
-    """Which of the two reads answers this candidate, as one decision in one place.
-
-    A row comes from ONE read, whole -- gaps included. Merging the two per window looked strictly
-    better and was worse: with a live gap suppressed by a cached cell, nothing was left to gap the
-    run, and the row rendered a CACHED figure under the live provenance its first cell carried. A
-    stale number labelled `api`, no note, exit 0. So whatever the live read produced is the answer
-    whenever it produced anything at all, and the cache answers only when it produced nothing.
-
-    A function rather than three lines inline because six interleaved positionals could not be
-    read at a call site without the signature open beside it, and because a rule stated in one
-    place is a rule that cannot quietly drift between its call sites -- there are two of them
-    now, the live-first default and the direct unit checks below.
-    """
-    return live if live[1] else cached
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Report Claude Code and Codex usage limits.")
     parser.add_argument("--live", action="store_true",
@@ -1690,11 +1673,7 @@ def main(argv: list[str] | None = None) -> int:
     notes: list[str] = []
     groups: list[tuple[str, str, str, list[Record]]] = []
 
-    # Only the cached reader takes the run's clock: it dates rows from a file that was
-    # written before the run. The live readers time-stamp their own observation, because
-    # a keychain prompt or a stalled app-server can put minutes between run start and the
-    # answer they are describing.
-    for group, candidates, producer, refresh in (
+    for group, candidates, producer, cache_fallback in (
         (CLAUDE_GROUP, claude, _claude_live, not args.live),
         (CODEX_GROUP, codex, _codex_records, False),
     ):
@@ -1708,7 +1687,7 @@ def main(argv: list[str] | None = None) -> int:
         for candidate in candidates:
             state, records, code = _examine(candidate, producer)
             where = _safe_name(candidate.path.name)
-            if refresh and not records and not candidate.gap:
+            if cache_fallback and not records and not candidate.gap:
                 # The live read is the DEFAULT read now, tried for every candidate before the
                 # cache is even opened -- so this is not a retry, it is the first read failing.
                 # A candidate whose PATH is what is wrong (`candidate.gap`) is excluded: the
@@ -1725,12 +1704,23 @@ def main(argv: list[str] | None = None) -> int:
                 # A live read that fails costs nothing: the cache is read exactly as the old
                 # default did, and a NOTE explains why -- deliberately not a warning, because
                 # default mode still read a value and reported it.
-                cached_state, cached_records, cached_code = _examine(
-                    candidate, lambda profile: _claude_cached(profile, now))
+                #
+                # Assigned directly rather than merged: a row comes from ONE read, whole -- gaps
+                # included. Merging the two per window looked strictly better and was worse: with
+                # a live gap suppressed by a cached cell, nothing was left to gap the run, and the
+                # row rendered a CACHED figure under the live provenance its first cell carried --
+                # a stale number labelled `api`, no note, exit 0. The `not records` guard above is
+                # exactly the condition under which the live read produced nothing to prefer, so
+                # what follows is always the cache's own triple, whole.
+                #
+                # Only the cached reader takes the run's clock here: it dates the row from a file
+                # written before the run, where the live readers elsewhere in this loop time-stamp
+                # their own observation, because a keychain prompt or a stalled app-server can put
+                # minutes between run start and the answer they are describing.
                 detail = _with_hint(code) or "the backend returned nothing to read"
                 notes.append(f"{where}: the live read did not answer -- {detail}")
-                state, records, code = _refreshed((state, records, code),
-                                                  (cached_state, cached_records, cached_code))
+                state, records, code = _examine(
+                    candidate, lambda profile: _claude_cached(profile, now))
             if code:
                 # A candidate-level outcome has no pool to hang a row on, so it becomes a note.
                 # It still decides the exit status below, exactly as before.
