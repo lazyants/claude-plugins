@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Lazy Ants Claude Code plugins",
-    "version": "1.6.0"
+    "version": "1.7.0"
   },
   "plugins": [
     {
@@ -155,6 +155,28 @@
         "marketplace",
         "diagnostics",
         "profiles"
+      ]
+    },
+    {
+      "name": "codebase-migrator",
+      "source": "./plugins/codebase-migrator",
+      "description": "Migrate a legacy Python codebase to a new target package one unit at a time, behind a strangler seam, with every port gated by a differential test against the legacy code itself. Codex proposes interesting inputs, the legacy code is executed to record what they should produce, codex ports and reviews each unit, and deterministic gates accept a port only when its return values, errors, argument and receiver mutations, output streams, persistent-state effects and call route all match - replayed in two deliberately different environments so a hidden dependency on the clock, randomness, hash order or time zone shows up. Frozen symbol registry, resumable ledger, and a write boundary that confines every model-authored write. Experimental 0.1: Python to Python only; the honest proof is a real pilot migration.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Lazy Ants"
+      },
+      "category": "development",
+      "keywords": [
+        "claude-code",
+        "codex",
+        "migration",
+        "legacy",
+        "modernization",
+        "strangler-fig",
+        "differential-testing",
+        "golden-master",
+        "refactoring",
+        "python"
       ]
     }
   ]

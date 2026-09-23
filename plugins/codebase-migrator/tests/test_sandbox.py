@@ -1,0 +1,531 @@
+"""Tests for sandbox.py -- the write-boundary dispatcher (plan sections 4.10, 7, owner D)."""
+
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+import cm_common
+import inventory
+import sandbox
+
+TESTS_DIR = Path(__file__).resolve().parent
+FIXTURES_DIR = TESTS_DIR / "fixtures"
+FAKE_CODEX = TESTS_DIR / "fakes" / "fake_codex.py"
+
+
+def _shop_cfg(root: Path) -> dict:
+    return {
+        "schema": 1,
+        "source_stack": "python",
+        "target_stack": "python",
+        "legacy_root": str(root / "legacy"),
+        "legacy_package": "shop",
+        "target_root": str(root / "target"),
+        "target_package": "shop2",
+        "fidelity_policy": "bug_for_bug",
+        "seam": "in_process",
+        "unit_granularity": "file",
+        "naming_policy": "preserve",
+        "net_source": "generated_golden_master",
+        "dead_code_policy": "port",
+        "coverage_floor_pct": 0,
+        "max_fix_rounds": 3,
+        "codex_bin": "codex",
+    }
+
+
+def _build_shop_root(root: Path) -> dict:
+    """Same fixture root as test_unit_gate.py. Returns the config as
+    `cm_common.load_config()` itself loads and validates it -- an existing
+    target_root is not a validation problem (fixed by A), so a root built
+    here is safe to load more than once, exactly like the real pipeline."""
+    shutil.copytree(FIXTURES_DIR / "legacy" / "shop", root / "legacy" / "shop")
+    cfg = _shop_cfg(root)
+    (root / "migration.json").write_text(json.dumps(cfg), encoding="utf-8")
+    (root / "conventions.md").write_text("Plain functions, preserve names.\n", encoding="utf-8")
+    for d in ("cases", "nets", "runs"):
+        (root / d).mkdir(parents=True, exist_ok=True)
+
+    inv = inventory.build_inventory(root, cfg)
+    cm_common.atomic_write_json(root / "inventory.json", inv)
+
+    registry = json.loads((FIXTURES_DIR / "registry.shop.json").read_text(encoding="utf-8"))
+    lock_rows = {
+        row["source"]: {"row": row, "digest": cm_common.sha256_json(row)}
+        for row in registry["rows"]
+    }
+    cm_common.atomic_write_json(root / "registry.lock.json", {"schema": 1, "rows": lock_rows})
+    return cm_common.load_config(root)
+
+
+@pytest.fixture
+def shop_root(work_root):
+    cfg = _build_shop_root(work_root)
+    return work_root, cfg
+
+
+def _install_good_port(cfg: dict) -> None:
+    target_root = Path(cfg["target_root"])
+    shutil.copytree(FIXTURES_DIR / "ports" / "good" / "shop2", target_root / "shop2")
+
+
+def _freeze_net(root: Path, cfg: dict, unit: str) -> None:
+    """Enough of a netted state for `ledger.eligible(unit)` to return no
+    reasons: a frozen net.lock.json entry whose digests match real files on
+    disk and whose legacy_closure_sha256 matches the current legacy tree."""
+    inv = json.loads((root / "inventory.json").read_text(encoding="utf-8"))
+    closure = cm_common.unit_closure(inv, unit)
+    legacy_root = Path(cfg["legacy_root"])
+    live_digests = cm_common.closure_digests(legacy_root, cfg["legacy_package"], closure)
+    legacy_closure_sha256 = cm_common.sha256_json(live_digests)
+
+    cases_path = root / "cases" / f"{unit}.json"
+    shutil.copyfile(FIXTURES_DIR / "cases" / f"{unit}.json", cases_path)
+    kept = len(json.loads(cases_path.read_text(encoding="utf-8"))["cases"])
+
+    nets_path = root / "nets" / f"{unit}.json"
+    cm_common.atomic_write_json(
+        nets_path, {"schema": 1, "unit": unit, "legacy_closure": live_digests, "observations": []}
+    )
+
+    net_lock_path = root / "net.lock.json"
+    net_lock = (
+        json.loads(net_lock_path.read_text(encoding="utf-8"))
+        if net_lock_path.is_file()
+        else {"schema": 1, "units": {}}
+    )
+    net_lock["units"][unit] = {
+        "net_sha256": cm_common.sha256_file(nets_path),
+        "cases_sha256": cm_common.sha256_file(cases_path),
+        "legacy_closure_sha256": legacy_closure_sha256,
+        "coverage_pct": 100,
+        "kept": kept,
+        "dropped": {},
+        "skipped_dropped_symbol": [],
+        "deterministic": True,
+        "stateful": False,
+    }
+    cm_common.atomic_write_json(net_lock_path, net_lock)
+
+
+def _record_probe(root: Path, monkeypatch, result: str = "denied") -> None:
+    monkeypatch.setenv("CM_CODEX_BIN", str(FAKE_CODEX))
+    version = sandbox._codex_version(str(FAKE_CODEX))
+    cm_common.atomic_write_json(
+        root / "runs" / "sandbox_probe.json",
+        {"schema": 1, "codex_version": version, "result": result, "at": "2026-01-01T00:00:00+00:00", "attempts": {}},
+    )
+
+
+def _use_fake(monkeypatch, scenario: str, **extra) -> None:
+    monkeypatch.setenv("CM_CODEX_BIN", str(FAKE_CODEX))
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", scenario)
+    for k, v in extra.items():
+        monkeypatch.setenv(k, v)
+
+
+# --- probe ---------------------------------------------------------------------
+
+
+def test_probe_denied_from_ground_truth_files(shop_root, monkeypatch):
+    root, cfg = shop_root
+    _use_fake(monkeypatch, "probe_denied")
+
+    code = sandbox.cmd_probe(root, cfg)
+
+    assert code == cm_common.EXIT_OK
+    record = json.loads((root / "runs" / "sandbox_probe.json").read_text(encoding="utf-8"))
+    assert record["result"] == "denied"
+    assert record["codex_version"] == "fake-codex 0.0.0-test"
+    # the canaries were removed afterward regardless of verdict
+    assert not (root / "runs" / ".cm_canary").exists()
+    assert not (Path(cfg["legacy_root"]) / ".cm_canary").exists()
+    assert not (Path(cfg["target_root"]) / ".cm_canary").exists()
+
+
+def test_probe_not_exercised_when_the_script_never_ran(shop_root, monkeypatch):
+    root, cfg = shop_root
+    _use_fake(monkeypatch, "probe_not_exercised")
+
+    code = sandbox.cmd_probe(root, cfg)
+
+    assert code == cm_common.EXIT_FAIL
+    record = json.loads((root / "runs" / "sandbox_probe.json").read_text(encoding="utf-8"))
+    assert record["result"] == "NOT_EXERCISED"
+
+
+def test_probe_not_denied_when_a_canary_is_overwritten(shop_root, monkeypatch):
+    root, cfg = shop_root
+    _use_fake(monkeypatch, "probe_not_denied")
+
+    code = sandbox.cmd_probe(root, cfg)
+
+    assert code == cm_common.EXIT_FAIL
+    record = json.loads((root / "runs" / "sandbox_probe.json").read_text(encoding="utf-8"))
+    assert record["result"] == "NOT_DENIED"
+
+
+def test_probe_argv_includes_ephemeral(shop_root, monkeypatch, tmp_path):
+    root, cfg = shop_root
+    log_path = tmp_path / "argv.json"
+    _use_fake(monkeypatch, "probe_denied", FAKE_CODEX_ARGV_LOG=str(log_path))
+
+    sandbox.cmd_probe(root, cfg)
+
+    argv = json.loads(log_path.read_text(encoding="utf-8"))
+    assert argv[0] == "exec"
+    assert "--ephemeral" in argv
+    assert argv[-1] == "-"
+
+
+# --- dispatch preconditions ------------------------------------------------------
+
+
+def test_dispatch_refuses_without_a_probe_record(shop_root, monkeypatch):
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _use_fake(monkeypatch, "port_ok")
+
+    with pytest.raises(SystemExit) as exc:
+        sandbox.cmd_dispatch(root, cfg, "shop.pricing", "port", 1)
+    assert exc.value.code == cm_common.EXIT_FAIL
+
+
+def test_dispatch_refuses_with_a_probe_from_another_codex_version(shop_root, monkeypatch):
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    monkeypatch.setenv("CM_CODEX_BIN", str(FAKE_CODEX))
+    cm_common.atomic_write_json(
+        root / "runs" / "sandbox_probe.json",
+        {"schema": 1, "codex_version": "some-other-codex-1.0", "result": "denied", "at": "x", "attempts": {}},
+    )
+    _use_fake(monkeypatch, "port_ok")
+
+    with pytest.raises(SystemExit) as exc:
+        sandbox.cmd_dispatch(root, cfg, "shop.pricing", "port", 1)
+    assert exc.value.code == cm_common.EXIT_FAIL
+
+
+@pytest.mark.parametrize("bad_result", ["NOT_DENIED", "NOT_EXERCISED"])
+def test_dispatch_refuses_with_a_non_denied_probe(shop_root, monkeypatch, bad_result):
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch, result=bad_result)
+    _use_fake(monkeypatch, "port_ok")
+
+    with pytest.raises(SystemExit) as exc:
+        sandbox.cmd_dispatch(root, cfg, "shop.pricing", "port", 1)
+    assert exc.value.code == cm_common.EXIT_FAIL
+
+
+# --- dispatch: port / fix promotion ------------------------------------------------
+
+
+def test_port_dispatch_promotes_target_only_and_lists_ignored_outputs(shop_root, monkeypatch, capsys):
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    port_text = (FIXTURES_DIR / "ports" / "good" / "shop2" / "pricing.py").read_text(encoding="utf-8")
+    _use_fake(monkeypatch, "port_extra_ignored", FAKE_CODEX_TARGET_PY=port_text)
+
+    code = sandbox.cmd_dispatch(root, cfg, "shop.pricing", "port", 1)
+
+    assert code == cm_common.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["promoted"] == ["out/target.py"]
+    assert out["ignored_outputs"] == ["out/notes.txt"]
+    assert out["tampered"] == []
+
+    target_path = cm_common.target_file(root, cfg, "shop.pricing")
+    assert target_path.read_text(encoding="utf-8") == port_text
+
+
+def test_dispatch_detects_a_write_into_the_durable_root_and_promotes_nothing(shop_root, monkeypatch, capsys):
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    tamper_target = Path(cfg["legacy_root"]) / "shop" / "money.py"
+    original = tamper_target.read_text(encoding="utf-8")
+    _use_fake(monkeypatch, "tamper_outside", FAKE_CODEX_TAMPER_PATH=str(tamper_target))
+
+    try:
+        with pytest.raises(SystemExit) as exc:
+            sandbox.cmd_dispatch(root, cfg, "shop.pricing", "port", 1)
+        assert exc.value.code == cm_common.EXIT_FAIL
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["ok"] is False
+        assert "legacy/shop/money.py" in out["tampered"]
+
+        target_path = cm_common.target_file(root, cfg, "shop.pricing")
+        assert not target_path.exists()
+    finally:
+        tamper_target.write_text(original, encoding="utf-8")
+
+
+def test_port_dispatch_refuses_a_symlinked_output(shop_root, monkeypatch):
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    _use_fake(monkeypatch, "port_symlink")
+
+    with pytest.raises(SystemExit) as exc:
+        sandbox.cmd_dispatch(root, cfg, "shop.pricing", "port", 1)
+    assert exc.value.code == cm_common.EXIT_FAIL
+
+    target_path = cm_common.target_file(root, cfg, "shop.pricing")
+    assert not target_path.exists()
+
+
+def test_fix_dispatch_refuses_with_an_unadjudicated_finding(shop_root, monkeypatch):
+    root, cfg = shop_root
+    _install_good_port(cfg)
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+
+    run_dir = cm_common.unit_run_dir(root, "shop.pricing")
+    finding = {
+        "rule": "idiom", "severity": "minor", "location": "shop2.pricing:describe",
+        "issue": "uses print directly", "suggestion": "use the target logging convention",
+    }
+    finding["digest"] = cm_common.sha256_json(finding)
+    target_sha256 = cm_common.sha256_file(cm_common.target_file(root, cfg, "shop.pricing"))
+    review_doc = {"schema": 1, "round": 1, "target_sha256": target_sha256, "findings": [finding], "malformed": []}
+    cm_common.atomic_write_json(run_dir / "review.r1.json", review_doc)
+    # deliberately neither admitted nor refused
+
+    _use_fake(monkeypatch, "fix_ok")
+    with pytest.raises(SystemExit) as exc:
+        sandbox.cmd_dispatch(root, cfg, "shop.pricing", "fix", 1)
+    assert exc.value.code == cm_common.EXIT_FAIL
+
+
+# --- dispatch: review promotion ---------------------------------------------------
+
+
+def test_review_dispatch_keeps_valid_findings_and_records_malformed_verbatim(shop_root, monkeypatch, capsys):
+    root, cfg = shop_root
+    _install_good_port(cfg)
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    payload = json.dumps(
+        {
+            "findings": [
+                {
+                    "rule": "idiom", "severity": "minor", "location": "shop2.pricing:apply_discount",
+                    "issue": "docstring missing", "suggestion": "add one",
+                },
+                {
+                    "rule": "error-path", "severity": "major", "location": "shop2.pricing:dedupe",
+                    "issue": "mutates its argument silently", "suggestion": "document it",
+                },
+                # missing "issue" and "suggestion" -- malformed
+                {"rule": "resource", "severity": "minor", "location": "shop2.pricing:describe"},
+            ]
+        }
+    )
+    _use_fake(monkeypatch, "review_json", FAKE_CODEX_REVIEW_JSON=payload)
+
+    code = sandbox.cmd_dispatch(root, cfg, "shop.pricing", "review", 1)
+
+    assert code == cm_common.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["malformed_findings"] == [
+        {"rule": "resource", "severity": "minor", "location": "shop2.pricing:describe"}
+    ]
+
+    review_doc = json.loads((root / "runs" / "shop.pricing" / "review.r1.json").read_text(encoding="utf-8"))
+    assert len(review_doc["findings"]) == 2
+    assert all("digest" in f for f in review_doc["findings"])
+    assert review_doc["malformed"] == [
+        {"rule": "resource", "severity": "minor", "location": "shop2.pricing:describe"}
+    ]
+
+
+def test_review_prose_around_json_is_recorded_as_malformed(shop_root, monkeypatch, capsys):
+    root, cfg = shop_root
+    _install_good_port(cfg)
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    payload = json.dumps({"findings": []})
+    _use_fake(monkeypatch, "review_prose", FAKE_CODEX_REVIEW_JSON=payload)
+
+    code = sandbox.cmd_dispatch(root, cfg, "shop.pricing", "review", 1)
+
+    assert code == cm_common.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["malformed_findings"] == ["<message not a single JSON object>"]
+
+    review_doc = json.loads((root / "runs" / "shop.pricing" / "review.r1.json").read_text(encoding="utf-8"))
+    assert review_doc["findings"] == []
+    assert review_doc["malformed"] == ["<message not a single JSON object>"]
+
+
+def test_review_empty_findings_is_a_valid_answer(shop_root, monkeypatch, capsys):
+    root, cfg = shop_root
+    _install_good_port(cfg)
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    _use_fake(monkeypatch, "review_empty")
+
+    code = sandbox.cmd_dispatch(root, cfg, "shop.pricing", "review", 1)
+
+    assert code == cm_common.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["malformed_findings"] == []
+    review_doc = json.loads((root / "runs" / "shop.pricing" / "review.r1.json").read_text(encoding="utf-8"))
+    assert review_doc["findings"] == []
+    assert review_doc["malformed"] == []
+
+
+# --- dispatch: cases promotion ----------------------------------------------------
+
+
+def test_cases_dispatch_merges_new_ids_only(shop_root, monkeypatch, capsys):
+    root, cfg = shop_root
+    _record_probe(root, monkeypatch)
+    existing = {"cases": [{"id": "p1", "call": "apply_discount", "args": [100, 10]}]}
+    cm_common.atomic_write_json(root / "cases" / "shop.pricing.json", existing)
+
+    payload = json.dumps(
+        {
+            "cases": [
+                {"id": "p1", "call": "apply_discount", "args": [999, 999]},  # existing id: never replaced
+                {"id": "p9", "call": "apply_discount", "args": [50, 5]},  # new
+                {"id": "", "call": "apply_discount", "args": [1, 1]},  # invalid: empty id
+            ]
+        }
+    )
+    _use_fake(monkeypatch, "cases_json", FAKE_CODEX_CASES_JSON=payload)
+
+    code = sandbox.cmd_dispatch(root, cfg, "shop.pricing", "cases", 1)
+
+    assert code == cm_common.EXIT_OK
+    merged = json.loads((root / "cases" / "shop.pricing.json").read_text(encoding="utf-8"))
+    ids = [c["id"] for c in merged["cases"]]
+    assert ids == ["p1", "p9"]
+    assert merged["cases"][0]["args"] == [100, 10]
+
+    out = json.loads(capsys.readouterr().out)
+    assert any("invalid case" in item for item in out["ignored_outputs"])
+
+
+# --- argv shape and rendered prompts -----------------------------------------------
+
+
+def test_dispatch_argv_matches_the_pinned_shape(shop_root, monkeypatch, tmp_path):
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    log_path = tmp_path / "argv.json"
+    _use_fake(monkeypatch, "port_ok", FAKE_CODEX_ARGV_LOG=str(log_path))
+
+    sandbox.cmd_dispatch(root, cfg, "shop.pricing", "port", 1)
+
+    argv = json.loads(log_path.read_text(encoding="utf-8"))
+    assert argv[0] == "exec"
+    assert argv[1] == "-s"
+    assert argv[2] == "workspace-write"
+    assert argv[3] == "-C"
+    assert argv[5] == "--skip-git-repo-check"
+    assert argv[-3] == "-o"
+    assert argv[-1] == "-"
+    assert "--ephemeral" not in argv
+
+
+def test_review_dispatch_uses_read_only_mode(shop_root, monkeypatch, tmp_path):
+    root, cfg = shop_root
+    _install_good_port(cfg)
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    log_path = tmp_path / "argv.json"
+    _use_fake(monkeypatch, "review_empty", FAKE_CODEX_ARGV_LOG=str(log_path))
+
+    sandbox.cmd_dispatch(root, cfg, "shop.pricing", "review", 1)
+
+    argv = json.loads(log_path.read_text(encoding="utf-8"))
+    assert argv[2] == "read-only"
+
+
+def test_render_template_names_the_single_write_target_and_marks_inputs_read_only():
+    templates_dir = cm_common.plugin_root() / "skills" / "codebase-migrator" / "assets" / "templates"
+
+    port_prompt = sandbox.render_template(templates_dir / "port_TASK.md", "shop.pricing", "shop2.pricing", 1)
+    assert "out/target.py" in port_prompt
+    assert "shop2.pricing" in port_prompt
+    assert "non-authoritative" in port_prompt.lower()
+    assert "{{" not in port_prompt
+
+    fix_prompt = sandbox.render_template(templates_dir / "fix_TASK.md", "shop.pricing", "shop2.pricing", 2)
+    assert "out/target.py" in fix_prompt
+    assert "round 2" in fix_prompt.lower()
+    assert "{{" not in fix_prompt
+
+    review_prompt = sandbox.render_template(templates_dir / "review_TASK.md", "shop.pricing", "shop2.pricing", 3)
+    assert "your one write target" in review_prompt.lower()
+    assert "none" in review_prompt.lower()
+    assert "round 3" in review_prompt.lower()
+    assert "{{" not in review_prompt
+
+    cases_prompt = sandbox.render_template(templates_dir / "cases_TASK.md", "shop.pricing", "shop2.pricing", 1)
+    assert "out/cases.json" in cases_prompt
+    assert "{{" not in cases_prompt
+
+
+def test_render_template_raises_on_an_unreplaced_placeholder(tmp_path):
+    bad = tmp_path / "bad.md"
+    bad.write_text("Hello {{UNIT}} and {{SOMETHING_ELSE}}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        sandbox.render_template(bad, "shop.pricing", "shop2.pricing", 1)
+
+
+def test_digests_reports_a_stable_count_and_hash(shop_root):
+    root, cfg = shop_root
+    first = sandbox.cmd_digests
+    import io
+    import contextlib
+
+    def _run():
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = first(root, cfg)
+        return code, json.loads(buf.getvalue())
+
+    code_a, out_a = _run()
+    code_b, out_b = _run()
+    assert code_a == cm_common.EXIT_OK == code_b
+    assert out_a == out_b
+    assert out_a["count"] >= 0
+
+
+def test_cli_main_probe_then_dispatch_across_two_invocations_on_the_same_root(shop_root, monkeypatch):
+    """`sandbox.py probe` creates target_root as a side effect (mkdir). A
+    second CLI-level call against the same root -- `dispatch`, a separate
+    `main()` invocation and so a fresh `cm_common.load_config()` -- used to
+    be refused by migration_validate.py before A's fix, which used to treat
+    an existing target_root as invalid config. This is the exact shape that
+    fix was needed for."""
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _use_fake(monkeypatch, "probe_denied")
+
+    monkeypatch.setattr("sys.argv", ["sandbox.py", "probe", "--root", str(root)])
+    code_probe = sandbox.main()
+    assert code_probe == cm_common.EXIT_OK
+    assert Path(cfg["target_root"]).is_dir()  # probe's own mkdir side effect
+
+    port_text = (FIXTURES_DIR / "ports" / "good" / "shop2" / "pricing.py").read_text(encoding="utf-8")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "port_ok")
+    monkeypatch.setenv("FAKE_CODEX_TARGET_PY", port_text)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["sandbox.py", "dispatch", "--root", str(root), "--unit", "shop.pricing", "--kind", "port", "--round", "1"],
+    )
+    code_dispatch = sandbox.main()
+    assert code_dispatch == cm_common.EXIT_OK
+
+    target_path = cm_common.target_file(root, cfg, "shop.pricing")
+    assert target_path.read_text(encoding="utf-8") == port_text

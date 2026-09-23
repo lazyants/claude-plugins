@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "rows": [
+    {
+      "source": "shop.money:round_money",
+      "cardinality": "one_to_one",
+      "entry": "shop2.money:round_money",
+      "targets": ["shop2.money:round_money"],
+      "reason": null
+    },
+    {
+      "source": "shop.money:to_cents",
+      "cardinality": "one_to_one",
+      "entry": "shop2.money:to_cents",
+      "targets": ["shop2.money:to_cents"],
+      "reason": null
+    },
+    {
+      "source": "shop.pricing:PricingError",
+      "cardinality": "one_to_one",
+      "entry": "shop2.pricing:PricingError",
+      "targets": ["shop2.pricing:PricingError"],
+      "reason": null
+    },
+    {
+      "source": "shop.pricing:apply_discount",
+      "cardinality": "one_to_one",
+      "entry": "shop2.pricing:apply_discount",
+      "targets": ["shop2.pricing:apply_discount"],
+      "reason": null
+    },
+    {
+      "source": "shop.pricing:normalize_items",
+      "cardinality": "one_to_one",
+      "entry": "shop2.pricing:normalize_items",
+      "targets": ["shop2.pricing:normalize_items"],
+      "reason": null
+    },
+    {
+      "source": "shop.pricing:dedupe",
+      "cardinality": "one_to_one",
+      "entry": "shop2.pricing:dedupe",
+      "targets": ["shop2.pricing:dedupe"],
+      "reason": null
+    },
+    {
+      "source": "shop.pricing:describe",
+      "cardinality": "one_to_one",
+      "entry": "shop2.pricing:describe",
+      "targets": ["shop2.pricing:describe"],
+      "reason": null
+    },
+    {
+      "source": "shop.cart:Cart",
+      "cardinality": "one_to_one",
+      "entry": "shop2.cart:Cart",
+      "targets": ["shop2.cart:Cart"],
+      "reason": null
+    }
+  ]
+}
