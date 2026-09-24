@@ -1,8 +1,0 @@
-{
-  "schema": 1,
-  "cases": [
-    {"id": "m1", "call": "round_money", "args": [2.345]},
-    {"id": "m2", "call": "to_cents", "args": [1.5]},
-    {"id": "m3", "call": "to_cents", "args": [-1]}
-  ]
-}
