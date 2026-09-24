@@ -640,3 +640,34 @@ def test_export_via_cli(work_root):
     code, payload = run_cli(["--root", str(root), "--locale", "de", "--dry-run"])
     assert code == 0, payload
     assert payload["exported"] == 1
+
+
+def test_export_refuses_when_an_untouched_declared_file_changes_after_the_backups(work_root, monkeypatch):
+    """The declared files are checked once before the backups and the journal
+    are written, and again right before the first replace; an edit to a file
+    this export does not replace (the source catalog) in between is caught by
+    the second check, and nothing is replaced."""
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                  make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+    de_path = project_dir / "locales" / "de.json"
+    en_path = project_dir / "locales" / "en.json"
+    de_before = de_path.read_bytes()
+
+    real_write_json = export_values.lz_common.atomic_write_json
+
+    def write_then_edit_source(path, obj):
+        real_write_json(path, obj)
+        if Path(path).name == "journal.json" and not getattr(write_then_edit_source, "done", False):
+            write_then_edit_source.done = True
+            en_path.write_text(en_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+
+    monkeypatch.setattr(export_values.lz_common, "atomic_write_json", write_then_edit_source)
+
+    try:
+        export_values.do_export(root, "de", dry_run=False)
+        raise AssertionError("expected export to refuse")
+    except SystemExit as exc:
+        assert exc.code == lz_common.EXIT_FAIL
+    assert write_then_edit_source.done
+    assert de_path.read_bytes() == de_before

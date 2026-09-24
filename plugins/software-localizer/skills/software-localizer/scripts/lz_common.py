@@ -629,7 +629,7 @@ def load_messages(path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _tree_digests(base: Path, exclude_dirs=(".git", "__pycache__", "node_modules")) -> dict:
+def _tree_digests(base: Path, exclude_dirs=(".git", "__pycache__")) -> dict:
     """`relpath (posix) -> sha256` for every file under `base`, sorted walk.
     A symlink (file or directory) is recorded as `"symlink:<target>"` and,
     for a directory, is not descended into."""

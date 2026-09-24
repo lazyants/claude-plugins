@@ -951,3 +951,21 @@ def test_cli_bad_argument_via_subprocess_prints_one_json_line(work_root):
     assert len(lines) == 1
     payload = json.loads(lines[0])
     assert payload["ok"] is False
+
+
+def test_require_accepted_adapter_fails_when_a_dependency_in_code_dir_node_modules_changes(work_root, tmp_path):
+    # An adapter's own installed dependencies live in code_dir/node_modules and
+    # can change what `parse` or `export` does, so they are adapter code too.
+    code_dir = tmp_path / "adapter_src"
+    (code_dir / "node_modules" / "dep").mkdir(parents=True)
+    (code_dir / "adapter.mjs").write_text("import 'dep'\n", encoding="utf-8")
+    dep = code_dir / "node_modules" / "dep" / "index.js"
+    dep.write_text("v1", encoding="utf-8")
+    cfg = {"adapter": {"argv": ["node", str(code_dir / "adapter.mjs")], "code_dir": str(code_dir), "options": {}}}
+    lz_common.atomic_write_json(work_root / "adapter.lock.json", lz_common.adapter_digest(work_root, cfg))
+    lz_common.require_accepted_adapter(work_root, cfg)
+
+    dep.write_text("v2", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc_info:
+        lz_common.require_accepted_adapter(work_root, cfg)
+    assert exc_info.value.code == lz_common.EXIT_FAIL

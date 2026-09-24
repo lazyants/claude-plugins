@@ -374,6 +374,12 @@ def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, tem
         lz_common.atomic_write_json(journal_path, journal)
 
     try:
+        # Again right before the first replace: backups and the journal were
+        # written in between, and a declared file this export does not
+        # replace (a source catalog) is not re-checked by the per-file guard.
+        stale = _stale_declared_files(live_messages, project_root, staging_sha256)
+        if stale:
+            raise RuntimeError("files changed on disk during the export: " + ", ".join(stale))
         for meta in files_meta:
             if meta["kind"] != "project":
                 continue
