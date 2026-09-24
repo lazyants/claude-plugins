@@ -24,7 +24,7 @@ def _read_optional(path: Path):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = cm_common.make_parser(prog="status.py", description="Read-only status report.")
     parser.add_argument("--root", required=True)
     args = parser.parse_args()
     root = cm_common.resolve_root(args.root)
@@ -36,21 +36,27 @@ def main() -> int:
     shims = _read_optional(root / "runs" / "shims.json")
     probe = _read_optional(root / "runs" / "sandbox_probe.json")
 
+    # `units` is the inventory's unit count -- the denominator for "N of
+    # units converged" -- not how many units the ledger happens to have
+    # touched yet (a unit can be fully discovered and still have no ledger
+    # entry at all until something first sets its state).
     units: object = "absent"
-    by_state: dict = {}
-    if ledger is not None:
-        ledger_units = ledger.get("units", {})
-        units = len(ledger_units)
-        for entry in ledger_units.values():
-            state = entry.get("state", "unknown")
-            by_state[state] = by_state.get(state, 0) + 1
-
     eligible: object = "absent"
     ineligible: object = "absent"
     if inventory is not None:
         inv_units = inventory.get("units", {})
+        units = len(inv_units)
         eligible = sum(1 for u in inv_units.values() if u.get("eligible"))
         ineligible = sum(1 for u in inv_units.values() if not u.get("eligible"))
+
+    in_ledger: object = "absent"
+    by_state: dict = {}
+    if ledger is not None:
+        ledger_units = ledger.get("units", {})
+        in_ledger = len(ledger_units)
+        for entry in ledger_units.values():
+            state = entry.get("state", "unknown")
+            by_state[state] = by_state.get(state, 0) + 1
 
     netted: object = "absent"
     if net_lock is not None:
@@ -75,6 +81,7 @@ def main() -> int:
     result = {
         "ok": True,
         "units": units,
+        "in_ledger": in_ledger,
         "by_state": by_state,
         "eligible": eligible,
         "ineligible": ineligible,
@@ -87,7 +94,7 @@ def main() -> int:
     }
 
     print("codebase-migrator status", file=sys.stderr)
-    print(f"  units: {units}", file=sys.stderr)
+    print(f"  units: {units}  in_ledger: {in_ledger}", file=sys.stderr)
     for state in sorted(by_state):
         print(f"    {state}: {by_state[state]}", file=sys.stderr)
     print(f"  eligible: {eligible}  ineligible: {ineligible}", file=sys.stderr)

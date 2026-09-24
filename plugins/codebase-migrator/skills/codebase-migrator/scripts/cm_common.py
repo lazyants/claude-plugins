@@ -8,6 +8,7 @@ no work at import time.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -91,6 +92,27 @@ def run_main(main: Callable[[], int]) -> NoReturn:
         fail(str(exc), EXIT_CANNOT)
     else:
         sys.exit(code)
+
+
+class _FailingArgumentParser(argparse.ArgumentParser):
+    """An `ArgumentParser` whose `error()` follows the plugin's failure
+    contract (one stdout JSON line, human detail on stderr, exit
+    `EXIT_CANNOT`) instead of argparse's default (usage text on stderr,
+    a bare `sys.exit(2)` with no JSON line at all)."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        fail(message, EXIT_CANNOT)
+
+
+def make_parser(prog: str, description: str = None) -> argparse.ArgumentParser:
+    """Build the top-level parser for a script, so a bad CLI argument still
+    emits exactly one JSON line before exiting.
+
+    `add_subparsers()` defaults its `parser_class` to `type(self)`, so every
+    subcommand parser created from the result of this function inherits the
+    same failure behaviour with no further wiring needed."""
+    return _FailingArgumentParser(prog=prog, description=description)
 
 
 def sha256_bytes(b: bytes) -> str:

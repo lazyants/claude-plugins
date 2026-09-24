@@ -5,7 +5,6 @@ every count to agree and every behavioural channel to match."""
 
 from __future__ import annotations
 
-import argparse
 import os
 import sys
 import tempfile
@@ -122,6 +121,23 @@ def _load_exceptions(root: Path, unit: str) -> dict:
     return {
         k[len(prefix):]: v for k, v in doc.get("cases", {}).items() if k.startswith(prefix)
     }
+
+
+def _no_op_exception_ids(exceptions: dict, net_doc: dict) -> list:
+    """Case ids whose declared `expected` does not differ from the legacy
+    observation on any declared channel — a no-op declaration lets a
+    target that never fixed the bug (still matches legacy) also match the
+    "expectation", so the check could never catch it."""
+    legacy_by_id = {o["case_id"]: o for o in net_doc.get("observations", [])}
+    no_op_ids = []
+    for case_id, entry in exceptions.items():
+        legacy_obs = legacy_by_id.get(case_id)
+        if legacy_obs is None:
+            continue  # an unknown/stale case id is not this check's job
+        expected_fields = entry.get("expected", {})
+        if not expected_fields or all(legacy_obs.get(ch) == v for ch, v in expected_fields.items()):
+            no_op_ids.append(case_id)
+    return sorted(no_op_ids)
 
 
 def _expected_for_case(case_id: str, legacy_obs: dict, exceptions: dict) -> dict:
@@ -264,35 +280,52 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
     calls_map = _build_calls_map(unit, replay_cases, lock_rows)
 
     exceptions = _load_exceptions(root, unit) if cfg.get("fidelity_policy") == "bug_for_bug_with_exceptions" else {}
+    if exceptions:
+        no_op_ids = _no_op_exception_ids(exceptions, net_doc)
+        if no_op_ids:
+            cm_common.fail(
+                f"{unit}: exceptions.json declares a no-op expectation (identical to legacy) for: "
+                + ", ".join(no_op_ids),
+                cm_common.EXIT_FAIL,
+                no_op_exception_ids=no_op_ids,
+            )
 
     before = cm_common.protected_digests(root, cfg)
     target_module_name = cm_common.target_module(cfg, unit)
     target_rel = "target/" + _staged_rel(root, cfg, unit, "target").as_posix()
 
     runs = {}
-    with tempfile.TemporaryDirectory(prefix="cm-stage-") as tmp:
-        for env in ("A", "B"):
-            stage = Path(tmp) / f"stage-{env}"
-            stage.mkdir(parents=True, exist_ok=True)
-            staged = observe.stage_trees(root, cfg, stage)
-            preload = [
-                m
-                for m in inventory.import_closure(staged["target"], cfg["target_package"], target_module_name)
-                if m != target_module_name
-            ]
-            job = {
-                "mode": "replay",
-                "env": env,
-                "preload": preload,
-                "stage_root": str(stage),
-                "sys_path": [str(staged["target"]), str(staged["legacy"])],
-                "module": target_module_name,
-                "calls": calls_map,
-                "cases": replay_cases,
-                "trace_file": None,
-            }
-            runs[env] = observe.run_harness(job, stage=stage)
+    harness_exc: Exception | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="cm-stage-") as tmp:
+            for env in ("A", "B"):
+                stage = Path(tmp) / f"stage-{env}"
+                stage.mkdir(parents=True, exist_ok=True)
+                staged = observe.stage_trees(root, cfg, stage)
+                preload = [
+                    m
+                    for m in inventory.import_closure(staged["target"], cfg["target_package"], target_module_name)
+                    if m != target_module_name
+                ]
+                job = {
+                    "mode": "replay",
+                    "env": env,
+                    "preload": preload,
+                    "stage_root": str(stage),
+                    "sys_path": [str(staged["target"]), str(staged["legacy"])],
+                    "module": target_module_name,
+                    "calls": calls_map,
+                    "cases": replay_cases,
+                    "trace_file": None,
+                }
+                runs[env] = observe.run_harness(job, stage=stage)
+    except Exception as exc:  # noqa: BLE001 - reported below, after the tamper check
+        harness_exc = exc
 
+    # The tamper check must run even when the harness itself failed
+    # (HarnessFailure, a stage_trees I/O error, ...): a run that tampers
+    # with a protected file and then crashes must still be caught, not
+    # silently skipped because the crash unwound past this check.
     after = cm_common.protected_digests(root, cfg)
     changed = cm_common.diff_digests(before, after)
     if changed:
@@ -301,6 +334,8 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
             cm_common.EXIT_FAIL,
             tampered=changed,
         )
+    if harness_exc is not None:
+        cm_common.fail(f"replay harness failed: {harness_exc}", cm_common.EXIT_CANNOT)
 
     eval_a = _evaluate_run(runs["A"], unit, closure_units, known_units, target_rel)
     eval_b = _evaluate_run(runs["B"], unit, closure_units, known_units, target_rel)
@@ -393,7 +428,7 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = cm_common.make_parser(prog="diff_gate.py")
     parser.add_argument("--root", required=True)
     parser.add_argument("--unit", required=True)
     args = parser.parse_args()

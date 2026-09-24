@@ -120,6 +120,29 @@ def _install_port(root: Path, variant: str) -> None:
     shutil.copytree(PORTS_DIR / variant / "shop2", target, ignore=shutil.ignore_patterns("__pycache__"))
 
 
+def test_harness_failure_still_runs_the_tamper_check(work_root, monkeypatch, capsys):
+    """If `observe.run_harness` raises (HarnessFailure, a stage_trees I/O
+    error, ...) the after-run `protected_digests` check must still run —
+    the exception unwinding out of the replay loop must never skip it."""
+    cfg = _scaffold(work_root)
+    _capture_pricing(work_root, cfg)
+    _install_port(work_root, "good")
+
+    tamper_path = Path(cfg["legacy_root"]) / "shop" / "TAMPERED.txt"
+
+    def _fake_run_harness(job, stage, timeout_s=120):
+        tamper_path.write_text("unexpected")
+        raise diff_gate.observe.HarnessFailure("forced failure for test")
+
+    monkeypatch.setattr(diff_gate.observe, "run_harness", _fake_run_harness)
+
+    with pytest.raises(SystemExit) as exc:
+        diff_gate.run(work_root, cfg, "shop.pricing")
+    assert exc.value.code == cm_common.EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert any("TAMPERED.txt" in t for t in payload.get("tampered", []))
+
+
 # ---------------------------------------------------------------------------
 # The good port
 # ---------------------------------------------------------------------------
@@ -195,6 +218,20 @@ def test_ancestor_package_init_is_allowed_but_units_own_legacy_file_is_not(work_
     known_units = set(inv.get("units", {}).keys())
     closure_units = sorted(set(cm_common.unit_closure(inv, "shop.pricing")) - {"shop.pricing"})
     assert diff_gate._route_violations(route_files, "shop.pricing", closure_units, known_units) == []
+
+    # The discriminating half: the exemption is for a docstring-only
+    # ancestor's init specifically, not for "any __init__.py". A real,
+    # EXECUTABLE ancestor unit outside U's closure must still be flagged
+    # when reached (synthetic "shop.groupA" as if it were a genuine unit
+    # with real code — a nested package one level down from "shop", which
+    # this fixture tree does not itself have — since only its presence in
+    # `known_units`, not its actual file content, drives this check).
+    fake_known_units = known_units | {"shop.groupA"}
+    executable_ancestor_route = ["target/shop2/pricing.py", "legacy/shop/groupA/__init__.py"]
+    executable_ancestor_violations = diff_gate._route_violations(
+        executable_ancestor_route, "shop.pricing", closure_units, fake_known_units
+    )
+    assert any("outside the dependency closure" in v for v in executable_ancestor_violations)
 
     # And the negative half: a port that reaches its OWN legacy file is
     # still refused, whatever else is on the route.
@@ -421,3 +458,32 @@ def test_bug_for_bug_with_exceptions_rejects_a_case_matching_legacy(work_root):
     result = diff_gate.run(work_root, cfg, "shop.pricing")
     assert result["ok"] is False
     assert any(m["case_id"] == "p1" for m in result["mismatches"])
+
+
+def test_bug_for_bug_with_exceptions_rejects_a_no_op_declaration(work_root, capsys):
+    """A declared `expected` identical to the legacy observation is a no-op:
+    a target that never fixed the bug (still matches legacy) would also
+    match this "expectation" — must be refused before any replay runs."""
+    cfg = _scaffold(work_root)
+    cfg["fidelity_policy"] = "bug_for_bug_with_exceptions"
+    cm_common.atomic_write_json(work_root / "migration.json", cfg)
+    _capture_pricing(work_root, cfg)
+    _install_port(work_root, "good")
+
+    net_doc = cm_common.read_json(work_root / "nets" / "shop.pricing.json", "nets")
+    p1 = next(o for o in net_doc["observations"] if o["case_id"] == "p1")
+    assert p1["return"] == {"$float": "90.0"}
+
+    exceptions_doc = {
+        "schema": 1,
+        "cases": {
+            "shop.pricing/p1": {"expected": {"return": p1["return"]}, "reason": "test: no-op"}
+        },
+    }
+    cm_common.atomic_write_json(work_root / "exceptions.json", exceptions_doc)
+
+    with pytest.raises(SystemExit) as exc:
+        diff_gate.run(work_root, cfg, "shop.pricing")
+    assert exc.value.code == cm_common.EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert "p1" in payload.get("no_op_exception_ids", [])

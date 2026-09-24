@@ -277,6 +277,73 @@ def test_per_key_id_context_independent_of_module_load_order(tmp_path, make_modu
     assert post["zzz_untouched:X"] == before
 
 
+def test_state_snapshot_detects_mutation_through_module_level_bound_method(tmp_path, make_module):
+    """A receiver mutated only through a module-level bound method
+    (`_bump = Counter().bump`, the receiver itself never separately a
+    module attribute) used to be invisible: `types.MethodType` sits in
+    `_OPAQUE_TYPES`, so it encoded as `$unsupported` on every snapshot,
+    identically before and after."""
+    mod = make_module(
+        "legacy",
+        "sm_bound_method",
+        "class Counter:\n"
+        "    def __init__(self):\n"
+        "        self.n = 0\n\n"
+        "    def bump(self):\n"
+        "        self.n += 1\n"
+        "        return self.n\n\n\n"
+        "_bump = Counter().bump\n\n\n"
+        "def call_bump():\n"
+        "    return _bump()\n",
+    )
+    changes = _changes_after(tmp_path, mod.call_bump)
+    assert "sm_bound_method:_bump" in changes
+
+
+def test_state_snapshot_detects_mutation_through_builtin_bound_method(tmp_path, make_module):
+    """`_add = [].append`: the list is reachable only via the builtin
+    method's own referents, never as a separate module attribute."""
+    mod = make_module(
+        "legacy",
+        "sm_builtin_method",
+        "_add = [].append\n\n\ndef call_add(x):\n    return _add(x)\n",
+    )
+    changes = _changes_after(tmp_path, lambda: mod.call_add(1))
+    assert "sm_builtin_method:_add" in changes
+
+
+def test_state_snapshot_detects_mutation_through_functools_partial(tmp_path, make_module):
+    """`functools.partial`'s own `__dict__` is always empty (verified: a
+    fresh partial's `vars()` is `{}`) even though `hasattr(..., "__dict__")`
+    is True — its real state (func/args/keywords) is never in that dict, so
+    the old `hasattr(__dict__)` fallback would have silently encoded a
+    constant empty state regardless of what the bound mutable arg does."""
+    mod = make_module(
+        "legacy",
+        "sm_partial",
+        "import functools\n\n\n"
+        "def _accumulate(acc, x):\n"
+        "    acc.append(x)\n"
+        "    return acc\n\n\n"
+        "_bound_acc = functools.partial(_accumulate, [])\n\n\n"
+        "def call_partial(x):\n"
+        "    return _bound_acc(x)\n",
+    )
+    changes = _changes_after(tmp_path, lambda: mod.call_partial(1))
+    assert "sm_partial:_bound_acc" in changes
+
+
+def test_state_snapshot_reports_no_change_for_a_pure_call_through_generic_referents(tmp_path, make_module):
+    """The generic `gc.get_referents` fallback must not spuriously flag a
+    call that touches none of these values."""
+    mod = make_module(
+        "legacy",
+        "sm_ref_graph_pure",
+        "_add = [].append\n\n\ndef noop():\n    return 1\n",
+    )
+    assert _changes_after(tmp_path, mod.noop) == []
+
+
 # ---------------------------------------------------------------------------
 # Subprocess-level harness behaviour
 # ---------------------------------------------------------------------------

@@ -177,7 +177,12 @@ def _flip_net_lock_field(root, unit, field, value):
 
 def _write_target(root, cfg, unit, content=None):
     content = content or (
-        "def apply_discount(price, pct):\n    return round(price * (100 - pct) / 100, 2)\n"
+        # a real import of the dependency's target module, so
+        # inventory.import_closure (and cache_key's target_closure_sha256)
+        # actually discovers shop2.money -- matching the real `good` port
+        # fixture's own shape (plan section 5.4).
+        "from shop2.money import round_money\n\n\n"
+        "def apply_discount(price, pct):\n    return round_money(price * (100 - pct) / 100)\n"
     )
     target_path = cm_common.target_file(root, cfg, unit)
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -390,6 +395,43 @@ def test_converge_refuses_on_stale_r2_r3(work_root):
     assert exc.value.code == cm_common.EXIT_FAIL
 
 
+def test_converge_refuses_after_dependency_shim_replaced_by_port(work_root):
+    # U's own target file and the legacy-side key stay identical throughout;
+    # only its dependency's target file changes from a shim to a real port.
+    root, cfg = _make_fully_eligible(work_root)
+    _write_target(root, cfg, "shop.pricing")
+
+    money_target = cm_common.target_file(root, cfg, "shop.money")
+    money_target.parent.mkdir(parents=True, exist_ok=True)
+    money_target.write_text(
+        "# codebase-migrator: shim for shop.money\nfrom shop.money import round_money\n",
+        encoding="utf-8",
+    )
+
+    target_sha256, _ = _write_r2_r3(root, cfg, "shop.pricing")
+    _write_review(root, "shop.pricing", 1, findings=[], target_sha256=target_sha256)
+
+    # converge succeeds while the dependency is still a shim.
+    code = ledger.cmd_converge(root, cfg, types.SimpleNamespace(unit="shop.pricing"))
+    assert code == cm_common.EXIT_OK
+
+    # replace the shim with a real port -- different bytes, same module name.
+    money_target.write_text("def round_money(x):\n    return round(x, 2)\n", encoding="utf-8")
+
+    # the stored r2/r3 (key_sha256 computed while money was a shim) must now
+    # be refused: a fresh cache_key's target_closure_sha256 has moved, even
+    # though shop.pricing's own target file and legacy_closure_sha256 have not.
+    with pytest.raises(SystemExit) as exc:
+        ledger.cmd_converge(root, cfg, types.SimpleNamespace(unit="shop.pricing"))
+    assert exc.value.code == cm_common.EXIT_FAIL
+
+    # classify flips the already-converged unit to stale, naming the field.
+    ledger.cmd_classify(root, cfg, types.SimpleNamespace())
+    led = json.loads((root / "ledger.json").read_text(encoding="utf-8"))
+    assert led["units"]["shop.pricing"]["state"] == "stale"
+    assert "target_closure_sha256" in led["units"]["shop.pricing"]["reason"]
+
+
 def test_converge_refuses_on_unrefused_finding(work_root):
     root, cfg = _make_fully_eligible(work_root)
     _write_target(root, cfg, "shop.pricing")
@@ -600,3 +642,33 @@ def test_key_command_matches_cache_key_function(work_root, capsys):
     out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert out["cache_key"] == key
     assert out["key_sha256"] == cm_common.sha256_json(key)
+
+
+def test_plugin_sha256_hashes_only_py_files(work_root, monkeypatch):
+    # A comparison against cache_key() itself (as in the test above) cannot
+    # catch a regression that widens plugin_sha256 to non-.py files: both
+    # sides would drift together. Point cm_common.plugin_root() at a
+    # throwaway fake plugin tree instead, so a non-.py file can be added
+    # without touching the real scripts/ directory.
+    fake_plugin = work_root / "fake_plugin"
+    scripts_dir = fake_plugin / "skills" / "codebase-migrator" / "scripts"
+    templates_dir = fake_plugin / "skills" / "codebase-migrator" / "assets" / "templates"
+    scripts_dir.mkdir(parents=True)
+    templates_dir.mkdir(parents=True)
+    (scripts_dir / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (scripts_dir / "b.py").write_text("B = 2\n", encoding="utf-8")
+
+    monkeypatch.setattr(cm_common, "plugin_root", lambda: fake_plugin)
+
+    root, cfg = _make_fully_eligible(work_root)
+    key_before = ledger.cache_key(root, cfg, "shop.pricing")
+
+    (scripts_dir / "NOTES.txt").write_text("not python\n", encoding="utf-8")
+    key_after_non_py = ledger.cache_key(root, cfg, "shop.pricing")
+    assert key_after_non_py["plugin_sha256"] == key_before["plugin_sha256"]
+
+    # sanity: an actual .py addition DOES change it, so the assertion above
+    # is not vacuously true because nothing gets hashed at all.
+    (scripts_dir / "c.py").write_text("C = 3\n", encoding="utf-8")
+    key_after_py = ledger.cache_key(root, cfg, "shop.pricing")
+    assert key_after_py["plugin_sha256"] != key_before["plugin_sha256"]

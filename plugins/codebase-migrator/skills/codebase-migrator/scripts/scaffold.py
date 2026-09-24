@@ -60,7 +60,9 @@ def _check_legacy_root_overlap(resolved_root: Path, migration_path: Path) -> Non
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = cm_common.make_parser(
+        prog="scaffold.py", description="Create or resume a codebase-migrator durable root."
+    )
     parser.add_argument("--root", required=True)
     parser.add_argument("--adopt", action="store_true")
     args = parser.parse_args()

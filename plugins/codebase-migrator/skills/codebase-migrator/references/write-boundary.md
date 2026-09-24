@@ -67,7 +67,21 @@ from the stage is promoted**, and the attempt is still recorded in the unit's di
 `unit_gate.py`'s `protected_intact` check re-verifies the same digests independently, so
 prevention that is never re-checked is not trusted on its own. `sandbox.py digests --root R`
 prints the same digest map's own count and combined sha256 on demand, read-only, for a manual
-before/after comparison outside a dispatch. This backstop is only as strong
+before/after comparison outside a dispatch.
+
+**The digest check runs even when the process it is bracketing fails to finish cleanly.**
+`sandbox.py dispatch`'s codex subprocess call is wrapped so a timeout (`subprocess.TimeoutExpired`)
+or any other subprocess failure is caught, not re-raised, and the after-digest and tamper
+comparison run before that error is reported — a turn that writes outside the stage and then
+hangs must not go unchecked just because it also failed to finish; `subprocess.run`'s own timeout
+handling kills the child first, so anything it wrote before hanging is already on disk by the
+time the digests are taken. `net_capture.py` and `diff_gate.py` apply the identical pattern
+around the harness subprocess: if it raises for any reason, the tamper check still runs first,
+and only if nothing tampered is the harness failure itself reported (`EXIT_CANNOT`, "could not
+judge") — a tampering result always wins over a harness-crashed result when both are true. The
+dispatch timeout (1800s) is overridable by the test-only `CM_DISPATCH_TIMEOUT_S` environment
+variable, read only when set, so a test can force a short timeout without touching the real
+default. This backstop is only as strong
 as the protection of the digest store itself — which is exactly why `net.lock.json` and
 `registry.lock.json` sit inside the protected set, not beside it.
 
@@ -76,8 +90,9 @@ as the protection of the digest store itself — which is exactly why `net.lock.
 There is no way to edit a frozen row, a net, or a gate script from inside a dispatched turn.
 The only sanctioned changes are explicit operator-invoked commands that require the caller to
 state the current on-disk value before changing it and append the prior state to a history:
-`registry_validate.py --correct SOURCE --expect-digest D --reason TEXT` for a frozen row, and
-`ledger.py accept-drift --unit U --operator NAME --reason T` for a net whose legacy source moved
+`registry_validate.py --root R --correct SOURCE --expect-digest D --reason TEXT` for a frozen
+row, and `ledger.py accept-drift --root R --unit U --operator NAME --reason T` for a net whose
+legacy source moved
 (this also removes the unit from `net.lock.json`, forcing a re-capture — see
 `state-and-resume.md`). `--correct` validates the proposed row — every row rule and every global
 sharing rule in `registry.json`, not only the one row being corrected — **before** it touches

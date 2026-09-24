@@ -302,6 +302,39 @@ def test_dispatch_detects_a_write_into_the_durable_root_and_promotes_nothing(sho
         tamper_target.write_text(original, encoding="utf-8")
 
 
+def test_dispatch_still_reports_tamper_and_journals_when_codex_times_out(shop_root, monkeypatch):
+    """A codex turn that writes into the legacy tree and then hangs must
+    still be caught: the after-run tamper check and the journal entry must
+    not be skipped just because the subprocess call itself raised
+    TimeoutExpired."""
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    tamper_target = Path(cfg["legacy_root"]) / "shop" / "money.py"
+    original = tamper_target.read_text(encoding="utf-8")
+    monkeypatch.setenv("CM_DISPATCH_TIMEOUT_S", "1")
+    _use_fake(
+        monkeypatch, "tamper_then_hang",
+        FAKE_CODEX_TAMPER_PATH=str(tamper_target), FAKE_CODEX_HANG_SECONDS="5",
+    )
+
+    try:
+        with pytest.raises(SystemExit) as exc:
+            sandbox.cmd_dispatch(root, cfg, "shop.pricing", "port", 1)
+        assert exc.value.code == cm_common.EXIT_FAIL  # tamper wins over "codex unavailable"
+
+        run_dir = cm_common.unit_run_dir(root, "shop.pricing")
+        journal_lines = (run_dir / "journal.jsonl").read_text(encoding="utf-8").splitlines()
+        assert journal_lines  # the timeout no longer skips the journal entry
+        last_entry = json.loads(journal_lines[-1])
+        assert any("legacy/shop/money.py" in t for t in last_entry["tampered"])
+
+        target_path = cm_common.target_file(root, cfg, "shop.pricing")
+        assert not target_path.exists()
+    finally:
+        tamper_target.write_text(original, encoding="utf-8")
+
+
 def test_port_dispatch_refuses_a_symlinked_output(shop_root, monkeypatch):
     root, cfg = shop_root
     _freeze_net(root, cfg, "shop.pricing")
@@ -701,3 +734,25 @@ def test_sandbox_dispatch_as_a_real_subprocess_against_fake_codex(shop_root, mon
 
     target_path = cm_common.target_file(root, cfg, "shop.pricing")
     assert target_path.read_text(encoding="utf-8") == port_text
+
+
+def test_dispatch_cli_unknown_flag_emits_one_json_line_and_exits_2(shop_root):
+    """`cm_common.make_parser` (A): an argparse error still follows the
+    plugin's one-JSON-line-on-stdout contract instead of argparse's own bare
+    usage-text-and-exit-2 default."""
+    root, _cfg = shop_root
+
+    proc = subprocess.run(
+        [
+            sys.executable, str(SANDBOX_SCRIPT), "dispatch",
+            "--root", str(root), "--unit", "shop.pricing", "--kind", "port", "--bogus-flag",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert proc.returncode == cm_common.EXIT_CANNOT
+    stdout_lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    assert len(stdout_lines) == 1, proc.stdout
+    payload = json.loads(stdout_lines[0])
+    assert payload["ok"] is False
+    assert "error" in payload

@@ -8,7 +8,6 @@ behavioural difference, or coverage below the floor; otherwise writes
 
 from __future__ import annotations
 
-import argparse
 import os
 import sys
 import tempfile
@@ -215,34 +214,42 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
     captures = {}
     legacy_closure_units = sorted(set(closure_units) | {unit})
     legacy_closure: dict[str, str] = {}
-    with tempfile.TemporaryDirectory(prefix="cm-stage-") as tmp:
-        for env in ("A", "B"):
-            stage = Path(tmp) / f"stage-{env}"
-            stage.mkdir(parents=True, exist_ok=True)
-            staged = observe.stage_trees(root, cfg, stage)
-            trace_file = str(_staged_legacy_file(root, cfg, staged["legacy"], unit))
-            job = {
-                "mode": "capture",
-                "env": env,
-                "preload": closure_units,
-                "stage_root": str(stage),
-                "sys_path": [str(staged["legacy"])],
-                "module": unit,
-                "calls": calls_map,
-                "cases": kept_cases,
-                "trace_file": trace_file,
-            }
-            captures[env] = observe.run_harness(job, stage=stage)
-            if env == "A":
-                # The net is bound to the exact legacy bytes the capture
-                # actually executed (plan 4.7 step 11) — hash the staged
-                # copy here, before this `with` block tears it down, never
-                # the live legacy_root (which could differ if something
-                # else edits it between staging and this point).
-                legacy_closure = cm_common.closure_digests(
-                    staged["legacy"], cfg["legacy_package"], legacy_closure_units
-                )
+    harness_exc: Exception | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="cm-stage-") as tmp:
+            for env in ("A", "B"):
+                stage = Path(tmp) / f"stage-{env}"
+                stage.mkdir(parents=True, exist_ok=True)
+                staged = observe.stage_trees(root, cfg, stage)
+                trace_file = str(_staged_legacy_file(root, cfg, staged["legacy"], unit))
+                job = {
+                    "mode": "capture",
+                    "env": env,
+                    "preload": closure_units,
+                    "stage_root": str(stage),
+                    "sys_path": [str(staged["legacy"])],
+                    "module": unit,
+                    "calls": calls_map,
+                    "cases": kept_cases,
+                    "trace_file": trace_file,
+                }
+                captures[env] = observe.run_harness(job, stage=stage)
+                if env == "A":
+                    # The net is bound to the exact legacy bytes the capture
+                    # actually executed (plan 4.7 step 11) — hash the staged
+                    # copy here, before this `with` block tears it down, never
+                    # the live legacy_root (which could differ if something
+                    # else edits it between staging and this point).
+                    legacy_closure = cm_common.closure_digests(
+                        staged["legacy"], cfg["legacy_package"], legacy_closure_units
+                    )
+    except Exception as exc:  # noqa: BLE001 - reported below, after the tamper check
+        harness_exc = exc
 
+    # The tamper check must run even when the harness itself failed
+    # (HarnessFailure, a stage_trees I/O error, ...): a run that tampers
+    # with a protected file and then crashes must still be caught, not
+    # silently skipped because the crash unwound past this check.
     after = cm_common.protected_digests(root, cfg)
     changed = cm_common.diff_digests(before, after)
     if changed:
@@ -251,6 +258,8 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
             cm_common.EXIT_FAIL,
             tampered=changed,
         )
+    if harness_exc is not None:
+        _fail(root, unit, f"capture harness failed: {harness_exc}", cm_common.EXIT_CANNOT)
 
     obs_a = captures["A"]["observations"]
     obs_b = captures["B"]["observations"]
@@ -372,7 +381,7 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = cm_common.make_parser(prog="net_capture.py")
     parser.add_argument("--root", required=True)
     parser.add_argument("--unit", required=True)
     args = parser.parse_args()

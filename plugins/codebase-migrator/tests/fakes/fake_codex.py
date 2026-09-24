@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 VERSION_STRING = "fake-codex 0.0.0-test"
@@ -175,6 +176,19 @@ def run_dispatch_scenario(scenario: str, stage: Path, out_file: Path) -> None:
         content = os.environ.get("FAKE_CODEX_TARGET_PY", DEFAULT_PORT_PY)
         (out_dir / "target.py").write_text(content, encoding="utf-8")
         out_file.write_text("done", encoding="utf-8")
+        return
+
+    if scenario == "tamper_then_hang":
+        # Writes into the durable/legacy/target tree exactly like
+        # tamper_outside, then hangs well past a short injected timeout --
+        # for a test proving the caller still runs its after-run tamper
+        # check (and still journals the attempt) once its subprocess call
+        # times out, instead of skipping both because the call raised.
+        tamper_path = os.environ.get("FAKE_CODEX_TAMPER_PATH")
+        if not tamper_path:
+            fail("tamper_then_hang scenario needs FAKE_CODEX_TAMPER_PATH")
+        Path(tamper_path).write_text("tampered", encoding="utf-8")
+        time.sleep(float(os.environ.get("FAKE_CODEX_HANG_SECONDS", "5")))
         return
 
     if scenario == "review_empty":

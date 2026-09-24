@@ -193,7 +193,7 @@ def do_correct(root: Path, inventory: dict, cfg: dict, rows: list[dict], args: a
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = cm_common.make_parser(prog="registry_validate.py")
     parser.add_argument("--root", required=True)
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--units")

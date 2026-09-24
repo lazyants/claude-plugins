@@ -7,7 +7,6 @@ and target trees, never the model's own report of what it did.
 """
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import stat as stat_module
@@ -38,6 +37,19 @@ SANDBOX_MODE = {
 REQUIRED_FINDING_FIELDS = ("rule", "severity", "location", "issue", "suggestion")
 SEVERITIES = ("blocker", "major", "minor")
 DISPATCH_TIMEOUT_S = 1800
+
+
+def _dispatch_timeout_s() -> int:
+    """`DISPATCH_TIMEOUT_S`, overridable by `CM_DISPATCH_TIMEOUT_S` -- read
+    only when that env var is set, so a test can force a short timeout
+    without touching the real default."""
+    override = os.environ.get("CM_DISPATCH_TIMEOUT_S")
+    if override:
+        try:
+            return int(override)
+        except ValueError:
+            pass
+    return DISPATCH_TIMEOUT_S
 
 
 def _now_iso() -> str:
@@ -139,7 +151,7 @@ def cmd_probe(root: Path, cfg: dict) -> int:
         "--skip-git-repo-check", "--ephemeral", "-o", str(out_file), "-",
     ]
     try:
-        subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=DISPATCH_TIMEOUT_S)
+        subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=_dispatch_timeout_s())
     except (OSError, subprocess.SubprocessError) as exc:
         for canary in canaries:
             canary.unlink(missing_ok=True)
@@ -560,10 +572,18 @@ def cmd_dispatch(root: Path, cfg: dict, unit: str, kind: str, round_num: int) ->
     binpath = _codex_bin(cfg)
     mode = SANDBOX_MODE[kind]
     argv = [binpath, "exec", "-s", mode, "-C", str(stage), "--skip-git-repo-check", "-o", str(out_file), "-"]
+    codex_error = None
     try:
-        subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=DISPATCH_TIMEOUT_S)
+        subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=_dispatch_timeout_s())
     except (OSError, subprocess.SubprocessError) as exc:
-        cm_common.fail(f"codex binary unavailable for dispatch: {exc}", cm_common.EXIT_CANNOT)
+        # A timeout (subprocess.TimeoutExpired, a SubprocessError) or any
+        # other failure here must still be followed by the tamper check and
+        # the journal entry below: a turn that writes outside the stage and
+        # then hangs must not go unchecked just because it also failed to
+        # finish. `subprocess.run`'s own timeout handling kills the child
+        # first, so anything it wrote before hanging is already on disk by
+        # the time `after` is taken.
+        codex_error = exc
 
     after = cm_common.protected_digests(root, cfg)
     tampered = cm_common.diff_digests(before, after)
@@ -573,6 +593,9 @@ def cmd_dispatch(root: Path, cfg: dict, unit: str, kind: str, round_num: int) ->
             "dispatch tampered with a protected tree; nothing promoted", cm_common.EXIT_FAIL,
             tampered=tampered,
         )
+    if codex_error is not None:
+        _append_journal(run_dir, kind, round_num, stage, 1, [], [], [])
+        cm_common.fail(f"codex binary unavailable for dispatch: {codex_error}", cm_common.EXIT_CANNOT)
 
     malformed_findings: list = []
     if kind in ("port", "fix"):
@@ -600,7 +623,7 @@ def cmd_digests(root: Path, cfg: dict) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = cm_common.make_parser(prog="sandbox.py")
     sub = parser.add_subparsers(dest="command", required=True)
 
     probe_p = sub.add_parser("probe")

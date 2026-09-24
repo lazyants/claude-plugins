@@ -7,7 +7,6 @@ and calls it.
 """
 from __future__ import annotations
 
-import argparse
 import ast
 import io
 import json
@@ -291,7 +290,7 @@ def run_gate(root: Path, cfg: dict, unit: str) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = cm_common.make_parser(prog="unit_gate.py")
     parser.add_argument("--root", required=True)
     parser.add_argument("--unit", required=True)
     args = parser.parse_args()

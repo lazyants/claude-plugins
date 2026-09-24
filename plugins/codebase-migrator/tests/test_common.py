@@ -144,6 +144,48 @@ def test_unit_closure_includes_ancestor_package_units(work_root):
     assert digests_2["pkg.sub.mod"] == digests_1["pkg.sub.mod"]
 
 
+def test_make_parser_error_emits_one_json_line_exit_2(capsys):
+    parser = cm_common.make_parser(prog="test-prog", description="d")
+    parser.add_argument("--root", required=True)
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["--nonexistent-flag", "x"])
+    assert exc_info.value.code == cm_common.EXIT_CANNOT
+    out = capsys.readouterr().out
+    lines = [line for line in out.strip().splitlines() if line.strip()]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["ok"] is False
+
+
+def test_make_parser_subcommand_bad_flag_emits_one_json_line_exit_2(capsys):
+    # add_subparsers() defaults parser_class to type(self): a subcommand
+    # parser must inherit the same failure behaviour with no extra wiring.
+    parser = cm_common.make_parser(prog="test-prog", description="d")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("go")
+    p.add_argument("--unit", required=True)
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["go", "--nonexistent-flag", "x"])
+    assert exc_info.value.code == cm_common.EXIT_CANNOT
+    out = capsys.readouterr().out
+    lines = [line for line in out.strip().splitlines() if line.strip()]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["ok"] is False
+
+    # a missing required subcommand goes through the TOP-LEVEL parser's
+    # error(), which must behave the same way.
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args([])
+    assert exc_info.value.code == cm_common.EXIT_CANNOT
+    out = capsys.readouterr().out
+    lines = [line for line in out.strip().splitlines() if line.strip()]
+    assert len(lines) == 1
+    json.loads(lines[0])
+
+
 def test_require_unit_rejects_traversal_absolute_and_unknown(work_root, capsys):
     inventory = {"schema": 1, "units": {"shop.pricing": {}}}
     cm_common.atomic_write_json(work_root / "inventory.json", inventory)

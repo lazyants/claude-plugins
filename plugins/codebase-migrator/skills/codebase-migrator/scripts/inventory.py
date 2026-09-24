@@ -8,7 +8,6 @@ runtime by net_capture.py's state snapshot, never here.
 """
 from __future__ import annotations
 
-import argparse
 import ast
 import os
 import sys
@@ -33,6 +32,7 @@ _UNCONTROLLED_ENVIRON_PREFIX = "os.environ"
 _IO_EXACT = {"open"}
 _IO_PREFIXES = ("shutil.", "subprocess.", "socket.", "threading.", "urllib.", "http.", "logging.")
 _IO_OS_EXEMPT = {"os.path.join", "os.path.basename", "os.path.dirname", "os.path.splitext"}
+_IO_PATH_EXACT_METHODS = {"open", "touch", "rename", "replace", "rmdir", "symlink_to"}
 
 _DYNAMIC_EXACT_CALL = {
     "eval",
@@ -72,7 +72,7 @@ def _is_io(resolved: str) -> bool:
         return True
     if resolved.startswith("pathlib.Path."):
         tail = resolved.rsplit(".", 1)[-1]
-        if "write" in tail or "unlink" in tail or "mkdir" in tail or tail == "open":
+        if "write" in tail or "unlink" in tail or "mkdir" in tail or tail in _IO_PATH_EXACT_METHODS:
             return True
     return False
 
@@ -244,6 +244,17 @@ class _Walker(ast.NodeVisitor):
                 self.dynamic_call.append(f"setattr@{func}")
             elif resolved in _DYNAMIC_EXACT_CALL:
                 self.dynamic_call.append(f"{resolved}@{func}")
+        else:
+            # `_dotted` cannot see through a CALL receiver (e.g.
+            # `pathlib.Path(p).write_text(...)`, or aliased `Path(p)...`):
+            # resolve the constructor call's own func specifically, so the
+            # method name still gets checked as `pathlib.Path.<method>`.
+            if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Call):
+                ctor_resolved = self._resolve(node.func.value.func)
+                if ctor_resolved == "pathlib.Path":
+                    path_resolved = f"pathlib.Path.{node.func.attr}"
+                    if _is_io(path_resolved):
+                        self.io.append(f"call:{path_resolved}@{func}")
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -443,6 +454,13 @@ def _build_unit(unit: str, path: Path, package: str, units: dict[str, Path]) -> 
     info = analyze_module(source, unit, package, is_package=is_package)
     imports_units = sorted({c for c in info["imports"] if c in units and c != unit})
     imported_symbols: set[str] = set()
+    # Local names bound to a whole module-unit (not a specific symbol):
+    # `from pkg import M` or `import pkg.M as M` where pkg.M is itself a
+    # discovered unit. `from shop import money` then `money.round_money(x)`
+    # (no direct `from shop.money import round_money`) is exactly this
+    # shape: the import statement alone names no symbol, so every
+    # `M.name` attribute access anywhere in the file has to be walked too.
+    module_alias: dict[str, str] = {}
     resolve_unit = f"{unit}.__init__" if is_package else unit
     tree = ast.parse(source, filename=unit)
     for node in ast.walk(tree):
@@ -451,10 +469,34 @@ def _build_unit(unit: str, path: Path, package: str, units: dict[str, Path]) -> 
                 base = node.module
             else:
                 base = _resolve_relative(resolve_unit, package, node.level, node.module)
-            if base in units:
+            # Match against the package tree by NAME (as `_Walker.visit_ImportFrom`
+            # does for the "imports" field), never by `base in units`: the
+            # top-level package's own `__init__.py` is almost always trivial
+            # (docstring-only, not a discovered unit), and `from pkg import
+            # money` is exactly that shape. Requiring `base` itself to be a
+            # unit would silently skip every such import.
+            if base and (base == package or base.startswith(package + ".")):
                 for alias in node.names:
-                    if f"{base}.{alias.name}" not in units:
+                    target_unit = f"{base}.{alias.name}"
+                    if target_unit in units:
+                        module_alias[alias.asname or alias.name] = target_unit
+                    else:
                         imported_symbols.add(f"{base}:{alias.name}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname and alias.name in units:
+                    module_alias[alias.asname] = alias.name
+    if module_alias:
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.ctx, ast.Load)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in module_alias
+            ):
+                target_unit = module_alias[node.value.id]
+                if f"{target_unit}.{node.attr}" not in units:
+                    imported_symbols.add(f"{target_unit}:{node.attr}")
     flags = {
         "uncontrolled_input": info["uncontrolled_input"],
         "dynamic_call": info["dynamic_call"],
@@ -497,27 +539,27 @@ def build_inventory(root: Path, cfg: dict) -> dict:
         except SyntaxError as exc:
             cm_common.fail(f"failed to parse {path}: {exc}", cm_common.EXIT_FAIL, file=str(path))
 
-    # static eligibility over the transitive closure of imports_units
-    def _closure_eligible(unit: str, seen: set[str] | None = None) -> tuple[bool, list[str]]:
-        seen = seen or set()
-        row = unit_rows[unit]
-        if row["ineligible_reasons"]:
-            return False, list(row["ineligible_reasons"])
-        reasons: list[str] = []
-        for dep in row["imports_units"]:
-            if dep in seen:
-                continue
-            dep_ok, dep_reasons = _closure_eligible(dep, seen | {unit})
-            if not dep_ok:
-                reasons.append(f"ineligible dependency: {dep}")
-        return (len(reasons) == 0), reasons
+    # Static eligibility over `cm_common.unit_closure`: unit plus its
+    # transitive imports_units AND every ancestor package of any of those
+    # that is itself an executable unit. Importing a module always runs its
+    # ancestor packages' __init__.py first, so an ancestor unit with a flag
+    # is exactly as disqualifying as an explicit import of a flagged
+    # dependency. `unit_closure` is already fully transitive, and each
+    # member's OWN flags (immutable, set once above) are what we check —
+    # never a row's `ineligible_reasons`, which this very loop is about to
+    # rewrite, so checking it would make the result depend on dict iteration
+    # order.
+    def _own_flags(row: dict) -> list[str]:
+        return list(row["flags"]["uncontrolled_input"]) + list(row["flags"]["io"]) + list(row["flags"]["dynamic_call"])
 
+    inventory_so_far = {"units": unit_rows}
     for unit, row in unit_rows.items():
-        own_reasons = list(row["ineligible_reasons"])
-        for dep in row["imports_units"]:
-            dep_ok, _ = _closure_eligible(dep)
-            if not dep_ok:
-                own_reasons.append(f"ineligible dependency: {dep}")
+        own_reasons = _own_flags(row)
+        for other in cm_common.unit_closure(inventory_so_far, unit):
+            if other == unit:
+                continue
+            if _own_flags(unit_rows[other]):
+                own_reasons.append(f"ineligible dependency: {other}")
         row["eligible"] = len(own_reasons) == 0
         row["ineligible_reasons"] = own_reasons
 
@@ -542,7 +584,7 @@ def build_inventory(root: Path, cfg: dict) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = cm_common.make_parser(prog="inventory.py")
     parser.add_argument("--root", required=True)
     args = parser.parse_args()
 

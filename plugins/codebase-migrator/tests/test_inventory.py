@@ -160,6 +160,33 @@ def test_zero_units_exits_1(tmp_path):
     assert payload["ok"] is False
 
 
+def test_static_eligibility_propagates_through_executable_ancestor_package(tmp_path):
+    # Importing "pkgz.mod" always runs pkgz/__init__.py first. If that
+    # ancestor package is itself an executable unit with a flag (review
+    # round 2, finding 2), "pkgz.mod" must be ineligible too, naming the
+    # ancestor — even though pkgz.mod itself has zero flags and no explicit
+    # import of "pkgz" in its own imports_units.
+    root = tmp_path / "root"
+    root.mkdir()
+    legacy = tmp_path / "legacy"
+    pkgz = legacy / "pkgz"
+    pkgz.mkdir(parents=True)
+    (pkgz / "__init__.py").write_text(
+        "import os\n\nVALUE = os.environ.get('X')\n", encoding="utf-8"
+    )
+    (pkgz / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    _write_migration_json(root, legacy, "pkgz", root / "target")
+
+    code, payload, stderr = _run("inventory.py", "--root", str(root))
+    assert code == 0, stderr
+    data = json.loads((root / "inventory.json").read_text(encoding="utf-8"))
+    assert data["units"]["pkgz"]["eligible"] is False
+    mod_row = data["units"]["pkgz.mod"]
+    assert mod_row["imports_units"] == []  # no explicit import of the ancestor
+    assert mod_row["eligible"] is False
+    assert "ineligible dependency: pkgz" in mod_row["ineligible_reasons"]
+
+
 # --- analyze_module: flag detection -----------------------------------------
 
 
@@ -227,6 +254,45 @@ def test_io_flag_on_open_call():
     )
     info = inventory.analyze_module(source, "pkg.mod", "pkg")
     assert "call:open@f" in info["io"]
+
+
+def test_pathlib_path_constructor_chain_flagged_on_unexercised_branch():
+    # `_dotted` cannot see through a CALL receiver, so `Path(p).write_text`
+    # needs its own resolution path (review round 2, finding 1). The write
+    # sits behind an `if` branch that never runs (flag is False) — this is
+    # static analysis, so the flag must fire regardless of which branch a
+    # real execution would take.
+    source = (
+        "from pathlib import Path\n\n"
+        "def f(p, flag):\n"
+        "    if flag:\n"
+        "        Path(p).write_text('x')\n"
+        "    else:\n"
+        "        return None\n"
+    )
+    info = inventory.analyze_module(source, "pkg.mod", "pkg")
+    assert "call:pathlib.Path.write_text@f" in info["io"]
+
+
+def test_pathlib_path_constructor_chain_other_write_methods_and_forms():
+    source = (
+        "import pathlib\n"
+        "from pathlib import Path\n\n"
+        "def g(p):\n"
+        "    pathlib.Path(p).unlink()\n\n"
+        "def h(p):\n"
+        "    return Path(p).rmdir()\n\n"
+        "def i(p):\n"
+        "    return Path(p).symlink_to('other')\n\n"
+        "def j(p):\n"
+        "    return Path(p).read_text()\n"
+    )
+    info = inventory.analyze_module(source, "pkg.mod", "pkg")
+    assert "call:pathlib.Path.unlink@g" in info["io"]
+    assert "call:pathlib.Path.rmdir@h" in info["io"]
+    assert "call:pathlib.Path.symlink_to@i" in info["io"]
+    # a read-only method must not be flagged
+    assert not any("read_text" in flag for flag in info["io"])
 
 
 def test_environ_subscript_read_flagged_as_uncontrolled_reference():
@@ -304,6 +370,40 @@ def test_imports_field_from_pkg_import_mod():
     assert "pkgx.a" in info["imports"]
 
 
+def test_imported_symbols_from_module_bound_attribute_access(tmp_path):
+    # review round 2, finding 3: `from pkg import M` (no direct
+    # `from pkg.M import name`) followed by `M.name` used to record NO
+    # imported symbol at all — --with-imported would then freeze nothing
+    # for M, and bridge could never shim it. Also covers the
+    # `import pkg.M as M` aliased form.
+    root = tmp_path / "root"
+    root.mkdir()
+    legacy = tmp_path / "legacy"
+    pkg = legacy / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "money.py").write_text("def round_money(x):\n    return x\n", encoding="utf-8")
+    (pkg / "pricing.py").write_text(
+        "from pkg import money\n\n"
+        "def apply(x):\n"
+        "    return money.round_money(x)\n",
+        encoding="utf-8",
+    )
+    (pkg / "cart.py").write_text(
+        "import pkg.money as m\n\n"
+        "def total(x):\n"
+        "    return m.round_money(x)\n",
+        encoding="utf-8",
+    )
+    _write_migration_json(root, legacy, "pkg", root / "target")
+
+    code, payload, stderr = _run("inventory.py", "--root", str(root))
+    assert code == 0, stderr
+    data = json.loads((root / "inventory.json").read_text(encoding="utf-8"))
+    assert data["units"]["pkg.pricing"]["imported_symbols"] == ["pkg.money:round_money"]
+    assert data["units"]["pkg.cart"]["imported_symbols"] == ["pkg.money:round_money"]
+
+
 def test_import_closure_follows_relative_import_two_levels(tmp_path):
     base = _build_pkgx(tmp_path)
     closure = inventory.import_closure(base, "pkgx", "pkgx.sub.b")
@@ -376,4 +476,6 @@ def test_build_inventory_resolves_package_init_relative_import(tmp_path):
     # does not exist under the legacy tree) and get silently dropped from
     # imports_units — the real dependency on pkgy.sub.helper would vanish.
     assert row["imports_units"] == ["pkgy.sub.helper"]
-    assert row["imported_symbols"] == []
+    # `helper.VALUE` is a module-bound attribute access (plan review round
+    # 2, finding 3): the module-alias walk records it as a real symbol use.
+    assert row["imported_symbols"] == ["pkgy.sub.helper:VALUE"]

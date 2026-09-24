@@ -202,6 +202,29 @@ def test_net_capture_wires_the_ab_comparison_for_hash_order_nondeterminism(work_
         assert "oddpkg.setmod" not in lock_doc.get("units", {})
 
 
+def test_harness_failure_still_runs_the_tamper_check(work_root, monkeypatch, capsys):
+    """If `observe.run_harness` raises (HarnessFailure, a stage_trees I/O
+    error, ...) the after-run `protected_digests` check must still run —
+    the exception unwinding out of the capture loop must never skip it."""
+    cfg = _scaffold(work_root)
+    _freeze_base_registry(work_root)
+    _copy_cases_fixture(work_root, "shop.pricing")
+
+    tamper_path = Path(cfg["legacy_root"]) / "shop" / "TAMPERED.txt"
+
+    def _fake_run_harness(job, stage, timeout_s=120):
+        tamper_path.write_text("unexpected")
+        raise net_capture.observe.HarnessFailure("forced failure for test")
+
+    monkeypatch.setattr(net_capture.observe, "run_harness", _fake_run_harness)
+
+    with pytest.raises(SystemExit) as exc:
+        net_capture.run(work_root, cfg, "shop.pricing")
+    assert exc.value.code == cm_common.EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert any("TAMPERED.txt" in t for t in payload.get("tampered", []))
+
+
 # ---------------------------------------------------------------------------
 # The three clean fixtures
 # ---------------------------------------------------------------------------

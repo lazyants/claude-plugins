@@ -12,6 +12,7 @@ module (as a library) is always side-effect free.
 
 from __future__ import annotations
 
+import gc
 import io
 import json
 import os
@@ -158,17 +159,33 @@ def encode(value, ctx: dict | None = None, state: bool = False, depth: int = 0):
         ]
         return {"$dict": pairs, "$id": n}
 
-    if isinstance(value, _OPAQUE_TYPES):
+    if not state:
+        if isinstance(value, _OPAQUE_TYPES):
+            return {"$unsupported": _type_qualname(value)}
+        if hasattr(value, "__dict__") or _has_declared_slots(type(value)):
+            n = _assign_id(ctx, oid)
+            qualname = f"{type(value).__module__}:{type(value).__qualname__}"
+            attrs = _instance_state(value)
+            encoded_state = {k: encode(v, ctx, state, depth + 1) for k, v in attrs.items()}
+            return {"$obj": qualname, "$state": encoded_state, "$id": n}
         return {"$unsupported": _type_qualname(value)}
 
-    if hasattr(value, "__dict__") or _has_declared_slots(type(value)):
-        n = _assign_id(ctx, oid)
-        qualname = f"{type(value).__module__}:{type(value).__qualname__}"
-        attrs = _instance_state(value)
-        encoded_state = {k: encode(v, ctx, state, depth + 1) for k, v in attrs.items()}
-        return {"$obj": qualname, "$state": encoded_state, "$id": n}
-
-    return {"$unsupported": _type_qualname(value)}
+    # State mode, no specific rule matched above (module/class/function
+    # defined in the stage are already handled). Rather than keep
+    # enumerating object shapes by name — this is the third review round to
+    # find one this used to miss (function attributes, then class dunders,
+    # now a bound method) — descend into whatever CPython's own garbage
+    # collector says this object references. A bound method's referents are
+    # its `__func__` and `__self__`; a builtin method like `[].append`'s is
+    # the list itself; `functools.partial`'s are its func/args/keywords —
+    # each covered generically, with no per-type special case. Plain custom
+    # instances (with or without a real `__dict__`) are covered the same
+    # way: their referents include the instance dict or slot values, which
+    # already carries the mutation. A referent that is itself a module still
+    # goes through this same `encode()` and hits the `$module` rule above,
+    # rather than being expanded into its own (potentially huge) referent
+    # graph.
+    return _encode_ref_graph_state(value, ctx, depth)
 
 
 def _encode_function_state(fn, ctx: dict, depth: int):
@@ -228,6 +245,28 @@ def _encode_class_state(cls, ctx: dict, depth: int):
         else:
             dict_items[name] = encode(value, ctx, True, depth + 1)
     return {"$cls": qualname, "$id": n, "dict": dict_items}
+
+
+_REFERENT_SKIP_TYPES = (type, types.CodeType, types.FrameType)
+
+
+def _encode_ref_graph_state(value, ctx: dict, depth: int):
+    """State-mode fallback for any object with no more specific rule:
+    encode what CPython's own garbage collector says this object
+    references. Type, code and frame objects are skipped outright (pure
+    interpreter bookkeeping, never behaviour); a module referent is not
+    skipped, but recurses through `encode()` itself, which hits the
+    `$module` rule and does not expand its own referent graph."""
+    oid = id(value)
+    if oid in ctx["seen"]:
+        return {"$ref": ctx["seen"][oid]}
+    n = _assign_id(ctx, oid)
+    items = []
+    for ref in gc.get_referents(value):
+        if isinstance(ref, _REFERENT_SKIP_TYPES):
+            continue
+        items.append(encode(ref, ctx, True, depth + 1))
+    return {"$ref_graph": _type_qualname(value), "$id": n, "items": items}
 
 
 def decode(obj):

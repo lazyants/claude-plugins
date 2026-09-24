@@ -137,6 +137,27 @@ def cache_key(root: Path, cfg: dict, unit: str) -> dict:
     script_digests = {p.name: cm_common.sha256_file(p) for p in sorted(scripts_dir.glob("*.py"))}
     plugin_sha256 = cm_common.sha256_json(script_digests)
 
+    # Porting a dependency (a shim becoming a real port) or editing a
+    # private helper module after R2/R3 changes U's actual behaviour while
+    # U's own target file and the legacy-side key stay identical, so
+    # converge would otherwise accept a stale r2/r3 pair. Walking U's
+    # target-side import closure catches both: the closure includes every
+    # dependency's shim-or-port file under target_root, and every private
+    # helper U's port reaches.
+    import inventory as _inventory_mod  # lazy import: mirrors load_config's own lazy import
+
+    target_root = cm_common.resolved_paths(root, cfg)["target_root"]
+    target_closure_modules = _inventory_mod.import_closure(
+        target_root, cfg["target_package"], cm_common.target_module(cfg, unit)
+    )
+    target_closure_digests = {}
+    for m in target_closure_modules:
+        f = cm_common._module_file(target_root, m)
+        if f.is_file():
+            rel = f.relative_to(target_root).as_posix()
+            target_closure_digests[rel] = cm_common.sha256_file(f)
+    target_closure_sha256 = cm_common.sha256_json(target_closure_digests)
+
     return {
         "legacy_closure_sha256": legacy_closure_sha256,
         "rows_sha256": rows_sha256,
@@ -145,6 +166,7 @@ def cache_key(root: Path, cfg: dict, unit: str) -> dict:
         "net_sha256": net_sha256,
         "cases_sha256": cases_sha256,
         "templates_sha256": templates_sha256,
+        "target_closure_sha256": target_closure_sha256,
         "adapter": "python-python/1",
         "plugin_sha256": plugin_sha256,
     }
@@ -624,7 +646,10 @@ def _build_parser() -> argparse.ArgumentParser:
     # The top-level parser does NOT itself take --root: the pinned CLI shape
     # is `ledger.py <cmd> --root R ...`, and giving the top level a required
     # --root would force it to appear before the subcommand name instead.
-    parser = argparse.ArgumentParser()
+    # cm_common.make_parser()'s failure behaviour propagates to every
+    # subcommand parser below (add_subparsers() defaults parser_class to
+    # type(self)), with no extra wiring needed at each sub.add_parser() call.
+    parser = cm_common.make_parser(prog="ledger.py", description="Per-unit state, cache key, R0 eligibility.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("key", parents=[root_parent])

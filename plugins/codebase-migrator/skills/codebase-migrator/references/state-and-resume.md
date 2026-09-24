@@ -38,7 +38,11 @@ but cannot declare it done.
 queue: nothing in v0.1 automatically re-runs a stale unit's gates. Re-porting or re-reviewing a
 converged unit is always an operator decision (`SKILL.md` §3) — a conventions edit legitimately
 moves every unit's cache key at once, and treating that as "every unit needs redoing" would
-contradict the entire point of converging units one at a time.
+contradict the entire point of converging units one at a time. A unit gone `stale` naming only
+`target_closure_sha256` did not itself change — a dependency it imports through the target
+package was ported, or a private helper it uses was edited — so the fix is to re-run
+`unit_gate.py` and `diff_gate.py` against the current target-side tree and `ledger.py converge`
+again, not to dispatch a new port turn for `U`.
 
 ## The cache key
 
@@ -57,8 +61,14 @@ these fields, in order, every path taken relative to the durable root:
 5. `net_sha256` and `cases_sha256` — both read from `net.lock.json` (`null` if `U` has no entry
    yet).
 6. `templates_sha256` — the digest of the four prompt templates together.
-7. `adapter` — the literal string identifying the Python-to-Python adapter.
-8. `plugin_sha256` — the digest of every script in the plugin.
+7. `target_closure_sha256` — the digest of every file in `U`'s **target-side** import closure
+   (`inventory.import_closure` walked from `target_module(U)` under `target_root`): every
+   dependency's shim-or-port file `U`'s port actually imports, plus every private target-side
+   helper it reaches. This is what catches the two changes `legacy_closure_sha256` cannot see,
+   because neither touches `U`'s own legacy bytes or its target file: a dependency's shim
+   becoming a real port, and an edit to a private helper module `U`'s port imports.
+8. `adapter` — the literal string identifying the Python-to-Python adapter.
+9. `plugin_sha256` — the digest of every script in the plugin.
 
 **Never hashed:** absolute paths, schema descriptions, timestamps. Two known literary-translator
 mistakes this deliberately avoids: hashing a schema's prose description (which re-translated
@@ -93,6 +103,16 @@ legacy closure digest stops matching it, naming the changed unit.
 This is deliberately the only path through a drift refusal: there is no way to keep an old net
 valid against new source, and no way to accept drift without re-measuring the unit from scratch.
 
+## The stdout and exit-code contract
+
+Every script builds its top-level parser with `cm_common.make_parser`, whose `argparse.
+ArgumentParser` subclass overrides `error()` so a bad CLI invocation — an unknown flag, a
+missing required one, an invalid choice — still emits exactly one JSON line to stdout
+(`{"ok": false, "error": "<message>"}`), the same as any other refusal, and exits 2. Nothing in
+this plugin ever lets argparse's own default behavior (usage text on stderr, a bare `sys.exit(2)`
+with no JSON at all) reach the caller, so a script's stdout is always machine-parseable JSON,
+never conditionally empty depending on how it was invoked.
+
 ## Atomic checkpoint
 
 Every write to `ledger.json`, `registry.json`/`registry.lock.json`, `net.lock.json`, and every
@@ -106,11 +126,15 @@ not repeat that.
 ## The read-only status reporter
 
 `status.py --root R` never writes anything — verified by a test that compares the tree's
-digests before and after running it. It reports unit counts by ledger state, eligible/ineligible
-counts, netted units, frozen row count, shim and port counts, and the last recorded write-
-boundary probe verdict. A missing input is reported as `absent` for that field specifically,
-never folded into a zero — a zero must always mean "measured and found to be zero," not "not
-looked at."
+digests before and after running it. `units` and `in_ledger` are deliberately two different
+counts: `units` is `inventory.json`'s unit count — the denominator for "N of units converged" —
+while `in_ledger` is how many units `ledger.json` actually has an entry for, which is smaller
+until something first sets a unit's state; a unit can be fully discovered by `inventory.py` and
+still be missing from the ledger entirely. Beyond those two, it reports counts by ledger state,
+eligible/ineligible counts, netted units, frozen row count, shim and port counts, and the last
+recorded write-boundary probe verdict. A missing input is reported as `absent` for that field
+specifically, never folded into a zero — a zero must always mean "measured and found to be
+zero," not "not looked at."
 
 ## What is not durable
 

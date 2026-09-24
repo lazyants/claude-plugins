@@ -7,7 +7,6 @@ unit can be ported against the target package before its dependency is.
 """
 from __future__ import annotations
 
-import argparse
 import os
 import sys
 from pathlib import Path
@@ -125,7 +124,7 @@ def build_bridge(root: Path, cfg: dict, check: bool) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = cm_common.make_parser(prog="bridge.py")
     parser.add_argument("--root", required=True)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()

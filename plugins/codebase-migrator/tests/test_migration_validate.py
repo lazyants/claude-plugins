@@ -148,6 +148,16 @@ def test_target_root_must_not_overlap_legacy_root(work_root):
     assert any(p["key"] == "target_root" for p in problems)
 
 
+def test_null_in_any_enum_field_is_a_problem(work_root):
+    for key in migration_validate._ENUMS:
+        cfg, root = _base_cfg(work_root)
+        cfg[key] = None
+        problems = migration_validate.validate(cfg, root)
+        matches = [p for p in problems if p["key"] == key]
+        assert matches, f"expected a problem for a JSON null {key}"
+        assert matches[0]["kind"] == "unsupported"
+
+
 def test_missing_required_key_is_a_problem(work_root):
     cfg, root = _base_cfg(work_root)
     del cfg["source_stack"]

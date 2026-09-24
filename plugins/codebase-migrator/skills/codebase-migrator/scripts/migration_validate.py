@@ -142,10 +142,12 @@ def validate(cfg: dict, root: "Path") -> list:
         problems.append(_problem("schema", "invalid", "schema must be 1"))
 
     for key, allowed in _ENUMS.items():
-        if key in unanswered:
-            continue
+        if key not in cfg or key in unanswered:
+            continue  # a missing key was already reported by the loop above
         value = cfg.get(key)
-        if value is not None and value not in allowed:
+        # `key in cfg` means a JSON null is NOT the same thing as a missing
+        # key here: an explicit null must still be a required STRING value.
+        if value not in allowed:
             problems.append(
                 _problem(key, "unsupported", f"{value!r} is not a v0.1 value for {key}")
             )
@@ -297,7 +299,9 @@ def validate(cfg: dict, root: "Path") -> list:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = cm_common.make_parser(
+        prog="migration_validate.py", description="Validate migration.json against the v0.1 schema."
+    )
     parser.add_argument("--root", required=True)
     args = parser.parse_args()
 

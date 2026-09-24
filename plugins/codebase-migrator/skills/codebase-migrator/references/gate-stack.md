@@ -9,12 +9,14 @@ loop order; this document is the mechanics behind each rung.
 Exit 0 only if every one of these holds, each failure named:
 
 - the inventory marks `U` **statically** eligible (no `uncontrolled_input`, `io` or
-  `dynamic_call` flag, in `U` or in any unit in its transitive `imports_units` closure), **and
-  the inventory is current** — `inventory.json`'s `source_sha256` matches the live bytes for
-  every unit in that closure;
-- every public symbol of `U`, and every symbol in `U`'s `imported_symbols`, has a frozen row;
-  any imported symbol whose unit is not yet ported must be a `one_to_one` row (a shim can only
-  re-export a 1:1 name);
+  `dynamic_call` flag, in `U` or in any unit in its transitive closure — `imports_units` plus
+  any executable ancestor package unit, below), **and the inventory is current** —
+  `inventory.json`'s `source_sha256` matches the live bytes for every unit in that closure;
+- every public symbol of `U`, and every symbol in `U`'s `imported_symbols`, has a frozen row
+  (`imported_symbols` covers both `from pkg.mod import name` directly and `from pkg import mod`
+  followed by `mod.name` anywhere in the file — the whole-submodule import names no symbol by
+  itself, so every attribute access on it has to be walked too); any imported symbol whose unit
+  is not yet ported must be a `one_to_one` row (a shim can only re-export a 1:1 name);
 - `net.lock.json` has an entry for `U` with `deterministic: true`, `stateful: false`, and
   `coverage_pct >= coverage_floor_pct`; the on-disk `nets/U.json` and `cases/U.json` digests
   match that entry;
@@ -120,7 +122,12 @@ part of `shop.pricing`'s transitive closure automatically. This closure is what 
 binding and the route rule use: `net_capture.py` preloads and hashes it (so a change to
 `shop/__init__.py`'s code drifts `shop.pricing`'s net exactly as a change to `shop/money.py`
 would), and `diff_gate.py`'s route rule treats `shop` as an ordinary in-closure unit. A
-docstring-only ancestor stays outside every closure and keeps the separate exemption above.
+docstring-only ancestor stays outside every closure and keeps the separate exemption above. This
+same closure decides **static eligibility** too (`inventory.py`): a flag on an executable
+ancestor unit — a clock read, an I/O call, a dynamic lookup — makes every descendant unit
+ineligible, naming the ancestor as an "ineligible dependency", exactly as an explicit `import` of
+a flagged dependency would. There is no way to import a submodule without running its ancestor
+packages' code first, so the ancestor's flag is unavoidably inherited.
 
 **Every case id must be unique, checked at three different points with two different
 remedies.** `net_capture.py` refuses (naming every duplicate) if `cases/U.json` itself holds two
@@ -151,7 +158,12 @@ target vs. the net's recorded legacy observation, with target `$obj` qualnames a
 custom exception class compares equal to the source class it replaces). Under
 `bug_for_bug_with_exceptions`, cases listed in `exceptions.json` compare against their declared
 expectation instead of legacy — and a listed case that still matches legacy fails too, since the
-defect it was supposed to remove is still there. Each mismatch is reported as `{"case_id",
+defect it was supposed to remove is still there. Before any of that, every declared exception is
+checked for being a **no-op**: an `expected` with no fields, or one whose every declared channel
+already equals what legacy produces, would let a target that never fixed the bug pass anyway —
+the exception would then verify nothing. Any no-op entry refuses the whole run, naming every
+affected case id (`no_op_exception_ids`), rather than silently accepting a declared exception
+that can never fail. Each mismatch is reported as `{"case_id",
 "channel", "legacy", "target"}`, where `channel` is the environment and the channel together —
 `"A:return"`, `"B:error"` — since the same channel can mismatch in one environment and not the
 other; the first 20 are kept in full, and `mismatch_count` always carries the true total even
@@ -235,6 +247,21 @@ returns a copy serialize identically until a caller later mutates one and not th
 
 A case whose observation contains `$unsupported` anywhere in its behavioral channels is dropped
 from the net, named by id, and any line reached only by that case is reported uncovered.
+
+**State mode encodes differently from the table above**, because the state snapshot's job is the
+opposite of the behavioral channels': never say "unsupported" about something that might be
+mutable state. A module, a class or a function defined in the stage each get their own dedicated
+encoding (module name; class `dict` with dunders included; function defaults/closure/attrs —
+`SKILL.md`'s scope statements and M3 cover why). For everything else state mode would otherwise
+have called `$unsupported` — a bound method, a builtin method like `[].append`, a
+`functools.partial`, or a plain custom instance — it descends into whatever CPython's own garbage
+collector reports as that object's referents (`gc.get_referents`), encoding each one recursively
+under `{"$ref_graph": "<type qualname>", "$id": n, "items": [...]}`; a plain instance's referents
+already include its `__dict__`/slot values, so this single generic mechanism replaces what used
+to be a growing list of type-specific rules — the same three review rounds each found one more
+shape it missed (function attributes, then class dunders, then bound methods) before this fallback
+was added. Only `type`, code and frame objects are skipped outright, as pure interpreter
+bookkeeping with no behavior of their own.
 
 ### Determinism
 

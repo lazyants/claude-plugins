@@ -209,3 +209,64 @@ def test_is_shim_detects_exact_marker(tmp_path):
 
     path.write_text("# not a shim\n", encoding="utf-8")
     assert bridge.is_shim(path, "shop.money") is False
+
+
+def test_module_bound_attribute_import_freezes_and_shims_end_to_end(tmp_path):
+    """Review round 2, finding 3, through the full chain: inventory ->
+    registry_validate --with-imported --freeze -> bridge. `from pkg import
+    money` followed by `money.round_money(x)` (no direct
+    `from pkg.money import round_money`) must still let --with-imported
+    freeze pkg.money's row, so bridge can shim the dependency — this is
+    exactly the shape that previously froze nothing for the dependency and
+    stalled the W3 pilot with no way to resolve the import."""
+    root = tmp_path / "root"
+    root.mkdir()
+    legacy = tmp_path / "legacy"
+    pkg = legacy / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "money.py").write_text("def round_money(x):\n    return round(x, 2)\n", encoding="utf-8")
+    (pkg / "pricing.py").write_text(
+        "from pkg import money\n\n"
+        "def apply(x):\n"
+        "    return money.round_money(x)\n",
+        encoding="utf-8",
+    )
+    cfg = _cfg(legacy, root / "target")
+    cfg["legacy_package"] = "pkg"
+    cfg["target_package"] = "pkg2"
+    (root / "migration.json").write_text(json.dumps(cfg), encoding="utf-8")
+    subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "inventory.py"), "--root", str(root)],
+        check=True, capture_output=True,
+    )
+
+    registry = {
+        "schema": 1,
+        "rows": [
+            {
+                "source": "pkg.money:round_money", "cardinality": "one_to_one",
+                "entry": "pkg2.money:round_money", "targets": ["pkg2.money:round_money"], "reason": None,
+            },
+            {
+                "source": "pkg.pricing:apply", "cardinality": "one_to_one",
+                "entry": "pkg2.pricing:apply", "targets": ["pkg2.pricing:apply"], "reason": None,
+            },
+        ],
+    }
+    (root / "registry.json").write_text(json.dumps(registry), encoding="utf-8")
+
+    code, payload, stderr = _run(
+        "registry_validate.py", "--root", str(root),
+        "--units", "pkg.pricing", "--with-imported", "--freeze",
+    )
+    assert code == 0, (payload, stderr)
+    lock = json.loads((root / "registry.lock.json").read_text(encoding="utf-8"))
+    assert set(lock["rows"]) == {"pkg.pricing:apply", "pkg.money:round_money"}
+
+    code, payload, stderr = _run("bridge.py", "--root", str(root))
+    assert code == 0, stderr
+    assert payload["shims"] == 1
+    census = json.loads((root / "runs" / "shims.json").read_text(encoding="utf-8"))
+    assert set(census["shims"]) == {"pkg.money"}
+    assert census["shims"]["pkg.money"]["symbols"] == ["pkg2.money:round_money"]

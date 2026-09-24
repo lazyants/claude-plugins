@@ -25,6 +25,7 @@ def test_status_absent_inputs_reported_as_absent(work_root):
     out = json.loads(proc.stdout.strip().splitlines()[-1])
     assert out["ok"] is True
     assert out["units"] == "absent"
+    assert out["in_ledger"] == "absent"
     assert out["eligible"] == "absent"
     assert out["ineligible"] == "absent"
     assert out["netted"] == "absent"
@@ -36,6 +37,11 @@ def test_status_absent_inputs_reported_as_absent(work_root):
 
 def test_status_is_read_only(work_root):
     root = work_root
+    # ledger.json and inventory.json deliberately have DIFFERENT unit
+    # counts: a unit can be fully discovered (in the inventory) with no
+    # ledger entry at all yet, until something first sets its state. `units`
+    # must track the inventory (the denominator for "N of units converged"),
+    # never the ledger's own count.
     cm_common.atomic_write_json(
         root / "ledger.json",
         {
@@ -53,6 +59,7 @@ def test_status_is_read_only(work_root):
             "units": {
                 "shop.pricing": {"eligible": True},
                 "shop.clock": {"eligible": False},
+                "shop.money": {"eligible": True},
             },
         },
     )
@@ -62,7 +69,9 @@ def test_status_is_read_only(work_root):
     assert before == after
 
     out = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert out["units"] == 2
+    assert out["units"] == 3
+    assert out["in_ledger"] == 2
+    assert out["units"] != out["in_ledger"]
     assert out["by_state"] == {"converged": 1, "pending": 1}
-    assert out["eligible"] == 1
+    assert out["eligible"] == 2
     assert out["ineligible"] == 1
