@@ -36,9 +36,22 @@ TEMP_ROOTS: tuple[str, ...] = (
 
 _UNIT_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+SHIM_PREFIX = "# codebase-migrator: shim for "
+CONVENTIONS_SENTINEL = "CHOOSE_CONVENTIONS"
+
+# port_TASK.md/fix_TASK.md/review_TASK.md/cases_TASK.md, keyed by dispatch
+# kind: sandbox.py drives dispatch from this, and ledger.cache_key hashes
+# every name in it.
+TEMPLATE_NAMES = {
+    "port": "port_TASK.md",
+    "fix": "fix_TASK.md",
+    "review": "review_TASK.md",
+    "cases": "cases_TASK.md",
+}
+
 # Interpreter-managed module attributes excluded from the state snapshot
-# (owner C, observe.py); kept here because it is a small fixed fact, not
-# behaviour, and both C's harness and A's cm_common may need it later.
+# (observe.py); kept here because it is a small fixed fact, not behaviour,
+# and both the harness and cm_common may need it later.
 INTERPRETER_MODULE_ATTRS = frozenset(
     {
         "__builtins__",
@@ -171,6 +184,39 @@ def read_json(path: Path, what: str):
         return json.loads(text)
     except json.JSONDecodeError as exc:
         fail(f"{what} is invalid JSON: {path} ({exc})", EXIT_CANNOT)
+
+
+def is_shim_file(path: Path) -> bool:
+    """True if `path`'s first line starts with `SHIM_PREFIX` -- the marker
+    `bridge.py` writes for every shim it creates (plan section 4.5)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            first_line = f.readline().rstrip("\n")
+    except OSError:
+        return False
+    return first_line.startswith(SHIM_PREFIX)
+
+
+def case_shape_problem(case, index: int = 0) -> str | None:
+    """The reason `case` (one golden-master case dict) is malformed, or
+    `None` if it is fine. `index` names the case in the first message,
+    before its own `id` is known; a caller that only needs a pass/fail
+    check, not the message, can omit it."""
+    if not isinstance(case, dict):
+        return f"case #{index} is not an object"
+    cid = case.get("id")
+    if not isinstance(cid, str) or not cid:
+        return f"case #{index} has no string id"
+    call = case.get("call")
+    if not isinstance(call, str) or not call:
+        return f"case {cid}: no string call"
+    for key in ("args", "init_args"):
+        if key in case and not isinstance(case[key], list):
+            return f"case {cid}: {key} must be a list"
+    for key in ("kwargs", "init_kwargs"):
+        if key in case and not isinstance(case[key], dict):
+            return f"case {cid}: {key} must be an object"
+    return None
 
 
 def resolve_root(root_arg: str) -> Path:
@@ -314,28 +360,13 @@ def tree_digests(base: Path, exclude_dirs=(".git", "__pycache__")) -> dict:
     return result
 
 
-def closure_digests(legacy_base: Path, legacy_package: str, units: list) -> dict:
-    """`unit -> sha256` of each unit's file under `legacy_base`. One
-    function serves both the staged tree (capture) and the live tree (R0,
-    R3, cache key), so equal bytes give equal digests regardless of which
-    tree produced them. A unit whose file is absent hashes as the digest of
-    empty bytes, so a removed dependency still shows up as a change rather
-    than silently vanishing from the map."""
-    base = Path(legacy_base)
-    result: dict[str, str] = {}
-    for unit in units:
-        f = _module_file(base, unit)
-        result[unit] = sha256_file(f) if f.is_file() else sha256_bytes(b"")
-    return result
-
-
 def file_digests(base: Path, relpaths: list) -> dict:
     """`{relpath: sha256}` for each of `relpaths` (already relative to
-    `base`, as `inventory.closure_files` produces them). Unlike
-    `closure_digests`, a missing file here is `fail(EXIT_CANNOT)` naming it:
-    a caller passing an `inventory.closure_files` result already knows every
-    path is expected to exist, so a miss means the tree is not what the
-    caller thinks it is, not a removed dependency to hash as empty."""
+    `base`, as `inventory.closure_files` produces them). A missing file here
+    is `fail(EXIT_CANNOT)` naming it: a caller passing an
+    `inventory.closure_files` result already knows every path is expected to
+    exist, so a miss means the tree is not what the caller thinks it is, not
+    a removed dependency to hash as empty."""
     base = Path(base)
     result: dict[str, str] = {}
     for rel in relpaths:
@@ -349,7 +380,7 @@ def file_digests(base: Path, relpaths: list) -> dict:
 def unit_closure(inventory: dict, unit: str) -> list:
     """`unit`, its transitive `imports_units`, and every ancestor package of
     any of those that is itself a unit (a package whose `__init__.py` has a
-    non-empty body after its docstring -- see `require_unit`/`inventory.py`).
+    non-empty body after its docstring -- see `inventory._is_init_unit`).
     Importing a module always executes its ancestor packages' `__init__.py`
     first, so an ancestor that is a real unit is an implicit dependency; an
     ancestor that is docstring-only is not a unit at all and is not added
@@ -409,3 +440,8 @@ def plugin_root() -> Path:
     """`plugins/codebase-migrator`, derived from this file's own location
     (`skills/codebase-migrator/scripts/cm_common.py`)."""
     return Path(__file__).resolve().parents[3]
+
+
+def templates_dir() -> Path:
+    """Where the dispatch prompt templates (`TEMPLATE_NAMES`'s values) live."""
+    return plugin_root() / "skills" / "codebase-migrator" / "assets" / "templates"

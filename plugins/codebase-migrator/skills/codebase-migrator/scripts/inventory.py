@@ -367,7 +367,7 @@ def _public_names_and_spans(tree: ast.Module) -> tuple[list[str], dict[str, list
             order.append(name)
 
     if dunder_all is not None:
-        names = [n for n in dunder_all if n in top_level or True]
+        names = list(dunder_all)
     else:
         names = [n for n in order if not n.startswith("_")]
     spans = {n: s for n, s in spans.items() if n in names}
@@ -479,6 +479,18 @@ def closure_files(base: Path, package: str, module: str) -> list[str]:
             if ancestor not in seen_modules:
                 pending.append(ancestor)
     return sorted(files)
+
+
+def module_name_from_closure_rel(rel: str) -> str:
+    """The dotted module name for one of `closure_files`'s base-relative
+    paths -- the inverse of how that function derived the path, so every
+    closure file (including an ancestor package's own `__init__.py`) can be
+    preloaded by name."""
+    if rel.endswith("/__init__.py"):
+        rel = rel[: -len("/__init__.py")]
+    elif rel.endswith(".py"):
+        rel = rel[: -len(".py")]
+    return rel.replace("/", ".")
 
 
 # --- inventory build ---------------------------------------------------------
@@ -601,7 +613,9 @@ def _build_unit(unit: str, path: Path, package: str, units: dict[str, Path]) -> 
         "dynamic_call": info["dynamic_call"],
         "io": info["io"],
     }
-    ineligible_reasons = list(flags["uncontrolled_input"]) + list(flags["io"]) + list(flags["dynamic_call"])
+    # `eligible`/`ineligible_reasons` are not computed here: `build_inventory`
+    # overwrites both for every unit (over `cm_common.unit_closure`, which
+    # needs every unit's row to already exist) before anything reads them.
     return {
         "file": _rel_file(unit, path),
         "source_sha256": cm_common.sha256_bytes(source.encode("utf-8")),
@@ -610,8 +624,6 @@ def _build_unit(unit: str, path: Path, package: str, units: dict[str, Path]) -> 
         "imports_units": imports_units,
         "imported_symbols": sorted(imported_symbols),
         "flags": flags,
-        "eligible": len(ineligible_reasons) == 0,
-        "ineligible_reasons": ineligible_reasons,
         "executable_lines": _executable_lines(source),
     }
 

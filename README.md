@@ -216,14 +216,14 @@ Trigger phrases: "migrate this codebase", "port this Python package", "legacy mo
 - **Eligibility, static and dynamic** — an AST inventory refuses units that do I/O, read the clock or randomness, or look things up by string; a runtime state snapshot refuses units that keep state between calls (module globals, class attributes, default arguments, closure cells, function attributes), including state a collaborator writes that never shows in a return value.
 - **A frozen symbol registry** with declared cardinality — one-to-one, split, merge, or dropped under a dead-code census — so unit 40 calls what unit 3 exported without reading unit 3.
 - **The differential gate** — compares return values, raised errors (custom exception classes mapped through the registry), argument and receiver mutations, aliasing between them, and both output streams; requires the call route to enter the port and never reach the unit's own legacy code, at import time included; refuses any persistent-state change; and replays in two deliberately different environments (hash seed, time zone, random seed, clock), so a hidden dependency on any of them shows up.
-- **A write boundary that is a property of the process** — every codex write turn runs in a stage outside any git worktree under `codex exec -s workspace-write`, protected trees are digest-checked before and after, and only one named output per unit is promoted; generated code is executed under an audit hook that denies writes, processes, sockets and threads.
+- **A write boundary that is a property of the process** — every codex write turn runs in a stage outside any git worktree under `codex exec -s workspace-write`, protected trees are digest-checked before and after, and only one named output per unit is promoted; generated code is executed under an audit hook that denies the writes, processes, sockets and threads honest code attempts.
 - **A resumable ledger** keyed on a cache key that binds each unit to its legacy code and every dependency, its frozen rows, its net and its conventions — so drift in a dependency, or a case added after capture, stops convergence until the net is re-captured.
 
 ### Status & scope
 
 - **Experimental 0.1.** Python → Python only, in-process seam, units that are deterministic and self-contained. The honest proof is a real pilot migration, which this release has not had; the test suite is not that proof.
 - Requires the `codex` CLI for the model turns. The write-boundary probe runs against the real binary once per codex version; CI tests the dispatcher against a strict fake.
-- Stated residuals, in the skill: audit hooks are not a security sandbox (the before/after digest check is the backstop); state held in C-level internals is invisible to the snapshot; `datetime`'s clock is not patched; the net only exercises the inputs its cases name.
+- Stated residuals, in the skill: audit hooks are not a security sandbox — R3 runs the port as the operator, and the before/after digest check covers only the durable root, `legacy_root` and `target_root`; state held in C-level internals is invisible to the snapshot; `datetime`'s clock is not patched; the net only exercises the inputs its cases name.
 
 ## License & disclaimer
 

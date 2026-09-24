@@ -12,23 +12,13 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import NoReturn
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import cm_common  # noqa: E402
 import inventory  # noqa: E402
 import observe  # noqa: E402
-
-_BEHAVIOURAL_CHANNELS = (
-    "status",
-    "return",
-    "error",
-    "receiver_after",
-    "args_after",
-    "kwargs_after",
-    "stdout",
-    "stderr",
-)
 
 
 def compare_captures(a: list, b: list) -> list:
@@ -44,7 +34,7 @@ def compare_captures(a: list, b: list) -> list:
         if oa is None or ob is None:
             diffs.append(case_id)
             continue
-        for channel in _BEHAVIOURAL_CHANNELS:
+        for channel in observe.BEHAVIOURAL_CHANNELS:
             if oa.get(channel) != ob.get(channel):
                 diffs.append(case_id)
                 break
@@ -55,18 +45,6 @@ def _staged_legacy_file(root: Path, cfg: dict, stage_legacy_base: Path, unit: st
     live = cm_common.legacy_file(root, cfg, unit)
     live_base = cm_common.resolved_paths(root, cfg)["legacy_root"]
     return stage_legacy_base / live.relative_to(live_base)
-
-
-def _module_name_from_closure_rel(rel: str) -> str:
-    """The dotted module name for one of `inventory.closure_files`'s
-    base-relative paths — the inverse of how that function derived the
-    path, so every closure file (including an ancestor package's own
-    `__init__.py`) can be preloaded by name."""
-    if rel.endswith("/__init__.py"):
-        rel = rel[: -len("/__init__.py")]
-    elif rel.endswith(".py"):
-        rel = rel[: -len(".py")]
-    return rel.replace("/", ".")
 
 
 def _read_registry_lock(root: Path) -> dict:
@@ -85,24 +63,6 @@ def _read_net_lock(root: Path) -> dict:
 
 def _dropped_symbols(lock_rows: dict) -> set:
     return {s for s, entry in lock_rows.items() if entry["row"].get("cardinality") == "dropped"}
-
-
-def _validate_case_shape(case, index: int):
-    if not isinstance(case, dict):
-        return f"case #{index} is not an object"
-    cid = case.get("id")
-    if not isinstance(cid, str) or not cid:
-        return f"case #{index} has no string id"
-    call = case.get("call")
-    if not isinstance(call, str) or not call:
-        return f"case {cid}: no string call"
-    for key in ("args", "init_args"):
-        if key in case and not isinstance(case[key], list):
-            return f"case {cid}: {key} must be a list"
-    for key in ("kwargs", "init_kwargs"):
-        if key in case and not isinstance(case[key], dict):
-            return f"case {cid}: {key} must be an object"
-    return None
 
 
 def _call_source_symbol(unit: str, call_spec: str) -> str:
@@ -137,14 +97,14 @@ def _scan_unsupported(value):
 
 
 def _find_unsupported(obs: dict):
-    for channel in _BEHAVIOURAL_CHANNELS:
+    for channel in observe.BEHAVIOURAL_CHANNELS:
         found = _scan_unsupported(obs.get(channel))
         if found:
             return found
     return None
 
 
-def _fail(root: Path, unit: str, msg: str, code: int, **fields) -> "NoReturn":
+def _fail(root: Path, unit: str, msg: str, code: int, **fields) -> NoReturn:
     """Like `cm_common.fail`, but first persists the exact same payload to
     `runs/<unit>/net_capture.json` — `sandbox.py`'s `cases` dispatch reads
     that file's `uncovered_lines` (default empty if absent), and a
@@ -188,7 +148,7 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
         _fail(root, unit, f"cases/{unit}.json has zero cases", cm_common.EXIT_FAIL)
 
     for i, case in enumerate(all_cases):
-        problem = _validate_case_shape(case, i)
+        problem = cm_common.case_shape_problem(case, i)
         if problem:
             _fail(root, unit, f"invalid case shape: {problem}", cm_common.EXIT_FAIL)
 
@@ -238,7 +198,7 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
                 # and the preload set can never drift apart (plan 4.7 step 11).
                 closure_files = inventory.closure_files(staged["legacy"], cfg["legacy_package"], unit)
                 preload = sorted(
-                    {_module_name_from_closure_rel(rel) for rel in closure_files} - {unit}
+                    {inventory.module_name_from_closure_rel(rel) for rel in closure_files} - {unit}
                 )
                 trace_file = str(_staged_legacy_file(root, cfg, staged["legacy"], unit))
                 job = {
@@ -354,7 +314,7 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
 
     legacy_closure_sha256 = cm_common.sha256_json(legacy_closure)
 
-    kept_stored = [{"case_id": obs["case_id"], **{k: obs[k] for k in _BEHAVIOURAL_CHANNELS}} for obs in kept]
+    kept_stored = [{"case_id": obs["case_id"], **{k: obs[k] for k in observe.BEHAVIOURAL_CHANNELS}} for obs in kept]
     net_doc = {
         "schema": 1,
         "unit": unit,

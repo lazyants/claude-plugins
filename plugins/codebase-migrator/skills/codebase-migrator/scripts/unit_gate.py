@@ -95,10 +95,9 @@ def check_no_stubs(source: str, tree: ast.Module) -> list[str]:
 
 
 def _frozen_rows_of_unit(lock: dict, unit: str) -> list[dict]:
-    prefix_unit = unit
     rows = []
     for src, entry in lock.get("rows", {}).items():
-        if src.split(":", 1)[0] == prefix_unit:
+        if src.split(":", 1)[0] == unit:
             rows.append(entry["row"])
     return rows
 
@@ -148,15 +147,6 @@ def _module_name_and_is_package(rel_path: str) -> tuple[str, bool]:
     return ".".join(p.with_suffix("").parts), False
 
 
-def _is_shim_file(path: Path) -> bool:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            first_line = fh.readline().rstrip("\n")
-    except OSError:
-        return False
-    return first_line.startswith("# codebase-migrator: shim for ")
-
-
 def check_closure_files(
     target_root: Path, target_package: str, target_module_name: str, legacy_package: str, own_target_rel: str
 ) -> tuple[bool, bool, list[str], list[str]]:
@@ -169,8 +159,8 @@ def check_closure_files(
     it. Each problem names its own file, not just the module or flag.
 
     `no_direct_legacy_import` exempts a closure file that IS a bridge shim
-    (bridge.py's and ledger.py's own marker rule: first line exactly
-    `# codebase-migrator: shim for <unit>`) -- a shim's whole body is a
+    (bridge.py's own marker rule: first line starting with
+    `# codebase-migrator: shim for `) -- a shim's whole body is a
     direct legacy import by design (`from <legacy> import <name> as
     <name>`), so an unported dependency would otherwise fail every unit
     that still depends on it, which is most of them. `own_target_rel` (U's
@@ -196,7 +186,7 @@ def check_closure_files(
             self_contained_problems.append(f"{rel_path}: could not be analyzed ({exc})")
             continue
 
-        if rel_path == own_target_rel or not _is_shim_file(path):
+        if rel_path == own_target_rel or not cm_common.is_shim_file(path):
             bases = _absolute_import_bases(tree)
             offending = sorted(b for b in bases if b == legacy_package or b.startswith(legacy_package + "."))
             if offending:
@@ -251,7 +241,7 @@ def run_gate(root: Path, cfg: dict, unit: str) -> dict:
     target_module_name = cm_common.target_module(cfg, unit)
     target_root = cm_common.resolved_paths(root, cfg)["target_root"]
 
-    target_present = target_path.is_file() and not _is_shim_file(target_path)
+    target_present = target_path.is_file() and not cm_common.is_shim_file(target_path)
     checks["target_present"] = target_present
     if not target_present:
         problems.append(f"target_present: {target_path} is absent or is a shim")

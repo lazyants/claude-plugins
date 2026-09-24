@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -16,7 +15,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cm_common  # noqa: E402
 
 MARKER_NAME = ".codebase-migrator-root.json"
-CONVENTIONS_SENTINEL = "CHOOSE_CONVENTIONS"
 
 
 def _check_legacy_root_overlap(resolved_root: Path, migration_path: Path) -> None:
@@ -115,7 +113,7 @@ def main() -> int:
             cm_common.atomic_write_text(
                 conventions_path,
                 "# Conventions\n\n"
-                f"{CONVENTIONS_SENTINEL}\n\n"
+                f"{cm_common.CONVENTIONS_SENTINEL}\n\n"
                 "Replace this sentinel with the target-idiom rulebook for this migration "
                 "before any unit can be judged eligible (see `ledger.py eligible`).\n",
             )

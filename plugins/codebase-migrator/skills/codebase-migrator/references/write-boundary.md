@@ -1,12 +1,18 @@
 # The write boundary — capability, not instruction
 
-Every process that runs model-authored bytes runs inside this boundary: the R1 port turn, the
-R5 fix turn, the R4 review turn (read-only, but still a codex process), **and the gate's own
-execution of the generated code** in `unit_gate.py`'s compile step and `diff_gate.py`'s replay.
-That last one is the easiest to miss and the most damaging: a target module built from a
-hostile legacy comment could, once R3 actually imports and calls it, try to rewrite
-`net.lock.json`, a gate script, or the digest store — exactly the artifacts the earlier gates
-already trusted. Literary-translator's own history is why this is a capability boundary and not
+Every codex process runs inside this boundary: the R1 port turn, the R5 fix turn and the R4
+review turn (read-only, but still a codex process). **The gates' own execution of code does
+not.** `unit_gate.py` only compiles the port (nothing runs), but `diff_gate.py`'s replay imports
+and calls it — and `net_capture.py` calls the legacy code — in an ordinary subprocess running as
+the operator, with no OS-level confinement. What guards that execution is weaker, and is stated
+here as such: an in-process audit hook (`observe.py`) that denies the write, spawn, socket and
+ctypes events honest code raises, which code set on defeating it can switch off from inside the
+same interpreter; and the digest check of layer 3, which re-hashes the durable root,
+`legacy_root` and `target_root` after the run and rejects it on any change there. So a target
+module built from a hostile legacy comment that tries, once R3 imports it, to rewrite
+`net.lock.json` or the digest store is caught; a write outside those three trees — a gate
+script, the operator's home directory — or a network call is neither prevented nor detected.
+Literary-translator's own history is why the codex side is a capability boundary and not
 a path convention: four successive by-path write guards in that plugin were each bypassable,
 because the runtime resolves its working root by walking up to the git top level, and no `--cwd`
 narrowed it (LT 1.17.0). A separate worktree is not sufficient for the same reason — it does not

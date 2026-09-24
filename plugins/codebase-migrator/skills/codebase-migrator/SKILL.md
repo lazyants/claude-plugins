@@ -114,7 +114,8 @@ not as `missing`: the key is present, it just isn't a valid value), `unknown_key
   itself.** Every **model-authored** write to `legacy_root` or `target_root` happens only inside
   `sandbox.py dispatch`'s promotion step, from a stage the write boundary already checked.
   `bridge.py` is the one script that writes into `target_root` directly, outside that boundary —
-  it is deterministic (a fixed re-export line per frozen `one_to_one` row, never model output)
+  it is deterministic (a fixed re-export line per frozen `one_to_one` row, whose names
+  `registry_validate.py` has checked are identifiers — never model-written code)
   and is dispatched by the driving session like any other script, not by codex. It still refuses
   by name, before writing, if any existing path component from `target_root` down to the shim it
   is about to write is a symlink, or resolves outside `target_root` — a symlinked package
@@ -424,8 +425,12 @@ malformed finding never discards the valid ones in the same review (LT 1.39.0).
 
 ## 7. Known residuals
 
-- The write boundary's audit hook is not a security sandbox — it is a fast, targeted denylist,
-  and the post-run digest re-check is the actual backstop (`references/write-boundary.md`).
+- The write boundary's audit hook is not a security sandbox — it is a fast, targeted denylist
+  that code set on defeating it can switch off from inside the same interpreter. R3's replay
+  runs the model-written port, and capture runs the legacy code, as the operator with no
+  OS-level confinement. The post-run digest re-check is the backstop only for the durable root,
+  `legacy_root` and `target_root`: a write anywhere else (a gate script, the home directory) or
+  a network call is neither prevented nor detected (`references/write-boundary.md`).
 - The state snapshot cannot see C-level internal state — `functools.lru_cache`'s cache, or
   anything reachable only through a C registry — and it does not see a monkeypatch of a module
   outside the staged trees, or a reassigned `__code__`/`__bases__`/annotation mid-call. These are
@@ -445,7 +450,7 @@ malformed finding never discards the valid ones in the same review (LT 1.39.0).
   unrelated class with its own `write_text()`/`mkdir()`/`unlink()` method gets that class's calls
   flagged as `io` too, and the unit refused as ineligible for a method that never touches a file.
   What actually decides correctness is the runtime audit hook (`references/write-boundary.md`),
-  which denies the real attempted write during capture or replay however the call was spelled,
+  which denies the real attempted write during capture or replay however honest code spelled it,
   backed by the coverage floor that requires the denying line to have actually been exercised —
   the static flag only decides how early the unit is screened out, never whether an I/O call is
   truly caught.

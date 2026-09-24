@@ -28,6 +28,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import cm_common  # noqa: E402
 
+# The behavioural channels a golden-master observation is compared on
+# (net_capture.py's cross-environment determinism check, diff_gate.py's
+# legacy-vs-target replay comparison). Never `covered_lines`, `route_files`
+# or any path -- those legitimately differ between runs.
+BEHAVIOURAL_CHANNELS = (
+    "status",
+    "return",
+    "error",
+    "receiver_after",
+    "args_after",
+    "kwargs_after",
+    "stdout",
+    "stderr",
+)
+
 # ---------------------------------------------------------------------------
 # Canonical encoding (plan 4.6)
 # ---------------------------------------------------------------------------
@@ -232,9 +247,7 @@ def _encode_class_state(cls, ctx: dict, depth: int):
     for name, value in vars(cls).items():
         if name in ("__dict__", "__weakref__"):
             continue
-        if isinstance(value, staticmethod):
-            dict_items[name] = encode(value.__func__, ctx, True, depth + 1)
-        elif isinstance(value, classmethod):
+        if isinstance(value, (staticmethod, classmethod)):
             dict_items[name] = encode(value.__func__, ctx, True, depth + 1)
         elif isinstance(value, property):
             dict_items[name] = {
@@ -962,8 +975,8 @@ def _copy_tree(src: Path, dst: Path) -> None:
 def run_harness(job: dict, stage: Path, timeout_s: int = 120) -> dict:
     """Run `python3 observe.py harness` in a fresh subprocess with a minimal
     environment, feed it `job` on stdin, and parse its one-line result. A
-    timeout, or a non-JSON/empty stdout, is reported as `harness_error` for
-    every case (the latter also raises `HarnessFailure`)."""
+    timeout is reported as `harness_error` for every case; a non-JSON or
+    empty stdout raises `HarnessFailure` instead."""
     env_name = job["env"]
     params = _ENV_PARAMS[env_name]
     stage = Path(stage)

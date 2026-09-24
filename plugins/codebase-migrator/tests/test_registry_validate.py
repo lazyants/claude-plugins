@@ -237,6 +237,51 @@ def test_merge_target_must_be_shared_by_another_merge_row(shop_inventory):
     assert any("shared by at least one other merge row" in p["message"] for p in problems if p["source"] == "shop.money:round_money")
 
 
+def test_entry_and_target_name_injection_shapes_are_refused(shop_inventory):
+    # bridge.py writes entry's name part straight into generated source
+    # (`from <legacy> import <name> as <entry's name part>`), so a newline,
+    # a semicolon or a keyword there must never freeze.
+    inventory, cfg = shop_inventory
+    for bad_name in ("x\nimport os", "x;import os", "class"):
+        row = {
+            "source": "shop.money:round_money",
+            "cardinality": "one_to_one",
+            "entry": f"shop2.money:{bad_name}",
+            "targets": [f"shop2.money:{bad_name}"],
+            "reason": None,
+        }
+        problems = registry_validate.row_problems([row], inventory, cfg)
+        assert any(p["source"] == "shop.money:round_money" for p in problems), bad_name
+
+    # A non-string targets element, or one with no ":", must be refused as
+    # an ordinary problem -- never a crash out of `target.split(":", 1)`.
+    for bad_target in (12345, "shop2.money"):
+        row = {
+            "source": "shop.money:round_money",
+            "cardinality": "one_to_one",
+            "entry": bad_target,
+            "targets": [bad_target],
+            "reason": None,
+        }
+        problems = registry_validate.row_problems([row], inventory, cfg)
+        assert any(p["source"] == "shop.money:round_money" for p in problems), bad_target
+
+
+def test_dotted_class_method_target_is_accepted(shop_inventory):
+    # observe.py's case dispatch splits a one-dot target into a class name
+    # and a method name: that shape must not be refused as unsafe.
+    inventory, cfg = shop_inventory
+    row = {
+        "source": "shop.money:round_money",
+        "cardinality": "one_to_one",
+        "entry": "shop2.money:RoundMoney.compute",
+        "targets": ["shop2.money:RoundMoney.compute"],
+        "reason": None,
+    }
+    problems = registry_validate.row_problems([row], inventory, cfg)
+    assert problems == []
+
+
 def test_valid_shop_registry_has_no_problems(shop_inventory):
     inventory, cfg = shop_inventory
     problems = registry_validate.row_problems(_base_rows(), inventory, cfg)

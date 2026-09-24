@@ -17,27 +17,6 @@ import inventory  # noqa: E402
 import ledger  # noqa: E402
 import observe  # noqa: E402
 
-_SHIM_PREFIX = "# codebase-migrator: shim for "
-_BEHAVIOURAL_CHANNELS = (
-    "status",
-    "return",
-    "error",
-    "receiver_after",
-    "args_after",
-    "kwargs_after",
-    "stdout",
-    "stderr",
-)
-
-
-def _is_shim(path: Path) -> bool:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            first_line = f.readline().rstrip("\n")
-    except OSError:
-        return False
-    return first_line.startswith(_SHIM_PREFIX)
-
 
 def _read_net_lock(root: Path) -> dict:
     path = root / "net.lock.json"
@@ -61,18 +40,6 @@ def _staged_rel(root: Path, cfg: dict, unit: str, which: str) -> Path:
         live = cm_common.target_file(root, cfg, unit)
         base = cm_common.resolved_paths(root, cfg)["target_root"]
     return live.relative_to(base)
-
-
-def _module_name_from_closure_rel(rel: str) -> str:
-    """The dotted module name for one of `inventory.closure_files`'s
-    base-relative paths — the inverse of how that function derived the
-    path, so every closure file (including an ancestor package's own
-    `__init__.py`) can be preloaded by name."""
-    if rel.endswith("/__init__.py"):
-        rel = rel[: -len("/__init__.py")]
-    elif rel.endswith(".py"):
-        rel = rel[: -len(".py")]
-    return rel.replace("/", ".")
 
 
 def _route_violations(route_files, unit_own_rel: str, allowed_legacy_rels: set) -> list:
@@ -239,7 +206,7 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
     target_path = cm_common.target_file(root, cfg, unit)
     if not target_path.is_file():
         cm_common.fail(f"{unit}: target file is absent: {target_path}", cm_common.EXIT_FAIL)
-    if _is_shim(target_path):
+    if cm_common.is_shim_file(target_path):
         cm_common.fail(f"{unit}: target file is a shim, not a port: {target_path}", cm_common.EXIT_FAIL)
 
     inv = cm_common.read_json(root / "inventory.json", "inventory.json")
@@ -300,7 +267,7 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
                     staged["target"], cfg["target_package"], target_module_name
                 )
                 preload = sorted(
-                    {_module_name_from_closure_rel(rel) for rel in target_closure_files} - {target_module_name}
+                    {inventory.module_name_from_closure_rel(rel) for rel in target_closure_files} - {target_module_name}
                 )
                 if env == "A":
                     # Computed from the staged copy while it still exists
@@ -382,7 +349,7 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
                     # any legacy file here is either an ancestor-package init
                     # (not itself a unit, not worth naming) or a genuine
                     # dependency unit — `known_units` distinguishes the two.
-                    touched_unit = _module_name_from_closure_rel(rel[len("legacy/"):])
+                    touched_unit = inventory.module_name_from_closure_rel(rel[len("legacy/"):])
                     if touched_unit in known_units:
                         crossed_shims.add(touched_unit)
 
@@ -393,7 +360,7 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
         expected = _expected_for_case(cid, legacy_obs, exceptions)
         for env_name, e in (("A", eval_a[cid]), ("B", eval_b[cid])):
             target_obs = _remap_observation_for_target(e["obs"], target_to_source)
-            for channel in _BEHAVIOURAL_CHANNELS:
+            for channel in observe.BEHAVIOURAL_CHANNELS:
                 if target_obs.get(channel) != expected.get(channel):
                     mismatches.append(
                         {

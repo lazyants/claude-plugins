@@ -14,7 +14,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cm_common  # noqa: E402
 
-_SHIM_PREFIX = "# codebase-migrator: shim for "
 _PACKAGE_MARKER = "# codebase-migrator: package marker\n"
 
 
@@ -31,7 +30,7 @@ def _first_line(path: Path) -> str | None:
 
 
 def is_shim(path: Path, unit: str) -> bool:
-    return _first_line(path) == f"{_SHIM_PREFIX}{unit}"
+    return _first_line(path) == f"{cm_common.SHIM_PREFIX}{unit}"
 
 
 def _path_components(target_root: Path, target_path: Path) -> list[Path]:
@@ -137,7 +136,7 @@ def build_bridge(root: Path, cfg: dict, check: bool) -> dict:
 
         symbols = [row["entry"] for row in one_to_one_rows]
         if not check:
-            lines = [f"{_SHIM_PREFIX}{unit}"]
+            lines = [f"{cm_common.SHIM_PREFIX}{unit}"]
             for row in one_to_one_rows:
                 legacy_module, legacy_name = row["source"].split(":", 1)
                 _, target_name = row["entry"].split(":", 1)

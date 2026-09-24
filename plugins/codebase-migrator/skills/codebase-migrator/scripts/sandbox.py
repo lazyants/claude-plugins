@@ -22,12 +22,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cm_common  # noqa: E402
 import ledger  # noqa: E402
 
-TEMPLATE_NAMES = {
-    "port": "port_TASK.md",
-    "fix": "fix_TASK.md",
-    "review": "review_TASK.md",
-    "cases": "cases_TASK.md",
-}
 SANDBOX_MODE = {
     "port": "workspace-write",
     "fix": "workspace-write",
@@ -88,15 +82,6 @@ def render_template(template_path: Path, unit: str, target_module: str, round_nu
     if "{{" in text:
         raise ValueError(f"template has an unreplaced placeholder: {template_path.name}")
     return text
-
-
-def _is_shim(path: Path) -> bool:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            first_line = fh.readline().rstrip("\n")
-    except OSError:
-        return False
-    return first_line.startswith("# codebase-migrator: shim for ")
 
 
 # --- probe -------------------------------------------------------------------
@@ -315,7 +300,7 @@ def _check_eligibility(root: Path, cfg: dict, unit: str, kind: str) -> None:
 
 def _check_fix_preconditions(root: Path, cfg: dict, unit: str, round_num: int) -> None:
     target_path = cm_common.target_file(root, cfg, unit)
-    if not target_path.is_file() or _is_shim(target_path):
+    if not target_path.is_file() or cm_common.is_shim_file(target_path):
         cm_common.fail("fix dispatch requires an existing port", cm_common.EXIT_FAIL, unit=unit)
     run_dir = cm_common.unit_run_dir(root, unit)
     review_path = run_dir / f"review.r{round_num}.json"
@@ -450,22 +435,6 @@ def _promote_review(root: Path, cfg: dict, unit: str, round_num: int, out_file: 
     return [f"runs/{unit}/review.r{round_num}.json"], [], malformed
 
 
-def _valid_case_shape(case) -> bool:
-    if not isinstance(case, dict):
-        return False
-    if not isinstance(case.get("id"), str) or not case["id"]:
-        return False
-    if not isinstance(case.get("call"), str) or not case["call"]:
-        return False
-    for key in ("args", "init_args"):
-        if key in case and not isinstance(case[key], list):
-            return False
-    for key in ("kwargs", "init_kwargs"):
-        if key in case and not isinstance(case[key], dict):
-            return False
-    return True
-
-
 def _promote_cases(root: Path, unit: str, stage: Path) -> tuple[list, list]:
     out_dir = stage / "out"
     others = sorted(p.name for p in out_dir.iterdir()) if out_dir.is_dir() else []
@@ -508,7 +477,7 @@ def _promote_cases(root: Path, unit: str, stage: Path) -> tuple[list, list]:
     invalid = []
     valid_new = []
     for case in doc["cases"]:
-        if not _valid_case_shape(case):
+        if cm_common.case_shape_problem(case) is not None:
             invalid.append(case.get("id") if isinstance(case, dict) else None)
             continue
         if case["id"] in existing_ids:
@@ -557,8 +526,8 @@ def cmd_dispatch(root: Path, cfg: dict, unit: str, kind: str, round_num: int) ->
 
     (stage / "out").mkdir(parents=True, exist_ok=True)
 
-    templates_dir = cm_common.plugin_root() / "skills" / "codebase-migrator" / "assets" / "templates"
-    template_path = templates_dir / TEMPLATE_NAMES[kind]
+    templates_dir = cm_common.templates_dir()
+    template_path = templates_dir / cm_common.TEMPLATE_NAMES[kind]
     target_module_name = cm_common.target_module(cfg, unit)
     try:
         prompt = render_template(template_path, unit, target_module_name, round_num)

@@ -2,14 +2,13 @@
 """Per-unit ledger: state, cache key, R0 eligibility (plan section 4.11).
 
 Importable: `cache_key(root, cfg, unit) -> dict`, `eligible(root, cfg, unit) -> list[str]`.
-Keep this module importable with no side effects at import time: `diff_gate.py` (C) and
-`unit_gate.py`/`sandbox.py` (D) import `cache_key` and `eligible`.
+Keep this module importable with no side effects at import time: `diff_gate.py` and
+`unit_gate.py`/`sandbox.py` import `cache_key` and `eligible`.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import sys
@@ -20,7 +19,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import cm_common  # noqa: E402
 
-CONVENTIONS_SENTINEL = "CHOOSE_CONVENTIONS"
 STATES = {
     "pending",
     "drafted",
@@ -63,15 +61,6 @@ def _read_net_lock(root: Path) -> dict:
     return cm_common.read_json(path, "net.lock.json")
 
 
-def _is_shim(path: Path) -> bool:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            first_line = f.readline().rstrip("\n")
-    except OSError:
-        return False
-    return first_line.startswith("# codebase-migrator: shim for ")
-
-
 def _inventory_stale_units(root: Path, cfg: dict, inventory: dict, closure: list) -> list:
     """Units in `closure` whose live legacy bytes no longer match the
     inventory's recorded `source_sha256` (or that the inventory does not
@@ -95,7 +84,6 @@ def cache_key(root: Path, cfg: dict, unit: str) -> dict:
     import inventory as _inventory_mod  # lazy import: mirrors load_config's own lazy import
 
     inventory = cm_common.read_json(root / "inventory.json", "inventory.json")
-    closure = cm_common.unit_closure(inventory, unit)
     legacy_root = cm_common.resolved_paths(root, cfg)["legacy_root"]
 
     # `closure_files` (not `unit_closure`'s dotted names) is the file set
@@ -134,9 +122,9 @@ def cache_key(root: Path, cfg: dict, unit: str) -> dict:
     net_sha256 = net_lock_entry.get("net_sha256") if net_lock_entry else None
     cases_sha256 = net_lock_entry.get("cases_sha256") if net_lock_entry else None
 
-    templates_dir = cm_common.plugin_root() / "skills" / "codebase-migrator" / "assets" / "templates"
+    templates_dir = cm_common.templates_dir()
     template_digests = {}
-    for name in ("port_TASK.md", "fix_TASK.md", "review_TASK.md", "cases_TASK.md"):
+    for name in cm_common.TEMPLATE_NAMES.values():
         p = templates_dir / name
         template_digests[name] = cm_common.sha256_file(p) if p.is_file() else cm_common.sha256_bytes(b"")
     templates_sha256 = cm_common.sha256_json(template_digests)
@@ -215,7 +203,7 @@ def eligible(root: Path, cfg: dict, unit: str) -> list:
             continue
         owning_unit = s.split(":", 1)[0]
         target_path = cm_common.target_file(root, cfg, owning_unit)
-        is_ported = target_path.is_file() and not _is_shim(target_path)
+        is_ported = target_path.is_file() and not cm_common.is_shim_file(target_path)
         if not is_ported and row_entry["row"].get("cardinality") != "one_to_one":
             non_one_to_one_unported.append(s)
     if non_one_to_one_unported:
@@ -284,8 +272,8 @@ def eligible(root: Path, cfg: dict, unit: str) -> list:
 
     conventions_path = root / "conventions.md"
     if conventions_path.is_file():
-        if CONVENTIONS_SENTINEL in conventions_path.read_text(encoding="utf-8"):
-            reasons.append(f"conventions.md still contains {CONVENTIONS_SENTINEL}")
+        if cm_common.CONVENTIONS_SENTINEL in conventions_path.read_text(encoding="utf-8"):
+            reasons.append(f"conventions.md still contains {cm_common.CONVENTIONS_SENTINEL}")
     else:
         reasons.append("conventions.md is missing")
 
@@ -418,13 +406,13 @@ def cmd_converge(root: Path, cfg: dict, args) -> int:
     review = cm_common.read_json(review_path, review_path.name)
     if review.get("target_sha256") != current_target_sha256:
         cm_common.fail(
-            f"cannot converge: latest review was produced for a different target_sha256",
+            "cannot converge: latest review was produced for a different target_sha256",
             cm_common.EXIT_FAIL,
             unit=unit,
         )
     if review.get("malformed"):
         cm_common.fail(
-            f"cannot converge: latest review has malformed findings", cm_common.EXIT_FAIL, unit=unit
+            "cannot converge: latest review has malformed findings", cm_common.EXIT_FAIL, unit=unit
         )
 
     refusals_path = run_dir / "refusals.json"
@@ -628,9 +616,8 @@ def cmd_accept_drift(root: Path, cfg: dict, args) -> int:
     )
     cm_common.atomic_write_json(drift_log_path, drift_log)
 
-    if net_entry is not None:
-        del net_lock["units"][unit]
-        cm_common.atomic_write_json(root / "net.lock.json", net_lock)
+    del net_lock["units"][unit]
+    cm_common.atomic_write_json(root / "net.lock.json", net_lock)
 
     ledger = _read_ledger(root)
     entry = ledger["units"].get(unit, {})

@@ -3,7 +3,6 @@
 import io
 import json
 import os
-import shutil
 import sys
 
 import pytest
@@ -89,27 +88,6 @@ def test_under_temp_root(work_root):
     assert not cm_common.under_temp_root(work_root)
 
 
-def test_closure_digests_equal_for_copy_and_differ_after_change(work_root):
-    legacy = work_root / "legacy"
-    (legacy / "pkg").mkdir(parents=True)
-    (legacy / "pkg" / "__init__.py").write_text("", encoding="utf-8")
-    (legacy / "pkg" / "a.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (legacy / "pkg" / "b.py").write_text("VALUE = 2\n", encoding="utf-8")
-
-    units = ["pkg.a", "pkg.b"]
-    digests_1 = cm_common.closure_digests(legacy, "pkg", units)
-
-    copy_root = work_root / "legacy_copy"
-    shutil.copytree(legacy, copy_root)
-    digests_2 = cm_common.closure_digests(copy_root, "pkg", units)
-    assert digests_1 == digests_2
-
-    (legacy / "pkg" / "b.py").write_text("VALUE = 999\n", encoding="utf-8")
-    digests_3 = cm_common.closure_digests(legacy, "pkg", units)
-    assert digests_3["pkg.a"] == digests_1["pkg.a"]
-    assert digests_3["pkg.b"] != digests_1["pkg.b"]
-
-
 def test_file_digests_hashes_relpaths_and_refuses_a_missing_one(work_root):
     base = work_root / "base"
     (base / "sub").mkdir(parents=True)
@@ -166,14 +144,6 @@ def test_unit_closure_includes_ancestor_package_units(work_root):
     # "pkg" itself is never added: it is not a key of inventory["units"],
     # i.e. not a unit at all (docstring-only __init__.py).
     assert "pkg" not in closure
-
-    digests_1 = cm_common.closure_digests(legacy, "pkg", closure)
-    assert "pkg.sub" in digests_1  # maps to pkg/sub/__init__.py, like legacy_file would
-
-    (legacy / "pkg" / "sub" / "__init__.py").write_text("CONST = 2\n", encoding="utf-8")
-    digests_2 = cm_common.closure_digests(legacy, "pkg", closure)
-    assert digests_2["pkg.sub"] != digests_1["pkg.sub"]
-    assert digests_2["pkg.sub.mod"] == digests_1["pkg.sub.mod"]
 
 
 def test_make_parser_error_emits_one_json_line_exit_2(capsys):

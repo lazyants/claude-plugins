@@ -7,7 +7,6 @@ CLI: `migration_validate.py --root R`.
 
 from __future__ import annotations
 
-import argparse
 import os
 import re
 import sys
@@ -113,13 +112,13 @@ def _problem(key: str, kind: str, message: str) -> dict:
     return {"key": key, "kind": kind, "message": message}
 
 
-def validate(cfg: dict, root: "Path") -> list:
+def validate(cfg: dict, root: Path) -> list:
     """Return a list of problems for `cfg` (already-parsed `migration.json`).
     `root` is `cfg`'s directory, used to resolve relative paths."""
     root = Path(root)
     problems = []
 
-    for key, value in cfg.items():
+    for key in cfg:
         if key not in _KNOWN_KEYS:
             problems.append(_problem(key, "unknown_key", f"unknown key: {key}"))
 

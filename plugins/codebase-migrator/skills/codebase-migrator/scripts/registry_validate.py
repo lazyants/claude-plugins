@@ -9,6 +9,7 @@ changes except through --correct, which is an audited, explicit act.
 from __future__ import annotations
 
 import argparse
+import keyword
 import sys
 import os
 from datetime import datetime, timezone
@@ -23,6 +24,20 @@ _FROZEN_MISMATCH = "frozen row differs from registry.json; raise it with --corre
 
 def _unit_of(source: str) -> str:
     return source.split(":", 1)[0]
+
+
+def _has_safe_name_part(value: str) -> bool:
+    """True if `value` (a `"module:name"` registry field) has a name part
+    (after the first `:`) that is a dotted path of plain identifiers -- every
+    `.`-separated segment must satisfy `str.isidentifier()` and must not be a
+    keyword. `bridge.py` writes a row's `entry` straight into generated
+    source (`from <legacy> import <name> as <entry's name part>`), so
+    anything else could inject a statement into the shim."""
+    _, sep, name = value.partition(":")
+    if not sep:
+        return False
+    segments = name.split(".")
+    return bool(segments) and all(seg.isidentifier() and not keyword.iskeyword(seg) for seg in segments)
 
 
 def _read_optional(path: Path, what: str, default: dict) -> dict:
@@ -79,10 +94,19 @@ def row_problems(rows: list[dict], inventory: dict, cfg: dict) -> list[dict]:
             problems.append({"source": source, "message": "a non-dropped row needs a non-null entry"})
         elif entry not in targets:
             problems.append({"source": source, "message": "entry must be one of targets"})
+        # `entry` is required (just above) to be one of `targets`, so this
+        # loop's safety check covers it too -- `bridge.py` writes exactly
+        # `entry`'s name part into generated source (`as <name>`), and a
+        # dropped row has no targets to walk here at all.
         for target in targets:
+            if not isinstance(target, str):
+                problems.append({"source": source, "message": f"target {target!r} is not a string"})
+                continue
             target_module = target.split(":", 1)[0]
             if target_module != expected_module:
                 problems.append({"source": source, "message": f"target {target} is not in module {expected_module}"})
+            if not _has_safe_name_part(target):
+                problems.append({"source": source, "message": f"target {target!r} has an unsafe name"})
         if cardinality == "one_to_one" and len(targets) != 1:
             problems.append({"source": source, "message": "one_to_one needs exactly one target"})
         if cardinality == "split" and len(targets) < 2:
