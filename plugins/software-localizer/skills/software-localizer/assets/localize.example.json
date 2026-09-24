@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "project_root": "/absolute/path/to/the/project",
+  "source_locale": "en",
+  "target_locales": ["de", "ru"],
+  "adapter": {
+    "argv": ["node", "adapter/adapter.mjs"],
+    "options": {"catalog_dir": "src/i18n/locales"}
+  },
+  "style": {
+    "de": {"formality": "Sie", "notes": "Formal, concise; keep English product names."},
+    "ru": {"formality": "вы", "notes": "Polite form; prefer an established Russian term over an anglicism."}
+  },
+  "allow_identical": [],
+  "batch_size": 40,
+  "max_rounds": 3,
+  "adapter_timeout_s": 300
+}

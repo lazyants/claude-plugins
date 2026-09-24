@@ -1,0 +1,14 @@
+{
+  "app.title": "Моё приложение",
+  "nav.home": "Главная",
+  "nav.about": "О нас",
+  "nav.contact": "Контакты",
+  "nav.save": "Сохранить",
+  "dialog.confirm": "Вы уверены? @:nav.save",
+  "user.greeting": "Здравствуйте, {name}!",
+  "notice.leadingSpace": " Внимание: прочитайте сначала",
+  "cart.itemCount": "{count} товар | {count} товара | {count} товаров",
+  "mail.unreadCount": "{count} непрочитанное сообщение | {count} непрочитанных сообщения | {count} непрочитанных сообщений",
+  "footer.copyright": "Все права защищены",
+  "error.notFound": "Страница не найдена"
+}

@@ -1,0 +1,14 @@
+{
+  "app.title": "My App",
+  "nav.home": "Home",
+  "nav.about": "About",
+  "nav.contact": "Contact",
+  "nav.save": "Save",
+  "dialog.confirm": "Are you sure? @:nav.save",
+  "user.greeting": "Hello, {name}!",
+  "notice.leadingSpace": " Note: read this first",
+  "cart.itemCount": "{count} item | {count} items",
+  "mail.unreadCount": "No unread mail | {count} unread message | {count} unread messages",
+  "footer.copyright": "All rights reserved",
+  "error.notFound": "Page not found"
+}

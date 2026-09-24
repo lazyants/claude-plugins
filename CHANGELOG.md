@@ -2,6 +2,14 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.1.0] — 2026-09-24
+
+### Added
+
+- **New plugin: `software-localizer`** — translate a software project's UI strings into another language, or audit an existing translation: a canon and glossary approved once, codex translation in batches through script checks and a Claude review bound to the exact value, a ledger that never overwrites a person's edit, journaled export with rollback, and a per-language report. Collect/export/parse is a per-project adapter written when the skill is used and accepted by round-trip, parse and coverage checks; none ships in the plugin.
+- Scripts (stdlib only, Python ≥ 3.11): `scaffold.py`, `config_validate.py`, `adapter_check.py`, `collect.py`, `ledger.py`, `canon.py`, `packets.py`, `checks.py`, `export_values.py`, `report.py`, `status.py`, with `lz_common.py` and `adapter_client.py`.
+- CI: `.github/workflows/software-localizer.yml` runs the plugin's pytest suite on Python 3.11 and 3.14.
+
 ## [codebase-migrator — removed] — 2026-09-24
 
 ### Removed

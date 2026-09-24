@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Lazy Ants Claude Code plugins",
-    "version": "1.8.0"
+    "version": "1.9.0"
   },
   "plugins": [
     {
@@ -155,6 +155,29 @@
         "marketplace",
         "diagnostics",
         "profiles"
+      ]
+    },
+    {
+      "name": "software-localizer",
+      "source": "./plugins/software-localizer",
+      "description": "Translate a software project's UI strings into another language, or audit the translation it already has, with literary-translator's discipline: a canon and glossary decided once so every term and UI label is named the same way, codex translation in small batches through script checks and a Claude review bound to the exact value, a resumable ledger that never overwrites a person's edit, and a report for a native speaker. Collecting strings and exporting translations is a per-project adapter written when the plugin is used, accepted only after mechanical round-trip and coverage checks; export is journaled and rolls back on failure.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Lazy Ants"
+      },
+      "category": "translation",
+      "keywords": [
+        "claude-code",
+        "codex",
+        "localization",
+        "l10n",
+        "i18n",
+        "translation",
+        "glossary",
+        "terminology",
+        "audit",
+        "vue-i18n",
+        "gettext"
       ]
     }
   ]

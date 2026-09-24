@@ -1,0 +1,301 @@
+"""Tests for `export_values.py` (plan section 11): recovery-first, the
+freshness guards, the temp-copy complete-record comparison, the journal +
+backups (including the ledger) with a per-file byte re-check, and rollback.
+
+Every test drives the real fixture toy adapter over a writable copy of the
+fixture toy project (`work_root/project`), collected and synced for real --
+`messages.json` is never hand-written here. Candidates are still built by
+hand directly on the ledger (this file's job is export's own contract, not
+`packets.py`'s, which has its own test file)."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+TESTS_DIR = Path(__file__).resolve().parent
+SCRIPTS_DIR = TESTS_DIR.parent / "skills" / "software-localizer" / "scripts"
+FIXTURES_DIR = TESTS_DIR / "fixtures"
+sys.path.insert(0, str(SCRIPTS_DIR))
+
+import adapter_client  # noqa: E402
+import canon as canon_mod  # noqa: E402
+import export_values  # noqa: E402
+import ledger as ledger_mod  # noqa: E402
+import lz_common  # noqa: E402
+
+# Derived empirically from tests/fixtures/toy_project's actual form counts
+# (cart.itemCount: en/de have 2 forms, ru has 3; mail.unreadCount: en/ru have
+# 3 forms, de has 2) -- see the plugin's plural contract (plan section 4).
+TOY_OPTIONS = {
+    "plural_labels": {
+        "en": {"2": [["one", True], ["other", False]], "3": [["zero", True], ["one", True], ["other", False]]},
+        "de": {"2": [["one", True], ["other", False]], "3": [["one", True], ["other", False]]},
+        "ru": {"2": [["one", False], ["few", False], ["many", False]],
+               "3": [["one", False], ["few", False], ["many", False]]},
+    },
+    "general": {"2": 1, "3": 2},
+}
+
+
+# --- helpers -----------------------------------------------------------
+
+
+def setup_export_workspace(work_root, target_locales=("de", "ru")):
+    project_dir = work_root / "project"
+    shutil.copytree(FIXTURES_DIR / "toy_project", project_dir)
+    root = work_root / "R"
+
+    cfg = {
+        "schema": 1, "project_root": str(project_dir), "source_locale": "en",
+        "target_locales": list(target_locales),
+        "adapter": {"argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")], "options": dict(TOY_OPTIONS)},
+        "style": {loc: {"formality": "Sie", "notes": ""} for loc in target_locales},
+        "allow_identical": [], "batch_size": 40, "max_rounds": 3, "adapter_timeout_s": 30,
+    }
+    lz_common.atomic_write_json(root / "localize.json", cfg)
+    loaded_cfg = lz_common.load_config(root)
+    lock = lz_common.adapter_digest(root, loaded_cfg)
+    lz_common.atomic_write_json(root / "adapter.lock.json", lock)
+
+    messages = adapter_client.collect(str(root), loaded_cfg, str(project_dir), str(root / "messages.json"))
+
+    def parse_fn(items):
+        return adapter_client.parse(str(root), loaded_cfg, str(project_dir), items)
+
+    canon_lock = canon_mod.load_lock(root)
+    ledger_mod.sync(root, loaded_cfg, messages, parse_fn, canon_lock)
+    by_id = {m["id"]: m for m in messages["messages"]}
+    return root, loaded_cfg, project_dir, by_id
+
+
+def make_ready_candidate(cfg, message, locale, value, origin="translate", accepted_by=None, audited_target_sha=None):
+    value_sha = lz_common.value_sha256(value)
+    return {
+        "value": value, "value_sha256": value_sha, "origin": origin,
+        "source_sha256": ledger_mod.source_sha256(message),
+        "context_sha256": ledger_mod.context_sha256(message, locale),
+        "style_sha256": ledger_mod.style_sha256(cfg, locale),
+        "audited_target_sha256": audited_target_sha,
+        "checks": "pass", "problems": [],
+        "verdict": {"value_sha256": value_sha, "verdict": "pass", "issues": [], "run": "test"},
+        "accepted_by": accepted_by,
+    }
+
+
+def set_candidate(root, locale, msg_id, candidate, state=None):
+    ledger_data = ledger_mod.load(root)
+    entry = ledger_data["locales"][locale][msg_id]
+    entry["candidate"] = candidate
+    if state is not None:
+        entry["state"] = state
+    ledger_mod.save(root, ledger_data)
+    return ledger_data
+
+
+def run_cli(args):
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "export_values.py"), *args],
+        capture_output=True, text=True,
+    )
+    lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, f"expected one JSON line; stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    return proc.returncode, json.loads(lines[0])
+
+
+# --- dry run -----------------------------------------------------------
+
+
+def test_export_dry_run_reports_changes_without_writing(work_root):
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+
+    before = (project_dir / "locales" / "de.json").read_bytes()
+    result = export_values.do_export(root, "de", dry_run=True)
+    after = (project_dir / "locales" / "de.json").read_bytes()
+
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["exported"] == 1
+    assert result["changed_by_file"] == {"locales/en.json": 1}
+    assert before == after
+
+    ledger_data = ledger_mod.load(root)
+    assert ledger_data["locales"]["de"]["footer.copyright"]["state"] == "pending"
+
+
+# --- real export ---------------------------------------------------------
+
+
+def test_export_writes_value_and_marks_translated(work_root):
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+
+    result = export_values.do_export(root, "de", dry_run=False)
+    assert result["ok"] is True
+    assert result["exported"] == 1
+
+    de_json = json.loads((project_dir / "locales" / "de.json").read_text(encoding="utf-8"))
+    assert de_json["footer.copyright"] == "Alle Rechte vorbehalten"
+
+    ledger_data = ledger_mod.load(root)
+    entry = ledger_data["locales"]["de"]["footer.copyright"]
+    assert entry["state"] == "translated"
+    assert entry["last_exported_sha256"] == lz_common.value_sha256("Alle Rechte vorbehalten")
+
+    journal_path = Path(result["journal"])
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["status"] == "done"
+
+
+def test_export_only_touches_files_it_actually_changed(work_root):
+    """en.json (source) and ru.json (a different locale) are both listed by
+    the adapter but untouched by a de-only export -- neither should be
+    backed up, rewritten, or even read for a byte comparison against a
+    changed sha256; the journal's project-file list must name only de.json.
+    """
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+
+    en_path = project_dir / "locales" / "en.json"
+    ru_path = project_dir / "locales" / "ru.json"
+    en_before = en_path.read_bytes()
+    ru_before = ru_path.read_bytes()
+
+    result = export_values.do_export(root, "de", dry_run=False)
+
+    assert en_path.read_bytes() == en_before
+    assert ru_path.read_bytes() == ru_before
+
+    journal = json.loads(Path(result["journal"]).read_text(encoding="utf-8"))
+    project_dests = {f["dest"] for f in journal["files"] if f["kind"] == "project"}
+    assert project_dests == {str(project_dir / "locales" / "de.json")}
+
+
+# --- freshness guards ------------------------------------------------------
+
+
+def test_export_refused_when_live_target_changed_since_sync(work_root):
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+
+    # Someone else translates it directly in the project, bypassing the plugin.
+    de_path = project_dir / "locales" / "de.json"
+    de_data = json.loads(de_path.read_text(encoding="utf-8"))
+    de_data["footer.copyright"] = "Ein Mensch hat das übersetzt"
+    de_path.write_text(json.dumps(de_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    try:
+        export_values.do_export(root, "de", dry_run=True)
+        raise AssertionError("expected export to refuse")
+    except SystemExit as exc:
+        assert exc.code == lz_common.EXIT_FAIL
+
+    # Nothing was touched.
+    assert de_path.read_text(encoding="utf-8") == json.dumps(de_data, indent=2, ensure_ascii=False) + "\n"
+
+
+def test_export_refused_when_source_changed_since_review(work_root):
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    candidate = make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten")
+    candidate["source_sha256"] = "stale-hash-from-an-older-review"
+    set_candidate(root, "de", "footer.copyright", candidate)
+
+    try:
+        export_values.do_export(root, "de", dry_run=True)
+        raise AssertionError("expected export to refuse")
+    except SystemExit as exc:
+        assert exc.code == lz_common.EXIT_FAIL
+
+
+# --- human_locked / accepted audit proposal --------------------------------
+
+
+def test_export_human_locked_not_exported_unless_accepted(work_root):
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    candidate = make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten")
+    # human_locked needs a *live* target for the staleness guard to compare
+    # against, so give it one and point project_value_sha256 at it directly.
+    de_path = project_dir / "locales" / "de.json"
+    de_data = json.loads(de_path.read_text(encoding="utf-8"))
+    de_data["footer.copyright"] = "Ein Mensch hat das übersetzt"
+    de_path.write_text(json.dumps(de_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    ledger_data = ledger_mod.load(root)
+    entry = ledger_data["locales"]["de"]["footer.copyright"]
+    entry["state"] = "human_locked"
+    entry["project_value_sha256"] = lz_common.value_sha256("Ein Mensch hat das übersetzt")
+    entry["candidate"] = candidate
+    ledger_mod.save(root, ledger_data)
+
+    result = export_values.do_export(root, "de", dry_run=True)
+    assert result["exported"] == 0  # human_locked, no accepted_by -> not exportable
+
+    candidate["accepted_by"] = "alice"
+    candidate["audited_target_sha256"] = lz_common.value_sha256("Ein Mensch hat das übersetzt")
+    set_candidate(root, "de", "footer.copyright", candidate)
+
+    result = export_values.do_export(root, "de", dry_run=True)
+    assert result["exported"] == 1
+
+
+# --- recovery ---------------------------------------------------------------
+
+
+def test_export_recovers_leftover_in_progress_journal(work_root):
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+
+    de_path = project_dir / "locales" / "de.json"
+    ledger_path = root / "ledger" / "de.json"  # ledger.py stores one file per locale
+    original_de_bytes = de_path.read_bytes()
+    original_ledger_bytes = ledger_path.read_bytes()
+
+    stamp = "20260101T000000Z"
+    export_dir = root / "exports" / stamp
+    backup_dir = export_dir / "backup"
+    lz_common.atomic_write_text(backup_dir / "project" / "locales" / "de.json",
+                                 original_de_bytes.decode("utf-8"))
+    lz_common.atomic_write_text(backup_dir / "ledger.json", original_ledger_bytes.decode("utf-8"))
+    journal = {
+        "schema": 1, "stamp": stamp, "locale": "de", "status": "in_progress",
+        "started_at": "2026-01-01T00:00:00Z", "finished_at": None,
+        "files": [
+            {"kind": "project", "dest": str(de_path), "backup": "project/locales/de.json",
+             "sha256_before": lz_common.sha256_bytes(original_de_bytes)},
+            {"kind": "ledger", "dest": str(ledger_path), "backup": "ledger.json",
+             "sha256_before": lz_common.sha256_bytes(original_ledger_bytes)},
+        ],
+    }
+    lz_common.atomic_write_json(export_dir / "journal.json", journal)
+
+    # Simulate a crash mid-replacement: the project file was already swapped
+    # for a new value, but the ledger update never landed.
+    de_path.write_text('{"footer.copyright": "mid-export garbage"}\n', encoding="utf-8")
+
+    result = export_values.do_export(root, "de", dry_run=True)
+    assert result["recovered"] == [str(export_dir)]
+    assert de_path.read_bytes() == original_de_bytes
+    assert ledger_path.read_bytes() == original_ledger_bytes
+
+    rolled_back_journal = json.loads((export_dir / "journal.json").read_text(encoding="utf-8"))
+    assert rolled_back_journal["status"] == "rolled_back"
+
+
+# --- CLI subprocess smoke test ----------------------------------------------
+
+
+def test_export_via_cli(work_root):
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+
+    code, payload = run_cli(["--root", str(root), "--locale", "de", "--dry-run"])
+    assert code == 0, payload
+    assert payload["exported"] == 1
