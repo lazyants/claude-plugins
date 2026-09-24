@@ -91,6 +91,27 @@ def _require_ok(reply: dict, command: str) -> None:
         raise AdapterError(f"adapter {command!r} reported failure: {error}")
 
 
+def _first_locale_coverage_gap(messages: dict, target_locales) -> str | None:
+    """The id of the first message whose `targets` -- or, for a plural
+    message, `plural.target_labels` -- does not have an entry for every
+    configured target locale, or `None` when every message does.
+    `lz_common.load_messages`/`messages_shape_problem` validate the shape
+    of `targets`/`target_labels` but have no `cfg`, so they cannot check
+    coverage against `target_locales`; this is that check. A message may
+    legally hold `null` for a locale it has no translation for -- the
+    requirement is the KEY being present, not a non-null value."""
+    for message in messages["messages"]:
+        targets = message["targets"]
+        if any(locale not in targets for locale in target_locales):
+            return message["id"]
+        plural = message.get("plural")
+        if plural is not None:
+            target_labels = plural["target_labels"]
+            if any(locale not in target_labels for locale in target_locales):
+                return message["id"]
+    return None
+
+
 def collect(root: str, cfg: dict, project_dir: str, out_path: str) -> dict:
     """Run `collect`, validate the messages file it wrote, and only then
     atomically replace `out_path` with it. Returns the validated messages
@@ -125,6 +146,19 @@ def collect(root: str, cfg: dict, project_dir: str, out_path: str) -> dict:
         problem = lz_common.messages_shape_problem(messages)
         if problem is not None:
             lz_common.fail(f"messages.json is invalid: {problem}", lz_common.EXIT_CANNOT)
+
+        # Every configured target locale must have a targets (and, for a
+        # plural message, target_labels) entry in every message -- checked
+        # here, with cfg, and still before out_path is touched: a message
+        # missing a configured locale's key would otherwise pass shape
+        # validation and only fail later, on a per-locale lookup, after
+        # collect already replaced the last good messages.json.
+        gap_id = _first_locale_coverage_gap(messages, cfg["target_locales"])
+        if gap_id is not None:
+            lz_common.fail(
+                f"messages.json message {gap_id!r} does not cover every configured target locale",
+                lz_common.EXIT_FAIL,
+            )
 
         lz_common.atomic_write_json(out_path, messages)
 
@@ -185,6 +219,15 @@ def parse(root: str, cfg: dict, project_dir: str, items: list[dict]) -> dict[str
 
         extra_args = ["--options", options_path, "--in", in_path]
         reply = run(root, cfg, project_dir, "parse", extra_args)
+
+    # `parse`'s contract (plan section 5) does not require a top-level "ok"
+    # field to succeed, but a reply that carries one and sets it to
+    # anything other than `True` is contradicting itself -- e.g. `{"ok":
+    # false, "results": {...}}` -- and must not be silently accepted just
+    # because "results" happens to validate.
+    if "ok" in reply and reply["ok"] is not True:
+        error = reply.get("error", "unknown error")
+        raise AdapterError(f"adapter 'parse' reported failure: {error}")
 
     results = reply.get("results")
     if not isinstance(results, dict):

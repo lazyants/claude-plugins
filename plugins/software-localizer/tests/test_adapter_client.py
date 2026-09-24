@@ -386,6 +386,83 @@ def test_collect_leaves_previous_messages_untouched_on_shape_violation(work_root
     assert json.loads(out_path.read_text(encoding="utf-8")) == VALID_MESSAGES
 
 
+def test_collect_refuses_when_a_message_is_missing_a_configured_target_locale(work_root, project_dir, capsys):
+    # _cfg() (below) configures target_locales=["de"]; a message whose
+    # `targets` has no "de" key at all (not even null) passed shape
+    # validation but would only fail later, on a per-locale lookup -- caught
+    # here instead, before out_path is ever touched.
+    incomplete = {
+        "schema": 1,
+        "files": ["locales/en.json"],
+        "messages": [
+            {
+                "id": "m1",
+                "source": "Hi",
+                "context": {"file": "locales/en.json", "key": "m1", "max_length": None, "comment": None},
+                "targets": {},
+            }
+        ],
+    }
+    _write_adapter(work_root, f"""
+        from pathlib import Path
+        def cmd_collect(args):
+            Path(args.out).write_text({json.dumps(json.dumps(incomplete))})
+            emit({{"ok": True}})
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            pass
+    """)
+    out_path = work_root / "messages.json"
+    out_path.write_text(json.dumps(VALID_MESSAGES), encoding="utf-8")  # a prior good file
+
+    with pytest.raises(SystemExit) as exc_info:
+        adapter_client.collect(str(work_root), _cfg(), str(project_dir), str(out_path))
+
+    assert exc_info.value.code == 1  # EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert payload["ok"] is False
+    assert "m1" in payload["error"]
+    # The prior good messages.json must be left untouched.
+    assert json.loads(out_path.read_text(encoding="utf-8")) == VALID_MESSAGES
+
+
+def test_collect_refuses_when_a_plural_message_is_missing_target_labels_for_a_locale(work_root, project_dir, capsys):
+    incomplete = {
+        "schema": 1,
+        "files": ["locales/en.json"],
+        "messages": [
+            {
+                "id": "p1",
+                "source": {"forms": ["1 item", "N items"]},
+                "plural": {
+                    "source_labels": [{"label": "one", "exact": True}, {"label": "other", "exact": False}],
+                    "target_labels": {},  # missing "de", the only configured target locale
+                    "count_arguments": ["n"],
+                    "general_index": 1,
+                },
+                "context": {"file": "locales/en.json", "key": "p1", "max_length": None, "comment": None},
+                "targets": {"de": None},
+            }
+        ],
+    }
+    _write_adapter(work_root, f"""
+        from pathlib import Path
+        def cmd_collect(args):
+            Path(args.out).write_text({json.dumps(json.dumps(incomplete))})
+            emit({{"ok": True}})
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            pass
+    """)
+    with pytest.raises(SystemExit) as exc_info:
+        adapter_client.collect(str(work_root), _cfg(), str(project_dir), str(work_root / "messages.json"))
+    assert exc_info.value.code == 1  # EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert "p1" in payload["error"]
+
+
 # --- export() --------------------------------------------------------------
 
 def test_export_writes_values_and_returns_reply(work_root, project_dir):
@@ -581,6 +658,25 @@ def test_parse_accepts_a_well_formed_argument_and_structure_token(work_root, pro
     results = adapter_client.parse(str(work_root), _cfg(), str(project_dir), [{"key": "k1", "text": "Hi"}])
     assert results["k1"]["ok"] is True
     assert len(results["k1"]["tokens"]) == 2
+
+
+def test_parse_fails_when_top_level_ok_is_false(work_root, project_dir):
+    # `parse`'s contract does not require a top-level "ok" (only "results"
+    # matters on success), but a reply that carries one set to false is
+    # contradicting itself -- e.g. {"ok": false, "results": {...}} -- and
+    # must not be silently accepted just because "results" happens to
+    # validate.
+    _write_adapter(work_root, """
+        def cmd_collect(args):
+            pass
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            emit({"ok": False, "error": "boom", "results": {"k1": {"ok": True, "tokens": []}}})
+    """)
+    with pytest.raises(AdapterError) as exc_info:
+        adapter_client.parse(str(work_root), _cfg(), str(project_dir), [{"key": "k1", "text": "Hi"}])
+    assert "boom" in str(exc_info.value)
 
 
 def test_parse_fails_when_a_requested_key_is_missing_from_results(work_root, project_dir):

@@ -52,7 +52,11 @@ def setup_export_workspace(work_root, target_locales=("de", "ru")):
     cfg = {
         "schema": 1, "project_root": str(project_dir), "source_locale": "en",
         "target_locales": list(target_locales),
-        "adapter": {"argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")], "options": dict(TOY_OPTIONS)},
+        "adapter": {
+            "argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")],
+            "code_dir": str(FIXTURES_DIR),  # the shared fixture script lives here
+            "options": dict(TOY_OPTIONS),
+        },
         "style": {loc: {"formality": "Sie", "notes": ""} for loc in target_locales},
         "allow_identical": [], "batch_size": 40, "max_rounds": 3, "adapter_timeout_s": 30,
     }
@@ -496,6 +500,52 @@ def test_export_refuses_when_live_file_edited_after_staging(work_root, monkeypat
     # The person's edit survives -- not the pre-export original, and not
     # the candidate's translated value.
     assert de_path.read_text(encoding="utf-8") == edited_text
+
+
+def test_export_refuses_when_an_untouched_declared_file_is_removed_after_staging(work_root, monkeypatch):
+    """`_changed_files` (used to pick which files get backed up, replaced,
+    and run through the per-file check right before each replace) skips a
+    declared file outright once it stops being a file at all (`if not
+    dest.is_file(): continue`) -- so a declared file this export leaves
+    alone -- en.json (the source locale), untouched by a de-only export of
+    footer.copyright, per `test_export_only_touches_files_it_actually_changed`
+    -- that gets REMOVED between staging and commit never reaches that check
+    under the old code: `_changed_files` silently treats "no longer a file"
+    as "nothing to replace here", and the export would otherwise go on to
+    replace de.json anyway. The new check, run immediately before the
+    commit phase against every declared file (not only the ones about to be
+    replaced), catches this and refuses the whole export with nothing
+    replaced."""
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+
+    de_path = project_dir / "locales" / "de.json"
+    en_path = project_dir / "locales" / "en.json"
+    de_before = de_path.read_bytes()
+
+    real_stage_files = export_values.lz_common.stage_files
+
+    def stage_then_remove(project_dir_arg, files, dest):
+        real_stage_files(project_dir_arg, files, dest)
+        # en.json is declared by the adapter but never replaced by this
+        # de-only export; removing it right after staging captured its hash
+        # is the window this check has to catch.
+        en_path.unlink()
+
+    monkeypatch.setattr(export_values.lz_common, "stage_files", stage_then_remove)
+
+    try:
+        export_values.do_export(root, "de", dry_run=False)
+        raise AssertionError("expected export to refuse")
+    except SystemExit as exc:
+        assert exc.code == lz_common.EXIT_FAIL
+
+    # Nothing replaced: de.json (the file this export would have written)
+    # is untouched, and en.json stays removed -- not silently recreated by
+    # a backup/rollback path that was never entered for it.
+    assert de_path.read_bytes() == de_before
+    assert not en_path.exists()
 
 
 # --- rollback restores only what it replaced ----------------------------------

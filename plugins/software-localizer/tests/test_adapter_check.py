@@ -284,6 +284,154 @@ def test_run_reports_a_source_failure_a_colliding_key_used_to_hide(work_root):
     assert "cart.itemCount" not in result["source_failures"]
 
 
+_MIRROR_ADAPTER_SRC = '''\
+"""Test-only adapter, self-contained (no lz_common import, like the toy
+fixture): like a well-behaved adapter, but its export() has a deliberate
+bug -- exporting locale "de" ALSO silently writes the same values into
+locale "ru"'s file. Used by exactly one test to prove the awkward round
+trip now compares the complete recollected message (every locale), not
+only the locale it just exported."""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj))
+    sys.stdout.write("\\n")
+
+
+def locale_path(locale):
+    return Path("locales") / f"{locale}.json"
+
+
+def read_locale(locale):
+    p = locale_path(locale)
+    if p.is_file():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return {}
+
+
+def cmd_collect(args):
+    source = read_locale("en")
+    target_locales = [t for t in args.target_locales.split(",") if t]
+    targets = {loc: read_locale(loc) for loc in target_locales}
+    messages = []
+    for key, value in source.items():
+        messages.append({
+            "id": key,
+            "source": value,
+            "context": {"file": "locales/en.json", "key": key, "max_length": None, "comment": None},
+            "targets": {loc: targets[loc].get(key) for loc in target_locales},
+        })
+    files = ["locales/en.json"] + [f"locales/{loc}.json" for loc in target_locales]
+    Path(args.out).write_text(
+        json.dumps({"schema": 1, "files": files, "messages": messages}), encoding="utf-8"
+    )
+    emit({"ok": True})
+
+
+def cmd_export(args):
+    values = json.loads(Path(args.values).read_text(encoding="utf-8"))["values"]
+    obj = read_locale(args.locale)
+    obj.update(values)
+    locale_path(args.locale).write_text(json.dumps(obj), encoding="utf-8")
+    if args.locale == "de":
+        # The bug this fixture exists to demonstrate: exporting "de" also
+        # silently writes the same values into "ru".
+        mirror = read_locale("ru")
+        mirror.update(values)
+        locale_path("ru").write_text(json.dumps(mirror), encoding="utf-8")
+    emit({"ok": True})
+
+
+def cmd_parse(args):
+    items = json.loads(Path(args.in_path).read_text(encoding="utf-8"))["items"]
+    emit({"ok": True, "results": {it["key"]: {"ok": True, "tokens": []} for it in items}})
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    c = sub.add_parser("collect")
+    c.add_argument("--options", required=True)
+    c.add_argument("--source-locale", required=True)
+    c.add_argument("--target-locales", required=True)
+    c.add_argument("--out", required=True)
+    e = sub.add_parser("export")
+    e.add_argument("--options", required=True)
+    e.add_argument("--locale", required=True)
+    e.add_argument("--values", required=True)
+    p = sub.add_parser("parse")
+    p.add_argument("--options", required=True)
+    p.add_argument("--in", dest="in_path", required=True)
+    args = parser.parse_args()
+    if args.command == "collect":
+        cmd_collect(args)
+    elif args.command == "export":
+        cmd_export(args)
+    elif args.command == "parse":
+        cmd_parse(args)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
+def test_awkward_round_trip_catches_a_cross_locale_export(work_root, tmp_path):
+    """The NB finding this closes: the awkward round trip used to compare
+    only `targets[locale]` for the locale it just exported, so an export
+    that silently corrupts a DIFFERENT locale's stored value for the same
+    id went unnoticed -- masked once that other locale's own turn later
+    overwrites its own awkward value. Comparing the complete recollected
+    message (every locale) catches it immediately, before it self-heals."""
+    root = work_root / "R"
+    root.mkdir()
+    adapter_dir = root / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter.py").write_text(_MIRROR_ADAPTER_SRC, encoding="utf-8")
+
+    project_dir = tmp_path / "project"
+    (project_dir / "locales").mkdir(parents=True)
+    (project_dir / "locales" / "en.json").write_text(json.dumps({"greeting": "Hello"}), encoding="utf-8")
+    (project_dir / "locales" / "de.json").write_text(json.dumps({"greeting": "Hallo"}), encoding="utf-8")
+    (project_dir / "locales" / "ru.json").write_text(json.dumps({"greeting": "Privet"}), encoding="utf-8")
+
+    cfg = {
+        "schema": 1,
+        "project_root": str(project_dir),
+        "source_locale": "en",
+        "target_locales": ["de", "ru"],
+        "adapter": {"argv": [sys.executable, "adapter/adapter.py"], "options": {}},
+        "style": {
+            "de": {"formality": "Sie", "notes": ""},
+            "ru": {"formality": "вы", "notes": ""},
+        },
+        "allow_identical": [],
+        "batch_size": 40,
+        "max_rounds": 3,
+        "adapter_timeout_s": 30,
+    }
+    lz_common.atomic_write_json(root / "localize.json", cfg)
+
+    code, reply = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+
+    # de is processed first (target_locales order); its own export writes
+    # the correct de value and the bug silently mirrors it into ru. Without
+    # the fix, ru's own later turn overwrites that corruption with its own
+    # intended awkward value before anything checks it, so the OLD code
+    # reports this locale ok -- masking a real, if transient, corruption.
+    assert reply["result"]["staging_consistent"] == {"ok": True}
+    assert reply["result"]["unchanged_round_trip"]["ok"] is True
+    assert reply["result"]["awkward_round_trip"]["ok"] is False
+    assert reply["result"]["awkward_round_trip"]["locales"]["de"]["ok"] is False
+    assert code == 1
+    assert reply["ok"] is False
+
+
 # --- run(): the independent project inventory ---------------------------------
 
 

@@ -28,6 +28,7 @@ a check this script ran and found failing (exit `1`).
 
 from __future__ import annotations
 
+import copy
 import itertools
 import json
 import os
@@ -119,21 +120,24 @@ def _check_awkward_round_trip(root: str, cfg: dict, project_dir: Path, messages:
     results = {}
     overall_ok = True
 
+    # The expected state accumulates ACROSS locale turns, starting from the
+    # baseline: once a locale's awkward export legitimately lands, that
+    # value is the expected baseline for every later turn's "everything
+    # else stays put" comparison too -- comparing against the ORIGINAL,
+    # never-updated baseline would flag an earlier turn's own intended
+    # change as an unexpected one once a later turn's comparison runs.
+    expected_by_id = {m["id"]: copy.deepcopy(m) for m in messages["messages"]}
+
     for locale in cfg["target_locales"]:
         entry: dict = {"ok": True, "problems": []}
         values = {}
-        expected: dict[str, object] = {}
 
         if non_plural is not None:
-            value = _awkward_value(f"NP-{locale}")
-            values[non_plural["id"]] = value
-            expected[non_plural["id"]] = value
+            values[non_plural["id"]] = _awkward_value(f"NP-{locale}")
 
         if plural_msg is not None:
             n = len(plural_msg["plural"]["target_labels"][locale])
-            forms = [_awkward_value(f"P{i}-{locale}") for i in range(n)]
-            values[plural_msg["id"]] = {"forms": forms}
-            expected[plural_msg["id"]] = {"forms": forms}
+            values[plural_msg["id"]] = {"forms": [_awkward_value(f"P{i}-{locale}") for i in range(n)]}
 
         if not values:
             results[locale] = entry
@@ -142,38 +146,37 @@ def _check_awkward_round_trip(root: str, cfg: dict, project_dir: Path, messages:
         adapter_client.export(root, cfg, str(project_dir), locale, values)
         after_out = os.path.join(scratch_dir, f"_awkward_{locale}.json")
         after = adapter_client.collect(root, cfg, str(project_dir), after_out)
-
         after_by_id = {m["id"]: m for m in after["messages"]}
-        before_by_id = {m["id"]: m for m in messages["messages"]}
 
-        # `after_by_id` comes from a fresh collect in the staged copy, which may not
-        # even hold every id `before_by_id` (the live collect) does -- exactly when
-        # staging is inconsistent (`_check_staging_consistency`). `.get()` throughout:
-        # a missing id is a problem to report here too, never a crash.
-        for msg_id, want in expected.items():
+        for msg_id, value in values.items():
+            expected_by_id[msg_id]["targets"][locale] = value
+
+        # The COMPLETE re-collected message, for every id, must equal the
+        # accumulated expectation -- every locale, not only `locale` (plan
+        # section 6, the "awkward round trip" requirement): comparing only
+        # `targets[locale]` let an export that silently touches a DIFFERENT
+        # locale's stored value for the same id go unnoticed, since that
+        # other locale's own later turn would overwrite its own awkward
+        # value and erase the evidence before anything checked it.
+        for msg_id, expected_msg in expected_by_id.items():
             after_msg = after_by_id.get(msg_id)
             if after_msg is None:
                 entry["ok"] = False
                 entry["problems"].append({"id": msg_id, "missing_after_export": True})
                 continue
-            got = after_msg["targets"][locale]
-            if got != want:
+            if after_msg != expected_msg:
                 entry["ok"] = False
-                entry["problems"].append({"id": msg_id, "expected": want, "got": got})
+                entry["problems"].append({
+                    "id": msg_id,
+                    "expected": expected_msg,
+                    "got": after_msg,
+                    "unexpected_change": msg_id not in values,
+                })
 
-        for msg_id, before_msg in before_by_id.items():
-            if msg_id in expected:
-                continue
-            after_msg = after_by_id.get(msg_id)
-            if after_msg is None:
-                entry["ok"] = False
-                entry["problems"].append({"id": msg_id, "missing_after_export": True})
-                continue
-            want = before_msg["targets"][locale]
-            got = after_msg["targets"][locale]
-            if got != want:
-                entry["ok"] = False
-                entry["problems"].append({"id": msg_id, "expected": want, "got": got, "unexpected_change": True})
+        extra_ids = sorted(set(after_by_id) - set(expected_by_id))
+        if extra_ids:
+            entry["ok"] = False
+            entry["problems"].append({"extra_ids_after_export": extra_ids})
 
         results[locale] = entry
         overall_ok = overall_ok and entry["ok"]

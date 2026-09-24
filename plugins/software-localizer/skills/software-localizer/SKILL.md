@@ -59,7 +59,9 @@ Ask the operator which strings are in scope (UI only? emails? docs?) and where t
 
 ## 2. Build the adapter
 
-Write it with the operator, in `R/adapter/` (or in the project, if the team wants to keep it).
+Write it with the operator, in `R/adapter/` — or in a directory inside the project, if the team
+wants to keep it, set as `adapter.code_dir`. Every adapter file must be in that one directory:
+acceptance covers the whole directory.
 Contract: `references/adapter-contract.md`. Three commands, each printing one JSON line:
 
 - `collect` — every in-scope string into the neutral `messages.json`, with ids, sources,

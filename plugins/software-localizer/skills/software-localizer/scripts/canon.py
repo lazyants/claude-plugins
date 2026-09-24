@@ -5,7 +5,13 @@
     {"id": "t-cart", "kind": "term|ui_label|dnt", "source": "Cart", "note": "",
      "occurrences": ["frontend:shop.cart.title"],
      "translations": {"de": {"value": "Warenkorb", "status": "proposed|approved",
-                              "approved_by": None, "approved_at": None}}}
+                              "approved_by": None, "approved_at": None,
+                              "current": ["Im Warenkorb"]}}}
+
+`current` (only ever set by `import`, on a still-`proposed` translation) is
+the locale's live renderings the canon turn saw when it proposed `value` —
+kept for an operator to see side by side with the proposal; `freeze` never
+carries it into `canon.lock.json`.
 
 `import` merges in candidates from a canon-turn's output (plan section 10):
 
@@ -129,7 +135,10 @@ def import_candidates(canon: dict, candidates: list) -> dict:
     unioned, `note` fills in only if the existing entry's is empty, and an
     incoming locale's `proposed` value either creates a fresh `proposed`
     translation or replaces an existing *proposed* one -- an already
-    `approved` translation is never overwritten by an import. Returns
+    `approved` translation is never overwritten by an import. A well-shaped
+    `current` (a list of strings) rides along on that fresh `proposed`
+    translation, display-only (see the module docstring); a malformed one is
+    silently dropped rather than refusing the whole candidate. Returns
     `{"added": [...ids...], "merged": [...ids...]}`.
 
     Raises `ValueError` for a candidate missing `kind`/`source` or naming an
@@ -183,13 +192,26 @@ def import_candidates(canon: dict, candidates: list) -> dict:
             proposed = t.get("proposed") if isinstance(t, dict) else None
             if proposed is None:
                 continue
-            current = entry["translations"].get(locale)
-            if current is not None and current.get("status") == "approved":
+            existing_translation = entry["translations"].get(locale)
+            if existing_translation is not None and existing_translation.get("status") == "approved":
                 continue
-            entry["translations"][locale] = {
+            new_translation = {
                 "value": proposed, "status": "proposed",
                 "approved_by": None, "approved_at": None,
             }
+            # `current` (the locale's renderings the turn saw at proposal
+            # time, plan section 10) is display-only: kept on the entry so
+            # an operator can see it beside the proposal, but never fed into
+            # `freeze` -- it is not part of what a candidate or a review
+            # verdict is checked against (review round 3, item 5). An empty
+            # list carries nothing to display, so it is treated the same as
+            # an absent `current` (this also matches a canon turn's own
+            # audit-mode framing: "current" is the *existing* renderings it
+            # found, and there is nothing to attach when it found none).
+            incoming_current = t.get("current") if isinstance(t, dict) else None
+            if isinstance(incoming_current, list) and incoming_current and all(isinstance(c, str) for c in incoming_current):
+                new_translation["current"] = list(incoming_current)
+            entry["translations"][locale] = new_translation
 
     return {"added": added, "merged": merged, "skipped": skipped}
 
@@ -274,8 +296,11 @@ def freeze(root, canon: dict | None = None) -> dict:
                 "note": entry.get("note", ""), "occurrences": list(entry.get("occurrences", [])),
             }
         else:
+            # `current` is display-only (see `import_candidates`) and never
+            # reaches the frozen lock packets embed.
             approved = {
-                loc: dict(t) for loc, t in entry.get("translations", {}).items()
+                loc: {k: v for k, v in t.items() if k != "current"}
+                for loc, t in entry.get("translations", {}).items()
                 if t.get("status") == "approved"
             }
             if not approved:

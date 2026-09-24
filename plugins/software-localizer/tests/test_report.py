@@ -31,7 +31,11 @@ def make_cfg(target_locales=("de",)):
     return {
         "schema": 1, "project_root": str(FIXTURES_DIR / "toy_project"), "source_locale": "en",
         "target_locales": list(target_locales),
-        "adapter": {"argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")], "options": {}},
+        "adapter": {
+            "argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")],
+            "code_dir": str(FIXTURES_DIR),  # the shared fixture script lives here
+            "options": {},
+        },
         "style": {loc: {"formality": "Sie", "notes": ""} for loc in target_locales},
         "allow_identical": [], "batch_size": 40, "max_rounds": 3, "adapter_timeout_s": 30,
     }
@@ -111,6 +115,27 @@ def test_report_exported_section(work_root):
     assert "## Exported" in text
     assert "`a`" in text
     assert "value: Hallo" in text
+
+
+def test_report_adopted_entry_shows_project_value_under_adopted_label(work_root):
+    """Review round 3, item 4: `ledger.adopt` moves existing/human-locked
+    entries to "translated" without a candidate (plan section 7) -- before
+    the fix, this fell into "Exported" and read `candidate.value`, printing
+    "value: None" for a value the project genuinely has."""
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello", targets={"de": "Hallo (adopted)"})])
+    entry = make_entry("translated", candidate=None)
+    setup_workspace(work_root, cfg, msgs, {"de": {"a": entry}})
+
+    text = report.build_report(work_root, "de")
+    assert "## Adopted" in text
+    adopted_section = text.split("## Adopted")[1].split("## Ready to export")[0]
+    assert "`a`" in adopted_section
+    assert "value: Hallo (adopted)" in adopted_section
+    assert "None" not in adopted_section
+    # must not also appear under "Exported"
+    exported_section = text.split("## Exported")[1].split("## Adopted")[0]
+    assert "`a`" not in exported_section
 
 
 def test_report_ready_vs_still_needs_translation(work_root):

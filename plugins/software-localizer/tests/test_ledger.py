@@ -52,7 +52,11 @@ def make_real_cfg(target_locales=("de",)):
     return {
         "schema": 1, "project_root": str(FIXTURES_DIR / "toy_project"), "source_locale": "en",
         "target_locales": list(target_locales),
-        "adapter": {"argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")], "options": {}},
+        "adapter": {
+            "argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")],
+            "code_dir": str(FIXTURES_DIR),  # the shared fixture script lives here
+            "options": {},
+        },
         "style": {loc: {"formality": "Sie", "notes": ""} for loc in target_locales},
         "allow_identical": [], "batch_size": 40, "max_rounds": 3, "adapter_timeout_s": 30,
     }
@@ -489,6 +493,36 @@ def test_sync_translated_to_human_locked_on_target_edit(work_root):
     assert ledger.load(work_root)["locales"]["de"]["m1"]["state"] == "human_locked"
 
 
+def test_sync_translated_to_human_locked_clears_candidate(work_root):
+    """Review round 3, item 1 (MAJOR): a person's edit superseding an
+    exported value must also drop the old candidate -- before the fix, a
+    still-passing candidate survived the transition to `human_locked`, and
+    `adopt`ing the human edit later moved the entry back to `translated`
+    where `exportable()` could select that stale candidate again and
+    `export_values.py` would overwrite the person's edit with it."""
+    cfg = make_cfg()
+    msg = make_message("m1", "Hello", targets={"de": "Hallo"})
+    sync_once(work_root, cfg, make_messages([msg]))
+
+    ledger_data = ledger.load(work_root)
+    entry = ledger_data["locales"]["de"]["m1"]
+    entry["state"] = "translated"
+    entry["last_exported_sha256"] = entry["project_value_sha256"]
+    entry["candidate"] = make_candidate(
+        value="Hallo", source_sha256=ledger.source_sha256(msg),
+        context_sha256=ledger.context_sha256(msg, "de"), style_sha256=ledger.style_sha256(cfg, "de"),
+        checks="pass", verdict={"value_sha256": lz_common.value_sha256("Hallo"), "verdict": "pass"},
+    )
+    ledger.save(work_root, ledger_data)
+
+    msg["targets"] = {"de": "Hallo!! edited by a person"}
+    sync_once(work_root, cfg, make_messages([msg]))
+
+    entry2 = ledger.load(work_root)["locales"]["de"]["m1"]
+    assert entry2["state"] == "human_locked"
+    assert entry2["candidate"] is None
+
+
 def test_sync_translated_to_stale_on_source_change(work_root):
     cfg = make_cfg()
     msg = make_message("m1", "Hello", targets={"de": "Hallo"})
@@ -825,6 +859,57 @@ def test_adopt_all_existing():
     }}}
     result = ledger.adopt(ledger_data, "de", None, "alice")
     assert result["adopted"] == ["a"]
+
+
+def test_adopt_clears_the_old_candidate():
+    """Review round 3, item 1 (MAJOR): adoption takes the project's current
+    value as the plugin's own baseline, so an older candidate (judged
+    against a value this no longer is) must not linger to be re-exported."""
+    ledger_data = {"locales": {"de": {"a": {
+        "state": "human_locked", "project_value_sha256": "h1", "last_exported_sha256": "old",
+        "candidate": make_candidate(
+            value="Hallo (stale)", checks="pass",
+            verdict={"value_sha256": lz_common.value_sha256("Hallo (stale)"), "verdict": "pass"},
+        ),
+    }}}}
+    result = ledger.adopt(ledger_data, "de", ["a"], "alice")
+    assert result["adopted"] == ["a"]
+    assert ledger_data["locales"]["de"]["a"]["candidate"] is None
+
+
+def test_export_person_edit_sync_adopt_export_does_not_restore_the_old_candidate(work_root):
+    """Review round 3, item 1 (MAJOR), the full lifecycle from the review
+    finding: export -> person edits -> sync -> adopt must leave the id NOT
+    exportable with the plugin's old (pre-edit) candidate value."""
+    cfg = make_cfg()
+    msg = make_message("m1", "Hello")
+    sync_once(work_root, cfg, make_messages([msg]))  # pending
+
+    ledger_data = ledger.load(work_root)
+    ledger.set_candidate(ledger_data, "de", "m1", make_candidate(
+        value="Hallo (plugin)",
+        source_sha256=ledger.source_sha256(msg), context_sha256=ledger.context_sha256(msg, "de"),
+        style_sha256=ledger.style_sha256(cfg, "de"), checks="pass",
+        verdict={"value_sha256": lz_common.value_sha256("Hallo (plugin)"), "verdict": "pass"},
+    ))
+    ledger.record_export(ledger_data, "de", {"m1": "Hallo (plugin)"})  # what export_values.py does on success
+    ledger.save(work_root, ledger_data)
+    assert ledger.load(work_root)["locales"]["de"]["m1"]["state"] == "translated"
+
+    # a person edits the project's target directly, bypassing the plugin
+    msg["targets"] = {"de": "Hallo (person)"}
+    sync_once(work_root, cfg, make_messages([msg]))
+    assert ledger.load(work_root)["locales"]["de"]["m1"]["state"] == "human_locked"
+
+    ledger_data = ledger.load(work_root)
+    ledger.adopt(ledger_data, "de", ["m1"], "alice")
+    ledger.save(work_root, ledger_data)
+
+    final = ledger.load(work_root)["locales"]["de"]["m1"]
+    assert final["state"] == "translated"
+    assert final["last_exported_sha256"] == lz_common.value_sha256("Hallo (person)")
+    assert final["candidate"] is None
+    assert ledger.exportable({"locales": {"de": {"m1": final}}}, "de") == []
 
 
 # --- CLI (real subprocess) --------------------------------------------------

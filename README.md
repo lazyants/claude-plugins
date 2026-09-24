@@ -214,7 +214,7 @@ Trigger phrases: "localize this project", "translate the app into German", "chec
 
 - **Canon and glossary** — product terms, UI labels that other messages refer to, and do-not-translate names, proposed by a model turn (in audit mode with every current rendering side by side), approved by a person as a short core list, and frozen. Whether a translation uses an approved term, in any inflection, is the review's judgement, not a string match.
 - **Two modes** — *translate* (new and changed strings only, incrementally) and *audit* (findings with proposed replacements; nothing is applied until a person accepts it).
-- **Script checks on every value** through the adapter's own parser — syntax, argument signatures, structure tokens, plural forms per the project's plural rules, surrounding whitespace, length, do-not-translate names.
+- **Script checks on every export candidate and audit proposal** through the adapter's own parser — syntax, argument signatures, structure tokens, plural forms per the project's plural rules, surrounding whitespace, length, do-not-translate names.
 - **Model turns with a fixed contract** — codex translates read-only and returns JSON; a Claude review gives a verdict for every id, bound to the hash of the exact value it judged.
 - **A ledger that never overwrites a person** — existing translations start protected, a later human edit locks a message, and a changed source marks only the plugin's own translations stale.
 - **Safe export** — re-collect before writing, refuse on any drift since review, write through a temporary copy that must differ only in the approved values, then replace files under a journal with backups that is rolled back on failure.

@@ -33,7 +33,13 @@ report for the reasoning kept short here):
   `audit_proposal` (an extra field beyond plan section 7's documented
   schema; JSON round-trips it fine) — there is no pinned setter for it, so
   it is read and written as a plain dict field, matching `accept-audit`'s
-  own job of turning it into a candidate.
+  own job of turning it into a candidate. A `review` `fail` with a
+  `proposed` value routes here too when the candidate it is reviewing has
+  `origin: "audit"` (i.e. it was itself installed by `accept-audit` and is
+  now being reviewed per that command's "still needs a review verdict"
+  note): the checked replacement goes back into `audit_proposal`, not
+  straight into a candidate, so it still needs `accept-audit` again rather
+  than sitting as an unexportable candidate with `accepted_by: None`.
 """
 
 from __future__ import annotations
@@ -780,13 +786,19 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         if kind == "review":
             ledger_mod.record_verdict(ledger_data, locale, msg_id, run_verdict)
             entry = _locale_entries(ledger_data, locale)[msg_id]
-            entry["rounds"] = entry.get("rounds", 0) + 1
             failed_ids.append(msg_id)
+            # Escalation timing (plan section 10): test whether `rounds` has
+            # ALREADY reached `max_rounds` before this failure, not after
+            # bumping it for this round -- otherwise a failure at
+            # `rounds == max_rounds - 1` escalates one round early and
+            # discards a proposal that should still have been installed and
+            # reviewed (review round 3, item 3).
             if _maybe_escalate(ledger_data, cfg, locale, msg_id, verdict.get("issues", [])):
                 escalated.append(msg_id)
                 entry["review_proposal"] = {"value": verdict.get("proposed"), "issues": verdict.get("issues", []),
                                              "run": batch_name} if verdict.get("proposed") is not None else None
                 continue
+            entry["rounds"] = entry.get("rounds", 0) + 1
             proposed = verdict.get("proposed")
             if proposed is not None:
                 is_plural = item.get("target_labels") is not None
@@ -798,21 +810,48 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                     message, locale, proposed, source_parse, proposed_parse, canon_lock, cfg,
                 )
                 old_candidate = entry.get("candidate") or {}
-                new_candidate = {
-                    "value": proposed,
-                    "value_sha256": lz_common.value_sha256(proposed),
-                    "origin": old_candidate.get("origin", "translate"),
-                    "source_sha256": ledger_mod.source_sha256(message),
-                    "context_sha256": ledger_mod.context_sha256(message, locale),
-                    "style_sha256": ledger_mod.style_sha256(cfg, locale),
-                    "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
-                    "audited_target_sha256": old_candidate.get("audited_target_sha256"),
-                    "checks": "fail" if problems else "pass",
-                    "problems": problems,
-                    "verdict": None,
-                    "accepted_by": None,
-                }
-                ledger_mod.set_candidate(ledger_data, locale, msg_id, new_candidate)
+                if old_candidate.get("origin") == "audit":
+                    # This review was judging an already-*accepted* audit
+                    # candidate (`accept-audit`'s "still needs a review
+                    # verdict on its hash before export"). A checked
+                    # replacement belongs back in the audit-proposal
+                    # approval path, not installed straight as a candidate:
+                    # `ledger.exportable` only waives its state gate when
+                    # `accepted_by` is set, and a fresh candidate here would
+                    # carry `accepted_by: None` with no route back to
+                    # `accept-audit` (which reads `audit_proposal`, already
+                    # cleared when this candidate was accepted) -- it could
+                    # never be exported (review round 3, item 2).
+                    entry["audit_proposal"] = {
+                        "value": proposed,
+                        "value_sha256": lz_common.value_sha256(proposed),
+                        "audited_target_sha256": old_candidate.get("audited_target_sha256"),
+                        "source_sha256": ledger_mod.source_sha256(message),
+                        "context_sha256": ledger_mod.context_sha256(message, locale),
+                        "style_sha256": ledger_mod.style_sha256(cfg, locale),
+                        "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
+                        "checks": "fail" if problems else "pass",
+                        "problems": problems,
+                        "issues": verdict.get("issues", []),
+                        "run": batch_name,
+                    }
+                    proposals_stored.append(msg_id)
+                else:
+                    new_candidate = {
+                        "value": proposed,
+                        "value_sha256": lz_common.value_sha256(proposed),
+                        "origin": old_candidate.get("origin", "translate"),
+                        "source_sha256": ledger_mod.source_sha256(message),
+                        "context_sha256": ledger_mod.context_sha256(message, locale),
+                        "style_sha256": ledger_mod.style_sha256(cfg, locale),
+                        "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
+                        "audited_target_sha256": old_candidate.get("audited_target_sha256"),
+                        "checks": "fail" if problems else "pass",
+                        "problems": problems,
+                        "verdict": None,
+                        "accepted_by": None,
+                    }
+                    ledger_mod.set_candidate(ledger_data, locale, msg_id, new_candidate)
         else:  # audit
             failed_ids.append(msg_id)
             proposed = verdict.get("proposed")

@@ -23,10 +23,12 @@ EXIT_OK, EXIT_FAIL, EXIT_CANNOT = 0, 1, 2
 
 CHOOSE_PREFIX = "CHOOSE_"
 
-# The directory the driving session writes a project-built adapter into
-# (plan section 2); `adapter_digest` hashes this whole tree when it holds
-# anything, and only falls back to hashing an outside-R script file named
-# by `adapter.argv` when it does not (plan section 6).
+# `adapter.code_dir`'s default (plan section 6): ALL adapter code lives in
+# ONE directory, hashed as a whole by `adapter_digest`, so editing any file
+# there -- a helper `adapter.argv` never names directly included -- always
+# invalidates acceptance. A relative `code_dir` resolves against the
+# workspace root `R`; an absolute one may sit anywhere, including inside
+# the project.
 ADAPTER_DIR_NAME = "adapter"
 
 
@@ -324,13 +326,45 @@ def validate_config(cfg, root) -> list:
                 if not isinstance(formality, str) or not formality:
                     problems.append({"field": f"style.{loc}.formality", "message": "formality must be a non-empty string"})
 
-    # adapter.argv: a non-empty list of strings whose first element resolves
-    # (on PATH or as a file, relative paths resolved against R).
+    # adapter.code_dir / adapter.argv: ALL adapter code lives in one
+    # directory (plan section 6), `code_dir` (default `ADAPTER_DIR_NAME`,
+    # resolved the same way as `project_root` -- relative against `root`,
+    # absolute used as is); it must already exist. `argv` is a non-empty
+    # list of strings whose first element resolves (on PATH or as a file,
+    # relative paths resolved against R). `argv[0]` -- the interpreter, or
+    # the adapter executable itself -- is exempt from the "must sit inside
+    # code_dir" rule below (an absolute interpreter, e.g. a test's
+    # `sys.executable`, is not adapter code); `adapter_digest` still hashes
+    # it when it resolves to a file, so a change to it (an interpreter
+    # upgrade, say) invalidates acceptance anyway. Every OTHER element
+    # (`argv[1:]`) that resolves to a file -- absolute or R-relative --
+    # must sit inside `code_dir`, or editing it would never invalidate
+    # acceptance.
     adapter = cfg.get("adapter")
     if not _is_choose(adapter):
         if not isinstance(adapter, dict):
             problems.append({"field": "adapter", "message": "adapter must be an object"})
         else:
+            code_dir_value = adapter.get("code_dir", ADAPTER_DIR_NAME)
+            code_dir_resolved = None
+            if _is_choose(code_dir_value):
+                pass  # already flagged by _find_choose_sentinels
+            elif not isinstance(code_dir_value, str) or not code_dir_value:
+                problems.append({"field": "adapter.code_dir", "message": "adapter.code_dir must be a non-empty string"})
+            else:
+                candidate = _resolve_maybe_relative(root, code_dir_value)
+                try:
+                    candidate = candidate.resolve()
+                except OSError:
+                    pass
+                if not candidate.is_dir():
+                    problems.append({
+                        "field": "adapter.code_dir",
+                        "message": f"adapter.code_dir does not exist or is not a directory: {code_dir_value}",
+                    })
+                else:
+                    code_dir_resolved = candidate
+
             argv = adapter.get("argv")
             if not _is_choose(argv):
                 if not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
@@ -345,22 +379,43 @@ def validate_config(cfg, root) -> list:
                     # element with no separator (a bare command name, a flag) is only
                     # checked at index 0, where it must resolve on PATH.
                     for i, item in enumerate(argv):
-                        if os.path.isabs(item) or (root / item).is_file():
+                        if os.path.isabs(item):
+                            resolved_item = Path(item)
+                            is_file = resolved_item.is_file()
+                        else:
+                            resolved_item = root / item
+                            is_file = resolved_item.is_file()
+
+                        if not is_file:
+                            if os.path.isabs(item):
+                                continue  # an absolute non-file element (e.g. a flag): accepted as before
+                            has_sep = "/" in item or (os.sep != "/" and os.sep in item)
+                            if has_sep:
+                                problems.append({
+                                    "field": f"adapter.argv[{i}]",
+                                    "message": (
+                                        "relative adapter paths resolve against the workspace; "
+                                        "use an absolute path for a script elsewhere"
+                                    ),
+                                })
+                            elif i == 0 and shutil.which(item) is None:
+                                problems.append({
+                                    "field": "adapter.argv[0]",
+                                    "message": f"does not resolve on PATH or as a file: {item}",
+                                })
                             continue
-                        has_sep = "/" in item or (os.sep != "/" and os.sep in item)
-                        if has_sep:
-                            problems.append({
-                                "field": f"adapter.argv[{i}]",
-                                "message": (
-                                    "relative adapter paths resolve against the workspace; "
-                                    "use an absolute path for a script elsewhere"
-                                ),
-                            })
-                        elif i == 0 and shutil.which(item) is None:
-                            problems.append({
-                                "field": "adapter.argv[0]",
-                                "message": f"does not resolve on PATH or as a file: {item}",
-                            })
+
+                        if i == 0:
+                            continue  # the interpreter / adapter executable itself: exempt
+
+                        if code_dir_resolved is not None:
+                            try:
+                                resolved_item.resolve().relative_to(code_dir_resolved)
+                            except ValueError:
+                                problems.append({
+                                    "field": f"adapter.argv[{i}]",
+                                    "message": "keep every adapter file in adapter.code_dir",
+                                })
             options = adapter.get("options", {})
             if not isinstance(options, dict):
                 problems.append({"field": "adapter.options", "message": "adapter.options must be an object"})
@@ -574,7 +629,7 @@ def load_messages(path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _tree_digests(base: Path, exclude_dirs=(".git", "__pycache__")) -> dict:
+def _tree_digests(base: Path, exclude_dirs=(".git", "__pycache__", "node_modules")) -> dict:
     """`relpath (posix) -> sha256` for every file under `base`, sorted walk.
     A symlink (file or directory) is recorded as `"symlink:<target>"` and,
     for a directory, is not descended into."""
@@ -605,14 +660,14 @@ def _tree_digests(base: Path, exclude_dirs=(".git", "__pycache__")) -> dict:
 
 
 def resolve_argv(root, cfg: dict) -> list[str]:
-    """The one argv-resolution rule, shared by execution and digesting
-    (plan sections 5 and 6) so the two can never silently disagree about
-    which file actually runs: an element that is already an absolute path
-    stays as is; a relative element naming a file that exists under `root`
-    becomes its absolute path; anything else -- a bare command name meant
-    to be found on `PATH` (`"node"`, `"python3"`), or a flag -- passes
-    through unchanged. `adapter_client.run` calls this to build the argv it
-    executes; `adapter_digest` calls it to decide what to hash."""
+    """The one argv-resolution rule (plan section 5): an element that is
+    already an absolute path stays as is; a relative element naming a file
+    that exists under `root` becomes its absolute path; anything else -- a
+    bare command name meant to be found on `PATH` (`"node"`, `"python3"`),
+    or a flag -- passes through unchanged. `adapter_client.run` calls this
+    to build the argv it actually executes; `adapter_digest` calls it to
+    decide what to hash; `validate_config` resolves relative elements the
+    same way to check they sit inside `adapter.code_dir`."""
     root = Path(root)
     resolved = []
     for item in cfg["adapter"]["argv"]:
@@ -626,52 +681,42 @@ def resolve_argv(root, cfg: dict) -> list[str]:
 
 def adapter_digest(root, cfg: dict) -> dict:
     """`{"files": {path: sha256}, "argv": [...], "options_sha256": ...}`
-    identifying what the adapter actually executes (plan section 6):
-    `adapter.argv` itself, so a changed argument or a swapped script is
-    caught even when its byte content happens to match; the sha256 of every
-    `resolve_argv` element that resolves to an existing file -- typically
-    the interpreter's script argument, wherever it lives, inside `root` or
-    out; and, when `root/adapter/` holds anything, every file under it too
-    (the normal case: the driving session places the adapter there). The
-    two file sources are additive, not either/or: a self-contained
-    `[interpreter, script]` adapter with nothing under `root/adapter/` is
-    covered by the argv-file hash alone; one with both a populated
-    `root/adapter/` and an argv script outside it is covered by both. An
-    argv element that resolves inside `root/adapter/` is not hashed twice:
-    it is already part of that tree's digest."""
+    identifying what the adapter actually executes (plan section 6): every
+    file under `adapter.code_dir` (default `ADAPTER_DIR_NAME`, resolved the
+    same way as `project_root` -- relative against `root`, absolute used as
+    is) -- ALL adapter code lives in this one hashed directory, so a helper
+    file no `argv` element names directly is still covered; the sha256 of
+    every `resolve_argv` element that resolves to an existing file, wherever
+    it lives -- `argv[0]` (the interpreter, or the adapter executable
+    itself) is exempt from `validate_config`'s "must sit inside code_dir"
+    rule, since an absolute interpreter is not adapter code, but its
+    content still decides how the adapter behaves, so it is hashed here
+    like everything else (an interpreter upgrade correctly invalidates
+    acceptance); `argv[1:]` elements that resolve to a file are, per
+    `validate_config`, already inside `code_dir`, so hashing them again here
+    is redundant with the tree walk above, not wrong; `adapter.argv` itself,
+    so a changed argument or a swapped script is caught even when its byte
+    content happens to match; and the options. `code_dir` must already
+    exist as a directory -- `validate_config` is what normally guarantees
+    that before this ever runs; called directly (as tests do) it enforces
+    the same thing itself, `fail(EXIT_CANNOT)`."""
     root = Path(root)
-    adapter_dir = root / ADAPTER_DIR_NAME
-    resolved_argv = resolve_argv(root, cfg)
-    argv = list(cfg["adapter"]["argv"])
-    files: dict = {}
+    adapter_cfg = cfg.get("adapter", {})
+    code_dir_value = adapter_cfg.get("code_dir", ADAPTER_DIR_NAME)
+    code_dir = _resolve_maybe_relative(root, code_dir_value)
+    if not code_dir.is_dir():
+        fail(f"adapter.code_dir is not a directory: {code_dir_value}", EXIT_CANNOT)
 
-    has_dir_contents = adapter_dir.is_dir() and any(adapter_dir.iterdir())
-    if has_dir_contents:
-        for rel, digest in sorted(_tree_digests(adapter_dir).items()):
-            files[f"{ADAPTER_DIR_NAME}/{rel}"] = digest
+    files = _tree_digests(code_dir)
 
-    # Only an element `resolve_argv` actually turned into (or that already was)
-    # an absolute path is a file to hash -- a bare token left unresolved (a
-    # PATH command, a flag) must never be probed against the process's own
-    # cwd, which would make the digest depend on where it happens to run from.
-    argv_files = [Path(item) for item in resolved_argv if os.path.isabs(item) and Path(item).is_file()]
-    if not has_dir_contents and not argv_files:
-        fail(
-            f"no adapter file found: {ADAPTER_DIR_NAME}/ is empty and adapter.argv names no existing file",
-            EXIT_CANNOT,
-        )
-    adapter_dir_resolved = adapter_dir.resolve() if has_dir_contents else None
-    for f in argv_files:
-        f_resolved = f.resolve()
-        if adapter_dir_resolved is not None:
-            try:
-                f_resolved.relative_to(adapter_dir_resolved)
-                continue  # already hashed above, as part of the adapter/ tree
-            except ValueError:
-                pass
-        files[str(f_resolved)] = sha256_file(f)
+    for item in resolve_argv(root, cfg):
+        if os.path.isabs(item):
+            candidate = Path(item)
+            if candidate.is_file():
+                files[str(candidate.resolve())] = sha256_file(candidate)
 
-    options = cfg.get("adapter", {}).get("options", {})
+    argv = list(adapter_cfg["argv"])
+    options = adapter_cfg.get("options", {})
     return {"files": files, "argv": argv, "options_sha256": sha256_json(options)}
 
 

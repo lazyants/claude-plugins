@@ -180,7 +180,11 @@ def test_now_iso_shape():
 # ---------------------------------------------------------------------------
 
 
-def _valid_config(project_root: Path) -> dict:
+def _valid_config(root: Path, project_root: Path) -> dict:
+    # adapter.code_dir defaults to ADAPTER_DIR_NAME ("adapter") and must
+    # already exist as a directory (validate_config now requires it even
+    # when argv, as here, names no file inside it).
+    Path(root, "adapter").mkdir(parents=True, exist_ok=True)
     return {
         "schema": 1,
         "project_root": str(project_root),
@@ -201,7 +205,7 @@ def _valid_config(project_root: Path) -> dict:
 def test_validate_config_accepts_a_well_formed_config(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     assert lz_common.validate_config(cfg, work_root) == []
 
 
@@ -244,7 +248,7 @@ def test_validate_config_reports_every_problem_at_once(work_root):
 
 
 def test_validate_config_refuses_project_root_equal_to_workspace_root(work_root):
-    cfg = _valid_config(work_root)
+    cfg = _valid_config(work_root, work_root)
     cfg["project_root"] = str(work_root)
     problems = lz_common.validate_config(cfg, work_root)
     assert any(p["field"] == "project_root" for p in problems)
@@ -253,7 +257,7 @@ def test_validate_config_refuses_project_root_equal_to_workspace_root(work_root)
 def test_validate_config_refuses_project_root_inside_workspace_root(work_root):
     inside = work_root / "proj"
     inside.mkdir()
-    cfg = _valid_config(inside)
+    cfg = _valid_config(work_root, inside)
     problems = lz_common.validate_config(cfg, work_root)
     assert any(p["field"] == "project_root" for p in problems)
 
@@ -263,7 +267,7 @@ def test_validate_config_refuses_project_root_containing_workspace_root(work_roo
     outer.mkdir()
     nested_root = outer / "nested" / "root"
     nested_root.mkdir(parents=True)
-    cfg = _valid_config(outer)
+    cfg = _valid_config(nested_root, outer)
     problems = lz_common.validate_config(cfg, nested_root)
     assert any(p["field"] == "project_root" for p in problems)
 
@@ -271,7 +275,7 @@ def test_validate_config_refuses_project_root_containing_workspace_root(work_roo
 def test_validate_config_refuses_source_locale_among_targets(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     cfg["source_locale"] = "de"
     problems = lz_common.validate_config(cfg, work_root)
     assert any(p["field"] == "target_locales" for p in problems)
@@ -280,7 +284,7 @@ def test_validate_config_refuses_source_locale_among_targets(work_root, tmp_path
 def test_validate_config_refuses_style_missing_or_extra_locale(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     del cfg["style"]["ru"]
     cfg["style"]["fr"] = {"formality": "vous", "notes": ""}
     problems = lz_common.validate_config(cfg, work_root)
@@ -292,7 +296,7 @@ def test_validate_config_refuses_style_missing_or_extra_locale(work_root, tmp_pa
 def test_validate_config_refuses_unresolvable_adapter_argv(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     cfg["adapter"]["argv"] = ["no-such-command-anywhere-xyz"]
     problems = lz_common.validate_config(cfg, work_root)
     assert any(p["field"] == "adapter.argv[0]" for p in problems)
@@ -301,13 +305,77 @@ def test_validate_config_refuses_unresolvable_adapter_argv(work_root, tmp_path):
 def test_validate_config_accepts_adapter_argv_relative_to_root(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    adapter_dir = work_root / "adapter"
-    adapter_dir.mkdir()
-    (adapter_dir / "adapter.py").write_text("# adapter\n", encoding="utf-8")
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)  # creates work_root/"adapter" already
+    (work_root / "adapter" / "adapter.py").write_text("# adapter\n", encoding="utf-8")
     cfg["adapter"]["argv"] = ["adapter/adapter.py"]
     problems = lz_common.validate_config(cfg, work_root)
     assert not any(p["field"].startswith("adapter.argv") for p in problems)
+
+
+def test_validate_config_refuses_a_missing_adapter_code_dir(work_root, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(work_root, project)
+    cfg["adapter"]["code_dir"] = "does-not-exist"
+    problems = lz_common.validate_config(cfg, work_root)
+    assert any(p["field"] == "adapter.code_dir" for p in problems)
+
+
+def test_validate_config_refuses_an_argv_script_outside_code_dir(work_root, tmp_path):
+    # code_dir defaults to work_root/"adapter" (created by _valid_config); a
+    # relative argv script that resolves under R but NOT under code_dir must
+    # be refused -- all adapter code lives in the one hashed directory.
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(work_root, project)
+    (work_root / "other_dir").mkdir()
+    (work_root / "other_dir" / "adapter.py").write_text("", encoding="utf-8")
+    cfg["adapter"]["argv"] = [sys.executable, "other_dir/adapter.py"]
+    problems = lz_common.validate_config(cfg, work_root)
+    matching = [p for p in problems if p["field"] == "adapter.argv[1]"]
+    assert len(matching) == 1
+    assert "code_dir" in matching[0]["message"]
+
+
+def test_validate_config_refuses_an_absolute_argv_script_outside_code_dir(work_root, tmp_path):
+    # Not just a relative argv element: an ABSOLUTE argv[1:] element that
+    # resolves to a file outside code_dir must also be refused, or the
+    # adapter's actual entry script could sit unhashed outside code_dir.
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(work_root, project)
+    outside = tmp_path / "outside_adapter.py"
+    outside.write_text("", encoding="utf-8")
+    cfg["adapter"]["argv"] = [sys.executable, str(outside)]
+    problems = lz_common.validate_config(cfg, work_root)
+    matching = [p for p in problems if p["field"] == "adapter.argv[1]"]
+    assert len(matching) == 1
+    assert "code_dir" in matching[0]["message"]
+
+
+def test_validate_config_accepts_an_absolute_argv0_adapter_executable_outside_code_dir(work_root, tmp_path):
+    # argv[0] -- the interpreter, or (as here) the adapter executable itself
+    # with no separate interpreter -- is exempt from the containment rule;
+    # only argv[1:] must sit inside code_dir.
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(work_root, project)
+    outside = tmp_path / "adapter_entrypoint.py"
+    outside.write_text("", encoding="utf-8")
+    cfg["adapter"]["argv"] = [str(outside)]
+    problems = lz_common.validate_config(cfg, work_root)
+    assert not any(p["field"].startswith("adapter.argv") for p in problems)
+
+
+def test_validate_config_accepts_an_absolute_code_dir_inside_the_project(work_root, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    code_dir = project / "adapter-src"
+    code_dir.mkdir()
+    cfg = _valid_config(work_root, project)
+    cfg["adapter"]["code_dir"] = str(code_dir)
+    problems = lz_common.validate_config(cfg, work_root)
+    assert not any(p["field"] == "adapter.code_dir" for p in problems)
 
 
 def test_validate_config_refuses_a_project_relative_adapter_script(work_root, tmp_path):
@@ -322,7 +390,7 @@ def test_validate_config_refuses_a_project_relative_adapter_script(work_root, tm
     project.mkdir()
     (project / "scripts").mkdir()
     (project / "scripts" / "adapter.js").write_text("", encoding="utf-8")
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     cfg["adapter"]["argv"] = [sys.executable, "scripts/adapter.js"]
     problems = lz_common.validate_config(cfg, work_root)
     matching = [p for p in problems if p["field"] == "adapter.argv[1]"]
@@ -335,7 +403,7 @@ def test_validate_config_refuses_a_project_relative_adapter_script(work_root, tm
 def test_validate_config_refuses_non_positive_int_tuning_fields(work_root, tmp_path, field, bad_value):
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     cfg[field] = bad_value
     problems = lz_common.validate_config(cfg, work_root)
     assert any(p["field"] == field for p in problems)
@@ -344,7 +412,7 @@ def test_validate_config_refuses_non_positive_int_tuning_fields(work_root, tmp_p
 def test_validate_config_accepts_tuning_fields_absent(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     del cfg["batch_size"]
     del cfg["max_rounds"]
     del cfg["adapter_timeout_s"]
@@ -354,7 +422,7 @@ def test_validate_config_accepts_tuning_fields_absent(work_root, tmp_path):
 def test_validate_config_refuses_allow_identical_not_a_list_of_strings(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     cfg["allow_identical"] = ["m1", 2]
     problems = lz_common.validate_config(cfg, work_root)
     assert any(p["field"] == "allow_identical" for p in problems)
@@ -365,7 +433,7 @@ def test_validate_config_refuses_a_path_unsafe_source_locale(work_root, tmp_path
     # unrestricted string lets "../../outside" escape the workspace tree.
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     cfg["source_locale"] = "../x"
     problems = lz_common.validate_config(cfg, work_root)
     assert any(p["field"] == "source_locale" for p in problems)
@@ -374,7 +442,7 @@ def test_validate_config_refuses_a_path_unsafe_source_locale(work_root, tmp_path
 def test_validate_config_refuses_a_path_unsafe_target_locale(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     cfg["target_locales"] = ["../../outside"]
     del cfg["style"]["de"]
     del cfg["style"]["ru"]
@@ -385,7 +453,7 @@ def test_validate_config_refuses_a_path_unsafe_target_locale(work_root, tmp_path
 def test_validate_config_accepts_locale_identifiers_with_underscore_and_hyphen(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     cfg["source_locale"] = "en_US"
     cfg["target_locales"] = ["pt-BR"]
     cfg["style"] = {"pt-BR": {"formality": "você", "notes": ""}}
@@ -404,7 +472,7 @@ def test_load_config_fails_cannot_with_problems(work_root, capsys):
 def test_load_config_returns_cfg_when_valid(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     lz_common.atomic_write_json(work_root / "localize.json", cfg)
     loaded = lz_common.load_config(work_root)
     assert loaded["source_locale"] == "en"
@@ -416,7 +484,7 @@ def test_load_config_fills_documented_defaults_when_absent(work_root, tmp_path):
     # does) used to KeyError when they were never filled in anywhere.
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     del cfg["batch_size"]
     del cfg["max_rounds"]
     del cfg["adapter_timeout_s"]
@@ -437,14 +505,14 @@ def test_load_config_runs_an_adapter_command_when_tuning_fields_were_absent(work
     # directly, because load_config is the one place that fills it in.
     project = tmp_path / "project"
     project.mkdir()
-    adapter_script = work_root / "adapter.py"
+    cfg = _valid_config(work_root, project)  # creates work_root/"adapter" (the code_dir)
+    adapter_script = work_root / "adapter" / "adapter.py"
     adapter_script.write_text(
         "import json, sys\n"
         "print(json.dumps({'ok': True}))\n",
         encoding="utf-8",
     )
-    cfg = _valid_config(project)
-    cfg["adapter"]["argv"] = [sys.executable, "adapter.py"]
+    cfg["adapter"]["argv"] = [sys.executable, "adapter/adapter.py"]
     del cfg["batch_size"]
     del cfg["max_rounds"]
     del cfg["adapter_timeout_s"]
@@ -468,7 +536,7 @@ def test_load_config_resolves_relative_project_root_against_root(tmp_path, monke
     root.mkdir()
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(root, project)
     cfg["project_root"] = "../project"
     lz_common.atomic_write_json(root / "localize.json", cfg)
 
@@ -483,7 +551,7 @@ def test_load_config_resolves_relative_project_root_against_root(tmp_path, monke
 def test_load_config_leaves_an_absolute_project_root_unchanged(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    cfg = _valid_config(project)
+    cfg = _valid_config(work_root, project)
     lz_common.atomic_write_json(work_root / "localize.json", cfg)
     loaded = lz_common.load_config(work_root)
     assert loaded["project_root"] == str(project.resolve())
@@ -677,7 +745,7 @@ def test_resolve_argv_leaves_absolute_path_untouched(work_root):
 # ---------------------------------------------------------------------------
 
 
-def test_adapter_digest_hashes_the_whole_adapter_dir_when_present(work_root):
+def test_adapter_digest_hashes_the_whole_code_dir_tree_when_present(work_root):
     adapter_dir = work_root / "adapter"
     adapter_dir.mkdir()
     (adapter_dir / "adapter.py").write_text("one", encoding="utf-8")
@@ -686,22 +754,62 @@ def test_adapter_digest_hashes_the_whole_adapter_dir_when_present(work_root):
 
     digest = lz_common.adapter_digest(work_root, cfg)
 
-    assert set(digest["files"]) == {"adapter/adapter.py", "adapter/helper.py"}
-    assert digest["files"]["adapter/adapter.py"] == lz_common.sha256_file(adapter_dir / "adapter.py")
+    # helper.py is never named in argv -- it is hashed anyway, because
+    # adapter_digest hashes the whole code_dir tree, not just argv's files.
+    # argv[1] ("adapter/adapter.py") also resolves to a file, so it is
+    # hashed a second time, keyed by its resolved absolute path -- redundant
+    # with the tree-walk entry, not wrong.
+    absolute_key = str((adapter_dir / "adapter.py").resolve())
+    assert set(digest["files"]) == {"adapter.py", "helper.py", absolute_key}
+    assert digest["files"]["adapter.py"] == lz_common.sha256_file(adapter_dir / "adapter.py")
+    assert digest["files"][absolute_key] == lz_common.sha256_file(adapter_dir / "adapter.py")
     assert digest["options_sha256"] == lz_common.sha256_json({"k": "v"})
 
 
-def test_adapter_digest_hashes_outside_script_when_no_adapter_dir(work_root, tmp_path):
-    script = tmp_path / "adapter_outside.py"
-    script.write_text("outside", encoding="utf-8")
-    cfg = {"adapter": {"argv": ["python3", str(script)], "options": {}}}
+def test_adapter_digest_hashes_an_absolute_code_dir_when_set(work_root, tmp_path):
+    # code_dir may be an absolute directory outside R (e.g. inside the
+    # project); adapter_digest resolves it the same way validate_config does.
+    code_dir = tmp_path / "adapter_src"
+    code_dir.mkdir()
+    (code_dir / "adapter.py").write_text("v1", encoding="utf-8")
+    cfg = {"adapter": {"argv": ["python3", str(code_dir / "adapter.py")], "code_dir": str(code_dir), "options": {}}}
 
     digest = lz_common.adapter_digest(work_root, cfg)
 
-    assert list(digest["files"].values()) == [lz_common.sha256_file(script)]
+    # argv[1] resolves to a file already inside code_dir, so it is hashed
+    # twice -- once by the tree walk (relative key), once directly (its
+    # resolved absolute path as key) -- both correct, both the same hash.
+    absolute_key = str((code_dir / "adapter.py").resolve())
+    assert digest["files"] == {
+        "adapter.py": lz_common.sha256_file(code_dir / "adapter.py"),
+        absolute_key: lz_common.sha256_file(code_dir / "adapter.py"),
+    }
 
 
-def test_adapter_digest_fails_cannot_when_nothing_found(work_root):
+def test_adapter_digest_hashes_argv0_even_when_outside_code_dir(work_root, tmp_path):
+    # argv[0] (the interpreter, or here the adapter executable itself) is
+    # exempt from the code_dir-containment RULE, but its own content still
+    # decides how the adapter behaves, so adapter_digest hashes it anyway
+    # when it resolves to a file -- an interpreter/executable upgrade
+    # correctly invalidates acceptance.
+    adapter_dir = work_root / "adapter"
+    adapter_dir.mkdir()  # code_dir must exist, even though it stays empty here
+    script = tmp_path / "adapter_entrypoint.py"
+    script.write_text("v1", encoding="utf-8")
+    cfg = {"adapter": {"argv": [str(script)], "options": {}}}
+
+    before = lz_common.adapter_digest(work_root, cfg)
+    assert str(script.resolve()) in before["files"]
+
+    script.write_text("v2 -- changed", encoding="utf-8")
+    after = lz_common.adapter_digest(work_root, cfg)
+
+    assert before != after
+
+
+def test_adapter_digest_fails_cannot_when_code_dir_does_not_exist(work_root):
+    # No `adapter.code_dir` given -> default ADAPTER_DIR_NAME ("adapter"),
+    # which does not exist under work_root in this test.
     cfg = {"adapter": {"argv": ["python3"], "options": {}}}
     with pytest.raises(SystemExit) as exc_info:
         lz_common.adapter_digest(work_root, cfg)
@@ -735,25 +843,6 @@ def test_adapter_digest_changes_when_argv_changes(work_root):
     assert before != after
     assert before["argv"] == ["python3", "adapter/adapter.py"]
     assert after["argv"] == ["python3", "adapter/adapter.py", "--strict"]
-
-
-def test_adapter_digest_hashes_an_argv_script_outside_root_even_with_an_adapter_dir(work_root, tmp_path):
-    # `R/adapter/` having content must not suppress hashing an argv element
-    # that resolves to a file outside R -- both sources are additive.
-    adapter_dir = work_root / "adapter"
-    adapter_dir.mkdir()
-    (adapter_dir / "adapter.py").write_text("dir content", encoding="utf-8")
-    external = tmp_path / "outside_helper.py"
-    external.write_text("v1", encoding="utf-8")
-    cfg = {"adapter": {"argv": ["python3", str(external)], "options": {}}}
-
-    before = lz_common.adapter_digest(work_root, cfg)
-    assert str(external.resolve()) in before["files"]
-
-    external.write_text("v2 -- changed", encoding="utf-8")
-    after = lz_common.adapter_digest(work_root, cfg)
-
-    assert before != after
 
 
 def test_require_accepted_adapter_fails_when_lock_missing(work_root):
@@ -791,15 +880,47 @@ def test_require_accepted_adapter_fails_when_adapter_changed_since_lock(work_roo
     assert exc_info.value.code == lz_common.EXIT_FAIL
 
 
-def test_require_accepted_adapter_fails_when_an_absolute_external_script_changes(work_root, tmp_path):
-    # No R/adapter/ tree at all here -- the only file identifying the
-    # adapter is an absolute argv element outside R. adapter_digest must go
-    # through the same resolve_argv rule adapter_client.run executes, so
-    # this is hashed too, and editing it after acceptance invalidates the
-    # lock exactly like an in-tree adapter file would.
-    script = tmp_path / "adapter_outside.py"
+def test_require_accepted_adapter_fails_when_a_helper_in_an_absolute_code_dir_changes(work_root, tmp_path):
+    # The MAJOR finding this closes: an adapter script that lives OUTSIDE R
+    # and imports a sibling helper. Before this fix, acceptance only hashed
+    # the single file adapter.argv named (the script itself) -- editing the
+    # helper left acceptance looking current even though the adapter's
+    # actual behavior (what `parse` does, say) could change. Centralizing
+    # on `adapter.code_dir` -- here an absolute directory outside R, e.g. a
+    # directory inside the project -- makes adapter_digest hash the WHOLE
+    # tree, helper included, and also demonstrates an absolute code_dir works.
+    code_dir = tmp_path / "adapter_src"
+    code_dir.mkdir()
+    (code_dir / "adapter.py").write_text("import helper\n", encoding="utf-8")
+    (code_dir / "helper.py").write_text("v1", encoding="utf-8")
+    cfg = {
+        "adapter": {
+            "argv": ["python3", str(code_dir / "adapter.py")],
+            "code_dir": str(code_dir),
+            "options": {},
+        }
+    }
+    digest = lz_common.adapter_digest(work_root, cfg)
+    lz_common.atomic_write_json(work_root / "adapter.lock.json", digest)
+    lz_common.require_accepted_adapter(work_root, cfg)  # accepted: does not raise
+
+    # helper.py is never named in adapter.argv -- only imported by adapter.py.
+    (code_dir / "helper.py").write_text("v2 -- changed", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        lz_common.require_accepted_adapter(work_root, cfg)
+    assert exc_info.value.code == lz_common.EXIT_FAIL
+
+
+def test_require_accepted_adapter_fails_when_the_script_in_an_absolute_code_dir_changes(work_root, tmp_path):
+    # Editing the SCRIPT itself (argv[1], named directly), not just an
+    # unreferenced helper, inside an absolute code_dir must also invalidate
+    # acceptance -- the tree walk covers it regardless of argv membership.
+    code_dir = tmp_path / "adapter_src"
+    code_dir.mkdir()
+    script = code_dir / "adapter.py"
     script.write_text("v1", encoding="utf-8")
-    cfg = {"adapter": {"argv": ["python3", str(script)], "options": {}}}
+    cfg = {"adapter": {"argv": [sys.executable, str(script)], "code_dir": str(code_dir), "options": {}}}
     digest = lz_common.adapter_digest(work_root, cfg)
     lz_common.atomic_write_json(work_root / "adapter.lock.json", digest)
     lz_common.require_accepted_adapter(work_root, cfg)  # accepted: does not raise

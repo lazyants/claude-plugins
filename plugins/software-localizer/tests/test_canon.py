@@ -147,6 +147,31 @@ def test_import_updates_a_still_proposed_translation():
     assert canon_data["entries"][0]["translations"]["de"]["status"] == "proposed"
 
 
+def test_import_keeps_a_nonempty_current_list_for_display():
+    """Review round 3, item 5: `current` (the locale's live renderings a
+    canon turn saw at proposal time) is display-only and must survive
+    `import`, which used to discard it entirely -- an audit-mode proposal
+    could reach approval with no side-by-side evidence of what it was
+    replacing. An empty `current` is treated as nothing to display (see
+    `test_import_creates_a_new_proposed_entry`, which passes `"current":
+    []` and asserts the exact `proposed()` shape without it)."""
+    canon_data = {"schema": 1, "entries": []}
+    canon.import_candidates(canon_data, [
+        make_candidate_input(translations={"de": {"proposed": "Warenkorb", "current": ["Im Warenkorb"]}}),
+    ])
+    assert canon_data["entries"][0]["translations"]["de"]["current"] == ["Im Warenkorb"]
+
+
+def test_import_drops_a_malformed_current_rather_than_the_whole_candidate():
+    canon_data = {"schema": 1, "entries": []}
+    canon.import_candidates(canon_data, [
+        make_candidate_input(translations={"de": {"proposed": "Warenkorb", "current": [123]}}),
+    ])
+    entry_translation = canon_data["entries"][0]["translations"]["de"]
+    assert "current" not in entry_translation
+    assert entry_translation["value"] == "Warenkorb"
+
+
 def test_import_rejects_an_unknown_kind():
     canon_data = {"schema": 1, "entries": []}
     with pytest.raises(ValueError):
@@ -291,6 +316,21 @@ def test_freeze_includes_only_approved_translations_on_disk(work_root):
     locked_translations = lock["entries"][0]["translations"]
     assert set(locked_translations) == {"de"}
     assert locked_translations["de"]["value"] == "Warenkorb"
+
+
+def test_freeze_excludes_current_from_a_locked_translation(work_root):
+    """Review round 3, item 5: `current` is display-only and must never
+    reach `canon.lock.json`, which packets embed into every turn."""
+    approved_with_current = approved("Warenkorb")
+    approved_with_current["current"] = ["Im Warenkorb"]
+    canon_data = {"schema": 1, "entries": [make_entry(translations={"de": approved_with_current})]}
+    canon.save(work_root, canon_data)
+
+    lock = canon.freeze(work_root)
+
+    locked_translation = lock["entries"][0]["translations"]["de"]
+    assert "current" not in locked_translation
+    assert locked_translation["value"] == "Warenkorb"
 
 
 def test_freeze_excludes_an_entry_with_no_approved_translation(work_root):

@@ -29,6 +29,7 @@ def _run(root):
 def test_valid_config_exits_ok(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
+    (work_root / "adapter").mkdir()  # adapter.code_dir's default must exist
     cfg = {
         "schema": 1,
         "project_root": str(project),

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Write `R/reports/<locale>.md`, a native-speaker-readable report (plan
-section 11): exported and pending candidates with source and context, audit
-findings with proposals, escalated ids with their problems, canon candidates
-raised by reviews, and notes on `existing`/`human_locked` messages.
+section 11): exported and pending candidates with source and context,
+adopted entries (translated with no candidate — `ledger.adopt` took the
+project's own value) shown with that current value, audit findings with
+proposals, escalated ids with their problems, canon candidates raised by
+reviews, and notes on `existing`/`human_locked` messages.
 
 Reads only durable state (the ledger, `messages.json`, and each review or
 audit run's `new_canon_candidates.json` side file that `packets.py accept`
@@ -89,6 +91,16 @@ def _row_candidate(msg_id, entry, message):
     ]
 
 
+def _row_adopted(msg_id, entry, message, current_value):
+    if message is None:
+        return [_missing_line(msg_id)]
+    return [
+        f"- `{msg_id}` — {_context_line(message)}",
+        f"  - source: {_source_text(message)}",
+        f"  - value: {_value_text(current_value)}",
+    ]
+
+
 def _row_pending(msg_id, entry, message):
     if message is None:
         return [_missing_line(msg_id)]
@@ -153,7 +165,7 @@ def build_report(root: Path, locale: str) -> str:
     ledger_data = ledger_mod.load(root)
     entries = ledger_data.get("locales", {}).get(locale, {})
 
-    exported, ready, needs_translation = [], [], []
+    exported, adopted, ready, needs_translation = [], [], [], []
     escalated, audit_findings, existing_notes = [], [], []
     counts: dict = {}
 
@@ -167,7 +179,17 @@ def build_report(root: Path, locale: str) -> str:
             audit_findings.append((msg_id, entry, message, current_value))
 
         if state == "translated":
-            exported.append((msg_id, entry, message))
+            if entry.get("candidate"):
+                exported.append((msg_id, entry, message))
+            else:
+                # `ledger.adopt` moves existing/human-locked entries to
+                # "translated" without a candidate (it treats the project's
+                # own value as the baseline, plan section 7). Reading
+                # `candidate.value` for one of these prints "None" under
+                # "Exported"; show the project's current value instead,
+                # under its own label (review round 3, item 4).
+                current_value = message.get("targets", {}).get(locale) if message else None
+                adopted.append((msg_id, entry, message, current_value))
         elif state in ("pending", "stale"):
             (ready if _ready(entry) else needs_translation).append((msg_id, entry, message))
         elif state == "escalated":
@@ -192,6 +214,7 @@ def build_report(root: Path, locale: str) -> str:
     lines.append("")
 
     _section(lines, "Exported", exported, _row_exported)
+    _section(lines, "Adopted", adopted, _row_adopted)
     _section(lines, "Ready to export", ready, _row_candidate)
     _section(lines, "Still needs translation", needs_translation, _row_pending)
     _section(lines, "Escalated", escalated, _row_escalated)

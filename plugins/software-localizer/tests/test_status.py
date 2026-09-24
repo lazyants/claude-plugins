@@ -94,6 +94,7 @@ def test_status_with_choose_sentinels_recommends_filling_in_config(work_root):
 def test_status_with_valid_config_but_no_adapter_check_recommends_adapter_check(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
+    (work_root / "adapter").mkdir()  # adapter.code_dir's default must exist
     lz_common.atomic_write_json(work_root / "localize.json", _valid_cfg(project))
     code, payload = _run(work_root)
     assert code == 0

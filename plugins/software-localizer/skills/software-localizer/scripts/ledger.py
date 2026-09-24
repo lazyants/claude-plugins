@@ -280,6 +280,11 @@ def sync(root, cfg: dict, messages: dict, parse_fn: Callable[[list], dict], cano
             elif state == "translated":
                 if new_project_sha != entry["last_exported_sha256"]:
                     entry["state"] = "human_locked"
+                    # A person's edit supersedes whatever the plugin last
+                    # exported; a still-passing old candidate must not
+                    # survive to be re-exported over that edit (review round
+                    # 3, item 1 -- see `adopt()` below for the other half).
+                    entry["candidate"] = None
                     counts["human_locked"] += 1
                 elif "source" in changed or "style" in changed:
                     entry["state"] = "stale"
@@ -379,6 +384,11 @@ def adopt(ledger: dict, locale: str, ids: list | None, by: str) -> dict:
             continue
         entry["state"] = "translated"
         entry["last_exported_sha256"] = entry["project_value_sha256"]
+        # Adoption takes the project's current value as the plugin's own
+        # baseline; an older candidate (from before the existing/human-locked
+        # state) is judged against a value this no longer is, and must not
+        # linger to be re-exported over it (review round 3, item 1).
+        entry["candidate"] = None
         adopted.append(msg_id)
 
     return {"adopted": adopted, "skipped": skipped, "by": by, "at": lz_common.now_iso()}

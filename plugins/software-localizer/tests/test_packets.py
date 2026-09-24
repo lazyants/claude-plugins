@@ -60,7 +60,11 @@ def make_cfg(target_locales=("de",), style=None, batch_size=40, max_rounds=3, op
     return {
         "schema": 1, "project_root": str(FIXTURES_DIR / "toy_project"), "source_locale": "en",
         "target_locales": list(target_locales),
-        "adapter": {"argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")], "options": options or {}},
+        "adapter": {
+            "argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")],
+            "code_dir": str(FIXTURES_DIR),  # the shared fixture script lives here
+            "options": options or {},
+        },
         "style": style, "allow_identical": [], "batch_size": batch_size, "max_rounds": max_rounds,
         "adapter_timeout_s": 30,
     }
@@ -743,6 +747,104 @@ def test_accept_review_fail_without_proposed_keeps_old_candidate_marked_failed(w
     entry = ledger_data["locales"]["de"]["a"]
     assert entry["candidate"]["value"] == "Hallo!!!"
     assert entry["candidate"]["verdict"]["verdict"] == "fail"
+
+
+def test_accept_review_fail_below_max_rounds_installs_proposal_and_increments(work_root):
+    """Review round 3, item 3: escalation timing. A failure must be tested
+    against `rounds` as it stood BEFORE this failure, not after bumping it
+    for this round -- before the fix, the bump happened first, so a failure
+    at `rounds == max_rounds - 1` escalated one round early and discarded a
+    proposal that should still have been installed and reviewed."""
+    cfg = make_cfg(max_rounds=2)
+    msgs = make_messages([make_message("a", "Hello")])
+    candidate = make_candidate("Hallo!", checks="pass")
+    entry = make_entry("pending", candidate=candidate, rounds=1)  # max_rounds - 1
+    run_dir = build_one_batch(work_root, cfg, msgs, {"de": {"a": entry}}, "review", "de")
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "fail",
+        "issues": [{"kind": "style", "text": "too informal"}], "proposed": "Hallo",
+        "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["escalated"] == []
+    assert result["failed"] == ["a"]
+    ledger_data = ledger_mod.load(work_root)
+    e = ledger_data["locales"]["de"]["a"]
+    assert e["state"] == "pending"  # not escalated
+    assert e["rounds"] == 2
+    assert e["candidate"]["value"] == "Hallo"  # the checked proposal was installed
+    assert e["candidate"]["verdict"] is None
+
+
+def test_accept_review_fail_at_max_rounds_escalates_without_a_further_increment(work_root):
+    """The other half of item 3's boundary: a failure at `rounds ==
+    max_rounds` (already reached) escalates and must not bump `rounds`
+    again or touch the existing candidate."""
+    cfg = make_cfg(max_rounds=2)
+    msgs = make_messages([make_message("a", "Hello")])
+    candidate = make_candidate("Hallo!", checks="pass")
+    entry = make_entry("pending", candidate=candidate, rounds=2)  # == max_rounds already
+    run_dir = build_one_batch(work_root, cfg, msgs, {"de": {"a": entry}}, "review", "de")
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "fail",
+        "issues": [{"kind": "style", "text": "still wrong"}], "proposed": "Hallo",
+        "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["escalated"] == ["a"]
+    ledger_data = ledger_mod.load(work_root)
+    e = ledger_data["locales"]["de"]["a"]
+    assert e["state"] == "escalated"
+    assert e["rounds"] == 2  # not bumped further
+    assert e["candidate"]["value"] == "Hallo!"  # never replaced with the proposal
+    assert e["review_proposal"]["value"] == "Hallo"
+
+
+def test_accept_review_fail_on_audit_candidate_reroutes_to_audit_proposal(work_root):
+    """Review round 3, item 2: a review packet built from a candidate whose
+    `origin` is "audit" (installed by `accept-audit`, which still needs a
+    review verdict on its hash before export -- plan section 10) must, on a
+    failed review with a `proposed` replacement, store that replacement back
+    as the entry's `audit_proposal` -- not as a fresh candidate with
+    `accepted_by: None`, which `ledger.exportable` can never select (its
+    state gate only waives for a set `accepted_by`, and this entry's state
+    is "existing") and `accept-audit` can never reach again (it reads
+    `audit_proposal`, already cleared when this candidate was accepted)."""
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello", targets={"de": "Hallo (audited)"})])
+    audited_sha = lz_common.value_sha256("Hallo (audited)")
+    candidate = make_candidate(
+        "Hallo (audited)", checks="pass", origin="audit", accepted_by="alice", audited_target_sha=audited_sha,
+    )
+    entry = make_entry("existing", candidate=candidate)
+    run_dir = build_one_batch(work_root, cfg, msgs, {"de": {"a": entry}}, "review", "de")
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "fail",
+        "issues": [{"kind": "style", "text": "too stiff"}], "proposed": "Hallo (better)",
+        "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["failed"] == ["a"]
+    assert result["audit_proposals"] == ["a"]
+    ledger_data = ledger_mod.load(work_root)
+    e = ledger_data["locales"]["de"]["a"]
+    # the old accepted candidate is untouched (state gate still waived by
+    # `accepted_by`) except for the fail verdict just recorded on it
+    assert e["candidate"]["value"] == "Hallo (audited)"
+    assert e["candidate"]["origin"] == "audit"
+    assert e["candidate"]["accepted_by"] == "alice"
+    assert e["candidate"]["verdict"]["verdict"] == "fail"
+    # the checked replacement is a fresh audit proposal, not a candidate
+    proposal = e["audit_proposal"]
+    assert proposal["value"] == "Hallo (better)"
+    assert proposal["checks"] == "pass"
+    assert proposal["audited_target_sha256"] == audited_sha
+    # never exportable as it stands (accepted_by None, no verdict yet) and
+    # it does not silently become so
+    assert "a" not in ledger_mod.exportable(ledger_data, "de")
 
 
 def test_accept_review_escalates_and_keeps_proposal_uninstalled(work_root):

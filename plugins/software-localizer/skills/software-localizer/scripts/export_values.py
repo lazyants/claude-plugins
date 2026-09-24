@@ -281,6 +281,25 @@ def _changed_by_file(changed_files: list, candidate_ids: list) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _stale_declared_files(live_messages: dict, project_root: Path, staging_sha256: dict) -> list:
+    """Every file the adapter DECLARED (`live_messages["files"]`), checked
+    against its staging-time sha256 -- not only the files `_changed_files`
+    picked out for replacement. The per-file check right before each replace
+    (in `_do_real_export`'s commit loop, below) only ever looks at a file
+    already selected for replacement; a declared file this export leaves
+    alone (e.g. a different locale's file, or the source file) never reaches
+    that check, so an edit landing on it in the same staging-to-commit
+    window would otherwise go uncaught. Returns the relative paths that no
+    longer match, sorted for a stable message."""
+    stale = []
+    for relpath in live_messages.get("files", []):
+        dest = project_root / relpath
+        current = lz_common.sha256_file(dest) if dest.is_file() else None
+        if current != staging_sha256.get(relpath):
+            stale.append(relpath)
+    return sorted(stale)
+
+
 def _ledger_snapshot_text(locale: str, entries: dict) -> str:
     """The exact bytes `ledger.save()` writes for one locale -- `ledger.py`
     pins this shape in its own module docstring (`{"schema": 1, "locale":
@@ -295,9 +314,21 @@ def _ledger_snapshot_text(locale: str, entries: dict) -> str:
 def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, temp_project: Path,
                      candidate_ids: list, values: dict, changed_by_file: dict, ledger_data: dict,
                      recovered: list, staging_sha256: dict) -> dict:
+    project_root = Path(cfg["project_root"])
+    # Immediately before the commit phase begins -- after the adapter
+    # export and the re-collect comparison already ran against the staged
+    # copy, before the first backup or replace -- refuse the whole export
+    # (nothing replaced) if ANY file the adapter declared drifted from its
+    # staging-time hash, not only the files this export is about to touch.
+    stale = _stale_declared_files(live_messages, project_root, staging_sha256)
+    if stale:
+        lz_common.fail(
+            "export refused: files changed on disk since staging: " + ", ".join(stale),
+            lz_common.EXIT_FAIL, locale=locale, recovered=recovered, stale_files=stale,
+        )
+
     stamp = _new_export_stamp()
     export_dir = root / "exports" / stamp
-    project_root = Path(cfg["project_root"])
     # ledger.py stores one file per locale (`R/ledger/<locale>.json`), never
     # a single `R/ledger.json` -- so a parallel export of a different locale
     # never races this one's backup/replace. Only this locale's file is

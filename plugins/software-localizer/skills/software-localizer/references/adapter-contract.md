@@ -1,11 +1,15 @@
 # The adapter contract
 
 An adapter is whatever the project needs — a Node script, a PHP script, a Python script — run as
-`adapter.argv` from `localize.json` plus a command. In `adapter.argv`, an absolute path is used as
-is and a relative path must name a file under the workspace `R` (keep the adapter in
-`R/adapter/`, or give an absolute path to a script elsewhere); bare command names such as `node`
-come from `PATH`. Every file named in `adapter.argv` is part of the acceptance digest, so editing
-it requires acceptance again. The core runs it with the **project root as
+`adapter.argv` from `localize.json` plus a command. **All adapter code lives in one directory**,
+`adapter.code_dir` (default `R/adapter/`; it may also be a directory inside the project, given
+as an absolute path): every file named in `adapter.argv` after the first element must be inside
+it. The first element is the command — `node`, `php`, a Python interpreter, or the adapter
+executable itself. The acceptance digest covers the whole `code_dir`, every file named in
+`adapter.argv` (the interpreter included, so an upgrade means re-acceptance), `argv` and
+`options`: editing any adapter file — helpers included — requires acceptance again. In `adapter.argv`, a relative path resolves
+against the workspace `R`; bare command names such as `node` come from `PATH`. The project's own
+tooling the adapter calls (its message compiler, `node_modules`, PHP) is not adapter code. The core runs it with the **project root as
 the working directory**, stdin closed, a timeout (`adapter_timeout_s`), and expects exactly one
 JSON line on stdout and exit code `0` (ok), `1` (refused) or `2` (cannot run).
 `adapter_client.py` is the only part of the core that runs it. `collect` and `export` reply

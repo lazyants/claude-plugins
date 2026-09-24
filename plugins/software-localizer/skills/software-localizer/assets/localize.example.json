@@ -5,6 +5,7 @@
   "target_locales": ["de", "ru"],
   "adapter": {
     "argv": ["node", "adapter/adapter.mjs"],
+    "code_dir": "adapter",
     "options": {"catalog_dir": "src/i18n/locales"}
   },
   "style": {

@@ -86,7 +86,11 @@ def drive_to_ledger_sync(work_root: Path, target_locales=("de", "ru")):
     cfg = read_json(root / "localize.json")
     cfg.update({
         "project_root": str(project_dir), "source_locale": "en", "target_locales": list(target_locales),
-        "adapter": {"argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")], "options": dict(TOY_OPTIONS)},
+        "adapter": {
+            "argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")],
+            "code_dir": str(FIXTURES_DIR),  # the shared fixture script lives here
+            "options": dict(TOY_OPTIONS),
+        },
         "style": {loc: {"formality": "Sie" if loc == "de" else "вы", "notes": "concise"} for loc in target_locales},
     })
     write_json(root / "localize.json", cfg)
