@@ -518,7 +518,30 @@ def install_audit_hook() -> None:
             raise PermissionError(reason)
 
     sys.addaudithook(_hook)
+    if sys.version_info < (3, 12):
+        _raise_thread_start_event()
     _audit_state["installed"] = True
+
+
+def _raise_thread_start_event() -> None:
+    """Python 3.11 starts a thread without raising any audit event (3.12
+    added `_thread.start_new_thread`), so the hook above could not deny it.
+    Wrap the one primitive every thread start goes through so it raises that
+    same event first; the hook then denies it exactly as on 3.12+."""
+    import _thread
+    import threading
+
+    original = _thread.start_new_thread
+
+    def start_new_thread(function, args, kwargs=None):
+        sys.audit("_thread.start_new_thread", function, args, kwargs)
+        if kwargs is None:
+            return original(function, args)
+        return original(function, args, kwargs)
+
+    _thread.start_new_thread = start_new_thread
+    _thread.start_new = start_new_thread
+    threading._start_new_thread = start_new_thread
 
 
 def _begin_window() -> None:
