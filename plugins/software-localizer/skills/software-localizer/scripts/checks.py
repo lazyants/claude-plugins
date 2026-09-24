@@ -69,7 +69,14 @@ def check_candidate(
     source_forms = forms_of(source)
 
     if is_plural:
-        if not isinstance(value, dict) or "forms" not in value:
+        forms_value = value.get("forms") if isinstance(value, dict) else None
+        forms_ok = isinstance(forms_value, list) and all(isinstance(f, str) for f in forms_value)
+        if not forms_ok:
+            # `{"forms": [...]}` with every form a string, exactly -- not
+            # merely a dict with a "forms" key. A bare string here (e.g.
+            # `{"forms": "A"}`) used to be accepted as-is: `list("A")`
+            # coincidentally produces a one-element list, which can pass a
+            # single-target-label plural silently instead of being refused.
             return [{
                 "check": "forms",
                 "detail": f"locale {locale!r}: expected a forms list, got {value!r}",
@@ -77,7 +84,7 @@ def check_candidate(
         target_labels = plural_spec["target_labels"][locale]
         general_index = plural_spec["general_index"]
         count_arguments = set(plural_spec.get("count_arguments", []))
-        value_forms = list(value["forms"])
+        value_forms = list(forms_value)
         source_parses = list(source_parse)
         value_parses = list(value_parse)
     else:

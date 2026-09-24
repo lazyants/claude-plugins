@@ -28,6 +28,7 @@ a check this script ran and found failing (exit `1`).
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import subprocess
@@ -180,44 +181,78 @@ def _check_awkward_round_trip(root: str, cfg: dict, project_dir: Path, messages:
     return {"ok": overall_ok, "locales": results}
 
 
-def _parse_items_for_forms(prefix: str, value) -> list[dict]:
-    if isinstance(value, dict):
-        return [{"key": f"{prefix}#{i}", "text": form} for i, form in enumerate(value["forms"])]
-    return [{"key": prefix, "text": value}]
+def _parse_items_for_forms(
+    counter, kind: str, msg_id: str, locale, value, items: list[dict], key_meta: dict
+) -> None:
+    """Append parse items for one message's source or target value (a plain
+    string, or `{"forms": [...]}` for a plural) to `items`, each keyed by an
+    opaque running index drawn from `counter` -- never a key built by string
+    concatenation. A non-plural id like `"foo#0"` and the first form of a
+    plural id `"foo"` used to both build the same `"src::foo#0"` key that
+    way, letting one adapter reply silently overwrite the other's in the
+    results dict. `key_meta` maps each new key back to `{"kind", "id",
+    "locale"}` so results can be attributed without reconstructing a key."""
+    forms = value["forms"] if isinstance(value, dict) else [value]
+    for form in forms:
+        key = str(next(counter))
+        items.append({"key": key, "text": form})
+        key_meta[key] = {"kind": kind, "id": msg_id, "locale": locale}
 
 
 def _check_parse_sanity(root: str, cfg: dict, project_dir: Path, messages: dict) -> dict:
-    source_items = []
-    target_items = []
+    counter = itertools.count()
+    items: list[dict] = []
+    key_meta: dict[str, dict] = {}
+
     for message in messages["messages"]:
-        source_items.extend(_parse_items_for_forms(f"src::{message['id']}", message["source"]))
+        _parse_items_for_forms(counter, "source", message["id"], None, message["source"], items, key_meta)
         for locale, target in message["targets"].items():
             if target is not None:
-                target_items.extend(_parse_items_for_forms(f"tgt::{locale}::{message['id']}", target))
+                _parse_items_for_forms(counter, "target", message["id"], locale, target, items, key_meta)
 
-    all_items = source_items + target_items
-    if not all_items:
+    if not items:
         return {"ok": True, "source_failures": [], "target_failures": []}
 
-    results = adapter_client.parse(root, cfg, str(project_dir), all_items)
+    results = adapter_client.parse(root, cfg, str(project_dir), items)
 
-    source_keys = {item["key"] for item in source_items}
-    source_failures = sorted(k for k in source_keys if not results[k]["ok"])
-    target_keys = {item["key"] for item in target_items}
-    target_failures = [
-        {"key": k, "error": results[k].get("error")} for k in sorted(target_keys) if not results[k]["ok"]
-    ]
+    source_failures = sorted({
+        meta["id"] for key, meta in key_meta.items()
+        if meta["kind"] == "source" and not results[key]["ok"]
+    })
+    target_failures = sorted(
+        (
+            {"id": meta["id"], "locale": meta["locale"], "error": results[key].get("error")}
+            for key, meta in key_meta.items()
+            if meta["kind"] == "target" and not results[key]["ok"]
+        ),
+        key=lambda e: (e["id"], e["locale"]),
+    )
 
     return {"ok": not source_failures, "source_failures": source_failures, "target_failures": target_failures}
 
 
 def _project_inventory(project_dir: Path) -> list[str]:
-    git_marker = project_dir / ".git"
-    if git_marker.exists():
+    # A project can be a subdirectory of a larger git checkout without a
+    # `.git` entry of its own (a monorepo layout); detect the ENCLOSING
+    # work tree, not just a local `.git`, or the tracked-plus-unignored
+    # contract silently degrades to an unfiltered walk that includes
+    # whatever the enclosing repo's `.gitignore` was meant to keep out.
+    in_work_tree = False
+    try:
+        check = subprocess.run(
+            ["git", "-C", str(project_dir), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        in_work_tree = check.returncode == 0 and check.stdout.strip() == "true"
+    except (OSError, subprocess.SubprocessError):
+        in_work_tree = False
+
+    if in_work_tree:
         try:
             proc = subprocess.run(
-                ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
-                cwd=str(project_dir),
+                ["git", "-C", str(project_dir), "ls-files", "--cached", "--others", "--exclude-standard"],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -261,7 +296,7 @@ def _write_coverage_prompt(plugin_root: Path, out_dir: Path, packet: dict) -> No
 
 
 def cmd_run(args) -> int:
-    root = Path(args.root)
+    root = lz_common.resolve_root(args.root)
     cfg = lz_common.load_config(root)
     project_dir = Path(cfg["project_root"])
 
@@ -340,7 +375,7 @@ def _validate_coverage_output(payload) -> list[dict]:
 
 
 def cmd_accept(args) -> int:
-    root = Path(args.root)
+    root = lz_common.resolve_root(args.root)
     cfg = lz_common.load_config(root)
 
     check_result = lz_common.read_json(root / "runs" / CHECK_RESULT_NAME, "adapter_check.py run result")

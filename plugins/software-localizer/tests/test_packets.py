@@ -102,10 +102,14 @@ def make_entry(state="pending", candidate=None, rounds=0, project_value_sha=None
 
 
 def make_candidate(value="Hallo", checks="pass", problems=None, verdict=None, origin="translate",
-                    accepted_by=None, audited_target_sha=None):
+                    accepted_by=None, audited_target_sha=None, canon_sha256=None):
+    # Every fixture in this file sets up an empty canon.lock.json (see
+    # `setup_workspace`), so `ledger_mod.canon_sha256(<any message>, EMPTY_CANON_LOCK)`
+    # is this same constant regardless of which message the candidate is for.
     return {
         "value": value, "value_sha256": lz_common.value_sha256(value), "origin": origin,
         "source_sha256": "s", "context_sha256": "c", "style_sha256": "st",
+        "canon_sha256": canon_sha256 if canon_sha256 is not None else lz_common.sha256_json([]),
         "audited_target_sha256": audited_target_sha, "checks": checks, "problems": list(problems or []),
         "verdict": verdict, "accepted_by": accepted_by,
     }
@@ -332,8 +336,8 @@ def test_build_restricted_canon_audit_from_entry(work_root):
 # --- accept: translate -----------------------------------------------------
 
 
-def build_one_batch(work_root, cfg, msgs, ledger_locales, kind, locale):
-    setup_workspace(work_root, cfg, msgs, ledger_locales)
+def build_one_batch(work_root, cfg, msgs, ledger_locales, kind, locale, canon_lock=None):
+    setup_workspace(work_root, cfg, msgs, ledger_locales, canon_lock=canon_lock)
     result = packets.do_build(work_root, kind, locale, TEMPLATES_DIR)
     assert result["batches"], "expected at least one batch"
     return Path(result["batches"][0]["dir"])
@@ -417,6 +421,100 @@ def test_accept_translate_escalates_at_max_rounds(work_root):
     assert ledger_data["locales"]["de"]["a"]["state"] == "escalated"
 
 
+def test_accept_translate_plural_single_target_label_succeeds(work_root):
+    """Item 1 of the review fix: a plural message whose locale needs only
+    one target form used to crash accept -- `_single_or_list` collapsed the
+    one-element parse-result list to a bare dict, and `checks.check_candidate`
+    (which always treats a plural's parse results as a list) then iterated
+    that dict's keys instead of forms, raising `AttributeError` on the first
+    `.get()` call. Without the fix this test fails with that `AttributeError`
+    instead of the assertions below."""
+    cfg = make_cfg()
+    msg = make_plural_message(
+        "a", ["1 Artikel", "{count} Artikel"], {"de": [{"label": "other", "exact": False}]}, general_index=1,
+    )
+    run_dir = build_one_batch(work_root, cfg, make_messages([msg]), {"de": {"a": make_entry("pending")}}, "translate", "de")
+    output_path = write_output(run_dir, {"translations": {"a": {"forms": ["{count} Dinge"]}}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["accepted"] == ["a"]
+    ledger_data = ledger_mod.load(work_root)
+    entry = ledger_data["locales"]["de"]["a"]
+    assert entry["candidate"]["checks"] == "pass"
+    assert entry["candidate"]["value"] == {"forms": ["{count} Dinge"]}
+
+
+def test_build_translate_embeds_canon_relevant_by_occurrence_not_only_source_match(work_root):
+    """Item 2 of the review fix: `ledger.relevant_canon`'s occurrence rule
+    (a `dnt` entry naming this message's id) must embed the entry into the
+    packet even when its `source` text does not occur in the message's own
+    source -- the old packets-local rule matched by source substring only
+    and would have left this entry out."""
+    cfg = make_cfg()
+    msg = make_message("a", "Hello")
+    canon_lock = {"schema": 1, "entries": [
+        {"id": "d-brand", "kind": "dnt", "source": "Brand", "note": "", "occurrences": ["a"]},
+    ]}
+    run_dir = build_one_batch(
+        work_root, cfg, make_messages([msg]), {"de": {"a": make_entry("pending")}}, "translate", "de",
+        canon_lock=canon_lock,
+    )
+    packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
+    assert [e["id"] for e in packet["canon"]["entries"]] == ["d-brand"]
+
+
+def test_accept_translate_stores_canon_sha256_matching_ledger_relevant_canon(work_root):
+    cfg = make_cfg()
+    msg = make_message("a", "Hello")
+    canon_lock = {"schema": 1, "entries": [
+        {"id": "d-brand", "kind": "dnt", "source": "Brand", "note": "", "occurrences": ["a"]},
+    ]}
+    run_dir = build_one_batch(
+        work_root, cfg, make_messages([msg]), {"de": {"a": make_entry("pending")}}, "translate", "de",
+        canon_lock=canon_lock,
+    )
+    output_path = write_output(run_dir, {"translations": {"a": "Hallo Brand"}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["accepted"] == ["a"]
+    ledger_data = ledger_mod.load(work_root)
+    candidate = ledger_data["locales"]["de"]["a"]["candidate"]
+    assert candidate["canon_sha256"] == ledger_mod.canon_sha256(msg, canon_lock)
+
+
+def test_accept_review_rebuilt_candidate_under_changed_canon_treated_as_missing(work_root):
+    """Item 2 of the review fix: a review verdict must also bind to the
+    canon snapshot the packet was built from, the same way it binds to
+    source/context/style. This simulates a candidate whose `canon_sha256`
+    moved after the packet was built (the canon lock changed and
+    `ledger.sync` rebuilt/cleared the candidate) -- the old verdict must
+    not attach even though `value_sha256` still matches."""
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello")])
+    candidate = make_candidate("Hallo", checks="pass")
+    run_dir = build_one_batch(
+        work_root, cfg, msgs, {"de": {"a": make_entry("pending", candidate=candidate)}}, "review", "de",
+    )
+    packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
+    item = packet["items"][0]
+    assert item["canon_sha256"] == candidate["canon_sha256"]  # the packet froze the candidate's snapshot as-built
+
+    ledger_data = ledger_mod.load(work_root)
+    ledger_data["locales"]["de"]["a"]["candidate"]["canon_sha256"] = "canon-changed"
+    ledger_mod.save(work_root, ledger_data, locales=["de"])
+
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "pass", "issues": [], "proposed": None,
+        "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == ["a"]
+    assert result["passed"] == []
+    ledger_data = ledger_mod.load(work_root)
+    assert ledger_data["locales"]["de"]["a"]["candidate"]["verdict"] is None
+
+
 # --- accept: review -------------------------------------------------------
 
 
@@ -456,6 +554,117 @@ def test_accept_review_hash_mismatch_treated_as_missing(work_root):
     assert result["passed"] == []
     ledger_data = ledger_mod.load(work_root)
     assert ledger_data["locales"]["de"]["a"]["candidate"]["verdict"] is None
+
+
+def test_accept_review_invalid_verdict_enum_treated_as_missing_no_rounds_increment(work_root):
+    """Item 4 of the review fix: an unrecognized `verdict` string must be
+    treated exactly like a missing verdict -- no rounds increment, no
+    candidate change, no escalation -- never silently applied as a fail."""
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello")])
+    candidate = make_candidate("Hallo", checks="pass")
+    run_dir = build_one_batch(
+        work_root, cfg, msgs, {"de": {"a": make_entry("pending", candidate=candidate)}}, "review", "de",
+    )
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "maybe", "issues": [], "proposed": None,
+        "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == ["a"]
+    assert result["failed"] == []
+    assert result["passed"] == []
+    ledger_data = ledger_mod.load(work_root)
+    entry = ledger_data["locales"]["de"]["a"]
+    assert entry["rounds"] == 0
+    assert entry["candidate"]["verdict"] is None
+
+
+def test_accept_review_malformed_issues_treated_as_missing(work_root):
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello")])
+    candidate = make_candidate("Hallo", checks="pass")
+    run_dir = build_one_batch(
+        work_root, cfg, msgs, {"de": {"a": make_entry("pending", candidate=candidate)}}, "review", "de",
+    )
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "fail",
+        "issues": [{"kind": "style"}], "proposed": None,  # issue is missing "text"
+        "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == ["a"]
+    ledger_data = ledger_mod.load(work_root)
+    assert ledger_data["locales"]["de"]["a"]["rounds"] == 0
+
+
+def test_accept_review_malformed_proposed_shape_treated_as_missing(work_root):
+    """A non-plural message's `proposed` must be a plain string; a
+    plural-shaped `{"forms": [...]}` on a non-plural message is invalid and
+    the whole verdict is treated as missing -- never reaching
+    `checks_mod.forms_of` unguarded."""
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello")])
+    candidate = make_candidate("Hallo!", checks="pass")
+    run_dir = build_one_batch(
+        work_root, cfg, msgs, {"de": {"a": make_entry("pending", candidate=candidate)}}, "review", "de",
+    )
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "fail",
+        "issues": [{"kind": "style", "text": "too informal"}], "proposed": {"forms": ["Hallo"]},
+        "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == ["a"]
+    ledger_data = ledger_mod.load(work_root)
+    entry = ledger_data["locales"]["de"]["a"]
+    assert entry["rounds"] == 0
+    assert entry["candidate"]["value"] == "Hallo!"  # untouched
+
+
+def test_accept_review_plural_proposed_wrong_shape_treated_as_missing(work_root):
+    """The inverse of the above: a plural message's `proposed` must be
+    `{"forms": [...]}`; a bare string is invalid."""
+    cfg = make_cfg()
+    msg = make_plural_message(
+        "a", ["1 Artikel", "{count} Artikel"], {"de": [{"label": "other", "exact": False}]}, general_index=1,
+    )
+    candidate = make_candidate({"forms": ["{count} Artikel!"]}, checks="pass")
+    run_dir = build_one_batch(
+        work_root, cfg, make_messages([msg]), {"de": {"a": make_entry("pending", candidate=candidate)}},
+        "review", "de",
+    )
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "fail",
+        "issues": [{"kind": "style", "text": "too informal"}], "proposed": "{count} Dinge",
+        "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == ["a"]
+    ledger_data = ledger_mod.load(work_root)
+    assert ledger_data["locales"]["de"]["a"]["rounds"] == 0
+
+
+def test_accept_audit_invalid_verdict_enum_treated_as_missing(work_root):
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello", targets={"de": "Hallo"})])
+    run_dir = build_one_batch(work_root, cfg, msgs, {"de": {"a": make_entry("existing")}}, "audit", "de")
+    packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
+    value_sha = packet["items"][0]["value_sha256"]
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": value_sha, "verdict": "nope",
+        "issues": [], "proposed": "Hallo!", "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == ["a"]
+    ledger_data = ledger_mod.load(work_root)
+    entry = ledger_data["locales"]["de"]["a"]
+    assert entry.get("audit_proposal") is None
 
 
 def test_accept_review_rebuilt_candidate_under_changed_style_treated_as_missing(work_root):
@@ -709,6 +918,7 @@ def test_accept_audit_promotes_passing_proposal(work_root):
     audit_proposal = {
         "value": "Hallo!", "value_sha256": lz_common.value_sha256("Hallo!"),
         "audited_target_sha256": "abc", "source_sha256": "s", "context_sha256": "c", "style_sha256": "st",
+        "canon_sha256": lz_common.sha256_json([]),
         "checks": "pass", "problems": [], "issues": [], "run": "batch1",
     }
     entry = make_entry("existing")
@@ -771,7 +981,27 @@ def test_accept_canon_writes_candidates_json(work_root):
     assert data["candidates"][0]["source"] == "Cart"
 
 
-def test_accept_canon_invalid_shape_refused(work_root):
+def test_accept_canon_missing_candidates_list_refused(work_root):
+    """The envelope itself (no 'candidates' list at all) is the one shape
+    nothing can be salvaged from -- still a hard failure."""
+    cfg = make_cfg(target_locales=("de",))
+    msgs = make_messages([make_message("a", "Cart")])
+    setup_workspace(work_root, cfg, msgs, {})
+    result = packets.do_build(work_root, "canon", None, TEMPLATES_DIR)
+    run_dir = Path(result["batches"][0]["dir"])
+    output_path = write_output(run_dir, {"nope": "not a candidates list"})
+
+    with pytest.raises(SystemExit) as exc:
+        packets.do_accept(work_root, run_dir, output_path)
+    assert exc.value.code == lz_common.EXIT_FAIL
+
+
+def test_accept_canon_invalid_candidate_dropped_and_listed_not_refused(work_root):
+    """Item 3 of the review fix: unlike a malformed envelope, one invalid
+    candidate inside an otherwise-valid list no longer fails the whole
+    batch -- it is dropped and listed in the result, and `accept` still
+    succeeds (this used to raise `SystemExit(EXIT_FAIL)` and lose every
+    candidate in the batch, valid ones included)."""
     cfg = make_cfg(target_locales=("de",))
     msgs = make_messages([make_message("a", "Cart")])
     setup_workspace(work_root, cfg, msgs, {})
@@ -779,9 +1009,68 @@ def test_accept_canon_invalid_shape_refused(work_root):
     run_dir = Path(result["batches"][0]["dir"])
     output_path = write_output(run_dir, {"candidates": [{"kind": "bogus", "source": "Cart"}]})
 
-    with pytest.raises(SystemExit) as exc:
-        packets.do_accept(work_root, run_dir, output_path)
-    assert exc.value.code == lz_common.EXIT_FAIL
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["ok"] is True
+    assert result["candidates"] == 0
+    assert len(result["dropped"]) == 1
+    data = json.loads((run_dir / "candidates.json").read_text(encoding="utf-8"))
+    assert data["candidates"] == []
+
+
+def test_accept_canon_non_string_occurrences_dropped(work_root):
+    """`occurrences: [123]` used to pass the old shape check (`isinstance(x,
+    list)` alone) and reach `candidates.json`; `canon.py import` then kept
+    it, and `checks._check_dnt` -- which matches occurrences by exact
+    string id -- silently never found the message again."""
+    cfg = make_cfg(target_locales=("de",))
+    msgs = make_messages([make_message("a", "Cart")])
+    setup_workspace(work_root, cfg, msgs, {})
+    result = packets.do_build(work_root, "canon", None, TEMPLATES_DIR)
+    run_dir = Path(result["batches"][0]["dir"])
+    output_path = write_output(run_dir, {"candidates": [
+        {"kind": "dnt", "source": "Cart", "note": "", "occurrences": [123]},
+    ]})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["candidates"] == 0
+    assert result["dropped"] == [{"index": 0, "candidate": {"kind": "dnt", "source": "Cart", "note": "", "occurrences": [123]}}]
+
+
+def test_accept_canon_occurrence_id_not_in_packet_dropped(work_root):
+    cfg = make_cfg(target_locales=("de",))
+    msgs = make_messages([make_message("a", "Cart")])
+    setup_workspace(work_root, cfg, msgs, {})
+    result = packets.do_build(work_root, "canon", None, TEMPLATES_DIR)
+    run_dir = Path(result["batches"][0]["dir"])
+    output_path = write_output(run_dir, {"candidates": [
+        {"kind": "term", "source": "Cart", "note": "", "occurrences": ["not-in-packet"]},
+    ]})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["candidates"] == 0
+    assert len(result["dropped"]) == 1
+
+
+def test_accept_canon_mixed_valid_and_invalid_candidates(work_root):
+    cfg = make_cfg(target_locales=("de",))
+    msgs = make_messages([make_message("a", "Cart")])
+    setup_workspace(work_root, cfg, msgs, {})
+    result = packets.do_build(work_root, "canon", None, TEMPLATES_DIR)
+    run_dir = Path(result["batches"][0]["dir"])
+    output_path = write_output(run_dir, {"candidates": [
+        {"kind": "term", "source": "Cart", "note": "", "occurrences": ["a"],
+         "translations": {"de": {"proposed": "Warenkorb", "current": []}}},
+        {"kind": "term", "source": "Cart", "occurrences": [123]},
+        {"kind": "term", "source": ""},  # empty source
+        "just a string",
+    ]})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["candidates"] == 1
+    assert len(result["dropped"]) == 3
+    data = json.loads((run_dir / "candidates.json").read_text(encoding="utf-8"))
+    assert len(data["candidates"]) == 1
+    assert data["candidates"][0]["source"] == "Cart"
 
 
 # --- CLI subprocess smoke test ----------------------------------------------

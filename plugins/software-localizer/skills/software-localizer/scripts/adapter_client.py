@@ -28,21 +28,6 @@ class AdapterError(Exception):
     was not exactly one JSON line, or a reply missing a required field."""
 
 
-def _resolve_argv(root: str, argv: list[str]) -> list[str]:
-    """Resolve a relative element of `argv` against the workspace root when
-    a file exists there; anything else (an absolute path, or a bare command
-    name meant to be found on `PATH`, such as `"node"`) passes through
-    unchanged."""
-    resolved = []
-    for token in argv:
-        if os.path.isabs(token):
-            resolved.append(token)
-            continue
-        candidate = os.path.join(root, token)
-        resolved.append(candidate if os.path.isfile(candidate) else token)
-    return resolved
-
-
 def run(
     root: str,
     cfg: dict,
@@ -54,7 +39,7 @@ def run(
     """Run `adapter.argv + [command] + extra_args` and return the one parsed
     JSON object it printed on stdout. Raises `AdapterError` naming `command`
     on any failure."""
-    argv = _resolve_argv(root, cfg["adapter"]["argv"]) + [command] + list(extra_args)
+    argv = lz_common.resolve_argv(root, cfg) + [command] + list(extra_args)
     effective_timeout = timeout if timeout is not None else cfg["adapter_timeout_s"]
 
     try:

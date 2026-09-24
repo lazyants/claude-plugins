@@ -265,21 +265,9 @@ def test_run_raises_when_reply_is_not_an_object(work_root, project_dir):
         adapter_client.run(str(work_root), _cfg(), str(project_dir), "collect", [])
 
 
-def test_resolve_argv_resolves_relative_file_under_root(work_root):
-    (work_root / "adapter.py").write_text("", encoding="utf-8")
-    resolved = adapter_client._resolve_argv(str(work_root), ["python3", "adapter.py"])
-    assert resolved[0] == "python3"
-    assert resolved[1] == str(work_root / "adapter.py")
-
-
-def test_resolve_argv_leaves_bare_command_that_is_not_a_file_under_root(work_root):
-    resolved = adapter_client._resolve_argv(str(work_root), ["python3", "adapter.py"])
-    assert resolved == ["python3", "adapter.py"]
-
-
-def test_resolve_argv_leaves_absolute_path_untouched(work_root):
-    resolved = adapter_client._resolve_argv(str(work_root), ["/usr/bin/env", "adapter.py"])
-    assert resolved[0] == "/usr/bin/env"
+# argv resolution itself (`lz_common.resolve_argv`, shared with `adapter_digest`)
+# is tested in test_lz_common.py; `test_run_resolves_relative_argv_against_root_not_cwd`
+# above already covers `run()` exercising it end to end.
 
 
 # --- collect() -----------------------------------------------------------

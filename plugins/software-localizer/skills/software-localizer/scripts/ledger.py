@@ -133,6 +133,37 @@ def style_sha256(cfg: dict, locale: str) -> str:
     return lz_common.sha256_json(cfg.get("style", {}).get(locale))
 
 
+def relevant_canon(message: dict, canon_lock: dict) -> list:
+    """The `canon.lock.json` entries relevant to one message: every `dnt`
+    entry naming this message's id in `occurrences`, plus every entry whose
+    `source` occurs as a substring of any form of this message's own source
+    text. This is the one relevance rule packets.py embeds into a packet's
+    `canon` field and `canon_sha256` below pins a candidate against -- moved
+    here (from packets.py, its original home) so both call sites share it."""
+    entries = canon_lock.get("entries", []) if isinstance(canon_lock, dict) else []
+    msg_id = message.get("id")
+    source_forms = checks.forms_of(message.get("source"))
+    kept = []
+    for entry in entries:
+        if entry.get("kind") == "dnt" and msg_id in entry.get("occurrences", []):
+            kept.append(entry)
+            continue
+        entry_source = entry.get("source", "")
+        if any(entry_source in form for form in source_forms):
+            kept.append(entry)
+    return kept
+
+
+def canon_sha256(message: dict, canon_lock: dict) -> str:
+    """A candidate's canon snapshot: the sha256 of exactly the canon lock
+    entries `relevant_canon` finds for this message. A candidate stores this
+    at accept time; `sync()` clears the candidate once it no longer matches
+    the canon lock's current relevant entries (a newly approved/changed
+    entry must force a fresh check, the same way a source/context/style
+    change does)."""
+    return lz_common.sha256_json(relevant_canon(message, canon_lock))
+
+
 def _project_value_sha256(message: dict, locale: str) -> str | None:
     value = (message.get("targets") or {}).get(locale)
     if value is None:
@@ -159,7 +190,9 @@ def _new_entry(state: str, source_sha: str, context_sha: str, style_sha: str, pr
     }
 
 
-def _clear_candidate_if_stale(entry: dict, new_source_sha: str, new_context_sha: str, new_style_sha: str) -> bool:
+def _clear_candidate_if_stale(
+    entry: dict, new_source_sha: str, new_context_sha: str, new_style_sha: str, new_canon_sha: str,
+) -> bool:
     """Clear `entry["candidate"]` when its snapshot no longer matches the
     message's current hashes, or (for an audit candidate) when the project
     value it judged has since moved. Returns True when it cleared one."""
@@ -170,6 +203,7 @@ def _clear_candidate_if_stale(entry: dict, new_source_sha: str, new_context_sha:
         candidate.get("source_sha256") != new_source_sha
         or candidate.get("context_sha256") != new_context_sha
         or candidate.get("style_sha256") != new_style_sha
+        or candidate.get("canon_sha256") != new_canon_sha
     )
     audited_mismatch = (
         candidate.get("origin") == "audit"
@@ -209,6 +243,7 @@ def sync(root, cfg: dict, messages: dict, parse_fn: Callable[[list], dict], cano
             new_source_sha = source_sha256(message)
             new_context_sha = context_sha256(message, locale)
             new_style_sha = style_sha256(cfg, locale)
+            new_canon_sha = canon_sha256(message, canon_lock)
 
             entry = locale_entries.get(msg_id)
             if entry is None:
@@ -262,7 +297,7 @@ def sync(root, cfg: dict, messages: dict, parse_fn: Callable[[list], dict], cano
             entry["context_sha256"] = new_context_sha
             entry["style_sha256"] = new_style_sha
             entry["project_value_sha256"] = new_project_sha
-            if _clear_candidate_if_stale(entry, new_source_sha, new_context_sha, new_style_sha):
+            if _clear_candidate_if_stale(entry, new_source_sha, new_context_sha, new_style_sha, new_canon_sha):
                 counts["candidates_cleared"] += 1
 
         for msg_id in locale_entries:

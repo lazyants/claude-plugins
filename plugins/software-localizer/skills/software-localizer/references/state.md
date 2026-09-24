@@ -32,10 +32,16 @@ any of them changes, sync clears the candidate.
    against.
 3. The adapter writes into a temporary copy; the copy is collected again and must differ from
    the live project in exactly the exported values — nothing else.
-4. A journal and backups (the changed project files and that locale's ledger file) are written;
-   each project file is re-read and must still have the bytes it had when it was staged — an
-   edit made meanwhile refuses the export; files are replaced one by one with atomic renames; the
-   ledger is updated; only then is the journal marked done. Any failure before that restores the
-   files this export replaced and the ledger — never a file it did not touch.
+4. A journal and backups (the changed project files and that locale's ledger file) are written,
+   recording for each file the bytes it had and the bytes the export will write. Each project
+   file is re-read and must still have the bytes it had when it was staged — an edit made
+   meanwhile refuses the export; files are replaced one by one with atomic renames; the ledger
+   is updated; only then is the journal marked done.
+5. Rolling back — after a failure, or on the next run after an interruption — decides per file
+   by its **current** bytes: still the exported bytes → the backup is restored; already the
+   original bytes → nothing to do; anything else → someone edited it since, so it is left alone
+   and reported as a conflict. A rollback never overwrites a person's edit.
+6. A candidate also records the canon entries relevant to its message; if an approved canon entry
+   changes after review, the candidate is not exported until it is checked and reviewed again.
 
 `--dry-run` stops after step 3 and shows what would change.

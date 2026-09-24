@@ -310,6 +310,26 @@ def test_validate_config_accepts_adapter_argv_relative_to_root(work_root, tmp_pa
     assert not any(p["field"].startswith("adapter.argv") for p in problems)
 
 
+def test_validate_config_refuses_a_project_relative_adapter_script(work_root, tmp_path):
+    # A script that exists only under the project, not under R, used to run
+    # anyway: `adapter_client` invokes the adapter with `cwd=project_dir`, so
+    # the OS resolved this relative element against the project, not R --
+    # while `adapter_digest` looked for it under R and never found it, so it
+    # was never hashed either. Refusing it here (a relative element that
+    # LOOKS like a path -- it has a separator -- and is not under R) closes
+    # that gap before `load_config` can ever hand it to either.
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "scripts").mkdir()
+    (project / "scripts" / "adapter.js").write_text("", encoding="utf-8")
+    cfg = _valid_config(project)
+    cfg["adapter"]["argv"] = [sys.executable, "scripts/adapter.js"]
+    problems = lz_common.validate_config(cfg, work_root)
+    matching = [p for p in problems if p["field"] == "adapter.argv[1]"]
+    assert len(matching) == 1
+    assert "workspace" in matching[0]["message"]
+
+
 @pytest.mark.parametrize("field", ["batch_size", "max_rounds", "adapter_timeout_s"])
 @pytest.mark.parametrize("bad_value", [0, -1, "40", 1.5, True])
 def test_validate_config_refuses_non_positive_int_tuning_fields(work_root, tmp_path, field, bad_value):
@@ -340,6 +360,38 @@ def test_validate_config_refuses_allow_identical_not_a_list_of_strings(work_root
     assert any(p["field"] == "allow_identical" for p in problems)
 
 
+def test_validate_config_refuses_a_path_unsafe_source_locale(work_root, tmp_path):
+    # A locale is joined straight into output paths (ledger.py); an
+    # unrestricted string lets "../../outside" escape the workspace tree.
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(project)
+    cfg["source_locale"] = "../x"
+    problems = lz_common.validate_config(cfg, work_root)
+    assert any(p["field"] == "source_locale" for p in problems)
+
+
+def test_validate_config_refuses_a_path_unsafe_target_locale(work_root, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(project)
+    cfg["target_locales"] = ["../../outside"]
+    del cfg["style"]["de"]
+    del cfg["style"]["ru"]
+    problems = lz_common.validate_config(cfg, work_root)
+    assert any(p["field"] == "target_locales[0]" for p in problems)
+
+
+def test_validate_config_accepts_locale_identifiers_with_underscore_and_hyphen(work_root, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(project)
+    cfg["source_locale"] = "en_US"
+    cfg["target_locales"] = ["pt-BR"]
+    cfg["style"] = {"pt-BR": {"formality": "você", "notes": ""}}
+    assert lz_common.validate_config(cfg, work_root) == []
+
+
 def test_load_config_fails_cannot_with_problems(work_root, capsys):
     lz_common.atomic_write_json(work_root / "localize.json", {"schema": 1})
     with pytest.raises(SystemExit) as exc_info:
@@ -356,6 +408,55 @@ def test_load_config_returns_cfg_when_valid(work_root, tmp_path):
     lz_common.atomic_write_json(work_root / "localize.json", cfg)
     loaded = lz_common.load_config(work_root)
     assert loaded["source_locale"] == "en"
+
+
+def test_load_config_fills_documented_defaults_when_absent(work_root, tmp_path):
+    # validate_config accepts these fields absent (they are optional); a
+    # consumer indexing cfg["adapter_timeout_s"] straight (adapter_client.run
+    # does) used to KeyError when they were never filled in anywhere.
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(project)
+    del cfg["batch_size"]
+    del cfg["max_rounds"]
+    del cfg["adapter_timeout_s"]
+    del cfg["allow_identical"]
+    lz_common.atomic_write_json(work_root / "localize.json", cfg)
+
+    loaded = lz_common.load_config(work_root)
+
+    assert loaded["batch_size"] == 40
+    assert loaded["max_rounds"] == 3
+    assert loaded["adapter_timeout_s"] == 300
+    assert loaded["allow_identical"] == []
+
+
+def test_load_config_runs_an_adapter_command_when_tuning_fields_were_absent(work_root, tmp_path):
+    # End-to-end version of the above: a config missing adapter_timeout_s
+    # must still let adapter_client.run index cfg["adapter_timeout_s"]
+    # directly, because load_config is the one place that fills it in.
+    project = tmp_path / "project"
+    project.mkdir()
+    adapter_script = work_root / "adapter.py"
+    adapter_script.write_text(
+        "import json, sys\n"
+        "print(json.dumps({'ok': True}))\n",
+        encoding="utf-8",
+    )
+    cfg = _valid_config(project)
+    cfg["adapter"]["argv"] = [sys.executable, "adapter.py"]
+    del cfg["batch_size"]
+    del cfg["max_rounds"]
+    del cfg["adapter_timeout_s"]
+    del cfg["allow_identical"]
+    lz_common.atomic_write_json(work_root / "localize.json", cfg)
+
+    loaded = lz_common.load_config(work_root)
+
+    import adapter_client
+
+    reply = adapter_client.run(str(work_root), loaded, str(project), "collect", [])
+    assert reply == {"ok": True}
 
 
 def test_load_config_resolves_relative_project_root_against_root(tmp_path, monkeypatch):
@@ -547,6 +648,31 @@ def test_load_messages_fails_on_a_negative_max_length(work_root):
 
 
 # ---------------------------------------------------------------------------
+# resolve_argv
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_argv_resolves_relative_file_under_root(work_root):
+    (work_root / "adapter.py").write_text("", encoding="utf-8")
+    cfg = {"adapter": {"argv": ["python3", "adapter.py"]}}
+    resolved = lz_common.resolve_argv(work_root, cfg)
+    assert resolved[0] == "python3"
+    assert resolved[1] == str(work_root / "adapter.py")
+
+
+def test_resolve_argv_leaves_bare_command_that_is_not_a_file_under_root(work_root):
+    cfg = {"adapter": {"argv": ["python3", "adapter.py"]}}
+    resolved = lz_common.resolve_argv(work_root, cfg)
+    assert resolved == ["python3", "adapter.py"]
+
+
+def test_resolve_argv_leaves_absolute_path_untouched(work_root):
+    cfg = {"adapter": {"argv": ["/usr/bin/env", "adapter.py"]}}
+    resolved = lz_common.resolve_argv(work_root, cfg)
+    assert resolved[0] == "/usr/bin/env"
+
+
+# ---------------------------------------------------------------------------
 # adapter_digest / require_accepted_adapter
 # ---------------------------------------------------------------------------
 
@@ -659,6 +785,26 @@ def test_require_accepted_adapter_fails_when_adapter_changed_since_lock(work_roo
     lz_common.atomic_write_json(work_root / "adapter.lock.json", digest)
 
     (adapter_dir / "adapter.py").write_text("v2 -- changed", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        lz_common.require_accepted_adapter(work_root, cfg)
+    assert exc_info.value.code == lz_common.EXIT_FAIL
+
+
+def test_require_accepted_adapter_fails_when_an_absolute_external_script_changes(work_root, tmp_path):
+    # No R/adapter/ tree at all here -- the only file identifying the
+    # adapter is an absolute argv element outside R. adapter_digest must go
+    # through the same resolve_argv rule adapter_client.run executes, so
+    # this is hashed too, and editing it after acceptance invalidates the
+    # lock exactly like an in-tree adapter file would.
+    script = tmp_path / "adapter_outside.py"
+    script.write_text("v1", encoding="utf-8")
+    cfg = {"adapter": {"argv": ["python3", str(script)], "options": {}}}
+    digest = lz_common.adapter_digest(work_root, cfg)
+    lz_common.atomic_write_json(work_root / "adapter.lock.json", digest)
+    lz_common.require_accepted_adapter(work_root, cfg)  # accepted: does not raise
+
+    script.write_text("v2 -- changed", encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc_info:
         lz_common.require_accepted_adapter(work_root, cfg)

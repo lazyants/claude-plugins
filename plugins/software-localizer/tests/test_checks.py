@@ -107,6 +107,23 @@ def test_forms_plural_pass_when_count_matches():
     assert by_check(problems, "forms") == []
 
 
+def test_forms_plural_value_forms_must_be_a_list_not_a_string():
+    # With exactly one target label, list(value["forms"]) on a malformed
+    # single-character string coincidentally produces a one-element list,
+    # matching the label count -- and used to pass with no problems at all.
+    message = make_plural_message("m1", ["a"], [{"label": "other", "exact": False}], 0)
+    problems = check_candidate(message, "xx", {"forms": "A"}, [ok()], [ok()], EMPTY_CANON, DEFAULT_CFG)
+    assert len(problems) == 1
+    assert problems[0]["check"] == "forms"
+
+
+def test_forms_plural_value_forms_must_contain_only_strings():
+    message = make_plural_message("m1", ["a", "b"], [{"label": "one", "exact": False}, {"label": "other", "exact": False}], 1)
+    problems = check_candidate(message, "xx", {"forms": ["x", 2]}, [ok(), ok()], [ok(), ok()], EMPTY_CANON, DEFAULT_CFG)
+    assert len(problems) == 1
+    assert problems[0]["check"] == "forms"
+
+
 # --- arguments (non-plural) --------------------------------------------------
 
 def test_arguments_nonplural_pass():

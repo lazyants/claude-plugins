@@ -172,8 +172,16 @@ def build_report(root: Path, locale: str) -> str:
             (ready if _ready(entry) else needs_translation).append((msg_id, entry, message))
         elif state == "escalated":
             escalated.append((msg_id, entry, message))
-        elif state in ("existing", "human_locked") and not entry.get("audit_proposal"):
-            existing_notes.append((msg_id, entry, message))
+        elif state in ("existing", "human_locked"):
+            candidate = entry.get("candidate")
+            # `accept-audit` leaves the entry existing/human_locked and
+            # clears `audit_proposal` (plan section 9) -- without this, a
+            # ready, accepted replacement fell through to a plain note and
+            # never showed up as actionable at all.
+            if candidate and candidate.get("accepted_by") and _ready(entry):
+                ready.append((msg_id, entry, message))
+            elif not entry.get("audit_proposal"):
+                existing_notes.append((msg_id, entry, message))
 
     canon_candidates = _collect_canon_candidates(root, locale)
 

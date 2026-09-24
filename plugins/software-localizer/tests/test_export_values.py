@@ -72,6 +72,14 @@ def setup_export_workspace(work_root, target_locales=("de", "ru")):
     return root, loaded_cfg, project_dir, by_id
 
 
+# Every test in this file leaves canon untouched (no canon.json/canon.lock.json
+# is ever written by `setup_export_workspace`), so `canon_mod.load_lock(root)`
+# always resolves to this same empty lock -- computing the candidate's
+# `canon_sha256` snapshot against it directly (instead of threading `root`
+# through every call site) still matches what `do_export` itself loads.
+EMPTY_CANON_LOCK = {"schema": 1, "entries": []}
+
+
 def make_ready_candidate(cfg, message, locale, value, origin="translate", accepted_by=None, audited_target_sha=None):
     value_sha = lz_common.value_sha256(value)
     return {
@@ -79,6 +87,7 @@ def make_ready_candidate(cfg, message, locale, value, origin="translate", accept
         "source_sha256": ledger_mod.source_sha256(message),
         "context_sha256": ledger_mod.context_sha256(message, locale),
         "style_sha256": ledger_mod.style_sha256(cfg, locale),
+        "canon_sha256": ledger_mod.canon_sha256(message, EMPTY_CANON_LOCK),
         "audited_target_sha256": audited_target_sha,
         "checks": "pass", "problems": [],
         "verdict": {"value_sha256": value_sha, "verdict": "pass", "issues": [], "run": "test"},
@@ -218,6 +227,43 @@ def test_export_refused_when_source_changed_since_review(work_root):
         assert exc.code == lz_common.EXIT_FAIL
 
 
+def test_export_refused_when_canon_changed_after_review(work_root, capsys):
+    """A new dnt entry approved for this message after its verdict must
+    invalidate the candidate even though source/context/style never moved
+    -- the export is refused, naming the id."""
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+
+    # Exportable before any canon change.
+    result = export_values.do_export(root, "de", dry_run=True)
+    assert result["exported"] == 1
+
+    canon = canon_mod.load(root)
+    added = canon_mod.import_candidates(canon, [{
+        "kind": "dnt", "source": "footer.copyright's own do-not-translate rule",
+        "occurrences": ["footer.copyright"],
+    }])
+    canon_mod.save(root, canon)
+    canon_mod.approve(root, canon, added["added"][0], None, None, "tester")
+    canon_mod.save(root, canon)
+    canon_mod.freeze(root, canon)
+
+    try:
+        export_values.do_export(root, "de", dry_run=True)
+        raise AssertionError("expected export to refuse after a canon change")
+    except SystemExit as exc:
+        assert exc.code == lz_common.EXIT_FAIL
+
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    problem_ids = {p.get("id") for p in payload.get("problems", [])}
+    assert "footer.copyright" in problem_ids
+
+    # Nothing was touched.
+    de_data = json.loads((project_dir / "locales" / "de.json").read_text(encoding="utf-8"))
+    assert de_data.get("footer.copyright") is None
+
+
 # --- human_locked / accepted audit proposal --------------------------------
 
 
@@ -253,12 +299,19 @@ def test_export_human_locked_not_exported_unless_accepted(work_root):
 
 
 def test_export_recovers_leftover_in_progress_journal(work_root):
+    """Content-based recovery, not a `replaced` flag (removed): this
+    journal carries no such flag anywhere, only `backup_sha256`/
+    `new_sha256`, and recovery still tells the already-replaced project
+    file apart from the never-written ledger purely from what is on disk
+    right now -- exactly the crash window (bytes swapped, flag never
+    recorded) the flag-based version could not survive."""
     root, cfg, project_dir, by_id = setup_export_workspace(work_root)
 
     de_path = project_dir / "locales" / "de.json"
     ledger_path = root / "ledger" / "de.json"  # ledger.py stores one file per locale
     original_de_bytes = de_path.read_bytes()
     original_ledger_bytes = ledger_path.read_bytes()
+    garbage_text = '{"footer.copyright": "mid-export garbage"}\n'
 
     stamp = "20260101T000000Z"
     export_dir = root / "exports" / stamp
@@ -267,21 +320,23 @@ def test_export_recovers_leftover_in_progress_journal(work_root):
                                  original_de_bytes.decode("utf-8"))
     lz_common.atomic_write_text(backup_dir / "ledger.json", original_ledger_bytes.decode("utf-8"))
     journal = {
-        "schema": 1, "stamp": stamp, "locale": "de", "status": "in_progress",
+        "schema": export_values.JOURNAL_SCHEMA, "stamp": stamp, "locale": "de", "status": "in_progress",
         "started_at": "2026-01-01T00:00:00Z", "finished_at": None,
         "files": [
             {"kind": "project", "dest": str(de_path), "backup": "project/locales/de.json",
-             "sha256_before": lz_common.sha256_bytes(original_de_bytes), "replaced": True},
+             "backup_sha256": lz_common.sha256_bytes(original_de_bytes),
+             "new_sha256": lz_common.sha256_text(garbage_text)},
             {"kind": "ledger", "dest": str(ledger_path), "backup": "ledger.json",
-             "sha256_before": lz_common.sha256_bytes(original_ledger_bytes)},
+             "backup_sha256": lz_common.sha256_bytes(original_ledger_bytes),
+             "new_sha256": lz_common.sha256_bytes(original_ledger_bytes)},
         ],
     }
     lz_common.atomic_write_json(export_dir / "journal.json", journal)
 
     # Simulate a crash mid-replacement: the project file was already swapped
-    # for a new value (hence "replaced": True above), but the ledger update
-    # never landed.
-    de_path.write_text('{"footer.copyright": "mid-export garbage"}\n', encoding="utf-8")
+    # for its intended new value (bytes matching `new_sha256` above), but
+    # the ledger update never landed (still matches its own `backup_sha256`).
+    de_path.write_text(garbage_text, encoding="utf-8")
 
     result = export_values.do_export(root, "de", dry_run=True)
     assert result["recovered"] == [str(export_dir)]
@@ -290,6 +345,80 @@ def test_export_recovers_leftover_in_progress_journal(work_root):
 
     rolled_back_journal = json.loads((export_dir / "journal.json").read_text(encoding="utf-8"))
     assert rolled_back_journal["status"] == "rolled_back"
+
+
+def test_export_recovery_leaves_a_persons_edit_and_reports_a_conflict(work_root, capsys):
+    """A person edits the file themselves while an earlier export sat
+    interrupted: bytes matching neither `backup_sha256` nor `new_sha256`.
+    Recovery must leave it exactly as it is and this run must refuse (exit
+    1) naming it, rather than guess and overwrite either the pre-export
+    original or the interrupted export's intended value. The journal is
+    still resolved (`rolled_back`) either way -- there is no command a
+    person could use to clear a stuck journal, so a later export must not
+    stay blocked by this one forever; the next `collect` + `ledger sync` is
+    what is meant to pick up the person's edit."""
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+
+    de_path = project_dir / "locales" / "de.json"
+    ledger_path = root / "ledger" / "de.json"
+    original_de_bytes = de_path.read_bytes()
+    original_ledger_bytes = ledger_path.read_bytes()
+    garbage_text = '{"footer.copyright": "mid-export garbage"}\n'
+
+    stamp = "20260101T000000Z"
+    export_dir = root / "exports" / stamp
+    backup_dir = export_dir / "backup"
+    lz_common.atomic_write_text(backup_dir / "project" / "locales" / "de.json",
+                                 original_de_bytes.decode("utf-8"))
+    lz_common.atomic_write_text(backup_dir / "ledger.json", original_ledger_bytes.decode("utf-8"))
+    journal = {
+        "schema": export_values.JOURNAL_SCHEMA, "stamp": stamp, "locale": "de", "status": "in_progress",
+        "started_at": "2026-01-01T00:00:00Z", "finished_at": None,
+        "files": [
+            {"kind": "project", "dest": str(de_path), "backup": "project/locales/de.json",
+             "backup_sha256": lz_common.sha256_bytes(original_de_bytes),
+             "new_sha256": lz_common.sha256_text(garbage_text)},
+            {"kind": "ledger", "dest": str(ledger_path), "backup": "ledger.json",
+             "backup_sha256": lz_common.sha256_bytes(original_ledger_bytes),
+             "new_sha256": lz_common.sha256_bytes(original_ledger_bytes)},
+        ],
+    }
+    lz_common.atomic_write_json(export_dir / "journal.json", journal)
+
+    # A person's own edit lands on the interrupted file -- neither the
+    # pre-export original nor the interrupted export's intended value.
+    persons_edit = '{"footer.copyright": "a person is editing this right now"}\n'
+    de_path.write_text(persons_edit, encoding="utf-8")
+
+    try:
+        export_values.do_export(root, "de", dry_run=True)
+        raise AssertionError("expected export to refuse on an unresolved conflict")
+    except SystemExit as exc:
+        assert exc.code == lz_common.EXIT_FAIL
+
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["ok"] is False
+    assert str(de_path) in payload.get("conflicts", [])
+
+    # Left untouched -- not the backup, not the interrupted export's value.
+    assert de_path.read_text(encoding="utf-8") == persons_edit
+    # The ledger (no conflict of its own) is still reconciled: still
+    # matching its own backup_sha256, so nothing to do.
+    assert ledger_path.read_bytes() == original_ledger_bytes
+
+    journal_after = json.loads((export_dir / "journal.json").read_text(encoding="utf-8"))
+    assert journal_after["status"] == "rolled_back"  # resolved -- never processed again
+    assert journal_after["conflicts"] == [str(de_path)]
+
+    # A later export (even the very next call) is not blocked by this
+    # journal anymore: recovery finds nothing left `in_progress`, so it
+    # proceeds normally. There is no ready candidate for footer.copyright
+    # here, so it exports nothing -- and, either way, the person's edit is
+    # never touched by export itself.
+    result = export_values.do_export(root, "de", dry_run=True)
+    assert result["exported"] == 0
+    assert result["recovered"] == []
+    assert de_path.read_text(encoding="utf-8") == persons_edit
 
 
 # --- exclusive lock + unique journal dirs -----------------------------------
@@ -373,11 +502,12 @@ def test_export_refuses_when_live_file_edited_after_staging(work_root, monkeypat
 
 
 def test_restore_backups_leaves_a_never_replaced_file_untouched(work_root):
-    """`_restore_backups` must restore a project file only when the journal
-    marks it `replaced`; a file that failed the byte re-check and was
-    therefore never touched must be left exactly as it is (a full restore
-    of every listed file would overwrite the person's edit that caused the
-    refusal in the first place)."""
+    """`_restore_backups` decides per file from its CURRENT bytes, never a
+    `replaced` flag (removed): a file whose bytes still match
+    `backup_sha256` was never actually replaced and is left exactly as it
+    is (restoring it too would just be a no-op, but the point of this test
+    is that the decision needs no flag at all); a file whose bytes match
+    `new_sha256` gets its backup restored. Neither is a conflict."""
     root, cfg, project_dir, by_id = setup_export_workspace(work_root)
     export_dir = root / "exports" / "20260101T000000Z-manual"
     backup_dir = export_dir / "backup"
@@ -387,24 +517,27 @@ def test_restore_backups_leaves_a_never_replaced_file_untouched(work_root):
     lz_common.atomic_write_text(backup_dir / "project" / "replaced.txt", "pre-export-content")
 
     unreplaced_dest = work_root / "unreplaced.txt"
-    unreplaced_dest.write_bytes(b"a person's edit, never replaced")
+    unreplaced_dest.write_bytes(b"pre-export-content-2")
     lz_common.atomic_write_text(backup_dir / "project" / "unreplaced.txt", "pre-export-content-2")
 
     journal = {
-        "schema": 1, "stamp": "20260101T000000Z-manual", "locale": "de", "status": "in_progress",
-        "started_at": "2026-01-01T00:00:00Z", "finished_at": None,
+        "schema": export_values.JOURNAL_SCHEMA, "stamp": "20260101T000000Z-manual", "locale": "de",
+        "status": "in_progress", "started_at": "2026-01-01T00:00:00Z", "finished_at": None,
         "files": [
             {"kind": "project", "dest": str(replaced_dest), "backup": "project/replaced.txt",
-             "sha256_before": "x", "replaced": True},
+             "backup_sha256": lz_common.sha256_text("pre-export-content"),
+             "new_sha256": lz_common.sha256_bytes(b"post-replace-content")},
             {"kind": "project", "dest": str(unreplaced_dest), "backup": "project/unreplaced.txt",
-             "sha256_before": "y", "replaced": False},
+             "backup_sha256": lz_common.sha256_text("pre-export-content-2"),
+             "new_sha256": lz_common.sha256_text("a-new-value-never-actually-written")},
         ],
     }
 
-    export_values._restore_backups(export_dir, journal)
+    conflicts = export_values._restore_backups(export_dir, journal)
 
+    assert conflicts == []
     assert replaced_dest.read_bytes() == b"pre-export-content"
-    assert unreplaced_dest.read_bytes() == b"a person's edit, never replaced"
+    assert unreplaced_dest.read_bytes() == b"pre-export-content-2"
 
 
 def test_export_rolls_back_the_replaced_file_and_ledger_after_a_real_replace(work_root, monkeypatch):

@@ -8,10 +8,13 @@ turns a coverage turn's answer into `adapter.lock.json`.
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -45,13 +48,27 @@ TOY_OPTIONS = {
 
 def _make_workspace(work_root: Path, *, project_git: bool = False, options_extra: dict | None = None):
     """`<work_root>/R` (the workspace, with the toy adapter under
-    `R/adapter/adapter.py`) and `<work_root>/project` (a fresh copy of the
-    toy project fixture), with a valid `localize.json` already written.
-    Returns `(root, project_dir, cfg)`."""
+    `R/adapter/adapter.py`) and a fresh copy of the toy project fixture in
+    its own OS-temp directory, with a valid `localize.json` already
+    written. Returns `(root, project_dir, cfg)`.
+
+    The project copy deliberately does NOT live under `work_root` (which
+    sits inside `tests/.work/` -- gitignored, but still physically inside
+    THIS repo's own git work tree): `adapter_check.py`'s coverage inventory
+    detects an ENCLOSING git work tree, not just a local `.git`, so a
+    project nested under `work_root` would register as "inside" this
+    checkout's own work tree and get an empty git-based inventory
+    (everything under `tests/.work/` is excluded) instead of the plain
+    walk a project with no git of its own is meant to fall back to."""
     root = work_root / "R"
     root.mkdir()
-    project_dir = work_root / "project"
-    shutil.copytree(TOY_PROJECT, project_dir)
+    # .resolve(): macOS's temp dir is reached through a /var -> /private/var
+    # symlink; lz_common.load_config resolves project_root the same way, so
+    # this must match or a straight string comparison against cfg["project_root"]
+    # would spuriously differ only by that symlink hop.
+    project_dir = Path(tempfile.mkdtemp(prefix="lz-swloc-project-")).resolve()
+    atexit.register(shutil.rmtree, project_dir, ignore_errors=True)
+    shutil.copytree(TOY_PROJECT, project_dir, dirs_exist_ok=True)
 
     adapter_dir = root / "adapter"
     adapter_dir.mkdir()
@@ -84,12 +101,13 @@ def _make_workspace(work_root: Path, *, project_git: bool = False, options_extra
     return root, project_dir, cfg
 
 
-def _run(script: Path, args: list[str]) -> tuple[int, dict]:
+def _run(script: Path, args: list[str], cwd: Path | None = None) -> tuple[int, dict]:
     proc = subprocess.run(
         [sys.executable, str(script), *args],
         capture_output=True,
         text=True,
         timeout=60,
+        cwd=str(cwd) if cwd is not None else None,
     )
     lines = [line for line in proc.stdout.splitlines() if line.strip()]
     assert len(lines) == 1, f"expected one JSON line on stdout, got {proc.stdout!r} (stderr: {proc.stderr!r})"
@@ -142,6 +160,30 @@ def test_run_is_idempotent(work_root):
     _run(ADAPTER_CHECK, ["run", "--root", str(root)])
     code, reply = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
     assert code == 0
+    assert reply["ok"] is True
+
+
+def test_run_accepts_a_relative_root_from_a_different_cwd(work_root):
+    # A relative --root used to stay relative all the way into the adapter
+    # subprocess's argv, which runs with cwd=project_dir -- a different
+    # directory than wherever the relative root string was valid from. The
+    # OS then resolved the script path against the wrong directory and the
+    # adapter subprocess could not be found at all.
+    #
+    # `elsewhere` is a sibling of R (one ".." level) rather than some
+    # unrelated deeply-nested tmp directory: with enough ".." segments a
+    # broken relative path can walk past the filesystem root and coincide
+    # with the right absolute path by pure depth accident, masking the bug
+    # this test exists to catch.
+    root, project_dir, cfg = _make_workspace(work_root)
+    elsewhere = work_root / "elsewhere"
+    elsewhere.mkdir()
+    rel_root = os.path.relpath(root, start=elsewhere)
+    assert rel_root == "../R"
+
+    code, reply = _run(ADAPTER_CHECK, ["run", "--root", rel_root], cwd=elsewhere)
+
+    assert code == 0, reply
     assert reply["ok"] is True
 
 
@@ -214,6 +256,34 @@ def test_run_fails_when_a_source_form_does_not_parse(work_root):
     assert any("error.notFound" in key for key in reply["result"]["parse_sanity"]["source_failures"])
 
 
+def test_run_reports_a_source_failure_a_colliding_key_used_to_hide(work_root):
+    # Old code built parse-sanity keys by string concatenation: a non-plural
+    # id "cart.itemCount#0" and the first form of the plural id
+    # "cart.itemCount" both built the key "src::cart.itemCount#0". Whichever
+    # item the adapter processed last overwrote the other's result in the
+    # results dict -- here the plural's valid form 0 (processed after,
+    # since it appears later in en.json) silently overwrote the failing
+    # non-plural's result, so the check passed when it should not have.
+    root, project_dir, cfg = _make_workspace(work_root)
+    en_path = project_dir / "locales" / "en.json"
+    data = json.loads(en_path.read_text(encoding="utf-8"))
+    new_data = {}
+    for key, value in data.items():
+        if key == "cart.itemCount":
+            new_data["cart.itemCount#0"] = "Stray @ token breaks this"
+        new_data[key] = value
+    en_path.write_text(json.dumps(new_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    code, reply = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+
+    assert code == 1
+    assert reply["ok"] is False
+    result = reply["result"]["parse_sanity"]
+    assert result["ok"] is False
+    assert "cart.itemCount#0" in result["source_failures"]
+    assert "cart.itemCount" not in result["source_failures"]
+
+
 # --- run(): the independent project inventory ---------------------------------
 
 
@@ -226,6 +296,39 @@ def test_inventory_includes_untracked_and_excludes_gitignored(work_root):
 
     code, reply = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
     assert code == 0
+
+    packet = json.loads((root / "runs" / "_coverage" / "packet.json").read_text(encoding="utf-8"))
+    assert "extra_catalog.json" in packet["inventory"]
+    assert "ignored_secret.txt" not in packet["inventory"]
+    assert "locales/en.json" in packet["inventory"]
+
+
+def test_inventory_detects_an_enclosing_git_worktree_without_a_local_git(work_root, tmp_path):
+    # The project itself has no `.git` -- it is a subdirectory of a larger
+    # checkout (a monorepo layout). Detecting only a LOCAL `.git` fell
+    # through to the unfiltered directory walk, which ignores .gitignore
+    # entirely: a large ignored tree could crowd the coverage packet.
+    root, project_dir, cfg = _make_workspace(work_root)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=str(repo_root), check=True, timeout=30)
+
+    nested_project = repo_root / "nested" / "project"
+    nested_project.parent.mkdir(parents=True)
+    shutil.move(str(project_dir), str(nested_project))
+    assert not (nested_project / ".git").exists()
+
+    (repo_root / ".gitignore").write_text("nested/project/ignored_secret.txt\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=str(repo_root), check=True, timeout=30)
+    (nested_project / "ignored_secret.txt").write_text("nope", encoding="utf-8")
+    (nested_project / "extra_catalog.json").write_text("{}\n", encoding="utf-8")
+
+    cfg["project_root"] = str(nested_project)
+    lz_common.atomic_write_json(root / "localize.json", cfg)
+
+    code, reply = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+    assert code == 0, reply
 
     packet = json.loads((root / "runs" / "_coverage" / "packet.json").read_text(encoding="utf-8"))
     assert "extra_catalog.json" in packet["inventory"]

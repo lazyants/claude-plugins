@@ -270,6 +270,14 @@ def test_seam_failure_person_translates_pending_message_never_overwritten(work_r
     # sync are both read-only -- so the person's own text is still there.
     assert read_json(de_path)["footer.copyright"] == "Ein Mensch hat das übersetzt"
 
+    # The seam continues into export: there is no candidate for this id (it
+    # was never translated), so export must not overwrite the person's edit
+    # either -- refused or skipped, and the bytes are exactly unchanged.
+    before_export_bytes = de_path.read_bytes()
+    export_result = expect_ok("export_values.py", ["--root", str(root), "--locale", "de"])
+    assert export_result["exported"] == 0
+    assert de_path.read_bytes() == before_export_bytes
+
 
 # --- failure case 2: the source changes after review -> export refused ----
 
@@ -312,6 +320,7 @@ def test_seam_failure_interrupted_export_recovered_on_next_run(work_root):
     # while the live project file has already been swapped for something
     # else and the ledger update never landed. This is the only practical
     # way to test recovery deterministically -- it is not messages.json.
+    garbage_text = '{"footer.copyright": "mid-export garbage"}\n'
     stamp = "20260101T000000Z"
     export_dir = root / "exports" / stamp
     backup_dir = export_dir / "backup"
@@ -322,18 +331,20 @@ def test_seam_failure_interrupted_export_recovered_on_next_run(work_root):
         "started_at": "2026-01-01T00:00:00Z", "finished_at": None,
         "files": [
             {"kind": "project", "dest": str(de_path), "backup": "project/locales/de.json",
-             "sha256_before": lz_common.sha256_bytes(original_de_bytes), "replaced": True},
+             "backup_sha256": lz_common.sha256_bytes(original_de_bytes),
+             "new_sha256": lz_common.sha256_text(garbage_text)},
             {"kind": "ledger", "dest": str(ledger_path), "backup": "ledger.json",
-             "sha256_before": lz_common.sha256_bytes(original_ledger_bytes)},
+             "backup_sha256": lz_common.sha256_bytes(original_ledger_bytes),
+             "new_sha256": lz_common.sha256_bytes(original_ledger_bytes)},
         ],
     }
     lz_common.atomic_write_json(export_dir / "journal.json", journal)
 
-    # "replaced": True on the project entry records that the swap below is
-    # what a real crash mid-replacement would have already done; recovery
-    # only restores files this transaction actually replaced, plus the
-    # ledger it always owns.
-    de_path.write_text('{"footer.copyright": "mid-export garbage"}\n', encoding="utf-8")
+    # The project file's bytes on disk (matching `new_sha256` above) are
+    # what tell recovery it was already replaced -- a real crash mid-
+    # replacement would leave exactly this, with no separate flag anywhere
+    # recording it; recovery reconciles by content, not by a flag.
+    de_path.write_text(garbage_text, encoding="utf-8")
 
     result = expect_ok("export_values.py", ["--root", str(root), "--locale", "de", "--dry-run"])
     assert result["recovered"] == [str(export_dir)]

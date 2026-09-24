@@ -9,6 +9,7 @@ and project) instead of duplicating them.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -49,6 +50,33 @@ def test_collect_writes_messages_json_after_acceptance(work_root):
     cart = by_id["cart.itemCount"]
     assert cart["plural"]["general_index"] == 1
     assert len(cart["plural"]["target_labels"]["ru"]) == 3
+
+
+def test_collect_accepts_a_relative_root_from_a_different_cwd(work_root):
+    # Same hazard as adapter_check.py's `run`: an unresolved relative --root
+    # stays relative all the way into the adapter subprocess's argv, which
+    # runs with cwd=project_dir -- a directory the relative root string was
+    # never valid from.
+    #
+    # `elsewhere` is a sibling of R (one ".." level), not some unrelated
+    # deeply-nested tmp directory: with enough ".." segments a broken
+    # relative path can walk past the filesystem root and coincide with the
+    # right absolute path by pure depth accident, masking the bug this test
+    # exists to catch.
+    root, project_dir, cfg = _make_workspace(work_root)
+    run_code, _ = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+    assert run_code == 0
+    _accept(root)
+
+    elsewhere = work_root / "elsewhere"
+    elsewhere.mkdir()
+    rel_root = os.path.relpath(root, start=elsewhere)
+    assert rel_root == "../R"
+
+    code, reply = _run(COLLECT, ["--root", rel_root], cwd=elsewhere)
+
+    assert code == 0, reply
+    assert reply["ok"] is True
 
 
 def test_collect_refuses_without_an_accepted_adapter(work_root):

@@ -137,15 +137,25 @@ def import_candidates(canon: dict, candidates: list) -> dict:
     here it has already been validated by `packets.py`, so this is a
     cannot-run condition (the CLI lets it bubble to `run_main`, exit 2), not
     a business refusal.
+
+    A candidate whose `occurrences` is present but not a list of strings is
+    instead skipped and reported in `"skipped"` -- defence for a
+    hand-written import file (packets.py's own canon-turn acceptance
+    already rejects this shape before it ever reaches disk, but this
+    module's `import` is also reachable directly from the CLI).
     """
-    added, merged = [], []
+    added, merged, skipped = [], [], []
     for candidate in candidates:
         kind = candidate.get("kind")
         source = candidate.get("source")
         if kind not in _KIND_PREFIX or not source:
             raise ValueError(f"invalid canon candidate (kind/source): {candidate!r}")
 
-        occurrences = list(candidate.get("occurrences") or [])
+        raw_occurrences = candidate.get("occurrences") or []
+        if not isinstance(raw_occurrences, list) or not all(isinstance(o, str) for o in raw_occurrences):
+            skipped.append({"kind": kind, "source": source, "reason": "occurrences must be a list of strings"})
+            continue
+        occurrences = list(raw_occurrences)
         note = candidate.get("note") or ""
         translations_in = candidate.get("translations") or {}
 
@@ -181,7 +191,7 @@ def import_candidates(canon: dict, candidates: list) -> dict:
                 "approved_by": None, "approved_at": None,
             }
 
-    return {"added": added, "merged": merged}
+    return {"added": added, "merged": merged, "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------

@@ -189,17 +189,20 @@ def select_audit(ledger_data: dict, locale: str) -> list:
 # ---------------------------------------------------------------------------
 
 
-def _source_occurs(entry_source: str, item_sources: list) -> bool:
-    for src in item_sources:
-        for form in checks_mod.forms_of(src):
-            if entry_source in form:
-                return True
-    return False
-
-
-def filter_canon_lock(canon_lock: dict, item_sources: list) -> dict:
-    entries = canon_lock.get("entries", []) if isinstance(canon_lock, dict) else []
-    kept = [e for e in entries if _source_occurs(e.get("source", ""), item_sources)]
+def filter_canon_lock(canon_lock: dict, messages: list) -> dict:
+    """The canon snapshot a batch packet embeds: the union of
+    `ledger.relevant_canon` for every message in the batch (a single
+    relevance rule, owned by `ledger.py` so `ledger.canon_sha256` pins
+    exactly what a candidate saw against the same rule)."""
+    seen_ids: set = set()
+    kept = []
+    for message in messages:
+        for entry in ledger_mod.relevant_canon(message, canon_lock):
+            entry_id = entry.get("id")
+            if entry_id in seen_ids:
+                continue
+            seen_ids.add(entry_id)
+            kept.append(entry)
     return {"entries": kept}
 
 
@@ -296,6 +299,7 @@ def build_review_item(message: dict, locale: str, entry: dict) -> dict:
         "source_sha256": cand["source_sha256"],
         "context_sha256": cand["context_sha256"],
         "style_sha256": cand["style_sha256"],
+        "canon_sha256": cand["canon_sha256"],
         "context": message.get("context", {}),
     }
     target_labels, count_arguments, general_index = plural_item_fields(message, locale)
@@ -395,7 +399,7 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None) 
     batches_out = []
     for name, ids in named:
         items = []
-        item_sources = []
+        item_messages = []
         for i in ids:
             message = by_id.get(i)
             if message is None:
@@ -412,7 +416,7 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None) 
                     skipped.append({"id": i, "reason": "no current target value for this locale"})
                     continue
             items.append(item)
-            item_sources.append(message["source"])
+            item_messages.append(message)
         if not items:
             continue
         packet = {
@@ -420,7 +424,7 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None) 
             "locale": locale,
             "batch": name,
             "style": style,
-            "canon": filter_canon_lock(canon_lock, item_sources),
+            "canon": filter_canon_lock(canon_lock, item_messages),
             "items": items,
         }
         if kind == "audit":
@@ -456,7 +460,7 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
     skipped, batches_out = [], []
     for n, ids in enumerate(chunks):
         name = f"canon-audit-{entry_id}" if n == 0 else f"canon-audit-{entry_id}-{n + 1}"
-        items, item_sources = [], []
+        items, item_messages = [], []
         for i in ids:
             message = by_id.get(i)
             if message is None:
@@ -467,12 +471,12 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
                 skipped.append({"id": i, "reason": "no current target value for this locale"})
                 continue
             items.append(item)
-            item_sources.append(message["source"])
+            item_messages.append(message)
         if not items:
             continue
         packet = {
             "kind": "audit", "locale": locale, "batch": name, "style": style,
-            "canon": filter_canon_lock(canon_lock, item_sources),
+            "canon": filter_canon_lock(canon_lock, item_messages),
             "canon_entry": canon_entry_meta,
             "items": items,
         }
@@ -518,11 +522,19 @@ def _parse_list(results: dict, item_id: str, prefix: str, forms: list) -> list:
     return [results[f"{item_id}::{prefix}::{idx}"] for idx in range(len(forms))]
 
 
-def _single_or_list(parses: list):
-    return parses[0] if len(parses) == 1 else parses
+def _single_or_list(parses: list, is_plural: bool):
+    """A non-plural message always has exactly one form -- unwrap it to a
+    scalar. A plural message keeps its parse results list-shaped for EVERY
+    form count, including exactly one target label: `checks.check_candidate`
+    always iterates a plural's `source_parse`/`value_parse` as a list
+    (`list(value_parse)`), and collapsing a one-element list here used to
+    hand it a single parse-result dict instead -- `list()` of a dict yields
+    its keys, not its forms, and the first `.get()` call on one of those
+    keys (a string) raised `AttributeError`."""
+    return parses if is_plural else parses[0]
 
 
-_CANDIDATE_SNAPSHOT_FIELDS = ("value_sha256", "source_sha256", "context_sha256", "style_sha256")
+_CANDIDATE_SNAPSHOT_FIELDS = ("value_sha256", "source_sha256", "context_sha256", "style_sha256", "canon_sha256")
 
 
 def _review_candidate_still_matches(ledger_data: dict, locale: str, msg_id: str, item: dict) -> bool:
@@ -604,10 +616,11 @@ def accept_translate(root: Path, cfg: dict, packet: dict, output: dict, ledger_d
             failed.append({"id": msg_id, "reason": "value is not a string or {'forms': [...]}"})
             continue
 
+        is_plural = item.get("target_labels") is not None
         extra_texts = {f"{msg_id}::value::{idx}": form for idx, form in enumerate(value_forms)}
         parse_results = _parse_batch(root, cfg, [item], extra_texts)
-        source_parse = _single_or_list(_parse_list(parse_results, msg_id, "source", source_forms))
-        value_parse = _single_or_list(_parse_list(parse_results, msg_id, "value", value_forms))
+        source_parse = _single_or_list(_parse_list(parse_results, msg_id, "source", source_forms), is_plural)
+        value_parse = _single_or_list(_parse_list(parse_results, msg_id, "value", value_forms), is_plural)
 
         problems = checks_mod.check_candidate(message, locale, value, source_parse, value_parse, canon_lock, cfg)
         candidate = {
@@ -617,6 +630,7 @@ def accept_translate(root: Path, cfg: dict, packet: dict, output: dict, ledger_d
             "source_sha256": ledger_mod.source_sha256(message),
             "context_sha256": ledger_mod.context_sha256(message, locale),
             "style_sha256": ledger_mod.style_sha256(cfg, locale),
+            "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
             "audited_target_sha256": None,
             "checks": "fail" if problems else "pass",
             "problems": problems,
@@ -639,6 +653,39 @@ def accept_translate(root: Path, cfg: dict, packet: dict, output: dict, ledger_d
         "accepted": accepted, "failed": failed + [{"id": i, "reason": "missing from output"} for i in missing],
         "extra": extra, "escalated": escalated,
     }
+
+
+def _valid_issue(issue) -> bool:
+    return isinstance(issue, dict) and isinstance(issue.get("kind"), str) and isinstance(issue.get("text"), str)
+
+
+def _valid_proposed_shape(proposed, is_plural: bool) -> bool:
+    """`proposed` is `null`, or a value of the right shape for this
+    message: a plain string for a non-plural message, `{"forms": [...]}`
+    (every form a string) for a plural one -- the same shape
+    `checks.forms_of` expects, checked up front so a malformed `proposed`
+    never reaches `checks_mod.forms_of` unguarded."""
+    if proposed is None:
+        return True
+    if is_plural:
+        forms = proposed.get("forms") if isinstance(proposed, dict) else None
+        return isinstance(forms, list) and all(isinstance(f, str) for f in forms)
+    return isinstance(proposed, str)
+
+
+def _valid_verdict_shape(verdict: dict, is_plural: bool) -> bool:
+    """A review/audit turn's verdict for one item, validated before it can
+    cause any ledger state change: `verdict` must be exactly "pass" or
+    "fail" (anything else is treated the same as a missing verdict -- no
+    rounds increment, no escalation), `issues` a list of
+    `{"kind": str, "text": str}`, `proposed` null or shaped for this
+    message's plurality."""
+    if verdict.get("verdict") not in ("pass", "fail"):
+        return False
+    issues = verdict.get("issues", [])
+    if not isinstance(issues, list) or not all(_valid_issue(i) for i in issues):
+        return False
+    return _valid_proposed_shape(verdict.get("proposed"), is_plural)
 
 
 def accept_review(root: Path, cfg: dict, packet: dict, output: dict, ledger_data: dict, batch_name: str) -> dict:
@@ -665,6 +712,14 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
     for msg_id, item in items.items():
         verdict = verdicts.get(msg_id)
         if not isinstance(verdict, dict) or verdict.get("value_sha256") != item["value_sha256"]:
+            missing.append(msg_id)
+            continue
+        is_plural = item.get("target_labels") is not None
+        if not _valid_verdict_shape(verdict, is_plural):
+            # A malformed verdict (an unrecognized `verdict` string, a
+            # non-{kind,text} issue, or a `proposed` of the wrong shape)
+            # must cause no ledger state change at all -- treated the same
+            # as a hash mismatch: no rounds increment, no escalation.
             missing.append(msg_id)
             continue
         if kind == "review" and not _review_candidate_still_matches(ledger_data, locale, msg_id, item):
@@ -734,10 +789,11 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                 continue
             proposed = verdict.get("proposed")
             if proposed is not None:
+                is_plural = item.get("target_labels") is not None
                 source_forms = checks_mod.forms_of(item["source"])
                 proposed_forms = checks_mod.forms_of(proposed)
-                source_parse = _single_or_list(_parse_list(parse_results, msg_id, "source", source_forms))
-                proposed_parse = _single_or_list(_parse_list(parse_results, msg_id, "proposed", proposed_forms))
+                source_parse = _single_or_list(_parse_list(parse_results, msg_id, "source", source_forms), is_plural)
+                proposed_parse = _single_or_list(_parse_list(parse_results, msg_id, "proposed", proposed_forms), is_plural)
                 problems = checks_mod.check_candidate(
                     message, locale, proposed, source_parse, proposed_parse, canon_lock, cfg,
                 )
@@ -749,6 +805,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                     "source_sha256": ledger_mod.source_sha256(message),
                     "context_sha256": ledger_mod.context_sha256(message, locale),
                     "style_sha256": ledger_mod.style_sha256(cfg, locale),
+                    "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
                     "audited_target_sha256": old_candidate.get("audited_target_sha256"),
                     "checks": "fail" if problems else "pass",
                     "problems": problems,
@@ -760,10 +817,11 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             failed_ids.append(msg_id)
             proposed = verdict.get("proposed")
             if proposed is not None:
+                is_plural = item.get("target_labels") is not None
                 source_forms = checks_mod.forms_of(item["source"])
                 proposed_forms = checks_mod.forms_of(proposed)
-                source_parse = _single_or_list(_parse_list(parse_results, msg_id, "source", source_forms))
-                proposed_parse = _single_or_list(_parse_list(parse_results, msg_id, "proposed", proposed_forms))
+                source_parse = _single_or_list(_parse_list(parse_results, msg_id, "source", source_forms), is_plural)
+                proposed_parse = _single_or_list(_parse_list(parse_results, msg_id, "proposed", proposed_forms), is_plural)
                 problems = checks_mod.check_candidate(
                     message, locale, proposed, source_parse, proposed_parse, canon_lock, cfg,
                 )
@@ -775,6 +833,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                     "source_sha256": ledger_mod.source_sha256(message),
                     "context_sha256": ledger_mod.context_sha256(message, locale),
                     "style_sha256": ledger_mod.style_sha256(cfg, locale),
+                    "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
                     "checks": "fail" if problems else "pass",
                     "problems": problems,
                     "issues": verdict.get("issues", []),
@@ -805,7 +864,7 @@ def do_accept(root: Path, run_dir: Path, output_path: Path) -> dict:
     lz_common.require_accepted_adapter(root, cfg)
 
     if kind == "canon":
-        return accept_canon(run_dir, output)
+        return accept_canon(packet, run_dir, output)
 
     if kind not in ("translate", "review", "audit"):
         lz_common.fail(f"packet.json has an unknown kind: {kind}", lz_common.EXIT_CANNOT)
@@ -827,33 +886,79 @@ def do_accept(root: Path, run_dir: Path, output_path: Path) -> dict:
 CANDIDATE_KINDS = ("term", "ui_label", "dnt")
 
 
-def _validate_canon_candidates(output) -> list:
+def _valid_translation_entry(entry) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    proposed = entry.get("proposed")
+    if proposed is not None and not isinstance(proposed, str):
+        return False
+    current = entry.get("current")
+    if current is not None and (not isinstance(current, list) or not all(isinstance(c, str) for c in current)):
+        return False
+    return True
+
+
+def _valid_canon_translations(translations, target_locales: list) -> bool:
+    if translations is None:
+        return True
+    if not isinstance(translations, dict):
+        return False
+    return all(locale in target_locales and _valid_translation_entry(entry) for locale, entry in translations.items())
+
+
+def _valid_canon_output_candidate(cand, valid_ids: set, target_locales: list) -> bool:
+    """One candidate from `build --kind canon`'s output, checked before it
+    is written to `candidates.json` (plan section 10, item 3 of the review
+    fix): `kind` in term|ui_label|dnt, a non-empty string `source`, `note`
+    a string or absent, `occurrences` a list of strings each naming an id
+    present in this packet (a non-string entry such as `[123]` used to
+    reach `canon.json` and silently defeat `checks._check_dnt`, which
+    matches occurrences by exact string id), and `translations` -- when
+    given -- an object whose keys are this packet's target locales and
+    whose values carry an optional string `proposed` and an optional
+    list-of-strings `current`."""
+    if not isinstance(cand, dict):
+        return False
+    if cand.get("kind") not in CANDIDATE_KINDS:
+        return False
+    if not isinstance(cand.get("source"), str) or not cand["source"]:
+        return False
+    note = cand.get("note")
+    if note is not None and not isinstance(note, str):
+        return False
+    occurrences = cand.get("occurrences")
+    if not isinstance(occurrences, list) or not all(isinstance(o, str) for o in occurrences):
+        return False
+    if not all(o in valid_ids for o in occurrences):
+        return False
+    return _valid_canon_translations(cand.get("translations"), target_locales)
+
+
+def accept_canon(packet: dict, run_dir: Path, output: dict) -> dict:
+    """Validate a canon turn's output before writing `candidates.json`: a
+    malformed candidate is dropped and listed in the result rather than
+    either silently written through or failing the whole batch -- the
+    batch may carry a mix of good and bad candidates, and the good ones
+    must still reach `canon.py import`."""
     if not isinstance(output, dict) or not isinstance(output.get("candidates"), list):
-        return None
-    problems = []
-    for i, cand in enumerate(output["candidates"]):
-        if not isinstance(cand, dict):
-            problems.append(f"candidates[{i}] is not an object")
-            continue
-        if cand.get("kind") not in CANDIDATE_KINDS:
-            problems.append(f"candidates[{i}].kind must be one of {CANDIDATE_KINDS}")
-        if not isinstance(cand.get("source"), str) or not cand["source"]:
-            problems.append(f"candidates[{i}].source must be a non-empty string")
-        if not isinstance(cand.get("occurrences", []), list):
-            problems.append(f"candidates[{i}].occurrences must be a list")
-    return problems
-
-
-def accept_canon(run_dir: Path, output: dict) -> dict:
-    problems = _validate_canon_candidates(output)
-    if problems is None:
         lz_common.fail("canon output is missing a 'candidates' list", lz_common.EXIT_FAIL)
-    if problems:
-        lz_common.fail("canon output has invalid candidates", lz_common.EXIT_FAIL, problems=problems)
+
+    valid_ids = {item["id"] for item in packet.get("items", [])}
+    target_locales = packet.get("locales", [])
+
+    valid_candidates, dropped = [], []
+    for i, cand in enumerate(output["candidates"]):
+        if _valid_canon_output_candidate(cand, valid_ids, target_locales):
+            valid_candidates.append(cand)
+        else:
+            dropped.append({"index": i, "candidate": cand})
+
     out_path = run_dir / "candidates.json"
-    lz_common.atomic_write_json(out_path, {"candidates": output["candidates"]})
-    return {"ok": True, "kind": "canon", "run": run_dir.name, "candidates": len(output["candidates"]),
-            "output": str(out_path)}
+    lz_common.atomic_write_json(out_path, {"candidates": valid_candidates})
+    return {
+        "ok": True, "kind": "canon", "run": run_dir.name, "candidates": len(valid_candidates),
+        "dropped": dropped, "output": str(out_path),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -885,6 +990,7 @@ def do_accept_audit(root: Path, locale: str, ids: list, by: str) -> dict:
             "source_sha256": proposal["source_sha256"],
             "context_sha256": proposal["context_sha256"],
             "style_sha256": proposal["style_sha256"],
+            "canon_sha256": proposal["canon_sha256"],
             "audited_target_sha256": proposal["audited_target_sha256"],
             "checks": "pass",
             "problems": [],

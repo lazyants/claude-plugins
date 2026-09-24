@@ -16,7 +16,7 @@ def main() -> int:
     parser.add_argument("--root", required=True)
     args = parser.parse_args()
 
-    root = Path(args.root)
+    root = lz_common.resolve_root(args.root)
     cfg = lz_common.load_config(root)
     lz_common.require_accepted_adapter(root, cfg)
 

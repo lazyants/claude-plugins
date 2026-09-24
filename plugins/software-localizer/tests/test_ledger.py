@@ -113,12 +113,18 @@ def sync_once(root, cfg, messages, parse_fn=unexpected_parse_fn, canon_lock=None
 
 
 def make_candidate(value="Hallo", value_sha256=None, origin="translate", source_sha256="s",
-                    context_sha256="c", style_sha256="st", audited_target_sha256=None,
+                    context_sha256="c", style_sha256="st", canon_sha256=None, audited_target_sha256=None,
                     checks="pass", verdict=None, accepted_by=None):
+    # Every test in this file that syncs against a canon lock uses
+    # EMPTY_CANON_LOCK (see `sync_once`), so `ledger.canon_sha256(<any
+    # message>, EMPTY_CANON_LOCK)` is this same constant regardless of
+    # which message the candidate is for.
     return {
         "value": value, "value_sha256": value_sha256 or lz_common.value_sha256(value),
         "origin": origin, "source_sha256": source_sha256, "context_sha256": context_sha256,
-        "style_sha256": style_sha256, "audited_target_sha256": audited_target_sha256,
+        "style_sha256": style_sha256,
+        "canon_sha256": canon_sha256 if canon_sha256 is not None else lz_common.sha256_json([]),
+        "audited_target_sha256": audited_target_sha256,
         "checks": checks, "problems": [], "verdict": verdict, "accepted_by": accepted_by,
     }
 
@@ -252,6 +258,55 @@ def test_style_sha256_differs_per_locale():
         "ru": {"formality": "ты", "notes": ""},
     })
     assert ledger.style_sha256(cfg, "de") != ledger.style_sha256(cfg, "ru")
+
+
+# --- relevant_canon / canon_sha256 (item 2 of the review fix) ------------
+
+
+def test_relevant_canon_matches_by_source_substring():
+    msg = make_message("m1", "Add to Cart")
+    canon_lock = {"schema": 1, "entries": [
+        {"id": "t-cart", "kind": "term", "source": "Cart", "occurrences": []},
+        {"id": "t-nope", "kind": "term", "source": "Unrelated", "occurrences": []},
+    ]}
+    assert [e["id"] for e in ledger.relevant_canon(msg, canon_lock)] == ["t-cart"]
+
+
+def test_relevant_canon_matches_dnt_by_occurrence_even_without_source_match():
+    """A `dnt` entry naming this message's id in `occurrences` is relevant
+    even when its `source` text never occurs in the message's own source --
+    the occurrence rule is an OR with the source-substring rule, not a
+    refinement of it."""
+    msg = make_message("m1", "Hello")
+    canon_lock = {"schema": 1, "entries": [
+        {"id": "d-brand", "kind": "dnt", "source": "Brand", "occurrences": ["m1"]},
+    ]}
+    assert [e["id"] for e in ledger.relevant_canon(msg, canon_lock)] == ["d-brand"]
+
+
+def test_relevant_canon_dnt_not_occurring_here_and_not_source_matching_is_excluded():
+    msg = make_message("m1", "Hello")
+    canon_lock = {"schema": 1, "entries": [
+        {"id": "d-brand", "kind": "dnt", "source": "Brand", "occurrences": ["some-other-id"]},
+    ]}
+    assert ledger.relevant_canon(msg, canon_lock) == []
+
+
+def test_canon_sha256_changes_when_relevant_entries_change():
+    msg = make_message("m1", "Add to Cart")
+    empty = ledger.canon_sha256(msg, EMPTY_CANON_LOCK)
+    with_entry = ledger.canon_sha256(msg, {"schema": 1, "entries": [
+        {"id": "t-cart", "kind": "term", "source": "Cart", "occurrences": []},
+    ]})
+    assert empty != with_entry
+
+
+def test_canon_sha256_ignores_an_irrelevant_entry():
+    msg = make_message("m1", "Add to Cart")
+    with_irrelevant = ledger.canon_sha256(msg, {"schema": 1, "entries": [
+        {"id": "t-nope", "kind": "term", "source": "Unrelated", "occurrences": []},
+    ]})
+    assert with_irrelevant == ledger.canon_sha256(msg, EMPTY_CANON_LOCK)
 
 
 # --- sync: bootstrap -----------------------------------------------------
@@ -584,6 +639,35 @@ def test_sync_clears_candidate_on_source_snapshot_mismatch(work_root):
 
     msg["source"] = "Hello there"
     report = sync_once(work_root, cfg, make_messages([msg]))
+
+    entry = ledger.load(work_root)["locales"]["de"]["m1"]
+    assert entry["state"] == "pending"  # unaffected: this id has no project target
+    assert entry["candidate"] is None
+    assert report["counts"]["de"]["candidates_cleared"] == 1
+
+
+def test_sync_clears_candidate_on_canon_snapshot_mismatch(work_root):
+    """Item 2 of the review fix: a candidate whose canon snapshot no longer
+    matches the current canon lock's relevant entries must be cleared, the
+    same way a source/context/style mismatch clears it -- a newly approved
+    or changed canon entry must force a fresh check."""
+    cfg = make_cfg()
+    msg = make_message("m1", "Add to Cart")
+    sync_once(work_root, cfg, make_messages([msg]))  # pending
+
+    ledger_data = ledger.load(work_root)
+    ledger.set_candidate(ledger_data, "de", "m1", make_candidate(
+        source_sha256=ledger.source_sha256(msg),
+        context_sha256=ledger.context_sha256(msg, "de"),
+        style_sha256=ledger.style_sha256(cfg, "de"),
+        canon_sha256=ledger.canon_sha256(msg, EMPTY_CANON_LOCK),
+    ))
+    ledger.save(work_root, ledger_data)
+
+    new_canon_lock = {"schema": 1, "entries": [
+        {"id": "t-cart", "kind": "term", "source": "Cart", "occurrences": []},
+    ]}
+    report = sync_once(work_root, cfg, make_messages([msg]), canon_lock=new_canon_lock)
 
     entry = ledger.load(work_root)["locales"]["de"]["m1"]
     assert entry["state"] == "pending"  # unaffected: this id has no project target

@@ -86,7 +86,7 @@ def test_import_creates_a_new_proposed_entry():
     assert entry["source"] == "Cart"
     assert entry["occurrences"] == ["m1"]
     assert entry["translations"]["de"] == proposed("Warenkorb")
-    assert result == {"added": [entry["id"]], "merged": []}
+    assert result == {"added": [entry["id"]], "merged": [], "skipped": []}
 
 
 def test_import_merges_by_kind_and_source_unions_occurrences():
@@ -98,7 +98,7 @@ def test_import_merges_by_kind_and_source_unions_occurrences():
 
     assert len(canon_data["entries"]) == 1
     assert canon_data["entries"][0]["occurrences"] == ["m1", "m2"]
-    assert result == {"added": [], "merged": [entry_id]}
+    assert result == {"added": [], "merged": [entry_id], "skipped": []}
 
 
 def test_import_different_kind_same_source_are_separate_entries():
@@ -157,6 +157,42 @@ def test_import_rejects_an_empty_source():
     canon_data = {"schema": 1, "entries": []}
     with pytest.raises(ValueError):
         canon.import_candidates(canon_data, [make_candidate_input(source="")])
+
+
+def test_import_skips_a_candidate_with_non_string_occurrences_and_reports_it():
+    """Item 3 of the review fix: `occurrences` containing a non-string id
+    (e.g. `[123]`) is not a cannot-run condition like a bad `kind`/`source`
+    -- it is skipped and reported, a defence for a hand-written import file
+    (packets.py's own canon-turn acceptance already rejects this shape
+    before it reaches disk)."""
+    canon_data = {"schema": 1, "entries": []}
+    result = canon.import_candidates(canon_data, [make_candidate_input(occurrences=[123])])
+    assert canon_data["entries"] == []
+    assert result == {
+        "added": [], "merged": [],
+        "skipped": [{"kind": "term", "source": "Cart", "reason": "occurrences must be a list of strings"}],
+    }
+
+
+def test_import_skips_a_candidate_whose_occurrences_is_not_a_list():
+    canon_data = {"schema": 1, "entries": []}
+    result = canon.import_candidates(canon_data, [
+        {"kind": "term", "source": "Cart", "note": "", "occurrences": "m1", "translations": {}},
+    ])
+    assert canon_data["entries"] == []
+    assert len(result["skipped"]) == 1
+
+
+def test_import_mixed_valid_and_non_string_occurrences_candidates():
+    canon_data = {"schema": 1, "entries": []}
+    result = canon.import_candidates(canon_data, [
+        make_candidate_input(source="Cart", occurrences=["m1"]),
+        make_candidate_input(source="Checkout", occurrences=[123]),
+    ])
+    assert len(canon_data["entries"]) == 1
+    assert canon_data["entries"][0]["source"] == "Cart"
+    assert len(result["added"]) == 1
+    assert len(result["skipped"]) == 1
 
 
 # --- approve -------------------------------------------------------------

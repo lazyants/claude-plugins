@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import json
 import os
 import sys
 import tempfile
@@ -28,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import lz_common  # noqa: E402
 import adapter_client  # noqa: E402
+import canon as canon_mod  # noqa: E402
 import ledger as ledger_mod  # noqa: E402
 
 JOURNAL_SCHEMA = 1
@@ -89,26 +91,51 @@ def _atomic_replace_bytes(dest: Path, data: bytes) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _restore_backups(export_dir: Path, journal: dict) -> None:
-    """Restore only what this transaction actually replaced (tracked per
-    file in the journal as the commit proceeds), plus the locale ledger,
-    which this transaction always owns exclusively. A file that failed the
-    pre-replace byte check and was therefore never replaced is left exactly
-    as it is -- restoring it too would erase the very edit that caused the
-    rollback, not one the rollback produced."""
+def _restore_backups(export_dir: Path, journal: dict) -> list:
+    """Reconcile every journaled file against its CURRENT bytes, never a
+    `replaced` flag set by a separate journal write after each replace (a
+    flag that a crash landing between the replace and that write would
+    leave stuck at `false` even though the replace had already happened).
+    Per file: current bytes == `new_sha256` -> the replace landed -> restore
+    the backup. current bytes == `backup_sha256` -> it never landed (or this
+    already ran) -> nothing to do. Anything else -> someone edited the file
+    after an interrupted export -> leave it, and report it as a conflict
+    for the caller to surface. This one rule serves both next-run recovery
+    and the real export's own exception-path rollback."""
     backup_dir = export_dir / "backup"
+    conflicts = []
     for f in journal["files"]:
-        if f["kind"] != "ledger" and not f.get("replaced"):
+        dest = Path(f["dest"])
+        current = dest.read_bytes() if dest.is_file() else None
+        current_sha256 = lz_common.sha256_bytes(current) if current is not None else None
+        if current_sha256 == f.get("new_sha256"):
+            data = (backup_dir / f["backup"]).read_bytes()
+            _atomic_replace_bytes(dest, data)
+        elif current_sha256 == f.get("backup_sha256"):
             continue
-        data = (backup_dir / f["backup"]).read_bytes()
-        _atomic_replace_bytes(Path(f["dest"]), data)
+        else:
+            conflicts.append(f["dest"])
+    return conflicts
 
 
-def recover_unfinished_exports(root: Path) -> list:
+def recover_unfinished_exports(root: Path) -> tuple[list, list]:
+    """Returns `(recovered, conflicts)`: `recovered` is every leftover
+    `in_progress` journal this call reconciled -- restoring what it can and
+    leaving a conflicted file exactly as the person left it -- and then
+    marked `rolled_back`, so it is never processed again (there is no
+    command a person could run to clear an `in_progress` journal, so
+    leaving one stuck there would wedge every future export). `conflicts`
+    is every destination path left untouched because a person's edit
+    landed on it since; the caller surfaces these in THIS run's failure
+    output. A later call finds no `in_progress` journal left and proceeds
+    normally -- the person's edit stays exactly as they left it, and the
+    next `collect` + `ledger sync` will see it and lock the message
+    (`human_locked`), which is the right outcome."""
     exports_dir = root / "exports"
     recovered = []
+    conflicts = []
     if not exports_dir.is_dir():
-        return recovered
+        return recovered, conflicts
     for stamp_dir in sorted(p for p in exports_dir.iterdir() if p.is_dir()):
         journal_path = stamp_dir / "journal.json"
         if not journal_path.is_file():
@@ -116,12 +143,14 @@ def recover_unfinished_exports(root: Path) -> list:
         journal = lz_common.read_json(journal_path, f"export journal {journal_path}")
         if journal.get("status") != "in_progress":
             continue
-        _restore_backups(stamp_dir, journal)
+        file_conflicts = _restore_backups(stamp_dir, journal)
         journal["status"] = "rolled_back"
         journal["finished_at"] = lz_common.now_iso()
+        journal["conflicts"] = file_conflicts
         lz_common.atomic_write_json(journal_path, journal)
         recovered.append(str(stamp_dir))
-    return recovered
+        conflicts.extend(file_conflicts)
+    return recovered, conflicts
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +158,8 @@ def recover_unfinished_exports(root: Path) -> list:
 # ---------------------------------------------------------------------------
 
 
-def _staleness_problems(cfg: dict, locale: str, candidate_ids: list, by_id: dict, entries: dict) -> list:
+def _staleness_problems(cfg: dict, locale: str, candidate_ids: list, by_id: dict, entries: dict,
+                         canon_lock: dict) -> list:
     problems = []
     for msg_id in candidate_ids:
         message = by_id.get(msg_id)
@@ -157,6 +187,13 @@ def _staleness_problems(cfg: dict, locale: str, candidate_ids: list, by_id: dict
             continue
         if ledger_mod.style_sha256(cfg, locale) != candidate.get("style_sha256"):
             problems.append({"id": msg_id, "reason": "the locale style changed since this candidate was reviewed"})
+            continue
+        # Canon can change after the candidate's verdict (a new dnt entry, a
+        # newly approved term) without touching source/context/style at
+        # all; a candidate snapshot taken against the old canon lock must
+        # not export against the new one.
+        if ledger_mod.canon_sha256(message, canon_lock) != candidate.get("canon_sha256"):
+            problems.append({"id": msg_id, "reason": "the canon changed since this candidate was reviewed"})
     return problems
 
 
@@ -244,6 +281,17 @@ def _changed_by_file(changed_files: list, candidate_ids: list) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _ledger_snapshot_text(locale: str, entries: dict) -> str:
+    """The exact bytes `ledger.save()` writes for one locale -- `ledger.py`
+    pins this shape in its own module docstring (`{"schema": 1, "locale":
+    ..., "entries": ...}`, `indent=2, sort_keys=True, ensure_ascii=False`
+    plus a trailing newline). Computed here, once, so the same text is both
+    hashed for the journal's `new_sha256` and written to disk -- never two
+    separate serializations that could drift apart."""
+    return json.dumps({"schema": 1, "locale": locale, "entries": entries},
+                       indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
 def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, temp_project: Path,
                      candidate_ids: list, values: dict, changed_by_file: dict, ledger_data: dict,
                      recovered: list, staging_sha256: dict) -> dict:
@@ -257,33 +305,40 @@ def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, tem
     ledger_path = root / "ledger" / f"{locale}.json"
 
     # Only a file this export actually changed is backed up and replaced.
+    # Every project file's new bytes are already sitting in `temp_project`,
+    # so its `new_sha256` is known up front, before anything is replaced.
+    # The ledger's new bytes are not knowable yet -- `record_export` hasn't
+    # run -- so its entry starts with `new_bytes: None` and is completed
+    # later, still strictly before the ledger is actually written.
     files_meta = []
     for relpath in _changed_files(live_messages, temp_project, project_root):
         files_meta.append({"kind": "project", "relpath": relpath, "dest": str(project_root / relpath),
                             "backup": f"project/{relpath}", "sha256_staged": staging_sha256.get(relpath),
-                            "replaced": False})
+                            "new_bytes": (temp_project / relpath).read_bytes()})
     files_meta.append({"kind": "ledger", "relpath": None, "dest": str(ledger_path), "backup": "ledger.json",
-                        "sha256_staged": None, "replaced": False})
+                        "sha256_staged": None, "new_bytes": None})
 
     backup_dir = export_dir / "backup"
     for meta in files_meta:
         data = Path(meta["dest"]).read_bytes()
-        meta["sha256_before"] = lz_common.sha256_bytes(data)
+        meta["backup_sha256"] = lz_common.sha256_bytes(data)
         _atomic_replace_bytes(backup_dir / meta["backup"], data)
 
     journal = {
         "schema": JOURNAL_SCHEMA, "stamp": stamp, "locale": locale, "status": "in_progress",
         "started_at": lz_common.now_iso(), "finished_at": None,
         "files": [{"kind": m["kind"], "dest": m["dest"], "backup": m["backup"],
-                    "sha256_before": m["sha256_before"], "replaced": False} for m in files_meta],
+                    "backup_sha256": m["backup_sha256"],
+                    "new_sha256": lz_common.sha256_bytes(m["new_bytes"]) if m["new_bytes"] is not None else None}
+                   for m in files_meta],
     }
     journal_path = export_dir / "journal.json"
     lz_common.atomic_write_json(journal_path, journal)
 
-    def _mark_replaced(dest: str) -> None:
+    def _set_new_sha256(dest: str, new_sha256: str) -> None:
         for f in journal["files"]:
             if f["dest"] == dest:
-                f["replaced"] = True
+                f["new_sha256"] = new_sha256
                 break
         lz_common.atomic_write_json(journal_path, journal)
 
@@ -302,24 +357,31 @@ def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, tem
             expected = meta.get("sha256_staged")
             if expected is None or lz_common.sha256_bytes(current) != expected:
                 raise RuntimeError(f"{meta['relpath']} changed on disk during the export")
-            new_bytes = (temp_project / meta["relpath"]).read_bytes()
-            _atomic_replace_bytes(dest, new_bytes)
-            _mark_replaced(meta["dest"])
+            _atomic_replace_bytes(dest, meta["new_bytes"])
 
         ledger_mod.record_export(ledger_data, locale, values)
-        ledger_mod.save(root, ledger_data, locales=[locale])
-        _mark_replaced(str(ledger_path))
+        ledger_text = _ledger_snapshot_text(locale, ledger_data["locales"][locale])
+        # Record the ledger's new bytes before writing them -- recovery
+        # must never have to guess what an interrupted ledger write was
+        # going to produce.
+        _set_new_sha256(str(ledger_path), lz_common.sha256_text(ledger_text))
+        lz_common.atomic_write_text(ledger_path, ledger_text)
 
         journal["status"] = "done"
         journal["finished_at"] = lz_common.now_iso()
         lz_common.atomic_write_json(journal_path, journal)
     except BaseException as exc:
-        _restore_backups(export_dir, journal)
+        conflicts = _restore_backups(export_dir, journal)
+        # Always resolved to `rolled_back`, conflicts and all -- same rule
+        # as `recover_unfinished_exports` -- so this journal is never
+        # processed again; a conflicted file is simply left as the person
+        # left it, and this run's own failure names it.
         journal["status"] = "rolled_back"
         journal["finished_at"] = lz_common.now_iso()
+        journal["conflicts"] = conflicts
         lz_common.atomic_write_json(journal_path, journal)
         lz_common.fail(f"export failed and was rolled back: {exc}", lz_common.EXIT_FAIL,
-                        locale=locale, recovered=recovered)
+                        locale=locale, recovered=recovered, conflicts=conflicts)
 
     return {"ok": True, "locale": locale, "dry_run": False, "exported": len(candidate_ids),
             "changed_by_file": changed_by_file, "recovered": recovered, "journal": str(journal_path)}
@@ -332,12 +394,24 @@ def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, tem
 
 def do_export(root: Path, locale: str, dry_run: bool) -> dict:
     with _exclusive_export_lock(root):
-        recovered = recover_unfinished_exports(root)
+        recovered, conflicts = recover_unfinished_exports(root)
+        if conflicts:
+            # Every other file was already reconciled and the leftover
+            # journal is resolved (`rolled_back`) -- this call still stops
+            # and names the conflicted files, once, so a person sees them;
+            # a later call (this locale or another) is not blocked by this
+            # journal again -- the next `collect` + `ledger sync` is what
+            # picks up the person's edit and locks the message.
+            lz_common.fail(
+                "export blocked: recovering an earlier interrupted export found files edited since then",
+                lz_common.EXIT_FAIL, locale=locale, recovered=recovered, conflicts=conflicts,
+            )
 
         cfg = lz_common.load_config(root)
         if locale not in cfg["target_locales"]:
             lz_common.fail(f"locale is not a configured target: {locale}", lz_common.EXIT_CANNOT, locale=locale)
         lz_common.require_accepted_adapter(root, cfg)
+        canon_lock = canon_mod.load_lock(root)
 
         project_root = Path(cfg["project_root"])
         project_dir = str(project_root)
@@ -351,7 +425,7 @@ def do_export(root: Path, locale: str, dry_run: bool) -> dict:
         candidate_ids = ledger_mod.exportable(ledger_data, locale)
         entries = ledger_data.get("locales", {}).get(locale, {})
 
-        problems = _staleness_problems(cfg, locale, candidate_ids, by_id, entries)
+        problems = _staleness_problems(cfg, locale, candidate_ids, by_id, entries, canon_lock)
         if problems:
             lz_common.fail("export refused: some candidates are stale", lz_common.EXIT_FAIL,
                             locale=locale, problems=problems, recovered=recovered)

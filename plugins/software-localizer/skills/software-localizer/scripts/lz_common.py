@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -211,6 +212,16 @@ def _resolve_maybe_relative(root: Path, value: str) -> Path:
     return p
 
 
+# A locale identifier is used to build output paths (ledger.py, export
+# targets): it must never contain a path separator or a ".." segment, so it
+# cannot escape the tree it is joined into.
+_LOCALE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def _locale_ok(value) -> bool:
+    return isinstance(value, str) and _LOCALE_RE.match(value) is not None
+
+
 def validate_config(cfg, root) -> list:
     """Every problem with `cfg` (`localize.json`'s already-parsed content),
     per plan section 3. Never raises or exits: reports every problem found,
@@ -228,9 +239,12 @@ def validate_config(cfg, root) -> list:
         problems.append({"field": "schema", "message": "schema must be 1"})
 
     source_locale = cfg.get("source_locale")
-    source_ok = isinstance(source_locale, str) and bool(source_locale)
+    source_ok = _locale_ok(source_locale)
     if not source_ok:
-        problems.append({"field": "source_locale", "message": "source_locale must be a non-empty string"})
+        problems.append({
+            "field": "source_locale",
+            "message": "source_locale must be a path-safe locale identifier: letters, digits, '_', '-', not starting with '_' or '-'",
+        })
 
     target_locales = cfg.get("target_locales")
     target_set: set = set()
@@ -240,8 +254,11 @@ def validate_config(cfg, root) -> list:
         else:
             seen: set = set()
             for i, loc in enumerate(target_locales):
-                if not isinstance(loc, str) or not loc:
-                    problems.append({"field": f"target_locales[{i}]", "message": "must be a non-empty string"})
+                if not _locale_ok(loc):
+                    problems.append({
+                        "field": f"target_locales[{i}]",
+                        "message": "must be a path-safe locale identifier: letters, digits, '_', '-', not starting with '_' or '-'",
+                    })
                     continue
                 if loc in seen:
                     problems.append({"field": f"target_locales[{i}]", "message": f"duplicate target locale: {loc}"})
@@ -319,15 +336,31 @@ def validate_config(cfg, root) -> list:
                 if not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
                     problems.append({"field": "adapter.argv", "message": "must be a non-empty list of non-empty strings"})
                 else:
-                    exe = argv[0]
-                    resolved = shutil.which(exe) is not None
-                    if not resolved:
-                        resolved = _resolve_maybe_relative(root, exe).is_file()
-                    if not resolved:
-                        problems.append({
-                            "field": "adapter.argv[0]",
-                            "message": f"does not resolve on PATH or as a file: {exe}",
-                        })
+                    # Every element is checked the same way `resolve_argv` resolves it
+                    # (an absolute path, or a relative path naming a file under `root`,
+                    # is fine); a relative element that LOOKS like a path (it has a
+                    # separator) but is not under `root` is refused here, before it can
+                    # silently run against the project's own cwd instead -- unresolved
+                    # and unhashed by `adapter_digest` (plan section 6). A relative
+                    # element with no separator (a bare command name, a flag) is only
+                    # checked at index 0, where it must resolve on PATH.
+                    for i, item in enumerate(argv):
+                        if os.path.isabs(item) or (root / item).is_file():
+                            continue
+                        has_sep = "/" in item or (os.sep != "/" and os.sep in item)
+                        if has_sep:
+                            problems.append({
+                                "field": f"adapter.argv[{i}]",
+                                "message": (
+                                    "relative adapter paths resolve against the workspace; "
+                                    "use an absolute path for a script elsewhere"
+                                ),
+                            })
+                        elif i == 0 and shutil.which(item) is None:
+                            problems.append({
+                                "field": "adapter.argv[0]",
+                                "message": f"does not resolve on PATH or as a file: {item}",
+                            })
             options = adapter.get("options", {})
             if not isinstance(options, dict):
                 problems.append({"field": "adapter.options", "message": "adapter.options must be an object"})
@@ -362,7 +395,13 @@ def load_config(root) -> dict:
     resolves against `root`, the same convention `validate_config` already
     checked it against) -- every other script reads `cfg["project_root"]`
     straight, with no resolution of its own, so it targets the same
-    directory regardless of the process's current working directory."""
+    directory regardless of the process's current working directory.
+
+    `batch_size`, `max_rounds`, `adapter_timeout_s` and `allow_identical`
+    are optional in `localize.json` (`validate_config` accepts them absent
+    or explicitly `null`); this is where their documented defaults (40, 3,
+    300, `[]`) are filled in, so every downstream consumer can index them
+    directly instead of each repeating its own fallback."""
     root = Path(root)
     cfg = read_json(root / "localize.json", "localize.json")
     problems = validate_config(cfg, root)
@@ -370,6 +409,14 @@ def load_config(root) -> dict:
         detail = "; ".join(f"{p['field']}: {p['message']}" for p in problems)
         fail(f"localize.json has problems: {detail}", EXIT_CANNOT, problems=problems)
     cfg["project_root"] = str(_resolve_maybe_relative(root, cfg["project_root"]).resolve())
+    if cfg.get("batch_size") is None:
+        cfg["batch_size"] = 40
+    if cfg.get("max_rounds") is None:
+        cfg["max_rounds"] = 3
+    if cfg.get("adapter_timeout_s") is None:
+        cfg["adapter_timeout_s"] = 300
+    if cfg.get("allow_identical") is None:
+        cfg["allow_identical"] = []
     return cfg
 
 
@@ -557,18 +604,24 @@ def _tree_digests(base: Path, exclude_dirs=(".git", "__pycache__")) -> dict:
     return result
 
 
-def _adapter_argv_files(root: Path, cfg: dict) -> list:
-    """Every element of `adapter.argv` that resolves to an existing file, as
-    opposed to a bare command found on `PATH` (`"node"`, `"python3"`).
-    Typically this is exactly the one script element of an
-    `[interpreter, script]` pair."""
-    argv = cfg["adapter"]["argv"]
-    files = []
-    for item in argv:
-        p = _resolve_maybe_relative(root, item)
-        if p.is_file():
-            files.append(p)
-    return files
+def resolve_argv(root, cfg: dict) -> list[str]:
+    """The one argv-resolution rule, shared by execution and digesting
+    (plan sections 5 and 6) so the two can never silently disagree about
+    which file actually runs: an element that is already an absolute path
+    stays as is; a relative element naming a file that exists under `root`
+    becomes its absolute path; anything else -- a bare command name meant
+    to be found on `PATH` (`"node"`, `"python3"`), or a flag -- passes
+    through unchanged. `adapter_client.run` calls this to build the argv it
+    executes; `adapter_digest` calls it to decide what to hash."""
+    root = Path(root)
+    resolved = []
+    for item in cfg["adapter"]["argv"]:
+        if os.path.isabs(item):
+            resolved.append(item)
+            continue
+        candidate = root / item
+        resolved.append(str(candidate) if candidate.is_file() else item)
+    return resolved
 
 
 def adapter_digest(root, cfg: dict) -> dict:
@@ -576,18 +629,19 @@ def adapter_digest(root, cfg: dict) -> dict:
     identifying what the adapter actually executes (plan section 6):
     `adapter.argv` itself, so a changed argument or a swapped script is
     caught even when its byte content happens to match; the sha256 of every
-    argv element that resolves to an existing file, relative to `root` or
-    absolute -- typically the interpreter's script argument, wherever it
-    lives, inside `root` or out; and, when `root/adapter/` holds anything,
-    every file under it too (the normal case: the driving session places
-    the adapter there). The two file sources are additive, not either/or:
-    a self-contained `[interpreter, script]` adapter with nothing under
-    `root/adapter/` is covered by the argv-file hash alone; one with both a
-    populated `root/adapter/` and an argv script outside it is covered by
-    both. An argv element that resolves inside `root/adapter/` is not hashed
-    twice: it is already part of that tree's digest."""
+    `resolve_argv` element that resolves to an existing file -- typically
+    the interpreter's script argument, wherever it lives, inside `root` or
+    out; and, when `root/adapter/` holds anything, every file under it too
+    (the normal case: the driving session places the adapter there). The
+    two file sources are additive, not either/or: a self-contained
+    `[interpreter, script]` adapter with nothing under `root/adapter/` is
+    covered by the argv-file hash alone; one with both a populated
+    `root/adapter/` and an argv script outside it is covered by both. An
+    argv element that resolves inside `root/adapter/` is not hashed twice:
+    it is already part of that tree's digest."""
     root = Path(root)
     adapter_dir = root / ADAPTER_DIR_NAME
+    resolved_argv = resolve_argv(root, cfg)
     argv = list(cfg["adapter"]["argv"])
     files: dict = {}
 
@@ -596,7 +650,11 @@ def adapter_digest(root, cfg: dict) -> dict:
         for rel, digest in sorted(_tree_digests(adapter_dir).items()):
             files[f"{ADAPTER_DIR_NAME}/{rel}"] = digest
 
-    argv_files = _adapter_argv_files(root, cfg)
+    # Only an element `resolve_argv` actually turned into (or that already was)
+    # an absolute path is a file to hash -- a bare token left unresolved (a
+    # PATH command, a flag) must never be probed against the process's own
+    # cwd, which would make the digest depend on where it happens to run from.
+    argv_files = [Path(item) for item in resolved_argv if os.path.isabs(item) and Path(item).is_file()]
     if not has_dir_contents and not argv_files:
         fail(
             f"no adapter file found: {ADAPTER_DIR_NAME}/ is empty and adapter.argv names no existing file",
