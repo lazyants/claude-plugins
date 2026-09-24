@@ -5,9 +5,11 @@ An adapter is whatever the project needs — a Node script, a PHP script, a Pyth
 `adapter.code_dir` (default `R/adapter/`; it may also be a directory inside the project, given
 as an absolute path): every file named in `adapter.argv` after the first element must be inside
 it. The first element is the command — `node`, `php`, a Python interpreter, or the adapter
-executable itself. The acceptance digest covers the whole `code_dir`, every file named in
-`adapter.argv` (the interpreter included, so an upgrade means re-acceptance), `argv` and
-`options`: editing any adapter file — helpers included — requires acceptance again. In `adapter.argv`, a relative path resolves
+executable itself; a bare name such as `node` is resolved on `PATH` exactly as the run will
+resolve it. The acceptance digest covers the whole `code_dir` (which must not contain
+symlinks), every file named in or resolved from `adapter.argv` (the interpreter included, so an
+upgrade means re-acceptance), `argv` and `options`: editing any adapter file — helpers
+included — requires acceptance again. In `adapter.argv`, a relative path resolves
 against the workspace `R`; bare command names such as `node` come from `PATH`. The project's own
 tooling the adapter calls (its message compiler, `node_modules`, PHP) is not adapter code. The core runs it with the **project root as
 the working directory**, stdin closed, a timeout (`adapter_timeout_s`), and expects exactly one
@@ -108,5 +110,6 @@ backslashes, newlines, tabs, surrounding spaces, non-Latin text) and collecting 
 them exactly, with everything else unchanged; every source parses. It also prepares the
 **coverage turn**, where a model compares the collected ids with the raw files and with an
 independent inventory of the whole project, to catch a string or a whole catalog the adapter
-never collected. `adapter_check.py accept` records the result with the adapter's file digests
-and options; any change to either requires acceptance again.
+never collected; its answer must echo the `run_id` of the check run it answers.
+`adapter_check.py accept` records the result with the adapter's file digests and options; any
+change to either requires acceptance again.

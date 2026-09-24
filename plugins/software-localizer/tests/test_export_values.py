@@ -248,6 +248,45 @@ def test_export_refused_when_source_changed_since_review(work_root):
         assert exc.code == lz_common.EXIT_FAIL
 
 
+def test_export_refused_when_comment_changed_since_review(work_root, monkeypatch, capsys):
+    """Bot review round 1, finding 2 (P1): `ledger.context_sha256` used to
+    hash only `context.max_length`, so a changed developer comment left the
+    candidate's `context_sha256` unchanged and export's staleness check
+    never caught it, even though the comment is the same `context` object
+    `build_review_item`/`build_audit_item` hand to the reviewing turn as
+    the meaning it is judging the value under. The real toy adapter never
+    emits a comment (always `None`), so the "live" comment change is
+    injected via the one `adapter_client.collect` call `do_export` makes
+    for its current view -- the same monkeypatch style this file already
+    uses to inject a change that can only land mid-flow."""
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    message = dict(by_id["footer.copyright"])
+    message["context"] = {**message["context"], "comment": "shown in the site footer"}
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, message, "de", "Alle Rechte vorbehalten"))
+
+    real_collect = export_values.adapter_client.collect
+
+    def collect_with_changed_comment(root_arg, cfg_arg, project_dir_arg, out_path):
+        result = real_collect(root_arg, cfg_arg, project_dir_arg, out_path)
+        for m in result["messages"]:
+            if m["id"] == "footer.copyright":
+                m["context"] = {**m["context"], "comment": "now: shown on every page, not only the footer"}
+        return result
+
+    monkeypatch.setattr(export_values.adapter_client, "collect", collect_with_changed_comment)
+
+    try:
+        export_values.do_export(root, "de", dry_run=True)
+        raise AssertionError("expected export to refuse after a comment-only context change")
+    except SystemExit as exc:
+        assert exc.code == lz_common.EXIT_FAIL
+
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    problems = {p.get("id"): p.get("reason") for p in payload.get("problems", [])}
+    assert problems.get("footer.copyright") == "the context changed since this candidate was reviewed"
+
+
 def test_export_refused_when_canon_changed_after_review(work_root, capsys):
     """A new dnt entry approved for this message after its verdict must
     invalidate the candidate even though source/context/style never moved

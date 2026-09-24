@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -398,6 +399,37 @@ def test_validate_config_accepts_an_absolute_code_dir_inside_the_project(work_ro
     assert not any(p["field"] == "adapter.code_dir" for p in problems)
 
 
+def test_validate_config_refuses_a_symlinked_file_in_code_dir(work_root, tmp_path):
+    # [bot P1] A symlink inside code_dir records only its target STRING in
+    # the tree digest (lz_common._tree_digests); editing the target's bytes
+    # then leaves adapter_digest unchanged, so an accepted adapter could
+    # silently run different code. Refuse it up front instead.
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(work_root, project)
+    outside = tmp_path / "outside_helper.py"
+    outside.write_text("v1", encoding="utf-8")
+    (work_root / "adapter" / "helper.py").symlink_to(outside)
+    problems = lz_common.validate_config(cfg, work_root)
+    matching = [p for p in problems if p["field"] == "adapter.code_dir" and "symlink" in p["message"]]
+    assert len(matching) == 1, problems
+    assert "helper.py" in matching[0]["message"]
+
+
+def test_validate_config_refuses_a_symlinked_directory_in_code_dir(work_root, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(work_root, project)
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "helper.py").write_text("v1", encoding="utf-8")
+    (work_root / "adapter" / "vendored").symlink_to(outside_dir, target_is_directory=True)
+    problems = lz_common.validate_config(cfg, work_root)
+    matching = [p for p in problems if p["field"] == "adapter.code_dir" and "symlink" in p["message"]]
+    assert len(matching) == 1, problems
+    assert "vendored" in matching[0]["message"]
+
+
 def test_validate_config_refuses_a_project_relative_adapter_script(work_root, tmp_path):
     # A script that exists only under the project, not under R, used to run
     # anyway: `adapter_client` invokes the adapter with `cwd=project_dir`, so
@@ -778,11 +810,15 @@ def test_adapter_digest_hashes_the_whole_code_dir_tree_when_present(work_root):
     # adapter_digest hashes the whole code_dir tree, not just argv's files.
     # argv[1] ("adapter/adapter.py") also resolves to a file, so it is
     # hashed a second time, keyed by its resolved absolute path -- redundant
-    # with the tree-walk entry, not wrong.
+    # with the tree-walk entry, not wrong. argv[0] ("python3") is a bare
+    # command; adapter_digest resolves it with shutil.which (the same PATH
+    # lookup adapter_client.run's subprocess performs) and hashes what it finds.
     absolute_key = str((adapter_dir / "adapter.py").resolve())
-    assert set(digest["files"]) == {"adapter.py", "helper.py", absolute_key}
+    which_key = str(Path(shutil.which("python3")).resolve())
+    assert set(digest["files"]) == {"adapter.py", "helper.py", absolute_key, which_key}
     assert digest["files"]["adapter.py"] == lz_common.sha256_file(adapter_dir / "adapter.py")
     assert digest["files"][absolute_key] == lz_common.sha256_file(adapter_dir / "adapter.py")
+    assert digest["files"][which_key] == lz_common.sha256_file(which_key)
     assert digest["options_sha256"] == lz_common.sha256_json({"k": "v"})
 
 
@@ -799,10 +835,14 @@ def test_adapter_digest_hashes_an_absolute_code_dir_when_set(work_root, tmp_path
     # argv[1] resolves to a file already inside code_dir, so it is hashed
     # twice -- once by the tree walk (relative key), once directly (its
     # resolved absolute path as key) -- both correct, both the same hash.
+    # argv[0] ("python3") is a bare command, resolved and hashed via
+    # shutil.which the same way as above.
     absolute_key = str((code_dir / "adapter.py").resolve())
+    which_key = str(Path(shutil.which("python3")).resolve())
     assert digest["files"] == {
         "adapter.py": lz_common.sha256_file(code_dir / "adapter.py"),
         absolute_key: lz_common.sha256_file(code_dir / "adapter.py"),
+        which_key: lz_common.sha256_file(which_key),
     }
 
 
@@ -834,6 +874,74 @@ def test_adapter_digest_fails_cannot_when_code_dir_does_not_exist(work_root):
     with pytest.raises(SystemExit) as exc_info:
         lz_common.adapter_digest(work_root, cfg)
     assert exc_info.value.code == lz_common.EXIT_CANNOT
+
+
+def test_adapter_digest_refuses_a_symlink_in_code_dir(work_root, tmp_path):
+    # adapter_digest enforces the same rule as validate_config, for a caller
+    # (like this test, or require_accepted_adapter) that reaches it directly.
+    adapter_dir = work_root / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter.py").write_text("v1", encoding="utf-8")
+    outside = tmp_path / "outside_helper.py"
+    outside.write_text("v1", encoding="utf-8")
+    (adapter_dir / "helper.py").symlink_to(outside)
+    cfg = {"adapter": {"argv": ["python3", "adapter/adapter.py"], "options": {}}}
+    with pytest.raises(SystemExit) as exc_info:
+        lz_common.adapter_digest(work_root, cfg)
+    assert exc_info.value.code == lz_common.EXIT_CANNOT
+
+
+def test_adapter_digest_fails_cannot_when_argv0_does_not_resolve_on_path(work_root, monkeypatch):
+    adapter_dir = work_root / "adapter"
+    adapter_dir.mkdir()
+    cfg = {"adapter": {"argv": ["no-such-command-anywhere-xyz"], "options": {}}}
+    monkeypatch.setenv("PATH", "")
+    with pytest.raises(SystemExit) as exc_info:
+        lz_common.adapter_digest(work_root, cfg)
+    assert exc_info.value.code == lz_common.EXIT_CANNOT
+
+
+def test_adapter_digest_changes_when_a_bare_argv0_resolves_to_a_different_executable_on_path(work_root, tmp_path, monkeypatch):
+    # [bot P1] resolve_argv() leaves a bare argv[0] relative, and the old
+    # code hashed only absolute paths -- a PATH change that swaps in a
+    # different "node"/"python3" binary of the same name left the digest
+    # (and any lock built from it) unchanged, even though
+    # adapter_client.run's own subprocess call would execute the new one.
+    adapter_dir = work_root / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter.py").write_text("v1", encoding="utf-8")
+    cfg = {"adapter": {"argv": ["fake-runner", "adapter/adapter.py"], "options": {}}}
+
+    bin_a = tmp_path / "bin_a"
+    bin_a.mkdir()
+    runner_a = bin_a / "fake-runner"
+    runner_a.write_text("#!/bin/sh\necho a\n", encoding="utf-8")
+    runner_a.chmod(0o755)
+
+    bin_b = tmp_path / "bin_b"
+    bin_b.mkdir()
+    runner_b = bin_b / "fake-runner"
+    runner_b.write_text("#!/bin/sh\necho a different binary of the same name\n", encoding="utf-8")
+    runner_b.chmod(0o755)
+
+    monkeypatch.setenv("PATH", str(bin_a))
+    before = lz_common.adapter_digest(work_root, cfg)
+    resolved_a = str(runner_a.resolve())
+    assert before["files"][resolved_a] == lz_common.sha256_file(runner_a)
+
+    monkeypatch.setenv("PATH", str(bin_b))
+    after = lz_common.adapter_digest(work_root, cfg)
+    resolved_b = str(runner_b.resolve())
+    assert after["files"][resolved_b] == lz_common.sha256_file(runner_b)
+
+    assert before != after
+
+    # The MAJOR consequence: a lock accepted under bin_a must now be refused,
+    # exactly like an edited adapter file would be.
+    lz_common.atomic_write_json(work_root / "adapter.lock.json", before)
+    with pytest.raises(SystemExit) as exc_info:
+        lz_common.require_accepted_adapter(work_root, cfg)  # still on PATH=bin_b
+    assert exc_info.value.code == lz_common.EXIT_FAIL
 
 
 def test_adapter_digest_changes_when_a_file_changes(work_root):

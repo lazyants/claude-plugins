@@ -19,10 +19,12 @@ only in the source language on purpose (say so in `why_user_visible` if unsure).
 Reply with ONE JSON object and nothing else:
 
 ```json
-{"missing": [{"file": "relative/path", "key": "the key or null for a whole missed file", "why_user_visible": "…"}]}
+{"run_id": "<copy the packet's run_id exactly>",
+ "missing": [{"file": "relative/path", "key": "the key or null for a whole missed file", "why_user_visible": "…"}]}
 ```
 
-An empty list means nothing was missed.
+An empty list means nothing was missed. Copy `run_id` from the packet exactly: an answer for a
+different run of the adapter check is refused.
 
 ## Packet
 

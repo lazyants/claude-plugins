@@ -258,6 +258,35 @@ def test_context_sha256_changes_with_source_labels():
     assert h1 != h2
 
 
+def test_context_sha256_changes_with_comment():
+    """Bot review round 1, finding 2 (P1): before the fix, only
+    `context.max_length` fed the hash -- a changed developer comment (the
+    same `context` object `build_review_item`/`build_audit_item` hand to
+    the reviewing turn as the meaning it is judging the value under) left
+    `context_sha256` unchanged, so `sync()` never re-checked a `translated`
+    entry whose comment moved and export's staleness check never caught it
+    either."""
+    msg = make_message("m1", "Hi")
+    h1 = ledger.context_sha256(msg, "de")
+    msg["context"]["comment"] = "shown on the delete-account confirmation dialog"
+    h2 = ledger.context_sha256(msg, "de")
+    assert h1 != h2
+
+
+def test_context_sha256_changes_with_file_or_key():
+    """The same finding, for `context.file`/`context.key`: any field the
+    normalized context carries must move the hash, not only `max_length`
+    and the plural spec."""
+    msg = make_message("m1", "Hi")
+    base = ledger.context_sha256(msg, "de")
+    file_changed = dict(msg)
+    file_changed["context"] = {**msg["context"], "file": "other/file.json"}
+    assert ledger.context_sha256(file_changed, "de") != base
+    key_changed = dict(msg)
+    key_changed["context"] = {**msg["context"], "key": "a.different.key"}
+    assert ledger.context_sha256(key_changed, "de") != base
+
+
 def test_style_sha256_differs_per_locale():
     cfg = make_cfg(target_locales=("de", "ru"), style={
         "de": {"formality": "Sie", "notes": ""},
@@ -704,6 +733,33 @@ def test_sync_clears_candidate_on_canon_snapshot_mismatch(work_root):
         {"id": "t-cart", "kind": "term", "source": "Cart", "occurrences": []},
     ]}
     report = sync_once(work_root, cfg, make_messages([msg]), canon_lock=new_canon_lock)
+
+    entry = ledger.load(work_root)["locales"]["de"]["m1"]
+    assert entry["state"] == "pending"  # unaffected: this id has no project target
+    assert entry["candidate"] is None
+    assert report["counts"]["de"]["candidates_cleared"] == 1
+
+
+def test_sync_clears_candidate_on_comment_change(work_root):
+    """Bot review round 1, finding 2 (P1), the `sync()`-level half: a
+    candidate built while the message carried one developer comment must be
+    cleared once `sync()` sees the comment change, the same way a
+    source/canon snapshot mismatch clears it -- `context_sha256` binds to
+    the whole `context` object now, not only `max_length`."""
+    cfg = make_cfg()
+    msg = make_message("m1", "Hello")  # pending: no project target
+    sync_once(work_root, cfg, make_messages([msg]))
+
+    ledger_data = ledger.load(work_root)
+    ledger.set_candidate(ledger_data, "de", "m1", make_candidate(
+        source_sha256=ledger.source_sha256(msg),
+        context_sha256=ledger.context_sha256(msg, "de"),
+        style_sha256=ledger.style_sha256(cfg, "de"),
+    ))
+    ledger.save(work_root, ledger_data)
+
+    msg["context"]["comment"] = "Delete button, confirmation dialog"
+    report = sync_once(work_root, cfg, make_messages([msg]))
 
     entry = ledger.load(work_root)["locales"]["de"]["m1"]
     assert entry["state"] == "pending"  # unaffected: this id has no project target

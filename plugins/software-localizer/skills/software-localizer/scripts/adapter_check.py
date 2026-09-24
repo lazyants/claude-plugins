@@ -15,9 +15,10 @@ contract. `run`:
 4. Runs `parse` against the LIVE project (read-only; it may need the
    project's own tooling, which is not limited to the declared files).
 
-It also prepares the coverage turn's packet and prompt; `accept` validates
-the coverage turn's answer and, once every miss is out of scope, writes
-`adapter.lock.json`.
+It also prepares the coverage turn's packet and prompt, tagged with a fresh
+`run_id`; `accept` validates that the coverage turn's answer echoes that
+same `run_id` (refusing a stale answer left over from an earlier run) and,
+once every miss is out of scope, writes `adapter.lock.json`.
 
 An `adapter_client.AdapterError` (a broken adapter subprocess, a timeout, a
 malformed reply) and a `lz_common.stage_files` refusal (a declared file is
@@ -36,6 +37,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -277,7 +279,7 @@ def _project_inventory(project_dir: Path) -> list[str]:
     return sorted(paths)
 
 
-def _build_coverage_packet(project_dir: Path, messages: dict) -> dict:
+def _build_coverage_packet(project_dir: Path, messages: dict, run_id: str) -> dict:
     ids_by_file: dict[str, list[str]] = {}
     for message in messages["messages"]:
         f = message["context"]["file"]
@@ -285,6 +287,7 @@ def _build_coverage_packet(project_dir: Path, messages: dict) -> dict:
     files = [{"file": path, "ids": sorted(ids)} for path, ids in sorted(ids_by_file.items())]
     return {
         "schema": 1,
+        "run_id": run_id,
         "project_root": str(project_dir),
         "files": files,
         "inventory": _project_inventory(project_dir),
@@ -305,6 +308,11 @@ def cmd_run(args) -> int:
     root = lz_common.resolve_root(args.root)
     cfg = lz_common.load_config(root)
     project_dir = Path(cfg["project_root"])
+    # A fresh id per run, echoed by the coverage answer and checked by
+    # `accept`: it binds that answer to THIS run's packet (its ids and
+    # inventory), so an answer left over from a stale run -- one that never
+    # saw the adapter's current collected ids -- cannot lock in acceptance.
+    run_id = uuid.uuid4().hex
 
     with tempfile.TemporaryDirectory(dir=str(root)) as tmp:
         live_out = os.path.join(tmp, "messages_live.json")
@@ -332,10 +340,12 @@ def cmd_run(args) -> int:
         # Bound to the run: `accept` refuses unless the adapter's digest at
         # acceptance time still equals this one, so a checked-and-passed
         # adapter cannot be edited before `accept` locks in a version that
-        # was never actually exercised.
+        # was never actually exercised. `run_id` binds it the same way to
+        # the coverage answer: `accept` refuses one that does not echo it.
         check_result = {
             "schema": 1,
             "ok": overall_ok,
+            "run_id": run_id,
             "staging_consistent": staging_result,
             "unchanged_round_trip": unchanged_result,
             "awkward_round_trip": awkward_result,
@@ -347,7 +357,7 @@ def cmd_run(args) -> int:
         lz_common.atomic_write_json(root / lz_common.ADAPTER_CHECK_RESULT, check_result)
 
         coverage_dir = root / "runs" / COVERAGE_DIR_NAME
-        packet = _build_coverage_packet(project_dir, live_messages)
+        packet = _build_coverage_packet(project_dir, live_messages, run_id)
         lz_common.atomic_write_json(coverage_dir / "packet.json", packet)
         plugin_root = Path(__file__).resolve().parent.parent
         _write_coverage_prompt(plugin_root, coverage_dir, packet)
@@ -361,9 +371,12 @@ def _missing_key(entry: dict) -> str:
     return entry["file"] if key is None else f"{entry['file']}#{key}"
 
 
-def _validate_coverage_output(payload) -> list[dict]:
+def _validate_coverage_output(payload) -> tuple[str, list[dict]]:
     if not isinstance(payload, dict) or not isinstance(payload.get("missing"), list):
         lz_common.fail("coverage output must be an object with a 'missing' list", lz_common.EXIT_CANNOT)
+    run_id = payload.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        lz_common.fail("coverage output must have a non-empty string 'run_id'", lz_common.EXIT_CANNOT)
     missing = payload["missing"]
     for entry in missing:
         if not isinstance(entry, dict):
@@ -376,7 +389,7 @@ def _validate_coverage_output(payload) -> list[dict]:
             lz_common.fail(
                 "a coverage 'missing' entry has no string 'why_user_visible'", lz_common.EXIT_CANNOT
             )
-    return missing
+    return run_id, missing
 
 
 def cmd_accept(args) -> int:
@@ -399,7 +412,19 @@ def cmd_accept(args) -> int:
         )
 
     coverage_payload = lz_common.read_json(Path(args.coverage), "coverage turn output")
-    missing = _validate_coverage_output(coverage_payload)
+    run_id, missing = _validate_coverage_output(coverage_payload)
+
+    # The coverage answer must be for THIS run, not one left over from
+    # before the adapter's last change: `run` writes a fresh `run_id` into
+    # both the packet the model answered and the check result read above,
+    # so an answer that does not echo the current one never saw the current
+    # collected ids and inventory.
+    if run_id != check_result.get("run_id"):
+        lz_common.fail(
+            "the coverage answer's run_id does not match the last `adapter_check.py run`; "
+            "re-run the coverage turn against the current packet",
+            lz_common.EXIT_FAIL,
+        )
 
     out_of_scope = set(args.out_of_scope)
     unaccepted = [entry for entry in missing if _missing_key(entry) not in out_of_scope]

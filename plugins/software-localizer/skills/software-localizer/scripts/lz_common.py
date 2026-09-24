@@ -385,6 +385,17 @@ def validate_config(cfg, root) -> list:
                     })
                 else:
                     code_dir_resolved = candidate
+                    # A symlink's target can be edited without moving the tree
+                    # digest at all (adapter_digest records only the target
+                    # string, never its content) -- refuse every one up front
+                    # rather than let acceptance silently authorize different
+                    # code later. adapter_digest enforces the same rule as a
+                    # hard failure for a caller that reaches it directly.
+                    for rel in _find_symlinks(code_dir_resolved):
+                        problems.append({
+                            "field": "adapter.code_dir",
+                            "message": f"adapter.code_dir must not contain symlinks: {rel}",
+                        })
 
             argv = adapter.get("argv")
             if not _is_choose(argv):
@@ -633,6 +644,35 @@ def load_messages(path) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _find_symlinks(base: Path, exclude_dirs=(".git", "__pycache__")) -> list[str]:
+    """Every symlink (file or directory) under `base`, as sorted relpath
+    (posix) strings; a symlinked directory is not descended into. Shared by
+    `validate_config` (reported as a validation problem) and `adapter_digest`
+    (a hard refusal): a symlink's target can be edited without moving the
+    tree digest at all, which would silently authorize different code to run
+    -- see references/adapter-contract.md."""
+    base = Path(base)
+    found: list[str] = []
+    if not base.exists():
+        return found
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        keep_dirs = []
+        for d in sorted(dirnames):
+            if d in exclude_dirs:
+                continue
+            full_d = Path(dirpath) / d
+            if full_d.is_symlink():
+                found.append(full_d.relative_to(base).as_posix())
+                continue
+            keep_dirs.append(d)
+        dirnames[:] = keep_dirs
+        for name in sorted(filenames):
+            full = Path(dirpath) / name
+            if full.is_symlink():
+                found.append(full.relative_to(base).as_posix())
+    return sorted(found)
+
+
 def _tree_digests(base: Path, exclude_dirs=(".git", "__pycache__")) -> dict:
     """`relpath (posix) -> sha256` for every file under `base`, sorted walk.
     A symlink (file or directory) is recorded as `"symlink:<target>"` and,
@@ -698,9 +738,17 @@ def adapter_digest(root, cfg: dict) -> dict:
     already inside `code_dir`, so hashing them again here is redundant with
     the tree walk, not wrong; `adapter.argv` itself, so a changed argument
     or a swapped script is caught even when its byte content happens to
-    match; and the options. `code_dir` must already exist as a directory --
-    `validate_config` is what normally guarantees that before this ever
-    runs; called directly (as tests do) it enforces the same thing itself,
+    match; and the options. A bare `argv[0]` (not absolute, and not a file
+    under `root` -- a command meant to be found on `PATH`, e.g. `"node"`) is
+    resolved with `shutil.which`, the same lookup `adapter_client.run`'s
+    subprocess performs via `PATH`; the executable it finds is hashed under
+    its own resolved absolute path, so a `PATH` change that swaps in a
+    different binary of the same name invalidates acceptance -- `argv`
+    itself still names the bare command, unresolved, since `adapter_client`
+    executes `argv` unchanged and relies on that same lookup. `code_dir`
+    must already exist as a directory and contain no symlink --
+    `validate_config` is what normally guarantees both before this ever
+    runs; called directly (as tests do) it enforces the same things itself,
     `fail(EXIT_CANNOT)`."""
     root = Path(root)
     adapter_cfg = cfg["adapter"]
@@ -709,13 +757,23 @@ def adapter_digest(root, cfg: dict) -> dict:
     if not code_dir.is_dir():
         fail(f"adapter.code_dir is not a directory: {code_dir_value}", EXIT_CANNOT)
 
+    symlinks = _find_symlinks(code_dir)
+    if symlinks:
+        fail(f"adapter.code_dir must not contain symlinks: {symlinks[0]}", EXIT_CANNOT)
+
     files = _tree_digests(code_dir)
 
-    for item in resolve_argv(root, cfg):
+    for i, item in enumerate(resolve_argv(root, cfg)):
         if os.path.isabs(item):
             candidate = Path(item)
             if candidate.is_file():
                 files[str(candidate.resolve())] = sha256_file(candidate)
+        elif i == 0:
+            which_path = shutil.which(item)
+            if which_path is None:
+                fail(f"adapter.argv[0] does not resolve on PATH or as a file: {item}", EXIT_CANNOT)
+            resolved_which = str(Path(which_path).resolve())
+            files[resolved_which] = sha256_file(resolved_which)
 
     argv = list(adapter_cfg["argv"])
     options = adapter_cfg.get("options", {})

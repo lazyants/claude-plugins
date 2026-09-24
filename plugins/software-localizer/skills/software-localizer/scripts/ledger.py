@@ -103,13 +103,19 @@ def source_sha256(message: dict) -> str:
 
 def context_sha256(message: dict, locale: str) -> str:
     """The whole plural spec `checks.py` depends on for this locale, plus
-    `max_length`: the locale's `target_labels`, `general_index`,
-    `source_labels`, and the sorted `count_arguments`. A
-    change to any of these must trigger the re-check `sync()` runs on a
-    `translated` entry whose context changed — `general_index` picks which
-    source form is "the general one" for argument-parity and structure
-    checks, so a change there can flip which arguments a value is required
-    to carry even though no other field moved."""
+    the complete normalized `context` object (`file`, `key`, `comment`,
+    `max_length` — whatever the message carries): the locale's
+    `target_labels`, `general_index`, `source_labels`, and the sorted
+    `count_arguments`. A change to any of these must trigger the re-check
+    `sync()` runs on a `translated` entry whose context changed —
+    `general_index` picks which source form is "the general one" for
+    argument-parity and structure checks, so a change there can flip which
+    arguments a value is required to carry even though no other field
+    moved; a changed developer `comment` can just as surely change the
+    semantics a reviewer judged the value under, even though it is not
+    itself a check input, because `build_review_item`/`build_audit_item`
+    hand the whole `context` object to the reviewing turn as the meaning it
+    is judging the value against."""
     plural = message.get("plural")
     if plural is None:
         target_labels = None
@@ -121,12 +127,12 @@ def context_sha256(message: dict, locale: str) -> str:
         general_index = plural.get("general_index")
         source_labels = plural.get("source_labels")
         count_arguments = sorted(plural.get("count_arguments", []))
-    max_length = (message.get("context") or {}).get("max_length")
+    context = message.get("context") or {}
     payload = {
+        "context": context,
         "plural_target_labels": target_labels,
         "general_index": general_index,
         "source_labels": source_labels,
-        "max_length": max_length,
         "count_arguments": count_arguments,
     }
     return lz_common.sha256_json(payload)

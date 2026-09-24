@@ -18,7 +18,7 @@ from test_adapter_check import ADAPTER_CHECK, COLLECT, _make_workspace, _run, _w
 
 def _accept(root, by="tester"):
     coverage_path = root.parent / "coverage.json"
-    _write_coverage(coverage_path, [])
+    _write_coverage(root, coverage_path, [])
     code, reply = _run(
         ADAPTER_CHECK, ["accept", "--root", str(root), "--coverage", str(coverage_path), "--by", by]
     )

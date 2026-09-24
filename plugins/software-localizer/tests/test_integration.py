@@ -73,12 +73,18 @@ def write_json(path: Path, obj) -> None:
 # --- seam steps ----------------------------------------------------------
 
 
-def drive_to_ledger_sync(work_root: Path, target_locales=("de", "ru")):
+def drive_to_ledger_sync(work_root: Path, target_locales=("de", "ru"), after_copy=None):
     """Every step common to the happy path and every failure case: a fresh
     workspace, a writable copy of the fixture project, an accepted adapter,
-    one collect, one ledger sync. Returns `(root, project_dir)`."""
+    one collect, one ledger sync. Returns `(root, project_dir)`. `after_copy`,
+    when given, is called with the writable `project_dir` right after it is
+    copied and before scaffold/collect run -- a test mutates its OWN copy
+    there (e.g. to make an otherwise-`existing` message `pending`), never the
+    shared fixture under `tests/fixtures/toy_project`."""
     project_dir = work_root / "project"
     shutil.copytree(FIXTURES_DIR / "toy_project", project_dir)
+    if after_copy is not None:
+        after_copy(project_dir)
     root = work_root / "R"
 
     expect_ok("scaffold.py", ["--root", str(root)])
@@ -100,7 +106,8 @@ def drive_to_ledger_sync(work_root: Path, target_locales=("de", "ru")):
     assert run_result["ok"] is True, run_result
 
     coverage_out = root / "runs" / "_coverage" / "output.json"
-    write_json(coverage_out, {"missing": []})
+    coverage_packet = read_json(root / "runs" / "_coverage" / "packet.json")
+    write_json(coverage_out, {"run_id": coverage_packet["run_id"], "missing": []})
     expect_ok("adapter_check.py", ["accept", "--root", str(root), "--coverage", str(coverage_out), "--by", "tester"])
 
     expect_ok("collect.py", ["--root", str(root)])
@@ -247,6 +254,86 @@ def test_seam_happy_path(work_root):
     do_review(root)
     do_export(root, project_dir)
     do_audit_and_report(root)
+
+
+# --- plural end-to-end: bot review round 1, finding 1 -----------------------
+
+
+def test_seam_plural_translate_review_export_regression(work_root):
+    """Bot review round 1, finding 1 (P1): `packets.item_to_message()` used
+    to reconstruct a plural packet item's `plural` spec without
+    `source_labels`, while `ledger.context_sha256()` hashes it. So
+    `accept_translate()` stored a `context_sha256` on the candidate computed
+    with `source_labels=None`, and `export_values.py`'s staleness check --
+    which recomputes `context_sha256` from the real, freshly-collected
+    message (real `source_labels`) -- always found a mismatch and refused
+    the candidate as stale ("the context changed since this candidate was
+    reviewed"), even though nothing about the message had actually changed.
+    No newly translated plural message could ever complete translate ->
+    review -> export. Drive `cart.itemCount` (a real plural message in the
+    fixture toy project, 2 forms for `de`) through the whole real seam --
+    subprocesses, not hand-built ledger state -- and confirm it reaches
+    export."""
+    def make_cart_item_count_pending_for_de(project_dir: Path):
+        de_path = project_dir / "locales" / "de.json"
+        de_data = read_json(de_path)
+        del de_data["cart.itemCount"]
+        write_json(de_path, de_data)
+
+    root, project_dir = drive_to_ledger_sync(work_root, after_copy=make_cart_item_count_pending_for_de)
+
+    entry = read_json(root / "ledger" / "de.json")["entries"]["cart.itemCount"]
+    assert entry["state"] == "pending"
+
+    def find_batch_with(build_result: dict, msg_id: str) -> Path:
+        for batch in build_result["batches"]:
+            batch_dir = Path(batch["dir"])
+            packet = read_json(batch_dir / "packet.json")
+            if any(i["id"] == msg_id for i in packet["items"]):
+                return batch_dir
+        raise AssertionError(f"no batch carries {msg_id!r}: {build_result}")
+
+    build = expect_ok("packets.py", ["build", "--root", str(root), "--kind", "translate", "--locale", "de"])
+    batch_dir = find_batch_with(build, "cart.itemCount")
+    packet = read_json(batch_dir / "packet.json")
+    item = next(i for i in packet["items"] if i["id"] == "cart.itemCount")
+    # The fix under test: the packet item must carry `source_labels`, or
+    # `item_to_message()` at accept time reconstructs a plural spec that
+    # hashes differently from the live message's.
+    assert item["source_labels"], item
+
+    output_path = batch_dir / "translate.out.json"
+    write_json(output_path, {"translations": {"cart.itemCount": {"forms": ["{count} Artikel", "{count} Artikel"]}}})
+    accept = expect_ok("packets.py", ["accept", "--root", str(root), "--run", str(batch_dir),
+                                       "--output", str(output_path)])
+    assert accept["accepted"] == ["cart.itemCount"], accept
+
+    build = expect_ok("packets.py", ["build", "--root", str(root), "--kind", "review", "--locale", "de"])
+    batch_dir = find_batch_with(build, "cart.itemCount")
+    packet = read_json(batch_dir / "packet.json")
+    value_sha = next(i["value_sha256"] for i in packet["items"] if i["id"] == "cart.itemCount")
+
+    output_path = batch_dir / "review.out.json"
+    write_json(output_path, {"verdicts": {"cart.itemCount": {
+        "value_sha256": value_sha, "verdict": "pass", "issues": [], "proposed": None, "new_canon_candidates": [],
+    }}})
+    accept = expect_ok("packets.py", ["accept", "--root", str(root), "--run", str(batch_dir),
+                                       "--output", str(output_path)])
+    assert accept["passed"] == ["cart.itemCount"], accept
+
+    # Pre-fix, this dry run refused "cart.itemCount" with "the context
+    # changed since this candidate was reviewed" -- the bug this test guards.
+    dry = expect_ok("export_values.py", ["--root", str(root), "--locale", "de", "--dry-run"])
+    problem_ids = {p.get("id") for p in dry.get("problems", [])}
+    assert "cart.itemCount" not in problem_ids, dry
+
+    result = expect_ok("export_values.py", ["--root", str(root), "--locale", "de"])
+    assert result["exported"] >= 1, result
+
+    expect_ok("collect.py", ["--root", str(root)])
+    messages = read_json(root / "messages.json")
+    by_id = {m["id"]: m for m in messages["messages"]}
+    assert by_id["cart.itemCount"]["targets"]["de"] == {"forms": ["{count} Artikel", "{count} Artikel"]}
 
 
 # --- failure case 1: a person adds a target after sync, never overwritten --

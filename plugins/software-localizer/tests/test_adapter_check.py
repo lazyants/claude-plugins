@@ -114,8 +114,20 @@ def _run(script: Path, args: list[str], cwd: Path | None = None) -> tuple[int, d
     return proc.returncode, json.loads(lines[0])
 
 
-def _write_coverage(path: Path, missing: list[dict]) -> None:
-    path.write_text(json.dumps({"missing": missing}), encoding="utf-8")
+def _write_coverage(root: Path, path: Path, missing: list[dict], run_id: str | None = None) -> None:
+    """A coverage answer echoing the last `run`'s `run_id`, read from its
+    packet -- exactly what a real coverage turn is asked to copy. `run_id`
+    overrides that (a test of the binding itself); a test that calls this
+    before any `run` (no packet on disk yet) gets a placeholder, since such
+    a test's `accept` call fails on the missing prior run before ever
+    reaching the coverage answer's own content."""
+    if run_id is None:
+        packet_path = root / "runs" / "_coverage" / "packet.json"
+        if packet_path.is_file():
+            run_id = json.loads(packet_path.read_text(encoding="utf-8"))["run_id"]
+        else:
+            run_id = "no-prior-run"
+    path.write_text(json.dumps({"run_id": run_id, "missing": missing}), encoding="utf-8")
 
 
 # --- _first_of() ---------------------------------------------------------------
@@ -179,6 +191,27 @@ def test_run_is_idempotent(work_root):
     code, reply = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
     assert code == 0
     assert reply["ok"] is True
+
+
+def test_run_writes_a_fresh_run_id_into_the_packet_and_the_check_result(work_root):
+    # [bot P1] the coverage answer must be bound to the run it answers, or an
+    # old answer left over from before the adapter changed could still pass.
+    root, project_dir, cfg = _make_workspace(work_root)
+
+    _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+    packet_1 = json.loads((root / "runs" / "_coverage" / "packet.json").read_text(encoding="utf-8"))
+    result_1 = json.loads((root / "runs" / "_adapter_check.json").read_text(encoding="utf-8"))
+    assert isinstance(packet_1["run_id"], str) and packet_1["run_id"]
+    assert result_1["run_id"] == packet_1["run_id"]
+
+    _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+    packet_2 = json.loads((root / "runs" / "_coverage" / "packet.json").read_text(encoding="utf-8"))
+    result_2 = json.loads((root / "runs" / "_adapter_check.json").read_text(encoding="utf-8"))
+    assert packet_2["run_id"] != packet_1["run_id"]
+    assert result_2["run_id"] == packet_2["run_id"]
+
+    prompt = (root / "runs" / "_coverage" / "prompt.md").read_text(encoding="utf-8")
+    assert packet_2["run_id"] in prompt
 
 
 def test_run_accepts_a_relative_root_from_a_different_cwd(work_root):
@@ -531,7 +564,7 @@ def test_accept_succeeds_with_no_missing_strings(work_root):
     assert run_code == 0
 
     coverage_path = work_root / "coverage.json"
-    _write_coverage(coverage_path, [])
+    _write_coverage(root, coverage_path, [])
 
     code, reply = _run(
         ADAPTER_CHECK, ["accept", "--root", str(root), "--coverage", str(coverage_path), "--by", "tester"]
@@ -551,13 +584,60 @@ def test_accept_succeeds_with_no_missing_strings(work_root):
     lz_common.require_accepted_adapter(root, fresh_cfg)  # does not raise
 
 
+def test_accept_refuses_a_run_id_from_a_previous_run(work_root):
+    # [bot P1] The finding this closes: `run` used to overwrite
+    # `_coverage/packet.json` but leave any PRIOR answer in place, and
+    # `accept` validated only that answer's shape -- so an old `{"missing":
+    # []}` answer, from before the adapter changed, could still lock in the
+    # CURRENT adapter, even though the coverage model never saw its current
+    # ids/inventory. Binding the answer to a fresh `run_id` each run closes
+    # that: the OLD answer must be refused.
+    root, project_dir, cfg = _make_workspace(work_root)
+    _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+
+    coverage_path = work_root / "coverage.json"
+    _write_coverage(root, coverage_path, [])  # echoes the FIRST run's run_id
+
+    # The adapter changes and is re-checked -- a fresh run_id, per the
+    # contract, even though nothing about the coverage answer changed.
+    adapter_file = root / "adapter" / "adapter.py"
+    adapter_file.write_text(adapter_file.read_text(encoding="utf-8") + "\n# mutated after run\n", encoding="utf-8")
+    run_code, _ = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+    assert run_code == 0
+
+    code, reply = _run(
+        ADAPTER_CHECK, ["accept", "--root", str(root), "--coverage", str(coverage_path), "--by", "tester"]
+    )
+
+    assert code == 1
+    assert reply["ok"] is False
+    assert "run_id" in reply["error"]
+    assert not (root / "adapter.lock.json").exists()
+
+
+def test_accept_refuses_a_missing_run_id(work_root):
+    root, project_dir, cfg = _make_workspace(work_root)
+    _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+
+    coverage_path = work_root / "coverage.json"
+    coverage_path.write_text(json.dumps({"missing": []}), encoding="utf-8")  # no "run_id" at all
+
+    code, reply = _run(
+        ADAPTER_CHECK, ["accept", "--root", str(root), "--coverage", str(coverage_path), "--by", "tester"]
+    )
+
+    assert code == lz_common.EXIT_CANNOT
+    assert reply["ok"] is False
+    assert not (root / "adapter.lock.json").exists()
+
+
 def test_accept_refuses_an_unaccepted_missing_string(work_root):
     root, project_dir, cfg = _make_workspace(work_root)
     _run(ADAPTER_CHECK, ["run", "--root", str(root)])
 
     coverage_path = work_root / "coverage.json"
     _write_coverage(
-        coverage_path,
+        root, coverage_path,
         [{"file": "locales/en.json", "key": "brand.name", "why_user_visible": "shown in the footer"}],
     )
 
@@ -579,7 +659,7 @@ def test_accept_allows_a_missing_string_marked_out_of_scope(work_root):
 
     coverage_path = work_root / "coverage.json"
     _write_coverage(
-        coverage_path,
+        root, coverage_path,
         [{"file": "locales/en.json", "key": "brand.name", "why_user_visible": "shown in the footer"}],
     )
 
@@ -604,7 +684,7 @@ def test_accept_out_of_scope_key_for_a_whole_missed_file(work_root):
 
     coverage_path = work_root / "coverage.json"
     _write_coverage(
-        coverage_path, [{"file": "docs/help.md", "key": None, "why_user_visible": "a whole catalog the adapter misses"}]
+        root, coverage_path, [{"file": "docs/help.md", "key": None, "why_user_visible": "a whole catalog the adapter misses"}]
     )
 
     code, reply = _run(
@@ -631,7 +711,7 @@ def test_accept_refuses_when_adapter_changed_since_run(work_root):
     adapter_file.write_text(adapter_file.read_text(encoding="utf-8") + "\n# mutated after run\n", encoding="utf-8")
 
     coverage_path = work_root / "coverage.json"
-    _write_coverage(coverage_path, [])
+    _write_coverage(root, coverage_path, [])
 
     code, reply = _run(
         ADAPTER_CHECK, ["accept", "--root", str(root), "--coverage", str(coverage_path), "--by", "tester"]
@@ -646,7 +726,7 @@ def test_accept_refuses_when_adapter_changed_since_run(work_root):
 def test_accept_requires_a_prior_run(work_root):
     root, project_dir, cfg = _make_workspace(work_root)
     coverage_path = work_root / "coverage.json"
-    _write_coverage(coverage_path, [])
+    _write_coverage(root, coverage_path, [])
 
     code, reply = _run(
         ADAPTER_CHECK, ["accept", "--root", str(root), "--coverage", str(coverage_path), "--by", "tester"]
@@ -662,7 +742,7 @@ def test_accept_refuses_when_run_did_not_pass(work_root):
     assert run_code == 1
 
     coverage_path = work_root / "coverage.json"
-    _write_coverage(coverage_path, [])
+    _write_coverage(root, coverage_path, [])
 
     code, reply = _run(
         ADAPTER_CHECK, ["accept", "--root", str(root), "--coverage", str(coverage_path), "--by", "tester"]
@@ -680,7 +760,7 @@ def test_lock_refuses_a_changed_adapter_file(work_root):
     root, project_dir, cfg = _make_workspace(work_root)
     _run(ADAPTER_CHECK, ["run", "--root", str(root)])
     coverage_path = work_root / "coverage.json"
-    _write_coverage(coverage_path, [])
+    _write_coverage(root, coverage_path, [])
     accept_code, _ = _run(
         ADAPTER_CHECK, ["accept", "--root", str(root), "--coverage", str(coverage_path), "--by", "tester"]
     )
@@ -701,7 +781,7 @@ def test_lock_refuses_changed_options(work_root):
     root, project_dir, cfg = _make_workspace(work_root)
     _run(ADAPTER_CHECK, ["run", "--root", str(root)])
     coverage_path = work_root / "coverage.json"
-    _write_coverage(coverage_path, [])
+    _write_coverage(root, coverage_path, [])
     accept_code, _ = _run(
         ADAPTER_CHECK, ["accept", "--root", str(root), "--coverage", str(coverage_path), "--by", "tester"]
     )

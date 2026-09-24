@@ -205,19 +205,26 @@ def message_by_id(messages: dict) -> dict:
 def plural_item_fields(message: dict, locale: str):
     plural = message.get("plural")
     if plural is None:
-        return None, None, None
+        return None, None, None, None
     target_labels = plural["target_labels"].get(locale)
-    return target_labels, plural.get("count_arguments", []), plural.get("general_index")
+    source_labels = plural.get("source_labels")
+    return target_labels, source_labels, plural.get("count_arguments", []), plural.get("general_index")
 
 
 def item_to_message(item: dict, locale: str) -> dict:
     """Reconstruct the minimal `message` shape `checks.check_candidate` and
     `ledger.*_sha256` need, from a packet item (accept time never re-reads
-    `messages.json`; the packet is the frozen snapshot)."""
+    `messages.json`; the packet is the frozen snapshot). Every field
+    `ledger.context_sha256` reads for a plural message -- `source_labels`
+    included -- must round-trip through the packet, or the hash this
+    reconstruction feeds into differs from the one `sync()` computes from
+    the live message, and a candidate for a plural message is refused as
+    stale forever."""
     target_labels = item.get("target_labels")
     if target_labels is not None:
         plural = {
             "target_labels": {locale: target_labels},
+            "source_labels": item.get("source_labels"),
             "count_arguments": item.get("count_arguments", []),
             "general_index": item.get("general_index", 0),
         }
@@ -258,9 +265,10 @@ def build_translate_item(message: dict, locale: str, entry: dict) -> dict:
         "source": message["source"],
         "context": message.get("context", {}),
     }
-    target_labels, count_arguments, general_index = plural_item_fields(message, locale)
+    target_labels, source_labels, count_arguments, general_index = plural_item_fields(message, locale)
     if target_labels is not None:
         item["target_labels"] = target_labels
+        item["source_labels"] = source_labels
         item["count_arguments"] = count_arguments
         item["general_index"] = general_index
     previous, problems = _previous_fix_round(entry)
@@ -289,9 +297,10 @@ def build_review_item(message: dict, locale: str, entry: dict) -> dict:
         "canon_sha256": cand["canon_sha256"],
         "context": message.get("context", {}),
     }
-    target_labels, count_arguments, general_index = plural_item_fields(message, locale)
+    target_labels, source_labels, count_arguments, general_index = plural_item_fields(message, locale)
     if target_labels is not None:
         item["target_labels"] = target_labels
+        item["source_labels"] = source_labels
         item["count_arguments"] = count_arguments
         item["general_index"] = general_index
     return item
@@ -311,9 +320,10 @@ def build_audit_item(message: dict, locale: str):
         "value_sha256": lz_common.value_sha256(value),
         "context": message.get("context", {}),
     }
-    target_labels, count_arguments, general_index = plural_item_fields(message, locale)
+    target_labels, source_labels, count_arguments, general_index = plural_item_fields(message, locale)
     if target_labels is not None:
         item["target_labels"] = target_labels
+        item["source_labels"] = source_labels
         item["count_arguments"] = count_arguments
         item["general_index"] = general_index
     return item
