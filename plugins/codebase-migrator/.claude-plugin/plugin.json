@@ -1,9 +1,0 @@
-{
-  "name": "codebase-migrator",
-  "description": "Unit-by-unit migration of a legacy Python codebase to a new target package behind a strangler seam, gated by a differential test against the legacy code itself: codex proposes inputs, the legacy code is executed to record the expected behaviour, codex ports and reviews each unit, and deterministic gates accept a port only when its observed behaviour, persistent-state effects and call route match. Experimental: Python to Python only.",
-  "version": "0.1.0",
-  "author": {
-    "name": "Lazy Ants"
-  },
-  "skills": "./skills/"
-}

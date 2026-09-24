@@ -1,8 +1,0 @@
-{
-  "schema": 1,
-  "cases": [
-    {"id": "c1", "call": "Cart.add", "init_args": ["ann"], "args": ["x", 2.5]},
-    {"id": "c2", "call": "Cart.add", "init_args": ["ann"], "args": ["y", 1.0, 0]},
-    {"id": "c3", "call": "Cart.total", "init_args": ["ann"], "args": [10]}
-  ]
-}

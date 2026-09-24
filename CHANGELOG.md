@@ -2,6 +2,12 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [codebase-migrator — removed] — 2026-09-24
+
+### Removed
+
+- **`codebase-migrator` is withdrawn from the marketplace**, the same day it shipped. It was built on a misreading of the request: "a literary-translator for software" meant localizing software projects into other human languages, not migrating code between stacks. The plugin directory, its marketplace entry, README row and section, CI workflow and `CLAUDE.md` row are removed; the code stays in git history (#959). Marketplace `metadata.version` 1.7.0 → 1.8.0.
+
 ## [codebase-migrator 0.1.0] — 2026-09-24
 
 ### Added
