@@ -1,4 +1,4 @@
-"""Canon (glossary) management for software-localizer (plan section 8).
+"""Canon (glossary) management for software-localizer.
 
 `R/canon.json`: `{"schema": 1, "entries": [...]}`, an entry:
 
@@ -13,7 +13,7 @@ the locale's live renderings the canon turn saw when it proposed `value` —
 kept for an operator to see side by side with the proposal; `freeze` never
 carries it into `canon.lock.json`.
 
-`import` merges in candidates from a canon-turn's output (plan section 10):
+`import` merges in candidates from a canon-turn's output:
 
     {"candidates": [{"kind", "source", "note", "occurrences",
                       "translations": {locale: {"proposed": value, "current": [...]}}}]}
@@ -22,11 +22,16 @@ A caller importing a review turn's `new_canon_candidates` (same table) wraps
 that list in `{"candidates": [...]}` in this same shape before calling
 `import --file F` — this module only ever reads the canonical shape above.
 
-`R/canon.lock.json` is the frozen subset packets embed: every `dnt` entry
-(unconditionally) plus every entry with at least one *approved* translation
-(only those translations, never the still-proposed ones), each entry with
-its own sha256. `R/canon.history.json` is an append-only record of every
-approval and change (who, when, before, after).
+`R/canon.lock.json` is the frozen subset packets embed: every *approved*
+`dnt` entry (`approve`'s `approved_by`/`approved_at`, set on the entry as a
+whole) plus every entry with at least one *approved* translation (only those
+translations, never the still-proposed ones), each entry with its own
+sha256. A `dnt` entry a person never approved must not lock -- a
+model-proposed `dnt` from a canon or review turn is only ever `import`ed, and
+`import` never approves anything, so an unreviewed proposal must not become
+an active do-not-translate rule the moment someone runs `freeze` (security-
+review observation). `R/canon.history.json` is an append-only record of
+every approval and change (who, when, before, after).
 
 `load_lock` is the only function other owners import directly (`packets.py`
 builds packets from it; `ledger.py`'s CLI passes it into `sync`); `import`,
@@ -35,9 +40,13 @@ builds packets from it; `ledger.py`'s CLI passes it into `sync`); `import`,
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
-import lz_common
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import lz_common  # noqa: E402
 
 _KIND_PREFIX = {"term": "t", "ui_label": "u", "dnt": "d"}
 
@@ -47,11 +56,14 @@ _KIND_PREFIX = {"term": "t", "ui_label": "u", "dnt": "d"}
 # ---------------------------------------------------------------------------
 
 
-def load(root) -> dict:
-    path = Path(root) / "canon.json"
+def _read_or_default(path: Path, label: str, default: dict) -> dict:
     if not path.exists():
-        return {"schema": 1, "entries": []}
-    return lz_common.read_json(path, "canon.json")
+        return dict(default)
+    return lz_common.read_json(path, label)
+
+
+def load(root) -> dict:
+    return _read_or_default(Path(root) / "canon.json", "canon.json", {"schema": 1, "entries": []})
 
 
 def save(root, canon: dict) -> None:
@@ -59,17 +71,11 @@ def save(root, canon: dict) -> None:
 
 
 def load_lock(root) -> dict:
-    path = Path(root) / "canon.lock.json"
-    if not path.exists():
-        return {"schema": 1, "entries": []}
-    return lz_common.read_json(path, "canon.lock.json")
+    return _read_or_default(Path(root) / "canon.lock.json", "canon.lock.json", {"schema": 1, "entries": []})
 
 
 def load_history(root) -> dict:
-    path = Path(root) / "canon.history.json"
-    if not path.exists():
-        return {"schema": 1, "events": []}
-    return lz_common.read_json(path, "canon.history.json")
+    return _read_or_default(Path(root) / "canon.history.json", "canon.history.json", {"schema": 1, "events": []})
 
 
 def _append_history(root, event: dict) -> None:
@@ -112,7 +118,10 @@ def _slugify(text: str) -> str:
 
 
 def _new_id(canon: dict, kind: str, source: str) -> str:
-    prefix = _KIND_PREFIX.get(kind, "e")
+    # `kind` is already validated to be in `_KIND_PREFIX` by the only
+    # caller (`import_candidates`, below its own `kind not in _KIND_PREFIX`
+    # check), so a lookup fallback here would never fire.
+    prefix = _KIND_PREFIX[kind]
     base = f"{prefix}-{_slugify(source)}"
     existing_ids = {e["id"] for e in canon["entries"]}
     if base not in existing_ids:
@@ -129,7 +138,7 @@ def _new_id(canon: dict, kind: str, source: str) -> str:
 
 
 def import_candidates(canon: dict, candidates: list) -> dict:
-    """Merge `candidates` (plan section 10 shape) into `canon` in place.
+    """Merge `candidates` into `canon` in place.
 
     An entry with the same `kind` and `source` merges: occurrences are
     unioned, `note` fills in only if the existing entry's is empty, and an
@@ -175,7 +184,7 @@ def import_candidates(canon: dict, candidates: list) -> dict:
                 "kind": kind,
                 "source": source,
                 "note": note,
-                "occurrences": list(occurrences),
+                "occurrences": occurrences,
                 "translations": {},
             }
             canon["entries"].append(entry)
@@ -200,14 +209,14 @@ def import_candidates(canon: dict, candidates: list) -> dict:
                 "approved_by": None, "approved_at": None,
             }
             # `current` (the locale's renderings the turn saw at proposal
-            # time, plan section 10) is display-only: kept on the entry so
-            # an operator can see it beside the proposal, but never fed into
-            # `freeze` -- it is not part of what a candidate or a review
-            # verdict is checked against (review round 3, item 5). An empty
-            # list carries nothing to display, so it is treated the same as
-            # an absent `current` (this also matches a canon turn's own
-            # audit-mode framing: "current" is the *existing* renderings it
-            # found, and there is nothing to attach when it found none).
+            # time) is display-only: kept on the entry so an operator can
+            # see it beside the proposal, but never fed into `freeze` -- it
+            # is not part of what a candidate or a review verdict is checked
+            # against. An empty list carries nothing to display, so it is
+            # treated the same as an absent `current` (this also matches a
+            # canon turn's own audit-mode framing: "current" is the
+            # *existing* renderings it found, and there is nothing to
+            # attach when it found none).
             incoming_current = t.get("current") if isinstance(t, dict) else None
             if isinstance(incoming_current, list) and incoming_current and all(isinstance(c, str) for c in incoming_current):
                 new_translation["current"] = list(incoming_current)
@@ -291,6 +300,8 @@ def freeze(root, canon: dict | None = None) -> dict:
     locked_entries = []
     for entry in canon["entries"]:
         if entry["kind"] == "dnt":
+            if not entry.get("approved_by"):
+                continue
             locked = {
                 "id": entry["id"], "kind": entry["kind"], "source": entry["source"],
                 "note": entry.get("note", ""), "occurrences": list(entry.get("occurrences", [])),

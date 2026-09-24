@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Create or resume a software-localizer durable root (plan sections 2-3).
+"""Create or resume a software-localizer durable root.
 
 Writes `localize.json` with every answer a `CHOOSE_...` sentinel when it does
 not already exist; never overwrites an existing one, so an operator's
@@ -16,18 +15,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import lz_common  # noqa: E402
 
-DEFAULT_CONFIG = {
-    "schema": 1,
-    "project_root": "CHOOSE_PROJECT_ROOT",
-    "source_locale": "CHOOSE_SOURCE_LOCALE",
-    "target_locales": "CHOOSE_TARGET_LOCALES",
-    "adapter": {"argv": "CHOOSE_ADAPTER_ARGV", "options": {}},
-    "style": {},
-    "allow_identical": [],
-    "batch_size": 40,
-    "max_rounds": 3,
-    "adapter_timeout_s": 300,
-}
+
+def _default_config() -> dict:
+    cfg = {
+        "schema": 1,
+        "project_root": "CHOOSE_PROJECT_ROOT",
+        "source_locale": "CHOOSE_SOURCE_LOCALE",
+        "target_locales": "CHOOSE_TARGET_LOCALES",
+        "adapter": {"argv": "CHOOSE_ADAPTER_ARGV", "options": {}},
+        "style": {},
+    }
+    cfg.update({k: (list(v) if isinstance(v, list) else v) for k, v in lz_common.CONFIG_DEFAULTS.items()})
+    return cfg
 
 
 def main() -> int:
@@ -48,7 +47,7 @@ def main() -> int:
         outcome = "resumed"
         created = False
     else:
-        lz_common.atomic_write_json(config_path, DEFAULT_CONFIG)
+        lz_common.atomic_write_json(config_path, _default_config())
         outcome = "fresh"
         created = True
 

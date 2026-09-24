@@ -1,4 +1,4 @@
-"""Tests for config_validate.py, driven as a real subprocess (plan section 3).
+"""Tests for config_validate.py, driven as a real subprocess.
 
 The validation RULES themselves are covered in depth by test_lz_common.py
 against `lz_common.validate_config`; these tests cover the script's own

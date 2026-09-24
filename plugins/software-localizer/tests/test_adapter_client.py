@@ -1,5 +1,5 @@
-"""Tests for `adapter_client.py` (plan section 5): the only module that
-invokes a project adapter.
+"""Tests for `adapter_client.py`: the only module that invokes a project
+adapter.
 
 Every test writes its own tiny throwaway adapter script under `work_root`
 (never the shared fixture adapter in `tests/fixtures/`), so each test's

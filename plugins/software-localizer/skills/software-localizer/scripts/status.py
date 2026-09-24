@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Read-only status report (plan sections 11-12). Never writes.
+"""Read-only status report. Never writes.
 
 Reports counts per locale and state from the ledger, whether
 `adapter.lock.json` is present and current, and the next command to run.
@@ -7,18 +6,17 @@ Every input is read defensively (a missing or corrupt file is reported as
 `"absent"`/`"unknown"`, never a crash): the operator runs this at any point
 in an unfinished pipeline, including before `localize.json` even exists.
 
-The ledger is stored per locale at `R/ledger/<locale>.json`
-(`{"schema": 1, "locale": L, "entries": {id: entry}}`); there is no
-`R/ledger.json`. `_load_ledger` still reads every `R/ledger/*.json` file
-directly, field by field, into the in-memory shape `{"schema": 1,
-"locales": {locale: {id: entry}}}` -- a missing `R/ledger/` directory means
-no locale has been synced yet, same as an empty one, and any file that is
-missing, unreadable, or the wrong shape is skipped rather than raising.
-`_next_command` does import `ledger.py` for the one rule it must not
-re-derive (`ledger.exportable`, the same readiness rule `export_values.py`
-itself enforces) -- that call is wrapped so a locale whose entries are too
-malformed for it to read falls back to "unknown" for that locale rather
-than crashing.
+The ledger is stored per locale at `R/ledger/<locale>.json` (`{"schema": 1,
+"locale": L, "entries": {id: entry}}`). `_load_ledger` reads every
+`R/ledger/*.json` file directly, field by field, into the in-memory shape
+`{"schema": 1, "locales": {locale: {id: entry}}}` -- a missing `R/ledger/`
+directory means no locale has been synced yet, same as an empty one, and
+any file that is missing, unreadable, or the wrong shape is skipped rather
+than raising. `_next_command` imports `ledger.py` for the rules it must not
+re-derive (`ledger.exportable` and `ledger.candidate_needs_review`, the same
+readiness rules `export_values.py` and `packets.py` themselves enforce) --
+those calls are wrapped so a locale whose entries are too malformed to read
+falls back to "unknown" for that locale rather than crashing.
 """
 
 from __future__ import annotations
@@ -47,14 +45,13 @@ def _load_ledger(root: Path) -> dict:
     """The ledger, aggregated across every target locale, read directly from
     `R/ledger/<locale>.json` (each `{"schema": 1, "locale": L, "entries":
     {id: entry}}`) into `{"schema": 1, "locales": {locale: {id: entry}}}`.
-    This stays a direct, field-by-field read (not `ledger.load`) so a
-    missing `R/ledger/` directory, or one with no readable files, still
-    means "no locale synced yet" rather than a crash; any file that is
-    missing, unreadable, or the wrong shape is skipped rather than raising.
-    `ledger.py` is still imported elsewhere in this module (`_next_command`
-    calls `ledger.exportable` on the dict this function returns, whose
-    shape matches what `exportable` expects) -- only the read path here
-    stays local."""
+    This is a direct, field-by-field read (not `ledger.load`) so a missing
+    `R/ledger/` directory, or one with no readable files, still means "no
+    locale synced yet" rather than a crash; any file that is missing,
+    unreadable, or the wrong shape is skipped rather than raising. The
+    returned shape matches what `ledger.exportable` and
+    `ledger.candidate_needs_review` expect, so `_next_command` can pass it
+    straight through."""
     locales: dict = {}
     ledger_dir = root / "ledger"
     if ledger_dir.is_dir():
@@ -71,34 +68,18 @@ def _load_ledger(root: Path) -> dict:
 
 
 def _ledger_counts(ledger: dict) -> dict:
-    """`{locale: {state: count}}` from a loaded ledger."""
+    """`{locale: {state: count}}` from a loaded ledger. `ledger` and its
+    `"locales"`/per-locale `entries` are always dicts here (`_load_ledger`'s
+    own contract); only an individual `entry` -- one message id's value --
+    is unguarded input and needs the defensive check."""
     result: dict = {}
-    locales = ledger.get("locales", {}) if isinstance(ledger, dict) else {}
-    if not isinstance(locales, dict):
-        return result
-    for locale, entries in locales.items():
+    for locale, entries in ledger["locales"].items():
         by_state: dict = {}
-        if isinstance(entries, dict):
-            for entry in entries.values():
-                state = entry.get("state", "unknown") if isinstance(entry, dict) else "unknown"
-                by_state[state] = by_state.get(state, 0) + 1
+        for entry in entries.values():
+            state = entry.get("state", "unknown") if isinstance(entry, dict) else "unknown"
+            by_state[state] = by_state.get(state, 0) + 1
         result[locale] = by_state
     return result
-
-
-def _candidate_needs_review(entry) -> bool:
-    """checks passed but no verdict is bound to the candidate's current
-    value hash yet -- the same rule `packets.select_review` uses. `ledger.py`
-    has no equivalent exposed helper for this one, so it stays local (unlike
-    export-readiness below, which now calls `ledger.exportable` instead of
-    re-deriving the rule)."""
-    if not isinstance(entry, dict):
-        return False
-    cand = entry.get("candidate")
-    if not isinstance(cand, dict) or cand.get("checks") != "pass":
-        return False
-    verdict = cand.get("verdict")
-    return not isinstance(verdict, dict) or verdict.get("value_sha256") != cand.get("value_sha256")
 
 
 def _exportable_ids_by_locale(ledger: dict, target_locales: list) -> dict:
@@ -133,33 +114,32 @@ def _adapter_lock_status(root: Path, cfg) -> dict:
     if lz_common.validate_config(cfg, root):
         return {"present": True, "current": "unknown"}
 
-    try:
-        current = lz_common.adapter_digest(root, cfg)
-    except SystemExit:
+    code_dir_value = cfg["adapter"].get("code_dir", lz_common.ADAPTER_DIR_NAME)
+    code_dir = Path(code_dir_value)
+    if not code_dir.is_absolute():
+        code_dir = root / code_dir
+    if not code_dir.is_dir():
+        # adapter_digest would fail(EXIT_CANNOT) on this -- a status report
+        # never raises, so the currency check is skipped instead.
         return {"present": True, "current": "unknown"}
 
-    # Same three fields `lz_common.require_accepted_adapter` compares (files,
-    # argv, options_sha256) -- reproduced rather than called, since that
-    # function's job is to `fail()` and exit, not report a status.
-    is_current = (
-        lock.get("files") == current.get("files")
-        and lock.get("argv") == current.get("argv")
-        and lock.get("options_sha256") == current.get("options_sha256")
-    )
-    return {"present": True, "current": is_current}
+    current = lz_common.adapter_digest(root, cfg)
+    return {"present": True, "current": lz_common.adapter_lock_matches(lock, current)}
 
 
 def _next_command(root: Path, cfg, cfg_problems, adapter_check_ran, adapter_lock, messages, ledger, ledger_counts) -> str:
-    """A best-effort staging hint following plan section 12's order. This is
-    presence-based, not a full re-derivation of pipeline correctness (that
-    is `export_values.py`'s job at export time)."""
+    """A best-effort staging hint. This is presence-based, not a full
+    re-derivation of pipeline correctness (that is `export_values.py`'s job
+    at export time)."""
     root_display = str(root)
     if cfg is None:
         return f"scaffold.py --root {root_display}"
     if cfg_problems:
         return f"fill in localize.json, then config_validate.py --root {root_display}"
     if not adapter_check_ran:
-        return f"build the adapter under R/adapter/, then adapter_check.py run --root {root_display}"
+        code_dir_value = cfg["adapter"].get("code_dir", lz_common.ADAPTER_DIR_NAME)
+        code_dir_display = code_dir_value if os.path.isabs(code_dir_value) else f"R/{code_dir_value}"
+        return f"build the adapter under {code_dir_display}, then adapter_check.py run --root {root_display}"
     if not adapter_lock["present"] or adapter_lock["current"] is not True:
         return f"run the coverage turn, then adapter_check.py accept --root {root_display} --coverage <file> --by <name>"
     if messages is None:
@@ -169,16 +149,16 @@ def _next_command(root: Path, cfg, cfg_problems, adapter_check_ran, adapter_lock
 
     target_locales = cfg.get("target_locales")
     target_locales = target_locales if isinstance(target_locales, list) else []
-    locales_entries = ledger.get("locales", {}) if isinstance(ledger, dict) else {}
+    locales_entries = ledger["locales"]
     exportable_by_locale = _exportable_ids_by_locale(ledger, target_locales)
 
-    # plan section 12's order: a candidate already passing checks is closer
-    # to done than one that still needs a translate round, so review and
-    # export outrank translate; audit (revisiting a value the plugin never
-    # produced) is last.
+    # A candidate already passing checks is closer to done than one that
+    # still needs a translate round, so review and export outrank
+    # translate; audit (revisiting a value the plugin never produced) is
+    # last.
     for locale in target_locales:
         entries = locales_entries.get(locale, {})
-        if isinstance(entries, dict) and any(_candidate_needs_review(e) for e in entries.values()):
+        if any(ledger_mod.candidate_needs_review(e) for e in entries.values()):
             return f"packets.py build --root {root_display} --kind review --locale {locale}"
 
     for locale in target_locales:
@@ -188,7 +168,7 @@ def _next_command(root: Path, cfg, cfg_problems, adapter_check_ran, adapter_lock
     for locale in target_locales:
         entries = locales_entries.get(locale, {})
         exportable_ids = exportable_by_locale.get(locale)
-        if not isinstance(entries, dict) or exportable_ids is None:
+        if exportable_ids is None:
             continue  # unknown export-readiness here -- never guess "needs translate"
         for msg_id, e in entries.items():
             if isinstance(e, dict) and e.get("state") in ("pending", "stale") and msg_id not in exportable_ids:
@@ -213,7 +193,7 @@ def main() -> int:
         {"field": "<root>", "message": "localize.json is missing or not an object"}
     ]
 
-    adapter_check_ran = (root / "runs" / "_adapter_check.json").is_file()
+    adapter_check_ran = (root / lz_common.ADAPTER_CHECK_RESULT).is_file()
     adapter_lock = _adapter_lock_status(root, cfg)
 
     messages = _read_optional(root / "messages.json")

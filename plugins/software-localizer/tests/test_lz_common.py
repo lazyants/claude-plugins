@@ -1,6 +1,8 @@
 """Tests for lz_common.py: the shared library every other script imports."""
 
 import json
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -109,6 +111,24 @@ def test_atomic_write_text_creates_parent_dirs_and_leaves_no_temp_file(work_root
     assert path.read_text(encoding="utf-8") == "hello"
     leftovers = [p for p in path.parent.iterdir() if p.name.startswith(".lz-tmp-")]
     assert leftovers == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="permission bits are POSIX-only")
+def test_atomic_write_text_preserves_an_existing_destinations_permission_bits(work_root):
+    path = work_root / "f.txt"
+    path.write_text("v1", encoding="utf-8")
+    os.chmod(path, 0o644)
+    lz_common.atomic_write_text(path, "v2")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+@pytest.mark.skipif(os.name != "posix", reason="permission bits are POSIX-only")
+def test_atomic_write_text_gives_a_new_file_the_umask_default(work_root):
+    path = work_root / "new.txt"
+    umask = os.umask(0)
+    os.umask(umask)  # read-only: restore immediately
+    lz_common.atomic_write_text(path, "v1")
+    assert stat.S_IMODE(path.stat().st_mode) == (0o666 & ~umask)
 
 
 def test_atomic_write_json_preserves_non_ascii_and_is_pretty(work_root):

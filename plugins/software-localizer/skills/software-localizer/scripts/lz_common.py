@@ -23,13 +23,22 @@ EXIT_OK, EXIT_FAIL, EXIT_CANNOT = 0, 1, 2
 
 CHOOSE_PREFIX = "CHOOSE_"
 
-# `adapter.code_dir`'s default (plan section 6): ALL adapter code lives in
-# ONE directory, hashed as a whole by `adapter_digest`, so editing any file
-# there -- a helper `adapter.argv` never names directly included -- always
-# invalidates acceptance. A relative `code_dir` resolves against the
-# workspace root `R`; an absolute one may sit anywhere, including inside
-# the project.
+# `adapter.code_dir`'s default. See references/adapter-contract.md for the
+# full contract: ALL adapter code lives in ONE directory, hashed as a whole
+# by `adapter_digest`, so editing any file there -- a helper `adapter.argv`
+# never names directly -- always invalidates acceptance. A relative
+# `code_dir` resolves against the workspace root `R`; an absolute one may
+# sit anywhere, including inside the project.
 ADAPTER_DIR_NAME = "adapter"
+
+# `adapter_check.py run`'s result, relative to `R`. Read by `adapter_check.py
+# accept` and reported on (never written) by `status.py`.
+ADAPTER_CHECK_RESULT = "runs/_adapter_check.json"
+
+# `load_config` fills each of these in when `localize.json` leaves it absent
+# or `null`; `scaffold.py` seeds a fresh `localize.json` with the same
+# values. Lists are copied at each use site, never shared.
+CONFIG_DEFAULTS = {"batch_size": 40, "max_rounds": 3, "adapter_timeout_s": 300, "allow_identical": []}
 
 
 def emit(obj: dict) -> None:
@@ -82,7 +91,7 @@ class _FailingArgumentParser(argparse.ArgumentParser):
         fail(message, EXIT_CANNOT)
 
 
-def make_parser(prog: str, description: str = None) -> argparse.ArgumentParser:
+def make_parser(prog: str, description: str | None = None) -> argparse.ArgumentParser:
     """Build the top-level parser for a script, so a bad CLI argument still
     emits exactly one JSON line before exiting.
 
@@ -119,7 +128,7 @@ def sha256_json(obj) -> str:
 def value_sha256(value) -> str:
     """The hash of a message VALUE: a plain string, or `{"forms": [...]}`.
     Ledger candidates and review verdicts are bound to a value by this hash
-    (plan sections 7 and 10), so a candidate and the verdict cast on it can
+    (see references/state.md), so a candidate and the verdict cast on it can
     be matched by content, not by object identity."""
     is_string = isinstance(value, str)
     is_forms = isinstance(value, dict) and isinstance(value.get("forms"), list)
@@ -128,18 +137,35 @@ def value_sha256(value) -> str:
     return sha256_json(value)
 
 
-def atomic_write_text(path, text: str) -> None:
-    """Write `text` to `path` atomically: tmp file in the same directory,
+def is_forms_value(v) -> bool:
+    """`True` for the plural message-value shape, `{"forms": [...]}` where
+    every form is a string; `False` otherwise."""
+    return isinstance(v, dict) and isinstance(v.get("forms"), list) and all(isinstance(f, str) for f in v["forms"])
+
+
+def atomic_write_bytes(path, data: bytes) -> None:
+    """Write `data` to `path` atomically: tmp file in the same directory,
     flush, fsync, then `os.replace`. Leaves no temp file behind, on success
-    or on failure."""
+    or on failure. Preserves an existing destination's permission bits
+    (`os.stat(dest).st_mode & 0o7777`, applied to the temp file before the
+    replace); a new file gets the umask default (`0o666 & ~umask`), the same
+    as a plain `open()` for writing -- not `mkstemp`'s own, more
+    restrictive, `0o600`."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".lz-tmp-", dir=str(path.parent))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
             f.flush()
             os.fsync(f.fileno())
+        try:
+            mode = os.stat(path).st_mode & 0o7777
+        except FileNotFoundError:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)
     except BaseException:
         try:
@@ -147,6 +173,11 @@ def atomic_write_text(path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+def atomic_write_text(path, text: str) -> None:
+    """`atomic_write_bytes`, encoding `text` as UTF-8."""
+    atomic_write_bytes(path, text.encode("utf-8"))
 
 
 def atomic_write_json(path, obj) -> None:
@@ -185,7 +216,7 @@ def now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
-# localize.json (plan section 3)
+# localize.json
 # ---------------------------------------------------------------------------
 
 
@@ -196,9 +227,8 @@ def _is_choose(value) -> bool:
 def _find_choose_sentinels(value, path: str, problems: list) -> None:
     """Recursively flag every string leaf that still carries a `CHOOSE_`
     placeholder, wherever it sits in the config tree."""
-    if isinstance(value, str):
-        if value.startswith(CHOOSE_PREFIX):
-            problems.append({"field": path or "<root>", "message": f"still has a placeholder value: {value}"})
+    if _is_choose(value):
+        problems.append({"field": path or "<root>", "message": f"still has a placeholder value: {value}"})
     elif isinstance(value, dict):
         for key in sorted(value):
             _find_choose_sentinels(value[key], f"{path}.{key}" if path else key, problems)
@@ -225,10 +255,9 @@ def _locale_ok(value) -> bool:
 
 
 def validate_config(cfg, root) -> list:
-    """Every problem with `cfg` (`localize.json`'s already-parsed content),
-    per plan section 3. Never raises or exits: reports every problem found,
-    at once, as `[{"field", "message"}]`; an empty list means `cfg` is
-    ready to use."""
+    """Every problem with `cfg` (`localize.json`'s already-parsed content).
+    Never raises or exits: reports every problem found, at once, as
+    `[{"field", "message"}]`; an empty list means `cfg` is ready to use."""
     root = Path(root)
     problems: list = []
 
@@ -270,19 +299,15 @@ def validate_config(cfg, root) -> list:
             if source_ok and source_locale in target_set:
                 problems.append({"field": "target_locales", "message": "source_locale must not also be a target locale"})
 
-    # project_root (plan section 2): a relative value resolves against R,
-    # the same convention `adapter.argv` uses, and must not equal, sit
-    # inside, or contain R.
+    # project_root: a relative value resolves against R, the same convention
+    # `adapter.argv` uses, and must not equal, sit inside, or contain R.
     project_root = cfg.get("project_root")
     if not _is_choose(project_root):
         if not isinstance(project_root, str) or not project_root:
             problems.append({"field": "project_root", "message": "project_root must be a non-empty string"})
         else:
             p = _resolve_maybe_relative(root, project_root)
-            try:
-                p_resolved = p.resolve()
-            except OSError:
-                p_resolved = p
+            p_resolved = p.resolve()
             if not p_resolved.is_dir():
                 problems.append({"field": "project_root", "message": f"project_root does not exist: {project_root}"})
             else:
@@ -327,7 +352,7 @@ def validate_config(cfg, root) -> list:
                     problems.append({"field": f"style.{loc}.formality", "message": "formality must be a non-empty string"})
 
     # adapter.code_dir / adapter.argv: ALL adapter code lives in one
-    # directory (plan section 6), `code_dir` (default `ADAPTER_DIR_NAME`,
+    # directory, `code_dir` (default `ADAPTER_DIR_NAME`,
     # resolved the same way as `project_root` -- relative against `root`,
     # absolute used as is); it must already exist. `argv` is a non-empty
     # list of strings whose first element resolves (on PATH or as a file,
@@ -352,11 +377,7 @@ def validate_config(cfg, root) -> list:
             elif not isinstance(code_dir_value, str) or not code_dir_value:
                 problems.append({"field": "adapter.code_dir", "message": "adapter.code_dir must be a non-empty string"})
             else:
-                candidate = _resolve_maybe_relative(root, code_dir_value)
-                try:
-                    candidate = candidate.resolve()
-                except OSError:
-                    pass
+                candidate = _resolve_maybe_relative(root, code_dir_value).resolve()
                 if not candidate.is_dir():
                     problems.append({
                         "field": "adapter.code_dir",
@@ -375,16 +396,12 @@ def validate_config(cfg, root) -> list:
                     # is fine); a relative element that LOOKS like a path (it has a
                     # separator) but is not under `root` is refused here, before it can
                     # silently run against the project's own cwd instead -- unresolved
-                    # and unhashed by `adapter_digest` (plan section 6). A relative
-                    # element with no separator (a bare command name, a flag) is only
-                    # checked at index 0, where it must resolve on PATH.
+                    # and unhashed by `adapter_digest`. A relative element with no
+                    # separator (a bare command name, a flag) is only checked at
+                    # index 0, where it must resolve on PATH.
                     for i, item in enumerate(argv):
-                        if os.path.isabs(item):
-                            resolved_item = Path(item)
-                            is_file = resolved_item.is_file()
-                        else:
-                            resolved_item = root / item
-                            is_file = resolved_item.is_file()
+                        resolved_item = Path(item) if os.path.isabs(item) else root / item
+                        is_file = resolved_item.is_file()
 
                         if not is_file:
                             if os.path.isabs(item):
@@ -454,9 +471,9 @@ def load_config(root) -> dict:
 
     `batch_size`, `max_rounds`, `adapter_timeout_s` and `allow_identical`
     are optional in `localize.json` (`validate_config` accepts them absent
-    or explicitly `null`); this is where their documented defaults (40, 3,
-    300, `[]`) are filled in, so every downstream consumer can index them
-    directly instead of each repeating its own fallback."""
+    or explicitly `null`); this is where `CONFIG_DEFAULTS` is filled in, so
+    every downstream consumer can index them directly instead of each
+    repeating its own fallback."""
     root = Path(root)
     cfg = read_json(root / "localize.json", "localize.json")
     problems = validate_config(cfg, root)
@@ -464,19 +481,14 @@ def load_config(root) -> dict:
         detail = "; ".join(f"{p['field']}: {p['message']}" for p in problems)
         fail(f"localize.json has problems: {detail}", EXIT_CANNOT, problems=problems)
     cfg["project_root"] = str(_resolve_maybe_relative(root, cfg["project_root"]).resolve())
-    if cfg.get("batch_size") is None:
-        cfg["batch_size"] = 40
-    if cfg.get("max_rounds") is None:
-        cfg["max_rounds"] = 3
-    if cfg.get("adapter_timeout_s") is None:
-        cfg["adapter_timeout_s"] = 300
-    if cfg.get("allow_identical") is None:
-        cfg["allow_identical"] = []
+    for key, default in CONFIG_DEFAULTS.items():
+        if cfg.get(key) is None:
+            cfg[key] = list(default) if isinstance(default, list) else default
     return cfg
 
 
 # ---------------------------------------------------------------------------
-# messages.json (plan section 4)
+# messages.json
 # ---------------------------------------------------------------------------
 
 
@@ -491,10 +503,10 @@ def _label_shape_ok(label) -> bool:
 
 def messages_shape_problem(data):
     """The first structural problem with an already-parsed `messages.json`,
-    or `None` when its shape is valid (plan section 4): types, required
-    keys, unique ids, non-empty label lists, and every target's form count
-    matching its label count. Content judgments (script checks, review) are
-    a different layer and are not this function's job."""
+    or `None` when its shape is valid: types, required keys, unique ids,
+    non-empty label lists, and every target's form count matching its label
+    count. Content judgments (script checks, review) are a different layer
+    and are not this function's job."""
     if not isinstance(data, dict):
         return "top level is not an object"
     if data.get("schema") != 1:
@@ -560,12 +572,7 @@ def _plural_shape_problem(tag: str, plural, source, targets):
     if not isinstance(plural, dict):
         return f"{tag}.plural must be an object"
 
-    source_forms_ok = (
-        isinstance(source, dict)
-        and isinstance(source.get("forms"), list)
-        and bool(source["forms"])
-        and all(isinstance(f, str) for f in source["forms"])
-    )
+    source_forms_ok = is_forms_value(source) and bool(source["forms"])
     if not source_forms_ok:
         return f"{tag}.source must be {{'forms': [...]}} with at least one string, for a plural message"
     n_source_forms = len(source["forms"])
@@ -602,10 +609,7 @@ def _plural_shape_problem(tag: str, plural, source, targets):
     for locale, value in targets.items():
         if value is None:
             continue
-        forms_ok = isinstance(value, dict) and isinstance(value.get("forms"), list) and all(
-            isinstance(f, str) for f in value["forms"]
-        )
-        if not forms_ok:
+        if not is_forms_value(value):
             return f"{tag}.targets[{locale!r}] must be {{'forms': [...]}} or null"
         expected_labels = target_labels.get(locale)
         if expected_labels is not None and len(value["forms"]) != len(expected_labels):
@@ -615,8 +619,8 @@ def _plural_shape_problem(tag: str, plural, source, targets):
 
 
 def load_messages(path) -> dict:
-    """Read and shape-validate `messages.json` (plan section 4). The only
-    reader: every script that needs message data goes through this."""
+    """Read and shape-validate `messages.json`. The only reader: every
+    script that needs message data goes through this."""
     data = read_json(path, "messages.json")
     problem = messages_shape_problem(data)
     if problem:
@@ -625,7 +629,7 @@ def load_messages(path) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Adapter acceptance (plan section 6)
+# Adapter acceptance -- see references/adapter-contract.md
 # ---------------------------------------------------------------------------
 
 
@@ -660,9 +664,9 @@ def _tree_digests(base: Path, exclude_dirs=(".git", "__pycache__")) -> dict:
 
 
 def resolve_argv(root, cfg: dict) -> list[str]:
-    """The one argv-resolution rule (plan section 5): an element that is
-    already an absolute path stays as is; a relative element naming a file
-    that exists under `root` becomes its absolute path; anything else -- a
+    """The one argv-resolution rule: an element that is already an absolute
+    path stays as is; a relative element naming a file that exists under
+    `root` becomes its absolute path; anything else -- a
     bare command name meant to be found on `PATH` (`"node"`, `"python3"`),
     or a flag -- passes through unchanged. `adapter_client.run` calls this
     to build the argv it actually executes; `adapter_digest` calls it to
@@ -681,27 +685,25 @@ def resolve_argv(root, cfg: dict) -> list[str]:
 
 def adapter_digest(root, cfg: dict) -> dict:
     """`{"files": {path: sha256}, "argv": [...], "options_sha256": ...}`
-    identifying what the adapter actually executes (plan section 6): every
-    file under `adapter.code_dir` (default `ADAPTER_DIR_NAME`, resolved the
-    same way as `project_root` -- relative against `root`, absolute used as
-    is) -- ALL adapter code lives in this one hashed directory, so a helper
-    file no `argv` element names directly is still covered; the sha256 of
-    every `resolve_argv` element that resolves to an existing file, wherever
-    it lives -- `argv[0]` (the interpreter, or the adapter executable
-    itself) is exempt from `validate_config`'s "must sit inside code_dir"
-    rule, since an absolute interpreter is not adapter code, but its
-    content still decides how the adapter behaves, so it is hashed here
-    like everything else (an interpreter upgrade correctly invalidates
-    acceptance); `argv[1:]` elements that resolve to a file are, per
-    `validate_config`, already inside `code_dir`, so hashing them again here
-    is redundant with the tree walk above, not wrong; `adapter.argv` itself,
-    so a changed argument or a swapped script is caught even when its byte
-    content happens to match; and the options. `code_dir` must already
-    exist as a directory -- `validate_config` is what normally guarantees
-    that before this ever runs; called directly (as tests do) it enforces
-    the same thing itself, `fail(EXIT_CANNOT)`."""
+    identifying what the adapter actually executes: the sha256 of every file
+    under `adapter.code_dir` (default `ADAPTER_DIR_NAME`, resolved the same
+    way as `project_root` -- relative against `root`, absolute used as is),
+    ALL of it, so a helper file no `argv` element names directly is still
+    covered; the sha256 of every `resolve_argv` element that resolves to an
+    existing file, wherever it lives -- this catches `argv[0]` (the
+    interpreter, or the adapter executable itself), exempt from
+    `validate_config`'s "must sit inside code_dir" rule but still hashed
+    here, so an interpreter upgrade correctly invalidates acceptance;
+    `argv[1:]` elements that resolve to a file are, per `validate_config`,
+    already inside `code_dir`, so hashing them again here is redundant with
+    the tree walk, not wrong; `adapter.argv` itself, so a changed argument
+    or a swapped script is caught even when its byte content happens to
+    match; and the options. `code_dir` must already exist as a directory --
+    `validate_config` is what normally guarantees that before this ever
+    runs; called directly (as tests do) it enforces the same thing itself,
+    `fail(EXIT_CANNOT)`."""
     root = Path(root)
-    adapter_cfg = cfg.get("adapter", {})
+    adapter_cfg = cfg["adapter"]
     code_dir_value = adapter_cfg.get("code_dir", ADAPTER_DIR_NAME)
     code_dir = _resolve_maybe_relative(root, code_dir_value)
     if not code_dir.is_dir():
@@ -720,6 +722,18 @@ def adapter_digest(root, cfg: dict) -> dict:
     return {"files": files, "argv": argv, "options_sha256": sha256_json(options)}
 
 
+def adapter_lock_matches(lock: dict, current: dict) -> bool:
+    """`True` when `lock` (an `adapter.lock.json`-shaped dict, or `{}`)
+    still matches `current` (an `adapter_digest` result) on files, argv and
+    options_sha256 -- the comparison `require_accepted_adapter` enforces,
+    and `status.py` reports on without failing."""
+    return (
+        lock.get("files") == current.get("files")
+        and lock.get("argv") == current.get("argv")
+        and lock.get("options_sha256") == current.get("options_sha256")
+    )
+
+
 def require_accepted_adapter(root, cfg: dict) -> None:
     """`fail(EXIT_FAIL)` unless `R/adapter.lock.json` matches the adapter's
     current files, argv and options (`adapter_digest`). Called by
@@ -729,11 +743,7 @@ def require_accepted_adapter(root, cfg: dict) -> None:
     lock_path = root / "adapter.lock.json"
     lock = read_json(lock_path, "adapter.lock.json") if lock_path.is_file() else {}
     current = adapter_digest(root, cfg)
-    if (
-        lock.get("files") != current["files"]
-        or lock.get("argv") != current["argv"]
-        or lock.get("options_sha256") != current["options_sha256"]
-    ):
+    if not adapter_lock_matches(lock, current):
         fail(
             "the adapter is not accepted for its current files and options: run adapter_check.py accept",
             EXIT_FAIL,

@@ -133,6 +133,8 @@ python3 S/canon.py freeze --root R
 
 Review turns later propose new candidates (each review batch writes
 `<batch dir>/new_canon_candidates.json`); import them the same way and approve as they come.
+Nothing a model proposes takes effect until a person approves it — an unapproved entry,
+do-not-translate entries included, stays out of `canon.lock.json`.
 
 Changing an approved entry later is always `canon.py change` (it states the current value and
 a reason), followed by a restricted audit of that entry in the locale:

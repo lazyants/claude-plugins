@@ -1,6 +1,6 @@
-"""Tests for `export_values.py` (plan section 11): recovery-first, the
-freshness guards, the temp-copy complete-record comparison, the journal +
-backups (including the ledger) with a per-file byte re-check, and rollback.
+"""Tests for `export_values.py`: recovery-first, the freshness guards, the
+temp-copy complete-record comparison, the journal + backups (including the
+ledger) with a per-file byte re-check, and rollback.
 
 Every test drives the real fixture toy adapter over a writable copy of the
 fixture toy project (`work_root/project`), collected and synced for real --
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -29,7 +30,7 @@ import lz_common  # noqa: E402
 
 # Derived empirically from tests/fixtures/toy_project's actual form counts
 # (cart.itemCount: en/de have 2 forms, ru has 3; mail.unreadCount: en/ru have
-# 3 forms, de has 2) -- see the plugin's plural contract (plan section 4).
+# 3 forms, de has 2) -- see the plugin's plural contract.
 TOY_OPTIONS = {
     "plural_labels": {
         "en": {"2": [["one", True], ["other", False]], "3": [["zero", True], ["one", True], ["other", False]]},
@@ -169,6 +170,22 @@ def test_export_writes_value_and_marks_translated(work_root):
     assert journal["status"] == "done"
 
 
+def test_export_preserves_the_project_files_permission_bits(work_root):
+    """A real export replaces a project file through a temp-file-plus-rename
+    dance; the destination's own permission bits (0o644, say -- not
+    mkstemp's private 0o600 default) must survive the replace."""
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+
+    de_path = project_dir / "locales" / "de.json"
+    de_path.chmod(0o644)
+
+    export_values.do_export(root, "de", dry_run=False)
+
+    assert stat.S_IMODE(de_path.stat().st_mode) == 0o644
+
+
 def test_export_only_touches_files_it_actually_changed(work_root):
     """en.json (source) and ru.json (a different locale) are both listed by
     the adapter but untouched by a de-only export -- neither should be
@@ -303,12 +320,10 @@ def test_export_human_locked_not_exported_unless_accepted(work_root):
 
 
 def test_export_recovers_leftover_in_progress_journal(work_root):
-    """Content-based recovery, not a `replaced` flag (removed): this
-    journal carries no such flag anywhere, only `backup_sha256`/
-    `new_sha256`, and recovery still tells the already-replaced project
-    file apart from the never-written ledger purely from what is on disk
-    right now -- exactly the crash window (bytes swapped, flag never
-    recorded) the flag-based version could not survive."""
+    """Content-based recovery: the journal carries only `backup_sha256`/
+    `new_sha256` for each file, and recovery tells the already-replaced
+    project file apart from the never-written ledger purely from what is on
+    disk right now -- surviving a crash landing anywhere in that window."""
     root, cfg, project_dir, by_id = setup_export_workspace(work_root)
 
     de_path = project_dir / "locales" / "de.json"
@@ -506,16 +521,13 @@ def test_export_refuses_when_an_untouched_declared_file_is_removed_after_staging
     """`_changed_files` (used to pick which files get backed up, replaced,
     and run through the per-file check right before each replace) skips a
     declared file outright once it stops being a file at all (`if not
-    dest.is_file(): continue`) -- so a declared file this export leaves
-    alone -- en.json (the source locale), untouched by a de-only export of
-    footer.copyright, per `test_export_only_touches_files_it_actually_changed`
-    -- that gets REMOVED between staging and commit never reaches that check
-    under the old code: `_changed_files` silently treats "no longer a file"
-    as "nothing to replace here", and the export would otherwise go on to
-    replace de.json anyway. The new check, run immediately before the
-    commit phase against every declared file (not only the ones about to be
-    replaced), catches this and refuses the whole export with nothing
-    replaced."""
+    dest.is_file(): continue`). en.json (the source locale) is declared by
+    the adapter but untouched by a de-only export of footer.copyright (per
+    `test_export_only_touches_files_it_actually_changed`); `_stale_declared_files`
+    is what still catches it if it gets REMOVED between staging and commit --
+    it checks every declared file against its staging-time hash immediately
+    before the commit phase, not only the ones `_changed_files` picked out
+    for replacement, so nothing is replaced when it fires."""
     root, cfg, project_dir, by_id = setup_export_workspace(work_root)
     set_candidate(root, "de", "footer.copyright",
                    make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
@@ -552,12 +564,11 @@ def test_export_refuses_when_an_untouched_declared_file_is_removed_after_staging
 
 
 def test_restore_backups_leaves_a_never_replaced_file_untouched(work_root):
-    """`_restore_backups` decides per file from its CURRENT bytes, never a
-    `replaced` flag (removed): a file whose bytes still match
-    `backup_sha256` was never actually replaced and is left exactly as it
-    is (restoring it too would just be a no-op, but the point of this test
-    is that the decision needs no flag at all); a file whose bytes match
-    `new_sha256` gets its backup restored. Neither is a conflict."""
+    """`_restore_backups` decides per file from its CURRENT bytes alone: a
+    file whose bytes still match `backup_sha256` was never actually
+    replaced and is left exactly as it is (restoring it too would just be a
+    no-op); a file whose bytes match `new_sha256` gets its backup restored.
+    Neither is a conflict."""
     root, cfg, project_dir, by_id = setup_export_workspace(work_root)
     export_dir = root / "exports" / "20260101T000000Z-manual"
     backup_dir = export_dir / "backup"
@@ -627,6 +638,31 @@ def test_export_rolls_back_the_replaced_file_and_ledger_after_a_real_replace(wor
     assert len(export_dirs) == 1
     journal = json.loads((export_dirs[0] / "journal.json").read_text(encoding="utf-8"))
     assert journal["status"] == "rolled_back"
+
+
+def test_export_rollback_preserves_the_project_files_permission_bits(work_root, monkeypatch):
+    """The rollback path restores the backup through the same temp-file-
+    plus-rename replace as a forward export; the destination's permission
+    bits must survive that too."""
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+
+    de_path = project_dir / "locales" / "de.json"
+    de_path.chmod(0o644)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated failure right after the real replace")
+
+    monkeypatch.setattr(export_values.ledger_mod, "record_export", boom)
+
+    try:
+        export_values.do_export(root, "de", dry_run=False)
+        raise AssertionError("expected export to roll back")
+    except SystemExit as exc:
+        assert exc.code == lz_common.EXIT_FAIL
+
+    assert stat.S_IMODE(de_path.stat().st_mode) == 0o644
 
 
 # --- CLI subprocess smoke test ----------------------------------------------

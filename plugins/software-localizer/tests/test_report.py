@@ -1,5 +1,5 @@
-"""Tests for `report.py` (plan section 11): the native-speaker report --
-exported and pending candidates, escalated ids with problems, audit findings
+"""Tests for `report.py`: the native-speaker report -- exported and pending
+candidates, escalated ids with problems, audit findings
 with proposals, canon candidates raised by reviews, and existing/human-locked
 notes. Ledger and messages are hand-built (report.py only reads durable
 state, never re-derives it), matching `test_ledger.py`'s own convention.
@@ -118,10 +118,10 @@ def test_report_exported_section(work_root):
 
 
 def test_report_adopted_entry_shows_project_value_under_adopted_label(work_root):
-    """Review round 3, item 4: `ledger.adopt` moves existing/human-locked
-    entries to "translated" without a candidate (plan section 7) -- before
-    the fix, this fell into "Exported" and read `candidate.value`, printing
-    "value: None" for a value the project genuinely has."""
+    """`ledger.adopt` moves existing/human-locked entries to "translated"
+    without a candidate; reading `candidate.value` for one of these would
+    print "value: None" for a value the project genuinely has, so it must
+    render under "Adopted" with the project's current value instead."""
     cfg = make_cfg()
     msgs = make_messages([make_message("a", "Hello", targets={"de": "Hallo (adopted)"})])
     entry = make_entry("translated", candidate=None)
@@ -201,9 +201,9 @@ def test_report_audit_findings_with_current_and_proposed(work_root):
 
 def test_report_accepted_audit_candidate_is_ready_to_export(work_root):
     """`accept-audit` leaves the entry `existing`/`human_locked` and clears
-    `audit_proposal` (plan section 9): a candidate that is otherwise ready
-    (checks pass, verdict pass on its hash, `accepted_by` set) must show up
-    under "Ready to export", not disappear into a plain note."""
+    `audit_proposal`: a candidate that is otherwise ready (checks pass,
+    verdict pass on its hash, `accepted_by` set) must show up under
+    "Ready to export", not disappear into a plain note."""
     cfg = make_cfg()
     msgs = make_messages([make_message("a", "Hello", targets={"de": "Hallo"})])
     candidate = make_candidate("Hallo!")
@@ -229,7 +229,30 @@ def test_report_existing_notes(work_root):
     text = report.build_report(work_root, "de")
     existing_section = text.split("## Existing")[1].split("## Canon candidates")[0]
     assert "`a`" in existing_section
-    assert "source changed while existing" in existing_section
+    # A note is rendered as its own readable text, not the raw ledger dict
+    # that carries it (which would leak its `at` timestamp and quoting).
+    assert "  - note: source changed while existing" in existing_section
+    assert "'at':" not in existing_section
+    assert "{'" not in existing_section
+
+
+def test_report_note_with_problems_rendered_one_per_line(work_root):
+    """A note recorded by a failed context re-check (`ledger.sync`) or an
+    escalation (`ledger.mark_escalated`) carries a `problems` list alongside
+    its text; each problem must render as its own line, not fold into the
+    note's dict repr."""
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello", targets={"de": "Hallo"})])
+    note = {"at": "2026-01-01T00:00:00Z", "note": "context changed and the re-check failed",
+            "problems": [{"check": "arguments", "detail": "missing {x}"}]}
+    entry = make_entry("existing", notes=[note])
+    setup_workspace(work_root, cfg, msgs, {"de": {"a": entry}})
+
+    text = report.build_report(work_root, "de")
+    existing_section = text.split("## Existing")[1].split("## Canon candidates")[0]
+    assert "  - note: context changed and the re-check failed" in existing_section
+    assert "    - problem: arguments: missing {x}" in existing_section
+    assert "{'check'" not in existing_section
 
 
 def test_report_canon_candidates_from_review_side_files(work_root):

@@ -1,4 +1,4 @@
-"""Tests for `ledger.py` (plan section 7): every state transition `sync()`
+"""Tests for `ledger.py`: every state transition `sync()`
 performs, plus the plain functions `packets.py`/`export_values.py` call
 directly, plus one real-subprocess check of the CLI's adapter wiring.
 
@@ -15,6 +15,8 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 TESTS_DIR = Path(__file__).resolve().parent
 SCRIPTS_DIR = TESTS_DIR.parent / "skills" / "software-localizer" / "scripts"
@@ -156,7 +158,7 @@ def test_save_then_load_roundtrips(work_root):
     assert ledger.load(work_root) == data
 
 
-def test_save_writes_one_file_per_locale_in_the_pinned_shape(work_root):
+def test_save_writes_one_file_per_locale_in_the_documented_shape(work_root):
     data = {"schema": 1, "locales": {
         "de": {"m1": {"state": "pending"}},
         "ru": {"m1": {"state": "existing"}},
@@ -819,6 +821,50 @@ def test_exportable_escalated_then_fixed():
         "a": {"state": "escalated", "candidate": make_candidate(checks="pass", verdict=passing_verdict)},
     }}}
     assert ledger.exportable(ledger_data, "de") == ["a"]
+
+
+# --- locale_entries / candidate_ready / candidate_needs_review -------------
+
+
+def test_locale_entries_defaults_to_empty_dict():
+    assert ledger.locale_entries({}, "de") == {}
+    assert ledger.locale_entries({"locales": {}}, "de") == {}
+
+
+def test_candidate_needs_review_true_when_checks_pass_and_no_verdict():
+    entry = {"candidate": make_candidate(checks="pass", verdict=None)}
+    assert ledger.candidate_needs_review(entry) is True
+    assert ledger.candidate_ready(entry) is False
+
+
+def test_candidate_needs_review_false_once_a_matching_pass_verdict_is_bound():
+    passing_verdict = {"value_sha256": lz_common.value_sha256("Hallo"), "verdict": "pass"}
+    entry = {"candidate": make_candidate(checks="pass", verdict=passing_verdict)}
+    assert ledger.candidate_needs_review(entry) is False
+    assert ledger.candidate_ready(entry) is True
+
+
+def test_candidate_needs_review_true_when_the_bound_verdict_is_stale():
+    stale_verdict = {"value_sha256": lz_common.value_sha256("a different value"), "verdict": "pass"}
+    entry = {"candidate": make_candidate(checks="pass", verdict=stale_verdict)}
+    assert ledger.candidate_needs_review(entry) is True
+    assert ledger.candidate_ready(entry) is False
+
+
+@pytest.mark.parametrize("entry", [
+    None,
+    "not a dict",
+    {},
+    {"candidate": None},
+    {"candidate": "not a dict"},
+    {"candidate": make_candidate(checks="fail")},
+    {"candidate": make_candidate(checks="pass", verdict="not a dict")},
+])
+def test_candidate_ready_and_needs_review_never_raise_on_a_malformed_entry(entry):
+    # A malformed entry must return False (or True for needs_review, once
+    # checks did pass but the verdict shape is unusable), never raise.
+    assert ledger.candidate_ready(entry) is False
+    ledger.candidate_needs_review(entry)  # must not raise
 
 
 def test_record_export_sets_translated_and_both_hashes():

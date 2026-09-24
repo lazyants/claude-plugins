@@ -1,4 +1,4 @@
-"""Tests for scaffold.py, driven as a real subprocess (plan sections 2-3)."""
+"""Tests for scaffold.py, driven as a real subprocess."""
 
 import json
 import subprocess

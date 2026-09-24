@@ -1,6 +1,6 @@
-"""Tests for `canon.py` (plan section 8): import merge rules, approve,
-freeze contents, change's `--expect` guard and its restricted-audit
-request, plus one real-subprocess round trip through the CLI.
+"""Tests for `canon.py`: import merge rules, approve, freeze contents,
+change's `--expect` guard and its restricted-audit request, plus one
+real-subprocess round trip through the CLI.
 """
 
 from __future__ import annotations
@@ -148,13 +148,12 @@ def test_import_updates_a_still_proposed_translation():
 
 
 def test_import_keeps_a_nonempty_current_list_for_display():
-    """Review round 3, item 5: `current` (the locale's live renderings a
-    canon turn saw at proposal time) is display-only and must survive
-    `import`, which used to discard it entirely -- an audit-mode proposal
-    could reach approval with no side-by-side evidence of what it was
-    replacing. An empty `current` is treated as nothing to display (see
-    `test_import_creates_a_new_proposed_entry`, which passes `"current":
-    []` and asserts the exact `proposed()` shape without it)."""
+    """`current` (the locale's live renderings a canon turn saw at proposal
+    time) is display-only and must survive `import`: dropping it would let
+    an audit-mode proposal reach approval with no side-by-side evidence of
+    what it was replacing. An empty `current` is treated as nothing to
+    display (see `test_import_creates_a_new_proposed_entry`, which passes
+    `"current": []` and asserts the exact `proposed()` shape without it)."""
     canon_data = {"schema": 1, "entries": []}
     canon.import_candidates(canon_data, [
         make_candidate_input(translations={"de": {"proposed": "Warenkorb", "current": ["Im Warenkorb"]}}),
@@ -288,8 +287,11 @@ def test_approve_appends_to_history(work_root):
 # --- freeze ----------------------------------------------------------------
 
 
-def test_freeze_includes_every_dnt_entry_unconditionally(work_root):
-    canon_data = {"schema": 1, "entries": [make_entry("d-brand", kind="dnt", source="Kinprove", occurrences=["m1"])]}
+def test_freeze_includes_an_approved_dnt_entry(work_root):
+    entry = make_entry("d-brand", kind="dnt", source="Kinprove", occurrences=["m1"])
+    entry["approved_by"] = "alice"
+    entry["approved_at"] = "2026-01-01T00:00:00Z"
+    canon_data = {"schema": 1, "entries": [entry]}
     canon.save(work_root, canon_data)
 
     lock = canon.freeze(work_root)
@@ -301,6 +303,18 @@ def test_freeze_includes_every_dnt_entry_unconditionally(work_root):
     assert locked["occurrences"] == ["m1"]
     assert "translations" not in locked
     assert "sha256" in locked and isinstance(locked["sha256"], str)
+
+
+def test_freeze_excludes_an_unapproved_dnt_entry(work_root):
+    """A model-proposed `dnt` (`import`ed but never `approve`d) must not
+    lock: `freeze` only carries a `dnt` entry a person has actually
+    approved (security-review observation)."""
+    canon_data = {"schema": 1, "entries": [make_entry("d-brand", kind="dnt", source="Kinprove", occurrences=["m1"])]}
+    canon.save(work_root, canon_data)
+
+    lock = canon.freeze(work_root)
+
+    assert lock["entries"] == []
 
 
 def test_freeze_includes_only_approved_translations_on_disk(work_root):

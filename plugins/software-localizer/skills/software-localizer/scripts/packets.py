@@ -1,15 +1,13 @@
-#!/usr/bin/env python3
-"""Build and accept model-turn packets (plan section 10): translate, review,
-audit, canon. Every packet is a frozen snapshot of what the model saw — a
-turn is validated against that snapshot, never against a possibly-changed
+"""Build and accept model-turn packets: translate, review, audit, canon.
+Every packet is a frozen snapshot of what the model saw — a turn is
+validated against that snapshot, never against a possibly-changed
 `messages.json` or `canon.json` read again later.
 
-The coverage turn is built and accepted by `adapter_check.py`, not here (plan
-section 6): its packet is not id-keyed the way the four kinds here are, and
-the pinned cross-module API gives this module no way to read its request.
+The coverage turn is built and accepted by `adapter_check.py`, not here: its
+packet is not id-keyed the way the four kinds here are, and the
+cross-module API gives this module no way to read its request.
 
-Design choices this module makes where the plan leaves a gap (see the build
-report for the reasoning kept short here):
+Design decisions worth calling out:
 
 - `build --kind canon` takes no `--locale` (it proposes canon for every
   target locale at once, matching `canon_TASK.md`'s reply shape) and scans
@@ -24,38 +22,40 @@ report for the reasoning kept short here):
   occurrences, with `canon_entry` set to the entry/before/after/reason.
 - `accept --kind translate` additionally excludes an id whose current
   candidate already has `checks: "pass"` and a `verdict: "pass"` bound to
-  that candidate's hash from a later `build --kind translate` (plan section
-  12 says the translate/review loop ends when `build` finds nothing left;
-  the ledger state alone (`pending`/`stale`) does not change until export,
-  so without this exclusion `build` would offer an already-approved
-  candidate for retranslation forever).
+  that candidate's hash from a later `build --kind translate` (the
+  translate/review loop ends when `build` finds nothing left; the ledger
+  state alone (`pending`/`stale`) does not change until export, so without
+  this exclusion `build` would offer an already-approved candidate for
+  retranslation forever).
 - An audit `fail` with a `proposed` value is stored on the ledger entry as
-  `audit_proposal` (an extra field beyond plan section 7's documented
-  schema; JSON round-trips it fine) — there is no pinned setter for it, so
-  it is read and written as a plain dict field, matching `accept-audit`'s
-  own job of turning it into a candidate. A `review` `fail` with a
-  `proposed` value routes here too when the candidate it is reviewing has
-  `origin: "audit"` (i.e. it was itself installed by `accept-audit` and is
-  now being reviewed per that command's "still needs a review verdict"
-  note): the checked replacement goes back into `audit_proposal`, not
-  straight into a candidate, so it still needs `accept-audit` again rather
-  than sitting as an unexportable candidate with `accepted_by: None`.
+  `audit_proposal` (an extra field beyond `ledger.py`'s documented entry
+  schema; JSON round-trips it fine) — there is no setter for it in
+  `ledger.py`, so it is read and written as a plain dict field, matching
+  `accept-audit`'s own job of turning it into a candidate. A `review` `fail`
+  with a `proposed` value routes here too when the candidate it is
+  reviewing has `origin: "audit"` (i.e. it was itself installed by
+  `accept-audit` and is now being reviewed per that command's "still needs a
+  review verdict" note): the checked replacement goes back into
+  `audit_proposal`, not straight into a candidate, so it still needs
+  `accept-audit` again rather than sitting as an unexportable candidate with
+  `accepted_by: None`.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import lz_common  # noqa: E402
 import adapter_client  # noqa: E402
+import canon as canon_mod  # noqa: E402
 import checks as checks_mod  # noqa: E402
 import ledger as ledger_mod  # noqa: E402
-import canon as canon_mod  # noqa: E402
+import lz_common  # noqa: E402
 
 KINDS = ("translate", "review", "audit", "canon")
 TRANSLATE_STATES = ("pending", "stale")
@@ -133,17 +133,20 @@ def make_batches(ids: list, batch_size: int) -> list:
 
 def name_batches(batches: list) -> list:
     """`[(name, ids), ...]`, names derived from each batch's id prefix and
-    de-duplicated within this call."""
+    de-duplicated within this call, case-insensitively -- two prefixes that
+    differ only in case (`Auth.x`, `auth.y`) name the same directory on a
+    case-insensitive filesystem (macOS), and the second batch would
+    otherwise silently overwrite the first (security-review observation)."""
     used: set = set()
     named = []
     for ids in batches:
         base = _sanitize_batch_name(batch_prefix(ids[0]))
         name = base
         n = 2
-        while name in used:
+        while name.lower() in used:
             name = f"{base}-{n}"
             n += 1
-        used.add(name)
+        used.add(name.lower())
         named.append((name, ids))
     return named
 
@@ -153,40 +156,18 @@ def name_batches(batches: list) -> list:
 # ---------------------------------------------------------------------------
 
 
-def _locale_entries(ledger_data: dict, locale: str) -> dict:
-    return ledger_data.get("locales", {}).get(locale, {})
-
-
-def _candidate_ready(entry: dict) -> bool:
-    """A candidate whose checks passed and whose verdict is a pass bound to
-    that exact candidate hash — nothing left for a translate round to do."""
-    cand = entry.get("candidate")
-    if not cand or cand.get("checks") != "pass":
-        return False
-    verdict = cand.get("verdict")
-    return bool(verdict) and verdict.get("verdict") == "pass" and verdict.get("value_sha256") == cand.get("value_sha256")
-
-
 def select_translate(ledger_data: dict, locale: str) -> list:
-    entries = _locale_entries(ledger_data, locale)
-    return [i for i, e in entries.items() if e.get("state") in TRANSLATE_STATES and not _candidate_ready(e)]
+    entries = ledger_mod.locale_entries(ledger_data, locale)
+    return [i for i, e in entries.items() if e.get("state") in TRANSLATE_STATES and not ledger_mod.candidate_ready(e)]
 
 
 def select_review(ledger_data: dict, locale: str) -> list:
-    entries = _locale_entries(ledger_data, locale)
-    result = []
-    for i, e in entries.items():
-        cand = e.get("candidate")
-        if not cand or cand.get("checks") != "pass":
-            continue
-        verdict = cand.get("verdict")
-        if verdict is None or verdict.get("value_sha256") != cand.get("value_sha256"):
-            result.append(i)
-    return result
+    entries = ledger_mod.locale_entries(ledger_data, locale)
+    return [i for i, e in entries.items() if ledger_mod.candidate_needs_review(e)]
 
 
 def select_audit(ledger_data: dict, locale: str) -> list:
-    entries = _locale_entries(ledger_data, locale)
+    entries = ledger_mod.locale_entries(ledger_data, locale)
     return [i for i, e in entries.items() if e.get("state") in AUDIT_STATES]
 
 
@@ -290,12 +271,12 @@ def build_translate_item(message: dict, locale: str, entry: dict) -> dict:
 
 
 def build_review_item(message: dict, locale: str, entry: dict) -> dict:
-    """The candidate's `source_sha256`/`context_sha256`/`style_sha256`
-    snapshots ride along as-built: `accept`'s review path re-checks them
-    against the *current* candidate before binding a verdict, so a verdict
-    cast on this snapshot never attaches to a candidate quietly rebuilt
-    under a changed context or style, even when the rebuilt value happens to
-    hash the same."""
+    """The candidate's `value_sha256`/`source_sha256`/`context_sha256`/
+    `style_sha256`/`canon_sha256` snapshots ride along as-built: `accept`'s
+    review path re-checks them against the *current* candidate before
+    binding a verdict, so a verdict cast on this snapshot never attaches to
+    a candidate quietly rebuilt under a changed context or style, even when
+    the rebuilt value happens to hash the same."""
     cand = entry["candidate"]
     item = {
         "id": message["id"],
@@ -367,7 +348,7 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None) 
     by_id = message_by_id(messages)
     ledger_data = ledger_mod.load(root)
     canon_lock = canon_mod.load_lock(root)
-    batch_size = cfg.get("batch_size", 40)
+    batch_size = cfg["batch_size"]
 
     if entry_id is not None:
         return _build_restricted_canon_audit(root, cfg, locale, entry_id, by_id, canon_lock, templates_dir)
@@ -399,7 +380,7 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None) 
     else:
         selected_ids = select_audit(ledger_data, locale)
 
-    entries = _locale_entries(ledger_data, locale)
+    entries = ledger_mod.locale_entries(ledger_data, locale)
     style = cfg["style"][locale]
     named = name_batches(make_batches(selected_ids, batch_size))
     batches_out = []
@@ -444,9 +425,9 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None) 
 def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: str, by_id: dict,
                                    canon_lock: dict, templates_dir: Path) -> dict:
     """`build --kind audit --entry ID`: the restricted canon audit
-    `canon.py change` requests (plan section 8) — an audit packet scoped to
-    one canon entry's occurrences, with `canon_entry` set so the reviewer
-    judges only that entry's rendering."""
+    `canon.py change` requests — an audit packet scoped to one canon entry's
+    occurrences, with `canon_entry` set so the reviewer judges only that
+    entry's rendering."""
     request_path = root / "runs" / locale / f"canon-audit-{entry_id}.json"
     if not request_path.is_file():
         lz_common.fail(f"no restricted canon-audit request for entry: {entry_id}",
@@ -455,7 +436,7 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
     occurrences = request.get("occurrences", [])
     style = cfg["style"][locale]
     run_locale_dir = root / "runs" / locale
-    batch_size = cfg.get("batch_size", 40)
+    batch_size = cfg["batch_size"]
 
     chunks = make_batches(occurrences, batch_size)
     canon_entry_meta = {
@@ -546,11 +527,11 @@ _CANDIDATE_SNAPSHOT_FIELDS = ("value_sha256", "source_sha256", "context_sha256",
 def _review_candidate_still_matches(ledger_data: dict, locale: str, msg_id: str, item: dict) -> bool:
     """A review verdict binds to the exact candidate the packet was built
     from: the id's *current* candidate must still carry the same
-    value_sha256, source_sha256, context_sha256 and style_sha256 the packet
-    item recorded at build time. If the candidate was rebuilt since (even to
-    the same value, under a changed context or style), this is False and
-    the verdict must not attach."""
-    entry = _locale_entries(ledger_data, locale).get(msg_id)
+    value_sha256, source_sha256, context_sha256, style_sha256 and
+    canon_sha256 the packet item recorded at build time. If the candidate
+    was rebuilt since (even to the same value, under a changed context or
+    style), this is False and the verdict must not attach."""
+    entry = ledger_mod.locale_entries(ledger_data, locale).get(msg_id)
     candidate = entry.get("candidate") if entry else None
     if candidate is None:
         return False
@@ -578,9 +559,9 @@ def _valid_review_canon_candidate(cand) -> bool:
 
 def _canon_import_shape(cand: dict, msg_id: str, locale: str) -> dict:
     """A validated raw candidate, wrapped in the shape `canon.py import
-    --file` reads (plan section 10, documented in `canon.py`'s own
-    docstring): `occurrences` is this message id, `translations` carries the
-    proposed value under this locale."""
+    --file` reads (documented in `canon.py`'s own module docstring):
+    `occurrences` is this message id, `translations` carries the proposed
+    value under this locale."""
     return {
         "kind": cand["kind"],
         "source": cand["source"],
@@ -591,8 +572,8 @@ def _canon_import_shape(cand: dict, msg_id: str, locale: str) -> dict:
 
 
 def _maybe_escalate(ledger_data: dict, cfg: dict, locale: str, msg_id: str, problems: list) -> bool:
-    entry = _locale_entries(ledger_data, locale).get(msg_id, {})
-    if entry.get("rounds", 0) >= cfg.get("max_rounds", 3):
+    entry = ledger_mod.locale_entries(ledger_data, locale).get(msg_id, {})
+    if entry.get("rounds", 0) >= cfg["max_rounds"]:
         ledger_mod.mark_escalated(ledger_data, locale, msg_id, problems)
         return True
     return False
@@ -609,29 +590,53 @@ def accept_translate(root: Path, cfg: dict, packet: dict, output: dict, ledger_d
     extra = sorted(set(translations) - set(items))
     canon_lock = packet.get("canon", {"entries": []})
 
+    # A malformed value (not a string, not `{"forms": [...]}` of strings --
+    # an int, None, a list, or a forms dict with non-string forms) must
+    # never reach the adapter's parse: only a shape-valid value's forms go
+    # into `extra_texts` below (security-review observation). One batched
+    # `_parse_batch` call covers the whole batch's source forms plus every
+    # shape-valid value's forms, matching `_accept_review_or_audit`.
+    value_forms_by_id: dict = {}
+    extra_texts: dict = {}
+    for msg_id, item in items.items():
+        if msg_id not in translations:
+            continue
+        value = translations[msg_id]
+        if isinstance(value, str) or lz_common.is_forms_value(value):
+            value_forms = checks_mod.forms_of(value)
+            value_forms_by_id[msg_id] = value_forms
+            for idx, form in enumerate(value_forms):
+                extra_texts[f"{msg_id}::value::{idx}"] = form
+    parse_results = _parse_batch(root, cfg, list(items.values()), extra_texts)
+
     accepted, failed, escalated = [], [], []
     for msg_id, item in items.items():
         if msg_id not in translations:
             continue
         value = translations[msg_id]
         message = item_to_message(item, locale)
-        source_forms = checks_mod.forms_of(item["source"])
-        try:
-            value_forms = checks_mod.forms_of(value)
-        except (TypeError, KeyError):
-            failed.append({"id": msg_id, "reason": "value is not a string or {'forms': [...]}"})
-            continue
-
         is_plural = item.get("target_labels") is not None
-        extra_texts = {f"{msg_id}::value::{idx}": form for idx, form in enumerate(value_forms)}
-        parse_results = _parse_batch(root, cfg, [item], extra_texts)
-        source_parse = _single_or_list(_parse_list(parse_results, msg_id, "source", source_forms), is_plural)
-        value_parse = _single_or_list(_parse_list(parse_results, msg_id, "value", value_forms), is_plural)
 
-        problems = checks_mod.check_candidate(message, locale, value, source_parse, value_parse, canon_lock, cfg)
+        value_forms = value_forms_by_id.get(msg_id)
+        if value_forms is None:
+            problems = [{
+                "check": "shape",
+                "detail": f"value is not a string or {{'forms': [...]}} of strings: {value!r}",
+            }]
+        else:
+            source_forms = checks_mod.forms_of(item["source"])
+            source_parse = _single_or_list(_parse_list(parse_results, msg_id, "source", source_forms), is_plural)
+            value_parse = _single_or_list(_parse_list(parse_results, msg_id, "value", value_forms), is_plural)
+            problems = checks_mod.check_candidate(message, locale, value, source_parse, value_parse, canon_lock, cfg)
+
+        # `lz_common.value_sha256` raises on a shape-invalid value (an int,
+        # None, a list); `sha256_json` computes the identical hash for a
+        # well-shaped value (it is what `value_sha256` itself delegates to)
+        # while never raising, so a malformed translation still gets a
+        # recorded (if unexportable) candidate instead of aborting accept.
         candidate = {
             "value": value,
-            "value_sha256": lz_common.value_sha256(value),
+            "value_sha256": lz_common.sha256_json(value),
             "origin": "translate",
             "source_sha256": ledger_mod.source_sha256(message),
             "context_sha256": ledger_mod.context_sha256(message, locale),
@@ -644,7 +649,7 @@ def accept_translate(root: Path, cfg: dict, packet: dict, output: dict, ledger_d
             "accepted_by": None,
         }
         ledger_mod.set_candidate(ledger_data, locale, msg_id, candidate)
-        entry = _locale_entries(ledger_data, locale)[msg_id]
+        entry = ledger_mod.locale_entries(ledger_data, locale)[msg_id]
         entry["rounds"] = entry.get("rounds", 0) + 1
 
         if problems:
@@ -674,8 +679,7 @@ def _valid_proposed_shape(proposed, is_plural: bool) -> bool:
     if proposed is None:
         return True
     if is_plural:
-        forms = proposed.get("forms") if isinstance(proposed, dict) else None
-        return isinstance(forms, list) and all(isinstance(f, str) for f in forms)
+        return lz_common.is_forms_value(proposed)
     return isinstance(proposed, str)
 
 
@@ -765,9 +769,10 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             raw_candidates = []
         elif not isinstance(raw_candidates, list):
             # The whole field is the wrong shape (e.g. a string) -- record
-            # it as one invalid entry rather than iterating its characters,
-            # which used to land single-character "candidates" in the side
-            # file and break report.py's `cand.get(...)` reads.
+            # it as one invalid entry rather than iterating its characters:
+            # iterating a string here would land single-character
+            # "candidates" in the side file and break report.py's
+            # `cand.get(...)` reads.
             invalid_canon_candidates.append({"id": msg_id, "candidate": raw_candidates})
             raw_candidates = []
         for cand in raw_candidates:
@@ -785,14 +790,14 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         # fail
         if kind == "review":
             ledger_mod.record_verdict(ledger_data, locale, msg_id, run_verdict)
-            entry = _locale_entries(ledger_data, locale)[msg_id]
+            entry = ledger_mod.locale_entries(ledger_data, locale)[msg_id]
             failed_ids.append(msg_id)
-            # Escalation timing (plan section 10): test whether `rounds` has
-            # ALREADY reached `max_rounds` before this failure, not after
-            # bumping it for this round -- otherwise a failure at
+            # Escalation timing: test whether `rounds` has ALREADY reached
+            # `max_rounds` before this failure, not after bumping it for
+            # this round -- otherwise a failure at
             # `rounds == max_rounds - 1` escalates one round early and
             # discards a proposal that should still have been installed and
-            # reviewed (review round 3, item 3).
+            # reviewed.
             if _maybe_escalate(ledger_data, cfg, locale, msg_id, verdict.get("issues", [])):
                 escalated.append(msg_id)
                 entry["review_proposal"] = {"value": verdict.get("proposed"), "issues": verdict.get("issues", []),
@@ -821,7 +826,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                     # carry `accepted_by: None` with no route back to
                     # `accept-audit` (which reads `audit_proposal`, already
                     # cleared when this candidate was accepted) -- it could
-                    # never be exported (review round 3, item 2).
+                    # never be exported.
                     entry["audit_proposal"] = {
                         "value": proposed,
                         "value_sha256": lz_common.value_sha256(proposed),
@@ -864,7 +869,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                 problems = checks_mod.check_candidate(
                     message, locale, proposed, source_parse, proposed_parse, canon_lock, cfg,
                 )
-                entry = _locale_entries(ledger_data, locale).setdefault(msg_id, {})
+                entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
                 entry["audit_proposal"] = {
                     "value": proposed,
                     "value_sha256": lz_common.value_sha256(proposed),
@@ -947,15 +952,14 @@ def _valid_canon_translations(translations, target_locales: list) -> bool:
 
 def _valid_canon_output_candidate(cand, valid_ids: set, target_locales: list) -> bool:
     """One candidate from `build --kind canon`'s output, checked before it
-    is written to `candidates.json` (plan section 10, item 3 of the review
-    fix): `kind` in term|ui_label|dnt, a non-empty string `source`, `note`
-    a string or absent, `occurrences` a list of strings each naming an id
-    present in this packet (a non-string entry such as `[123]` used to
-    reach `canon.json` and silently defeat `checks._check_dnt`, which
-    matches occurrences by exact string id), and `translations` -- when
-    given -- an object whose keys are this packet's target locales and
-    whose values carry an optional string `proposed` and an optional
-    list-of-strings `current`."""
+    is written to `candidates.json`: `kind` in term|ui_label|dnt, a
+    non-empty string `source`, `note` a string or absent, `occurrences` a
+    list of strings each naming an id present in this packet (a non-string
+    entry such as `[123]` must not reach `canon.json`: it would silently
+    defeat `checks._check_dnt`, which matches occurrences by exact string
+    id), and `translations` -- when given -- an object whose keys are this
+    packet's target locales and whose values carry an optional string
+    `proposed` and an optional list-of-strings `current`."""
     if not isinstance(cand, dict):
         return False
     if cand.get("kind") not in CANDIDATE_KINDS:
@@ -1010,7 +1014,7 @@ def do_accept_audit(root: Path, locale: str, ids: list, by: str) -> dict:
     if locale not in cfg["target_locales"]:
         lz_common.fail(f"locale is not a configured target: {locale}", lz_common.EXIT_CANNOT, locale=locale)
     ledger_data = ledger_mod.load(root)
-    entries = _locale_entries(ledger_data, locale)
+    entries = ledger_mod.locale_entries(ledger_data, locale)
 
     accepted, failed = [], []
     for msg_id in ids:
@@ -1111,7 +1115,9 @@ def main() -> int:
         lz_common.emit(result)
         return lz_common.EXIT_OK if not result["failed"] else lz_common.EXIT_FAIL
 
-    lz_common.fail(f"unknown command: {args.command}", lz_common.EXIT_CANNOT)
+    # Unreachable: argparse's required subparsers group admits only the
+    # three commands above.
+    raise AssertionError(f"unknown command: {args.command}")
 
 
 if __name__ == "__main__":

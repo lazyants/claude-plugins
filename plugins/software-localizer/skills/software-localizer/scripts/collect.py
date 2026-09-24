@@ -1,14 +1,17 @@
-"""Collect the project's current strings into `R/messages.json` (plan
-section 6, last paragraph). Refuses unless the adapter is accepted
-(`lz_common.require_accepted_adapter`); the actual adapter invocation and
-message-format validation are `adapter_client.collect`'s job."""
+"""Collect the project's current strings into `R/messages.json`. Refuses
+unless the adapter is accepted (`lz_common.require_accepted_adapter`); the
+actual adapter invocation and message-format validation are
+`adapter_client.collect`'s job."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import os
+import sys
 
-import adapter_client
-import lz_common
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import adapter_client  # noqa: E402
+import lz_common  # noqa: E402
 
 
 def main() -> int:

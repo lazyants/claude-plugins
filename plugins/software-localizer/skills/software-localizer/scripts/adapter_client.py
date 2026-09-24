@@ -1,11 +1,16 @@
-"""The only module that invokes a project adapter (plan section 5).
+"""The only module that invokes a project adapter. See
+references/adapter-contract.md for the full contract.
 
 An adapter is `cfg["adapter"]["argv"]` plus one of `collect` / `export` /
 `parse`, run with the project root as the working directory, stdin closed,
 and a timeout. It must print exactly one JSON line on stdout and exit `0`.
 Any other outcome — non-zero exit, a timeout, output that is not exactly one
 JSON line, or a reply missing a field this contract requires — becomes an
-`AdapterError` naming the command that failed.
+`AdapterError` naming the command that failed. The one exception:
+`collect`'s reply is validated as a shape-checked `messages.json` and, on a
+mismatch, exits straight through `lz_common.fail` (`EXIT_CANNOT`) rather
+than raising `AdapterError` -- a malformed collect is a broken adapter, not
+a recoverable invocation failure.
 
 `collect`/`export`/`parse` write their options (and, for `export`/`parse`,
 their other input) to a temp file under the workspace root and pass its path
@@ -18,9 +23,12 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 
-import lz_common
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import lz_common  # noqa: E402
 
 
 class AdapterError(Exception):
@@ -220,7 +228,7 @@ def parse(root: str, cfg: dict, project_dir: str, items: list[dict]) -> dict[str
         extra_args = ["--options", options_path, "--in", in_path]
         reply = run(root, cfg, project_dir, "parse", extra_args)
 
-    # `parse`'s contract (plan section 5) does not require a top-level "ok"
+    # `parse`'s contract does not require a top-level "ok"
     # field to succeed, but a reply that carries one and sets it to
     # anything other than `True` is contradicting itself -- e.g. `{"ok":
     # false, "results": {...}}` -- and must not be silently accepted just

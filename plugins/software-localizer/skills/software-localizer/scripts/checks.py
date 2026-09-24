@@ -1,4 +1,4 @@
-"""Script checks for a candidate translation value (plan section 9).
+"""Script checks for a candidate translation value.
 
 Pure functions only: everything they need — the message, the adapter's parse
 results for the source and the candidate, the frozen canon, the config — is
@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from collections import Counter
 from typing import Any
+
+import lz_common
 
 
 def forms_of(value: Any) -> list:
@@ -56,7 +58,7 @@ def check_candidate(
     canon_lock: dict,
     cfg: dict,
 ) -> list[dict]:
-    """Every script check of plan section 9 against one candidate value.
+    """Every script check against one candidate value.
 
     Returns a list of `{"check", "detail"}` problems, empty on a full pass.
     `source_parse`/`value_parse` are a single parse result for a non-plural
@@ -69,14 +71,12 @@ def check_candidate(
     source_forms = forms_of(source)
 
     if is_plural:
-        forms_value = value.get("forms") if isinstance(value, dict) else None
-        forms_ok = isinstance(forms_value, list) and all(isinstance(f, str) for f in forms_value)
-        if not forms_ok:
-            # `{"forms": [...]}` with every form a string, exactly -- not
-            # merely a dict with a "forms" key. A bare string here (e.g.
-            # `{"forms": "A"}`) used to be accepted as-is: `list("A")`
-            # coincidentally produces a one-element list, which can pass a
-            # single-target-label plural silently instead of being refused.
+        # `{"forms": [...]}` with every form a string, exactly -- not
+        # merely a dict with a "forms" key. A bare string (e.g.
+        # `{"forms": "A"}`) must not pass as a forms list: `list("A")`
+        # coincidentally produces a one-element list, which would pass a
+        # single-target-label plural silently instead of being refused.
+        if not lz_common.is_forms_value(value):
             return [{
                 "check": "forms",
                 "detail": f"locale {locale!r}: expected a forms list, got {value!r}",
@@ -84,7 +84,7 @@ def check_candidate(
         target_labels = plural_spec["target_labels"][locale]
         general_index = plural_spec["general_index"]
         count_arguments = set(plural_spec.get("count_arguments", []))
-        value_forms = list(forms_value)
+        value_forms = list(value["forms"])
         source_parses = list(source_parse)
         value_parses = list(value_parse)
     else:
@@ -319,15 +319,17 @@ def _check_whitespace(is_plural, value_forms, source_forms, target_labels, gener
 
 
 def _check_empty(value_forms, is_plural, target_labels) -> list[dict]:
+    # Every `value_forms` element is already a string here: `check_candidate`
+    # refuses (the "forms" problem, above) before this runs otherwise.
     problems = []
     for i, vf in enumerate(value_forms):
-        if not isinstance(vf, str) or vf.strip() == "":
+        if vf.strip() == "":
             label = _label_at(target_labels, i) if is_plural else "value"
             problems.append({"check": "empty", "detail": f"form '{label}' is empty or whitespace-only"})
     return problems
 
 
-def _dnt_source_texts(canon_lock: dict) -> list[dict]:
+def _dnt_entries(canon_lock: dict) -> list[dict]:
     return [e for e in canon_lock.get("entries", []) if e.get("kind") == "dnt"]
 
 
@@ -336,8 +338,11 @@ def _check_identical(message, value_forms, source_forms, is_plural, general_inde
         return []
     if value_forms != source_forms:
         return []
-    compare_source = source_forms[general_index] if is_plural else source_forms[0]
-    for entry in _dnt_source_texts(canon_lock):
+    # `check_candidate` sets `general_index = 0` for a non-plural message, so
+    # `source_forms[general_index]` is already `source_forms[0]` there --
+    # no need to branch on `is_plural`.
+    compare_source = source_forms[general_index]
+    for entry in _dnt_entries(canon_lock):
         if entry.get("source") == compare_source:
             return []
     return [{"check": "identical", "detail": "value is identical to the source"}]
@@ -347,9 +352,11 @@ def _check_max_length(message, value_forms, is_plural, target_labels) -> list[di
     max_length = (message.get("context") or {}).get("max_length")
     if max_length is None:
         return []
+    # Every `value_forms` element is already a string here (see
+    # `_check_empty`).
     problems = []
     for i, vf in enumerate(value_forms):
-        if isinstance(vf, str) and len(vf) > max_length:
+        if len(vf) > max_length:
             label = _label_at(target_labels, i) if is_plural else "value"
             problems.append({
                 "check": "max_length",
@@ -359,14 +366,16 @@ def _check_max_length(message, value_forms, is_plural, target_labels) -> list[di
 
 
 def _check_dnt(message, value_forms, is_plural, target_labels, canon_lock) -> list[dict]:
+    # Every `value_forms` element is already a string here (see
+    # `_check_empty`).
     problems = []
     msg_id = message["id"]
-    for entry in _dnt_source_texts(canon_lock):
+    for entry in _dnt_entries(canon_lock):
         if msg_id not in entry.get("occurrences", []):
             continue
         term = entry.get("source", "")
         for i, vf in enumerate(value_forms):
-            if not isinstance(vf, str) or term not in vf:
+            if term not in vf:
                 label = _label_at(target_labels, i) if is_plural else "value"
                 problems.append({
                     "check": "dnt",

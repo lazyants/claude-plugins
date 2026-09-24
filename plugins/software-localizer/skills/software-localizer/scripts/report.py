@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
-"""Write `R/reports/<locale>.md`, a native-speaker-readable report (plan
-section 11): exported and pending candidates with source and context,
+"""Write `R/reports/<locale>.md`, a native-speaker-readable report:
+exported and pending candidates with source and context,
 adopted entries (translated with no candidate — `ledger.adopt` took the
 project's own value) shown with that current value, audit findings with
 proposals, escalated ids with their problems, canon candidates raised by
@@ -15,31 +14,19 @@ into the ledger or was refused before it got here.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import lz_common  # noqa: E402
 import ledger as ledger_mod  # noqa: E402
 
 
-def _ready(entry: dict) -> bool:
-    cand = entry.get("candidate")
-    if not cand or cand.get("checks") != "pass":
-        return False
-    verdict = cand.get("verdict")
-    return bool(verdict) and verdict.get("verdict") == "pass" and verdict.get("value_sha256") == cand.get("value_sha256")
-
-
-def _source_text(message: dict):
-    source = message.get("source")
-    if isinstance(source, dict):
-        return " / ".join(source.get("forms", []))
-    return source
-
-
 def _value_text(value):
+    """A message value or source can be a plain string or `{"forms": [...]}`
+    (plural forms); render either as one human-readable line."""
     if isinstance(value, dict):
         return " / ".join(value.get("forms", []))
     return value
@@ -65,8 +52,19 @@ def _section(lines: list, title: str, rows: list, row_fn) -> None:
     lines.append("")
 
 
+_MISSING = "(no longer in the project)"
+
+
 def _missing_line(msg_id: str) -> str:
-    return f"- `{msg_id}` — (no longer in the project)"
+    return f"- `{msg_id}` — {_MISSING}"
+
+
+def _context_or_missing(message) -> str:
+    return _context_line(message) if message else _MISSING
+
+
+def _problem_text(p: dict) -> str:
+    return f"{p.get('check', p.get('kind', '?'))}: {p.get('detail', p.get('text', ''))}"
 
 
 def _row_exported(msg_id, entry, message):
@@ -75,7 +73,7 @@ def _row_exported(msg_id, entry, message):
     value = (entry.get("candidate") or {}).get("value")
     return [
         f"- `{msg_id}` — {_context_line(message)}",
-        f"  - source: {_source_text(message)}",
+        f"  - source: {_value_text(message.get('source'))}",
         f"  - value: {_value_text(value)}",
     ]
 
@@ -86,7 +84,7 @@ def _row_candidate(msg_id, entry, message):
     value = (entry.get("candidate") or {}).get("value")
     return [
         f"- `{msg_id}` — {_context_line(message)}",
-        f"  - source: {_source_text(message)}",
+        f"  - source: {_value_text(message.get('source'))}",
         f"  - candidate: {_value_text(value)}",
     ]
 
@@ -96,7 +94,7 @@ def _row_adopted(msg_id, entry, message, current_value):
         return [_missing_line(msg_id)]
     return [
         f"- `{msg_id}` — {_context_line(message)}",
-        f"  - source: {_source_text(message)}",
+        f"  - source: {_value_text(message.get('source'))}",
         f"  - value: {_value_text(current_value)}",
     ]
 
@@ -104,19 +102,19 @@ def _row_adopted(msg_id, entry, message, current_value):
 def _row_pending(msg_id, entry, message):
     if message is None:
         return [_missing_line(msg_id)]
-    out = [f"- `{msg_id}` — {_context_line(message)}", f"  - source: {_source_text(message)}"]
+    out = [f"- `{msg_id}` — {_context_line(message)}", f"  - source: {_value_text(message.get('source'))}"]
     candidate = entry.get("candidate")
     if candidate and candidate.get("problems"):
         for p in candidate["problems"]:
-            out.append(f"  - problem: {p.get('check', p.get('kind', '?'))}: {p.get('detail', p.get('text', ''))}")
+            out.append(f"  - problem: {_problem_text(p)}")
     return out
 
 
 def _row_escalated(msg_id, entry, message):
-    out = [f"- `{msg_id}` — {_context_line(message) if message else '(no longer in the project)'}"]
+    out = [f"- `{msg_id}` — {_context_or_missing(message)}"]
     candidate = entry.get("candidate") or {}
     for p in candidate.get("problems", []):
-        out.append(f"  - problem: {p.get('check', p.get('kind', '?'))}: {p.get('detail', p.get('text', ''))}")
+        out.append(f"  - problem: {_problem_text(p)}")
     proposal = entry.get("review_proposal")
     if proposal and proposal.get("value") is not None:
         out.append(f"  - kept proposal (never installed): {_value_text(proposal.get('value'))}")
@@ -124,9 +122,9 @@ def _row_escalated(msg_id, entry, message):
 
 
 def _row_audit(msg_id, entry, message, current_value):
-    out = [f"- `{msg_id}` — {_context_line(message) if message else '(no longer in the project)'}"]
+    out = [f"- `{msg_id}` — {_context_or_missing(message)}"]
     if message is not None:
-        out.append(f"  - source: {_source_text(message)}")
+        out.append(f"  - source: {_value_text(message.get('source'))}")
     out.append(f"  - current: {_value_text(current_value)}")
     proposal = entry["audit_proposal"]
     out.append(f"  - proposed: {_value_text(proposal.get('value'))} (checks {proposal.get('checks')})")
@@ -136,9 +134,14 @@ def _row_audit(msg_id, entry, message, current_value):
 
 
 def _row_notes(msg_id, entry, message):
-    out = [f"- `{msg_id}` — {_context_line(message) if message else '(no longer in the project)'}"]
+    """A note is a ledger record (`{"at": ..., "note": text, "problems"?:
+    [...]}`), never a bare string — render its text, and any problems it
+    carries, as readable lines instead of the dict itself."""
+    out = [f"- `{msg_id}` — {_context_or_missing(message)}"]
     for note in entry.get("notes", []):
-        out.append(f"  - note: {note}")
+        out.append(f"  - note: {note.get('note', '')}")
+        for p in note.get("problems", []):
+            out.append(f"    - problem: {_problem_text(p)}")
     return out
 
 
@@ -163,7 +166,7 @@ def build_report(root: Path, locale: str) -> str:
     messages = lz_common.load_messages(root / "messages.json")
     by_id = {m["id"]: m for m in messages["messages"]}
     ledger_data = ledger_mod.load(root)
-    entries = ledger_data.get("locales", {}).get(locale, {})
+    entries = ledger_mod.locale_entries(ledger_data, locale)
 
     exported, adopted, ready, needs_translation = [], [], [], []
     escalated, audit_findings, existing_notes = [], [], []
@@ -183,24 +186,23 @@ def build_report(root: Path, locale: str) -> str:
                 exported.append((msg_id, entry, message))
             else:
                 # `ledger.adopt` moves existing/human-locked entries to
-                # "translated" without a candidate (it treats the project's
-                # own value as the baseline, plan section 7). Reading
-                # `candidate.value` for one of these prints "None" under
-                # "Exported"; show the project's current value instead,
-                # under its own label (review round 3, item 4).
+                # "translated" without a candidate -- it treats the
+                # project's own value as the baseline. Reading
+                # `candidate.value` for one of these would print "None"
+                # under "Exported"; show the project's current value
+                # instead, under its own label.
                 current_value = message.get("targets", {}).get(locale) if message else None
                 adopted.append((msg_id, entry, message, current_value))
         elif state in ("pending", "stale"):
-            (ready if _ready(entry) else needs_translation).append((msg_id, entry, message))
+            (ready if ledger_mod.candidate_ready(entry) else needs_translation).append((msg_id, entry, message))
         elif state == "escalated":
             escalated.append((msg_id, entry, message))
         elif state in ("existing", "human_locked"):
             candidate = entry.get("candidate")
             # `accept-audit` leaves the entry existing/human_locked and
-            # clears `audit_proposal` (plan section 9) -- without this, a
-            # ready, accepted replacement fell through to a plain note and
-            # never showed up as actionable at all.
-            if candidate and candidate.get("accepted_by") and _ready(entry):
+            # clears `audit_proposal`; a ready, accepted replacement must
+            # still show up as actionable, not as a plain note.
+            if candidate and candidate.get("accepted_by") and ledger_mod.candidate_ready(entry):
                 ready.append((msg_id, entry, message))
             elif not entry.get("audit_proposal"):
                 existing_notes.append((msg_id, entry, message))

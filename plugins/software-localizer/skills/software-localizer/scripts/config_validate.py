@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Validate `localize.json` against the v0.1 schema (plan section 3).
+"""Validate `localize.json` against schema 1.
 
 CLI: `config_validate.py --root R`. Importable: `lz_common.validate_config`
 is where the rules actually live; this script only wires it to argv and to
@@ -10,7 +9,6 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -19,7 +17,7 @@ import lz_common  # noqa: E402
 
 def main() -> int:
     parser = lz_common.make_parser(
-        prog="config_validate.py", description="Validate localize.json against the v0.1 schema."
+        prog="config_validate.py", description="Validate localize.json against schema 1."
     )
     parser.add_argument("--root", required=True)
     args = parser.parse_args()

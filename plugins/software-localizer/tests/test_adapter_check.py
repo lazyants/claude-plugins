@@ -1,4 +1,4 @@
-"""Tests for `adapter_check.py` (plan section 6): `run` exercises the "toy"
+"""Tests for `adapter_check.py`: `run` exercises the "toy"
 fixture adapter (`tests/fixtures/toy_adapter.py`) against a copy of
 `tests/fixtures/toy_project/` in a temporary project copy, and `accept`
 turns a coverage turn's answer into `adapter.lock.json`.
@@ -30,8 +30,8 @@ COLLECT = SCRIPTS_DIR / "collect.py"
 TOY_PROJECT = FIXTURES_DIR / "toy_project"
 TOY_ADAPTER = FIXTURES_DIR / "toy_adapter.py"
 
-# Mirrors the toy adapter's expected --options shape (references/adapter-contract.md,
-# plan section 5.4): labels for the two source plural-form counts the fixture project
+# Mirrors the toy adapter's expected --options shape (references/adapter-contract.md):
+# labels for the two source plural-form counts the fixture project
 # uses (2: cart.itemCount, 3: mail.unreadCount).
 TOY_OPTIONS = {
     "plural_labels": {
@@ -116,6 +116,24 @@ def _run(script: Path, args: list[str], cwd: Path | None = None) -> tuple[int, d
 
 def _write_coverage(path: Path, missing: list[dict]) -> None:
     path.write_text(json.dumps({"missing": missing}), encoding="utf-8")
+
+
+# --- _first_of() ---------------------------------------------------------------
+
+
+def test_first_of_treats_an_explicit_null_plural_as_non_plural():
+    """F1: `_first_of` used to test `"plural" in message`, which is `True`
+    even when the value is `None` -- `messages_shape_problem` treats a
+    message with `"plural": null` the same as one with no `plural` key at
+    all (both are non-plural), so this message was wrongly classified as
+    plural and skipped by the non-plural probe. `message.get("plural") is
+    not None`, the same test used everywhere else (e.g. in
+    `messages_shape_problem` itself), decides plural-ness correctly."""
+    non_plural_with_null_key = {"id": "a", "plural": None}
+    plural_msg = {"id": "b", "plural": {"source_labels": []}}
+    messages = [non_plural_with_null_key, plural_msg]
+    assert adapter_check._first_of(messages, plural=False) == non_plural_with_null_key
+    assert adapter_check._first_of(messages, plural=True) == plural_msg
 
 
 # --- run(): the valid fixture ------------------------------------------------

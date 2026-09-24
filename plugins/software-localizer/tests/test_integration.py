@@ -1,13 +1,13 @@
-"""Integration test ("the seam", plan section 13): drives every real
-software-localizer script as a subprocess against the fixture toy adapter
-and a writable copy of the fixture toy project, end to end --
+"""Integration test ("the seam"): drives every real software-localizer
+script as a subprocess against the fixture toy adapter and a writable copy
+of the fixture toy project, end to end --
 
     scaffold -> config -> adapter acceptance -> collect -> ledger sync ->
     canon (import/approve/freeze) -> translate -> review -> export ->
     audit -> report
 
--- plus the three failure cases plan section 13 names. `messages.json` is
-never hand-written anywhere in this file: it only ever comes from a real
+-- plus three failure cases. `messages.json` is never hand-written anywhere
+in this file: it only ever comes from a real
 `collect.py` run. `localize.json` is filled in directly (exactly what an
 operator does by hand in `SKILL.md` step 1) and every model turn's answer is
 a small canned JSON file this test writes (exactly what the driving session
@@ -31,7 +31,7 @@ import lz_common  # noqa: E402  (read-only: value hashing/atomic writes for the 
 
 # Derived empirically from tests/fixtures/toy_project's actual form counts
 # (cart.itemCount: en/de have 2 forms, ru has 3; mail.unreadCount: en/ru have
-# 3 forms, de has 2) -- see the plugin's plural contract (plan section 4).
+# 3 forms, de has 2) -- see the plugin's plural contract.
 TOY_OPTIONS = {
     "plural_labels": {
         "en": {"2": [["one", True], ["other", False]], "3": [["zero", True], ["one", True], ["other", False]]},

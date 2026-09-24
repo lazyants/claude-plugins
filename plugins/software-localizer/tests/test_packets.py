@@ -1,4 +1,4 @@
-"""Tests for `packets.py` (plan section 10): build selection and batching,
+"""Tests for `packets.py`: build selection and batching,
 accept's per-kind rules (translate/review/audit/canon), and `accept-audit`.
 
 Most tests call `packets.do_build`/`packets.do_accept`/`packets.do_accept_audit`
@@ -273,6 +273,27 @@ def test_build_batches_by_prefix_and_batch_size(work_root):
     assert names == {"app", "app-2", "nav"}
 
 
+def test_build_batch_names_deduplicate_case_insensitively(work_root):
+    """Security-review fix: two prefixes differing only by case ("Auth" and
+    "auth") must not produce the same batch name -- on a case-insensitive
+    filesystem (macOS) that would make the second batch's directory silently
+    overwrite the first's."""
+    cfg = make_cfg()
+    ids = ["Auth.x", "auth.y"]
+    msgs = make_messages([make_message(i, "x") for i in ids])
+    ledger_locales = {"de": {i: make_entry("pending") for i in ids}}
+    setup_workspace(work_root, cfg, msgs, ledger_locales)
+
+    result = packets.do_build(work_root, "translate", "de", TEMPLATES_DIR)
+
+    names = {b["batch"] for b in result["batches"]}
+    assert names == {"Auth", "auth-2"}  # two distinct names, not one overwriting the other
+    dirs = {Path(b["dir"]) for b in result["batches"]}
+    assert len(dirs) == 2
+    for d in dirs:
+        assert (d / "packet.json").is_file()
+
+
 def test_build_requires_locale_for_non_canon(work_root):
     cfg = make_cfg()
     setup_workspace(work_root, cfg, make_messages([]), {})
@@ -413,6 +434,68 @@ def test_accept_translate_checks_fail_increments_rounds(work_root):
     assert entry["state"] == "pending"  # not yet at max_rounds
 
 
+def test_accept_translate_batches_the_whole_batch_into_one_parse_call(work_root, monkeypatch):
+    """C1 fix: `accept_translate` calls the adapter's parse ONCE for the
+    whole batch, not once per item."""
+    call_count = 0
+
+    def counting_parse(root, cfg, project_dir, items):
+        nonlocal call_count
+        call_count += 1
+        return fake_parse(root, cfg, project_dir, items)
+
+    monkeypatch.setattr(adapter_client, "parse", counting_parse)
+
+    cfg = make_cfg()
+    ids = ["m.a", "m.b", "m.c"]
+    msgs = make_messages([make_message(i, "Hello") for i in ids])
+    run_dir = build_one_batch(work_root, cfg, msgs, {"de": {i: make_entry("pending") for i in ids}}, "translate", "de")
+    output_path = write_output(run_dir, {"translations": {"m.a": "Hallo", "m.b": "Hallo", "m.c": "Hallo"}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+
+    assert result["accepted"] == ["m.a", "m.b", "m.c"]
+    assert call_count == 1
+
+
+def test_accept_translate_malformed_value_becomes_shape_failure_never_reaches_adapter(work_root, monkeypatch):
+    """F2 fix (security-review observation): a translation value that is
+    not a string and not a well-formed `{"forms": [...]}` (int, None, list,
+    or a forms dict with non-string forms) must become a per-item "shape"
+    failure -- never reach the adapter's parse -- and must not abort the
+    rest of the batch."""
+    def guarding_parse(root, cfg, project_dir, items):
+        for item in items:
+            assert isinstance(item["text"], str), f"a non-string value reached the adapter: {item!r}"
+        return fake_parse(root, cfg, project_dir, items)
+
+    monkeypatch.setattr(adapter_client, "parse", guarding_parse)
+
+    cfg = make_cfg()
+    ids = ["m.a", "m.b", "m.c", "m.d"]
+    msgs = make_messages([make_message(i, "Hello") for i in ids])
+    run_dir = build_one_batch(work_root, cfg, msgs, {"de": {i: make_entry("pending") for i in ids}}, "translate", "de")
+    output_path = write_output(run_dir, {
+        "translations": {"m.a": None, "m.b": 42, "m.c": ["Hallo"], "m.d": "Hallo"},
+    })
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+
+    assert result["accepted"] == ["m.d"]
+    failed = {f["id"]: f for f in result["failed"]}
+    for bad_id in ("m.a", "m.b", "m.c"):
+        assert failed[bad_id]["problems"][0]["check"] == "shape"
+
+    ledger_data = ledger_mod.load(work_root)
+    for bad_id in ("m.a", "m.b", "m.c"):
+        entry = ledger_data["locales"]["de"][bad_id]
+        assert entry["candidate"]["checks"] == "fail"
+        assert entry["candidate"]["problems"][0]["check"] == "shape"
+        assert entry["rounds"] == 1
+    good_entry = ledger_data["locales"]["de"]["m.d"]
+    assert good_entry["candidate"]["checks"] == "pass"
+
+
 def test_accept_translate_escalates_at_max_rounds(work_root):
     cfg = make_cfg(max_rounds=1)
     msgs = make_messages([make_message("a", "Hello {name}")])
@@ -426,13 +509,12 @@ def test_accept_translate_escalates_at_max_rounds(work_root):
 
 
 def test_accept_translate_plural_single_target_label_succeeds(work_root):
-    """Item 1 of the review fix: a plural message whose locale needs only
-    one target form used to crash accept -- `_single_or_list` collapsed the
-    one-element parse-result list to a bare dict, and `checks.check_candidate`
-    (which always treats a plural's parse results as a list) then iterated
-    that dict's keys instead of forms, raising `AttributeError` on the first
-    `.get()` call. Without the fix this test fails with that `AttributeError`
-    instead of the assertions below."""
+    """A plural message whose locale needs only one target form must not
+    crash accept: `_single_or_list` must keep the one-element parse-result
+    list list-shaped, since `checks.check_candidate` always treats a
+    plural's parse results as a list -- collapsing it to a bare dict would
+    make that code iterate the dict's keys instead of forms, raising
+    `AttributeError` on the first `.get()` call."""
     cfg = make_cfg()
     msg = make_plural_message(
         "a", ["1 Artikel", "{count} Artikel"], {"de": [{"label": "other", "exact": False}]}, general_index=1,
@@ -803,15 +885,15 @@ def test_accept_review_fail_at_max_rounds_escalates_without_a_further_increment(
 
 
 def test_accept_review_fail_on_audit_candidate_reroutes_to_audit_proposal(work_root):
-    """Review round 3, item 2: a review packet built from a candidate whose
-    `origin` is "audit" (installed by `accept-audit`, which still needs a
-    review verdict on its hash before export -- plan section 10) must, on a
-    failed review with a `proposed` replacement, store that replacement back
-    as the entry's `audit_proposal` -- not as a fresh candidate with
-    `accepted_by: None`, which `ledger.exportable` can never select (its
-    state gate only waives for a set `accepted_by`, and this entry's state
-    is "existing") and `accept-audit` can never reach again (it reads
-    `audit_proposal`, already cleared when this candidate was accepted)."""
+    """A review packet built from a candidate whose `origin` is "audit"
+    (installed by `accept-audit`, which still needs a review verdict on its
+    hash before export) must, on a failed review with a `proposed`
+    replacement, store that replacement back as the entry's
+    `audit_proposal` -- not as a fresh candidate with `accepted_by: None`,
+    which `ledger.exportable` can never select (its state gate only waives
+    for a set `accepted_by`, and this entry's state is "existing") and
+    `accept-audit` can never reach again (it reads `audit_proposal`,
+    already cleared when this candidate was accepted)."""
     cfg = make_cfg()
     msgs = make_messages([make_message("a", "Hello", targets={"de": "Hallo (audited)"})])
     audited_sha = lz_common.value_sha256("Hallo (audited)")
@@ -1099,11 +1181,10 @@ def test_accept_canon_missing_candidates_list_refused(work_root):
 
 
 def test_accept_canon_invalid_candidate_dropped_and_listed_not_refused(work_root):
-    """Item 3 of the review fix: unlike a malformed envelope, one invalid
-    candidate inside an otherwise-valid list no longer fails the whole
-    batch -- it is dropped and listed in the result, and `accept` still
-    succeeds (this used to raise `SystemExit(EXIT_FAIL)` and lose every
-    candidate in the batch, valid ones included)."""
+    """Unlike a malformed envelope, one invalid candidate inside an
+    otherwise-valid list must not fail the whole batch -- it is dropped and
+    listed in the result, and `accept` still succeeds and keeps the valid
+    candidates."""
     cfg = make_cfg(target_locales=("de",))
     msgs = make_messages([make_message("a", "Cart")])
     setup_workspace(work_root, cfg, msgs, {})
@@ -1120,10 +1201,10 @@ def test_accept_canon_invalid_candidate_dropped_and_listed_not_refused(work_root
 
 
 def test_accept_canon_non_string_occurrences_dropped(work_root):
-    """`occurrences: [123]` used to pass the old shape check (`isinstance(x,
-    list)` alone) and reach `candidates.json`; `canon.py import` then kept
-    it, and `checks._check_dnt` -- which matches occurrences by exact
-    string id -- silently never found the message again."""
+    """`occurrences: [123]` must not reach `candidates.json`: a non-string
+    entry there would let `canon.py import` keep it, and
+    `checks._check_dnt` -- which matches occurrences by exact string id --
+    would then silently never find the message again."""
     cfg = make_cfg(target_locales=("de",))
     msgs = make_messages([make_message("a", "Cart")])
     setup_workspace(work_root, cfg, msgs, {})

@@ -1,8 +1,9 @@
-"""Tests for status.py, driven as a real subprocess (plan sections 11-12).
+"""Tests for status.py, driven as a real subprocess.
 
 status.py is read-only and must never crash, however incomplete the
-workspace is -- these tests drive it through every stage of plan section
-12's pipeline order and confirm it never writes anything.
+workspace is -- these tests drive it through every stage of the pipeline's
+staging order (see references/state.md) and confirm it never writes
+anything.
 """
 
 import json

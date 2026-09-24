@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""Export ledger candidates back into the live project (plan section 11).
+"""Export ledger candidates back into the live project (see
+references/state.md for the full export-safety walkthrough).
 
 Recovery of an interrupted previous export always runs first, unconditional
 on the locale requested here — a leftover `in_progress` journal is a project
@@ -25,7 +25,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import lz_common  # noqa: E402
 import adapter_client  # noqa: E402
@@ -36,7 +36,7 @@ JOURNAL_SCHEMA = 1
 
 
 # ---------------------------------------------------------------------------
-# Exclusive lock (plan section 11's whole flow: recovery through commit)
+# Exclusive lock (the whole flow: recovery through commit)
 # ---------------------------------------------------------------------------
 
 
@@ -65,37 +65,14 @@ def _new_export_stamp() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Atomic byte replace (export deals in raw file bytes, not JSON)
-# ---------------------------------------------------------------------------
-
-
-def _atomic_replace_bytes(dest: Path, data: bytes) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".lz-export-tmp-", dir=str(dest.parent))
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_name, dest)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-
-
-# ---------------------------------------------------------------------------
-# Recovery (plan section 11, step 1)
+# Recovery
 # ---------------------------------------------------------------------------
 
 
 def _restore_backups(export_dir: Path, journal: dict) -> list:
-    """Reconcile every journaled file against its CURRENT bytes, never a
-    `replaced` flag set by a separate journal write after each replace (a
-    flag that a crash landing between the replace and that write would
-    leave stuck at `false` even though the replace had already happened).
+    """Reconcile every journaled file against its CURRENT bytes: a crash can
+    land at any point around a replace, so recovery must derive what
+    happened from the file itself, not from a separate status write.
     Per file: current bytes == `new_sha256` -> the replace landed -> restore
     the backup. current bytes == `backup_sha256` -> it never landed (or this
     already ran) -> nothing to do. Anything else -> someone edited the file
@@ -110,7 +87,7 @@ def _restore_backups(export_dir: Path, journal: dict) -> list:
         current_sha256 = lz_common.sha256_bytes(current) if current is not None else None
         if current_sha256 == f.get("new_sha256"):
             data = (backup_dir / f["backup"]).read_bytes()
-            _atomic_replace_bytes(dest, data)
+            lz_common.atomic_write_bytes(dest, data)
         elif current_sha256 == f.get("backup_sha256"):
             continue
         else:
@@ -154,7 +131,7 @@ def recover_unfinished_exports(root: Path) -> tuple[list, list]:
 
 
 # ---------------------------------------------------------------------------
-# Freshness guards (plan section 11, step 2)
+# Freshness guards
 # ---------------------------------------------------------------------------
 
 
@@ -198,7 +175,7 @@ def _staleness_problems(cfg: dict, locale: str, candidate_ids: list, by_id: dict
 
 
 # ---------------------------------------------------------------------------
-# Complete-record comparison (plan section 11, step 4)
+# Complete-record comparison
 # ---------------------------------------------------------------------------
 
 
@@ -239,7 +216,7 @@ def _compare_messages(live: dict, temp: dict, locale: str, values: dict) -> list
 
 
 # ---------------------------------------------------------------------------
-# Which files an export actually touches (plan section 11, steps 4 and 5)
+# Which files an export actually touches
 # ---------------------------------------------------------------------------
 
 
@@ -277,7 +254,7 @@ def _changed_by_file(changed_files: list, candidate_ids: list) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Journal + backups + replacement (plan section 11, step 5)
+# Journal + backups + replacement
 # ---------------------------------------------------------------------------
 
 
@@ -329,10 +306,10 @@ def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, tem
 
     stamp = _new_export_stamp()
     export_dir = root / "exports" / stamp
-    # ledger.py stores one file per locale (`R/ledger/<locale>.json`), never
-    # a single `R/ledger.json` -- so a parallel export of a different locale
-    # never races this one's backup/replace. Only this locale's file is
-    # backed up, updated and (on failure) restored.
+    # ledger.py stores one file per locale (`R/ledger/<locale>.json`), so a
+    # parallel export of a different locale never races this one's
+    # backup/replace. Only this locale's file is backed up, updated and (on
+    # failure) restored.
     ledger_path = root / "ledger" / f"{locale}.json"
 
     # Only a file this export actually changed is backed up and replaced.
@@ -353,7 +330,7 @@ def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, tem
     for meta in files_meta:
         data = Path(meta["dest"]).read_bytes()
         meta["backup_sha256"] = lz_common.sha256_bytes(data)
-        _atomic_replace_bytes(backup_dir / meta["backup"], data)
+        lz_common.atomic_write_bytes(backup_dir / meta["backup"], data)
 
     journal = {
         "schema": JOURNAL_SCHEMA, "stamp": stamp, "locale": locale, "status": "in_progress",
@@ -394,7 +371,7 @@ def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, tem
             expected = meta.get("sha256_staged")
             if expected is None or lz_common.sha256_bytes(current) != expected:
                 raise RuntimeError(f"{meta['relpath']} changed on disk during the export")
-            _atomic_replace_bytes(dest, meta["new_bytes"])
+            lz_common.atomic_write_bytes(dest, meta["new_bytes"])
 
         ledger_mod.record_export(ledger_data, locale, values)
         ledger_text = _ledger_snapshot_text(locale, ledger_data["locales"][locale])
@@ -460,7 +437,7 @@ def do_export(root: Path, locale: str, dry_run: bool) -> dict:
 
         ledger_data = ledger_mod.load(root)
         candidate_ids = ledger_mod.exportable(ledger_data, locale)
-        entries = ledger_data.get("locales", {}).get(locale, {})
+        entries = ledger_mod.locale_entries(ledger_data, locale)
 
         problems = _staleness_problems(cfg, locale, candidate_ids, by_id, entries, canon_lock)
         if problems:

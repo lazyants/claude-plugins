@@ -1,4 +1,4 @@
-"""Tests for `checks.py` (plan section 9): every check, pass and fail.
+"""Tests for `checks.py`: every check, pass and fail.
 
 `checks.check_candidate` is pure, so these tests build small parse-result
 fixtures directly instead of running a real adapter.
@@ -110,7 +110,7 @@ def test_forms_plural_pass_when_count_matches():
 def test_forms_plural_value_forms_must_be_a_list_not_a_string():
     # With exactly one target label, list(value["forms"]) on a malformed
     # single-character string coincidentally produces a one-element list,
-    # matching the label count -- and used to pass with no problems at all.
+    # matching the label count -- must still be refused, not pass silently.
     message = make_plural_message("m1", ["a"], [{"label": "other", "exact": False}], 0)
     problems = check_candidate(message, "xx", {"forms": "A"}, [ok()], [ok()], EMPTY_CANON, DEFAULT_CFG)
     assert len(problems) == 1
@@ -160,7 +160,7 @@ def test_arguments_nonplural_fail_different_signature():
 
 # --- arguments (plural): count_arguments as one group, exact/non-exact -----
 
-# The inbox.count example from the plan (`adapter-contract.md` / plan section 4):
+# The inbox.count example from `references/adapter-contract.md`:
 # source forms "No messages" / "{count} message" / "{count} messages", general_index 2.
 INBOX_SOURCE_FORMS = ["No messages", "{count} message", "{count} messages"]
 INBOX_SOURCE_PARSE = [

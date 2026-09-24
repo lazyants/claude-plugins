@@ -1,4 +1,5 @@
-"""Ledger state management for software-localizer (plan section 7).
+"""Ledger state management for software-localizer. See `references/state.md`
+for the full state machine `sync()` implements.
 
 Stored as one file per locale, `R/ledger/<locale>.json`:
 
@@ -6,7 +7,7 @@ Stored as one file per locale, `R/ledger/<locale>.json`:
 
 -- never a single `R/ledger.json` -- so two processes each working one
 locale (a `packets.py`/`export_values.py` run per locale, in parallel) never
-write the same file. In memory `load()`/`save()` still use the pinned shape
+write the same file. In memory `load()`/`save()` still use the shape
 `{"schema": 1, "locales": {locale: {id: entry}}}`; `save(root, ledger,
 locales=None)` writes only the listed locales (`None` = every locale in the
 in-memory dict), each atomically, so a locale-scoped caller never touches a
@@ -21,34 +22,36 @@ sibling locale's file. An entry:
 decision (`adopt`) or a model turn's outcome (`set_candidate`/`record_verdict`
 /`mark_escalated`, applied by `packets.py`) or an export
 (`record_export`, applied by `export_values.py`). Those four plus `load`,
-`save` and `exportable` are the cross-module surface: `packets.py` and
+`save`, `exportable`, `locale_entries`, `candidate_ready` and
+`candidate_needs_review` are the cross-module surface: `packets.py` and
 `export_values.py` import and call them directly, never through the CLI.
 
 `sync()` takes a `parse_fn` (a unary callable: `items -> {key: {"ok": ...}}`,
-the same result shape `adapter_client.parse` returns) instead of importing
+the same result shape `adapter_client.parse` returns) instead of calling
 `adapter_client` itself, so a test can pass a fake and the pure logic never
 needs a real adapter. The CLI's `sync` subcommand is the only place that
-binds `parse_fn` to the real `adapter_client.parse` (imported lazily, inside
-the command function, so importing `ledger` never requires `adapter_client`
-to exist).
+binds `parse_fn` to the real `adapter_client.parse`.
 """
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
-import checks
-import lz_common
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-STATES = ("pending", "translated", "stale", "existing", "human_locked", "escalated")
+import adapter_client  # noqa: E402
+import canon  # noqa: E402
+import checks  # noqa: E402
+import lz_common  # noqa: E402
 
 # States sync() may move straight to "existing" when a project value shows up
-# that the plugin itself did not export (plan section 7, second bullet).
+# that the plugin itself did not export.
 _MAY_BECOME_EXISTING = ("pending", "stale", "escalated")
 
-# States sync() only annotates with a note on drift, never moves (plan
-# section 7, third bullet).
+# States sync() only annotates with a note on drift, never moves.
 _NOTE_ONLY_ON_DRIFT = ("existing", "human_locked")
 
 
@@ -90,7 +93,7 @@ def save(root, ledger: dict, locales: list | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# per-locale content hashes (plan section 7)
+# per-locale content hashes
 # ---------------------------------------------------------------------------
 
 
@@ -101,7 +104,7 @@ def source_sha256(message: dict) -> str:
 def context_sha256(message: dict, locale: str) -> str:
     """The whole plural spec `checks.py` depends on for this locale, plus
     `max_length`: the locale's `target_labels`, `general_index`,
-    `source_labels`, and the sorted `count_arguments` (plan section 7). A
+    `source_labels`, and the sorted `count_arguments`. A
     change to any of these must trigger the re-check `sync()` runs on a
     `translated` entry whose context changed — `general_index` picks which
     source form is "the general one" for argument-parity and structure
@@ -138,8 +141,8 @@ def relevant_canon(message: dict, canon_lock: dict) -> list:
     entry naming this message's id in `occurrences`, plus every entry whose
     `source` occurs as a substring of any form of this message's own source
     text. This is the one relevance rule packets.py embeds into a packet's
-    `canon` field and `canon_sha256` below pins a candidate against -- moved
-    here (from packets.py, its original home) so both call sites share it."""
+    `canon` field and `canon_sha256` below pins a candidate against -- kept
+    here so both call sites share it."""
     entries = canon_lock.get("entries", []) if isinstance(canon_lock, dict) else []
     msg_id = message.get("id")
     source_forms = checks.forms_of(message.get("source"))
@@ -217,18 +220,26 @@ def _clear_candidate_if_stale(
 
 
 def sync(root, cfg: dict, messages: dict, parse_fn: Callable[[list], dict], canon_lock: dict) -> dict:
-    """Apply plan section 7's transitions for every (locale, id) and persist
-    the result. Returns a report: `{"gone": [...], "notes": [...], "counts":
-    {locale: {...}}}`."""
+    """Apply this ledger's locale/id state transitions for every message and
+    persist the result (see `references/state.md`). Returns a report:
+    `{"gone": [...], "notes": [...], "counts": {locale: {...}}}`."""
     ledger = load(root)
     locales_dict = ledger.setdefault("locales", {})
     target_locales = cfg["target_locales"]
+
+    # `canon_sha256` depends on the message and the canon lock, never on
+    # locale -- computed once per message here instead of once per
+    # (locale, message) pair inside the loop below.
+    canon_sha_by_id = {m["id"]: canon_sha256(m, canon_lock) for m in messages["messages"]}
 
     report: dict = {"gone": [], "notes": [], "counts": {}}
     recheck_items: list = []
 
     for locale in target_locales:
         locale_entries = locales_dict.setdefault(locale, {})
+        # `style_sha256` depends only on `cfg`/`locale`, never on the
+        # message -- computed once per locale instead of once per message.
+        new_style_sha = style_sha256(cfg, locale)
         counts = {
             "new": 0, "existing_from_pending": 0, "human_locked": 0, "stale": 0,
             "notes": 0, "candidates_cleared": 0, "gone": 0, "context_rechecked": 0,
@@ -242,8 +253,7 @@ def sync(root, cfg: dict, messages: dict, parse_fn: Callable[[list], dict], cano
             new_project_sha = _project_value_sha256(message, locale)
             new_source_sha = source_sha256(message)
             new_context_sha = context_sha256(message, locale)
-            new_style_sha = style_sha256(cfg, locale)
-            new_canon_sha = canon_sha256(message, canon_lock)
+            new_canon_sha = canon_sha_by_id[msg_id]
 
             entry = locale_entries.get(msg_id)
             if entry is None:
@@ -282,8 +292,8 @@ def sync(root, cfg: dict, messages: dict, parse_fn: Callable[[list], dict], cano
                     entry["state"] = "human_locked"
                     # A person's edit supersedes whatever the plugin last
                     # exported; a still-passing old candidate must not
-                    # survive to be re-exported over that edit (review round
-                    # 3, item 1 -- see `adopt()` below for the other half).
+                    # survive to be re-exported over that edit -- see
+                    # `adopt()` below for the other half.
                     entry["candidate"] = None
                     counts["human_locked"] += 1
                 elif "source" in changed or "style" in changed:
@@ -323,9 +333,9 @@ def _apply_context_rechecks(
     recheck_items: list, parse_fn: Callable[[list], dict], canon_lock: dict, cfg: dict,
     locales_dict: dict, report: dict,
 ) -> None:
-    """Re-run §9 checks on the project's current value for every `translated`
-    entry whose context changed (plan section 7, fourth bullet), in one
-    batched `parse_fn` call. A check failure moves the entry to `stale`."""
+    """Re-run `checks.check_candidate` on the project's current value for
+    every `translated` entry whose context changed, in one batched
+    `parse_fn` call. A check failure moves the entry to `stale`."""
     parse_items: list = []
     plan: list = []
     for info in recheck_items:
@@ -387,7 +397,7 @@ def adopt(ledger: dict, locale: str, ids: list | None, by: str) -> dict:
         # Adoption takes the project's current value as the plugin's own
         # baseline; an older candidate (from before the existing/human-locked
         # state) is judged against a value this no longer is, and must not
-        # linger to be re-exported over it (review round 3, item 1).
+        # linger to be re-exported over it.
         entry["candidate"] = None
         adopted.append(msg_id)
 
@@ -421,18 +431,48 @@ def mark_escalated(ledger: dict, locale: str, msg_id: str, problems) -> None:
     })
 
 
+def locale_entries(ledger_data: dict, locale: str) -> dict:
+    return ledger_data.get("locales", {}).get(locale, {})
+
+
+def candidate_ready(entry: dict) -> bool:
+    """A candidate whose checks passed and whose verdict is a pass bound to
+    that exact candidate hash -- nothing left for a translate round to do
+    (the predicate `exportable` uses). Defensive: never raises on a
+    malformed entry."""
+    if not isinstance(entry, dict):
+        return False
+    candidate = entry.get("candidate")
+    if not isinstance(candidate, dict) or candidate.get("checks") != "pass":
+        return False
+    verdict = candidate.get("verdict")
+    if not isinstance(verdict, dict) or verdict.get("verdict") != "pass":
+        return False
+    return verdict.get("value_sha256") == candidate.get("value_sha256")
+
+
+def candidate_needs_review(entry: dict) -> bool:
+    """A candidate whose checks passed but carries no verdict bound to its
+    current value hash -- still needs a review turn. Defensive: never
+    raises on a malformed entry."""
+    if not isinstance(entry, dict):
+        return False
+    candidate = entry.get("candidate")
+    if not isinstance(candidate, dict) or candidate.get("checks") != "pass":
+        return False
+    verdict = candidate.get("verdict")
+    if not isinstance(verdict, dict):
+        return True
+    return verdict.get("value_sha256") != candidate.get("value_sha256")
+
+
 def exportable(ledger: dict, locale: str) -> list:
-    """Ids ready for `export_values.py` (plan section 11, step 3)."""
+    """Ids ready for `export_values.py`."""
     ids = []
-    for msg_id, entry in ledger.get("locales", {}).get(locale, {}).items():
+    for msg_id, entry in locale_entries(ledger, locale).items():
+        if not candidate_ready(entry):
+            continue
         candidate = entry.get("candidate")
-        if candidate is None or candidate.get("checks") != "pass":
-            continue
-        verdict = candidate.get("verdict")
-        if not verdict or verdict.get("verdict") != "pass":
-            continue
-        if verdict.get("value_sha256") != candidate.get("value_sha256"):
-            continue
         eligible_state = entry.get("state") in ("pending", "stale", "translated", "escalated")
         if eligible_state or candidate.get("accepted_by"):
             ids.append(msg_id)
@@ -442,7 +482,7 @@ def exportable(ledger: dict, locale: str) -> list:
 def record_export(ledger: dict, locale: str, exported: dict) -> None:
     """After a successful export: each exported id becomes `translated`,
     with `last_exported_sha256` and `project_value_sha256` set to the value
-    that was written (plan section 11, step 5)."""
+    that was written."""
     for msg_id, value in exported.items():
         entry = ledger["locales"][locale][msg_id]
         value_sha = lz_common.value_sha256(value)
@@ -456,26 +496,14 @@ def record_export(ledger: dict, locale: str, exported: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_project_dir(root, cfg: dict) -> str:
-    p = Path(cfg["project_root"])
-    if not p.is_absolute():
-        p = Path(root) / p
-    return str(p)
-
-
 def _cmd_sync(args) -> int:
     root = lz_common.resolve_root(args.root)
     cfg = lz_common.load_config(root)
     messages = lz_common.load_messages(root / "messages.json")
-
-    import canon  # local import: canon.py is this owner's sibling module
     canon_lock = canon.load_lock(root)
 
-    import adapter_client  # lazy: only the CLI needs a real adapter
-    project_dir = _resolve_project_dir(root, cfg)
-
     def parse_fn(items):
-        return adapter_client.parse(str(root), cfg, project_dir, items)
+        return adapter_client.parse(str(root), cfg, cfg["project_root"], items)
 
     report = sync(root, cfg, messages, parse_fn, canon_lock)
     lz_common.emit({"ok": True, **report})
@@ -485,9 +513,10 @@ def _cmd_sync(args) -> int:
 def _cmd_adopt(args) -> int:
     root = lz_common.resolve_root(args.root)
     ledger = load(root)
-    ids = None if args.all_existing else list(args.ids or [])
-    if not args.all_existing and not ids:
-        lz_common.fail("provide --id at least once, or --all-existing", lz_common.EXIT_CANNOT)
+    # `--id`/`--all-existing` is a required mutually exclusive group
+    # (`build_parser` below), so `args.ids` is always non-empty when
+    # `--all-existing` was not given -- no separate guard needed.
+    ids = None if args.all_existing else args.ids
     result = adopt(ledger, args.locale, ids, args.by)
     save(root, ledger, locales=[args.locale])
     lz_common.emit({"ok": True, **result})
@@ -513,12 +542,9 @@ def build_parser():
 
 
 def main() -> int:
+    dispatch = {"sync": _cmd_sync, "adopt": _cmd_adopt}
     args = build_parser().parse_args()
-    if args.command == "sync":
-        return _cmd_sync(args)
-    if args.command == "adopt":
-        return _cmd_adopt(args)
-    lz_common.fail(f"unknown command: {args.command}", lz_common.EXIT_CANNOT)
+    return dispatch[args.command](args)
 
 
 if __name__ == "__main__":

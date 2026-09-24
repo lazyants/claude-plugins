@@ -1,4 +1,5 @@
-"""Adapter acceptance (plan section 6). `run`:
+"""Adapter acceptance. See references/adapter-contract.md for the full
+contract. `run`:
 
 1. `collect`s the LIVE project (read-only by contract) -- this is where the
    adapter's `files` list comes from.
@@ -33,14 +34,16 @@ import itertools
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
-import adapter_client
-import lz_common
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import adapter_client  # noqa: E402
+import lz_common  # noqa: E402
 
 COVERAGE_DIR_NAME = "_coverage"
-CHECK_RESULT_NAME = "_adapter_check.json"
 PLACEHOLDER = "{{PACKET_JSON}}"
 
 # Awkward text: quote, backslash, newline, tab, a leading and a trailing
@@ -52,7 +55,7 @@ def _awkward_value(tag: str) -> str:
 
 def _first_of(messages: list[dict], plural: bool) -> dict | None:
     for message in messages:
-        if ("plural" in message) == plural:
+        if (message.get("plural") is not None) == plural:
             return message
     return None
 
@@ -190,11 +193,11 @@ def _parse_items_for_forms(
     """Append parse items for one message's source or target value (a plain
     string, or `{"forms": [...]}` for a plural) to `items`, each keyed by an
     opaque running index drawn from `counter` -- never a key built by string
-    concatenation. A non-plural id like `"foo#0"` and the first form of a
-    plural id `"foo"` used to both build the same `"src::foo#0"` key that
-    way, letting one adapter reply silently overwrite the other's in the
-    results dict. `key_meta` maps each new key back to `{"kind", "id",
-    "locale"}` so results can be attributed without reconstructing a key."""
+    concatenation, which can collide (a non-plural id like `"foo#0"` and the
+    first form of a plural id `"foo"` can build the same composite key,
+    letting one adapter reply silently overwrite the other's in the results
+    dict). `key_meta` maps each new key back to `{"kind", "id", "locale"}`
+    so results can be attributed without reconstructing a key."""
     forms = value["forms"] if isinstance(value, dict) else [value]
     for form in forms:
         key = str(next(counter))
@@ -250,7 +253,7 @@ def _project_inventory(project_dir: Path) -> list[str]:
         )
         in_work_tree = check.returncode == 0 and check.stdout.strip() == "true"
     except (OSError, subprocess.SubprocessError):
-        in_work_tree = False
+        pass
 
     if in_work_tree:
         try:
@@ -341,10 +344,9 @@ def cmd_run(args) -> int:
             "checked_at": lz_common.now_iso(),
         }
 
-        runs_dir = root / "runs"
-        lz_common.atomic_write_json(runs_dir / CHECK_RESULT_NAME, check_result)
+        lz_common.atomic_write_json(root / lz_common.ADAPTER_CHECK_RESULT, check_result)
 
-        coverage_dir = runs_dir / COVERAGE_DIR_NAME
+        coverage_dir = root / "runs" / COVERAGE_DIR_NAME
         packet = _build_coverage_packet(project_dir, live_messages)
         lz_common.atomic_write_json(coverage_dir / "packet.json", packet)
         plugin_root = Path(__file__).resolve().parent.parent
@@ -381,7 +383,7 @@ def cmd_accept(args) -> int:
     root = lz_common.resolve_root(args.root)
     cfg = lz_common.load_config(root)
 
-    check_result = lz_common.read_json(root / "runs" / CHECK_RESULT_NAME, "adapter_check.py run result")
+    check_result = lz_common.read_json(root / lz_common.ADAPTER_CHECK_RESULT, "adapter_check.py run result")
     if not check_result.get("ok"):
         lz_common.fail(
             "adapter_check.py run did not pass; fix the adapter and rerun before accepting",
@@ -399,7 +401,7 @@ def cmd_accept(args) -> int:
     coverage_payload = lz_common.read_json(Path(args.coverage), "coverage turn output")
     missing = _validate_coverage_output(coverage_payload)
 
-    out_of_scope = set(args.out_of_scope or [])
+    out_of_scope = set(args.out_of_scope)
     unaccepted = [entry for entry in missing if _missing_key(entry) not in out_of_scope]
     if unaccepted:
         lz_common.fail(
@@ -444,9 +446,7 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.command == "run":
         return cmd_run(args)
-    if args.command == "accept":
-        return cmd_accept(args)
-    lz_common.fail(f"unknown command: {args.command}", lz_common.EXIT_CANNOT)
+    return cmd_accept(args)
 
 
 if __name__ == "__main__":

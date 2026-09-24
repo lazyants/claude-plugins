@@ -1,6 +1,5 @@
-"""Tests for `collect.py` (plan section 6, last paragraph): collect the
-project's current strings into `R/messages.json`, refusing unless the
-adapter is accepted.
+"""Tests for `collect.py`: collect the project's current strings into
+`R/messages.json`, refusing unless the adapter is accepted.
 
 Reuses `test_adapter_check.py`'s workspace helpers (the toy fixture adapter
 and project) instead of duplicating them.
