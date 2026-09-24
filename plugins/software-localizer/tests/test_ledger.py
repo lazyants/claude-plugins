@@ -222,6 +222,30 @@ def test_context_sha256_ignores_source_text():
     assert ledger.context_sha256(a, "de") == ledger.context_sha256(b, "de")
 
 
+def test_context_sha256_changes_with_general_index():
+    msg = make_plural_message(
+        "m1", ["{count} item", "{count} items"],
+        {"de": [{"label": "one", "exact": True}, {"label": "other", "exact": False}]},
+        general_index=0,
+    )
+    h1 = ledger.context_sha256(msg, "de")
+    msg["plural"]["general_index"] = 1
+    h2 = ledger.context_sha256(msg, "de")
+    assert h1 != h2
+
+
+def test_context_sha256_changes_with_source_labels():
+    msg = make_plural_message(
+        "m1", ["{count} item", "{count} items"],
+        {"de": [{"label": "one", "exact": True}, {"label": "other", "exact": False}]},
+        general_index=0,
+    )
+    h1 = ledger.context_sha256(msg, "de")
+    msg["plural"]["source_labels"][0]["exact"] = True
+    h2 = ledger.context_sha256(msg, "de")
+    assert h1 != h2
+
+
 def test_style_sha256_differs_per_locale():
     cfg = make_cfg(target_locales=("de", "ru"), style={
         "de": {"formality": "Sie", "notes": ""},
@@ -479,6 +503,51 @@ def test_sync_translated_context_change_recheck_fail_becomes_stale(work_root):
     entry2 = ledger.load(work_root)["locales"]["de"]["m1"]
     assert entry2["state"] == "stale"
     assert entry2["notes"][-1]["note"] == "context changed and the re-check failed"
+
+
+def test_sync_translated_general_index_change_recheck_fails(work_root):
+    """`general_index` alone moving must be seen as a context change (item 1
+    of the review fix): the source form the general_index now points at
+    requires an argument ("extra") the existing translated forms do not
+    carry, so the re-check this triggers must fail and stale the entry.
+    Before the fix `context_sha256` ignored `general_index`, so this change
+    was invisible to `sync()` and the entry stayed `translated` forever."""
+    cfg = make_cfg()
+    msg = make_plural_message(
+        "m1", ["{count} apple", "{count} apples {extra}"],
+        {"de": [{"label": "one", "exact": True}, {"label": "other", "exact": False}]},
+        general_index=0, count_arguments=("count",),
+        targets={"de": {"forms": ["Hallo {count}", "Hallo {count}"]}},
+    )
+    sync_once(work_root, cfg, make_messages([msg]))  # existing (a project target is set)
+
+    ledger_data = ledger.load(work_root)
+    entry = ledger_data["locales"]["de"]["m1"]
+    entry["state"] = "translated"
+    entry["last_exported_sha256"] = entry["project_value_sha256"]
+    ledger.save(work_root, ledger_data)
+
+    old_context_sha = ledger.context_sha256(msg, "de")
+    msg["plural"]["general_index"] = 1  # only general_index changes
+    new_context_sha = ledger.context_sha256(msg, "de")
+    assert old_context_sha != new_context_sha
+
+    def parse_fn(items):
+        out = {}
+        for item in items:
+            text = item["text"]
+            tokens = [{"kind": "argument", "name": "count", "signature": "{count}"}]
+            if "extra" in text:
+                tokens.append({"kind": "argument", "name": "extra", "signature": "{extra}"})
+            out[item["key"]] = {"ok": True, "tokens": tokens}
+        return out
+
+    report = sync_once(work_root, cfg, make_messages([msg]), parse_fn=parse_fn)
+
+    entry2 = ledger.load(work_root)["locales"]["de"]["m1"]
+    assert entry2["state"] == "stale"
+    assert report["counts"]["de"]["context_rechecked"] == 1
+    assert report["counts"]["de"]["stale"] == 1
 
 
 def test_sync_translated_unchanged_stays_translated(work_root):

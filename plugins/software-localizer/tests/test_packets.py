@@ -458,6 +458,39 @@ def test_accept_review_hash_mismatch_treated_as_missing(work_root):
     assert ledger_data["locales"]["de"]["a"]["candidate"]["verdict"] is None
 
 
+def test_accept_review_rebuilt_candidate_under_changed_style_treated_as_missing(work_root):
+    """Item 2 of the review fix: a verdict must bind to the review context,
+    not only the value hash. Here the candidate is rebuilt (simulating a
+    retranslation after `ledger.style_sha256` changed) with the *same*
+    value, so `value_sha256` still matches what the packet captured -- only
+    `style_sha256` moved. The old verdict must not attach."""
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello")])
+    candidate = make_candidate("Hallo", checks="pass")
+    run_dir = build_one_batch(
+        work_root, cfg, msgs, {"de": {"a": make_entry("pending", candidate=candidate)}}, "review", "de",
+    )
+    packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
+    item = packet["items"][0]
+    assert item["style_sha256"] == "st"  # the packet froze the candidate's snapshot as-built
+
+    # Simulate a rebuild under a changed style: same value, new style_sha256.
+    ledger_data = ledger_mod.load(work_root)
+    ledger_data["locales"]["de"]["a"]["candidate"]["style_sha256"] = "st-changed"
+    ledger_mod.save(work_root, ledger_data, locales=["de"])
+
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "pass", "issues": [], "proposed": None,
+        "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == ["a"]
+    assert result["passed"] == []
+    ledger_data = ledger_mod.load(work_root)
+    assert ledger_data["locales"]["de"]["a"]["candidate"]["verdict"] is None
+
+
 def test_accept_review_fail_with_proposed_becomes_new_candidate_needing_verdict(work_root):
     cfg = make_cfg()
     msgs = make_messages([make_message("a", "Hello")])
@@ -536,11 +569,94 @@ def test_accept_review_new_canon_candidates_written_to_side_file(work_root):
         "new_canon_candidates": [{"kind": "term", "source": "Cart", "proposed": "Warenkorb", "note": "seen twice"}],
     }}})
 
-    packets.do_accept(work_root, run_dir, output_path)
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["invalid_canon_candidates"] == []
     side_file = run_dir / "new_canon_candidates.json"
     assert side_file.is_file()
     data = json.loads(side_file.read_text(encoding="utf-8"))
+    cand = data["candidates"][0]
+    assert cand["source"] == "Cart"
+    # item 3: the side file is written in the canon import shape (plan
+    # section 10 / `canon.py import --file`'s documented shape), not the
+    # raw `{"kind","source","proposed","note"}` a review turn emits.
+    assert cand["occurrences"] == ["a"]
+    assert cand["translations"] == {"de": {"proposed": "Warenkorb", "current": []}}
+
+
+def test_accept_review_invalid_new_canon_candidates_dropped_and_listed(work_root):
+    """Item 3 of the review fix: a `new_canon_candidates` entry that is not
+    a valid candidate object is dropped, not written to the side file, and
+    listed in the accept output instead of breaking `report.py` later."""
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello")])
+    candidate = make_candidate("Hallo", checks="pass")
+    run_dir = build_one_batch(
+        work_root, cfg, msgs, {"de": {"a": make_entry("pending", candidate=candidate)}}, "review", "de",
+    )
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "pass", "issues": [], "proposed": None,
+        "new_canon_candidates": "not-a-list",
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["passed"] == ["a"]  # the verdict itself is unaffected
+    assert result["invalid_canon_candidates"] == [{"id": "a", "candidate": "not-a-list"}]
+    side_file = run_dir / "new_canon_candidates.json"
+    assert not side_file.is_file()  # nothing invalid ever reaches disk
+
+
+def test_accept_review_mixed_valid_and_invalid_canon_candidate_entries(work_root):
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello")])
+    candidate = make_candidate("Hallo", checks="pass")
+    run_dir = build_one_batch(
+        work_root, cfg, msgs, {"de": {"a": make_entry("pending", candidate=candidate)}}, "review", "de",
+    )
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "pass", "issues": [], "proposed": None,
+        "new_canon_candidates": [
+            {"kind": "term", "source": "Cart", "proposed": "Warenkorb", "note": ""},
+            {"kind": "bogus", "source": "Cart"},  # bad kind
+            {"kind": "term", "source": ""},  # empty source
+            "just a string",
+        ],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert len(result["invalid_canon_candidates"]) == 3
+    side_file = run_dir / "new_canon_candidates.json"
+    data = json.loads(side_file.read_text(encoding="utf-8"))
+    assert len(data["candidates"]) == 1
     assert data["candidates"][0]["source"] == "Cart"
+
+
+def test_accept_review_valid_canon_candidate_imports_into_canon(work_root):
+    """The side file's shape is exactly what `canon.import_candidates`
+    documents -- import it and confirm the occurrence and locale proposal
+    land where `canon.py import --file` would put them."""
+    cfg = make_cfg()
+    msgs = make_messages([make_message("a", "Hello")])
+    candidate = make_candidate("Hallo", checks="pass")
+    run_dir = build_one_batch(
+        work_root, cfg, msgs, {"de": {"a": make_entry("pending", candidate=candidate)}}, "review", "de",
+    )
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "pass", "issues": [], "proposed": None,
+        "new_canon_candidates": [{"kind": "term", "source": "Cart", "proposed": "Warenkorb", "note": "seen twice"}],
+    }}})
+
+    packets.do_accept(work_root, run_dir, output_path)
+    side_file = run_dir / "new_canon_candidates.json"
+    data = json.loads(side_file.read_text(encoding="utf-8"))
+
+    canon = canon_mod.load(work_root)
+    result = canon_mod.import_candidates(canon, data["candidates"])
+    assert len(result["added"]) == 1
+    entry = canon["entries"][0]
+    assert entry["source"] == "Cart"
+    assert entry["occurrences"] == ["a"]
+    assert entry["translations"]["de"]["value"] == "Warenkorb"
+    assert entry["translations"]["de"]["status"] == "proposed"
 
 
 # --- accept: audit ---------------------------------------------------------

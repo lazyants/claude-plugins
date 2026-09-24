@@ -332,6 +332,21 @@ def validate_config(cfg, root) -> list:
             if not isinstance(options, dict):
                 problems.append({"field": "adapter.options", "message": "adapter.options must be an object"})
 
+    # batch_size / max_rounds / adapter_timeout_s: optional (consumers fall
+    # back to a default when absent); when present, positive integers.
+    for field in ("batch_size", "max_rounds", "adapter_timeout_s"):
+        value = cfg.get(field)
+        if value is None or _is_choose(value):
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            problems.append({"field": field, "message": f"{field} must be a positive integer"})
+
+    # allow_identical: optional; when present, a list of strings.
+    allow_identical = cfg.get("allow_identical")
+    if allow_identical is not None and not _is_choose(allow_identical):
+        if not isinstance(allow_identical, list) or not all(isinstance(a, str) for a in allow_identical):
+            problems.append({"field": "allow_identical", "message": "allow_identical must be a list of strings"})
+
     return problems
 
 
@@ -341,13 +356,20 @@ def load_config(root) -> dict:
     downstream script's point of view an unready config is a missing
     dependency, not its own judgment to make. `config_validate.py` is the
     one script that reports these problems as its own verdict rather than
-    a hard failure."""
+    a hard failure.
+
+    `project_root` comes back resolved to an absolute path (a relative value
+    resolves against `root`, the same convention `validate_config` already
+    checked it against) -- every other script reads `cfg["project_root"]`
+    straight, with no resolution of its own, so it targets the same
+    directory regardless of the process's current working directory."""
     root = Path(root)
     cfg = read_json(root / "localize.json", "localize.json")
     problems = validate_config(cfg, root)
     if problems:
         detail = "; ".join(f"{p['field']}: {p['message']}" for p in problems)
         fail(f"localize.json has problems: {detail}", EXIT_CANNOT, problems=problems)
+    cfg["project_root"] = str(_resolve_maybe_relative(root, cfg["project_root"]).resolve())
     return cfg
 
 
@@ -365,7 +387,7 @@ def _label_shape_ok(label) -> bool:
     )
 
 
-def _messages_shape_problem(data):
+def messages_shape_problem(data):
     """The first structural problem with an already-parsed `messages.json`,
     or `None` when its shape is valid (plan section 4): types, required
     keys, unique ids, non-empty label lists, and every target's form count
@@ -421,8 +443,10 @@ def _messages_shape_problem(data):
         if not isinstance(context.get("key"), str):
             return f"{tag}.context.key must be a string"
         max_length = context.get("max_length")
-        if max_length is not None and (not isinstance(max_length, int) or isinstance(max_length, bool)):
-            return f"{tag}.context.max_length must be an integer or null"
+        if max_length is not None and (
+            not isinstance(max_length, int) or isinstance(max_length, bool) or max_length < 0
+        ):
+            return f"{tag}.context.max_length must be a non-negative integer or null"
         comment = context.get("comment")
         if comment is not None and not isinstance(comment, str):
             return f"{tag}.context.comment must be a string or null"
@@ -492,7 +516,7 @@ def load_messages(path) -> dict:
     """Read and shape-validate `messages.json` (plan section 4). The only
     reader: every script that needs message data goes through this."""
     data = read_json(path, "messages.json")
-    problem = _messages_shape_problem(data)
+    problem = messages_shape_problem(data)
     if problem:
         fail(f"messages.json is invalid: {problem}", EXIT_CANNOT)
     return data
@@ -548,44 +572,65 @@ def _adapter_argv_files(root: Path, cfg: dict) -> list:
 
 
 def adapter_digest(root, cfg: dict) -> dict:
-    """`{"files": {path: sha256}, "options_sha256": ...}` identifying the
-    adapter's current content (plan section 6). When `R/adapter/` holds any
-    file, every file under it is hashed (the normal case: the driving
-    session places the adapter there). Otherwise the files named by
-    `adapter.argv` that resolve to something on disk are hashed instead
-    (the adapter lives outside `R`)."""
+    """`{"files": {path: sha256}, "argv": [...], "options_sha256": ...}`
+    identifying what the adapter actually executes (plan section 6):
+    `adapter.argv` itself, so a changed argument or a swapped script is
+    caught even when its byte content happens to match; the sha256 of every
+    argv element that resolves to an existing file, relative to `root` or
+    absolute -- typically the interpreter's script argument, wherever it
+    lives, inside `root` or out; and, when `root/adapter/` holds anything,
+    every file under it too (the normal case: the driving session places
+    the adapter there). The two file sources are additive, not either/or:
+    a self-contained `[interpreter, script]` adapter with nothing under
+    `root/adapter/` is covered by the argv-file hash alone; one with both a
+    populated `root/adapter/` and an argv script outside it is covered by
+    both. An argv element that resolves inside `root/adapter/` is not hashed
+    twice: it is already part of that tree's digest."""
     root = Path(root)
     adapter_dir = root / ADAPTER_DIR_NAME
+    argv = list(cfg["adapter"]["argv"])
     files: dict = {}
 
     has_dir_contents = adapter_dir.is_dir() and any(adapter_dir.iterdir())
     if has_dir_contents:
         for rel, digest in sorted(_tree_digests(adapter_dir).items()):
             files[f"{ADAPTER_DIR_NAME}/{rel}"] = digest
-    else:
-        argv_files = _adapter_argv_files(root, cfg)
-        if not argv_files:
-            fail(
-                f"no adapter file found: {ADAPTER_DIR_NAME}/ is empty and adapter.argv names no existing file",
-                EXIT_CANNOT,
-            )
-        for f in argv_files:
-            files[str(f.resolve())] = sha256_file(f)
+
+    argv_files = _adapter_argv_files(root, cfg)
+    if not has_dir_contents and not argv_files:
+        fail(
+            f"no adapter file found: {ADAPTER_DIR_NAME}/ is empty and adapter.argv names no existing file",
+            EXIT_CANNOT,
+        )
+    adapter_dir_resolved = adapter_dir.resolve() if has_dir_contents else None
+    for f in argv_files:
+        f_resolved = f.resolve()
+        if adapter_dir_resolved is not None:
+            try:
+                f_resolved.relative_to(adapter_dir_resolved)
+                continue  # already hashed above, as part of the adapter/ tree
+            except ValueError:
+                pass
+        files[str(f_resolved)] = sha256_file(f)
 
     options = cfg.get("adapter", {}).get("options", {})
-    return {"files": files, "options_sha256": sha256_json(options)}
+    return {"files": files, "argv": argv, "options_sha256": sha256_json(options)}
 
 
 def require_accepted_adapter(root, cfg: dict) -> None:
     """`fail(EXIT_FAIL)` unless `R/adapter.lock.json` matches the adapter's
-    current files and options (`adapter_digest`). Called by `collect.py`,
-    `export_values.py` and `packets.py` before any of them run the adapter
-    or rely on its accepted state."""
+    current files, argv and options (`adapter_digest`). Called by
+    `collect.py`, `export_values.py` and `packets.py` before any of them run
+    the adapter or rely on its accepted state."""
     root = Path(root)
     lock_path = root / "adapter.lock.json"
     lock = read_json(lock_path, "adapter.lock.json") if lock_path.is_file() else {}
     current = adapter_digest(root, cfg)
-    if lock.get("files") != current["files"] or lock.get("options_sha256") != current["options_sha256"]:
+    if (
+        lock.get("files") != current["files"]
+        or lock.get("argv") != current["argv"]
+        or lock.get("options_sha256") != current["options_sha256"]
+    ):
         fail(
             "the adapter is not accepted for its current files and options: run adapter_check.py accept",
             EXIT_FAIL,

@@ -202,6 +202,55 @@ def test_arguments_plural_count_and_n_are_one_group():
     assert by_check(problems, "arguments") == []
 
 
+def test_arguments_plural_count_group_signature_mismatch_extra_formatter_is_refused():
+    # The count-group coverage rule lets a form use any alias name, but its
+    # signature must still be source-compatible: a source `{count}` does not
+    # license a candidate that reuses the same name with an added formatter.
+    source_forms = ["no items", "{count} items"]
+    source_parse = [ok([]), ok([arg("count")])]
+    message = make_plural_message(
+        "m1", source_forms,
+        [{"label": "zero", "exact": True}, {"label": "other", "exact": False}],
+        general_index=1, count_arguments=["count", "n"],
+    )
+    value = {"forms": ["keine", "{count, number, currency} Artikel"]}
+    value_parse = [ok([]), ok([arg("count", "{count, number, currency}")])]
+    problems = check_candidate(message, "xx", value, source_parse, value_parse, EMPTY_CANON, DEFAULT_CFG)
+    assert len(by_check(problems, "arguments")) == 1
+
+
+def test_arguments_plural_count_group_alias_signature_mismatch_is_refused():
+    # Same defect, spelled through the alias name instead: `{n, number}` is
+    # not the same shape as the source's plain `{count}`.
+    source_forms = ["no items", "{count} items"]
+    source_parse = [ok([]), ok([arg("count")])]
+    message = make_plural_message(
+        "m1", source_forms,
+        [{"label": "zero", "exact": True}, {"label": "other", "exact": False}],
+        general_index=1, count_arguments=["count", "n"],
+    )
+    value = {"forms": ["keine", "{n, number} Artikel"]}
+    value_parse = [ok([]), ok([arg("n", "{n, number}")])]
+    problems = check_candidate(message, "xx", value, source_parse, value_parse, EMPTY_CANON, DEFAULT_CFG)
+    assert len(by_check(problems, "arguments")) == 1
+
+
+def test_arguments_plural_count_group_alias_reverse_direction_passes():
+    # The alias check is symmetric: a source spelled with "n" still accepts a
+    # same-shape "count" candidate, not just the other way around.
+    source_forms = ["no items", "{n} items"]
+    source_parse = [ok([]), ok([arg("n")])]
+    message = make_plural_message(
+        "m1", source_forms,
+        [{"label": "zero", "exact": True}, {"label": "other", "exact": False}],
+        general_index=1, count_arguments=["count", "n"],
+    )
+    value = {"forms": ["keine", "{count} Artikel"]}
+    value_parse = [ok([]), ok([arg("count")])]
+    problems = check_candidate(message, "xx", value, source_parse, value_parse, EMPTY_CANON, DEFAULT_CFG)
+    assert by_check(problems, "arguments") == []
+
+
 def test_arguments_plural_unknown_argument_is_refused():
     message = make_plural_message(
         "m1", INBOX_SOURCE_FORMS,

@@ -310,6 +310,36 @@ def test_validate_config_accepts_adapter_argv_relative_to_root(work_root, tmp_pa
     assert not any(p["field"].startswith("adapter.argv") for p in problems)
 
 
+@pytest.mark.parametrize("field", ["batch_size", "max_rounds", "adapter_timeout_s"])
+@pytest.mark.parametrize("bad_value", [0, -1, "40", 1.5, True])
+def test_validate_config_refuses_non_positive_int_tuning_fields(work_root, tmp_path, field, bad_value):
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(project)
+    cfg[field] = bad_value
+    problems = lz_common.validate_config(cfg, work_root)
+    assert any(p["field"] == field for p in problems)
+
+
+def test_validate_config_accepts_tuning_fields_absent(work_root, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(project)
+    del cfg["batch_size"]
+    del cfg["max_rounds"]
+    del cfg["adapter_timeout_s"]
+    assert lz_common.validate_config(cfg, work_root) == []
+
+
+def test_validate_config_refuses_allow_identical_not_a_list_of_strings(work_root, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(project)
+    cfg["allow_identical"] = ["m1", 2]
+    problems = lz_common.validate_config(cfg, work_root)
+    assert any(p["field"] == "allow_identical" for p in problems)
+
+
 def test_load_config_fails_cannot_with_problems(work_root, capsys):
     lz_common.atomic_write_json(work_root / "localize.json", {"schema": 1})
     with pytest.raises(SystemExit) as exc_info:
@@ -326,6 +356,36 @@ def test_load_config_returns_cfg_when_valid(work_root, tmp_path):
     lz_common.atomic_write_json(work_root / "localize.json", cfg)
     loaded = lz_common.load_config(work_root)
     assert loaded["source_locale"] == "en"
+
+
+def test_load_config_resolves_relative_project_root_against_root(tmp_path, monkeypatch):
+    # A relative project_root resolves against `root` (R), not the process's
+    # current working directory -- a script run from anywhere else must
+    # still target the same, R-relative, directory. (project_root must sit
+    # outside R, so it is a sibling here, reached by "../project".)
+    root = tmp_path / "R"
+    root.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(project)
+    cfg["project_root"] = "../project"
+    lz_common.atomic_write_json(root / "localize.json", cfg)
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    loaded = lz_common.load_config(root)
+    assert loaded["project_root"] == str(project.resolve())
+
+
+def test_load_config_leaves_an_absolute_project_root_unchanged(work_root, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(project)
+    lz_common.atomic_write_json(work_root / "localize.json", cfg)
+    loaded = lz_common.load_config(work_root)
+    assert loaded["project_root"] == str(project.resolve())
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +512,40 @@ def test_load_messages_fails_on_wrong_schema(work_root):
     assert exc_info.value.code == lz_common.EXIT_CANNOT
 
 
+def test_load_messages_accepts_a_zero_max_length(work_root):
+    data = {
+        "schema": 1,
+        "files": [],
+        "messages": [
+            {
+                "id": "x", "source": "a",
+                "context": {"file": "f", "key": "x", "max_length": 0, "comment": None},
+                "targets": {},
+            }
+        ],
+    }
+    path = _write_messages(work_root, data)
+    assert lz_common.load_messages(path) == data
+
+
+def test_load_messages_fails_on_a_negative_max_length(work_root):
+    data = {
+        "schema": 1,
+        "files": [],
+        "messages": [
+            {
+                "id": "x", "source": "a",
+                "context": {"file": "f", "key": "x", "max_length": -1, "comment": None},
+                "targets": {},
+            }
+        ],
+    }
+    path = _write_messages(work_root, data)
+    with pytest.raises(SystemExit) as exc_info:
+        lz_common.load_messages(path)
+    assert exc_info.value.code == lz_common.EXIT_CANNOT
+
+
 # ---------------------------------------------------------------------------
 # adapter_digest / require_accepted_adapter
 # ---------------------------------------------------------------------------
@@ -496,6 +590,43 @@ def test_adapter_digest_changes_when_a_file_changes(work_root):
     before = lz_common.adapter_digest(work_root, cfg)
     (adapter_dir / "adapter.py").write_text("v2", encoding="utf-8")
     after = lz_common.adapter_digest(work_root, cfg)
+    assert before != after
+
+
+def test_adapter_digest_changes_when_argv_changes(work_root):
+    # The digest must cover what actually executes, not just file content:
+    # a changed argument invalidates the lock even when adapter.py itself
+    # is untouched.
+    adapter_dir = work_root / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter.py").write_text("same content", encoding="utf-8")
+    cfg_before = {"adapter": {"argv": ["python3", "adapter/adapter.py"], "options": {}}}
+    cfg_after = {"adapter": {"argv": ["python3", "adapter/adapter.py", "--strict"], "options": {}}}
+
+    before = lz_common.adapter_digest(work_root, cfg_before)
+    after = lz_common.adapter_digest(work_root, cfg_after)
+
+    assert before != after
+    assert before["argv"] == ["python3", "adapter/adapter.py"]
+    assert after["argv"] == ["python3", "adapter/adapter.py", "--strict"]
+
+
+def test_adapter_digest_hashes_an_argv_script_outside_root_even_with_an_adapter_dir(work_root, tmp_path):
+    # `R/adapter/` having content must not suppress hashing an argv element
+    # that resolves to a file outside R -- both sources are additive.
+    adapter_dir = work_root / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter.py").write_text("dir content", encoding="utf-8")
+    external = tmp_path / "outside_helper.py"
+    external.write_text("v1", encoding="utf-8")
+    cfg = {"adapter": {"argv": ["python3", str(external)], "options": {}}}
+
+    before = lz_common.adapter_digest(work_root, cfg)
+    assert str(external.resolve()) in before["files"]
+
+    external.write_text("v2 -- changed", encoding="utf-8")
+    after = lz_common.adapter_digest(work_root, cfg)
+
     assert before != after
 
 

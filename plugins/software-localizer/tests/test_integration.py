@@ -322,13 +322,17 @@ def test_seam_failure_interrupted_export_recovered_on_next_run(work_root):
         "started_at": "2026-01-01T00:00:00Z", "finished_at": None,
         "files": [
             {"kind": "project", "dest": str(de_path), "backup": "project/locales/de.json",
-             "sha256_before": lz_common.sha256_bytes(original_de_bytes)},
+             "sha256_before": lz_common.sha256_bytes(original_de_bytes), "replaced": True},
             {"kind": "ledger", "dest": str(ledger_path), "backup": "ledger.json",
              "sha256_before": lz_common.sha256_bytes(original_ledger_bytes)},
         ],
     }
     lz_common.atomic_write_json(export_dir / "journal.json", journal)
 
+    # "replaced": True on the project entry records that the swap below is
+    # what a real crash mid-replacement would have already done; recovery
+    # only restores files this transaction actually replaced, plus the
+    # ledger it always owns.
     de_path.write_text('{"footer.copyright": "mid-export garbage"}\n', encoding="utf-8")
 
     result = expect_ok("export_values.py", ["--root", str(root), "--locale", "de", "--dry-run"])

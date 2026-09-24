@@ -147,6 +147,25 @@ def _multiset_diff(expected: list, actual: list) -> tuple[list, list]:
     return missing, extra
 
 
+def _count_group_signature_matches(
+    name: str, signature: str, count_arguments: set, source_arg_signatures: dict,
+) -> bool:
+    """Whether a count-group token (`name`, `signature`) is source-compatible:
+    some source count-group token's signature, with ITS name replaced by
+    `name`, equals `signature`. `{count}` and `{n}` are then the same shape
+    (replacing "count" with "n" in "{count}" gives "{n}"), but `{count}` does
+    not license a candidate `{count, number, currency}` or `{n, number}` --
+    replacing the source name only changes the name, never the rest of the
+    formatter. Only the first occurrence of the source name is replaced, so a
+    name that also occurs inside a later format keyword (e.g. "n" inside
+    "number") is left alone."""
+    for source_name in count_arguments:
+        for source_signature in source_arg_signatures.get(source_name, ()):
+            if source_signature.replace(source_name, name, 1) == signature:
+                return True
+    return False
+
+
 def _check_arguments(
     is_plural, value_forms, value_parses, source_parses, target_labels,
     general_index, count_arguments,
@@ -188,16 +207,25 @@ def _check_arguments(
         is_exact = bool(target_labels[i].get("exact")) if i < len(target_labels) else False
         v_tokens = _tokens(vp, "argument")
 
-        # A count-group name (e.g. vue-i18n's "count"/"n") is validated only
-        # by the coverage rule below: its whole point is that a form may use
-        # any member of the group, so its literal name and signature need
-        # not match what a particular source form happened to use.
+        # A count-group name (e.g. vue-i18n's "count"/"n") may use any member
+        # of the group -- its coverage is checked separately below -- but its
+        # signature must still be source-compatible once the name difference
+        # is accounted for: `{count}` and `{n}` are the same shape, but
+        # `{count, number, currency}` is not licensed by a source `{count}`.
         bad = [
             t["signature"] for t in v_tokens
-            if t["name"] not in count_arguments
-            and (
-                t["name"] not in source_arg_signatures
-                or t["signature"] not in source_arg_signatures[t["name"]]
+            if (
+                t["name"] in count_arguments
+                and not _count_group_signature_matches(
+                    t["name"], t["signature"], count_arguments, source_arg_signatures,
+                )
+            )
+            or (
+                t["name"] not in count_arguments
+                and (
+                    t["name"] not in source_arg_signatures
+                    or t["signature"] not in source_arg_signatures[t["name"]]
+                )
             )
         ]
         if bad:

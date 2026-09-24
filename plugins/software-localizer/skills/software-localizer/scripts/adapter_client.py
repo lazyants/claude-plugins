@@ -19,7 +19,6 @@ import json
 import os
 import subprocess
 import tempfile
-from pathlib import Path
 
 import lz_common
 
@@ -108,8 +107,11 @@ def _require_ok(reply: dict, command: str) -> None:
 
 
 def collect(root: str, cfg: dict, project_dir: str, out_path: str) -> dict:
-    """Run `collect`, validate the messages file it wrote, and write it
-    (atomically) to `out_path`. Returns the validated messages dict."""
+    """Run `collect`, validate the messages file it wrote, and only then
+    atomically replace `out_path` with it. Returns the validated messages
+    dict. Validation happens on the temp-dir copy, before `out_path` is
+    touched at all: a malformed collect must never clobber the last good
+    `messages.json`."""
     with tempfile.TemporaryDirectory(dir=root) as tmp:
         options_path = _write_options(tmp, cfg)
         collected_path = os.path.join(tmp, "messages.json")
@@ -131,12 +133,17 @@ def collect(root: str, cfg: dict, project_dir: str, out_path: str) -> dict:
             except json.JSONDecodeError as exc:
                 raise AdapterError(f"adapter 'collect' wrote invalid JSON: {exc}")
 
+        # Shape-validated against the plan's message-format contract here, in
+        # the temp dir, before `out_path` is touched: a violation means the
+        # adapter is wrong and fails the process (lz_common.load_messages's
+        # own contract, exit 2) without ever overwriting the last good file.
+        problem = lz_common.messages_shape_problem(messages)
+        if problem is not None:
+            lz_common.fail(f"messages.json is invalid: {problem}", lz_common.EXIT_CANNOT)
+
         lz_common.atomic_write_json(out_path, messages)
 
-    # Validated against the plan's message-format contract; a violation
-    # means the adapter is wrong, not that the caller should get a partial
-    # result back — lz_common.load_messages fails the process (exit 2).
-    return lz_common.load_messages(Path(out_path))
+    return messages
 
 
 def export(root: str, cfg: dict, project_dir: str, locale: str, values: dict) -> dict:
@@ -156,6 +163,28 @@ def export(root: str, cfg: dict, project_dir: str, locale: str, values: dict) ->
         reply = run(root, cfg, project_dir, "export", extra_args)
         _require_ok(reply, "export")
         return reply
+
+
+def _require_valid_token(key: str, index: int, token) -> None:
+    """A `parse` token must be `{"kind": "argument", "name": str, "signature":
+    str}` or `{"kind": "structure", "text": str}`; any other shape, or an
+    unknown `kind`, is a malformed reply the caller must not silently treat
+    as a valid parse."""
+    if not isinstance(token, dict):
+        raise AdapterError(f"adapter 'parse' reply for key {key!r} has a non-object token at index {index}")
+    kind = token.get("kind")
+    if kind == "argument":
+        if not isinstance(token.get("name"), str) or not isinstance(token.get("signature"), str):
+            raise AdapterError(
+                f"adapter 'parse' reply for key {key!r} has a malformed argument token at index {index}"
+            )
+    elif kind == "structure":
+        if not isinstance(token.get("text"), str):
+            raise AdapterError(
+                f"adapter 'parse' reply for key {key!r} has a malformed structure token at index {index}"
+            )
+    else:
+        raise AdapterError(f"adapter 'parse' reply for key {key!r} has an unknown token kind {kind!r} at index {index}")
 
 
 def parse(root: str, cfg: dict, project_dir: str, items: list[dict]) -> dict[str, dict]:
@@ -179,10 +208,16 @@ def parse(root: str, cfg: dict, project_dir: str, items: list[dict]) -> dict[str
     for key, result in results.items():
         if not isinstance(result, dict) or "ok" not in result:
             raise AdapterError(f"adapter 'parse' reply for key {key!r} is missing required fields")
-        if result["ok"]:
-            if not isinstance(result.get("tokens"), list):
+        ok = result["ok"]
+        if not isinstance(ok, bool):
+            raise AdapterError(f"adapter 'parse' reply for key {key!r} has a non-boolean 'ok'")
+        if ok:
+            tokens = result.get("tokens")
+            if not isinstance(tokens, list):
                 raise AdapterError(f"adapter 'parse' reply for key {key!r} is missing 'tokens'")
-        elif "error" not in result:
+            for i, token in enumerate(tokens):
+                _require_valid_token(key, i, token)
+        elif not isinstance(result.get("error"), str):
             raise AdapterError(f"adapter 'parse' reply for key {key!r} is missing 'error'")
 
     requested_keys = {item["key"] for item in items}

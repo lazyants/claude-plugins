@@ -125,6 +125,7 @@ confirms, then freeze:
 
 ```bash
 python3 S/canon.py approve --root R --entry ID --locale L [--value V] --by "<operator>"
+python3 S/canon.py approve --root R --entry ID --by "<operator>"   # a do-not-translate entry
 python3 S/canon.py freeze --root R
 ```
 
@@ -162,7 +163,8 @@ never share state: the ledger, candidates, style, plural labels, canon translati
 report are all kept per locale. With several target languages, run the per-locale loops in
 parallel — one subagent per locale, each driving its own `packets.py build/accept` cycle — and
 keep `collect.py` + `ledger.py sync` and every `canon.py` change in the main session, since
-they touch all locales at once. A full audit is large (a project with 2 000 strings and 7
+they touch all locales at once. `export_values.py` takes an exclusive lock on the workspace, so
+exports of different locales run one after another even when started in parallel. A full audit is large (a project with 2 000 strings and 7
 target languages is ~14 000 items, ~350 batches at the default `batch_size`): agree with the
 operator whether to audit everything or start with the most-used namespaces.
 

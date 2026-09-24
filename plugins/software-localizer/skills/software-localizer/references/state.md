@@ -24,15 +24,18 @@ any of them changes, sync clears the candidate.
 
 ## Export safety — `export_values.py`
 
+0. Exports hold an exclusive lock on `R/exports/.lock` from start to finish, so two exports
+   never interleave and recovery never touches an export that is still running.
 1. An unfinished export journal from an interrupted run is rolled back first.
 2. The live project is collected again. Export is refused when a target changed since the last
    sync, or when the source, context or style differs from what the candidate was reviewed
    against.
 3. The adapter writes into a temporary copy; the copy is collected again and must differ from
    the live project in exactly the exported values — nothing else.
-4. A journal and backups (the project files and that locale's ledger file) are written; each project file is
-   re-read and must still have the bytes the export started from; files are replaced one by one
-   with atomic renames; the ledger is updated; only then is the journal marked done. Any failure
-   before that restores every backup.
+4. A journal and backups (the changed project files and that locale's ledger file) are written;
+   each project file is re-read and must still have the bytes it had when it was staged — an
+   edit made meanwhile refuses the export; files are replaced one by one with atomic renames; the
+   ledger is updated; only then is the journal marked done. Any failure before that restores the
+   files this export replaced and the ledger — never a file it did not touch.
 
 `--dry-run` stops after step 3 and shows what would change.

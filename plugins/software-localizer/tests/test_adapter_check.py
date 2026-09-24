@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+import adapter_check
 import lz_common
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -232,6 +233,26 @@ def test_inventory_includes_untracked_and_excludes_gitignored(work_root):
     assert "locales/en.json" in packet["inventory"]
 
 
+# --- coverage prompt: no built-in fallback --------------------------------------
+
+
+def test_write_coverage_prompt_fails_cannot_when_packaged_template_missing(work_root, capsys):
+    # No fallback template: a missing packaged asset is a broken install, not
+    # something to silently paper over with a second, drifting prompt.
+    fake_plugin_root = work_root / "fake_plugin"
+    (fake_plugin_root / "assets" / "templates").mkdir(parents=True)
+    out_dir = work_root / "coverage_out"
+
+    with pytest.raises(SystemExit) as exc_info:
+        adapter_check._write_coverage_prompt(fake_plugin_root, out_dir, {"schema": 1})
+
+    assert exc_info.value.code == lz_common.EXIT_CANNOT
+    payload = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert payload["ok"] is False
+    assert "coverage_TASK.md" in payload["error"]
+    assert not (out_dir / "prompt.md").exists()
+
+
 # --- accept() ------------------------------------------------------------------
 
 
@@ -327,6 +348,30 @@ def test_accept_out_of_scope_key_for_a_whole_missed_file(work_root):
 
     assert code == 0
     assert reply["ok"] is True
+
+
+def test_accept_refuses_when_adapter_changed_since_run(work_root):
+    """`run` binds its stored digest to what it actually exercised; editing
+    the adapter afterward must not let `accept` lock in an unexercised
+    version."""
+    root, project_dir, cfg = _make_workspace(work_root)
+    run_code, _ = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+    assert run_code == 0
+
+    adapter_file = root / "adapter" / "adapter.py"
+    adapter_file.write_text(adapter_file.read_text(encoding="utf-8") + "\n# mutated after run\n", encoding="utf-8")
+
+    coverage_path = work_root / "coverage.json"
+    _write_coverage(coverage_path, [])
+
+    code, reply = _run(
+        ADAPTER_CHECK, ["accept", "--root", str(root), "--coverage", str(coverage_path), "--by", "tester"]
+    )
+
+    assert code == 1
+    assert reply["ok"] is False
+    assert "adapter_check.py run" in reply["error"]
+    assert not (root / "adapter.lock.json").exists()
 
 
 def test_accept_requires_a_prior_run(work_root):

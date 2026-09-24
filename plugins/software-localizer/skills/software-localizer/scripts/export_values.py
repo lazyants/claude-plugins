@@ -5,14 +5,23 @@ Recovery of an interrupted previous export always runs first, unconditional
 on the locale requested here — a leftover `in_progress` journal is a project
 in an unknown state and blocks trust for every locale, not just the one that
 produced it.
+
+The whole flow for one call -- recovery, the freshness guards, staging and
+the commit -- runs under one exclusive lock (`R/exports/.lock`). Without it,
+two exports started in the same second could pick the same journal
+directory, or one export's recovery could roll back another one that is
+still running.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import os
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -22,6 +31,35 @@ import adapter_client  # noqa: E402
 import ledger as ledger_mod  # noqa: E402
 
 JOURNAL_SCHEMA = 1
+
+
+# ---------------------------------------------------------------------------
+# Exclusive lock (plan section 11's whole flow: recovery through commit)
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _exclusive_export_lock(root: Path):
+    """Hold `R/exports/.lock` (created if missing) for the whole call.
+    Blocking is fine: a second export simply waits its turn instead of
+    racing the first one's journal, backup or commit phase."""
+    lock_dir = root / "exports"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / ".lock"
+    fh = open(lock_path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+
+
+def _new_export_stamp() -> str:
+    """A per-export directory name that can never collide, even for two
+    exports started in the same second: `now_iso()` alone only has second
+    precision."""
+    return f"{lz_common.now_iso().replace(':', '-')}-{uuid.uuid4().hex[:8]}"
 
 
 # ---------------------------------------------------------------------------
@@ -52,8 +90,16 @@ def _atomic_replace_bytes(dest: Path, data: bytes) -> None:
 
 
 def _restore_backups(export_dir: Path, journal: dict) -> None:
+    """Restore only what this transaction actually replaced (tracked per
+    file in the journal as the commit proceeds), plus the locale ledger,
+    which this transaction always owns exclusively. A file that failed the
+    pre-replace byte check and was therefore never replaced is left exactly
+    as it is -- restoring it too would erase the very edit that caused the
+    rollback, not one the rollback produced."""
     backup_dir = export_dir / "backup"
     for f in journal["files"]:
+        if f["kind"] != "ledger" and not f.get("replaced"):
+            continue
         data = (backup_dir / f["backup"]).read_bytes()
         _atomic_replace_bytes(Path(f["dest"]), data)
 
@@ -156,14 +202,52 @@ def _compare_messages(live: dict, temp: dict, locale: str, values: dict) -> list
 
 
 # ---------------------------------------------------------------------------
+# Which files an export actually touches (plan section 11, steps 4 and 5)
+# ---------------------------------------------------------------------------
+
+
+def _changed_files(live_messages: dict, temp_project: Path, project_root: Path) -> list:
+    """Relative paths, from `live_messages["files"]`, whose bytes actually
+    differ between the exported staged copy and the live project right now
+    -- the export's real blast radius, found without re-running the
+    adapter. `context.file` (a message's SOURCE file) is not this: a
+    message's source file need not be the target file its locale value
+    lives in at all."""
+    changed = []
+    for relpath in live_messages.get("files", []):
+        dest = project_root / relpath
+        if not dest.is_file():
+            continue
+        staged = temp_project / relpath
+        if staged.is_file() and staged.read_bytes() == dest.read_bytes():
+            continue
+        changed.append(relpath)
+    return changed
+
+
+def _changed_by_file(changed_files: list, candidate_ids: list) -> dict:
+    """Per-file candidate counts for the dry-run/export report. When the
+    export touched exactly one file, every requested id's count attributes
+    to it unambiguously. There is no per-id target-file mapping in the
+    message contract, so the core has no adapter-independent way to split
+    ids across more than one changed file; each such file is reported with
+    an unknown count (`None`) rather than a fabricated split."""
+    if not changed_files:
+        return {}
+    if len(changed_files) == 1:
+        return {changed_files[0]: len(candidate_ids)}
+    return {f: None for f in changed_files}
+
+
+# ---------------------------------------------------------------------------
 # Journal + backups + replacement (plan section 11, step 5)
 # ---------------------------------------------------------------------------
 
 
 def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, temp_project: Path,
                      candidate_ids: list, values: dict, changed_by_file: dict, ledger_data: dict,
-                     recovered: list) -> dict:
-    stamp = lz_common.now_iso().replace(":", "-")
+                     recovered: list, staging_sha256: dict) -> dict:
+    stamp = _new_export_stamp()
     export_dir = root / "exports" / stamp
     project_root = Path(cfg["project_root"])
     # ledger.py stores one file per locale (`R/ledger/<locale>.json`), never
@@ -172,22 +256,14 @@ def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, tem
     # backed up, updated and (on failure) restored.
     ledger_path = root / "ledger" / f"{locale}.json"
 
-    # Only a file this export actually changed is backed up and replaced --
-    # comparing the staged (already-exported) copy against the live file
-    # tells us which, without re-running the adapter. A missing staged copy
-    # is treated as "changed" defensively (stage_files should have copied
-    # every listed file; this only guards a future contract change there).
+    # Only a file this export actually changed is backed up and replaced.
     files_meta = []
-    for relpath in live_messages.get("files", []):
-        dest = project_root / relpath
-        if not dest.is_file():
-            continue
-        staged = temp_project / relpath
-        if staged.is_file() and staged.read_bytes() == dest.read_bytes():
-            continue
-        files_meta.append({"kind": "project", "relpath": relpath, "dest": str(dest),
-                            "backup": f"project/{relpath}"})
-    files_meta.append({"kind": "ledger", "relpath": None, "dest": str(ledger_path), "backup": "ledger.json"})
+    for relpath in _changed_files(live_messages, temp_project, project_root):
+        files_meta.append({"kind": "project", "relpath": relpath, "dest": str(project_root / relpath),
+                            "backup": f"project/{relpath}", "sha256_staged": staging_sha256.get(relpath),
+                            "replaced": False})
+    files_meta.append({"kind": "ledger", "relpath": None, "dest": str(ledger_path), "backup": "ledger.json",
+                        "sha256_staged": None, "replaced": False})
 
     backup_dir = export_dir / "backup"
     for meta in files_meta:
@@ -199,10 +275,17 @@ def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, tem
         "schema": JOURNAL_SCHEMA, "stamp": stamp, "locale": locale, "status": "in_progress",
         "started_at": lz_common.now_iso(), "finished_at": None,
         "files": [{"kind": m["kind"], "dest": m["dest"], "backup": m["backup"],
-                    "sha256_before": m["sha256_before"]} for m in files_meta],
+                    "sha256_before": m["sha256_before"], "replaced": False} for m in files_meta],
     }
     journal_path = export_dir / "journal.json"
     lz_common.atomic_write_json(journal_path, journal)
+
+    def _mark_replaced(dest: str) -> None:
+        for f in journal["files"]:
+            if f["dest"] == dest:
+                f["replaced"] = True
+                break
+        lz_common.atomic_write_json(journal_path, journal)
 
     try:
         for meta in files_meta:
@@ -210,13 +293,22 @@ def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, tem
                 continue
             dest = Path(meta["dest"])
             current = dest.read_bytes()
-            if lz_common.sha256_bytes(current) != meta["sha256_before"]:
+            # The guard is the hash taken when this file was STAGED --
+            # before the adapter subprocess ran and before the re-collect
+            # and compare steps -- never a hash taken here, right before
+            # backup. A freshly-read hash would just become part of what
+            # gets backed up, so an edit made during the (potentially slow)
+            # adapter run would be silently overwritten instead of caught.
+            expected = meta.get("sha256_staged")
+            if expected is None or lz_common.sha256_bytes(current) != expected:
                 raise RuntimeError(f"{meta['relpath']} changed on disk during the export")
             new_bytes = (temp_project / meta["relpath"]).read_bytes()
             _atomic_replace_bytes(dest, new_bytes)
+            _mark_replaced(meta["dest"])
 
         ledger_mod.record_export(ledger_data, locale, values)
         ledger_mod.save(root, ledger_data, locales=[locale])
+        _mark_replaced(str(ledger_path))
 
         journal["status"] = "done"
         journal["finished_at"] = lz_common.now_iso()
@@ -239,64 +331,72 @@ def _do_real_export(root: Path, cfg: dict, locale: str, live_messages: dict, tem
 
 
 def do_export(root: Path, locale: str, dry_run: bool) -> dict:
-    recovered = recover_unfinished_exports(root)
+    with _exclusive_export_lock(root):
+        recovered = recover_unfinished_exports(root)
 
-    cfg = lz_common.load_config(root)
-    if locale not in cfg["target_locales"]:
-        lz_common.fail(f"locale is not a configured target: {locale}", lz_common.EXIT_CANNOT, locale=locale)
-    lz_common.require_accepted_adapter(root, cfg)
+        cfg = lz_common.load_config(root)
+        if locale not in cfg["target_locales"]:
+            lz_common.fail(f"locale is not a configured target: {locale}", lz_common.EXIT_CANNOT, locale=locale)
+        lz_common.require_accepted_adapter(root, cfg)
 
-    project_dir = str(Path(cfg["project_root"]))
-    try:
-        live_messages = adapter_client.collect(str(root), cfg, project_dir, str(root / "messages.json"))
-    except adapter_client.AdapterError as exc:
-        lz_common.fail(f"collect failed: {exc}", lz_common.EXIT_FAIL, locale=locale, recovered=recovered)
-    by_id = {m["id"]: m for m in live_messages["messages"]}
-
-    ledger_data = ledger_mod.load(root)
-    candidate_ids = ledger_mod.exportable(ledger_data, locale)
-    entries = ledger_data.get("locales", {}).get(locale, {})
-
-    problems = _staleness_problems(cfg, locale, candidate_ids, by_id, entries)
-    if problems:
-        lz_common.fail("export refused: some candidates are stale", lz_common.EXIT_FAIL,
-                        locale=locale, problems=problems, recovered=recovered)
-
-    values = {msg_id: entries[msg_id]["candidate"]["value"] for msg_id in candidate_ids}
-    if not values:
-        return {"ok": True, "locale": locale, "dry_run": dry_run, "exported": 0,
-                "changed_by_file": {}, "recovered": recovered}
-
-    changed_by_file: dict = {}
-    for msg_id in candidate_ids:
-        file_path = by_id[msg_id].get("context", {}).get("file", "?")
-        changed_by_file[file_path] = changed_by_file.get(file_path, 0) + 1
-
-    with tempfile.TemporaryDirectory(dir=str(root)) as tmp:
-        temp_project = Path(tmp) / "project"
-        # Stage exactly the declared files, never the whole project (plan
-        # section 6's staging refusal applies here too): a real project's
-        # dependency/data directories dwarf its catalogs.
-        lz_common.stage_files(project_dir, live_messages["files"], temp_project)
+        project_root = Path(cfg["project_root"])
+        project_dir = str(project_root)
         try:
-            adapter_client.export(str(root), cfg, str(temp_project), locale, values)
-            temp_messages_path = Path(tmp) / "messages.json"
-            temp_messages = adapter_client.collect(str(root), cfg, str(temp_project), str(temp_messages_path))
+            live_messages = adapter_client.collect(str(root), cfg, project_dir, str(root / "messages.json"))
         except adapter_client.AdapterError as exc:
-            lz_common.fail(f"export re-collect failed: {exc}", lz_common.EXIT_FAIL,
-                            locale=locale, recovered=recovered)
+            lz_common.fail(f"collect failed: {exc}", lz_common.EXIT_FAIL, locale=locale, recovered=recovered)
+        by_id = {m["id"]: m for m in live_messages["messages"]}
 
-        diff_problems = _compare_messages(live_messages, temp_messages, locale, values)
-        if diff_problems:
-            lz_common.fail("export refused: exporting changed more than the requested values",
-                            lz_common.EXIT_FAIL, locale=locale, problems=diff_problems, recovered=recovered)
+        ledger_data = ledger_mod.load(root)
+        candidate_ids = ledger_mod.exportable(ledger_data, locale)
+        entries = ledger_data.get("locales", {}).get(locale, {})
 
-        if dry_run:
-            return {"ok": True, "locale": locale, "dry_run": True, "exported": len(candidate_ids),
-                    "changed_by_file": changed_by_file, "recovered": recovered}
+        problems = _staleness_problems(cfg, locale, candidate_ids, by_id, entries)
+        if problems:
+            lz_common.fail("export refused: some candidates are stale", lz_common.EXIT_FAIL,
+                            locale=locale, problems=problems, recovered=recovered)
 
-        return _do_real_export(root, cfg, locale, live_messages, temp_project, candidate_ids, values,
-                                changed_by_file, ledger_data, recovered)
+        values = {msg_id: entries[msg_id]["candidate"]["value"] for msg_id in candidate_ids}
+        if not values:
+            return {"ok": True, "locale": locale, "dry_run": dry_run, "exported": 0,
+                    "changed_by_file": {}, "recovered": recovered}
+
+        with tempfile.TemporaryDirectory(dir=str(root)) as tmp:
+            temp_project = Path(tmp) / "project"
+            # Stage exactly the declared files, never the whole project (plan
+            # section 6's staging refusal applies here too): a real project's
+            # dependency/data directories dwarf its catalogs.
+            lz_common.stage_files(project_dir, live_messages["files"], temp_project)
+            # The freshness guard's baseline: each live file's bytes at the
+            # moment it was staged, before the adapter subprocess (export)
+            # or the re-collect/compare steps below can run.
+            staging_sha256 = {
+                relpath: lz_common.sha256_file(temp_project / relpath)
+                for relpath in live_messages.get("files", [])
+                if (temp_project / relpath).is_file()
+            }
+            try:
+                adapter_client.export(str(root), cfg, str(temp_project), locale, values)
+                temp_messages_path = Path(tmp) / "messages.json"
+                temp_messages = adapter_client.collect(str(root), cfg, str(temp_project), str(temp_messages_path))
+            except adapter_client.AdapterError as exc:
+                lz_common.fail(f"export re-collect failed: {exc}", lz_common.EXIT_FAIL,
+                                locale=locale, recovered=recovered)
+
+            diff_problems = _compare_messages(live_messages, temp_messages, locale, values)
+            if diff_problems:
+                lz_common.fail("export refused: exporting changed more than the requested values",
+                                lz_common.EXIT_FAIL, locale=locale, problems=diff_problems, recovered=recovered)
+
+            changed_files = _changed_files(live_messages, temp_project, project_root)
+            changed_by_file = _changed_by_file(changed_files, candidate_ids)
+
+            if dry_run:
+                return {"ok": True, "locale": locale, "dry_run": True, "exported": len(candidate_ids),
+                        "changed_by_file": changed_by_file, "recovered": recovered}
+
+            return _do_real_export(root, cfg, locale, live_messages, temp_project, candidate_ids, values,
+                                    changed_by_file, ledger_data, recovered, staging_sha256)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

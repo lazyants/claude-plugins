@@ -121,7 +121,10 @@ def test_export_dry_run_reports_changes_without_writing(work_root):
     assert result["ok"] is True
     assert result["dry_run"] is True
     assert result["exported"] == 1
-    assert result["changed_by_file"] == {"locales/en.json": 1}
+    # The exported candidate is "de"; the file that will actually change is
+    # `locales/de.json` (found from the staged-vs-live byte diff), never
+    # `context.file` (the message's SOURCE file, `locales/en.json`).
+    assert result["changed_by_file"] == {"locales/de.json": 1}
     assert before == after
 
     ledger_data = ledger_mod.load(root)
@@ -268,7 +271,7 @@ def test_export_recovers_leftover_in_progress_journal(work_root):
         "started_at": "2026-01-01T00:00:00Z", "finished_at": None,
         "files": [
             {"kind": "project", "dest": str(de_path), "backup": "project/locales/de.json",
-             "sha256_before": lz_common.sha256_bytes(original_de_bytes)},
+             "sha256_before": lz_common.sha256_bytes(original_de_bytes), "replaced": True},
             {"kind": "ledger", "dest": str(ledger_path), "backup": "ledger.json",
              "sha256_before": lz_common.sha256_bytes(original_ledger_bytes)},
         ],
@@ -276,7 +279,8 @@ def test_export_recovers_leftover_in_progress_journal(work_root):
     lz_common.atomic_write_json(export_dir / "journal.json", journal)
 
     # Simulate a crash mid-replacement: the project file was already swapped
-    # for a new value, but the ledger update never landed.
+    # for a new value (hence "replaced": True above), but the ledger update
+    # never landed.
     de_path.write_text('{"footer.copyright": "mid-export garbage"}\n', encoding="utf-8")
 
     result = export_values.do_export(root, "de", dry_run=True)
@@ -286,6 +290,160 @@ def test_export_recovers_leftover_in_progress_journal(work_root):
 
     rolled_back_journal = json.loads((export_dir / "journal.json").read_text(encoding="utf-8"))
     assert rolled_back_journal["status"] == "rolled_back"
+
+
+# --- exclusive lock + unique journal dirs -----------------------------------
+
+
+def test_export_dir_stamps_never_collide_within_the_same_second(monkeypatch):
+    """`now_iso()` alone only has second precision; two exports started in
+    the same second must still get distinct journal directories."""
+    monkeypatch.setattr(export_values.lz_common, "now_iso", lambda: "2026-01-01T00-00-00Z")
+    stamps = {export_values._new_export_stamp() for _ in range(20)}
+    assert len(stamps) == 20
+
+
+def test_export_holds_the_lock_before_recovery_runs(work_root, monkeypatch):
+    """Recovery must only ever run while the exclusive lock is held -- so
+    the lock has to be acquired first, structurally, not just believed to
+    be uncontended in practice."""
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+
+    order = []
+    real_flock = export_values.fcntl.flock
+
+    def traced_flock(fd, op):
+        if op == export_values.fcntl.LOCK_EX:
+            order.append("lock")
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(export_values.fcntl, "flock", traced_flock)
+
+    real_recover = export_values.recover_unfinished_exports
+
+    def traced_recover(root_arg):
+        order.append("recover")
+        return real_recover(root_arg)
+
+    monkeypatch.setattr(export_values, "recover_unfinished_exports", traced_recover)
+
+    export_values.do_export(root, "de", dry_run=True)
+
+    assert order == ["lock", "recover"]
+
+
+# --- edit landing between staging and replace --------------------------------
+
+
+def test_export_refuses_when_live_file_edited_after_staging(work_root, monkeypatch):
+    """A person's edit that lands after staging (e.g. while the adapter
+    subprocess or the re-collect/compare steps run) must be caught against
+    the hash taken AT staging time -- not a hash taken later, right before
+    backup, which would just absorb the edit into the backup itself and
+    silently overwrite it."""
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+
+    de_path = project_dir / "locales" / "de.json"
+    edited_text = '{"footer.copyright": "a person is editing this right now"}\n'
+
+    real_stage_files = export_values.lz_common.stage_files
+
+    def stage_then_edit(project_dir_arg, files, dest):
+        real_stage_files(project_dir_arg, files, dest)
+        # The edit lands right after staging captured its hash -- exactly
+        # the window between staging and the eventual backup/replace.
+        de_path.write_text(edited_text, encoding="utf-8")
+
+    monkeypatch.setattr(export_values.lz_common, "stage_files", stage_then_edit)
+
+    try:
+        export_values.do_export(root, "de", dry_run=False)
+        raise AssertionError("expected export to refuse")
+    except SystemExit as exc:
+        assert exc.code == lz_common.EXIT_FAIL
+
+    # The person's edit survives -- not the pre-export original, and not
+    # the candidate's translated value.
+    assert de_path.read_text(encoding="utf-8") == edited_text
+
+
+# --- rollback restores only what it replaced ----------------------------------
+
+
+def test_restore_backups_leaves_a_never_replaced_file_untouched(work_root):
+    """`_restore_backups` must restore a project file only when the journal
+    marks it `replaced`; a file that failed the byte re-check and was
+    therefore never touched must be left exactly as it is (a full restore
+    of every listed file would overwrite the person's edit that caused the
+    refusal in the first place)."""
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    export_dir = root / "exports" / "20260101T000000Z-manual"
+    backup_dir = export_dir / "backup"
+
+    replaced_dest = work_root / "replaced.txt"
+    replaced_dest.write_bytes(b"post-replace-content")
+    lz_common.atomic_write_text(backup_dir / "project" / "replaced.txt", "pre-export-content")
+
+    unreplaced_dest = work_root / "unreplaced.txt"
+    unreplaced_dest.write_bytes(b"a person's edit, never replaced")
+    lz_common.atomic_write_text(backup_dir / "project" / "unreplaced.txt", "pre-export-content-2")
+
+    journal = {
+        "schema": 1, "stamp": "20260101T000000Z-manual", "locale": "de", "status": "in_progress",
+        "started_at": "2026-01-01T00:00:00Z", "finished_at": None,
+        "files": [
+            {"kind": "project", "dest": str(replaced_dest), "backup": "project/replaced.txt",
+             "sha256_before": "x", "replaced": True},
+            {"kind": "project", "dest": str(unreplaced_dest), "backup": "project/unreplaced.txt",
+             "sha256_before": "y", "replaced": False},
+        ],
+    }
+
+    export_values._restore_backups(export_dir, journal)
+
+    assert replaced_dest.read_bytes() == b"pre-export-content"
+    assert unreplaced_dest.read_bytes() == b"a person's edit, never replaced"
+
+
+def test_export_rolls_back_the_replaced_file_and_ledger_after_a_real_replace(work_root, monkeypatch):
+    """Rollback through the REAL export path (`_do_real_export`'s own
+    exception handler), not the separate crash-recovery entry point: inject
+    a failure right after the export's one real file replacement (the toy
+    adapter always produces exactly one destination file per locale, so
+    that replacement is also the export's only one) and confirm the project
+    file and the ledger both come back byte-identical to before, with the
+    journal marked rolled_back."""
+    root, cfg, project_dir, by_id = setup_export_workspace(work_root)
+    set_candidate(root, "de", "footer.copyright",
+                   make_ready_candidate(cfg, by_id["footer.copyright"], "de", "Alle Rechte vorbehalten"))
+
+    de_path = project_dir / "locales" / "de.json"
+    ledger_path = root / "ledger" / "de.json"
+    original_de_bytes = de_path.read_bytes()
+    original_ledger_bytes = ledger_path.read_bytes()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated failure right after the real replace")
+
+    # record_export runs immediately after the (single, real) project-file
+    # replacement has already landed on disk, and before the ledger save.
+    monkeypatch.setattr(export_values.ledger_mod, "record_export", boom)
+
+    try:
+        export_values.do_export(root, "de", dry_run=False)
+        raise AssertionError("expected export to roll back")
+    except SystemExit as exc:
+        assert exc.code == lz_common.EXIT_FAIL
+
+    assert de_path.read_bytes() == original_de_bytes
+    assert ledger_path.read_bytes() == original_ledger_bytes
+
+    export_dirs = [p for p in (root / "exports").iterdir() if p.is_dir()]
+    assert len(export_dirs) == 1
+    journal = json.loads((export_dirs[0] / "journal.json").read_text(encoding="utf-8"))
+    assert journal["status"] == "rolled_back"
 
 
 # --- CLI subprocess smoke test ----------------------------------------------

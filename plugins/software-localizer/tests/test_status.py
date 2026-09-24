@@ -174,6 +174,36 @@ def test_status_reports_adapter_lock_present_but_stale(work_root, tmp_path):
     assert "adapter_check.py accept" in payload["next_command"]
 
 
+def test_status_reports_adapter_lock_stale_when_only_argv_changed(work_root, tmp_path):
+    """`_adapter_lock_status` must compare all three fields
+    `lz_common.require_accepted_adapter` does (files, argv, options_sha256),
+    not just files/options_sha256: a lock whose `files` and `options_sha256`
+    still match the current digest, but whose `argv` does not, must be
+    reported stale."""
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_cfg(project)
+    cfg["adapter"] = {"argv": ["python3", "adapter/adapter.py"], "options": {}}
+    lz_common.atomic_write_json(work_root / "localize.json", cfg)
+
+    adapter_dir = work_root / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter.py").write_text("v1", encoding="utf-8")
+    (work_root / "runs").mkdir()
+    lz_common.atomic_write_json(work_root / "runs" / "_adapter_check.json", {"ok": True})
+
+    digest = lz_common.adapter_digest(work_root, cfg)
+    stale_lock = dict(digest)
+    stale_lock["argv"] = digest["argv"] + ["--extra-flag"]  # only argv moved
+    lz_common.atomic_write_json(work_root / "adapter.lock.json", stale_lock)
+
+    code, payload = _run(work_root)
+    assert code == 0
+    assert payload["adapter_lock"]["present"] is True
+    assert payload["adapter_lock"]["current"] is False
+    assert "adapter_check.py accept" in payload["next_command"]
+
+
 def test_status_reports_ledger_counts_per_locale_and_state(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
@@ -213,6 +243,78 @@ def test_status_reports_ledger_counts_per_locale_and_state(work_root, tmp_path):
     assert "--locale de" in payload["next_command"]
 
 
+def test_status_recommends_review_before_translate(work_root, tmp_path):
+    """Item 4: a candidate that already passed checks and only needs a
+    verdict outranks a sibling id that still needs a fresh translate round
+    -- `next_command` must point at `review`, not `translate`, even though
+    a `ru` id is `pending` with no candidate at all."""
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_cfg(project)
+    cfg["adapter"] = {"argv": ["python3", "adapter/adapter.py"], "options": {}}
+    lz_common.atomic_write_json(work_root / "localize.json", cfg)
+
+    adapter_dir = work_root / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter.py").write_text("v1", encoding="utf-8")
+    (work_root / "runs").mkdir()
+    lz_common.atomic_write_json(work_root / "runs" / "_adapter_check.json", {"ok": True})
+    digest = lz_common.adapter_digest(work_root, cfg)
+    lz_common.atomic_write_json(work_root / "adapter.lock.json", digest)
+    lz_common.atomic_write_json(work_root / "messages.json", {"schema": 1, "files": [], "messages": []})
+
+    _write_ledger(work_root, {
+        "de": {"a": {
+            "state": "pending",
+            "candidate": {"checks": "pass", "value_sha256": "v1", "verdict": None},
+        }},
+        "ru": {"b": {"state": "pending", "candidate": None}},
+    })
+
+    code, payload = _run(work_root)
+    assert code == 0
+    assert "packets.py build" in payload["next_command"]
+    assert "--kind review" in payload["next_command"]
+    assert "--locale de" in payload["next_command"]
+
+
+def test_status_recommends_export_before_translate(work_root, tmp_path):
+    """A fully-passing, not-yet-exported candidate outranks a sibling id
+    that still needs translation -- `next_command` must point at
+    `export_values.py`, not `translate`."""
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_cfg(project)
+    cfg["adapter"] = {"argv": ["python3", "adapter/adapter.py"], "options": {}}
+    lz_common.atomic_write_json(work_root / "localize.json", cfg)
+
+    adapter_dir = work_root / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter.py").write_text("v1", encoding="utf-8")
+    (work_root / "runs").mkdir()
+    lz_common.atomic_write_json(work_root / "runs" / "_adapter_check.json", {"ok": True})
+    digest = lz_common.adapter_digest(work_root, cfg)
+    lz_common.atomic_write_json(work_root / "adapter.lock.json", digest)
+    lz_common.atomic_write_json(work_root / "messages.json", {"schema": 1, "files": [], "messages": []})
+
+    _write_ledger(work_root, {
+        "de": {"a": {
+            "state": "pending",
+            "candidate": {
+                "checks": "pass", "value_sha256": "v1",
+                "verdict": {"verdict": "pass", "value_sha256": "v1"},
+            },
+        }},
+        "ru": {"b": {"state": "pending", "candidate": None}},
+    })
+
+    code, payload = _run(work_root)
+    assert code == 0
+    assert "export_values.py" in payload["next_command"]
+    assert "--locale de" in payload["next_command"]
+    assert "translate" not in payload["next_command"]
+
+
 def test_status_recommends_export_when_nothing_is_pending_or_stale(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
@@ -237,3 +339,36 @@ def test_status_recommends_export_when_nothing_is_pending_or_stale(work_root, tm
     code, payload = _run(work_root)
     assert code == 0
     assert "export_values.py" in payload["next_command"]
+
+
+def test_status_never_crashes_on_a_malformed_ledger_entry(work_root, tmp_path):
+    """`ledger.exportable` (now called for the export decision) indexes an
+    entry with `entry.get(...)`, unguarded -- a non-dict entry raises. That
+    locale must fall back to "unknown" and be left out of every bucket,
+    never crash the whole report; a sibling locale with a normal entry is
+    still read correctly."""
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_cfg(project)
+    cfg["adapter"] = {"argv": ["python3", "adapter/adapter.py"], "options": {}}
+    lz_common.atomic_write_json(work_root / "localize.json", cfg)
+
+    adapter_dir = work_root / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter.py").write_text("v1", encoding="utf-8")
+    (work_root / "runs").mkdir()
+    lz_common.atomic_write_json(work_root / "runs" / "_adapter_check.json", {"ok": True})
+    digest = lz_common.adapter_digest(work_root, cfg)
+    lz_common.atomic_write_json(work_root / "adapter.lock.json", digest)
+    lz_common.atomic_write_json(work_root / "messages.json", {"schema": 1, "files": [], "messages": []})
+
+    _write_ledger(work_root, {
+        "de": {"a": "not-a-dict-entry"},  # malformed: exportable() raises on this
+        "ru": {"b": {"state": "pending", "candidate": None}},
+    })
+
+    code, payload = _run(work_root)
+    assert code == 0
+    assert payload["ok"] is True
+    assert "translate" in payload["next_command"]
+    assert "--locale ru" in payload["next_command"]

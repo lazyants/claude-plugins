@@ -41,26 +41,6 @@ COVERAGE_DIR_NAME = "_coverage"
 CHECK_RESULT_NAME = "_adapter_check.json"
 PLACEHOLDER = "{{PACKET_JSON}}"
 
-# Used only when the coverage template has not been written yet (or is
-# missing at run time for any other reason) -- keeps this script usable on
-# its own contract instead of hard-depending on another owner's file.
-FALLBACK_COVERAGE_TEMPLATE = """# Check that the adapter collects every user-visible string
-
-Find user-visible, translatable text the adapter missed, using the files it reads (with the ids
-it collected from each) and the independent inventory of the whole project below. Reply with ONE
-JSON object and nothing else:
-
-```json
-{"missing": [{"file": "relative/path", "key": "the key, or null for a whole missed file", \
-"why_user_visible": "..."}]}
-```
-
-An empty list means nothing was missed.
-
-## Packet
-
-""" + PLACEHOLDER + "\n"
-
 # Awkward text: quote, backslash, newline, tab, a leading and a trailing
 # space, and non-Latin script, with a tag so a swapped or duplicated form is
 # still detectable.
@@ -272,10 +252,9 @@ def _build_coverage_packet(project_dir: Path, messages: dict) -> dict:
 
 def _write_coverage_prompt(plugin_root: Path, out_dir: Path, packet: dict) -> None:
     template_path = plugin_root / "assets" / "templates" / "coverage_TASK.md"
-    if template_path.is_file():
-        template_text = template_path.read_text(encoding="utf-8")
-    else:
-        template_text = FALLBACK_COVERAGE_TEMPLATE
+    if not template_path.is_file():
+        lz_common.fail(f"packaged coverage prompt template is missing: {template_path}", lz_common.EXIT_CANNOT)
+    template_text = template_path.read_text(encoding="utf-8")
     packet_json = json.dumps(packet, indent=2, ensure_ascii=False, sort_keys=True)
     rendered = template_text.replace(PLACEHOLDER, packet_json)
     lz_common.atomic_write_text(out_dir / "prompt.md", rendered)
@@ -309,6 +288,10 @@ def cmd_run(args) -> int:
             staging_result["ok"] and unchanged_result["ok"] and awkward_result["ok"] and parse_result["ok"]
         )
 
+        # Bound to the run: `accept` refuses unless the adapter's digest at
+        # acceptance time still equals this one, so a checked-and-passed
+        # adapter cannot be edited before `accept` locks in a version that
+        # was never actually exercised.
         check_result = {
             "schema": 1,
             "ok": overall_ok,
@@ -316,6 +299,7 @@ def cmd_run(args) -> int:
             "unchanged_round_trip": unchanged_result,
             "awkward_round_trip": awkward_result,
             "parse_sanity": parse_result,
+            "adapter_digest": lz_common.adapter_digest(root, cfg),
             "checked_at": lz_common.now_iso(),
         }
 
@@ -367,6 +351,13 @@ def cmd_accept(args) -> int:
             check_result=check_result,
         )
 
+    digest = lz_common.adapter_digest(root, cfg)
+    if check_result.get("adapter_digest") != digest:
+        lz_common.fail(
+            "the adapter changed since the last run; re-run `adapter_check.py run`",
+            lz_common.EXIT_FAIL,
+        )
+
     coverage_payload = lz_common.read_json(Path(args.coverage), "coverage turn output")
     missing = _validate_coverage_output(coverage_payload)
 
@@ -379,10 +370,10 @@ def cmd_accept(args) -> int:
             unaccepted=unaccepted,
         )
 
-    digest = lz_common.adapter_digest(root, cfg)
     lock = {
         "schema": 1,
         "files": digest["files"],
+        "argv": digest["argv"],
         "options_sha256": digest["options_sha256"],
         "check_results": check_result,
         "missing": missing,

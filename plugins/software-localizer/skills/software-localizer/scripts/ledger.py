@@ -99,21 +99,30 @@ def source_sha256(message: dict) -> str:
 
 
 def context_sha256(message: dict, locale: str) -> str:
-    """The message's plural spec *for this locale*, `max_length`, and the
-    sorted `count_arguments` — exactly the three things plan section 7 names,
-    nothing else (`general_index`/`source_labels` drift is not tracked here;
-    it is folded into `source_sha256` only insofar as the source itself
-    changes)."""
+    """The whole plural spec `checks.py` depends on for this locale, plus
+    `max_length`: the locale's `target_labels`, `general_index`,
+    `source_labels`, and the sorted `count_arguments` (plan section 7). A
+    change to any of these must trigger the re-check `sync()` runs on a
+    `translated` entry whose context changed — `general_index` picks which
+    source form is "the general one" for argument-parity and structure
+    checks, so a change there can flip which arguments a value is required
+    to carry even though no other field moved."""
     plural = message.get("plural")
     if plural is None:
         target_labels = None
+        general_index = None
+        source_labels = None
         count_arguments: list = []
     else:
         target_labels = plural.get("target_labels", {}).get(locale)
+        general_index = plural.get("general_index")
+        source_labels = plural.get("source_labels")
         count_arguments = sorted(plural.get("count_arguments", []))
     max_length = (message.get("context") or {}).get("max_length")
     payload = {
         "plural_target_labels": target_labels,
+        "general_index": general_index,
+        "source_labels": source_labels,
         "max_length": max_length,
         "count_arguments": count_arguments,
     }

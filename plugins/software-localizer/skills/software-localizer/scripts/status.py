@@ -9,11 +9,16 @@ in an unfinished pipeline, including before `localize.json` even exists.
 
 The ledger is stored per locale at `R/ledger/<locale>.json`
 (`{"schema": 1, "locale": L, "entries": {id: entry}}`); there is no
-`R/ledger.json`. `_load_ledger` reads every `R/ledger/*.json` file directly
-(never imports `ledger.py`, which owner D is still writing) into the
-in-memory shape `{"schema": 1, "locales": {locale: {id: entry}}}`. A
-missing `R/ledger/` directory means no locale has been synced yet, same as
-an empty one.
+`R/ledger.json`. `_load_ledger` still reads every `R/ledger/*.json` file
+directly, field by field, into the in-memory shape `{"schema": 1,
+"locales": {locale: {id: entry}}}` -- a missing `R/ledger/` directory means
+no locale has been synced yet, same as an empty one, and any file that is
+missing, unreadable, or the wrong shape is skipped rather than raising.
+`_next_command` does import `ledger.py` for the one rule it must not
+re-derive (`ledger.exportable`, the same readiness rule `export_values.py`
+itself enforces) -- that call is wrapped so a locale whose entries are too
+malformed for it to read falls back to "unknown" for that locale rather
+than crashing.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import ledger as ledger_mod  # noqa: E402
 import lz_common  # noqa: E402
 
 
@@ -41,11 +47,14 @@ def _load_ledger(root: Path) -> dict:
     """The ledger, aggregated across every target locale, read directly from
     `R/ledger/<locale>.json` (each `{"schema": 1, "locale": L, "entries":
     {id: entry}}`) into `{"schema": 1, "locales": {locale: {id: entry}}}`.
-    Never imports `ledger.py` (owner D's module, still being written) --
-    status.py must keep working regardless of that module's state. A
-    missing `R/ledger/` directory, or one with no readable files, means no
-    locale has been synced yet; any file that is missing, unreadable, or
-    the wrong shape is skipped rather than raising."""
+    This stays a direct, field-by-field read (not `ledger.load`) so a
+    missing `R/ledger/` directory, or one with no readable files, still
+    means "no locale synced yet" rather than a crash; any file that is
+    missing, unreadable, or the wrong shape is skipped rather than raising.
+    `ledger.py` is still imported elsewhere in this module (`_next_command`
+    calls `ledger.exportable` on the dict this function returns, whose
+    shape matches what `exportable` expects) -- only the read path here
+    stays local."""
     locales: dict = {}
     ledger_dir = root / "ledger"
     if ledger_dir.is_dir():
@@ -77,6 +86,38 @@ def _ledger_counts(ledger: dict) -> dict:
     return result
 
 
+def _candidate_needs_review(entry) -> bool:
+    """checks passed but no verdict is bound to the candidate's current
+    value hash yet -- the same rule `packets.select_review` uses. `ledger.py`
+    has no equivalent exposed helper for this one, so it stays local (unlike
+    export-readiness below, which now calls `ledger.exportable` instead of
+    re-deriving the rule)."""
+    if not isinstance(entry, dict):
+        return False
+    cand = entry.get("candidate")
+    if not isinstance(cand, dict) or cand.get("checks") != "pass":
+        return False
+    verdict = cand.get("verdict")
+    return not isinstance(verdict, dict) or verdict.get("value_sha256") != cand.get("value_sha256")
+
+
+def _exportable_ids_by_locale(ledger: dict, target_locales: list) -> dict:
+    """`{locale: set(ids) | None}` via `ledger.exportable` -- the one place
+    export-readiness is defined, so this calls it instead of keeping a
+    second copy of the rule that can drift from the real one. `None` means
+    that locale's entries were too malformed for `exportable` to read (it
+    indexes with `entry["candidate"]`/`.get(...)` without guarding against a
+    non-dict entry); that locale is then left out of every decision below
+    -- "unknown", never a crash and never a guess."""
+    result: dict = {}
+    for locale in target_locales:
+        try:
+            result[locale] = set(ledger_mod.exportable(ledger, locale))
+        except Exception:
+            result[locale] = None
+    return result
+
+
 def _adapter_lock_status(root: Path, cfg) -> dict:
     """`{"present": bool, "current": bool | "unknown"}`. `"unknown"` covers
     every case where currency cannot be determined without a valid config
@@ -97,8 +138,13 @@ def _adapter_lock_status(root: Path, cfg) -> dict:
     except SystemExit:
         return {"present": True, "current": "unknown"}
 
-    is_current = lock.get("files") == current.get("files") and lock.get("options_sha256") == current.get(
-        "options_sha256"
+    # Same three fields `lz_common.require_accepted_adapter` compares (files,
+    # argv, options_sha256) -- reproduced rather than called, since that
+    # function's job is to `fail()` and exit, not report a status.
+    is_current = (
+        lock.get("files") == current.get("files")
+        and lock.get("argv") == current.get("argv")
+        and lock.get("options_sha256") == current.get("options_sha256")
     )
     return {"present": True, "current": is_current}
 
@@ -123,11 +169,30 @@ def _next_command(root: Path, cfg, cfg_problems, adapter_check_ran, adapter_lock
 
     target_locales = cfg.get("target_locales")
     target_locales = target_locales if isinstance(target_locales, list) else []
+    locales_entries = ledger.get("locales", {}) if isinstance(ledger, dict) else {}
+    exportable_by_locale = _exportable_ids_by_locale(ledger, target_locales)
+
+    # plan section 12's order: a candidate already passing checks is closer
+    # to done than one that still needs a translate round, so review and
+    # export outrank translate; audit (revisiting a value the plugin never
+    # produced) is last.
+    for locale in target_locales:
+        entries = locales_entries.get(locale, {})
+        if isinstance(entries, dict) and any(_candidate_needs_review(e) for e in entries.values()):
+            return f"packets.py build --root {root_display} --kind review --locale {locale}"
 
     for locale in target_locales:
-        counts = ledger_counts.get(locale, {})
-        if counts.get("pending", 0) or counts.get("stale", 0):
-            return f"packets.py build --root {root_display} --kind translate --locale {locale}"
+        if exportable_by_locale.get(locale):  # a non-empty set; None (unknown) also skips
+            return f"export_values.py --root {root_display} --locale {locale}"
+
+    for locale in target_locales:
+        entries = locales_entries.get(locale, {})
+        exportable_ids = exportable_by_locale.get(locale)
+        if not isinstance(entries, dict) or exportable_ids is None:
+            continue  # unknown export-readiness here -- never guess "needs translate"
+        for msg_id, e in entries.items():
+            if isinstance(e, dict) and e.get("state") in ("pending", "stale") and msg_id not in exportable_ids:
+                return f"packets.py build --root {root_display} --kind translate --locale {locale}"
 
     for locale in target_locales:
         counts = ledger_counts.get(locale, {})

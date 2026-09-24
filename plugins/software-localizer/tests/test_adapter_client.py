@@ -375,6 +375,29 @@ def test_collect_exits_cannot_when_messages_shape_invalid(work_root, project_dir
     assert exc_info.value.code == 2
 
 
+def test_collect_leaves_previous_messages_untouched_on_shape_violation(work_root, project_dir):
+    # A malformed collect must not clobber the last good messages.json: the
+    # shape check has to happen before `out_path` is ever touched.
+    _write_adapter(work_root, """
+        from pathlib import Path
+        def cmd_collect(args):
+            Path(args.out).write_text(json.dumps({"not": "valid"}))
+            emit({"ok": True})
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            pass
+    """)
+    out_path = work_root / "messages.json"
+    out_path.write_text(json.dumps(VALID_MESSAGES), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        adapter_client.collect(str(work_root), _cfg(), str(project_dir), str(out_path))
+
+    assert exc_info.value.code == 2
+    assert json.loads(out_path.read_text(encoding="utf-8")) == VALID_MESSAGES
+
+
 # --- export() --------------------------------------------------------------
 
 def test_export_writes_values_and_returns_reply(work_root, project_dir):
@@ -483,6 +506,93 @@ def test_parse_fails_when_ok_false_missing_error(work_root, project_dir):
     with pytest.raises(AdapterError) as exc_info:
         adapter_client.parse(str(work_root), _cfg(), str(project_dir), [{"key": "k1", "text": "Hi"}])
     assert "error" in str(exc_info.value)
+
+
+def test_parse_fails_when_ok_is_not_a_boolean(work_root, project_dir):
+    _write_adapter(work_root, """
+        def cmd_collect(args):
+            pass
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            emit({"ok": True, "results": {"k1": {"ok": "true", "tokens": []}}})
+    """)
+    with pytest.raises(AdapterError) as exc_info:
+        adapter_client.parse(str(work_root), _cfg(), str(project_dir), [{"key": "k1", "text": "Hi"}])
+    assert "k1" in str(exc_info.value) and "boolean" in str(exc_info.value)
+
+
+def test_parse_fails_on_unknown_token_kind(work_root, project_dir):
+    _write_adapter(work_root, """
+        def cmd_collect(args):
+            pass
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            emit({"ok": True, "results": {"k1": {"ok": True, "tokens": [{"kind": "emoji", "text": "x"}]}}})
+    """)
+    with pytest.raises(AdapterError) as exc_info:
+        adapter_client.parse(str(work_root), _cfg(), str(project_dir), [{"key": "k1", "text": "Hi"}])
+    assert "k1" in str(exc_info.value) and "kind" in str(exc_info.value)
+
+
+def test_parse_fails_on_argument_token_missing_signature(work_root, project_dir):
+    _write_adapter(work_root, """
+        def cmd_collect(args):
+            pass
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            emit({"ok": True, "results": {"k1": {"ok": True, "tokens": [{"kind": "argument", "name": "count"}]}}})
+    """)
+    with pytest.raises(AdapterError) as exc_info:
+        adapter_client.parse(str(work_root), _cfg(), str(project_dir), [{"key": "k1", "text": "Hi"}])
+    assert "k1" in str(exc_info.value) and "argument" in str(exc_info.value)
+
+
+def test_parse_fails_on_structure_token_missing_text(work_root, project_dir):
+    _write_adapter(work_root, """
+        def cmd_collect(args):
+            pass
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            emit({"ok": True, "results": {"k1": {"ok": True, "tokens": [{"kind": "structure"}]}}})
+    """)
+    with pytest.raises(AdapterError) as exc_info:
+        adapter_client.parse(str(work_root), _cfg(), str(project_dir), [{"key": "k1", "text": "Hi"}])
+    assert "k1" in str(exc_info.value) and "structure" in str(exc_info.value)
+
+
+def test_parse_fails_when_error_is_not_a_string(work_root, project_dir):
+    _write_adapter(work_root, """
+        def cmd_collect(args):
+            pass
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            emit({"ok": True, "results": {"k1": {"ok": False, "error": 404}}})
+    """)
+    with pytest.raises(AdapterError) as exc_info:
+        adapter_client.parse(str(work_root), _cfg(), str(project_dir), [{"key": "k1", "text": "Hi"}])
+    assert "k1" in str(exc_info.value) and "error" in str(exc_info.value)
+
+
+def test_parse_accepts_a_well_formed_argument_and_structure_token(work_root, project_dir):
+    _write_adapter(work_root, """
+        def cmd_collect(args):
+            pass
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            emit({"ok": True, "results": {"k1": {"ok": True, "tokens": [
+                {"kind": "argument", "name": "count", "signature": "{count}"},
+                {"kind": "structure", "text": "@:common.save"},
+            ]}}})
+    """)
+    results = adapter_client.parse(str(work_root), _cfg(), str(project_dir), [{"key": "k1", "text": "Hi"}])
+    assert results["k1"]["ok"] is True
+    assert len(results["k1"]["tokens"]) == 2
 
 
 def test_parse_fails_when_a_requested_key_is_missing_from_results(work_root, project_dir):

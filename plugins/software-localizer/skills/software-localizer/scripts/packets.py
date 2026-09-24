@@ -281,12 +281,21 @@ def build_translate_item(message: dict, locale: str, entry: dict) -> dict:
 
 
 def build_review_item(message: dict, locale: str, entry: dict) -> dict:
+    """The candidate's `source_sha256`/`context_sha256`/`style_sha256`
+    snapshots ride along as-built: `accept`'s review path re-checks them
+    against the *current* candidate before binding a verdict, so a verdict
+    cast on this snapshot never attaches to a candidate quietly rebuilt
+    under a changed context or style, even when the rebuilt value happens to
+    hash the same."""
     cand = entry["candidate"]
     item = {
         "id": message["id"],
         "source": message["source"],
         "value": cand["value"],
         "value_sha256": cand["value_sha256"],
+        "source_sha256": cand["source_sha256"],
+        "context_sha256": cand["context_sha256"],
+        "style_sha256": cand["style_sha256"],
         "context": message.get("context", {}),
     }
     target_labels, count_arguments, general_index = plural_item_fields(message, locale)
@@ -513,6 +522,56 @@ def _single_or_list(parses: list):
     return parses[0] if len(parses) == 1 else parses
 
 
+_CANDIDATE_SNAPSHOT_FIELDS = ("value_sha256", "source_sha256", "context_sha256", "style_sha256")
+
+
+def _review_candidate_still_matches(ledger_data: dict, locale: str, msg_id: str, item: dict) -> bool:
+    """A review verdict binds to the exact candidate the packet was built
+    from: the id's *current* candidate must still carry the same
+    value_sha256, source_sha256, context_sha256 and style_sha256 the packet
+    item recorded at build time. If the candidate was rebuilt since (even to
+    the same value, under a changed context or style), this is False and
+    the verdict must not attach."""
+    entry = _locale_entries(ledger_data, locale).get(msg_id)
+    candidate = entry.get("candidate") if entry else None
+    if candidate is None:
+        return False
+    return all(candidate.get(field) == item.get(field) for field in _CANDIDATE_SNAPSHOT_FIELDS)
+
+
+def _valid_review_canon_candidate(cand) -> bool:
+    """One raw entry from a review/audit verdict's `new_canon_candidates`:
+    an object with `kind` in `term|ui_label|dnt`, a non-empty string
+    `source`, and an optional string `proposed`/`note` (the shape
+    `review_TASK.md`/`audit_TASK.md` document -- not yet the canon import
+    shape, which needs the message id and locale this module supplies)."""
+    if not isinstance(cand, dict):
+        return False
+    if cand.get("kind") not in CANDIDATE_KINDS:
+        return False
+    if not isinstance(cand.get("source"), str) or not cand["source"]:
+        return False
+    for field in ("proposed", "note"):
+        value = cand.get(field)
+        if value is not None and not isinstance(value, str):
+            return False
+    return True
+
+
+def _canon_import_shape(cand: dict, msg_id: str, locale: str) -> dict:
+    """A validated raw candidate, wrapped in the shape `canon.py import
+    --file` reads (plan section 10, documented in `canon.py`'s own
+    docstring): `occurrences` is this message id, `translations` carries the
+    proposed value under this locale."""
+    return {
+        "kind": cand["kind"],
+        "source": cand["source"],
+        "note": cand.get("note") or "",
+        "occurrences": [msg_id],
+        "translations": {locale: {"proposed": cand.get("proposed"), "current": []}},
+    }
+
+
 def _maybe_escalate(ledger_data: dict, cfg: dict, locale: str, msg_id: str, problems: list) -> bool:
     entry = _locale_entries(ledger_data, locale).get(msg_id, {})
     if entry.get("rounds", 0) >= cfg.get("max_rounds", 3):
@@ -608,6 +667,14 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         if not isinstance(verdict, dict) or verdict.get("value_sha256") != item["value_sha256"]:
             missing.append(msg_id)
             continue
+        if kind == "review" and not _review_candidate_still_matches(ledger_data, locale, msg_id, item):
+            # The candidate this packet item snapshot was built from has
+            # since been rebuilt (context or style changed and it was
+            # retranslated) -- even a value that happens to hash the same
+            # must not have a verdict cast on the old snapshot attached to
+            # it, so this verdict is treated the same as a hash mismatch.
+            missing.append(msg_id)
+            continue
         valid_verdicts[msg_id] = verdict
 
     extra_texts = {}
@@ -620,6 +687,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
 
     passed, failed_ids, escalated, proposals_stored = [], [], [], []
     new_canon_candidates = []
+    invalid_canon_candidates = []
 
     for msg_id, verdict in valid_verdicts.items():
         item = items[msg_id]
@@ -630,7 +698,22 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             "issues": verdict.get("issues", []),
             "run": batch_name,
         }
-        new_canon_candidates.extend(verdict.get("new_canon_candidates") or [])
+
+        raw_candidates = verdict.get("new_canon_candidates")
+        if raw_candidates is None:
+            raw_candidates = []
+        elif not isinstance(raw_candidates, list):
+            # The whole field is the wrong shape (e.g. a string) -- record
+            # it as one invalid entry rather than iterating its characters,
+            # which used to land single-character "candidates" in the side
+            # file and break report.py's `cand.get(...)` reads.
+            invalid_canon_candidates.append({"id": msg_id, "candidate": raw_candidates})
+            raw_candidates = []
+        for cand in raw_candidates:
+            if _valid_review_canon_candidate(cand):
+                new_canon_candidates.append(_canon_import_shape(cand, msg_id, locale))
+            else:
+                invalid_canon_candidates.append({"id": msg_id, "candidate": cand})
 
         if verdict.get("verdict") == "pass":
             if kind == "review":
@@ -709,6 +792,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         "ok": True, "kind": kind, "locale": locale, "run": batch_name,
         "passed": passed, "failed": failed_ids, "missing": missing, "extra": extra_ids,
         "escalated": escalated, "audit_proposals": proposals_stored,
+        "invalid_canon_candidates": invalid_canon_candidates,
     }
 
 
