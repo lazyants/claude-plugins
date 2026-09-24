@@ -1,0 +1,55 @@
+name: codebase-migrator
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/codebase-migrator/**'
+      - '.github/workflows/codebase-migrator.yml'
+  pull_request:
+    paths:
+      - 'plugins/codebase-migrator/**'
+      - '.github/workflows/codebase-migrator.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the declared floor; 3.14 mirrors the dev machine. The coverage rule
+        # (executable_lines) and the audit events the harness relies on were measured on
+        # 3.12 and 3.14 only, so the 3.11 leg is where a divergence would first show.
+        python-version: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install pytest
+        run: python3 -m pip install --disable-pip-version-check pytest
+
+      - name: Toolchain
+        run: |
+          python3 -V
+          python3 -m pytest --version
+
+      # `tests/run-all.sh` asserts a non-zero collected count before it runs anything: a
+      # directory whose files match no collection pattern reports "no tests ran" and exits 0,
+      # which reads exactly like a green suite.
+      - name: tests/run-all.sh
+        working-directory: plugins/codebase-migrator
+        run: bash tests/run-all.sh

@@ -2,6 +2,14 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [codebase-migrator 0.1.0] — 2026-09-24
+
+### Added
+
+- **New plugin: `codebase-migrator`** — unit-by-unit migration of a legacy Python codebase to a new target package behind a strangler seam, each port gated by a differential test against the legacy code. Experimental; Python → Python only; not yet proven on a real pilot migration.
+- Scripts (stdlib only, Python ≥ 3.11): `scaffold.py` and `migration_validate.py` (intake with a questionnaire), `inventory.py` (static eligibility, import closure), `registry_validate.py` (frozen symbol registry with declared cardinality), `bridge.py` (strangler shims), `observe.py` + `net_capture.py` (golden-master capture with a state snapshot, a two-environment determinism probe and line coverage), `unit_gate.py` (mechanical gate), `diff_gate.py` (differential gate with route recording), `sandbox.py` (codex dispatch confined to a stage outside any git worktree, plus the canary probe), `ledger.py` (resumable ledger, convergence conditions) and `status.py` (read-only report).
+- CI: `.github/workflows/codebase-migrator.yml` runs the plugin's pytest suite on Python 3.11 and 3.14.
+
 ## [multi-profile-plugins 1.4.0] — 2026-09-14
 
 ### Changed

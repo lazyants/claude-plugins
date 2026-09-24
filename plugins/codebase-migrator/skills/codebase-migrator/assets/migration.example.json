@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "source_stack": "CHOOSE_SOURCE_STACK",
+  "target_stack": "CHOOSE_TARGET_STACK",
+  "legacy_root": "CHOOSE_LEGACY_ROOT",
+  "legacy_package": "CHOOSE_LEGACY_PACKAGE",
+  "target_root": "CHOOSE_TARGET_ROOT",
+  "target_package": "CHOOSE_TARGET_PACKAGE",
+  "fidelity_policy": "CHOOSE_FIDELITY_POLICY",
+  "seam": "CHOOSE_SEAM",
+  "unit_granularity": "CHOOSE_UNIT_GRANULARITY",
+  "naming_policy": "CHOOSE_NAMING_POLICY",
+  "net_source": "CHOOSE_NET_SOURCE",
+  "dead_code_policy": "CHOOSE_DEAD_CODE_POLICY",
+  "coverage_floor_pct": "CHOOSE_COVERAGE_FLOOR",
+  "max_fix_rounds": 3,
+  "codex_bin": "codex"
+}

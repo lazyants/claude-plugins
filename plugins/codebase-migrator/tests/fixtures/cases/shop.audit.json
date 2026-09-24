@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "cases": [
+    {"id": "s1", "call": "record", "args": ["e"]}
+  ]
+}

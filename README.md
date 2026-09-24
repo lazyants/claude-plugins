@@ -13,6 +13,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 | [`enduser-handbook`](#enduser-handbook--v1183) | 1.18.3 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
 | [`literary-translator`](#literary-translator--v12210) | 1.221.0 | High-fidelity literary book translation over a Gutenberg-style EPUB source (expert-mode `custom` extractor also supported) — a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability, plus optional book assembly into an Obsidian glossary-wiki behind a deterministic render/diff gate. |
 | [`multi-profile-plugins`](#multi-profile-plugins--v140) | 1.4.0 | Understand and diagnose config-profile isolation across multiple Claude Code `CLAUDE_CONFIG_DIR` profiles or Codex `CODEX_HOME` profiles — why profiles that share a plugins store hit recurring "corrupted installLocation" errors and cross-profile plugin deletion, and why a Codex profile seeded by copying `config.toml` keeps reading the home it came from. A read-only health-check script for each, plus a usage-limit report across every profile and home. |
+| [`codebase-migrator`](#codebase-migrator--v010) | 0.1.0 | Migrate a legacy Python codebase unit by unit behind a strangler seam, each port gated by a differential test against the legacy code itself — codex proposes inputs, the legacy code is executed to record what they must produce, and deterministic gates accept a port only when its observed behaviour, persistent-state effects and call route all match. Experimental; Python → Python only. |
 
 > **Changelogs.** Every plugin's release notes are in the root [`CHANGELOG.md`](CHANGELOG.md) — except `literary-translator`, which keeps its own at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md). The root file is frozen for that plugin at its `1.1.0` entry, so its later releases and its Known limitations are only in the per-plugin file. The per-plugin sections below describe what each plugin does and deliberately carry no per-release history — the changelog is the only place it lives.
 
@@ -200,6 +201,29 @@ Trigger phrases: "corrupted installLocation", "claude plugin across profiles", "
 ### Scope
 
 Knowledge + read-only diagnostics, for both CLIs. Converting a shared store to independent per-profile stores touches live plugin data, and re-seeding a Codex home rewrites a config the desktop app also writes; both are intentionally left as deliberate, backed-up manual steps — not automated actions this plugin performs.
+
+## `codebase-migrator` — v0.1.0
+
+Migrate a legacy Python codebase to a new target package **one unit at a time**, behind a strangler seam, with every port accepted or refused by a **differential test against the legacy code itself**. It applies the engine behind `literary-translator` to software, with one inversion: nobody can execute a sentence to check a translation, but legacy code can be executed. So the deterministic layer decides correctness, and the model review is demoted to what tests cannot see.
+
+The model is asked **what inputs are interesting to try**, never what the right answer is: codex proposes inputs for a unit, the legacy code is run on them to record the expected behaviour, and that recording (the net) becomes the acceptance authority. Codex then ports the unit, a mechanical gate checks the port's shape, a differential gate replays the net against it, and a codex review judges idiom, security and the error paths the net does not reach — looped to convergence under a round cap, with every finding either admitted or refused on the record.
+
+Trigger phrases: "migrate this codebase", "port this Python package", "legacy modernization", "strangler migration", "resume the migration" — full list in `plugins/codebase-migrator/skills/codebase-migrator/SKILL.md`.
+
+### What it covers
+
+- **Intake that halts until answered** — `migration.json` ships `CHOOSE_` sentinels, never working defaults, and the run that writes them prints the questionnaire: fidelity policy, naming and dead-code policy, coverage floor, the legacy and target packages.
+- **Eligibility, static and dynamic** — an AST inventory refuses units that do I/O, read the clock or randomness, or look things up by string; a runtime state snapshot refuses units that keep state between calls (module globals, class attributes, default arguments, closure cells, function attributes), including state a collaborator writes that never shows in a return value.
+- **A frozen symbol registry** with declared cardinality — one-to-one, split, merge, or dropped under a dead-code census — so unit 40 calls what unit 3 exported without reading unit 3.
+- **The differential gate** — compares return values, raised errors (custom exception classes mapped through the registry), argument and receiver mutations, aliasing between them, and both output streams; requires the call route to enter the port and never reach the unit's own legacy code, at import time included; refuses any persistent-state change; and replays in two deliberately different environments (hash seed, time zone, random seed, clock), so a hidden dependency on any of them shows up.
+- **A write boundary that is a property of the process** — every codex write turn runs in a stage outside any git worktree under `codex exec -s workspace-write`, protected trees are digest-checked before and after, and only one named output per unit is promoted; generated code is executed under an audit hook that denies the writes, processes, sockets and threads honest code attempts.
+- **A resumable ledger** keyed on a cache key that binds each unit to its legacy code and every dependency, its frozen rows, its net and its conventions — so drift in a dependency, or a case added after capture, stops convergence until the net is re-captured.
+
+### Status & scope
+
+- **Experimental 0.1.** Python → Python only, in-process seam, units that are deterministic and self-contained. The honest proof is a real pilot migration, which this release has not had; the test suite is not that proof.
+- Requires the `codex` CLI for the model turns. The write-boundary probe runs against the real binary once per codex version; CI tests the dispatcher against a strict fake.
+- Stated residuals, in the skill: audit hooks are not a security sandbox — R3 runs the port as the operator, and the before/after digest check covers only the durable root, `legacy_root` and `target_root`; state held in C-level internals is invisible to the snapshot; `datetime`'s clock is not patched; the net only exercises the inputs its cases name.
 
 ## License & disclaimer
 
