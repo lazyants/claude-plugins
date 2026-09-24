@@ -1,0 +1,13 @@
+{
+  "app.title": "Meine App",
+  "nav.home": "Startseite",
+  "nav.about": "Über uns",
+  "nav.contact": "Kontakt",
+  "nav.save": "Speichern",
+  "dialog.confirm": "Bist du sicher? @:nav.save",
+  "user.greeting": "Hallo, {name}!",
+  "notice.leadingSpace": " Hinweis: zuerst lesen",
+  "cart.itemCount": "{count} Artikel | {count} Artikel",
+  "mail.unreadCount": "{count} ungelesene Nachricht | {count} ungelesene Nachrichten",
+  "error.notFound": "Seite nicht gefunden"
+}

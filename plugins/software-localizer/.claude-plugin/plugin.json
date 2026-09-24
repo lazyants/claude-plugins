@@ -1,0 +1,9 @@
+{
+  "name": "software-localizer",
+  "description": "Translate a software project into another language, or audit the translation it already has, with literary-translator's discipline: a canon and glossary decided once so every term is named the same way, translation in small batches through script checks and a model review, a resumable ledger that never overwrites a person's edit, and a report for a native speaker. Collecting strings and exporting translations is a per-project adapter written when the plugin is used, accepted only after mechanical round-trip and coverage checks.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Lazy Ants"
+  },
+  "skills": "./skills/"
+}
