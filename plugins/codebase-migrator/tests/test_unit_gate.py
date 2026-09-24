@@ -154,7 +154,56 @@ def test_reads_clock_fails_target_self_contained_against_the_helper(shop_root):
     result = unit_gate.run_gate(root, cfg, "shop.pricing")
 
     assert _only_failed(result) == ["target_self_contained"]
-    assert any("shop2._util" in p for p in result["problems"])
+    # Named by its FILE now (inventory.closure_files, not a bare module
+    # name), matching what a helper that isn't itself a discovered unit
+    # still needs to be identified by.
+    assert any("shop2/_util.py" in p for p in result["problems"])
+    assert any("uncontrolled_input" in p for p in result["problems"])
+
+
+def test_helper_that_imports_legacy_fails_no_direct_legacy_import_against_the_helper(shop_root):
+    """`no_direct_legacy_import` now walks `inventory.closure_files`, not
+    just U's own file: a private helper the target module imports, which
+    itself imports the legacy package directly, must fail this check too,
+    named by the helper's own file."""
+    root, cfg = shop_root
+    _install_port(cfg, "helper_imports_legacy")
+
+    result = unit_gate.run_gate(root, cfg, "shop.pricing")
+
+    assert _only_failed(result) == ["no_direct_legacy_import"]
+    assert any("shop2/_helper.py" in p for p in result["problems"])
+    assert any("shop.money" in p for p in result["problems"])
+
+
+def test_dependency_still_a_shim_passes_r2(shop_root):
+    """A bridge shim's whole body IS a direct legacy import by design
+    (`from shop.money import round_money as round_money`) -- when
+    shop.pricing's own port is otherwise clean but its shop.money dependency
+    is still a shim, R2 must pass, not fail `no_direct_legacy_import`
+    against the shim it did not write."""
+    root, cfg = shop_root
+    _install_port(cfg, "dependency_still_shim")
+
+    result = unit_gate.run_gate(root, cfg, "shop.pricing")
+
+    assert result["problems"] == []
+    assert result["ok"] is True
+
+
+def test_executable_init_with_a_flag_fails_target_self_contained(shop_root):
+    """`inventory.closure_files` always includes every ancestor package
+    `__init__.py`, whether or not it is itself a discovered unit: an
+    executable `shop2/__init__.py` that reads the clock at import time must
+    fail `target_self_contained`, named by its own file, even though nothing
+    in `shop2.pricing` imports `shop2` for any symbol of its own."""
+    root, cfg = shop_root
+    _install_port(cfg, "executable_init")
+
+    result = unit_gate.run_gate(root, cfg, "shop.pricing")
+
+    assert _only_failed(result) == ["target_self_contained"]
+    assert any("shop2/__init__.py" in p for p in result["problems"])
     assert any("uncontrolled_input" in p for p in result["problems"])
 
 

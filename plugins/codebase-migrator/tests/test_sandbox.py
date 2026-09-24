@@ -88,11 +88,15 @@ def _install_good_port(cfg: dict) -> None:
 def _freeze_net(root: Path, cfg: dict, unit: str) -> None:
     """Enough of a netted state for `ledger.eligible(unit)` to return no
     reasons: a frozen net.lock.json entry whose digests match real files on
-    disk and whose legacy_closure_sha256 matches the current legacy tree."""
-    inv = json.loads((root / "inventory.json").read_text(encoding="utf-8"))
-    closure = cm_common.unit_closure(inv, unit)
+    disk and whose legacy_closure_sha256 matches the current legacy tree.
+
+    Keyed by `inventory.closure_files` relative file paths (via
+    `cm_common.file_digests`), matching exactly what `ledger.eligible()` and
+    `net_capture.py` both compute -- every import-closure module file plus
+    every ancestor package `__init__.py`, unit or not."""
     legacy_root = Path(cfg["legacy_root"])
-    live_digests = cm_common.closure_digests(legacy_root, cfg["legacy_package"], closure)
+    closure_files = inventory.closure_files(legacy_root, cfg["legacy_package"], unit)
+    live_digests = cm_common.file_digests(legacy_root, closure_files)
     legacy_closure_sha256 = cm_common.sha256_json(live_digests)
 
     cases_path = root / "cases" / f"{unit}.json"
@@ -333,6 +337,72 @@ def test_dispatch_still_reports_tamper_and_journals_when_codex_times_out(shop_ro
         assert not target_path.exists()
     finally:
         tamper_target.write_text(original, encoding="utf-8")
+
+
+def test_dispatch_tamper_wins_even_when_the_codex_call_is_interrupted(shop_root, monkeypatch):
+    """`try`/`finally` (not an except-list) means the tamper check and its
+    journal entry run for ANY exit from the codex call, including a bare
+    `KeyboardInterrupt` that the narrow except-list never matches -- and
+    since a `cm_common.fail` call inside `finally` supersedes whatever was
+    propagating, the interrupt itself never escapes: tampering is reported
+    as the ordinary "dispatch tampered" refusal."""
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    tamper_target = Path(cfg["legacy_root"]) / "shop" / "money.py"
+    original = tamper_target.read_text(encoding="utf-8")
+
+    real_run = subprocess.run
+
+    def _fake_run(argv, **kwargs):
+        # Only intercept the actual codex-exec call; let _codex_version's
+        # "--version" probe and _assert_stage_outside_git's "git" call
+        # through untouched, or the preconditions above would trip first.
+        if isinstance(argv, list) and len(argv) > 1 and argv[1] == "exec":
+            tamper_target.write_text("tampered", encoding="utf-8")
+            raise KeyboardInterrupt
+        return real_run(argv, **kwargs)
+
+    _use_fake(monkeypatch, "port_ok")
+    monkeypatch.setattr(sandbox.subprocess, "run", _fake_run)
+
+    try:
+        with pytest.raises(SystemExit) as exc:
+            sandbox.cmd_dispatch(root, cfg, "shop.pricing", "port", 1)
+        assert exc.value.code == cm_common.EXIT_FAIL
+
+        run_dir = cm_common.unit_run_dir(root, "shop.pricing")
+        journal_lines = (run_dir / "journal.jsonl").read_text(encoding="utf-8").splitlines()
+        assert journal_lines
+        last_entry = json.loads(journal_lines[-1])
+        assert any("legacy/shop/money.py" in t for t in last_entry["tampered"])
+
+        target_path = cm_common.target_file(root, cfg, "shop.pricing")
+        assert not target_path.exists()
+    finally:
+        tamper_target.write_text(original, encoding="utf-8")
+
+
+def test_dispatch_rejects_a_nonzero_codex_exit_even_with_a_wellformed_review(shop_root, monkeypatch):
+    """A failed process that still left a syntactically clean
+    `{"findings": []}` on disk must not become a promoted, clean review."""
+    root, cfg = shop_root
+    _install_good_port(cfg)
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    _use_fake(monkeypatch, "review_then_fail")
+
+    with pytest.raises(SystemExit) as exc:
+        sandbox.cmd_dispatch(root, cfg, "shop.pricing", "review", 1)
+    assert exc.value.code == cm_common.EXIT_FAIL
+
+    run_dir = cm_common.unit_run_dir(root, "shop.pricing")
+    assert not (run_dir / "review.r1.json").exists()
+
+    journal_lines = (run_dir / "journal.jsonl").read_text(encoding="utf-8").splitlines()
+    assert journal_lines
+    last_entry = json.loads(journal_lines[-1])
+    assert last_entry["exit"] == 1
 
 
 def test_port_dispatch_refuses_a_symlinked_output(shop_root, monkeypatch):

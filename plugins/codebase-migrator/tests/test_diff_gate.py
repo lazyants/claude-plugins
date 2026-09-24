@@ -214,22 +214,21 @@ def test_ancestor_package_init_is_allowed_but_units_own_legacy_file_is_not(work_
         probe = observe.run_harness(probe_job, stage=stage, timeout_s=30)
     route_files = probe["import_route_files"] or []
     assert "legacy/shop/__init__.py" in route_files
-    inv = cm_common.read_json(work_root / "inventory.json", "inventory.json")
-    known_units = set(inv.get("units", {}).keys())
-    closure_units = sorted(set(cm_common.unit_closure(inv, "shop.pricing")) - {"shop.pricing"})
-    assert diff_gate._route_violations(route_files, "shop.pricing", closure_units, known_units) == []
 
-    # The discriminating half: the exemption is for a docstring-only
-    # ancestor's init specifically, not for "any __init__.py". A real,
-    # EXECUTABLE ancestor unit outside U's closure must still be flagged
-    # when reached (synthetic "shop.groupA" as if it were a genuine unit
-    # with real code — a nested package one level down from "shop", which
-    # this fixture tree does not itself have — since only its presence in
-    # `known_units`, not its actual file content, drives this check).
-    fake_known_units = known_units | {"shop.groupA"}
+    live_legacy_root = cm_common.resolved_paths(work_root, cfg)["legacy_root"]
+    live_closure_files = inventory.closure_files(live_legacy_root, cfg["legacy_package"], "shop.pricing")
+    unit_own_rel = "legacy/shop/pricing.py"
+    allowed_legacy_rels = {f"legacy/{rel}" for rel in live_closure_files} - {unit_own_rel}
+    assert diff_gate._route_violations(route_files, unit_own_rel, allowed_legacy_rels) == []
+
+    # The discriminating half: `allowed_legacy_rels` is a closed set built
+    # from `inventory.closure_files` — a path that is not in it, whatever
+    # it is (a real unrelated unit or a made-up one), is still a violation
+    # when reached. No separate "is this a real unit" lookup remains to
+    # accidentally exempt something outside the closure.
     executable_ancestor_route = ["target/shop2/pricing.py", "legacy/shop/groupA/__init__.py"]
     executable_ancestor_violations = diff_gate._route_violations(
-        executable_ancestor_route, "shop.pricing", closure_units, fake_known_units
+        executable_ancestor_route, unit_own_rel, allowed_legacy_rels
     )
     assert any("outside the dependency closure" in v for v in executable_ancestor_violations)
 
@@ -317,7 +316,7 @@ def test_legacy_dependency_drift_refuses_naming_it_then_recovers(work_root, caps
         diff_gate.run(work_root, cfg, "shop.pricing")
     assert exc.value.code == cm_common.EXIT_FAIL
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert "shop.money" in payload.get("changed_units", [])
+    assert "shop/money.py" in payload.get("changed_legacy_files", [])
 
     # Execute the printed recovery recipe for real: inventory.py, then
     # ledger.py accept-drift, then net_capture.py.
@@ -407,6 +406,55 @@ def test_each_variant_fails_for_its_own_reason(work_root, variant):
     result = diff_gate.run(work_root, cfg, "shop.pricing")
     assert result["ok"] is False, (variant, result)
     assert VARIANT_CHECKS[variant](result), (variant, result)
+
+
+def test_main_module_tampering_cannot_hide_a_legacy_route(work_root):
+    """A port that reaches into `sys.modules["__main__"]` — the harness
+    itself, when run as a subprocess — and pokes at whatever it finds there
+    before delegating to legacy code must still have that legacy call show
+    up on the route. This reproduces the exact shape of a real vulnerability
+    (a module-level `_trace_state["suspended"]` flag reachable this way let
+    a port silence the tracer around a legacy call with the tamper count
+    staying clean) and confirms it is now a no-op: `_trace_state` no longer
+    exists, and the harness's route/coverage sets are plain local variables
+    inside the tracer's own closure, never module attributes reachable at
+    all. This must not rely on R2 (unit_gate's dynamic_call check) — it
+    asserts directly on R3's own route detection."""
+    cfg = _scaffold(work_root)
+    _capture_pricing(work_root, cfg)
+
+    target_dir = work_root / "target" / "shop2"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "__init__.py").write_text("")
+    shutil.copy(PORTS_DIR / "good" / "shop2" / "money.py", target_dir / "money.py")
+    (target_dir / "pricing.py").write_text(
+        "import importlib\n"
+        "import sys\n\n\n"
+        "from shop2.money import round_money\n\n\n"
+        "class PricingError(ValueError):\n"
+        "    pass\n\n\n"
+        "def apply_discount(price, pct):\n"
+        "    if pct < 0 or pct > 100:\n"
+        "        raise PricingError(\"pct out of range\")\n"
+        "    return round_money(price * (100 - pct) / 100)\n\n\n"
+        "def normalize_items(items):\n"
+        "    items.sort()\n\n\n"
+        "def dedupe(items):\n"
+        "    main_mod = sys.modules.get(\"__main__\")\n"
+        "    trace_state = getattr(main_mod, \"_trace_state\", None)\n"
+        "    if isinstance(trace_state, dict):\n"
+        "        trace_state[\"suspended\"] = True\n"
+        "    return importlib.import_module(\"shop.pricing\").dedupe(items)\n\n\n"
+        "def describe(price):\n"
+        "    print(\"price:\", price)\n"
+        "    return str(price)\n"
+    )
+
+    result = diff_gate.run(work_root, cfg, "shop.pricing")
+    assert result["ok"] is False
+    assert any(
+        "reached the unit's own legacy file" in rv["reason"] for rv in result["route_violations"]
+    )
 
 
 # ---------------------------------------------------------------------------

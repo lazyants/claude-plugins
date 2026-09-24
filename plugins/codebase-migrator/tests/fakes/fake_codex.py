@@ -195,6 +195,13 @@ def run_dispatch_scenario(scenario: str, stage: Path, out_file: Path) -> None:
         out_file.write_text(json.dumps({"findings": []}), encoding="utf-8")
         return
 
+    if scenario == "review_then_fail":
+        # A well-formed, empty review, but the process itself still exits
+        # nonzero -- proves the caller checks the exit code and does not
+        # treat a syntactically clean artifact as a successful turn.
+        out_file.write_text(json.dumps({"findings": []}), encoding="utf-8")
+        sys.exit(1)
+
     if scenario == "review_json":
         payload = os.environ.get("FAKE_CODEX_REVIEW_JSON")
         if payload is None:

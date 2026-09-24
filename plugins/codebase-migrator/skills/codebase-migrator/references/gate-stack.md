@@ -59,18 +59,31 @@ No LLM, no execution of the target code. Checks, each named in the `checks` obje
 4. **`no_stubs`** — no function/method body that is only `pass`, `...`, or
    `raise NotImplementedError(...)`; no `TODO`/`FIXME`/`XXX` in any comment token; no `except`
    handler whose body is only `pass` or `...`.
-5. **`no_direct_legacy_import`** — the target module never imports the legacy package or any of
-   its submodules directly; other units are reached only through the target package (i.e.
-   through a shim or a real port).
+5. **`no_direct_legacy_import`** and **`target_self_contained`** (below) are computed
+   **together**, over the same walk: every file
+   `inventory.closure_files(target_root, target_package, target_module(U))` names — U's target
+   module, every private helper it reaches, and every *existing* ancestor package `__init__.py`
+   along the way, whether or not that ancestor is
+   itself a discovered unit (an executable `shop2/__init__.py` runs at import time just like any
+   other file the closure reaches, so both checks must see it). Each problem names its own file,
+   not just the module.
+   - `no_direct_legacy_import`: no file in that closure imports the legacy package or any of its
+     submodules directly, **except** a file that is itself a bridge shim (first line exactly
+     `# codebase-migrator: shim for <unit>`) — a shim's whole body is a direct legacy import by
+     design (`from <legacy> import <name> as <name>`), so without this exemption an unported
+     dependency would fail every unit that still depends on it, which is most of them. **U's own
+     target file is never exempted**, even if it happened to look like a shim — `target_present`
+     already refuses that case before this check runs, so a port can never disguise itself as one.
+   - `target_self_contained`: no file in the closure — shims included — has an
+     `uncontrolled_input`, `io` or `dynamic_call` flag. A shim's own body carries no such flag
+     either way, but a private helper a shim's dependents still reach must stay self-contained,
+     so shims get no exemption here. This is a static check; whether the target keeps persistent
+     state is R3's job, not R2's — a static rule for hidden state has to enumerate syntax shapes
+     and always misses one, while a runtime snapshot compares values and sees all of them the
+     same way.
 6. **`protected_intact`** — every `net.lock.json` entry's `nets/`/`cases/` digests, and every
    `registry.lock.json` row's digest, match what is on disk; `inventory.json` is readable.
 7. **`all_rows_frozen`** — every public symbol of `U` in the inventory has a frozen row.
-8. **`target_self_contained`** — running the same static analysis `inventory.py` uses on **every
-   module in the target's own import closure** (`U`'s target module plus every private helper it
-   reaches) finds no `uncontrolled_input`, `io` or `dynamic_call` flag, each named with its
-   module. This is a static check; whether the target keeps persistent state is R3's job, not
-   R2's — a static rule for hidden state has to enumerate syntax shapes and always misses one,
-   while a runtime snapshot compares values and sees all of them the same way.
 
 Exit 0 only if every check passes. The stdout object (`ok`, `unit`, `checks`, `problems`) is
 persisted verbatim to `runs/U/r2.json`, with the same three fields R3 appends —
@@ -84,50 +97,49 @@ per capture environment — and compares.
 
 **Preconditions**, each refusing by name: the net and cases digests on disk must match
 `net.lock.json`; the target file must exist and not be a shim; the **live** legacy closure
-digest for `U` must still equal the net's `legacy_closure_sha256` (drift since capture, naming
-the changed unit and the recovery: `inventory.py`, `ledger.py accept-drift`,
-`net_capture.py`).
+digest for `U` must still equal the net's `legacy_closure_sha256` — drift since capture, naming
+every changed file (`changed_legacy_files`) and the recovery: `inventory.py`,
+`ledger.py accept-drift`, `net_capture.py`.
+
+**One closure, one file set, used everywhere.** `inventory.closure_files(base, package, module)`
+returns every file Python's own import machinery would execute when importing `module`: the file
+of each module in its static import closure, plus every *existing* ancestor package
+`__init__.py` along the way — whether or not that ancestor is itself a discovered unit. Importing
+`a.b.c` always runs `a/__init__.py` then `a/b/__init__.py` first, a docstring-only or otherwise
+trivial one included, so a closure built only from discovered units would silently miss files
+that genuinely execute at import time. This one function, applied to the legacy side and the
+target side, is what the net binding, the cache key (both `legacy_closure_sha256` and
+`target_closure_sha256`), R0's drift check, R2's `no_direct_legacy_import`/
+`target_self_contained` walk, and R3's route rule all use — there is no separate module-only
+closure and no separate "non-unit ancestor init" exemption anywhere in this list; a file is
+either in the set or it is not. (`cm_common.unit_closure`, a *dotted-name* closure over
+`imports_units` plus ancestor package **units** only, still exists and is used where a set of
+unit names rather than files is what's needed — the inventory-staleness check and static
+eligibility propagation below.) A flag on an executable ancestor unit — a clock read, an I/O
+call, a dynamic lookup — makes every descendant unit statically ineligible (`inventory.py`),
+naming the ancestor as an "ineligible dependency", exactly as an explicit `import` of a flagged
+dependency would: there is no way to import a submodule without running its ancestor packages'
+code first, so the ancestor's flag is unavoidably inherited.
 
 **Route rule**, checked on the import route and on every case's route, both recorded as paths
-relative to the replay stage:
-
-Checked in this priority order, first match wins:
+relative to the replay stage, in this priority order:
 
 - the staged **legacy** file of `U` must never appear, at any depth, in either route — a port
   that calls back into its own legacy implementation supplied the behavior instead of the port,
-  and is refused regardless of how well the values match, even in a case where `U` is itself a
-  package and its file would otherwise also read as a docstring-only ancestor init below;
-- any *other* staged legacy file that appears is legal when it belongs to a unit in `U`'s
-  transitive closure (`cm_common.unit_closure` — `imports_units` plus any executable ancestor
-  package unit, below) — a dependency's shim being imported;
-- otherwise, a legacy `__init__.py` is legal when its own dotted module name is **not** a known
-  unit at all in `inventory.json` — a docstring-only package init, wherever it sits in the tree,
-  not only when it is literally an ancestor of `U`. Python's import system always initializes
-  every ancestor package on the way to importing a submodule, so touching such a file is a
-  mechanical side effect of the import, never a reach the port chose to make. An `__init__.py`
-  that *is* a known unit gets no such pass — if it is not already in the closure, reaching it is
-  an ordinary violation;
+  and is refused regardless of how well the values match;
+- otherwise, any staged legacy file is legal exactly when it is a member of
+  `inventory.closure_files` for `U` (minus `U`'s own file, checked first above) — a dependency's
+  shim being imported, or an ancestor package `__init__.py` Python had to run regardless of
+  whether it is a unit;
 - anything else is a violation, named as reaching a legacy file outside the dependency closure.
+
+Membership is now pure set membership — there is no separate case for a "docstring-only ancestor
+init," because such a file is simply already in the closure set like any other member.
 
 Independently of the legacy-side checks above, the staged **target** file of `U` must be
 present in every case's route (the target was actually entered), and `crossed_shims` — the set
 of dependency units seen in case routes — is reported so W4 can prove the seam actually crossed
 on at least one case, or record that the pilot has no unported dependency.
-
-**A unit's closure includes its executable ancestor package units.** `imports_units` alone (an
-explicit `import`/`from` edge) is not the whole dependency story: importing `shop.pricing`
-always runs `shop/__init__.py` first, whatever `shop.pricing`'s own source says, so when that
-file carries real code — making `shop` a unit in its own right, not just a docstring — `shop` is
-part of `shop.pricing`'s transitive closure automatically. This closure is what both the net
-binding and the route rule use: `net_capture.py` preloads and hashes it (so a change to
-`shop/__init__.py`'s code drifts `shop.pricing`'s net exactly as a change to `shop/money.py`
-would), and `diff_gate.py`'s route rule treats `shop` as an ordinary in-closure unit. A
-docstring-only ancestor stays outside every closure and keeps the separate exemption above. This
-same closure decides **static eligibility** too (`inventory.py`): a flag on an executable
-ancestor unit — a clock read, an I/O call, a dynamic lookup — makes every descendant unit
-ineligible, naming the ancestor as an "ineligible dependency", exactly as an explicit `import` of
-a flagged dependency would. There is no way to import a submodule without running its ancestor
-packages' code first, so the ancestor's flag is unavoidably inherited.
 
 **Every case id must be unique, checked at three different points with two different
 remedies.** `net_capture.py` refuses (naming every duplicate) if `cases/U.json` itself holds two
@@ -215,8 +227,19 @@ start and one stop of the harness's own tracer (`sys.settrace` for capture) or p
 call to either function; if the window's own start/stop pair does not account for the whole
 delta — for example code inside the window calls `sys.setprofile(None)` and restores it, or
 calls into the wrong tracer — the case's `denied` list gains `"tamper:sys.settrace"` or
-`"tamper:sys.setprofile"`, and the case is never clean. A tampered **import window** denies
-every case in that run, not just the one that tampered.
+`"tamper:sys.setprofile"`, and the case is never clean. **There is deliberately no way to pause
+tracing mid-window.** An earlier design let observed code reach a module-level flag through
+`sys.modules["__main__"]` (the harness *is* `__main__`) and silence the tracer around a call
+while the audit hook's own settrace/setprofile call counters — the only thing the tamper check
+reads — stayed unchanged: exactly the kind of enforcement point an attacker could talk the way
+around (M7's "capability, not instruction" rule, `SKILL.md` §6, applied one level deeper, inside
+the harness itself). A snapshot needed between two windows is now always taken by the caller outside
+both, never by pausing one. Concretely, the harness runs the target module's own import as one
+window, then the preload list as a **second, separate** window, with `state_snapshot()` taken
+between the two (never inside either) to get the preload step's before/after picture; each case
+then runs in its own window. A tampered import **or** preload window denies every case in that
+run, not just the one that tampered — the two windows' denials and tampers are combined before
+being added to every case.
 
 ### Canonical encoding
 
@@ -256,12 +279,17 @@ encoding (module name; class `dict` with dunders included; function defaults/clo
 have called `$unsupported` — a bound method, a builtin method like `[].append`, a
 `functools.partial`, or a plain custom instance — it descends into whatever CPython's own garbage
 collector reports as that object's referents (`gc.get_referents`), encoding each one recursively
-under `{"$ref_graph": "<type qualname>", "$id": n, "items": [...]}`; a plain instance's referents
-already include its `__dict__`/slot values, so this single generic mechanism replaces what used
-to be a growing list of type-specific rules — the same three review rounds each found one more
-shape it missed (function attributes, then class dunders, then bound methods) before this fallback
-was added. Only `type`, code and frame objects are skipped outright, as pure interpreter
-bookkeeping with no behavior of their own.
+under `{"$ref_graph": "<type qualname>", "$id": n, "items": [...], "repr_sha256": <sha256 of
+repr(value)>}`; a plain instance's referents already include its `__dict__`/slot values, so this
+single generic mechanism replaces what used to be a growing list of type-specific rules — the
+same three review rounds each found one more shape it missed (function attributes, then class
+dunders, then bound methods) before this fallback was added. The `repr_sha256` closes the one
+gap referents alone cannot: a C-level immutable value type (`decimal.Decimal`, for one) can hold
+its value with no referents at all — `gc.get_referents(Decimal("1"))` is just its class, which
+the skip list drops — so a rebind from `Decimal("1")` to `Decimal("2")` would otherwise encode
+identically; `repr()` is the one thing that reliably reflects such a value, and a `repr()` that
+itself raises reports as a fixed sentinel rather than propagating. Only `type`, code and frame
+objects are skipped outright, as pure interpreter bookkeeping with no behavior of their own.
 
 ### Determinism
 

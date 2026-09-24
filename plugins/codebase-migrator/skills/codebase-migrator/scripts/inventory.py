@@ -34,6 +34,28 @@ _IO_PREFIXES = ("shutil.", "subprocess.", "socket.", "threading.", "urllib.", "h
 _IO_OS_EXEMPT = {"os.path.join", "os.path.basename", "os.path.dirname", "os.path.splitext"}
 _IO_PATH_EXACT_METHODS = {"open", "touch", "rename", "replace", "rmdir", "symlink_to"}
 
+# `_is_io`'s "pathlib.Path.<method>" rule above only fires once the receiver
+# resolves to "pathlib.Path" (a direct or constructor-chained reference).
+# `p = Path(x); p.write_text(...)` never resolves that way (`p` is an
+# ordinary local name), so this is a coarser, name-only pre-filter: once a
+# module imports pathlib in ANY form, a call to one of these EXACT method
+# names on any receiver is io. `replace`, `rename` and `open` are
+# deliberately excluded here (already covered above when the receiver DOES
+# resolve) because they collide with common non-Path methods (`str.replace`
+# above all) and would false-positive by name alone.
+_IO_PATH_METHODS_ANY_RECEIVER = {
+    "write_text",
+    "write_bytes",
+    "unlink",
+    "mkdir",
+    "touch",
+    "rmdir",
+    "symlink_to",
+    "hardlink_to",
+    "chmod",
+    "lchmod",
+}
+
 _DYNAMIC_EXACT_CALL = {
     "eval",
     "exec",
@@ -175,12 +197,24 @@ def _prescan_aliases(tree: ast.Module, module: str, package: str) -> tuple[dict,
     return import_alias, value_alias
 
 
+def _imports_pathlib(tree: ast.Module) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == "pathlib" or alias.name.startswith("pathlib.") for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "pathlib" or (node.module is not None and node.module.startswith("pathlib.")):
+                return True
+    return False
+
+
 class _Walker(ast.NodeVisitor):
-    def __init__(self, module: str, package: str, import_alias: dict, value_alias: dict):
+    def __init__(self, module: str, package: str, import_alias: dict, value_alias: dict, imports_pathlib: bool = False):
         self.module = module
         self.package = package
         self.import_alias = import_alias
         self.value_alias = value_alias
+        self.imports_pathlib = imports_pathlib
         self.stack: list[str] = []
         self.uncontrolled_input: list[str] = []
         self.io: list[str] = []
@@ -255,6 +289,16 @@ class _Walker(ast.NodeVisitor):
                     path_resolved = f"pathlib.Path.{node.func.attr}"
                     if _is_io(path_resolved):
                         self.io.append(f"call:{path_resolved}@{func}")
+        # Coarser, name-only pre-filter: `p = Path(x); p.write_text(...)`
+        # never resolves `p` to "pathlib.Path" above (no type inference), so
+        # once the module imports pathlib in any form, a call to one of the
+        # write-ish method names on ANY receiver is flagged by name alone.
+        if (
+            self.imports_pathlib
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _IO_PATH_METHODS_ANY_RECEIVER
+        ):
+            self.io.append(f"call:{node.func.attr}@{func}")
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -339,7 +383,7 @@ def analyze_module(source: str, module: str, package: str, *, is_package: bool =
     tree = ast.parse(source, filename=module)
     resolve_module = f"{module}.__init__" if is_package else module
     import_alias, value_alias = _prescan_aliases(tree, resolve_module, package)
-    walker = _Walker(resolve_module, package, import_alias, value_alias)
+    walker = _Walker(resolve_module, package, import_alias, value_alias, imports_pathlib=_imports_pathlib(tree))
     walker.visit(tree)
     names, spans = _public_names_and_spans(tree)
     return {
@@ -380,6 +424,42 @@ def import_closure(base: Path, package: str, module: str) -> list[str]:
             if cand not in seen:
                 pending.append(cand)
     return sorted(seen)
+
+
+def _module_file(base: Path, module: str) -> Path | None:
+    """The existing `.py` file for `module` under `base`, package or plain,
+    else `None`."""
+    candidate_file = base / (module.replace(".", "/") + ".py")
+    if candidate_file.is_file():
+        return candidate_file
+    candidate_init = base / module.replace(".", "/") / "__init__.py"
+    if candidate_init.is_file():
+        return candidate_init
+    return None
+
+
+def closure_files(base: Path, package: str, module: str) -> list[str]:
+    """Every file Python's own import machinery executes when importing
+    `module`: the file of each member of `import_closure`, plus every
+    EXISTING `__init__.py` along each member's ancestor-package chain
+    (within `package`, the package root's own `__init__.py` included) —
+    whether or not that ancestor is itself a discovered "unit". Importing
+    `a.b.c` always runs `a/__init__.py` then `a/b/__init__.py` first, a
+    docstring-only or otherwise trivial one included, so a closure built
+    only from discovered units silently misses files that genuinely execute
+    at import time. Sorted, posix, relative to `base`."""
+    files: set[str] = set()
+    for mod in import_closure(base, package, module):
+        mod_file = _module_file(base, mod)
+        if mod_file is not None:
+            files.add(mod_file.relative_to(base).as_posix())
+        parts = mod.split(".")
+        for i in range(1, len(parts)):
+            ancestor = ".".join(parts[:i])
+            init_path = base / ancestor.replace(".", "/") / "__init__.py"
+            if init_path.is_file():
+                files.add(init_path.relative_to(base).as_posix())
+    return sorted(files)
 
 
 # --- inventory build ---------------------------------------------------------

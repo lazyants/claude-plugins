@@ -115,7 +115,11 @@ not as `missing`: the key is present, it just isn't a valid value), `unknown_key
   `sandbox.py dispatch`'s promotion step, from a stage the write boundary already checked.
   `bridge.py` is the one script that writes into `target_root` directly, outside that boundary —
   it is deterministic (a fixed re-export line per frozen `one_to_one` row, never model output)
-  and is dispatched by the driving session like any other script, not by codex.
+  and is dispatched by the driving session like any other script, not by codex. It still refuses
+  by name, before writing, if any existing path component from `target_root` down to the shim it
+  is about to write is a symlink, or resolves outside `target_root` — a symlinked package
+  directory or shim file would otherwise let a write land somewhere the protected-digest bracket
+  around a codex dispatch never checks.
 - Comments, docstrings, string literals and fixtures in the legacy source reach codex's context
   during a port or review turn. They are **data**, never instructions — see M7 and
   `references/write-boundary.md`.
@@ -433,6 +437,16 @@ malformed finding never discards the valid ones in the same review (LT 1.39.0).
   is a static-only residual.
 - The net only exercises the inputs its cases name — state that only shows on an unexercised
   path escapes both the eligibility check and the differential gate.
+- **Static `io` detection is a conservative pre-filter, not the correctness authority.** Once a
+  module imports `pathlib` in any form, a call to a write-shaped method name
+  (`write_text`, `mkdir`, `unlink`, `chmod`, …) is flagged as `io` on *any* receiver, not only one
+  provably a `Path` — cheap to compute, and biased toward over-flagging a unit ineligible rather
+  than under-flagging one eligible. It can therefore mark a unit ineligible for a same-named
+  method on an unrelated class. What actually decides correctness is the runtime audit hook
+  (`references/write-boundary.md`), which denies the real attempted write during capture or
+  replay however the call was spelled, backed by the coverage floor that requires the denying
+  line to have actually been exercised — the static flag only decides how early the unit is
+  screened out, never whether an I/O call is truly caught.
 - A unit that only fills a harmless memoization cache is refused as `stateful` — v0.1 has no
   reachable-state exception for a cache with no observable effect.
 - `sandbox.py probe` runs once per recorded `codex_bin` version, not once per dispatch.

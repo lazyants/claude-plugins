@@ -94,14 +94,6 @@ def check_no_stubs(source: str, tree: ast.Module) -> list[str]:
     return problems
 
 
-def _module_file(base: Path, dotted: str) -> Path:
-    rel = dotted.replace(".", "/")
-    pkg_dir = base / rel
-    if pkg_dir.is_dir():
-        return pkg_dir / "__init__.py"
-    return base / (rel + ".py")
-
-
 def _frozen_rows_of_unit(lock: dict, unit: str) -> list[dict]:
     prefix_unit = unit
     rows = []
@@ -147,32 +139,75 @@ def _absolute_import_bases(tree: ast.Module) -> set[str]:
     return bases
 
 
-def check_no_direct_legacy_import(tree: ast.Module, legacy_package: str) -> tuple[bool, list[str]]:
-    bases = _absolute_import_bases(tree)
-    offending = sorted(b for b in bases if b == legacy_package or b.startswith(legacy_package + "."))
-    if offending:
-        return False, [f"imports legacy module(s): {', '.join(offending)}"]
-    return True, []
+def _module_name_and_is_package(rel_path: str) -> tuple[str, bool]:
+    """The dotted module name and whether it is a package `__init__.py`,
+    from one of `inventory.closure_files`'s relative posix paths."""
+    p = Path(rel_path)
+    if p.name == "__init__.py":
+        return ".".join(p.parent.parts), True
+    return ".".join(p.with_suffix("").parts), False
 
 
-def check_target_self_contained(target_root: Path, target_package: str, target_module_name: str) -> tuple[bool, list[str]]:
-    closure = inventory.import_closure(target_root, target_package, target_module_name)
-    problems = []
-    for mod in closure:
-        path = _module_file(target_root, mod)
+def _is_shim_file(path: Path) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            first_line = fh.readline().rstrip("\n")
+    except OSError:
+        return False
+    return first_line.startswith("# codebase-migrator: shim for ")
+
+
+def check_closure_files(
+    target_root: Path, target_package: str, target_module_name: str, legacy_package: str, own_target_rel: str
+) -> tuple[bool, bool, list[str], list[str]]:
+    """`no_direct_legacy_import` and `target_self_contained`, computed
+    together over every file `inventory.closure_files` reports for U's
+    target module: the import-closure's own files plus every EXISTING
+    ancestor package `__init__.py`, whether or not that ancestor is itself a
+    discovered unit -- an executable `shop2/__init__.py` runs at import time
+    just like any other file the closure reaches, and both checks must see
+    it. Each problem names its own file, not just the module or flag.
+
+    `no_direct_legacy_import` exempts a closure file that IS a bridge shim
+    (bridge.py's and ledger.py's own marker rule: first line exactly
+    `# codebase-migrator: shim for <unit>`) -- a shim's whole body is a
+    direct legacy import by design (`from <legacy> import <name> as
+    <name>`), so an unported dependency would otherwise fail every unit
+    that still depends on it, which is most of them. `own_target_rel` (U's
+    own target file, relative to `target_root`) is NEVER exempted even if it
+    happened to be a shim -- `target_present` already refuses that case
+    before this check runs, so a port can never disguise itself as one.
+    `target_self_contained` is never exempted: a shim's own body carries no
+    flag either way, but a private helper a shim's dependents still reach
+    must stay self-contained."""
+    files = inventory.closure_files(target_root, target_package, target_module_name)
+    legacy_problems: list[str] = []
+    self_contained_problems: list[str] = []
+    for rel_path in files:
+        path = target_root / rel_path
         if not path.is_file():
             continue
+        module_name, is_package = _module_name_and_is_package(rel_path)
         try:
             source = path.read_text(encoding="utf-8")
-            info = inventory.analyze_module(source, mod, target_package)
+            tree = ast.parse(source, filename=str(path))
+            info = inventory.analyze_module(source, module_name, target_package, is_package=is_package)
         except (OSError, SyntaxError) as exc:
-            problems.append(f"{mod}: could not be analyzed ({exc})")
+            self_contained_problems.append(f"{rel_path}: could not be analyzed ({exc})")
             continue
+
+        if rel_path == own_target_rel or not _is_shim_file(path):
+            bases = _absolute_import_bases(tree)
+            offending = sorted(b for b in bases if b == legacy_package or b.startswith(legacy_package + "."))
+            if offending:
+                legacy_problems.append(f"{rel_path}: imports legacy module(s): {', '.join(offending)}")
+
         for flag_name in ("uncontrolled_input", "io", "dynamic_call"):
             flags = info.get(flag_name, [])
             if flags:
-                problems.append(f"{mod}: {flag_name}: {', '.join(flags)}")
-    return (not problems), problems
+                self_contained_problems.append(f"{rel_path}: {flag_name}: {', '.join(flags)}")
+
+    return (not legacy_problems), (not self_contained_problems), legacy_problems, self_contained_problems
 
 
 def check_protected_intact(root: Path) -> tuple[bool, list[str]]:
@@ -216,15 +251,7 @@ def run_gate(root: Path, cfg: dict, unit: str) -> dict:
     target_module_name = cm_common.target_module(cfg, unit)
     target_root = cm_common.resolved_paths(root, cfg)["target_root"]
 
-    def _is_shim(path: Path) -> bool:
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                first_line = fh.readline().rstrip("\n")
-        except OSError:
-            return False
-        return first_line.startswith("# codebase-migrator: shim for ")
-
-    target_present = target_path.is_file() and not _is_shim(target_path)
+    target_present = target_path.is_file() and not _is_shim_file(target_path)
     checks["target_present"] = target_present
     if not target_present:
         problems.append(f"target_present: {target_path} is absent or is a shim")
@@ -261,13 +288,14 @@ def run_gate(root: Path, cfg: dict, unit: str) -> dict:
         checks["no_stubs"] = not stub_problems
         problems.extend(f"no_stubs: {p}" for p in stub_problems)
 
-        ok, ps = check_no_direct_legacy_import(tree, cfg["legacy_package"])
-        checks["no_direct_legacy_import"] = ok
-        problems.extend(f"no_direct_legacy_import: {p}" for p in ps)
-
-        ok, ps = check_target_self_contained(target_root, cfg["target_package"], target_module_name)
-        checks["target_self_contained"] = ok
-        problems.extend(f"target_self_contained: {p}" for p in ps)
+        own_target_rel = target_path.relative_to(target_root).as_posix()
+        legacy_ok, self_contained_ok, legacy_ps, self_contained_ps = check_closure_files(
+            target_root, cfg["target_package"], target_module_name, cfg["legacy_package"], own_target_rel
+        )
+        checks["no_direct_legacy_import"] = legacy_ok
+        problems.extend(f"no_direct_legacy_import: {p}" for p in legacy_ps)
+        checks["target_self_contained"] = self_contained_ok
+        problems.extend(f"target_self_contained: {p}" for p in self_contained_ps)
     else:
         for name in ("surface_matches", "no_stubs", "no_direct_legacy_import", "target_self_contained"):
             checks[name] = False

@@ -66,8 +66,8 @@ def row_problems(rows: list[dict], inventory: dict, cfg: dict) -> list[dict]:
                 problems.append({"source": source, "message": "a dropped row must have entry: null"})
             if targets:
                 problems.append({"source": source, "message": "a dropped row must have empty targets"})
-            if not reason:
-                problems.append({"source": source, "message": "a dropped row needs a non-empty reason"})
+            if not isinstance(reason, str) or not reason:
+                problems.append({"source": source, "message": "a dropped row needs a non-empty string reason"})
             if cfg.get("dead_code_policy") != "drop_with_census":
                 problems.append({"source": source, "message": "dropping a symbol requires dead_code_policy: drop_with_census"})
             if source not in unreferenced:

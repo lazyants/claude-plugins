@@ -242,7 +242,10 @@ def test_money_pricing_cart_net_with_coverage_and_determinism(work_root):
         assert result["kept"] > 0
 
     net_doc = cm_common.read_json(work_root / "nets" / "shop.pricing.json", "nets")
-    assert set(net_doc["legacy_closure"]) == {"shop.pricing", "shop.money"}
+    # legacy_closure is now keyed by inventory.closure_files' file paths
+    # (relative to the staged legacy root), which include shop's own
+    # ancestor-package __init__.py alongside the two real units.
+    assert set(net_doc["legacy_closure"]) == {"shop/pricing.py", "shop/money.py", "shop/__init__.py"}
 
     # runs/<unit>/net_capture.json mirrors the stdout object on success too
     # (sandbox.py's `cases` dispatch reads its `uncovered_lines`).

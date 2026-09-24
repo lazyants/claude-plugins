@@ -34,6 +34,46 @@ def is_shim(path: Path, unit: str) -> bool:
     return _first_line(path) == f"{_SHIM_PREFIX}{unit}"
 
 
+def _path_components(target_root: Path, target_path: Path) -> list[Path]:
+    """`target_root` itself, then every directory down to, and including,
+    `target_path`."""
+    rel = target_path.relative_to(target_root)
+    components = [target_root]
+    current = target_root
+    for part in rel.parts:
+        current = current / part
+        components.append(current)
+    return components
+
+
+def _refuse_if_unsafe_path(target_root: Path, target_path: Path) -> None:
+    """Before writing anything under `target_root`: refuse (naming it) if
+    any EXISTING path component from `target_root` down to `target_path` is
+    a symlink, or its realpath escapes `realpath(target_root)`. A symlinked
+    package directory or shim file would let a write land somewhere the
+    protected-digest bracket around a dispatch never checks."""
+    if not target_root.exists():
+        return
+    real_root = target_root.resolve()
+    for component in _path_components(target_root, target_path):
+        if not component.exists():
+            continue
+        if component.is_symlink():
+            cm_common.fail(
+                f"refusing to write: {component} is a symlink under target_root",
+                cm_common.EXIT_FAIL,
+                path=str(component),
+            )
+        try:
+            component.resolve().relative_to(real_root)
+        except ValueError:
+            cm_common.fail(
+                f"refusing to write: {component} resolves outside target_root",
+                cm_common.EXIT_FAIL,
+                path=str(component),
+            )
+
+
 def _ensure_init_chain(target_root: Path, unit_dir: Path) -> None:
     rel = unit_dir.relative_to(target_root)
     current = target_root
@@ -90,6 +130,7 @@ def build_bridge(root: Path, cfg: dict, check: bool) -> dict:
             continue
 
         target_path = cm_common.target_file(root, cfg, unit)
+        _refuse_if_unsafe_path(target_root, target_path)
         if target_path.exists() and not is_shim(target_path, unit):
             ports.append(unit)
             continue

@@ -134,7 +134,9 @@ def test_pilot_path_shop_pricing(work_root):
     assert proc.returncode == cm_common.EXIT_OK, proc.stderr
     assert out["verdict"] == "netted"
     net = json.loads((root / "nets" / "shop.pricing.json").read_text(encoding="utf-8"))
-    assert "shop.money" in net["legacy_closure"]
+    # legacy_closure is keyed by relpath (inventory.closure_files), not by
+    # unit dotted-name.
+    assert "shop/money.py" in net["legacy_closure"]
 
     # 9. bridge.py -- exactly one shim: shop.money, exporting round_money.
     proc = _run("bridge.py", ["--root", str(root)])

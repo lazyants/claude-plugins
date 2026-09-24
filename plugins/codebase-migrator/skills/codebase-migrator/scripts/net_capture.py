@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import cm_common  # noqa: E402
+import inventory  # noqa: E402
 import observe  # noqa: E402
 
 _BEHAVIOURAL_CHANNELS = (
@@ -54,6 +55,18 @@ def _staged_legacy_file(root: Path, cfg: dict, stage_legacy_base: Path, unit: st
     live = cm_common.legacy_file(root, cfg, unit)
     live_base = cm_common.resolved_paths(root, cfg)["legacy_root"]
     return stage_legacy_base / live.relative_to(live_base)
+
+
+def _module_name_from_closure_rel(rel: str) -> str:
+    """The dotted module name for one of `inventory.closure_files`'s
+    base-relative paths — the inverse of how that function derived the
+    path, so every closure file (including an ancestor package's own
+    `__init__.py`) can be preloaded by name."""
+    if rel.endswith("/__init__.py"):
+        rel = rel[: -len("/__init__.py")]
+    elif rel.endswith(".py"):
+        rel = rel[: -len(".py")]
+    return rel.replace("/", ".")
 
 
 def _read_registry_lock(root: Path) -> dict:
@@ -144,8 +157,8 @@ def _fail(root: Path, unit: str, msg: str, code: int, **fields) -> "NoReturn":
 
 
 def run(root: Path, cfg: dict, unit: str) -> dict:
-    inventory = cm_common.read_json(root / "inventory.json", "inventory.json")
-    units_info = inventory.get("units", {})
+    inv = cm_common.read_json(root / "inventory.json", "inventory.json")
+    units_info = inv.get("units", {})
     unit_info = units_info.get(unit)
     if unit_info is None:
         _fail(root, unit, f"unknown unit: {unit}", cm_common.EXIT_CANNOT)
@@ -208,11 +221,9 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
 
     before = cm_common.protected_digests(root, cfg)
 
-    closure_units = sorted(set(cm_common.unit_closure(inventory, unit)) - {unit})
     calls_map = {c["call"]: c["call"] for c in kept_cases}
 
     captures = {}
-    legacy_closure_units = sorted(set(closure_units) | {unit})
     legacy_closure: dict[str, str] = {}
     harness_exc: Exception | None = None
     try:
@@ -221,11 +232,19 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
                 stage = Path(tmp) / f"stage-{env}"
                 stage.mkdir(parents=True, exist_ok=True)
                 staged = observe.stage_trees(root, cfg, stage)
+                # closure_files is the same set Python's own import system
+                # would execute — the import-closure module files plus every
+                # ancestor package __init__.py, unit or not — so the digest
+                # and the preload set can never drift apart (plan 4.7 step 11).
+                closure_files = inventory.closure_files(staged["legacy"], cfg["legacy_package"], unit)
+                preload = sorted(
+                    {_module_name_from_closure_rel(rel) for rel in closure_files} - {unit}
+                )
                 trace_file = str(_staged_legacy_file(root, cfg, staged["legacy"], unit))
                 job = {
                     "mode": "capture",
                     "env": env,
-                    "preload": closure_units,
+                    "preload": preload,
                     "stage_root": str(stage),
                     "sys_path": [str(staged["legacy"])],
                     "module": unit,
@@ -236,13 +255,11 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
                 captures[env] = observe.run_harness(job, stage=stage)
                 if env == "A":
                     # The net is bound to the exact legacy bytes the capture
-                    # actually executed (plan 4.7 step 11) — hash the staged
-                    # copy here, before this `with` block tears it down, never
-                    # the live legacy_root (which could differ if something
-                    # else edits it between staging and this point).
-                    legacy_closure = cm_common.closure_digests(
-                        staged["legacy"], cfg["legacy_package"], legacy_closure_units
-                    )
+                    # actually executed — hash the staged copy here, before
+                    # this `with` block tears it down, never the live
+                    # legacy_root (which could differ if something else
+                    # edits it between staging and this point).
+                    legacy_closure = cm_common.file_digests(staged["legacy"], closure_files)
     except Exception as exc:  # noqa: BLE001 - reported below, after the tamper check
         harness_exc = exc
 

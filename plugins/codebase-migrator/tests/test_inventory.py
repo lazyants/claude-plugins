@@ -295,6 +295,41 @@ def test_pathlib_path_constructor_chain_other_write_methods_and_forms():
     assert not any("read_text" in flag for flag in info["io"])
 
 
+def test_pathlib_write_method_flagged_on_any_receiver_on_unexercised_branch():
+    # review round 3, finding 2: `p = Path(x); p.write_text(...)` never
+    # resolves `p` to "pathlib.Path" (no type inference), so the
+    # constructor-chain check alone misses it. Once the module imports
+    # pathlib in any form, the method name alone is enough — and the write
+    # sits behind an `if` that never runs, proving this is static.
+    source = (
+        "from pathlib import Path\n\n"
+        "def f(x, flag):\n"
+        "    p = Path(x)\n"
+        "    if flag:\n"
+        "        p.write_text('y')\n"
+        "    else:\n"
+        "        return None\n"
+    )
+    info = inventory.analyze_module(source, "pkg.mod", "pkg")
+    assert "call:write_text@f" in info["io"]
+
+
+def test_pathlib_str_replace_not_flagged_by_name_alone():
+    # `replace`, `rename` and `open` are deliberately excluded from the
+    # any-receiver pre-filter: str.replace is common enough that flagging it
+    # by name alone would false-positive constantly.
+    source = (
+        "import pathlib\n\n"
+        "def g(s):\n"
+        "    return s.replace('a', 'b')\n\n"
+        "def h(s, new):\n"
+        "    return s.rename(new)\n"
+    )
+    info = inventory.analyze_module(source, "pkg.mod", "pkg")
+    assert not any("replace" in flag for flag in info["io"])
+    assert not any("rename" in flag for flag in info["io"])
+
+
 def test_environ_subscript_read_flagged_as_uncontrolled_reference():
     # A bare subscript read is not a call, so the pre-existing "calls
     # resolving to os.environ*" rule alone misses it (this is exactly what a
@@ -429,6 +464,45 @@ def test_analyze_module_flags_reads_clock_helper():
     source = (FIXTURES_DIR / "ports" / "reads_clock" / "shop2" / "_util.py").read_text(encoding="utf-8")
     info = inventory.analyze_module(source, "shop2._util", "shop2")
     assert any(flag.startswith("call:time.time@") for flag in info["uncontrolled_input"])
+
+
+# --- closure_files: every file Python's own import machinery executes -----
+
+
+def test_closure_files_includes_the_package_root_init():
+    # review round 3, finding 1: shop2/pricing.py never itself imports
+    # shop2/__init__.py by name, but importing shop2.pricing always runs it
+    # first. A closure built only from discovered units silently misses it.
+    base = FIXTURES_DIR / "ports" / "good"
+    files = inventory.closure_files(base, "shop2", "shop2.pricing")
+    assert files == ["shop2/__init__.py", "shop2/money.py", "shop2/pricing.py"]
+
+
+def test_closure_files_includes_every_ancestor_init_nested(tmp_path):
+    base = tmp_path / "base"
+    pkg = base / "pkgn"
+    sub = pkg / "sub"
+    sub.mkdir(parents=True)
+    (pkg / "__init__.py").write_text('"""top docstring only"""\n', encoding="utf-8")
+    (sub / "__init__.py").write_text('"""sub docstring only"""\n', encoding="utf-8")
+    (sub / "leaf.py").write_text("X = 1\n", encoding="utf-8")
+
+    files = inventory.closure_files(base, "pkgn", "pkgn.sub.leaf")
+    # every ancestor's __init__.py is included, docstring-only or not —
+    # neither "pkgn" nor "pkgn.sub" is a discovered unit at all.
+    assert files == ["pkgn/__init__.py", "pkgn/sub/__init__.py", "pkgn/sub/leaf.py"]
+
+
+def test_closure_files_includes_docstring_only_init_even_when_unrelated(tmp_path):
+    base = tmp_path / "base"
+    pkg = base / "pkgo"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text('"""nothing but a docstring"""\n', encoding="utf-8")
+    (pkg / "mod.py").write_text("Y = 1\n", encoding="utf-8")
+
+    files = inventory.closure_files(base, "pkgo", "pkgo.mod")
+    assert "pkgo/__init__.py" in files
+    assert files == ["pkgo/__init__.py", "pkgo/mod.py"]
 
 
 # --- is_package: a package unit's relative import resolves against itself --

@@ -344,6 +344,34 @@ def test_state_snapshot_reports_no_change_for_a_pure_call_through_generic_refere
     assert _changes_after(tmp_path, mod.noop) == []
 
 
+def test_state_snapshot_detects_decimal_rebind_via_repr(tmp_path, make_module):
+    """`decimal.Decimal` is a C-level immutable value type with no
+    referents beyond its own type (`gc.get_referents(Decimal("1"))` is just
+    `[<class 'decimal.Decimal'>]`, which the skip list drops) — a rebind
+    from `Decimal("1")` to `Decimal("2")` would otherwise encode
+    identically. Only `repr_sha256` distinguishes them."""
+    mod = make_module(
+        "legacy",
+        "sm_decimal",
+        "from decimal import Decimal\n\n\n"
+        "_dec = Decimal('1')\n\n\n"
+        "def rebind():\n"
+        "    global _dec\n"
+        "    _dec = Decimal('2')\n",
+    )
+    changes = _changes_after(tmp_path, mod.rebind)
+    assert "sm_decimal:_dec" in changes
+
+
+def test_state_snapshot_reports_no_change_for_a_stable_ref_graph_object(tmp_path, make_module):
+    mod = make_module(
+        "legacy",
+        "sm_decimal_stable",
+        "from decimal import Decimal\n\n\n_dec = Decimal('1')\n\n\ndef noop():\n    return str(_dec)\n",
+    )
+    assert _changes_after(tmp_path, mod.noop) == []
+
+
 # ---------------------------------------------------------------------------
 # Subprocess-level harness behaviour
 # ---------------------------------------------------------------------------

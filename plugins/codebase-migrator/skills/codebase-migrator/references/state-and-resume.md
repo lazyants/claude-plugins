@@ -49,11 +49,12 @@ again, not to dispatch a new port turn for `U`.
 `ledger.py key --root R --unit U` computes and prints `cache_key(root, cfg, unit)`, a dict with
 these fields, in order, every path taken relative to the durable root:
 
-1. `legacy_closure_sha256` — the live legacy tree's digest over `U` plus its transitive
-   `imports_units`, plus any ancestor package unit Python executes on the way to importing `U`
-   (an ancestor whose `__init__.py` carries real code, not just a docstring —
-   `references/gate-stack.md`'s R3 section). A change to that ancestor's code moves this digest
-   exactly as a change to an explicitly-imported dependency would.
+1. `legacy_closure_sha256` — the digest of every file `inventory.closure_files(legacy_root,
+   legacy_package, U)` names (`references/gate-stack.md`'s "one closure, one file set"): `U`'s
+   file, its transitive `imports_units`, and every *existing* ancestor package `__init__.py`
+   along the way, unit or not. A change to any of those files — including a docstring-only
+   ancestor init, since it is a real file Python still executes — moves this digest exactly as a
+   change to an explicitly-imported dependency would.
 2. `rows_sha256` — the frozen rows of `U`'s own public symbols plus its `imported_symbols`,
    sorted by source.
 3. `conventions_sha256` — the digest of `conventions.md` as it stands right now.
@@ -61,12 +62,13 @@ these fields, in order, every path taken relative to the durable root:
 5. `net_sha256` and `cases_sha256` — both read from `net.lock.json` (`null` if `U` has no entry
    yet).
 6. `templates_sha256` — the digest of the four prompt templates together.
-7. `target_closure_sha256` — the digest of every file in `U`'s **target-side** import closure
-   (`inventory.import_closure` walked from `target_module(U)` under `target_root`): every
-   dependency's shim-or-port file `U`'s port actually imports, plus every private target-side
-   helper it reaches. This is what catches the two changes `legacy_closure_sha256` cannot see,
-   because neither touches `U`'s own legacy bytes or its target file: a dependency's shim
-   becoming a real port, and an edit to a private helper module `U`'s port imports.
+7. `target_closure_sha256` — the same `inventory.closure_files`, applied to the **target** side:
+   every file in `target_module(U)`'s import closure under `target_root` — every dependency's
+   shim-or-port file `U`'s port actually imports, every private target-side helper it reaches,
+   and every existing target-side ancestor package `__init__.py`, unit or not. This is what
+   catches the two changes `legacy_closure_sha256` cannot see, because neither touches `U`'s own
+   legacy bytes or its target file: a dependency's shim becoming a real port, and an edit to a
+   private helper module (or an ancestor `__init__.py`) `U`'s port imports.
 8. `adapter` — the literal string identifying the Python-to-Python adapter.
 9. `plugin_sha256` — the digest of every script in the plugin.
 
@@ -105,12 +107,19 @@ valid against new source, and no way to accept drift without re-measuring the un
 
 ## The stdout and exit-code contract
 
-Every script builds its top-level parser with `cm_common.make_parser`, whose `argparse.
-ArgumentParser` subclass overrides `error()` so a bad CLI invocation — an unknown flag, a
-missing required one, an invalid choice — still emits exactly one JSON line to stdout
-(`{"ok": false, "error": "<message>"}`), the same as any other refusal, and exits 2. Nothing in
-this plugin ever lets argparse's own default behavior (usage text on stderr, a bare `sys.exit(2)`
-with no JSON at all) reach the caller, so a script's stdout is always machine-parseable JSON,
+Every `--root`-based script builds its top-level parser with `cm_common.make_parser`, whose
+`argparse.ArgumentParser` subclass overrides `error()` so a bad CLI invocation — an unknown flag,
+a missing required one, an invalid choice — still emits exactly one JSON line to stdout
+(`{"ok": false, "error": "<message>"}`), the same as any other refusal, and exits 2.
+**`observe.py`'s `harness` entry point is the one exception**, and deliberately so: it is not a
+`--root` CLI at all but a bespoke stdin/stdout subprocess protocol (`SKILL.md` never invokes it
+directly — `net_capture.py`/`diff_gate.py` do, through `observe.run_harness`), so there is no
+`argparse` parser to route through `make_parser` in the first place. It still honors the same
+contract by hand: called with anything other than `observe.py harness`, or fed unparseable JSON
+on stdin, it writes its own one-line `{"ok": false, "error": "<message>"}` and exits 2, exactly
+like every other bad-invocation path — just not via the shared mechanism. Nothing in this plugin
+ever lets argparse's own default behavior (usage text on stderr, a bare `sys.exit(2)` with no
+JSON at all) reach the caller, so a script's stdout is always machine-parseable JSON,
 never conditionally empty depending on how it was invoked.
 
 ## Atomic checkpoint

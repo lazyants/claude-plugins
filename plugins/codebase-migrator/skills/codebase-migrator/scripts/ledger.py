@@ -92,11 +92,19 @@ def _inventory_stale_units(root: Path, cfg: dict, inventory: dict, closure: list
 
 def cache_key(root: Path, cfg: dict, unit: str) -> dict:
     root = Path(root)
+    import inventory as _inventory_mod  # lazy import: mirrors load_config's own lazy import
+
     inventory = cm_common.read_json(root / "inventory.json", "inventory.json")
     closure = cm_common.unit_closure(inventory, unit)
     legacy_root = cm_common.resolved_paths(root, cfg)["legacy_root"]
 
-    legacy_digests = cm_common.closure_digests(legacy_root, cfg["legacy_package"], closure)
+    # `closure_files` (not `unit_closure`'s dotted names) is the file set
+    # Python's own import machinery actually executes: it also includes
+    # every ancestor package's __init__.py, unit or not (a docstring-only
+    # one included). A closure built only from discovered units silently
+    # misses files that genuinely run at import time.
+    legacy_relpaths = _inventory_mod.closure_files(legacy_root, cfg["legacy_package"], unit)
+    legacy_digests = cm_common.file_digests(legacy_root, legacy_relpaths)
     legacy_closure_sha256 = cm_common.sha256_json(legacy_digests)
 
     unit_info = inventory.get("units", {}).get(unit, {})
@@ -138,24 +146,18 @@ def cache_key(root: Path, cfg: dict, unit: str) -> dict:
     plugin_sha256 = cm_common.sha256_json(script_digests)
 
     # Porting a dependency (a shim becoming a real port) or editing a
-    # private helper module after R2/R3 changes U's actual behaviour while
-    # U's own target file and the legacy-side key stay identical, so
-    # converge would otherwise accept a stale r2/r3 pair. Walking U's
-    # target-side import closure catches both: the closure includes every
-    # dependency's shim-or-port file under target_root, and every private
-    # helper U's port reaches.
-    import inventory as _inventory_mod  # lazy import: mirrors load_config's own lazy import
-
+    # private helper module or an ancestor package's __init__.py after
+    # R2/R3 changes U's actual behaviour while U's own target file and the
+    # legacy-side key stay identical, so converge would otherwise accept a
+    # stale r2/r3 pair. Walking U's target-side import closure catches all
+    # of these: it includes every dependency's shim-or-port file under
+    # target_root, every private helper U's port reaches, and every
+    # existing ancestor package __init__.py along the way.
     target_root = cm_common.resolved_paths(root, cfg)["target_root"]
-    target_closure_modules = _inventory_mod.import_closure(
+    target_relpaths = _inventory_mod.closure_files(
         target_root, cfg["target_package"], cm_common.target_module(cfg, unit)
     )
-    target_closure_digests = {}
-    for m in target_closure_modules:
-        f = cm_common._module_file(target_root, m)
-        if f.is_file():
-            rel = f.relative_to(target_root).as_posix()
-            target_closure_digests[rel] = cm_common.sha256_file(f)
+    target_closure_digests = cm_common.file_digests(target_root, target_relpaths)
     target_closure_sha256 = cm_common.sha256_json(target_closure_digests)
 
     return {
@@ -255,20 +257,27 @@ def eligible(root: Path, cfg: dict, unit: str) -> list:
         else:
             reasons.append(f"cases/{unit}.json is missing: re-run net_capture.py")
 
-        live_digests = cm_common.closure_digests(legacy_root, cfg["legacy_package"], closure)
+        # Same closure definition net_capture.py binds nets/U.json to:
+        # every file Python's import machinery actually executes, including
+        # an ancestor package's __init__.py whether or not it is itself a
+        # discovered unit (a docstring-only one included).
+        import inventory as _inventory_mod  # lazy import: mirrors load_config's own lazy import
+
+        live_relpaths = _inventory_mod.closure_files(legacy_root, cfg["legacy_package"], unit)
+        live_digests = cm_common.file_digests(legacy_root, live_relpaths)
         live_closure_sha256 = cm_common.sha256_json(live_digests)
         if live_closure_sha256 != net_entry.get("legacy_closure_sha256"):
             recorded_closure = (nets_data or {}).get("legacy_closure", {})
-            changed_units = sorted(
-                u
-                for u in set(recorded_closure) | set(live_digests)
-                if recorded_closure.get(u) != live_digests.get(u)
+            changed_paths = sorted(
+                p
+                for p in set(recorded_closure) | set(live_digests)
+                if recorded_closure.get(p) != live_digests.get(p)
             )
-            if not changed_units:
-                changed_units = closure
+            if not changed_paths:
+                changed_paths = live_relpaths
             reasons.append(
                 "legacy closure has drifted for "
-                + ", ".join(changed_units)
+                + ", ".join(changed_paths)
                 + f" since {unit}'s net was captured: "
                 "re-run inventory.py, ledger.py accept-drift or net_capture.py"
             )
@@ -586,10 +595,19 @@ def cmd_accept_drift(root: Path, cfg: dict, args) -> int:
 
     net_lock = _read_net_lock(root)
     net_entry = net_lock.get("units", {}).get(unit)
-    old_closure_sha256 = net_entry.get("legacy_closure_sha256") if net_entry else None
+    if net_entry is None:
+        cm_common.fail(
+            f"no net recorded for {unit}: nothing to accept drift from, run net_capture.py first",
+            cm_common.EXIT_FAIL,
+            unit=unit,
+        )
+    old_closure_sha256 = net_entry.get("legacy_closure_sha256")
+
+    import inventory as _inventory_mod  # lazy import: mirrors load_config's own lazy import
 
     legacy_root = cm_common.resolved_paths(root, cfg)["legacy_root"]
-    new_digests = cm_common.closure_digests(legacy_root, cfg["legacy_package"], closure)
+    new_relpaths = _inventory_mod.closure_files(legacy_root, cfg["legacy_package"], unit)
+    new_digests = cm_common.file_digests(legacy_root, new_relpaths)
     new_closure_sha256 = cm_common.sha256_json(new_digests)
 
     drift_log_path = root / "drift_log.json"

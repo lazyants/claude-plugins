@@ -127,6 +127,16 @@ def test_dropped_row_needs_a_reason(shop_inventory):
     assert any("reason" in p["message"] for p in problems if p["source"] == "shop.cart:Cart")
 
 
+def test_dropped_row_reason_must_be_a_string(shop_inventory):
+    # review round 3, finding 4: `if not reason` accepts any truthy value,
+    # so 7 or True previously slipped through as a "reason".
+    inventory, cfg = shop_inventory
+    for bad_reason in (7, True):
+        row = {"source": "shop.cart:Cart", "cardinality": "dropped", "entry": None, "targets": [], "reason": bad_reason}
+        problems = registry_validate.row_problems([row], inventory, _cfg(dead_code_policy="drop_with_census"))
+        assert any("reason" in p["message"] for p in problems if p["source"] == "shop.cart:Cart"), bad_reason
+
+
 def test_dropped_row_refused_under_dead_code_policy_port(shop_inventory):
     inventory, _ = shop_inventory
     row = {"source": "shop.cart:Cart", "cardinality": "dropped", "entry": None, "targets": [], "reason": "unused"}

@@ -329,6 +329,23 @@ def closure_digests(legacy_base: Path, legacy_package: str, units: list) -> dict
     return result
 
 
+def file_digests(base: Path, relpaths: list) -> dict:
+    """`{relpath: sha256}` for each of `relpaths` (already relative to
+    `base`, as `inventory.closure_files` produces them). Unlike
+    `closure_digests`, a missing file here is `fail(EXIT_CANNOT)` naming it:
+    a caller passing an `inventory.closure_files` result already knows every
+    path is expected to exist, so a miss means the tree is not what the
+    caller thinks it is, not a removed dependency to hash as empty."""
+    base = Path(base)
+    result: dict[str, str] = {}
+    for rel in relpaths:
+        f = base / rel
+        if not f.is_file():
+            fail(f"expected closure file is missing: {f}", EXIT_CANNOT)
+        result[rel] = sha256_file(f)
+    return result
+
+
 def unit_closure(inventory: dict, unit: str) -> list:
     """`unit`, its transitive `imports_units`, and every ancestor package of
     any of those that is itself a unit (a package whose `__init__.py` has a

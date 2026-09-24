@@ -70,18 +70,32 @@ prints the same digest map's own count and combined sha256 on demand, read-only,
 before/after comparison outside a dispatch.
 
 **The digest check runs even when the process it is bracketing fails to finish cleanly.**
-`sandbox.py dispatch`'s codex subprocess call is wrapped so a timeout (`subprocess.TimeoutExpired`)
-or any other subprocess failure is caught, not re-raised, and the after-digest and tamper
-comparison run before that error is reported — a turn that writes outside the stage and then
-hangs must not go unchecked just because it also failed to finish; `subprocess.run`'s own timeout
-handling kills the child first, so anything it wrote before hanging is already on disk by the
-time the digests are taken. `net_capture.py` and `diff_gate.py` apply the identical pattern
-around the harness subprocess: if it raises for any reason, the tamper check still runs first,
-and only if nothing tampered is the harness failure itself reported (`EXIT_CANNOT`, "could not
-judge") — a tampering result always wins over a harness-crashed result when both are true. The
-dispatch timeout (1800s) is overridable by the test-only `CM_DISPATCH_TIMEOUT_S` environment
-variable, read only when set, so a test can force a short timeout without touching the real
-default. This backstop is only as strong
+`sandbox.py dispatch`'s codex subprocess call sits in a `try`/`finally`, not a `try`/`except`
+alone: the after-digest snapshot and the tamper comparison happen inside the `finally`, so they
+run on **every** way out of that call — a caught timeout (`subprocess.TimeoutExpired`) or other
+subprocess failure, a normal return, or a `KeyboardInterrupt` propagating straight through
+(matched by no `except` clause, but a `finally` runs regardless of what is being unwound). A
+turn that writes outside the stage and then hangs, or is interrupted, must not go unchecked just
+because the call itself also failed to finish; `subprocess.run`'s own timeout handling kills the
+child first, so anything it wrote before hanging is already on disk by the time the digests are
+taken. Raising inside a `finally` supersedes whatever exception was propagating, so a
+`cm_common.fail` for tampering there replaces even a `KeyboardInterrupt` exactly as it would
+replace a normal return — tamper always wins. `net_capture.py` and `diff_gate.py` apply the
+identical pattern around the harness subprocess: if it raises for any reason, the tamper check
+still runs first, and only if nothing tampered is the harness failure itself reported
+(`EXIT_CANNOT`, "could not judge") — a tampering result always wins over a harness-crashed result
+when both are true. The dispatch timeout (1800s) is overridable by the test-only
+`CM_DISPATCH_TIMEOUT_S` environment variable, read only when set, so a test can force a short
+timeout without touching the real default.
+
+**A nonzero codex exit code rejects the turn even with no exception and no tampering.** codex
+exiting 1 (or any non-zero status) is not treated as success just because the subprocess call
+itself completed normally: `sandbox.py dispatch` checks `proc.returncode` after the tamper check
+and refuses ("codex exited with status N; nothing promoted") if it is non-zero, naming the real
+exit code both in the failure payload and in the journal entry — a failed turn's stage may still
+hold a well-formed `{"findings": []}` or a syntactically valid `out/target.py` from whatever
+codex managed to write before failing, and that must never be promoted as if the turn had
+succeeded. This backstop is only as strong
 as the protection of the digest store itself — which is exactly why `net.lock.json` and
 `registry.lock.json` sit inside the protected set, not beside it.
 

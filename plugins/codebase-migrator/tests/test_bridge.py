@@ -270,3 +270,23 @@ def test_module_bound_attribute_import_freezes_and_shims_end_to_end(tmp_path):
     census = json.loads((root / "runs" / "shims.json").read_text(encoding="utf-8"))
     assert set(census["shims"]) == {"pkg.money"}
     assert census["shims"]["pkg.money"]["symbols"] == ["pkg2.money:round_money"]
+
+
+def test_bridge_refuses_symlinked_package_directory(tmp_path):
+    # review round 3, finding 3: a symlinked package directory under
+    # target_root must never let a write escape it.
+    root = _make_root(tmp_path)
+    _freeze(root, "--units", "shop.pricing", "--with-imported")
+
+    target_root = root / "target"
+    target_root.mkdir(parents=True, exist_ok=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (target_root / "shop2").symlink_to(elsewhere, target_is_directory=True)
+
+    code, payload, stderr = _run("bridge.py", "--root", str(root))
+    assert code == 1
+    assert payload["ok"] is False
+    assert "shop2" in payload["path"]
+    # nothing was written through the symlink
+    assert list(elsewhere.iterdir()) == []

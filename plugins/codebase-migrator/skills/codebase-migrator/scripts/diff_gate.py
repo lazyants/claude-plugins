@@ -63,50 +63,42 @@ def _staged_rel(root: Path, cfg: dict, unit: str, which: str) -> Path:
     return live.relative_to(base)
 
 
-def _unit_from_rel(rel: str, root_prefix: str):
-    prefix = root_prefix + "/"
-    if not rel.startswith(prefix):
-        return None
-    inner = rel[len(prefix):]
-    if inner.endswith("/__init__.py"):
-        inner = inner[: -len("/__init__.py")]
-    elif inner.endswith(".py"):
-        inner = inner[: -len(".py")]
-    else:
-        return None
-    return inner.replace("/", ".")
+def _module_name_from_closure_rel(rel: str) -> str:
+    """The dotted module name for one of `inventory.closure_files`'s
+    base-relative paths — the inverse of how that function derived the
+    path, so every closure file (including an ancestor package's own
+    `__init__.py`) can be preloaded by name."""
+    if rel.endswith("/__init__.py"):
+        rel = rel[: -len("/__init__.py")]
+    elif rel.endswith(".py"):
+        rel = rel[: -len(".py")]
+    return rel.replace("/", ".")
 
 
-def _route_violations(route_files, unit: str, closure_units, known_units) -> list:
-    """Allowed: a legacy file belonging to a unit in `closure_units` (a
-    dependency shim being imported — `cm_common.unit_closure` now walks
-    ancestor-package units too, so a real ancestor unit U depends on is
-    already a member of `closure_units`); or an `__init__.py` whose derived
-    dotted name is NOT a real unit at all (a docstring-only ancestor
-    package — Python's import system always initializes ancestor packages,
-    so touching one is a mechanical side effect of the import, never a
-    reach the port chose to make). U's own legacy file is forbidden even
-    when it would otherwise qualify as such an ancestor init. An
-    EXECUTABLE ancestor init that is a real unit but NOT in the closure is
-    still a violation."""
+def _route_violations(route_files, unit_own_rel: str, allowed_legacy_rels: set) -> list:
+    """`allowed_legacy_rels` is the stage-relative ("legacy/...") form of
+    every path `inventory.closure_files(staged legacy, legacy_package, U)`
+    names, MINUS U's own file. `closure_files` already walks every
+    ancestor-package `__init__.py` along the way — unit or not — so no
+    separate exemption or unit-lookup logic is needed here: a file is
+    allowed iff it's in that one set, and U's own file is checked first so
+    it is refused even though it was excluded from the set for the same
+    reason."""
     violations = []
     for rel in route_files or []:
         if not rel.startswith("legacy/"):
             continue
-        touched_unit = _unit_from_rel(rel, "legacy")
-        if touched_unit == unit:
+        if rel == unit_own_rel:
             violations.append(f"reached the unit's own legacy file: {rel}")
-        elif touched_unit in closure_units:
-            continue
-        elif rel.endswith("/__init__.py") and touched_unit not in known_units:
+        elif rel in allowed_legacy_rels:
             continue
         else:
             violations.append(f"reached a legacy file outside the dependency closure: {rel}")
     return violations
 
 
-def _case_route_violations(route_files, unit: str, closure_units, known_units, target_rel: str) -> list:
-    violations = _route_violations(route_files, unit, closure_units, known_units)
+def _case_route_violations(route_files, unit_own_rel: str, allowed_legacy_rels: set, target_rel: str) -> list:
+    violations = _route_violations(route_files, unit_own_rel, allowed_legacy_rels)
     if target_rel not in (route_files or []):
         violations.append(f"target file was never reached: {target_rel}")
     return violations
@@ -195,8 +187,8 @@ def _build_calls_map(unit: str, replay_cases: list, lock_rows: dict) -> dict:
     return calls_map
 
 
-def _evaluate_run(run_result: dict, unit: str, closure_units, known_units, target_rel: str) -> dict:
-    import_violations = _route_violations(run_result.get("import_route_files"), unit, closure_units, known_units)
+def _evaluate_run(run_result: dict, unit_own_rel: str, allowed_legacy_rels: set, target_rel: str) -> dict:
+    import_violations = _route_violations(run_result.get("import_route_files"), unit_own_rel, allowed_legacy_rels)
     evaluated = {}
     for obs in run_result.get("observations", []):
         cid = obs["case_id"]
@@ -204,7 +196,7 @@ def _evaluate_run(run_result: dict, unit: str, closure_units, known_units, targe
         route_violations = list(import_violations)
         if executed:
             route_violations += _case_route_violations(
-                obs.get("route_files"), unit, closure_units, known_units, target_rel
+                obs.get("route_files"), unit_own_rel, allowed_legacy_rels, target_rel
             )
         evaluated[cid] = {
             "obs": obs,
@@ -252,20 +244,20 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
 
     inv = cm_common.read_json(root / "inventory.json", "inventory.json")
     known_units = set(inv.get("units", {}).keys())
-    closure_units = sorted(set(cm_common.unit_closure(inv, unit)) - {unit})
     legacy_root = cm_common.resolved_paths(root, cfg)["legacy_root"]
-    live_digests = cm_common.closure_digests(legacy_root, cfg["legacy_package"], sorted(closure_units + [unit]))
+    live_closure_files = inventory.closure_files(legacy_root, cfg["legacy_package"], unit)
+    live_digests = cm_common.file_digests(legacy_root, live_closure_files)
     stored_closure = net_doc.get("legacy_closure", {})
-    changed_units = sorted(
-        u for u in set(live_digests) | set(stored_closure) if live_digests.get(u) != stored_closure.get(u)
+    changed_legacy_files = sorted(
+        f for f in set(live_digests) | set(stored_closure) if live_digests.get(f) != stored_closure.get(f)
     )
-    if changed_units:
+    if changed_legacy_files:
         cm_common.fail(
             f"legacy closure drifted for {unit} since capture: "
-            + ", ".join(changed_units)
+            + ", ".join(changed_legacy_files)
             + " (recovery: inventory.py, ledger.py accept-drift, net_capture.py)",
             cm_common.EXIT_FAIL,
-            changed_units=changed_units,
+            changed_legacy_files=changed_legacy_files,
         )
 
     lock = _read_registry_lock(root)
@@ -293,8 +285,10 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
     before = cm_common.protected_digests(root, cfg)
     target_module_name = cm_common.target_module(cfg, unit)
     target_rel = "target/" + _staged_rel(root, cfg, unit, "target").as_posix()
+    unit_own_rel = "legacy/" + _staged_rel(root, cfg, unit, "legacy").as_posix()
 
     runs = {}
+    allowed_legacy_rels: set = set()
     harness_exc: Exception | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="cm-stage-") as tmp:
@@ -302,11 +296,18 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
                 stage = Path(tmp) / f"stage-{env}"
                 stage.mkdir(parents=True, exist_ok=True)
                 staged = observe.stage_trees(root, cfg, stage)
-                preload = [
-                    m
-                    for m in inventory.import_closure(staged["target"], cfg["target_package"], target_module_name)
-                    if m != target_module_name
-                ]
+                target_closure_files = inventory.closure_files(
+                    staged["target"], cfg["target_package"], target_module_name
+                )
+                preload = sorted(
+                    {_module_name_from_closure_rel(rel) for rel in target_closure_files} - {target_module_name}
+                )
+                if env == "A":
+                    # Computed from the staged copy while it still exists
+                    # (torn down when this `with` block exits) — the set of
+                    # legacy files the route rule allows for this unit.
+                    legacy_closure_files = inventory.closure_files(staged["legacy"], cfg["legacy_package"], unit)
+                    allowed_legacy_rels = {f"legacy/{rel}" for rel in legacy_closure_files} - {unit_own_rel}
                 job = {
                     "mode": "replay",
                     "env": env,
@@ -337,8 +338,8 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
     if harness_exc is not None:
         cm_common.fail(f"replay harness failed: {harness_exc}", cm_common.EXIT_CANNOT)
 
-    eval_a = _evaluate_run(runs["A"], unit, closure_units, known_units, target_rel)
-    eval_b = _evaluate_run(runs["B"], unit, closure_units, known_units, target_rel)
+    eval_a = _evaluate_run(runs["A"], unit_own_rel, allowed_legacy_rels, target_rel)
+    eval_b = _evaluate_run(runs["B"], unit_own_rel, allowed_legacy_rels, target_rel)
 
     cases_in_corpus = len(net_case_ids)
     executed_ids = [
@@ -376,8 +377,13 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
         for e in (eval_a[cid], eval_b[cid]):
             for rel in e["obs"].get("route_files") or []:
                 if rel.startswith("legacy/"):
-                    touched_unit = _unit_from_rel(rel, "legacy")
-                    if touched_unit in closure_units:
+                    # A counted case's route already passed `allowed_legacy_rels`
+                    # (unit's own file or a violation would have excluded it), so
+                    # any legacy file here is either an ancestor-package init
+                    # (not itself a unit, not worth naming) or a genuine
+                    # dependency unit — `known_units` distinguishes the two.
+                    touched_unit = _module_name_from_closure_rel(rel[len("legacy/"):])
+                    if touched_unit in known_units:
                         crossed_shims.add(touched_unit)
 
     legacy_by_id = {o["case_id"]: o for o in net_doc.get("observations", [])}

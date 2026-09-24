@@ -573,29 +573,48 @@ def cmd_dispatch(root: Path, cfg: dict, unit: str, kind: str, round_num: int) ->
     mode = SANDBOX_MODE[kind]
     argv = [binpath, "exec", "-s", mode, "-C", str(stage), "--skip-git-repo-check", "-o", str(out_file), "-"]
     codex_error = None
+    proc = None
     try:
-        subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=_dispatch_timeout_s())
+        proc = subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=_dispatch_timeout_s())
     except (OSError, subprocess.SubprocessError) as exc:
-        # A timeout (subprocess.TimeoutExpired, a SubprocessError) or any
-        # other failure here must still be followed by the tamper check and
-        # the journal entry below: a turn that writes outside the stage and
-        # then hangs must not go unchecked just because it also failed to
-        # finish. `subprocess.run`'s own timeout handling kills the child
-        # first, so anything it wrote before hanging is already on disk by
-        # the time `after` is taken.
         codex_error = exc
+    finally:
+        # A timeout, an OSError, a KeyboardInterrupt propagating straight
+        # through the call above (never matched by the narrow except-list,
+        # but a `finally` runs regardless of what is being unwound) -- the
+        # tamper check and its journal entry must still happen every time:
+        # a turn that writes outside the stage and then hangs, or is
+        # interrupted, must not go unchecked just because the call above
+        # also failed to finish. `subprocess.run`'s own timeout handling
+        # kills the child first, so anything it wrote before hanging is
+        # already on disk by the time `after` is taken. Raising inside a
+        # `finally` supersedes whatever exception was propagating, which is
+        # exactly "tamper still wins": a `cm_common.fail` call here replaces
+        # a KeyboardInterrupt just as it would replace a normal return.
+        after = cm_common.protected_digests(root, cfg)
+        tampered = cm_common.diff_digests(before, after)
+        if tampered:
+            _append_journal(run_dir, kind, round_num, stage, 1, tampered, [], [])
+            cm_common.fail(
+                "dispatch tampered with a protected tree; nothing promoted", cm_common.EXIT_FAIL,
+                tampered=tampered,
+            )
+        elif codex_error is not None:
+            _append_journal(run_dir, kind, round_num, stage, 1, [], [], [])
 
-    after = cm_common.protected_digests(root, cfg)
-    tampered = cm_common.diff_digests(before, after)
-    if tampered:
-        _append_journal(run_dir, kind, round_num, stage, 1, tampered, [], [])
-        cm_common.fail(
-            "dispatch tampered with a protected tree; nothing promoted", cm_common.EXIT_FAIL,
-            tampered=tampered,
-        )
     if codex_error is not None:
-        _append_journal(run_dir, kind, round_num, stage, 1, [], [], [])
         cm_common.fail(f"codex binary unavailable for dispatch: {codex_error}", cm_common.EXIT_CANNOT)
+
+    if proc.returncode != 0:
+        # A failed turn's stage may still hold a well-formed {"findings": []}
+        # or a syntactically valid out/target.py from whatever it managed to
+        # write before failing -- that must never be promoted as if the turn
+        # had succeeded.
+        _append_journal(run_dir, kind, round_num, stage, proc.returncode, [], [], [])
+        cm_common.fail(
+            f"codex exited with status {proc.returncode}; nothing promoted", cm_common.EXIT_FAIL,
+            exit_code=proc.returncode,
+        )
 
     malformed_findings: list = []
     if kind in ("port", "fix"):

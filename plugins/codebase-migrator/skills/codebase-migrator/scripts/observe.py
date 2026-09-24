@@ -250,13 +250,29 @@ def _encode_class_state(cls, ctx: dict, depth: int):
 _REFERENT_SKIP_TYPES = (type, types.CodeType, types.FrameType)
 
 
+def _safe_repr_sha256(value) -> str:
+    """A C-level immutable value type (`decimal.Decimal`, for one) can hold
+    its value with no referents at all — `gc.get_referents(Decimal("1"))`
+    is just `[<class 'decimal.Decimal'>]`, which the skip list drops, so a
+    rebind from `Decimal("1")` to `Decimal("2")` would otherwise encode
+    identically. `repr()` is the one thing that reliably reflects such a
+    value; a `repr()` that itself raises reports `"repr_error"` rather than
+    propagating."""
+    try:
+        text = repr(value)
+    except Exception:
+        return "repr_error"
+    return cm_common.sha256_bytes(text.encode("utf-8", errors="backslashreplace"))
+
+
 def _encode_ref_graph_state(value, ctx: dict, depth: int):
     """State-mode fallback for any object with no more specific rule:
     encode what CPython's own garbage collector says this object
-    references. Type, code and frame objects are skipped outright (pure
-    interpreter bookkeeping, never behaviour); a module referent is not
-    skipped, but recurses through `encode()` itself, which hits the
-    `$module` rule and does not expand its own referent graph."""
+    references, plus a hash of its `repr()` (see `_safe_repr_sha256`).
+    Type, code and frame objects are skipped outright (pure interpreter
+    bookkeeping, never behaviour); a module referent is not skipped, but
+    recurses through `encode()` itself, which hits the `$module` rule and
+    does not expand its own referent graph."""
     oid = id(value)
     if oid in ctx["seen"]:
         return {"$ref": ctx["seen"][oid]}
@@ -266,7 +282,12 @@ def _encode_ref_graph_state(value, ctx: dict, depth: int):
         if isinstance(ref, _REFERENT_SKIP_TYPES):
             continue
         items.append(encode(ref, ctx, True, depth + 1))
-    return {"$ref_graph": _type_qualname(value), "$id": n, "items": items}
+    return {
+        "$ref_graph": _type_qualname(value),
+        "$id": n,
+        "items": items,
+        "repr_sha256": _safe_repr_sha256(value),
+    }
 
 
 def decode(obj):
@@ -511,49 +532,15 @@ def _stage_relative(filename: str, stage_root: Path) -> str | None:
     return None
 
 
-# A traced/profiled window can itself need to call harness code while the
-# tracer/profiler is still installed (the import window takes a state
-# snapshot mid-window, per plan 4.6 step 2). That snapshot walks every loaded
-# module and encodes its attributes — dozens of Python-level calls — and a
-# process-wide `sys.setprofile` would otherwise see every one of them,
-# multiplying the work by the number of loaded modules and making a plain
-# import take minutes. `_trace_state["suspended"]` lets the harness's own
-# code run with the tracer/profiler function still installed (so the
-# tamper-check counters, which only count `sys.settrace`/`sys.setprofile`
-# CALLS, are unaffected) but immediately returning without doing any work.
-_trace_state = {"suspended": False}
-
-
-def pause_tracing():
-    """Context manager: run a block with the currently-installed capture
-    tracer or replay profiler turned into a no-op, without an extra
-    `sys.settrace`/`sys.setprofile` call (which would break the tamper
-    check's exact-delta-of-2 invariant)."""
-
-    class _Pause:
-        def __enter__(self):
-            self._prev = _trace_state["suspended"]
-            _trace_state["suspended"] = True
-
-        def __exit__(self, *exc):
-            _trace_state["suspended"] = self._prev
-
-    return _Pause()
-
-
 def _make_capture_tracer(trace_file: str | None, covered: set):
     trace_file_norm = os.path.normpath(trace_file) if trace_file else None
 
     def _line_tracer(frame, event, arg):
-        if _trace_state["suspended"]:
-            return None
         if event == "line":
             covered.add(frame.f_lineno)
         return _line_tracer
 
     def _global_tracer(frame, event, arg):
-        if _trace_state["suspended"]:
-            return None
         if event != "call":
             return None
         if trace_file_norm is not None and os.path.normpath(frame.f_code.co_filename) == trace_file_norm:
@@ -565,8 +552,6 @@ def _make_capture_tracer(trace_file: str | None, covered: set):
 
 def _make_replay_profiler(stage_root: Path, route: set):
     def _profiler(frame, event, arg):
-        if _trace_state["suspended"]:
-            return
         if event != "call":
             return
         rel = _stage_relative(frame.f_code.co_filename, stage_root)
@@ -577,10 +562,17 @@ def _make_replay_profiler(stage_root: Path, route: set):
 
 
 def _run_capture_window(trace_file: str | None, fn):
+    """Bracket exactly one call to `fn` with exactly one `sys.settrace`
+    start and stop. There is deliberately no way to pause tracing mid-call:
+    an earlier design used a module-level flag the observed code could
+    reach through `sys.modules["__main__"]` (the harness IS `__main__`) and
+    set around a legacy import or call, silencing the tracer while the
+    audit hook's settrace/setprofile CALL counters — the only thing the
+    tamper check reads — stayed at exactly 2. A snapshot needed between two
+    windows must be taken by the caller outside both, never by pausing one."""
     covered: set = set()
     tracer = _make_capture_tracer(trace_file, covered)
     pre_t, pre_p = _audit_state["settrace_count"], _audit_state["setprofile_count"]
-    _trace_state["suspended"] = False
     sys.settrace(tracer)
     try:
         fn()
@@ -595,10 +587,12 @@ def _run_capture_window(trace_file: str | None, fn):
 
 
 def _run_replay_window(stage_root: Path, fn):
+    """Bracket exactly one call to `fn` with exactly one `sys.setprofile`
+    start and stop — see `_run_capture_window` for why there is no
+    pause/resume escape hatch."""
     route: set = set()
     profiler = _make_replay_profiler(stage_root, route)
     pre_t, pre_p = _audit_state["settrace_count"], _audit_state["setprofile_count"]
-    _trace_state["suspended"] = False
     sys.setprofile(profiler)
     try:
         fn()
@@ -837,37 +831,60 @@ def run_job(job: dict) -> dict:
             sys.path.insert(0, p)
     install_audit_hook()
 
-    state = {"module_obj": None, "pre_preload": None, "post_preload": None}
+    holder = {"module_obj": None}
 
-    def _do_import():
+    def _import_module_only():
         import importlib
 
-        state["module_obj"] = importlib.import_module(module_name)
-        with pause_tracing():
-            state["pre_preload"] = state_snapshot(stage_root)
+        holder["module_obj"] = importlib.import_module(module_name)
+
+    def _import_preload_only():
+        import importlib
+
         for name in preload:
             importlib.import_module(name)
-        with pause_tracing():
-            state["post_preload"] = state_snapshot(stage_root)
 
-    _begin_window()
+    def _run_window(fn):
+        """One bracketed window: exactly one start and one stop. Returns
+        `(covered_or_route, tamper, error)`; `error` is the stringified
+        exception on failure, `covered_or_route` then `None`."""
+        try:
+            if mode == "capture":
+                covered_or_route, tamper = _run_capture_window(trace_file, fn)
+            else:
+                covered_or_route, tamper = _run_replay_window(stage_root, fn)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            return None, [], str(exc)
+        return covered_or_route, tamper, None
+
     old_out, old_err = _redirect_streams()
     import_error = None
-    import_covered_or_route: list | None = None
-    import_tamper: list = []
-    try:
-        if mode == "capture":
-            import_covered_or_route, import_tamper = _run_capture_window(trace_file, _do_import)
-        else:
-            import_covered_or_route, import_tamper = _run_replay_window(stage_root, _do_import)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as exc:
-        import_error = str(exc)
-        import_covered_or_route = None
-    finally:
-        _restore_streams(old_out, old_err)
-    import_denied = _end_window()
+
+    # Window 1: import `module` alone. A snapshot is never taken while a
+    # window is open (see `_run_capture_window`'s docstring) — it is taken
+    # here, between window 1 and window 2, outside both.
+    _begin_window()
+    module_covered_or_route, module_tamper, import_error = _run_window(_import_module_only)
+    module_denied = _end_window()
+
+    pre_preload: dict = {}
+    post_preload: dict = {}
+    preload_covered_or_route: list = []
+    preload_tamper: list = []
+    preload_denied: list = []
+    if import_error is None:
+        pre_preload = state_snapshot(stage_root)
+
+        # Window 2: import the preload list alone.
+        _begin_window()
+        preload_covered_or_route, preload_tamper, import_error = _run_window(_import_preload_only)
+        preload_denied = _end_window()
+
+        post_preload = state_snapshot(stage_root) if import_error is None else pre_preload
+
+    _restore_streams(old_out, old_err)
 
     if import_error is not None:
         observations = [_empty_observation(case.get("id", "?"), import_error) for case in cases]
@@ -878,17 +895,18 @@ def run_job(job: dict) -> dict:
             "import_error": import_error,
         }
 
-    pre_preload = state["pre_preload"] or {}
-    post_preload = state["post_preload"] or pre_preload
     pre_modules = {k.split(":", 1)[0] for k in pre_preload}
     raw_preload_changes = snapshot_changes(pre_preload, post_preload)
     preload_changes = [c for c in raw_preload_changes if c.split(":", 1)[0] in pre_modules]
 
-    import_extra_denied = sorted(set(import_denied) | set(import_tamper))
+    import_covered_or_route = sorted(set(module_covered_or_route or []) | set(preload_covered_or_route or []))
+    import_extra_denied = sorted(
+        set(module_denied) | set(preload_denied) | set(module_tamper) | set(preload_tamper)
+    )
 
     observations = []
     for case in cases:
-        obs = _run_one_case(state["module_obj"], case, calls, mode, stage_root, trace_file)
+        obs = _run_one_case(holder["module_obj"], case, calls, mode, stage_root, trace_file)
         if preload_changes:
             obs["state_changes"] = sorted(set(obs["state_changes"]) | set(preload_changes))
         if import_extra_denied:
@@ -897,8 +915,8 @@ def run_job(job: dict) -> dict:
 
     return {
         "observations": observations,
-        "import_covered_lines": sorted(import_covered_or_route) if mode == "capture" else None,
-        "import_route_files": sorted(import_covered_or_route) if mode == "replay" else None,
+        "import_covered_lines": import_covered_or_route if mode == "capture" else None,
+        "import_route_files": import_covered_or_route if mode == "replay" else None,
         "import_error": None,
     }
 
@@ -995,14 +1013,18 @@ def run_harness(job: dict, stage: Path, timeout_s: int = 120) -> dict:
 
 
 def main() -> int:
-    if len(sys.argv) < 2 or sys.argv[1] != "harness":
-        print("usage: observe.py harness", file=sys.stderr)
-        return cm_common.EXIT_CANNOT
-
     # Saved before any stream redirection: the harness's own result must
     # always reach the real stdout, even if a case leaves the streams
     # unrestored somewhere inside a bug.
     true_stdout = sys.stdout
+
+    if len(sys.argv) < 2 or sys.argv[1] != "harness":
+        message = "usage: observe.py harness"
+        print(message, file=sys.stderr)
+        true_stdout.write(json.dumps({"ok": False, "error": message}))
+        true_stdout.write("\n")
+        true_stdout.flush()
+        return cm_common.EXIT_CANNOT
 
     try:
         job = json.loads(sys.stdin.read())

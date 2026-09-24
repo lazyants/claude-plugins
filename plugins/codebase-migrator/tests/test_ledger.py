@@ -12,6 +12,7 @@ import types
 import pytest
 
 import cm_common
+import inventory
 import ledger
 
 
@@ -123,9 +124,13 @@ def _write_cases(root, unit, cases_list):
     cm_common.atomic_write_json(root / "cases" / f"{unit}.json", {"schema": 1, "cases": cases_list})
 
 
-def _capture_net(root, cfg, unit, closure_units, coverage_pct=100, deterministic=True, stateful=False):
+def _capture_net(root, cfg, unit, coverage_pct=100, deterministic=True, stateful=False):
+    # `closure_files` (not a hand-picked unit list) is the real contract:
+    # every file Python's import machinery executes, ancestor package
+    # __init__.py files included whether or not they are themselves units.
     legacy_root = cm_common.resolved_paths(root, cfg)["legacy_root"]
-    legacy_digests = cm_common.closure_digests(legacy_root, cfg["legacy_package"], list(closure_units))
+    legacy_relpaths = inventory.closure_files(legacy_root, cfg["legacy_package"], unit)
+    legacy_digests = cm_common.file_digests(legacy_root, legacy_relpaths)
     legacy_closure_sha256 = cm_common.sha256_json(legacy_digests)
 
     nets_path = root / "nets" / f"{unit}.json"
@@ -164,7 +169,7 @@ def _capture_net(root, cfg, unit, closure_units, coverage_pct=100, deterministic
 def _make_fully_eligible(work_root):
     root, cfg = _setup_root(work_root)
     _write_cases(root, "shop.pricing", [{"id": "c1", "call": "apply_discount", "args": [100, 10], "kwargs": {}}])
-    _capture_net(root, cfg, "shop.pricing", ["shop.pricing", "shop.money"])
+    _capture_net(root, cfg, "shop.pricing")
     return root, cfg
 
 
@@ -338,12 +343,32 @@ def test_eligible_reason_closure_drifted_in_dependency(work_root):
     reasons = ledger.eligible(root, cfg, "shop.pricing")
     assert len(reasons) == 1
     assert "drifted" in reasons[0]
-    # only the dependency that actually changed is named, not shop.pricing too
+    # only the file that actually changed is named, not shop/pricing.py too
     changed_segment = reasons[0].split("drifted for ", 1)[1].split(" since ", 1)[0]
-    assert changed_segment == "shop.money"
+    assert changed_segment == "shop/money.py"
 
     pricing_path = legacy_root / "shop" / "pricing.py"
     assert cm_common.sha256_file(pricing_path) == inv["units"]["shop.pricing"]["source_sha256"]
+
+
+def test_eligible_reason_legacy_ancestor_init_edited_after_capture(work_root):
+    # shop/__init__.py is docstring-only -- not itself a discovered unit, so
+    # inventory.json has no entry for it and per-unit staleness never sees
+    # it -- but Python's import machinery still runs it before shop.money or
+    # shop.pricing. closure_files includes it regardless, so editing it
+    # after capture must still be caught.
+    root, cfg = _make_fully_eligible(work_root)
+    legacy_root = cm_common.resolved_paths(root, cfg)["legacy_root"]
+    init_path = legacy_root / "shop" / "__init__.py"
+    assert "shop" not in json.loads((root / "inventory.json").read_text(encoding="utf-8"))["units"]
+
+    init_path.write_text('"""Fixture legacy package, edited."""\n', encoding="utf-8")
+
+    reasons = ledger.eligible(root, cfg, "shop.pricing")
+    assert len(reasons) == 1
+    assert "drifted" in reasons[0]
+    changed_segment = reasons[0].split("drifted for ", 1)[1].split(" since ", 1)[0]
+    assert changed_segment == "shop/__init__.py"
 
 
 def test_eligible_reason_conventions_sentinel(work_root):
@@ -389,6 +414,30 @@ def test_converge_refuses_on_stale_r2_r3(work_root):
     target_sha256, _ = _write_r2_r3(root, cfg, "shop.pricing")
     _write_review(root, "shop.pricing", 1, findings=[], target_sha256=target_sha256)
     _write_target(root, cfg, "shop.pricing", content="def apply_discount(price, pct):\n    return 0\n")
+
+    with pytest.raises(SystemExit) as exc:
+        ledger.cmd_converge(root, cfg, types.SimpleNamespace(unit="shop.pricing"))
+    assert exc.value.code == cm_common.EXIT_FAIL
+
+
+def test_converge_refuses_after_target_ancestor_init_edited(work_root):
+    # shop2/__init__.py is not itself a migration unit, but Python's import
+    # machinery still runs it before shop2.pricing -- closure_files includes
+    # it, so a converge with a stale r2/r3 must be refused after it changes,
+    # even though shop.pricing's own target file and legacy key are untouched.
+    root, cfg = _make_fully_eligible(work_root)
+    _write_target(root, cfg, "shop.pricing")
+
+    target_init = cm_common.target_file(root, cfg, "shop.pricing").parent / "__init__.py"
+    target_init.write_text("# codebase-migrator: package marker\n", encoding="utf-8")
+
+    target_sha256, _ = _write_r2_r3(root, cfg, "shop.pricing")
+    _write_review(root, "shop.pricing", 1, findings=[], target_sha256=target_sha256)
+
+    code = ledger.cmd_converge(root, cfg, types.SimpleNamespace(unit="shop.pricing"))
+    assert code == cm_common.EXIT_OK
+
+    target_init.write_text("# codebase-migrator: package marker, edited\n", encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc:
         ledger.cmd_converge(root, cfg, types.SimpleNamespace(unit="shop.pricing"))
@@ -503,6 +552,18 @@ def test_accept_drift_refuses_while_inventory_stale(work_root):
     money_path = legacy_root / "shop" / "money.py"
     money_path.write_text(money_path.read_text(encoding="utf-8") + "\n# edited\n", encoding="utf-8")
 
+    with pytest.raises(SystemExit) as exc:
+        ledger.cmd_accept_drift(
+            root, cfg, types.SimpleNamespace(unit="shop.pricing", operator="alice", reason="x")
+        )
+    assert exc.value.code == cm_common.EXIT_FAIL
+    assert not (root / "drift_log.json").exists()
+
+
+def test_accept_drift_refuses_with_no_net_lock_entry(work_root):
+    # There is no baseline to accept drift FROM if the unit was never netted
+    # at all.
+    root, cfg = _setup_root(work_root)
     with pytest.raises(SystemExit) as exc:
         ledger.cmd_accept_drift(
             root, cfg, types.SimpleNamespace(unit="shop.pricing", operator="alice", reason="x")
