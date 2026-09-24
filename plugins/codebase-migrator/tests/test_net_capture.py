@@ -19,31 +19,41 @@ REGISTRY_SRC = FIXTURES_DIR / "registry.shop.json"
 CASES_DIR = FIXTURES_DIR / "cases"
 
 
+_created_legacy_siblings: list[Path] = []
+
+
+def _register_legacy_sibling(path: Path) -> Path:
+    """Record a sibling directory this process created outside `work_root`,
+    so teardown removes EXACTLY the paths recorded here — never a glob
+    sweep over `tests/.work/`, which is shared with every other pytest
+    process that might be running concurrently (this session's or a
+    teammate's). A name-derived glob is unsafe two ways: it can delete
+    another process's still-in-use directory, and a path whose derived
+    "paired root" name never exists at all (e.g. a "<uuid>-pkgf-legacy"
+    sibling, whose non-existent "<uuid>-pkgf" pair is not this test's own
+    `work_root`) reads as orphaned to EVERY process's sweep from the
+    moment it's created, not just after this test finishes."""
+    _created_legacy_siblings.append(path)
+    return path
+
+
 def _sibling_legacy_root(root: Path) -> Path:
     """A legacy source directory OUTSIDE `root` — `migration_validate`
     refuses a durable root that equals, contains, or is contained by
     `legacy_root` (plan 2.1), so it can never live nested under `root`."""
-    return root.parent / (root.name + "-legacy")
+    return _register_legacy_sibling(root.parent / (root.name + "-legacy"))
 
 
 @pytest.fixture(autouse=True)
-def _cleanup_orphaned_legacy_siblings():
+def _cleanup_created_legacy_siblings():
     """`work_root` (conftest.py, owned by A) only removes its own
-    `tests/.work/<uuid>/` directory; the sibling `tests/.work/<uuid>-legacy/`
-    this file's `_scaffold`/`_sibling_legacy_root` create is not conftest's
-    to know about, so it must be swept here. Runs after every test (not
-    only ones using `work_root`) and removes any `*-legacy` directory whose
-    paired `<uuid>` root no longer exists — by fixture-teardown order,
-    `work_root`'s own directory is already gone by the time this runs, so
-    an orphan here always means "the test that made it just finished"."""
+    `tests/.work/<uuid>/` directory; a sibling this file creates via
+    `_register_legacy_sibling` is not conftest's to know about, so it is
+    removed here — by the exact path recorded, never a directory glob."""
     yield
-    work_dir = Path(__file__).resolve().parent / ".work"
-    if not work_dir.is_dir():
-        return
-    for legacy_dir in work_dir.glob("*-legacy"):
-        root_dir = work_dir / legacy_dir.name[: -len("-legacy")]
-        if not root_dir.exists():
-            shutil.rmtree(legacy_dir, ignore_errors=True)
+    while _created_legacy_siblings:
+        path = _created_legacy_siblings.pop()
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _scaffold(root: Path, coverage_floor: int = 50) -> dict:

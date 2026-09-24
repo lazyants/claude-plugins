@@ -438,15 +438,31 @@ malformed finding never discards the valid ones in the same review (LT 1.39.0).
 - The net only exercises the inputs its cases name — state that only shows on an unexercised
   path escapes both the eligibility check and the differential gate.
 - **Static `io` detection is a conservative pre-filter, not the correctness authority.** Once a
-  module imports `pathlib` in any form, a call to a write-shaped method name
+  module imports `pathlib` in any form, a call to a write-shaped method **name**
   (`write_text`, `mkdir`, `unlink`, `chmod`, …) is flagged as `io` on *any* receiver, not only one
   provably a `Path` — cheap to compute, and biased toward over-flagging a unit ineligible rather
-  than under-flagging one eligible. It can therefore mark a unit ineligible for a same-named
-  method on an unrelated class. What actually decides correctness is the runtime audit hook
-  (`references/write-boundary.md`), which denies the real attempted write during capture or
-  replay however the call was spelled, backed by the coverage floor that requires the denying
-  line to have actually been exercised — the static flag only decides how early the unit is
-  screened out, never whether an I/O call is truly caught.
+  than under-flagging one eligible. A module that imports `pathlib` anywhere and also defines an
+  unrelated class with its own `write_text()`/`mkdir()`/`unlink()` method gets that class's calls
+  flagged as `io` too, and the unit refused as ineligible for a method that never touches a file.
+  What actually decides correctness is the runtime audit hook (`references/write-boundary.md`),
+  which denies the real attempted write during capture or replay however the call was spelled,
+  backed by the coverage floor that requires the denying line to have actually been exercised —
+  the static flag only decides how early the unit is screened out, never whether an I/O call is
+  truly caught.
+- **The state snapshot's fallback encoding calls `repr()` on any object it has no more specific
+  rule for**, so an object whose own `__repr__` mutates state as a side effect (pathological, but
+  not impossible) can make a unit look `stateful` even though nothing the case itself did changed
+  anything — the act of snapshotting caused the apparent change. This can only make the snapshot
+  see *more* state change than genuinely happened, never less: a conservative false refusal, not
+  a false pass.
+- **A target file that starts with the bridge shim marker counts as an unported dependency, not a
+  port**, whichever script wrote it. `unit_gate.py`'s `target_present` check refuses a unit whose
+  own target file reads as a shim exactly as it would refuse a missing file, so a unit can never
+  converge while it is one. And because `target_closure_sha256` hashes the live bytes of every
+  file in the target-side closure, the moment a dependency's shim is genuinely replaced by a real
+  port, every already-converged unit that depends on it goes `stale` — that is by design (the
+  cache key's job), not a bug, but it means porting a long-shimmed, widely-depended-on unit can
+  mark many otherwise-untouched units `stale` in one step.
 - A unit that only fills a harmless memoization cache is refused as `stateful` — v0.1 has no
   reachable-state exception for a cache with no observable effect.
 - `sandbox.py probe` runs once per recorded `codex_bin` version, not once per dispatch.

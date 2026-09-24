@@ -440,25 +440,44 @@ def _module_file(base: Path, module: str) -> Path | None:
 
 def closure_files(base: Path, package: str, module: str) -> list[str]:
     """Every file Python's own import machinery executes when importing
-    `module`: the file of each member of `import_closure`, plus every
-    EXISTING `__init__.py` along each member's ancestor-package chain
+    `module`: the file of each module reached, plus every EXISTING
+    `__init__.py` along each reached module's ancestor-package chain
     (within `package`, the package root's own `__init__.py` included) —
     whether or not that ancestor is itself a discovered "unit". Importing
     `a.b.c` always runs `a/__init__.py` then `a/b/__init__.py` first, a
-    docstring-only or otherwise trivial one included, so a closure built
-    only from discovered units silently misses files that genuinely execute
-    at import time. Sorted, posix, relative to `base`."""
+    docstring-only or otherwise trivial one included.
+
+    This is computed to a FIXPOINT, not as a single pass over
+    `import_closure(module)`: an ancestor package's own `__init__.py` can
+    itself import things (`from . import audit` is a common pattern), and
+    those imports run on every import of the package too — they belong in
+    the closure exactly as much as `module`'s own imports do. So every
+    ancestor added here is itself queued and walked for its OWN imports
+    (and ITS ancestors), until nothing new is discovered. Sorted, posix,
+    relative to `base`."""
+    seen_modules: set[str] = set()
     files: set[str] = set()
-    for mod in import_closure(base, package, module):
+    pending = [module]
+    while pending:
+        mod = pending.pop()
+        if mod in seen_modules:
+            continue
+        seen_modules.add(mod)
+
         mod_file = _module_file(base, mod)
-        if mod_file is not None:
-            files.add(mod_file.relative_to(base).as_posix())
+        if mod_file is None:
+            continue
+        files.add(mod_file.relative_to(base).as_posix())
+
+        for dep in import_closure(base, package, mod):
+            if dep not in seen_modules:
+                pending.append(dep)
+
         parts = mod.split(".")
         for i in range(1, len(parts)):
             ancestor = ".".join(parts[:i])
-            init_path = base / ancestor.replace(".", "/") / "__init__.py"
-            if init_path.is_file():
-                files.add(init_path.relative_to(base).as_posix())
+            if ancestor not in seen_modules:
+                pending.append(ancestor)
     return sorted(files)
 
 

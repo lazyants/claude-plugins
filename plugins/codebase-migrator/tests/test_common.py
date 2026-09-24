@@ -110,6 +110,38 @@ def test_closure_digests_equal_for_copy_and_differ_after_change(work_root):
     assert digests_3["pkg.b"] != digests_1["pkg.b"]
 
 
+def test_file_digests_hashes_relpaths_and_refuses_a_missing_one(work_root):
+    base = work_root / "base"
+    (base / "sub").mkdir(parents=True)
+    (base / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (base / "sub" / "b.py").write_text("B = 2\n", encoding="utf-8")
+
+    digests = cm_common.file_digests(base, ["a.py", "sub/b.py"])
+    assert digests == {
+        "a.py": cm_common.sha256_file(base / "a.py"),
+        "sub/b.py": cm_common.sha256_file(base / "sub" / "b.py"),
+    }
+
+    with pytest.raises(SystemExit) as exc_info:
+        cm_common.file_digests(base, ["a.py", "missing.py"])
+    assert exc_info.value.code == cm_common.EXIT_CANNOT
+
+
+def test_file_digests_refuses_missing_file_names_it(work_root, capsys):
+    base = work_root / "base"
+    base.mkdir()
+
+    with pytest.raises(SystemExit) as exc_info:
+        cm_common.file_digests(base, ["missing.py"])
+    assert exc_info.value.code == cm_common.EXIT_CANNOT
+
+    captured = capsys.readouterr()
+    assert "missing.py" in captured.err
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+    assert payload["ok"] is False
+    assert "missing.py" in payload["error"]
+
+
 def test_unit_closure_includes_ancestor_package_units(work_root):
     # pkg/sub/__init__.py has real code, so it is a unit in its own right
     # (unlike a docstring-only package __init__.py); importing pkg.sub.mod

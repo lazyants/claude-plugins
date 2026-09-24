@@ -107,7 +107,14 @@ of each module in its static import closure, plus every *existing* ancestor pack
 `__init__.py` along the way — whether or not that ancestor is itself a discovered unit. Importing
 `a.b.c` always runs `a/__init__.py` then `a/b/__init__.py` first, a docstring-only or otherwise
 trivial one included, so a closure built only from discovered units would silently miss files
-that genuinely execute at import time. This one function, applied to the legacy side and the
+that genuinely execute at import time. **This is computed to a fixpoint, not a single pass**: an
+ancestor's own `__init__.py` can itself import things (`from . import helpers` is a common
+pattern), and those imports run on every import of the package too, so every module added to the
+closure — ancestor or not — is itself queued and walked for its own imports and its own
+ancestors, repeating until nothing new is discovered. A package `pkgf/__init__.py` doing
+`from . import helpers` therefore puts `helpers.py` in the closure of `pkgf.sibling` as well,
+even though `sibling.py` never imports `helpers` itself — the ancestor did, and the ancestor
+always runs. This one function, applied to the legacy side and the
 target side, is what the net binding, the cache key (both `legacy_closure_sha256` and
 `target_closure_sha256`), R0's drift check, R2's `no_direct_legacy_import`/
 `target_self_contained` walk, and R3's route rule all use — there is no separate module-only

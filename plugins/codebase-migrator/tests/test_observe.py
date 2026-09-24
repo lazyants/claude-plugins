@@ -4,7 +4,10 @@ hook, and the harness (plan section 4.6, tests owned by C)."""
 from __future__ import annotations
 
 import importlib
+import json
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -583,3 +586,25 @@ def test_harness_timeout_yields_harness_error_per_case(tmp_path):
     assert result["import_error"] is not None
     assert "timed out" in result["import_error"]
     assert result["observations"][0]["status"] == "harness_error"
+
+
+@pytest.mark.parametrize("argv_tail", [[], ["bogus"]])
+def test_observe_cli_without_harness_arg_emits_one_json_line_and_exits_2(argv_tail):
+    """`python3 observe.py` with no argv, or with a first argument that
+    isn't `harness`, must still print exactly one JSON line with `ok:
+    false` on stdout (not stderr-only) and exit 2 — proven by actually
+    running the script as a subprocess, not by reading the source."""
+    script = Path(observe.__file__).resolve()
+    proc = subprocess.run(
+        [sys.executable, str(script), *argv_tail],
+        input="{}",
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 2, proc
+    lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, proc.stdout
+    payload = json.loads(lines[0])
+    assert payload["ok"] is False
+    assert payload["error"]

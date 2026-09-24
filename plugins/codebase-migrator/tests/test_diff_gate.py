@@ -26,6 +26,26 @@ PORTS_DIR = FIXTURES_DIR / "ports"
 SCRIPTS_DIR = Path(cm_common.__file__).resolve().parent
 
 
+_created_legacy_siblings: list[Path] = []
+
+
+def _register_legacy_sibling(path: Path) -> Path:
+    """Record a sibling directory this process created outside `work_root`,
+    so teardown removes EXACTLY the paths recorded here — never a glob
+    sweep over `tests/.work/`, which is shared with every other pytest
+    process that might be running concurrently (this session's or a
+    teammate's). A name-derived glob is unsafe two ways: it can delete
+    another process's still-in-use directory, and a path whose derived
+    "paired root" name never exists at all (e.g. a "<uuid>-pkgf-legacy"
+    sibling, whose non-existent "<uuid>-pkgf" pair is not this test's own
+    `work_root`) reads as orphaned to EVERY process's sweep from the
+    moment it's created, not just after this test finishes — that was the
+    actual cause of an intermittent "tampered outside the sandbox" failure
+    seen under concurrent runs."""
+    _created_legacy_siblings.append(path)
+    return path
+
+
 def _sibling_legacy_root(root: Path) -> Path:
     """A legacy source directory OUTSIDE `root` — `migration_validate`
     refuses a durable root that equals, contains, or is contained by
@@ -34,27 +54,19 @@ def _sibling_legacy_root(root: Path) -> Path:
     `cm_common.load_config()`): any test that also drives a script as a
     real subprocess goes through that validation, so every test here uses
     the same valid layout rather than two different ones."""
-    return root.parent / (root.name + "-legacy")
+    return _register_legacy_sibling(root.parent / (root.name + "-legacy"))
 
 
 @pytest.fixture(autouse=True)
-def _cleanup_orphaned_legacy_siblings():
+def _cleanup_created_legacy_siblings():
     """`work_root` (conftest.py, owned by A) only removes its own
-    `tests/.work/<uuid>/` directory; the sibling `tests/.work/<uuid>-legacy/`
-    this file's `_scaffold`/`_sibling_legacy_root` create is not conftest's
-    to know about, so it must be swept here. Runs after every test (not
-    only ones using `work_root`) and removes any `*-legacy` directory whose
-    paired `<uuid>` root no longer exists — by fixture-teardown order,
-    `work_root`'s own directory is already gone by the time this runs, so
-    an orphan here always means "the test that made it just finished"."""
+    `tests/.work/<uuid>/` directory; a sibling this file creates via
+    `_register_legacy_sibling` is not conftest's to know about, so it is
+    removed here — by the exact path recorded, never a directory glob."""
     yield
-    work_dir = Path(__file__).resolve().parent / ".work"
-    if not work_dir.is_dir():
-        return
-    for legacy_dir in work_dir.glob("*-legacy"):
-        root_dir = work_dir / legacy_dir.name[: -len("-legacy")]
-        if not root_dir.exists():
-            shutil.rmtree(legacy_dir, ignore_errors=True)
+    while _created_legacy_siblings:
+        path = _created_legacy_siblings.pop()
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _scaffold(root: Path, coverage_floor: int = 50) -> dict:
@@ -535,3 +547,113 @@ def test_bug_for_bug_with_exceptions_rejects_a_no_op_declaration(work_root, caps
     assert exc.value.code == cm_common.EXIT_FAIL
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert "p1" in payload.get("no_op_exception_ids", [])
+
+
+def test_ancestor_init_helper_reached_through_a_shim_is_not_a_false_route_violation(work_root):
+    """B's `inventory.closure_files` fixpoint fix: a package's own
+    `__init__.py` doing `from . import helpers` puts `helpers.py` in the
+    closure of EVERY unit under that package (any import of any sibling
+    always runs the ancestor init first), not only of whatever module
+    directly imports `helpers`. Before the fix, `helpers.py` was missing
+    from a faithfully-ported unit's closure whenever the reach to it came
+    through a SHIMMED DEPENDENCY's ancestor init rather than through the
+    unit's own imports — producing a false "outside the dependency
+    closure" route violation for a completely faithful port."""
+    legacy_root = _register_legacy_sibling(work_root.parent / (work_root.name + "-pkgf-legacy"))
+    pkg_dir = legacy_root / "pkgf"
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+    (pkg_dir / "__init__.py").write_text("from . import helpers\n")
+    (pkg_dir / "helpers.py").write_text("def helper_fn():\n    return 1\n")
+    (pkg_dir / "dep.py").write_text("def dep_fn(x):\n    return x * 2\n")
+    (pkg_dir / "mainmod.py").write_text(
+        "from pkgf.dep import dep_fn\n\n\ndef apply(x):\n    return dep_fn(x) + 1\n"
+    )
+
+    (work_root / "cases").mkdir(parents=True, exist_ok=True)
+    (work_root / "nets").mkdir(parents=True, exist_ok=True)
+    (work_root / "runs").mkdir(parents=True, exist_ok=True)
+    (work_root / "conventions.md").write_text("conventions\n")
+    cfg = {
+        "schema": 1,
+        "source_stack": "python",
+        "target_stack": "python",
+        "legacy_root": str(legacy_root),
+        "legacy_package": "pkgf",
+        "target_root": "target",
+        "target_package": "pkgf2",
+        "fidelity_policy": "bug_for_bug",
+        "seam": "in_process",
+        "unit_granularity": "file",
+        "naming_policy": "preserve",
+        "net_source": "generated_golden_master",
+        "dead_code_policy": "port",
+        "coverage_floor_pct": 0,
+        "max_fix_rounds": 3,
+        "codex_bin": "codex",
+    }
+    cm_common.atomic_write_json(work_root / "migration.json", cfg)
+    inv = inventory.build_inventory(work_root, cfg)
+    cm_common.atomic_write_json(work_root / "inventory.json", inv)
+    assert inv["units"]["pkgf.mainmod"]["eligible"] is True
+
+    rows = [
+        {
+            "source": "pkgf.mainmod:apply",
+            "cardinality": "one_to_one",
+            "entry": "pkgf2.mainmod:apply",
+            "targets": ["pkgf2.mainmod:apply"],
+            "reason": None,
+        },
+        {
+            "source": "pkgf.dep:dep_fn",
+            "cardinality": "one_to_one",
+            "entry": "pkgf2.dep:dep_fn",
+            "targets": ["pkgf2.dep:dep_fn"],
+            "reason": None,
+        },
+    ]
+    _freeze_rows(work_root, rows)
+
+    _put_cases(work_root, "pkgf.mainmod", [{"id": "c1", "call": "apply", "args": [2]}])
+    capture_result = net_capture.run(work_root, cfg, "pkgf.mainmod")
+    assert capture_result["ok"] is True, capture_result
+
+    target_dir = work_root / "target" / "pkgf2"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "__init__.py").write_text("")
+    (target_dir / "dep.py").write_text(
+        "# codebase-migrator: shim for pkgf.dep\nfrom pkgf.dep import dep_fn\n"
+    )
+    # mainmod itself is a faithful, non-shim port; dep is the shimmed
+    # dependency whose reach (through the shim, into legacy pkgf.dep) is
+    # what forces legacy pkgf's ancestor __init__ — and thus helpers.py —
+    # onto the route.
+    (target_dir / "mainmod.py").write_text(
+        "from pkgf2.dep import dep_fn\n\n\ndef apply(x):\n    return dep_fn(x) + 1\n"
+    )
+
+    result = diff_gate.run(work_root, cfg, "pkgf.mainmod")
+    assert result["ok"] is True, result
+    assert result["route_violations"] == []
+    assert "pkgf.dep" in result["crossed_shims"]
+
+    # Confirm directly (not just via absence-of-violation) that helpers.py
+    # really was on the route — proving the "no violation" assertion above
+    # is not vacuously true because helpers.py never got touched at all.
+    with tempfile.TemporaryDirectory(prefix="probe-stage-") as tmp:
+        stage = Path(tmp)
+        staged = observe.stage_trees(work_root, cfg, stage)
+        probe_job = {
+            "mode": "replay",
+            "env": "A",
+            "preload": [],
+            "stage_root": str(stage),
+            "sys_path": [str(staged["target"]), str(staged["legacy"])],
+            "module": "pkgf2.mainmod",
+            "calls": {},
+            "cases": [],
+            "trace_file": None,
+        }
+        probe = observe.run_harness(probe_job, stage=stage, timeout_s=30)
+    probe_route = probe["import_route_files"] or []
+    assert "legacy/pkgf/helpers.py" in probe_route

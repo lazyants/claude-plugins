@@ -505,6 +505,23 @@ def test_closure_files_includes_docstring_only_init_even_when_unrelated(tmp_path
     assert files == ["pkgo/__init__.py", "pkgo/mod.py"]
 
 
+def test_closure_files_fixpoint_walks_ancestor_inits_own_imports(tmp_path):
+    # final verification round: an ancestor __init__.py can itself import
+    # things (`from . import helpers` is a common pattern), and those
+    # imports run on every import of the package too — a single pass over
+    # import_closure(module) alone misses them, since the starting unit
+    # ("sibling") never imports "helpers" itself.
+    base = tmp_path / "base"
+    pkg = base / "pkgf"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("from . import helpers\n", encoding="utf-8")
+    (pkg / "helpers.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    (pkg / "sibling.py").write_text("X = 1\n", encoding="utf-8")
+
+    files = inventory.closure_files(base, "pkgf", "pkgf.sibling")
+    assert files == ["pkgf/__init__.py", "pkgf/helpers.py", "pkgf/sibling.py"]
+
+
 # --- is_package: a package unit's relative import resolves against itself --
 
 
