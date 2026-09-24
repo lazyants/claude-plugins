@@ -16,8 +16,13 @@ stop a write by absolute path.
 
 ### 1. Prevention by allowlist
 
-A dispatched turn's writes are confined to a fresh stage directory (`tempfile.mkdtemp`, outside
-any git worktree). Everything the gates depend on — the corpus (`nets/`, `cases/`),
+A dispatched turn's writes are confined to a fresh stage directory (`tempfile.mkdtemp`), and
+every stage this module creates — for a probe or for a real dispatch — is checked, not merely
+assumed, to sit outside any git worktree (`git -C <stage> rev-parse` must fail) before anything
+is written into it: `codex exec` resolves its own workspace boundary upward to the nearest git
+top level, not just to `-C <stage>`, so a stage accidentally created inside this repo's own
+worktree would run with a boundary wider than the stage itself — the exact failure mode
+literary-translator hit (LT 1.17.0). Everything the gates depend on — the corpus (`nets/`, `cases/`),
 `net.lock.json`, `registry.json`/`registry.lock.json`, `conventions.md`, `migration.json`, and
 the recorded digests themselves — lives outside the writable area entirely. Nothing under
 `<ROOT>/runs/`, `<ROOT>/registry*.json`, `<ROOT>/net.lock.json`, `legacy_root`, or `target_root`
@@ -27,7 +32,7 @@ is ever the codex process's own working directory.
 
 `sandbox.py probe --root R` runs against the **real** `codex_bin`:
 
-1. Creates a fresh stage, verified to sit outside any git worktree.
+1. Creates a fresh stage (the same outside-any-git-worktree check as layer 1).
 2. Writes three canary files, each holding a random token: one under `<ROOT>/runs/`, one under
    `legacy_root`, one under `target_root` (creating `target_root` if it does not exist yet).
    **The probe writes to a canary placed in each protected location, never to the protected
@@ -74,8 +79,12 @@ state the current on-disk value before changing it and append the prior state to
 `registry_validate.py --correct SOURCE --expect-digest D --reason TEXT` for a frozen row, and
 `ledger.py accept-drift --unit U --operator NAME --reason T` for a net whose legacy source moved
 (this also removes the unit from `net.lock.json`, forcing a re-capture — see
-`state-and-resume.md`). Both prove an operator *supplied* the change; neither proves the operator
-read every consequence of it. That is all either should claim.
+`state-and-resume.md`). `--correct` validates the proposed row — every row rule and every global
+sharing rule in `registry.json`, not only the one row being corrected — **before** it touches
+the lock or appends to `registry.corrections.json`; a correction that would leave `registry.json`
+invalid is refused and neither file is written. Both commands prove an operator *supplied* the
+change; neither proves the operator read every consequence of it. That is all either should
+claim.
 
 ## What is promoted, by dispatch kind
 
@@ -87,7 +96,15 @@ re-checks the protected digests, and only then promotes:
 - **`port` / `fix`** — exactly `stage/out/target.py`, and only after it is confirmed a regular
   file by `lstat` (a symlink is refused by name — the stage is under the model's control, and a
   symlink there would make promotion read a file outside the stage), is valid UTF-8, and
-  compiles. Any other file under `stage/out/` is listed as `ignored_outputs`, never promoted.
+  compiles. The **destination** gets its own check, right before the atomic write: `dest`'s
+  parent, with symlinks resolved, must still sit inside `target_root` and outside both
+  `legacy_root` and the durable root, refusing by name otherwise. This is a second, independent
+  guard from the source-side `lstat` check above — the pre-dispatch digest snapshot compares the
+  *unresolved* trees, so a symlinked target package (`target_root/shop2 -> legacy_root/shop`)
+  would pass that check untouched and then silently redirect this promotion's write into the
+  legacy tree or the durable root's own state; checking only at promotion time also catches a
+  symlink swapped in between the digest snapshot and the write itself. Any other file under
+  `stage/out/` is listed as `ignored_outputs`, never promoted.
 - **`review`** — nothing is promoted into `legacy_root`/`target_root` at all; the review's own
   JSON is written to `runs/U/review.r<N>.json`, never overwriting an existing round file. The
   whole of the model's final message, trimmed of surrounding whitespace, must parse as one JSON
@@ -100,7 +117,13 @@ re-checks the protected digests, and only then promotes:
 - **`cases`** — `stage/out/cases.json` (same `lstat` regular-file check), each entry
   shape-validated (`id`, `call` required strings; `args`/`init_args` lists; `kwargs`/
   `init_kwargs` objects when present); new case ids are merged into `cases/U.json`, existing ids
-  are never replaced. The durable `cases/U.json` is `{"schema": 1, "cases": [...]}`.
+  are never replaced. Two different treatments of a repeated id: a proposed id that only
+  collides with one **already in** `cases/U.json` is not an error — it is silently skipped, and
+  the existing case is kept; a proposed id that repeats **within the same batch** is refused
+  outright (naming every id involved) and nothing from that dispatch is promoted, because
+  silently keeping one occurrence would pick an arbitrary winner and the second would otherwise
+  overwrite the first's stored inputs the moment both are appended. The durable `cases/U.json`
+  is `{"schema": 1, "cases": [...]}`.
 
 Every dispatch appends one line to `runs/U/journal.jsonl`: timestamp, kind, round, stage path,
 exit code, any tampering, what was promoted, what was ignored. The journal is append-only and is

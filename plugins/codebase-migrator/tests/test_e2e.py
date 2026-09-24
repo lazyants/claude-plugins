@@ -51,18 +51,20 @@ def _last_json(proc):
 
 
 def test_pilot_path_shop_pricing(work_root):
-    root = work_root
+    # `root` (the durable migration root) and `legacy_root` are SIBLINGS
+    # under work_root, never nested in each other: migration_validate.py
+    # refuses a root that equals, contains, or is contained by legacy_root.
+    root = work_root / "root"
 
-    # 1. scaffold.py -- fresh root (still empty), all keys unanswered.
+    # 1. scaffold.py -- fresh root (still absent), all keys unanswered.
     proc = _run("scaffold.py", ["--root", str(root)])
     out = _last_json(proc)
     assert proc.returncode == cm_common.EXIT_FAIL
     assert out["outcome"] == "fresh"
     assert out["created"] is True
 
-    # copy the legacy fixture into the now-scaffolded root, only after
-    # scaffold.py has established ownership of an empty root.
-    legacy_root = root / "legacy"
+    # copy the legacy fixture into a sibling of the now-scaffolded root.
+    legacy_root = work_root / "legacy"
     shutil.copytree(FIXTURES / "legacy" / "shop", legacy_root / "shop")
 
     # 2. fill migration.json and conventions.md.

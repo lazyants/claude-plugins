@@ -143,7 +143,7 @@ def frozen_mismatch_problems(rows: list[dict], lock: dict) -> list[dict]:
     return problems
 
 
-def do_correct(root: Path, rows: list[dict], args: argparse.Namespace) -> int:
+def do_correct(root: Path, inventory: dict, cfg: dict, rows: list[dict], args: argparse.Namespace) -> int:
     if not args.expect_digest or not args.reason:
         cm_common.fail("--correct requires both --expect-digest and --reason", cm_common.EXIT_CANNOT)
     lock_path = root / "registry.lock.json"
@@ -158,6 +158,21 @@ def do_correct(root: Path, rows: list[dict], args: argparse.Namespace) -> int:
     new_row = row_by_source.get(source)
     if new_row is None:
         cm_common.fail(f"{source} has no current row in registry.json", cm_common.EXIT_FAIL, source=source)
+
+    # Validate the proposed row (row rules, incl. dropped-under-policy and
+    # unreferenced) and the global sharing rules BEFORE touching the lock or
+    # the correction history: an invalid correction must never be applied,
+    # and the lock must stay exactly as it was.
+    problems = row_problems(rows, inventory, cfg)
+    if problems:
+        detail = "; ".join(f"{p['source']}: {p['message']}" for p in problems)
+        cm_common.fail(
+            f"the proposed correction leaves registry.json invalid: {detail}",
+            cm_common.EXIT_FAIL,
+            source=source,
+            problems=problems,
+        )
+
     old_row = existing["row"]
     lock["rows"][source] = {"row": new_row, "digest": cm_common.sha256_json(new_row)}
     cm_common.atomic_write_json(lock_path, lock)
@@ -197,7 +212,7 @@ def main() -> int:
     rows = registry.get("rows", [])
 
     if args.correct:
-        return do_correct(root, rows, args)
+        return do_correct(root, inventory, cfg, rows, args)
 
     if args.with_imported and not args.units:
         cm_common.fail("--with-imported requires --units", cm_common.EXIT_CANNOT)

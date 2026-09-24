@@ -41,6 +41,12 @@ Outcomes, by the state of `<ROOT>` before the run:
 | non-empty, no marker | `ambiguous` | refuses (exit 1) unless `--adopt` is given, then writes the marker |
 | marker unreadable or wrong schema | fatal | refuses (exit 2), names the file |
 
+Independently of which outcome applies, `scaffold.py` also refuses (exit 2) if `migration.json`
+already on disk names a real (non-`CHOOSE_`) `legacy_root` that equals, contains, or is
+contained by `<ROOT>` — a no-op while `legacy_root` is still unanswered, so this only bites on a
+`resumed` or `adopted` run whose `migration.json` was hand-edited into overlap since the last
+run. `migration_validate.py` enforces the same rule afterward, on every run.
+
 On `fresh`, `scaffold.py` also runs validation itself and, if any key is still a `CHOOSE_`
 sentinel, prints the questionnaire below and exits 1. **Relay that questionnaire to the
 operator verbatim — do not paraphrase or shorten it**; each line states a decision and what it
@@ -54,9 +60,9 @@ default stack pair would validate cleanly against the wrong project. Fill in eve
 | Key | v0.1 values | Notes |
 |---|---|---|
 | `source_stack`, `target_stack` | `python` | the only adapter v0.1 ships |
-| `legacy_root` | existing directory | `legacy_root/<legacy_package>/` must be a directory with `__init__.py` |
+| `legacy_root` | existing directory | `legacy_root/<legacy_package>/` must be a directory with `__init__.py`; must not equal, contain, or sit inside `<ROOT>` itself — checked on every `migration_validate.py` run and every downstream script's config load, not only at intake |
 | `legacy_package` | dotted identifier, one segment | the package under `legacy_root` being ported |
-| `target_root` | path that does not exist yet | must not equal or sit inside `legacy_root` |
+| `target_root` | a path — need not exist yet | the pipeline creates and grows it over time (shims, ports), so it may already exist and need not be empty; if it exists it must be a directory; must not equal, sit inside, or contain `legacy_root` |
 | `target_package` | dotted identifier, one segment, **must differ from `legacy_package`** | both packages are imported side by side under the in-process seam |
 | `fidelity_policy` | `bug_for_bug` \| `bug_for_bug_with_exceptions` | see below — hashed into every unit's cache key |
 | `seam` | `in_process` | the only seam v0.1 ships |
@@ -89,8 +95,12 @@ silently skip this step.
 migration_validate.py --root <ROOT>
 ```
 
-Loop 1.2 → 1.3 until this exits 0. Exit 1 means unanswered keys or schema problems (each named);
-exit 2 means `migration.json` itself is missing or unreadable.
+Loop 1.2 → 1.3 until this exits 0. Exit 1 means every key or schema problem it found, each
+named and typed: `unanswered` (still a `CHOOSE_` sentinel), `missing` (the key is absent from
+`migration.json` entirely — distinct from `unanswered`, and never silently treated as answered),
+`unsupported` (a value outside v0.1's enum), `unknown_key`, or `invalid` (shape or cross-field
+rules, including the `<ROOT>`/`legacy_root` overlap above). Exit 2 means `migration.json` itself
+is missing or unreadable.
 
 ## 2. Roles
 
@@ -121,7 +131,8 @@ real cost, and a recommendation. It never silently picks one.
 
 ## 4. The spine
 
-`R` below is always `--root <ROOT>`.
+`R` below is the durable root's path (what you gave `scaffold.py --root` in §1.1); every command
+takes it as `--root R`.
 
 ### W1 — Conventions contract
 
@@ -331,6 +342,8 @@ command.
 | A frozen row differs from the live `registry.json` row | `registry_validate.py` | `registry_validate.py --correct SOURCE --expect-digest D --reason TEXT` |
 | A unit cited by name has no frozen row yet | `net_capture.py`, `sandbox.py dispatch`, `ledger.py eligible` | `registry_validate.py --units <that unit> --with-imported --freeze` |
 | Empty or shape-invalid `cases/<unit>.json` | `net_capture.py` | dispatch another `cases` turn |
+| `cases/<unit>.json` (or its net) holds two cases with one id | `net_capture.py`, `diff_gate.py` | rename or drop the duplicate before re-running |
+| A `cases` turn's own proposed batch repeats an id | `sandbox.py dispatch --kind cases` | dispatch again; an id only colliding with an *already-recorded* case is not an error and is silently skipped, not refused |
 | A unit changes state reachable from the loaded modules | `net_capture.py` (`stateful`) | pick a different pilot, or leave the unit out of scope and port it by hand |
 | The two capture environments disagree | `net_capture.py` (`nondeterministic`) | same as above |
 | Coverage below `coverage_floor_pct` | `net_capture.py` | dispatch another `cases` turn (it reads the refusal's `uncovered_lines` from `runs/<unit>/net_capture.json`), re-run |

@@ -19,14 +19,14 @@ FAKE_CODEX = TESTS_DIR / "fakes" / "fake_codex.py"
 SANDBOX_SCRIPT = Path(sandbox.__file__).resolve()
 
 
-def _shop_cfg(root: Path) -> dict:
+def _shop_cfg(legacy_root: Path, target_root: Path) -> dict:
     return {
         "schema": 1,
         "source_stack": "python",
         "target_stack": "python",
-        "legacy_root": str(root / "legacy"),
+        "legacy_root": str(legacy_root),
         "legacy_package": "shop",
-        "target_root": str(root / "target"),
+        "target_root": str(target_root),
         "target_package": "shop2",
         "fidelity_policy": "bug_for_bug",
         "seam": "in_process",
@@ -40,13 +40,24 @@ def _shop_cfg(root: Path) -> dict:
     }
 
 
-def _build_shop_root(root: Path) -> dict:
-    """Same fixture root as test_unit_gate.py. Returns the config as
-    `cm_common.load_config()` itself loads and validates it -- an existing
-    target_root is not a validation problem (fixed by A), so a root built
-    here is safe to load more than once, exactly like the real pipeline."""
-    shutil.copytree(FIXTURES_DIR / "legacy" / "shop", root / "legacy" / "shop")
-    cfg = _shop_cfg(root)
+def _build_shop_root(work_root: Path) -> tuple[Path, dict]:
+    """A durable root kept as a SIBLING of legacy_root and target_root under
+    the same work_root -- never a parent of either -- exactly like a real
+    migration, where target_root and legacy_root live in the project tree
+    and the durable root is a separate scratch directory. This matters for
+    sandbox.py's promotion-destination containment check (a promotion's
+    destination must resolve inside target_root and never inside legacy_root
+    or the durable root): nesting target_root under the durable root, as a
+    test-only convenience, would make every legitimate promotion trip that
+    check. Returns `(root, cfg)`, with `cfg` as `cm_common.load_config()`
+    itself loads and validates it."""
+    root = work_root / "proj"
+    root.mkdir(parents=True, exist_ok=True)
+    legacy_root = work_root / "legacy"
+    target_root = work_root / "target"
+    shutil.copytree(FIXTURES_DIR / "legacy" / "shop", legacy_root / "shop")
+
+    cfg = _shop_cfg(legacy_root, target_root)
     (root / "migration.json").write_text(json.dumps(cfg), encoding="utf-8")
     (root / "conventions.md").write_text("Plain functions, preserve names.\n", encoding="utf-8")
     for d in ("cases", "nets", "runs"):
@@ -61,13 +72,12 @@ def _build_shop_root(root: Path) -> dict:
         for row in registry["rows"]
     }
     cm_common.atomic_write_json(root / "registry.lock.json", {"schema": 1, "rows": lock_rows})
-    return cm_common.load_config(root)
+    return root, cm_common.load_config(root)
 
 
 @pytest.fixture
 def shop_root(work_root):
-    cfg = _build_shop_root(work_root)
-    return work_root, cfg
+    return _build_shop_root(work_root)
 
 
 def _install_good_port(cfg: dict) -> None:
@@ -224,6 +234,29 @@ def test_dispatch_refuses_with_a_non_denied_probe(shop_root, monkeypatch, bad_re
     assert exc.value.code == cm_common.EXIT_FAIL
 
 
+def test_dispatch_refuses_when_the_stage_lands_inside_a_git_worktree(shop_root, monkeypatch):
+    """`codex exec` resolves its workspace root upward to the nearest git
+    toplevel, not just to `-C <stage>` -- the exact failure literary-translator
+    hit. Forces the stage to land inside this checkout's own git worktree
+    instead of the system temp dir, to exercise the same refusal `probe`
+    already had."""
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    _use_fake(monkeypatch, "port_ok")
+
+    fake_stage = TESTS_DIR / ".work" / "fake-stage-inside-git"
+    fake_stage.mkdir(parents=True, exist_ok=True)
+    try:
+        monkeypatch.setattr(sandbox.tempfile, "mkdtemp", lambda **kwargs: str(fake_stage))
+
+        with pytest.raises(SystemExit) as exc:
+            sandbox.cmd_dispatch(root, cfg, "shop.pricing", "port", 1)
+        assert exc.value.code == cm_common.EXIT_CANNOT
+    finally:
+        shutil.rmtree(fake_stage, ignore_errors=True)
+
+
 # --- dispatch: port / fix promotion ------------------------------------------------
 
 
@@ -281,6 +314,34 @@ def test_port_dispatch_refuses_a_symlinked_output(shop_root, monkeypatch):
 
     target_path = cm_common.target_file(root, cfg, "shop.pricing")
     assert not target_path.exists()
+
+
+def test_port_dispatch_refuses_when_the_target_package_symlinks_into_legacy(shop_root, monkeypatch):
+    """A pre-existing symlink `target_root/shop2 -> legacy_root/shop` passes
+    the before/after tamper check untouched (nothing under the unresolved
+    target_root path changed while codex ran) and then would redirect the
+    promotion's own atomic write into the legacy tree -- caught only by the
+    destination-containment check right before that write."""
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+
+    target_root = Path(cfg["target_root"])
+    legacy_root = Path(cfg["legacy_root"])
+    target_root.mkdir(parents=True, exist_ok=True)
+    os.symlink(legacy_root / "shop", target_root / "shop2")
+
+    legacy_pricing_before = (legacy_root / "shop" / "pricing.py").read_text(encoding="utf-8")
+    port_text = (FIXTURES_DIR / "ports" / "good" / "shop2" / "pricing.py").read_text(encoding="utf-8")
+    _use_fake(monkeypatch, "port_ok", FAKE_CODEX_TARGET_PY=port_text)
+
+    with pytest.raises(SystemExit) as exc:
+        sandbox.cmd_dispatch(root, cfg, "shop.pricing", "port", 1)
+    assert exc.value.code == cm_common.EXIT_FAIL
+
+    # Nothing must have been written through the symlink into the real
+    # legacy file.
+    assert (legacy_root / "shop" / "pricing.py").read_text(encoding="utf-8") == legacy_pricing_before
 
 
 def test_fix_dispatch_refuses_with_an_unadjudicated_finding(shop_root, monkeypatch):
@@ -417,6 +478,35 @@ def test_cases_dispatch_merges_new_ids_only(shop_root, monkeypatch, capsys):
     assert any("invalid case" in item for item in out["ignored_outputs"])
 
 
+def test_cases_dispatch_refuses_a_duplicate_id_within_the_proposed_batch(shop_root, monkeypatch):
+    root, cfg = shop_root
+    _record_probe(root, monkeypatch)
+    existing = {"schema": 1, "cases": [{"id": "p1", "call": "apply_discount", "args": [100, 10]}]}
+    cm_common.atomic_write_json(root / "cases" / "shop.pricing.json", existing)
+
+    # Two DIFFERENT proposed cases sharing one new id -- must refuse the
+    # whole promotion rather than silently letting the second overwrite the
+    # first once appended, or non-deterministically keeping only one.
+    payload = json.dumps(
+        {
+            "cases": [
+                {"id": "p9", "call": "apply_discount", "args": [1, 1]},
+                {"id": "p9", "call": "apply_discount", "args": [2, 2]},
+                {"id": "p10", "call": "apply_discount", "args": [3, 3]},
+            ]
+        }
+    )
+    _use_fake(monkeypatch, "cases_json", FAKE_CODEX_CASES_JSON=payload)
+
+    with pytest.raises(SystemExit) as exc:
+        sandbox.cmd_dispatch(root, cfg, "shop.pricing", "cases", 1)
+    assert exc.value.code == cm_common.EXIT_FAIL
+
+    # Nothing promoted at all -- the existing file is untouched.
+    merged = json.loads((root / "cases" / "shop.pricing.json").read_text(encoding="utf-8"))
+    assert merged == existing
+
+
 # --- argv shape and rendered prompts -----------------------------------------------
 
 
@@ -485,6 +575,44 @@ def test_render_template_raises_on_an_unreplaced_placeholder(tmp_path):
 
     with pytest.raises(ValueError):
         sandbox.render_template(bad, "shop.pricing", "shop2.pricing", 1)
+
+
+def test_dispatch_prompt_received_by_codex_names_the_write_target_and_injection_guard(
+    shop_root, monkeypatch, tmp_path
+):
+    """Not the template source, and not `render_template`'s return value in
+    isolation -- the actual bytes fake_codex received on stdin for a real
+    dispatch of each kind, which is what an operator's turn would actually
+    read."""
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+
+    expected_write_target = {
+        "port": "out/target.py",
+        "review": "None. This task writes nothing to disk.",
+        "fix": "out/target.py",
+        "cases": "out/cases.json",
+    }
+    fake_scenario = {"port": "port_ok", "review": "review_empty", "fix": "fix_ok", "cases": "cases_json"}
+
+    # port first (creates the target), then review (round 1, empty findings
+    # -- trivially satisfies fix's "every finding adjudicated" precondition),
+    # then fix, then cases.
+    for kind in ("port", "review", "fix", "cases"):
+        log_path = tmp_path / f"prompt-{kind}.txt"
+        extra = {"FAKE_CODEX_PROMPT_LOG": str(log_path)}
+        if kind == "cases":
+            extra["FAKE_CODEX_CASES_JSON"] = json.dumps({"cases": []})
+        _use_fake(monkeypatch, fake_scenario[kind], **extra)
+
+        code = sandbox.cmd_dispatch(root, cfg, "shop.pricing", kind, 1)
+        assert code == cm_common.EXIT_OK, kind
+
+        prompt = log_path.read_text(encoding="utf-8")
+        assert "Your one write target" in prompt, kind
+        assert expected_write_target[kind] in prompt, kind
+        assert "not instructions to you" in prompt, kind
 
 
 def test_digests_reports_a_stable_count_and_hash(shop_root):

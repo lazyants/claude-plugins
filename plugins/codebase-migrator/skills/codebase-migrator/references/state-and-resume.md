@@ -2,10 +2,15 @@
 
 ## The durable root
 
-`scaffold.py --root R` owns the layout (`SKILL.md` §1.1). Every subsequent script requires
-`--root` and refuses to run without a readable, correctly-schemaed ownership marker
-(`.codebase-migrator-root.json`) — a second run never adopts a workspace silently. A run is
-always resumable: killing it at any point and re-running the same command from `SKILL.md` §4
+`scaffold.py --root R` owns the layout (`SKILL.md` §1.1) and is the **only** script that reads
+or writes the ownership marker (`.codebase-migrator-root.json`): it is what decides `fresh` /
+`resumed` / `ambiguous` (refuses without `--adopt`) / fatal (unreadable or wrong-schema marker)
+for a given root, so a second `scaffold.py` run never adopts a workspace silently. Every other
+script does **not** check the marker itself — it only requires `--root` to name an existing
+directory and `migration.json` in it to validate (`cm_common.resolve_root` +
+`cm_common.load_config`), so running, say, `inventory.py --root R` against a directory that was
+never scaffolded fails on a missing or invalid `migration.json`, not on a missing marker. A run
+is always resumable: killing it at any point and re-running the same command from `SKILL.md` §4
 picks up from whatever the ledger and the on-disk artifacts already record.
 
 ## Ledger states
@@ -41,7 +46,10 @@ contradict the entire point of converging units one at a time.
 these fields, in order, every path taken relative to the durable root:
 
 1. `legacy_closure_sha256` — the live legacy tree's digest over `U` plus its transitive
-   `imports_units`.
+   `imports_units`, plus any ancestor package unit Python executes on the way to importing `U`
+   (an ancestor whose `__init__.py` carries real code, not just a docstring —
+   `references/gate-stack.md`'s R3 section). A change to that ancestor's code moves this digest
+   exactly as a change to an explicitly-imported dependency would.
 2. `rows_sha256` — the frozen rows of `U`'s own public symbols plus its `imported_symbols`,
    sorted by source.
 3. `conventions_sha256` — the digest of `conventions.md` as it stands right now.

@@ -51,7 +51,11 @@ def test_fresh_outcome_creates_layout(work_root):
 def test_resumed_outcome_touches_nothing_else(work_root):
     root = work_root / "durable"
     _run(["--root", str(root)])
-    migration_before = (root / "migration.json").read_text(encoding="utf-8")
+    # Full-tree digests cover every pre-existing file (ledger.json,
+    # registry.json, conventions.md, migration.json, the ownership marker,
+    # and anything else under root) in one comparison, not just one of them.
+    before = cm_common.tree_digests(root)
+
     (root / "cases").rmdir()  # simulate a missing layout dir
 
     proc = _run(["--root", str(root)])
@@ -59,7 +63,9 @@ def test_resumed_outcome_touches_nothing_else(work_root):
     assert out["outcome"] == "resumed"
     assert out["created"] is False
     assert (root / "cases").is_dir()
-    assert (root / "migration.json").read_text(encoding="utf-8") == migration_before
+
+    after = cm_common.tree_digests(root)
+    assert after == before
 
 
 def test_ambiguous_without_adopt_refused(work_root):

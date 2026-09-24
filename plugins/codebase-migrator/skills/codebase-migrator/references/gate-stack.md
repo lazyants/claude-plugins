@@ -89,23 +89,54 @@ the changed unit and the recovery: `inventory.py`, `ledger.py accept-drift`,
 **Route rule**, checked on the import route and on every case's route, both recorded as paths
 relative to the replay stage:
 
+Checked in this priority order, first match wins:
+
 - the staged **legacy** file of `U` must never appear, at any depth, in either route — a port
   that calls back into its own legacy implementation supplied the behavior instead of the port,
-  and is refused regardless of how well the values match;
-- any *other* staged legacy file that appears must belong to a unit in `U`'s transitive
-  `imports_units` — a dependency's shim being imported, which is legal;
-- **a legacy file that is not itself a unit is exempt from the route rule when it is an ancestor
-  package `__init__.py`** of a unit in `U`'s closure or of `U` itself — for example
-  `legacy/shop/__init__.py`, which holds only a docstring and so is never a unit (`inventory.py`
-  never lists it), but which Python still executes every time it imports `shop.pricing`. That
-  execution is a mechanical side effect of the import, not a reach the port chose to make, so it
-  is not counted as touching the unit's own file and not counted as an out-of-closure violation
-  either;
-- the staged **target** file of `U` must be present in every case's route (the target was
-  actually entered);
-- `crossed_shims` — the set of dependency units seen in case routes — is reported so W4 can
-  prove the seam actually crossed on at least one case, or record that the pilot has no
-  unported dependency.
+  and is refused regardless of how well the values match, even in a case where `U` is itself a
+  package and its file would otherwise also read as a docstring-only ancestor init below;
+- any *other* staged legacy file that appears is legal when it belongs to a unit in `U`'s
+  transitive closure (`cm_common.unit_closure` — `imports_units` plus any executable ancestor
+  package unit, below) — a dependency's shim being imported;
+- otherwise, a legacy `__init__.py` is legal when its own dotted module name is **not** a known
+  unit at all in `inventory.json` — a docstring-only package init, wherever it sits in the tree,
+  not only when it is literally an ancestor of `U`. Python's import system always initializes
+  every ancestor package on the way to importing a submodule, so touching such a file is a
+  mechanical side effect of the import, never a reach the port chose to make. An `__init__.py`
+  that *is* a known unit gets no such pass — if it is not already in the closure, reaching it is
+  an ordinary violation;
+- anything else is a violation, named as reaching a legacy file outside the dependency closure.
+
+Independently of the legacy-side checks above, the staged **target** file of `U` must be
+present in every case's route (the target was actually entered), and `crossed_shims` — the set
+of dependency units seen in case routes — is reported so W4 can prove the seam actually crossed
+on at least one case, or record that the pilot has no unported dependency.
+
+**A unit's closure includes its executable ancestor package units.** `imports_units` alone (an
+explicit `import`/`from` edge) is not the whole dependency story: importing `shop.pricing`
+always runs `shop/__init__.py` first, whatever `shop.pricing`'s own source says, so when that
+file carries real code — making `shop` a unit in its own right, not just a docstring — `shop` is
+part of `shop.pricing`'s transitive closure automatically. This closure is what both the net
+binding and the route rule use: `net_capture.py` preloads and hashes it (so a change to
+`shop/__init__.py`'s code drifts `shop.pricing`'s net exactly as a change to `shop/money.py`
+would), and `diff_gate.py`'s route rule treats `shop` as an ordinary in-closure unit. A
+docstring-only ancestor stays outside every closure and keeps the separate exemption above.
+
+**Every case id must be unique, checked at three different points with two different
+remedies.** `net_capture.py` refuses (naming every duplicate) if `cases/U.json` itself holds two
+cases sharing an id — checked before any capture runs. `diff_gate.py` refuses the same way if
+`nets/U.json`'s stored observations somehow hold a duplicate — a defensive re-check, since a
+net built by a duplicate-free capture should never have one. Neither is a merge, so neither has
+anywhere lighter to fall back to: the comparison pipeline keys every observation by `case_id`
+(`compare_captures`, the legacy-vs-target lookup in R3), and a duplicate would silently collapse
+two distinct observations into one. **`sandbox.py dispatch --kind cases` treats a repeated id
+differently depending on where it collides**, because that step is a merge, not a whole-file
+check: a proposed id that only matches one **already in** `cases/U.json` is not an error and is
+silently skipped (the existing case is kept, exactly as for any other already-seen id); a
+proposed id that repeats **within the same batch** is refused outright, naming every id
+involved, and nothing from that dispatch is promoted — silently keeping one occurrence would
+pick an arbitrary winner, and keeping both would let the second overwrite the first's stored
+inputs the moment they are both appended.
 
 **Three counts**, which must all agree and be non-zero: `cases_in_corpus` (observations in the
 net), `cases_executed` (ran cleanly — `status: ok`, empty `denied`, **and empty

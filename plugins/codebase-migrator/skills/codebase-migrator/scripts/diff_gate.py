@@ -78,41 +78,36 @@ def _unit_from_rel(rel: str, root_prefix: str):
     return inner.replace("/", ".")
 
 
-def _ancestor_prefixes(units) -> set:
-    """Every proper dotted-prefix of every unit in `units` — e.g. `shop` for
-    `shop.pricing`. Importing a submodule always initializes its ancestor
-    packages first, so touching an ancestor's `__init__.py` is a mechanical
-    side effect of the import, never a reach the port chose to make."""
-    prefixes: set = set()
-    for u in units:
-        parts = u.split(".")
-        for i in range(1, len(parts)):
-            prefixes.add(".".join(parts[:i]))
-    return prefixes
-
-
-def _route_violations(route_files, unit: str, closure_units) -> list:
-    allowed_ancestors = _ancestor_prefixes(list(closure_units) + [unit])
+def _route_violations(route_files, unit: str, closure_units, known_units) -> list:
+    """Allowed: a legacy file belonging to a unit in `closure_units` (a
+    dependency shim being imported — `cm_common.unit_closure` now walks
+    ancestor-package units too, so a real ancestor unit U depends on is
+    already a member of `closure_units`); or an `__init__.py` whose derived
+    dotted name is NOT a real unit at all (a docstring-only ancestor
+    package — Python's import system always initializes ancestor packages,
+    so touching one is a mechanical side effect of the import, never a
+    reach the port chose to make). U's own legacy file is forbidden even
+    when it would otherwise qualify as such an ancestor init. An
+    EXECUTABLE ancestor init that is a real unit but NOT in the closure is
+    still a violation."""
     violations = []
     for rel in route_files or []:
         if not rel.startswith("legacy/"):
             continue
         touched_unit = _unit_from_rel(rel, "legacy")
         if touched_unit == unit:
-            # U's own legacy file is forbidden even when it also happens to
-            # be an ancestor package of something in the closure.
             violations.append(f"reached the unit's own legacy file: {rel}")
         elif touched_unit in closure_units:
             continue
-        elif rel.endswith("/__init__.py") and touched_unit in allowed_ancestors:
+        elif rel.endswith("/__init__.py") and touched_unit not in known_units:
             continue
         else:
             violations.append(f"reached a legacy file outside the dependency closure: {rel}")
     return violations
 
 
-def _case_route_violations(route_files, unit: str, closure_units, target_rel: str) -> list:
-    violations = _route_violations(route_files, unit, closure_units)
+def _case_route_violations(route_files, unit: str, closure_units, known_units, target_rel: str) -> list:
+    violations = _route_violations(route_files, unit, closure_units, known_units)
     if target_rel not in (route_files or []):
         violations.append(f"target file was never reached: {target_rel}")
     return violations
@@ -184,8 +179,8 @@ def _build_calls_map(unit: str, replay_cases: list, lock_rows: dict) -> dict:
     return calls_map
 
 
-def _evaluate_run(run_result: dict, unit: str, closure_units, target_rel: str) -> dict:
-    import_violations = _route_violations(run_result.get("import_route_files"), unit, closure_units)
+def _evaluate_run(run_result: dict, unit: str, closure_units, known_units, target_rel: str) -> dict:
+    import_violations = _route_violations(run_result.get("import_route_files"), unit, closure_units, known_units)
     evaluated = {}
     for obs in run_result.get("observations", []):
         cid = obs["case_id"]
@@ -193,7 +188,7 @@ def _evaluate_run(run_result: dict, unit: str, closure_units, target_rel: str) -
         route_violations = list(import_violations)
         if executed:
             route_violations += _case_route_violations(
-                obs.get("route_files"), unit, closure_units, target_rel
+                obs.get("route_files"), unit, closure_units, known_units, target_rel
             )
         evaluated[cid] = {
             "obs": obs,
@@ -214,6 +209,16 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
     if not net_path.is_file() or cm_common.sha256_file(net_path) != net_entry.get("net_sha256"):
         cm_common.fail(f"nets/{unit}.json does not match net.lock.json: re-run net_capture.py", cm_common.EXIT_FAIL)
     net_doc = cm_common.read_json(net_path, f"nets/{unit}.json")
+    net_case_id_counts: dict[str, int] = {}
+    for obs in net_doc.get("observations", []):
+        net_case_id_counts[obs["case_id"]] = net_case_id_counts.get(obs["case_id"], 0) + 1
+    duplicate_net_ids = sorted(cid for cid, n in net_case_id_counts.items() if n > 1)
+    if duplicate_net_ids:
+        cm_common.fail(
+            f"nets/{unit}.json has duplicate case ids: " + ", ".join(duplicate_net_ids),
+            cm_common.EXIT_FAIL,
+            duplicate_case_ids=duplicate_net_ids,
+        )
 
     cases_path = root / "cases" / f"{unit}.json"
     if not cases_path.is_file() or cm_common.sha256_file(cases_path) != net_entry.get("cases_sha256"):
@@ -230,6 +235,7 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
         cm_common.fail(f"{unit}: target file is a shim, not a port: {target_path}", cm_common.EXIT_FAIL)
 
     inv = cm_common.read_json(root / "inventory.json", "inventory.json")
+    known_units = set(inv.get("units", {}).keys())
     closure_units = sorted(set(cm_common.unit_closure(inv, unit)) - {unit})
     legacy_root = cm_common.resolved_paths(root, cfg)["legacy_root"]
     live_digests = cm_common.closure_digests(legacy_root, cfg["legacy_package"], sorted(closure_units + [unit]))
@@ -296,8 +302,8 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
             tampered=changed,
         )
 
-    eval_a = _evaluate_run(runs["A"], unit, closure_units, target_rel)
-    eval_b = _evaluate_run(runs["B"], unit, closure_units, target_rel)
+    eval_a = _evaluate_run(runs["A"], unit, closure_units, known_units, target_rel)
+    eval_b = _evaluate_run(runs["B"], unit, closure_units, known_units, target_rel)
 
     cases_in_corpus = len(net_case_ids)
     executed_ids = [

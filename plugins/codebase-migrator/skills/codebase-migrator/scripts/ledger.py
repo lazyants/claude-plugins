@@ -134,7 +134,8 @@ def cache_key(root: Path, cfg: dict, unit: str) -> dict:
     templates_sha256 = cm_common.sha256_json(template_digests)
 
     scripts_dir = cm_common.plugin_root() / "skills" / "codebase-migrator" / "scripts"
-    plugin_sha256 = cm_common.sha256_json(cm_common.tree_digests(scripts_dir))
+    script_digests = {p.name: cm_common.sha256_file(p) for p in sorted(scripts_dir.glob("*.py"))}
+    plugin_sha256 = cm_common.sha256_json(script_digests)
 
     return {
         "legacy_closure_sha256": legacy_closure_sha256,

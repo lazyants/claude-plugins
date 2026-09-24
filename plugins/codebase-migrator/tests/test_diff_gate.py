@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ import cm_common
 import diff_gate
 import inventory
 import net_capture
+import observe
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 LEGACY_SRC = FIXTURES_DIR / "legacy" / "shop"
@@ -24,9 +26,40 @@ PORTS_DIR = FIXTURES_DIR / "ports"
 SCRIPTS_DIR = Path(cm_common.__file__).resolve().parent
 
 
+def _sibling_legacy_root(root: Path) -> Path:
+    """A legacy source directory OUTSIDE `root` — `migration_validate`
+    refuses a durable root that equals, contains, or is contained by
+    `legacy_root` (plan 2.1), so it can never live nested under `root`.
+    This matters even for tests that call `run()` directly (bypassing
+    `cm_common.load_config()`): any test that also drives a script as a
+    real subprocess goes through that validation, so every test here uses
+    the same valid layout rather than two different ones."""
+    return root.parent / (root.name + "-legacy")
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_orphaned_legacy_siblings():
+    """`work_root` (conftest.py, owned by A) only removes its own
+    `tests/.work/<uuid>/` directory; the sibling `tests/.work/<uuid>-legacy/`
+    this file's `_scaffold`/`_sibling_legacy_root` create is not conftest's
+    to know about, so it must be swept here. Runs after every test (not
+    only ones using `work_root`) and removes any `*-legacy` directory whose
+    paired `<uuid>` root no longer exists — by fixture-teardown order,
+    `work_root`'s own directory is already gone by the time this runs, so
+    an orphan here always means "the test that made it just finished"."""
+    yield
+    work_dir = Path(__file__).resolve().parent / ".work"
+    if not work_dir.is_dir():
+        return
+    for legacy_dir in work_dir.glob("*-legacy"):
+        root_dir = work_dir / legacy_dir.name[: -len("-legacy")]
+        if not root_dir.exists():
+            shutil.rmtree(legacy_dir, ignore_errors=True)
+
+
 def _scaffold(root: Path, coverage_floor: int = 50) -> dict:
-    (root / "legacy").mkdir(parents=True, exist_ok=True)
-    shutil.copytree(LEGACY_SRC, root / "legacy" / "shop", dirs_exist_ok=True)
+    legacy_root = _sibling_legacy_root(root)
+    shutil.copytree(LEGACY_SRC, legacy_root / "shop", dirs_exist_ok=True)
     (root / "cases").mkdir(parents=True, exist_ok=True)
     (root / "nets").mkdir(parents=True, exist_ok=True)
     (root / "runs").mkdir(parents=True, exist_ok=True)
@@ -35,7 +68,7 @@ def _scaffold(root: Path, coverage_floor: int = 50) -> dict:
         "schema": 1,
         "source_stack": "python",
         "target_stack": "python",
-        "legacy_root": "legacy",
+        "legacy_root": str(legacy_root),
         "legacy_package": "shop",
         "target_root": "target",
         "target_package": "shop2",
@@ -110,21 +143,61 @@ def test_good_port_passes_with_equal_nonzero_counts_both_envs(work_root):
 
 def test_ancestor_package_init_is_allowed_but_units_own_legacy_file_is_not(work_root):
     """The legacy `shop` package's own `__init__.py` is not a unit (docstring
-    only), yet importing `shop.pricing` (or a dependency reached through a
-    shim) always initializes it first — the route rule must not treat that
-    mechanical side effect as a violation. Reaching U's own legacy file must
-    still be refused, even though it is also an ancestor-package init for
-    nothing in particular here."""
+    only), yet importing a dependency reached through a shim always
+    initializes it first — the route rule must not treat that mechanical
+    side effect as a violation. `good`'s pricing.py imports `shop2.money`,
+    not legacy `shop.*`, so with a real money PORT that ancestor init never
+    even appears on the route — a prior version of this test asserted its
+    absence from `route_violations`, which held vacuously. Shimming money
+    instead forces `legacy/shop/__init__.py` onto the route for real, so
+    this proves the exemption actually distinguishes cases rather than
+    the ancestor init simply never showing up."""
     cfg = _scaffold(work_root)
     _capture_pricing(work_root, cfg)
 
-    _install_port(work_root, "good")
+    target_dir = work_root / "target" / "shop2"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "__init__.py").write_text("")
+    (target_dir / "money.py").write_text(
+        "# codebase-migrator: shim for shop.money\nfrom shop.money import round_money, to_cents\n"
+    )
+    shutil.copy(PORTS_DIR / "good" / "shop2" / "pricing.py", target_dir / "pricing.py")
+
     good_result = diff_gate.run(work_root, cfg, "shop.pricing")
     assert good_result["ok"] is True, good_result
+    assert "shop.money" in good_result["crossed_shims"]
     assert not any(
         "legacy/shop/__init__.py" in rv["reason"] for rv in good_result["route_violations"]
     )
 
+    # Confirm directly (not just by absence-of-violation) that the ancestor
+    # init really was on the route: import shop2.pricing alone (no case
+    # needed) already pulls in the shim, which pulls in legacy shop.money,
+    # which pulls in legacy shop's own package __init__.py.
+    with tempfile.TemporaryDirectory(prefix="probe-stage-") as tmp:
+        stage = Path(tmp)
+        staged = observe.stage_trees(work_root, cfg, stage)
+        probe_job = {
+            "mode": "replay",
+            "env": "A",
+            "preload": [],
+            "stage_root": str(stage),
+            "sys_path": [str(staged["target"]), str(staged["legacy"])],
+            "module": "shop2.pricing",
+            "calls": {},
+            "cases": [],
+            "trace_file": None,
+        }
+        probe = observe.run_harness(probe_job, stage=stage, timeout_s=30)
+    route_files = probe["import_route_files"] or []
+    assert "legacy/shop/__init__.py" in route_files
+    inv = cm_common.read_json(work_root / "inventory.json", "inventory.json")
+    known_units = set(inv.get("units", {}).keys())
+    closure_units = sorted(set(cm_common.unit_closure(inv, "shop.pricing")) - {"shop.pricing"})
+    assert diff_gate._route_violations(route_files, "shop.pricing", closure_units, known_units) == []
+
+    # And the negative half: a port that reaches its OWN legacy file is
+    # still refused, whatever else is on the route.
     _install_port(work_root, "back_to_legacy")
     reach_result = diff_gate.run(work_root, cfg, "shop.pricing")
     assert reach_result["ok"] is False
@@ -141,6 +214,30 @@ def test_appending_a_case_after_capture_refuses_on_cases_digest(work_root):
     doc = cm_common.read_json(work_root / "cases" / "shop.pricing.json", "cases")
     doc["cases"].append({"id": "p9", "call": "apply_discount", "args": [50, 20]})
     cm_common.atomic_write_json(work_root / "cases" / "shop.pricing.json", doc)
+
+    with pytest.raises(SystemExit) as exc:
+        diff_gate.run(work_root, cfg, "shop.pricing")
+    assert exc.value.code == cm_common.EXIT_FAIL
+
+
+def test_duplicate_case_ids_in_the_net_are_refused(work_root):
+    """`diff_gate` builds `cases_by_id`/`legacy_by_id` dicts keyed by
+    case_id: a repeated id in the net would silently overwrite an earlier
+    observation while every count still agrees — a false pass. Corrupt an
+    already-captured net directly (net_capture itself now refuses to ever
+    produce one) and confirm diff_gate refuses before doing any replay."""
+    cfg = _scaffold(work_root)
+    _capture_pricing(work_root, cfg)
+    _install_port(work_root, "good")
+
+    net_path = work_root / "nets" / "shop.pricing.json"
+    net_doc = cm_common.read_json(net_path, "net")
+    net_doc["observations"].append(dict(net_doc["observations"][0]))
+    cm_common.atomic_write_json(net_path, net_doc)
+    net_sha256 = cm_common.sha256_file(net_path)
+    lock_doc = cm_common.read_json(work_root / "net.lock.json", "lock")
+    lock_doc["units"]["shop.pricing"]["net_sha256"] = net_sha256
+    cm_common.atomic_write_json(work_root / "net.lock.json", lock_doc)
 
     with pytest.raises(SystemExit) as exc:
         diff_gate.run(work_root, cfg, "shop.pricing")
@@ -167,12 +264,16 @@ def test_shim_as_target_is_refused(work_root):
 
 
 def test_legacy_dependency_drift_refuses_naming_it_then_recovers(work_root, capsys):
+    # This test drives inventory.py/ledger.py as real subprocesses below,
+    # which go through cm_common.load_config()'s migration_validate check
+    # (unlike run() called directly) — _scaffold()'s sibling legacy_root
+    # already satisfies it.
     cfg = _scaffold(work_root)
     _capture_pricing(work_root, cfg)
     _install_port(work_root, "good")
     assert diff_gate.run(work_root, cfg, "shop.pricing")["ok"] is True
 
-    money_path = work_root / "legacy" / "shop" / "money.py"
+    money_path = Path(cfg["legacy_root"]) / "shop" / "money.py"
     money_path.write_text(money_path.read_text().replace("round(x + 0.0, 2)", "round(x + 0.0, 3)"))
 
     with pytest.raises(SystemExit) as exc:

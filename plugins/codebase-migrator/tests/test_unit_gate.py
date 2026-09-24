@@ -28,14 +28,14 @@ ALL_CHECKS = (
 )
 
 
-def _shop_cfg(root: Path) -> dict:
+def _shop_cfg(legacy_root: Path, target_root: Path) -> dict:
     return {
         "schema": 1,
         "source_stack": "python",
         "target_stack": "python",
-        "legacy_root": str(root / "legacy"),
+        "legacy_root": str(legacy_root),
         "legacy_package": "shop",
-        "target_root": str(root / "target"),
+        "target_root": str(target_root),
         "target_package": "shop2",
         "fidelity_policy": "bug_for_bug",
         "seam": "in_process",
@@ -49,18 +49,28 @@ def _shop_cfg(root: Path) -> dict:
     }
 
 
-def _build_shop_root(root: Path) -> dict:
+def _build_shop_root(work_root: Path) -> tuple[Path, dict]:
     """A durable root around the shared shop fixture: legacy tree, a current
     inventory.json and a frozen registry.lock.json for shop.money, shop.pricing
-    and shop.cart (tests/fixtures/registry.shop.json).
+    and shop.cart (tests/fixtures/registry.shop.json). Kept as a SIBLING of
+    legacy_root and target_root under the same work_root -- never a parent
+    of either -- since migration_validate.py refuses a durable root that
+    equals, contains, or is contained by legacy_root, and sandbox.py's
+    promotion-destination check separately refuses a target write that
+    resolves into the durable root.
 
-    Returns the config as `cm_common.load_config()` itself loads and
-    validates it -- migration_validate.py no longer treats an existing
-    target_root as a problem (fixed by A), so this and every CLI-level
-    `main()` call below are free to run more than once against the same
-    root, exactly like the real pipeline does once a port or shim exists."""
-    shutil.copytree(FIXTURES_DIR / "legacy" / "shop", root / "legacy" / "shop")
-    cfg = _shop_cfg(root)
+    Returns `(root, cfg)`, with `cfg` as `cm_common.load_config()` itself
+    loads and validates it -- an existing target_root is not a validation
+    problem (fixed by A), so this and every CLI-level `main()` call below
+    are free to run more than once against the same root, exactly like the
+    real pipeline does once a port or shim exists."""
+    root = work_root / "proj"
+    root.mkdir(parents=True, exist_ok=True)
+    legacy_root = work_root / "legacy"
+    target_root = work_root / "target"
+    shutil.copytree(FIXTURES_DIR / "legacy" / "shop", legacy_root / "shop")
+
+    cfg = _shop_cfg(legacy_root, target_root)
     (root / "migration.json").write_text(json.dumps(cfg), encoding="utf-8")
     (root / "conventions.md").write_text("Plain functions, preserve names.\n", encoding="utf-8")
     for d in ("cases", "nets", "runs"):
@@ -75,7 +85,7 @@ def _build_shop_root(root: Path) -> dict:
         for row in registry["rows"]
     }
     cm_common.atomic_write_json(root / "registry.lock.json", {"schema": 1, "rows": lock_rows})
-    return cm_common.load_config(root)
+    return root, cm_common.load_config(root)
 
 
 def _install_port(cfg: dict, variant: str) -> None:
@@ -85,8 +95,7 @@ def _install_port(cfg: dict, variant: str) -> None:
 
 @pytest.fixture
 def shop_root(work_root):
-    cfg = _build_shop_root(work_root)
-    return work_root, cfg
+    return _build_shop_root(work_root)
 
 
 def _only_failed(result: dict) -> list:

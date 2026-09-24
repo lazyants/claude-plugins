@@ -110,6 +110,40 @@ def test_closure_digests_equal_for_copy_and_differ_after_change(work_root):
     assert digests_3["pkg.b"] != digests_1["pkg.b"]
 
 
+def test_unit_closure_includes_ancestor_package_units(work_root):
+    # pkg/sub/__init__.py has real code, so it is a unit in its own right
+    # (unlike a docstring-only package __init__.py); importing pkg.sub.mod
+    # always executes pkg.sub's __init__.py first, so it is an implicit
+    # dependency that must be in the closure even though nothing declares
+    # it in imports_units.
+    legacy = work_root / "legacy"
+    (legacy / "pkg" / "sub").mkdir(parents=True)
+    (legacy / "pkg" / "__init__.py").write_text('"""docstring only."""\n', encoding="utf-8")
+    (legacy / "pkg" / "sub" / "__init__.py").write_text("CONST = 1\n", encoding="utf-8")
+    (legacy / "pkg" / "sub" / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    inventory = {
+        "schema": 1,
+        "units": {
+            "pkg.sub": {"imports_units": []},
+            "pkg.sub.mod": {"imports_units": []},
+        },
+    }
+    closure = cm_common.unit_closure(inventory, "pkg.sub.mod")
+    assert closure == ["pkg.sub", "pkg.sub.mod"]
+    # "pkg" itself is never added: it is not a key of inventory["units"],
+    # i.e. not a unit at all (docstring-only __init__.py).
+    assert "pkg" not in closure
+
+    digests_1 = cm_common.closure_digests(legacy, "pkg", closure)
+    assert "pkg.sub" in digests_1  # maps to pkg/sub/__init__.py, like legacy_file would
+
+    (legacy / "pkg" / "sub" / "__init__.py").write_text("CONST = 2\n", encoding="utf-8")
+    digests_2 = cm_common.closure_digests(legacy, "pkg", closure)
+    assert digests_2["pkg.sub"] != digests_1["pkg.sub"]
+    assert digests_2["pkg.sub.mod"] == digests_1["pkg.sub.mod"]
+
+
 def test_require_unit_rejects_traversal_absolute_and_unknown(work_root, capsys):
     inventory = {"schema": 1, "units": {"shop.pricing": {}}}
     cm_common.atomic_write_json(work_root / "inventory.json", inventory)

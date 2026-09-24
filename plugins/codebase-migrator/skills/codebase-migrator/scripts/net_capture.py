@@ -180,6 +180,19 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
         if problem:
             _fail(root, unit, f"invalid case shape: {problem}", cm_common.EXIT_FAIL)
 
+    id_counts: dict[str, int] = {}
+    for case in all_cases:
+        id_counts[case["id"]] = id_counts.get(case["id"], 0) + 1
+    duplicate_ids = sorted(cid for cid, n in id_counts.items() if n > 1)
+    if duplicate_ids:
+        _fail(
+            root,
+            unit,
+            f"cases/{unit}.json has duplicate case ids: " + ", ".join(duplicate_ids),
+            cm_common.EXIT_FAIL,
+            duplicate_case_ids=duplicate_ids,
+        )
+
     skipped_dropped = []
     kept_cases = []
     for case in all_cases:
@@ -200,6 +213,8 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
     calls_map = {c["call"]: c["call"] for c in kept_cases}
 
     captures = {}
+    legacy_closure_units = sorted(set(closure_units) | {unit})
+    legacy_closure: dict[str, str] = {}
     with tempfile.TemporaryDirectory(prefix="cm-stage-") as tmp:
         for env in ("A", "B"):
             stage = Path(tmp) / f"stage-{env}"
@@ -218,6 +233,15 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
                 "trace_file": trace_file,
             }
             captures[env] = observe.run_harness(job, stage=stage)
+            if env == "A":
+                # The net is bound to the exact legacy bytes the capture
+                # actually executed (plan 4.7 step 11) — hash the staged
+                # copy here, before this `with` block tears it down, never
+                # the live legacy_root (which could differ if something
+                # else edits it between staging and this point).
+                legacy_closure = cm_common.closure_digests(
+                    staged["legacy"], cfg["legacy_package"], legacy_closure_units
+                )
 
     after = cm_common.protected_digests(root, cfg)
     changed = cm_common.diff_digests(before, after)
@@ -302,9 +326,6 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
             uncovered_lines=uncovered_lines,
         )
 
-    legacy_root = cm_common.resolved_paths(root, cfg)["legacy_root"]
-    legacy_closure_units = sorted(set(closure_units) | {unit})
-    legacy_closure = cm_common.closure_digests(legacy_root, cfg["legacy_package"], legacy_closure_units)
     legacy_closure_sha256 = cm_common.sha256_json(legacy_closure)
 
     kept_stored = [{"case_id": obs["case_id"], **{k: obs[k] for k in _BEHAVIOURAL_CHANNELS}} for obs in kept]

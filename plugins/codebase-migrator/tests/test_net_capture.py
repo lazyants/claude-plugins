@@ -19,9 +19,36 @@ REGISTRY_SRC = FIXTURES_DIR / "registry.shop.json"
 CASES_DIR = FIXTURES_DIR / "cases"
 
 
+def _sibling_legacy_root(root: Path) -> Path:
+    """A legacy source directory OUTSIDE `root` — `migration_validate`
+    refuses a durable root that equals, contains, or is contained by
+    `legacy_root` (plan 2.1), so it can never live nested under `root`."""
+    return root.parent / (root.name + "-legacy")
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_orphaned_legacy_siblings():
+    """`work_root` (conftest.py, owned by A) only removes its own
+    `tests/.work/<uuid>/` directory; the sibling `tests/.work/<uuid>-legacy/`
+    this file's `_scaffold`/`_sibling_legacy_root` create is not conftest's
+    to know about, so it must be swept here. Runs after every test (not
+    only ones using `work_root`) and removes any `*-legacy` directory whose
+    paired `<uuid>` root no longer exists — by fixture-teardown order,
+    `work_root`'s own directory is already gone by the time this runs, so
+    an orphan here always means "the test that made it just finished"."""
+    yield
+    work_dir = Path(__file__).resolve().parent / ".work"
+    if not work_dir.is_dir():
+        return
+    for legacy_dir in work_dir.glob("*-legacy"):
+        root_dir = work_dir / legacy_dir.name[: -len("-legacy")]
+        if not root_dir.exists():
+            shutil.rmtree(legacy_dir, ignore_errors=True)
+
+
 def _scaffold(root: Path, coverage_floor: int = 50) -> dict:
-    (root / "legacy").mkdir(parents=True, exist_ok=True)
-    shutil.copytree(LEGACY_SRC, root / "legacy" / "shop", dirs_exist_ok=True)
+    legacy_root = _sibling_legacy_root(root)
+    shutil.copytree(LEGACY_SRC, legacy_root / "shop", dirs_exist_ok=True)
     (root / "cases").mkdir(parents=True, exist_ok=True)
     (root / "nets").mkdir(parents=True, exist_ok=True)
     (root / "runs").mkdir(parents=True, exist_ok=True)
@@ -30,7 +57,7 @@ def _scaffold(root: Path, coverage_floor: int = 50) -> dict:
         "schema": 1,
         "source_stack": "python",
         "target_stack": "python",
-        "legacy_root": "legacy",
+        "legacy_root": str(legacy_root),
         "legacy_package": "shop",
         "target_root": "target",
         "target_package": "shop2",
@@ -120,9 +147,10 @@ def test_net_capture_wires_the_ab_comparison_for_hash_order_nondeterminism(work_
     only nondeterminism is set iteration order under PYTHONHASHSEED (no
     static flag would ever catch this) proves the real A/B environments
     reach the verdict end to end, and that no net is written on refusal."""
-    (work_root / "legacy" / "oddpkg").mkdir(parents=True, exist_ok=True)
-    (work_root / "legacy" / "oddpkg" / "__init__.py").write_text('"""Throwaway package."""\n')
-    (work_root / "legacy" / "oddpkg" / "setmod.py").write_text(
+    legacy_root = _sibling_legacy_root(work_root)
+    (legacy_root / "oddpkg").mkdir(parents=True, exist_ok=True)
+    (legacy_root / "oddpkg" / "__init__.py").write_text('"""Throwaway package."""\n')
+    (legacy_root / "oddpkg" / "setmod.py").write_text(
         "def names():\n    return list({'alpha', 'beta', 'gamma', 'delta', 'eps'})\n"
     )
     (work_root / "cases").mkdir(parents=True, exist_ok=True)
@@ -133,7 +161,7 @@ def test_net_capture_wires_the_ab_comparison_for_hash_order_nondeterminism(work_
         "schema": 1,
         "source_stack": "python",
         "target_stack": "python",
-        "legacy_root": "legacy",
+        "legacy_root": str(legacy_root),
         "legacy_package": "oddpkg",
         "target_root": "target",
         "target_package": "oddpkg2",
@@ -259,6 +287,24 @@ def test_each_stateful_fixture_is_refused_naming_the_key(work_root, capsys, unit
     assert expected_keys <= all_changed, (unit, all_changed)
 
 
+def test_duplicate_case_ids_are_refused(work_root, capsys):
+    cfg = _scaffold(work_root)
+    _freeze_base_registry(work_root)
+    _put_cases(
+        work_root,
+        "shop.money",
+        [
+            {"id": "m1", "call": "round_money", "args": [1.0]},
+            {"id": "m1", "call": "round_money", "args": [2.0]},
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        net_capture.run(work_root, cfg, "shop.money")
+    assert exc.value.code == cm_common.EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert "m1" in payload.get("duplicate_case_ids", [])
+
+
 # ---------------------------------------------------------------------------
 # Dropped symbols
 # ---------------------------------------------------------------------------
@@ -296,7 +342,7 @@ def test_case_targeting_dropped_symbol_is_skipped_and_excluded_from_denominator(
 
 def test_case_returning_unsupported_value_is_dropped_and_its_line_uncovered(work_root):
     cfg = _scaffold(work_root)
-    (work_root / "legacy" / "shop" / "oddball.py").write_text(
+    (Path(cfg["legacy_root"]) / "shop" / "oddball.py").write_text(
         "def give_function():\n"
         "    return len\n\n\n"
         "def give_int():\n"
@@ -340,7 +386,7 @@ def test_below_floor_lists_uncovered_lines(work_root):
 
 def test_fully_exercised_throwaway_unit_reaches_100_percent_at_100_floor(work_root):
     cfg = _scaffold(work_root, coverage_floor=100)
-    (work_root / "legacy" / "shop" / "fully.py").write_text(
+    (Path(cfg["legacy_root"]) / "shop" / "fully.py").write_text(
         "def identity_decorator(fn):\n"
         "    return fn\n\n\n"
         "@identity_decorator\n"

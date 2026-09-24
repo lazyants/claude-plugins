@@ -53,10 +53,13 @@ def _write_migration_json(root: Path, legacy_root: Path, package: str, target_ro
 
 def _shop_root(tmp_path: Path) -> Path:
     """A durable root whose legacy tree is a private copy of the pinned shop
-    fixture (never mutate the shared fixture in place)."""
+    fixture (never mutate the shared fixture in place). legacy_root is a
+    SIBLING of the durable root, never nested under it: plan 2.1's root
+    safety rules refuse a durable root that equals, contains, or is
+    contained by legacy_root."""
     root = tmp_path / "root"
     root.mkdir()
-    legacy = root / "legacy"
+    legacy = tmp_path / "legacy"
     shutil.copytree(FIXTURES_DIR / "legacy", legacy)
     _write_migration_json(root, legacy, "shop", root / "target")
     return root
@@ -117,7 +120,7 @@ def test_symbol_spans_match_fixture_line_numbers(tmp_path):
 def test_parse_error_exits_naming_file(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
-    legacy = root / "legacy"
+    legacy = tmp_path / "legacy"
     (legacy / "broken").mkdir(parents=True)
     (legacy / "broken" / "__init__.py").write_text("x = 1\n", encoding="utf-8")
     (legacy / "broken" / "bad.py").write_text("def f(:\n", encoding="utf-8")
@@ -128,10 +131,27 @@ def test_parse_error_exits_naming_file(tmp_path):
     assert "bad.py" in payload["file"]
 
 
+def test_broken_init_py_exits_naming_file(tmp_path):
+    # _is_init_unit must not swallow a SyntaxError: a syntax-invalid
+    # __init__.py has to fail the same named-parse-error way as any other
+    # file, not be silently treated as "not a unit" (which would just drop
+    # it from the inventory with no error at all).
+    root = tmp_path / "root"
+    root.mkdir()
+    legacy = tmp_path / "legacy"
+    (legacy / "brokeninit").mkdir(parents=True)
+    (legacy / "brokeninit" / "__init__.py").write_text("def f(:\n", encoding="utf-8")
+    _write_migration_json(root, legacy, "brokeninit", root / "target")
+    code, payload, stderr = _run("inventory.py", "--root", str(root))
+    assert code == 1
+    assert payload["ok"] is False
+    assert "__init__.py" in payload["file"]
+
+
 def test_zero_units_exits_1(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
-    legacy = root / "legacy"
+    legacy = tmp_path / "legacy"
     (legacy / "empty").mkdir(parents=True)
     (legacy / "empty" / "__init__.py").write_text('"""just a docstring"""\n', encoding="utf-8")
     _write_migration_json(root, legacy, "empty", root / "target")
@@ -209,6 +229,41 @@ def test_io_flag_on_open_call():
     assert "call:open@f" in info["io"]
 
 
+def test_environ_subscript_read_flagged_as_uncontrolled_reference():
+    # A bare subscript read is not a call, so the pre-existing "calls
+    # resolving to os.environ*" rule alone misses it (this is exactly what a
+    # `return os.environ["CM_MODE"]` reviewer probe caught).
+    source = (
+        "import os\n\n"
+        "def f():\n"
+        "    return os.environ['CM_MODE']\n"
+    )
+    info = inventory.analyze_module(source, "pkg.mod", "pkg")
+    assert any(flag.startswith("ref:os.environ@f") for flag in info["uncontrolled_input"])
+
+
+def test_environ_flagged_through_import_alias():
+    source = (
+        "from os import environ\n\n"
+        "def g():\n"
+        "    return environ.get('CM_MODE')\n"
+    )
+    info = inventory.analyze_module(source, "pkg.mod", "pkg")
+    assert "call:os.environ.get@g" in info["uncontrolled_input"]
+    assert "ref:os.environ@g" in info["uncontrolled_input"]
+
+
+def test_getenv_reference_flagged_even_when_not_called():
+    source = (
+        "import os\n\n"
+        "def h():\n"
+        "    fn = os.getenv\n"
+        "    return fn\n"
+    )
+    info = inventory.analyze_module(source, "pkg.mod", "pkg")
+    assert "ref:os.getenv@h" in info["uncontrolled_input"]
+
+
 # --- imports field, function-local and relative imports ---------------------
 
 
@@ -274,3 +329,51 @@ def test_analyze_module_flags_reads_clock_helper():
     source = (FIXTURES_DIR / "ports" / "reads_clock" / "shop2" / "_util.py").read_text(encoding="utf-8")
     info = inventory.analyze_module(source, "shop2._util", "shop2")
     assert any(flag.startswith("call:time.time@") for flag in info["uncontrolled_input"])
+
+
+# --- is_package: a package unit's relative import resolves against itself --
+
+
+def test_analyze_module_package_init_resolves_relative_import_against_itself():
+    source = (
+        "from . import helper\n\n"
+        "def use():\n"
+        "    return helper.VALUE\n"
+    )
+    # A NESTED package unit ("pkgy.sub", an executable __init__.py): its own
+    # __package__ is itself, not its parent, so `from . import helper` must
+    # reach pkgy.sub.helper, never pkgy.helper.
+    as_package = inventory.analyze_module(source, "pkgy.sub", "pkgy", is_package=True)
+    as_module = inventory.analyze_module(source, "pkgy.sub", "pkgy", is_package=False)
+    assert "pkgy.sub.helper" in as_package["imports"]
+    assert "pkgy.helper" in as_module["imports"]
+    assert "pkgy.sub.helper" not in as_module["imports"]
+
+
+def test_build_inventory_resolves_package_init_relative_import(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    legacy = tmp_path / "legacy"
+    pkgy = legacy / "pkgy"
+    pkgy.mkdir(parents=True)
+    (pkgy / "__init__.py").write_text('"""namespace only"""\n', encoding="utf-8")
+    sub = pkgy / "sub"
+    sub.mkdir()
+    (sub / "__init__.py").write_text(
+        "from . import helper\n\n"
+        "def use():\n"
+        "    return helper.VALUE\n",
+        encoding="utf-8",
+    )
+    (sub / "helper.py").write_text("VALUE = 42\n", encoding="utf-8")
+    _write_migration_json(root, legacy, "pkgy", root / "target")
+
+    code, payload, stderr = _run("inventory.py", "--root", str(root))
+    assert code == 0, stderr
+    data = json.loads((root / "inventory.json").read_text(encoding="utf-8"))
+    row = data["units"]["pkgy.sub"]
+    # Without is_package this would resolve to "pkgy.helper" (a file that
+    # does not exist under the legacy tree) and get silently dropped from
+    # imports_units — the real dependency on pkgy.sub.helper would vanish.
+    assert row["imports_units"] == ["pkgy.sub.helper"]
+    assert row["imported_symbols"] == []

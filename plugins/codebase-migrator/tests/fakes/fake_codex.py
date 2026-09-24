@@ -10,10 +10,13 @@ Any other invocation is rejected with a non-zero exit. What the fake DOES is
 controlled only by the FAKE_CODEX_SCENARIO environment variable (plus a few
 scenario-specific FAKE_CODEX_* variables) -- never by the prompt text it
 reads from stdin, exactly like the real binary's behaviour is bounded by its
-sandbox mode and the files under -C, not by what the prompt asks for.
+sandbox mode and the files under -C, not by what the prompt asks for. Set
+FAKE_CODEX_PROMPT_LOG to a file path to have this fake write the received
+prompt there verbatim, for a test that wants to inspect it.
 """
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -97,10 +100,28 @@ def run_probe_scenario(scenario: str, stage: Path) -> None:
         return
 
     if scenario == "probe_denied":
-        for i, _canary_path in canaries:
-            (probe_dir / f"{i}.rc").write_text("1", encoding="utf-8")
-            (probe_dir / f"{i}.err").write_text("sh: Operation not permitted\n", encoding="utf-8")
-        inside.write_text("ok", encoding="utf-8")
+        # Genuinely run probe.sh, with every canary made read-only for the
+        # duration, so each write attempt fails for real and probe.sh writes
+        # its own rc/err files and its own inside.txt -- a probe.sh with no
+        # write commands in it (a bug in sandbox.py's own generation) then
+        # produces no rc files and this fake reports NOT_EXERCISED, instead
+        # of always reporting "denied" regardless of what was generated.
+        original_modes = {}
+        for _i, canary_path in canaries:
+            path = Path(canary_path)
+            try:
+                original_modes[path] = os.stat(path).st_mode
+                os.chmod(path, 0o444)
+            except OSError:
+                pass
+        try:
+            subprocess.run(["sh", str(stage / "probe.sh")], capture_output=True)
+        finally:
+            for path, mode in original_modes.items():
+                try:
+                    os.chmod(path, mode)
+                except OSError:
+                    pass
         return
 
     if scenario == "probe_not_denied":
@@ -193,9 +214,9 @@ def main() -> int:
     parsed = parse_exec_args(argv)
     stage = parsed["stage"]
 
-    # Read (and discard) the prompt, exactly like a real turn would -- its
-    # content never selects behaviour here.
-    sys.stdin.read()
+    # Read the prompt exactly like a real turn would -- its content never
+    # selects behaviour here, but a test may still want to inspect it.
+    prompt_text = sys.stdin.read()
 
     scenario = os.environ.get("FAKE_CODEX_SCENARIO")
     if not scenario:
@@ -204,6 +225,10 @@ def main() -> int:
     argv_log = os.environ.get("FAKE_CODEX_ARGV_LOG")
     if argv_log:
         Path(argv_log).write_text(json.dumps(argv), encoding="utf-8")
+
+    prompt_log = os.environ.get("FAKE_CODEX_PROMPT_LOG")
+    if prompt_log:
+        Path(prompt_log).write_text(prompt_text, encoding="utf-8")
 
     if (stage / "probe.sh").exists():
         run_probe_scenario(scenario, stage)

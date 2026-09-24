@@ -46,6 +46,12 @@ _DYNAMIC_EXACT_CALL = {
 }
 _DYNAMIC_ATTR_USE = {"sys.settrace", "sys.setprofile", "sys._getframe"}
 
+# Any reference to these — not only a call — is uncontrolled input: reading
+# the environment by attribute, subscript or iteration is exactly as
+# uncontrolled as calling it, and `os.environ.get(...)`/`os.getenv(...)`
+# still get their own "call:" flag from `_is_uncontrolled` on top of this.
+_UNCONTROLLED_REF_EXACT = {"os.environ", "os.getenv"}
+
 
 def _is_uncontrolled(resolved: str) -> bool:
     if resolved in _UNCONTROLLED_EXACT:
@@ -98,10 +104,16 @@ def _apply_alias(dotted: str, import_alias: dict, value_alias: dict) -> str:
 def _resolve_relative(module: str, package: str, level: int, node_module: str | None) -> str:
     """Resolve a relative import's absolute dotted target.
 
-    `module` is treated as a regular (non-package) module for this
-    resolution: level 1 reaches its own parent package. A package unit
-    (an `__init__.py`) resolving a relative import against itself is a
-    corner case this plugin's fixtures do not exercise.
+    `module` is treated as a regular (non-package) module: level 1 reaches
+    its own parent package. A package unit (an `__init__.py`, whose own
+    `__package__` is itself, not its parent) gets this right by having its
+    caller pass `module + ".__init__"` instead of `module` — the synthetic
+    trailing segment is exactly what a regular module's own filename would
+    supply, so the existing "strip one segment" arithmetic below produces
+    the package's own name at level 1, its parent at level 2, and so on,
+    with no separate code path. `analyze_module`'s `is_package` flag drives
+    this; callers that already have a real file (`_build_unit`,
+    `import_closure`) detect it from the filename.
     """
     if "." in module:
         base_parts = module.split(".")[:-1]
@@ -238,6 +250,18 @@ class _Walker(ast.NodeVisitor):
         resolved = self._resolve(node)
         if resolved in _DYNAMIC_ATTR_USE:
             self.dynamic_call.append(f"{resolved}@{self._qual()}")
+        if resolved in _UNCONTROLLED_REF_EXACT:
+            self.uncontrolled_input.append(f"ref:{resolved}@{self._qual()}")
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        # Catches a bare aliased reference (`from os import environ`, then
+        # `environ` or `environ["X"]` used directly with no `os.` prefix to
+        # see as an Attribute node) and a reference to `os.getenv` assigned
+        # to a name without being called.
+        resolved = self._resolve(node)
+        if resolved in _UNCONTROLLED_REF_EXACT:
+            self.uncontrolled_input.append(f"ref:{resolved}@{self._qual()}")
         self.generic_visit(node)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
@@ -295,10 +319,16 @@ def _public_names_and_spans(tree: ast.Module) -> tuple[list[str], dict[str, list
     return names, spans
 
 
-def analyze_module(source: str, module: str, package: str) -> dict:
+def analyze_module(source: str, module: str, package: str, *, is_package: bool = False) -> dict:
+    """`is_package` is keyword-only with a safe default (False): every
+    existing caller passing exactly the pinned 3 positional args is
+    unaffected. Pass it when `module`'s file is an `__init__.py`, so a
+    relative import inside it resolves against itself (plan 4.3's
+    `_resolve_relative`), not against its parent package."""
     tree = ast.parse(source, filename=module)
-    import_alias, value_alias = _prescan_aliases(tree, module, package)
-    walker = _Walker(module, package, import_alias, value_alias)
+    resolve_module = f"{module}.__init__" if is_package else module
+    import_alias, value_alias = _prescan_aliases(tree, resolve_module, package)
+    walker = _Walker(resolve_module, package, import_alias, value_alias)
     walker.visit(tree)
     names, spans = _public_names_and_spans(tree)
     return {
@@ -325,13 +355,14 @@ def import_closure(base: Path, package: str, module: str) -> list[str]:
         if not (candidate_file.is_file() or candidate_init.is_file()):
             continue
         seen.add(current)
-        source_file = candidate_file if candidate_file.is_file() else candidate_init
+        is_package = not candidate_file.is_file()
+        source_file = candidate_init if is_package else candidate_file
         try:
             source = source_file.read_text(encoding="utf-8")
         except OSError:
             continue
         try:
-            info = analyze_module(source, current, package)
+            info = analyze_module(source, current, package, is_package=is_package)
         except SyntaxError:
             continue
         for cand in info["imports"]:
@@ -344,11 +375,15 @@ def import_closure(base: Path, package: str, module: str) -> list[str]:
 
 
 def _is_init_unit(path: Path) -> bool:
+    # SyntaxError is NOT caught here: a syntax-invalid __init__.py must fail
+    # the same named parse-error way as any other file (build_inventory's
+    # caller of _discover_units catches it), never be silently treated as
+    # "not a unit". Only a genuinely unreadable file returns False.
     try:
         source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(path))
-    except (OSError, SyntaxError):
+    except OSError:
         return False
+    tree = ast.parse(source, filename=str(path))
     body = tree.body
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
         body = body[1:]
@@ -404,16 +439,18 @@ def _executable_lines(source: str) -> list[int]:
 
 def _build_unit(unit: str, path: Path, package: str, units: dict[str, Path]) -> dict:
     source = path.read_text(encoding="utf-8")
-    info = analyze_module(source, unit, package)
+    is_package = path.name == "__init__.py"
+    info = analyze_module(source, unit, package, is_package=is_package)
     imports_units = sorted({c for c in info["imports"] if c in units and c != unit})
     imported_symbols: set[str] = set()
+    resolve_unit = f"{unit}.__init__" if is_package else unit
     tree = ast.parse(source, filename=unit)
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             if node.level == 0:
                 base = node.module
             else:
-                base = _resolve_relative(unit, package, node.level, node.module)
+                base = _resolve_relative(resolve_unit, package, node.level, node.module)
             if base in units:
                 for alias in node.names:
                     if f"{base}.{alias.name}" not in units:
@@ -446,7 +483,10 @@ def build_inventory(root: Path, cfg: dict) -> dict:
     paths = cm_common.resolved_paths(root, cfg)
     legacy_root = paths["legacy_root"]
     package = cfg["legacy_package"]
-    units = _discover_units(legacy_root, package)
+    try:
+        units = _discover_units(legacy_root, package)
+    except SyntaxError as exc:
+        cm_common.fail(f"failed to parse {exc.filename}: {exc}", cm_common.EXIT_FAIL, file=str(exc.filename))
     if not units:
         cm_common.fail(f"no units found under {legacy_root / package}", cm_common.EXIT_FAIL)
 

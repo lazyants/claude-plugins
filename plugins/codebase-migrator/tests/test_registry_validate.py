@@ -55,8 +55,13 @@ def _cfg(dead_code_policy: str = "port", **overrides) -> dict:
 
 @pytest.fixture(scope="module")
 def shop_inventory(tmp_path_factory):
-    root = tmp_path_factory.mktemp("registry_inventory_root")
-    legacy = root / "legacy"
+    # legacy_root is a SIBLING of the durable root, never nested under it:
+    # plan 2.1 refuses a durable root that equals, contains, or is
+    # contained by legacy_root.
+    base = tmp_path_factory.mktemp("registry_inventory")
+    root = base / "root"
+    root.mkdir()
+    legacy = base / "legacy"
     shutil.copytree(FIXTURES_DIR / "legacy", legacy)
     cfg = _cfg(legacy_root=str(legacy), target_root=str(root / "target"))
     (root / "migration.json").write_text(json.dumps(cfg), encoding="utf-8")
@@ -240,7 +245,8 @@ def test_completeness_names_missing_symbol(shop_inventory):
 
 def _make_full_root(tmp_path: Path) -> Path:
     root = tmp_path / "root"
-    legacy = root / "legacy"
+    root.mkdir()
+    legacy = tmp_path / "legacy"
     shutil.copytree(FIXTURES_DIR / "legacy", legacy)
     cfg = _cfg(legacy_root=str(legacy), target_root=str(root / "target"))
     (root / "migration.json").write_text(json.dumps(cfg), encoding="utf-8")
@@ -315,6 +321,42 @@ def test_correct_wrong_digest_refused_right_digest_applied(tmp_path):
     corrections = json.loads((root / "registry.corrections.json").read_text(encoding="utf-8"))
     assert corrections["corrections"][-1]["source"] == "shop.pricing:dedupe"
     assert corrections["corrections"][-1]["reason"] == "renaming"
+
+
+def test_correct_to_invalid_dropped_row_refused_lock_unchanged(tmp_path):
+    # The proposed row must be validated (row rules AND global sharing
+    # rules) BEFORE the lock or the correction history change: a correction
+    # that would leave registry.json invalid must be refused outright, with
+    # nothing written.
+    root = _make_full_root(tmp_path)
+    code, _, stderr = _run("--root", str(root), "--units", "shop.pricing", "--with-imported", "--freeze")
+    assert code == 0, stderr
+
+    lock_before = json.loads((root / "registry.lock.json").read_text(encoding="utf-8"))
+    entry_before = lock_before["rows"]["shop.pricing:describe"]
+    corrections_path = root / "registry.corrections.json"
+    assert not corrections_path.exists()
+
+    registry = json.loads((root / "registry.json").read_text(encoding="utf-8"))
+    row = _row_for(registry["rows"], "shop.pricing:describe")
+    row["cardinality"] = "dropped"
+    row["entry"] = None
+    row["targets"] = []
+    row["reason"] = "never called"
+    (root / "registry.json").write_text(json.dumps(registry), encoding="utf-8")
+
+    # migration.json's dead_code_policy is "port" (the _cfg default): a
+    # dropped row is refused outright, regardless of digest correctness.
+    code, payload, stderr = _run(
+        "--root", str(root), "--correct", "shop.pricing:describe",
+        "--expect-digest", entry_before["digest"], "--reason", "drop it",
+    )
+    assert code != 0
+    assert payload["ok"] is False
+
+    lock_after = json.loads((root / "registry.lock.json").read_text(encoding="utf-8"))
+    assert lock_after["rows"]["shop.pricing:describe"] == entry_before
+    assert not corrections_path.exists()
 
 
 def test_correct_requires_both_flags(tmp_path):

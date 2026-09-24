@@ -54,8 +54,12 @@ def _base_rows() -> list[dict]:
 
 
 def _make_root(tmp_path: Path, dead_code_policy: str = "port") -> Path:
+    # legacy_root is a SIBLING of the durable root, never nested under it:
+    # plan 2.1 refuses a durable root that equals, contains, or is
+    # contained by legacy_root.
     root = tmp_path / "root"
-    legacy = root / "legacy"
+    root.mkdir()
+    legacy = tmp_path / "legacy"
     shutil.copytree(FIXTURES_DIR / "legacy", legacy)
     cfg = _cfg(legacy, root / "target", dead_code_policy)
     (root / "migration.json").write_text(json.dumps(cfg), encoding="utf-8")
@@ -174,7 +178,7 @@ def test_shim_exports_exactly_the_frozen_symbols_and_imports_resolve(tmp_path):
     shutil.copy2(good / "pricing.py", target_shop2 / "pricing.py")
     shutil.copy2(good / "cart.py", target_shop2 / "cart.py")
 
-    legacy_root = root / "legacy"
+    legacy_root = root.parent / "legacy"
     check = subprocess.run(
         [sys.executable, "-c", "import shop2.pricing; print(shop2.pricing.apply_discount(100, 10))"],
         cwd=str(root / "target"),

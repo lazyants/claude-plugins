@@ -90,6 +90,18 @@ def _is_shim(path: Path) -> bool:
 # --- probe -------------------------------------------------------------------
 
 
+def _assert_stage_outside_git(stage: Path) -> None:
+    """`codex exec` resolves its workspace root upward to the nearest git
+    toplevel, not just to `-C <stage>` -- the exact failure literary-translator
+    hit. A fresh stage created inside this repo's own git worktree would
+    then run with a workspace boundary wider than the stage itself, so every
+    stage this module creates -- for a probe or for a dispatch -- must fail
+    `git -C <stage> rev-parse`."""
+    check = subprocess.run(["git", "-C", str(stage), "rev-parse"], capture_output=True)
+    if check.returncode == 0:
+        cm_common.fail("stage landed inside a git worktree", cm_common.EXIT_CANNOT, stage=str(stage))
+
+
 def cmd_probe(root: Path, cfg: dict) -> int:
     paths = cm_common.resolved_paths(root, cfg)
     legacy_root = paths["legacy_root"]
@@ -97,9 +109,7 @@ def cmd_probe(root: Path, cfg: dict) -> int:
     target_root.mkdir(parents=True, exist_ok=True)
 
     stage = Path(tempfile.mkdtemp(prefix="cm-stage-"))
-    check = subprocess.run(["git", "-C", str(stage), "rev-parse"], capture_output=True)
-    if check.returncode == 0:
-        cm_common.fail("probe stage landed inside a git worktree", cm_common.EXIT_CANNOT, stage=str(stage))
+    _assert_stage_outside_git(stage)
 
     token = uuid.uuid4().hex
     canaries = [root / "runs" / ".cm_canary", legacy_root / ".cm_canary", target_root / ".cm_canary"]
@@ -326,6 +336,37 @@ def _is_regular_file(path: Path) -> bool:
     return stat_module.S_ISREG(st.st_mode)
 
 
+def _path_contains(base: Path, path: Path) -> bool:
+    return path == base or base in path.parents
+
+
+def _assert_destination_contained(dest: Path, root: Path, cfg: dict, unit: str) -> None:
+    """`dest`'s parent, after resolving symlinks, must stay inside
+    `target_root` and outside both `legacy_root` and the durable root. A
+    pre-dispatch tamper check compares digests of the unresolved trees, so a
+    symlinked target package (e.g. `target_root/shop2 -> legacy_root/shop`)
+    passes it untouched and then silently redirects this promotion's atomic
+    write into the legacy tree, or into the durable root's own state.
+    Checked here, right before the write, not earlier: a symlink swapped in
+    between the tamper check and this point must still be caught."""
+    paths = cm_common.resolved_paths(root, cfg)
+    target_root_rp = paths["target_root"].resolve()
+    legacy_root_rp = paths["legacy_root"].resolve()
+    durable_root_rp = Path(root).resolve()
+    dest_parent_rp = dest.parent.resolve()
+
+    if not _path_contains(target_root_rp, dest_parent_rp):
+        cm_common.fail(
+            "promotion destination is not inside target_root once symlinks are resolved",
+            cm_common.EXIT_FAIL, unit=unit, dest=str(dest), resolved_parent=str(dest_parent_rp),
+        )
+    if _path_contains(legacy_root_rp, dest_parent_rp) or _path_contains(durable_root_rp, dest_parent_rp):
+        cm_common.fail(
+            "promotion destination resolves into the legacy tree or the durable root",
+            cm_common.EXIT_FAIL, unit=unit, dest=str(dest), resolved_parent=str(dest_parent_rp),
+        )
+
+
 def _promote_port_or_fix(root: Path, cfg: dict, unit: str, stage: Path) -> tuple[list, list]:
     out_dir = stage / "out"
     others = sorted(p.name for p in out_dir.iterdir()) if out_dir.is_dir() else []
@@ -343,6 +384,7 @@ def _promote_port_or_fix(root: Path, cfg: dict, unit: str, stage: Path) -> tuple
         compile(text, str(dest), "exec")
     except SyntaxError as exc:
         cm_common.fail(f"out/target.py does not compile: {exc}", cm_common.EXIT_FAIL, unit=unit)
+    _assert_destination_contained(dest, root, cfg, unit)
     cm_common.atomic_write_text(dest, text)
     promoted = ["out/target.py"]
     ignored = [f"out/{name}" for name in others if name != "target.py"]
@@ -424,6 +466,29 @@ def _promote_cases(root: Path, unit: str, stage: Path) -> tuple[list, list]:
     if not isinstance(doc, dict) or not isinstance(doc.get("cases"), list):
         cm_common.fail("out/cases.json is not the pinned shape", cm_common.EXIT_FAIL, unit=unit)
 
+    # A duplicate id WITHIN the proposed batch is refused outright, naming
+    # every id involved: silently keeping the first (or the last) occurrence
+    # would non-deterministically decide which case an id refers to, and
+    # accepting both under one id would let the second overwrite the
+    # first's stored inputs the moment they are both appended below. An id
+    # that only collides with an EXISTING case is not an error -- it is
+    # simply skipped further down, since existing cases are never replaced.
+    proposed_ids = [
+        case.get("id") for case in doc["cases"]
+        if isinstance(case, dict) and isinstance(case.get("id"), str) and case.get("id")
+    ]
+    seen_once: set = set()
+    duplicate_ids: set = set()
+    for cid in proposed_ids:
+        if cid in seen_once:
+            duplicate_ids.add(cid)
+        seen_once.add(cid)
+    if duplicate_ids:
+        cm_common.fail(
+            "proposed cases contain a duplicate id within the batch", cm_common.EXIT_FAIL,
+            unit=unit, duplicate_ids=sorted(duplicate_ids),
+        )
+
     cases_path = root / "cases" / f"{unit}.json"
     existing_doc = _try_read_json(cases_path) or {"schema": 1, "cases": []}
     existing_ids = {c.get("id") for c in existing_doc.get("cases", [])}
@@ -467,6 +532,7 @@ def cmd_dispatch(root: Path, cfg: dict, unit: str, kind: str, round_num: int) ->
         _check_fix_preconditions(root, cfg, unit, round_num)
 
     stage = Path(tempfile.mkdtemp(prefix="cm-stage-"))
+    _assert_stage_outside_git(stage)
     pack_dir = stage / "pack"
     pack_dir.mkdir(parents=True, exist_ok=True)
     pack = _build_pack(root, cfg, unit, kind, round_num)

@@ -123,6 +123,14 @@ def validate(cfg: dict, root: "Path") -> list:
         if key not in _KNOWN_KEYS:
             problems.append(_problem(key, "unknown_key", f"unknown key: {key}"))
 
+    # A key entirely absent from cfg is distinct from one set to a CHOOSE_
+    # placeholder: it is never silently accepted as answered, and every
+    # check below that reads cfg.get(key) is guarded to skip a key already
+    # reported missing here, so it is not double-reported as "invalid" too.
+    missing_keys = sorted(k for k in _KNOWN_KEYS if k != "schema" and k not in cfg)
+    for key in missing_keys:
+        problems.append(_problem(key, "missing", f"{key} is required but missing"))
+
     unanswered = set()
     for key in QUESTIONNAIRE:
         value = cfg.get(key)
@@ -142,7 +150,7 @@ def validate(cfg: dict, root: "Path") -> list:
                 _problem(key, "unsupported", f"{value!r} is not a v0.1 value for {key}")
             )
 
-    if "coverage_floor_pct" not in unanswered:
+    if "coverage_floor_pct" in cfg and "coverage_floor_pct" not in unanswered:
         value = cfg.get("coverage_floor_pct")
         if not isinstance(value, int) or isinstance(value, bool) or not (0 <= value <= 100):
             problems.append(
@@ -164,7 +172,7 @@ def validate(cfg: dict, root: "Path") -> list:
     legacy_package = cfg.get("legacy_package")
     target_package = cfg.get("target_package")
     for key, value in (("legacy_package", legacy_package), ("target_package", target_package)):
-        if key in unanswered:
+        if key not in cfg or key in unanswered:
             continue
         if not isinstance(value, str) or not _IDENTIFIER_RE.match(value or ""):
             problems.append(
@@ -188,7 +196,7 @@ def validate(cfg: dict, root: "Path") -> list:
 
     legacy_root_value = cfg.get("legacy_root")
     legacy_root_path = None
-    if "legacy_root" not in unanswered:
+    if "legacy_root" in cfg and "legacy_root" not in unanswered:
         if isinstance(legacy_root_value, str):
             legacy_root_path = Path(legacy_root_value)
             if not legacy_root_path.is_absolute():
@@ -213,6 +221,36 @@ def validate(cfg: dict, root: "Path") -> list:
                 )
             )
 
+    # The durable root itself must not overlap legacy_root either (plan
+    # section 2.1's root safety rules). scaffold.py cannot check this on a
+    # fresh run -- migration.json does not exist yet, so legacy_root is not
+    # known at that point -- so it is checked here instead, on every
+    # load_config() call once legacy_root has a real value.
+    if legacy_root_path is not None:
+        root_resolved = root.resolve()
+        legacy_resolved = legacy_root_path.resolve()
+        overlap = root_resolved == legacy_resolved
+        if not overlap:
+            try:
+                root_resolved.relative_to(legacy_resolved)
+                overlap = True
+            except ValueError:
+                pass
+        if not overlap:
+            try:
+                legacy_resolved.relative_to(root_resolved)
+                overlap = True
+            except ValueError:
+                pass
+        if overlap:
+            problems.append(
+                _problem(
+                    "legacy_root",
+                    "invalid",
+                    "the durable root must not equal, contain, or be contained by legacy_root",
+                )
+            )
+
     # Whether target_root already exists is NOT checked here: the pipeline
     # itself creates and grows target_root over time (bridge.py's shims, a
     # promoted port), and this config is re-validated on every downstream
@@ -222,7 +260,7 @@ def validate(cfg: dict, root: "Path") -> list:
     # (no overlap with legacy_root) is checked, and it is checked every
     # time regardless of existence.
     target_root_value = cfg.get("target_root")
-    if "target_root" not in unanswered:
+    if "target_root" in cfg and "target_root" not in unanswered:
         if isinstance(target_root_value, str):
             target_root_path = Path(target_root_value)
             if not target_root_path.is_absolute():

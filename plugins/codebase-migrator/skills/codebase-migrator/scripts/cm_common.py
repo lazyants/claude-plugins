@@ -308,8 +308,23 @@ def closure_digests(legacy_base: Path, legacy_package: str, units: list) -> dict
 
 
 def unit_closure(inventory: dict, unit: str) -> list:
-    """`unit` plus its transitive `imports_units`, sorted."""
+    """`unit`, its transitive `imports_units`, and every ancestor package of
+    any of those that is itself a unit (a package whose `__init__.py` has a
+    non-empty body after its docstring -- see `require_unit`/`inventory.py`).
+    Importing a module always executes its ancestor packages' `__init__.py`
+    first, so an ancestor that is a real unit is an implicit dependency; an
+    ancestor that is docstring-only is not a unit at all and is not added
+    here (a route rule elsewhere admits it as an unavoidable import, but it
+    is never part of this closure). Sorted, de-duplicated."""
     units = inventory.get("units", {})
+
+    def ancestor_units(u):
+        parts = u.split(".")
+        for i in range(1, len(parts)):
+            prefix = ".".join(parts[:i])
+            if prefix in units:
+                yield prefix
+
     seen: set = set()
     stack = [unit]
     while stack:
@@ -320,6 +335,9 @@ def unit_closure(inventory: dict, unit: str) -> list:
         for dep in units.get(u, {}).get("imports_units", []):
             if dep not in seen:
                 stack.append(dep)
+        for anc in ancestor_units(u):
+            if anc not in seen:
+                stack.append(anc)
     return sorted(seen)
 
 
