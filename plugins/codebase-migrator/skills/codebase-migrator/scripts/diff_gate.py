@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""R3: the differential gate (plan section 4.8). Replays the frozen net's
+cases against the ported target module, in both environments, and requires
+every count to agree and every behavioural channel to match."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import cm_common  # noqa: E402
+import inventory  # noqa: E402
+import ledger  # noqa: E402
+import observe  # noqa: E402
+
+_SHIM_PREFIX = "# codebase-migrator: shim for "
+_BEHAVIOURAL_CHANNELS = (
+    "status",
+    "return",
+    "error",
+    "receiver_after",
+    "args_after",
+    "kwargs_after",
+    "stdout",
+    "stderr",
+)
+
+
+def _is_shim(path: Path) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            first_line = f.readline().rstrip("\n")
+    except OSError:
+        return False
+    return first_line.startswith(_SHIM_PREFIX)
+
+
+def _read_net_lock(root: Path) -> dict:
+    path = root / "net.lock.json"
+    if not path.is_file():
+        return {"schema": 1, "units": {}}
+    return cm_common.read_json(path, "net.lock.json")
+
+
+def _read_registry_lock(root: Path) -> dict:
+    path = root / "registry.lock.json"
+    if not path.is_file():
+        return {"schema": 1, "rows": {}}
+    return cm_common.read_json(path, "registry.lock.json")
+
+
+def _staged_rel(root: Path, cfg: dict, unit: str, which: str) -> Path:
+    if which == "legacy":
+        live = cm_common.legacy_file(root, cfg, unit)
+        base = cm_common.resolved_paths(root, cfg)["legacy_root"]
+    else:
+        live = cm_common.target_file(root, cfg, unit)
+        base = cm_common.resolved_paths(root, cfg)["target_root"]
+    return live.relative_to(base)
+
+
+def _unit_from_rel(rel: str, root_prefix: str):
+    prefix = root_prefix + "/"
+    if not rel.startswith(prefix):
+        return None
+    inner = rel[len(prefix):]
+    if inner.endswith("/__init__.py"):
+        inner = inner[: -len("/__init__.py")]
+    elif inner.endswith(".py"):
+        inner = inner[: -len(".py")]
+    else:
+        return None
+    return inner.replace("/", ".")
+
+
+def _ancestor_prefixes(units) -> set:
+    """Every proper dotted-prefix of every unit in `units` — e.g. `shop` for
+    `shop.pricing`. Importing a submodule always initializes its ancestor
+    packages first, so touching an ancestor's `__init__.py` is a mechanical
+    side effect of the import, never a reach the port chose to make."""
+    prefixes: set = set()
+    for u in units:
+        parts = u.split(".")
+        for i in range(1, len(parts)):
+            prefixes.add(".".join(parts[:i]))
+    return prefixes
+
+
+def _route_violations(route_files, unit: str, closure_units) -> list:
+    allowed_ancestors = _ancestor_prefixes(list(closure_units) + [unit])
+    violations = []
+    for rel in route_files or []:
+        if not rel.startswith("legacy/"):
+            continue
+        touched_unit = _unit_from_rel(rel, "legacy")
+        if touched_unit == unit:
+            # U's own legacy file is forbidden even when it also happens to
+            # be an ancestor package of something in the closure.
+            violations.append(f"reached the unit's own legacy file: {rel}")
+        elif touched_unit in closure_units:
+            continue
+        elif rel.endswith("/__init__.py") and touched_unit in allowed_ancestors:
+            continue
+        else:
+            violations.append(f"reached a legacy file outside the dependency closure: {rel}")
+    return violations
+
+
+def _case_route_violations(route_files, unit: str, closure_units, target_rel: str) -> list:
+    violations = _route_violations(route_files, unit, closure_units)
+    if target_rel not in (route_files or []):
+        violations.append(f"target file was never reached: {target_rel}")
+    return violations
+
+
+def _load_exceptions(root: Path, unit: str) -> dict:
+    path = root / "exceptions.json"
+    if not path.is_file():
+        return {}
+    doc = cm_common.read_json(path, "exceptions.json")
+    prefix = f"{unit}/"
+    return {
+        k[len(prefix):]: v for k, v in doc.get("cases", {}).items() if k.startswith(prefix)
+    }
+
+
+def _expected_for_case(case_id: str, legacy_obs: dict, exceptions: dict) -> dict:
+    entry = exceptions.get(case_id)
+    if entry is None:
+        return legacy_obs
+    expected = dict(legacy_obs)
+    expected.update(entry.get("expected", {}))
+    return expected
+
+
+def _remap_target_value(value, target_to_source: dict):
+    if isinstance(value, dict):
+        new_value = {k: _remap_target_value(v, target_to_source) for k, v in value.items()}
+        if "$obj" in new_value:
+            new_value["$obj"] = target_to_source.get(new_value["$obj"], new_value["$obj"])
+        return new_value
+    if isinstance(value, list):
+        return [_remap_target_value(v, target_to_source) for v in value]
+    return value
+
+
+def _remap_observation_for_target(obs: dict, target_to_source: dict) -> dict:
+    remapped = dict(obs)
+    for channel in ("receiver_after", "args_after", "kwargs_after", "return"):
+        remapped[channel] = _remap_target_value(obs.get(channel), target_to_source)
+    if obs.get("error") is not None:
+        remapped["error"] = {
+            "type": target_to_source.get(obs["error"]["type"], obs["error"]["type"]),
+            "message": obs["error"]["message"],
+        }
+    return remapped
+
+
+def _build_calls_map(unit: str, replay_cases: list, lock_rows: dict) -> dict:
+    calls_map = {}
+    for case in replay_cases:
+        call_spec = case["call"]
+        head, sep, tail = call_spec.partition(".")
+        source_symbol = f"{unit}:{head}"
+        entry = lock_rows.get(source_symbol)
+        if entry is None:
+            cm_common.fail(
+                f"case {case['id']} calls {call_spec}, but {source_symbol} has no frozen row",
+                cm_common.EXIT_FAIL,
+            )
+        row = entry["row"]
+        if row.get("cardinality") == "dropped":
+            cm_common.fail(
+                f"case {case['id']} calls {call_spec}, but {source_symbol} is dropped",
+                cm_common.EXIT_FAIL,
+            )
+        target_qualname = row["entry"].split(":", 1)[1]
+        calls_map[call_spec] = target_qualname + (sep + tail if sep else "")
+    return calls_map
+
+
+def _evaluate_run(run_result: dict, unit: str, closure_units, target_rel: str) -> dict:
+    import_violations = _route_violations(run_result.get("import_route_files"), unit, closure_units)
+    evaluated = {}
+    for obs in run_result.get("observations", []):
+        cid = obs["case_id"]
+        executed = obs["status"] == "ok" and not obs.get("denied") and not obs.get("state_changes")
+        route_violations = list(import_violations)
+        if executed:
+            route_violations += _case_route_violations(
+                obs.get("route_files"), unit, closure_units, target_rel
+            )
+        evaluated[cid] = {
+            "obs": obs,
+            "executed": executed,
+            "route_ok": executed and not route_violations,
+            "route_violations": route_violations,
+        }
+    return evaluated
+
+
+def run(root: Path, cfg: dict, unit: str) -> dict:
+    net_lock = _read_net_lock(root)
+    net_entry = net_lock.get("units", {}).get(unit)
+    if net_entry is None:
+        cm_common.fail(f"no net recorded for {unit}: run net_capture.py", cm_common.EXIT_FAIL)
+
+    net_path = root / "nets" / f"{unit}.json"
+    if not net_path.is_file() or cm_common.sha256_file(net_path) != net_entry.get("net_sha256"):
+        cm_common.fail(f"nets/{unit}.json does not match net.lock.json: re-run net_capture.py", cm_common.EXIT_FAIL)
+    net_doc = cm_common.read_json(net_path, f"nets/{unit}.json")
+
+    cases_path = root / "cases" / f"{unit}.json"
+    if not cases_path.is_file() or cm_common.sha256_file(cases_path) != net_entry.get("cases_sha256"):
+        cm_common.fail(
+            f"cases/{unit}.json changed since capture: re-run net_capture.py", cm_common.EXIT_FAIL
+        )
+    cases_doc = cm_common.read_json(cases_path, f"cases/{unit}.json")
+    cases_by_id = {c["id"]: c for c in cases_doc.get("cases", [])}
+
+    target_path = cm_common.target_file(root, cfg, unit)
+    if not target_path.is_file():
+        cm_common.fail(f"{unit}: target file is absent: {target_path}", cm_common.EXIT_FAIL)
+    if _is_shim(target_path):
+        cm_common.fail(f"{unit}: target file is a shim, not a port: {target_path}", cm_common.EXIT_FAIL)
+
+    inv = cm_common.read_json(root / "inventory.json", "inventory.json")
+    closure_units = sorted(set(cm_common.unit_closure(inv, unit)) - {unit})
+    legacy_root = cm_common.resolved_paths(root, cfg)["legacy_root"]
+    live_digests = cm_common.closure_digests(legacy_root, cfg["legacy_package"], sorted(closure_units + [unit]))
+    stored_closure = net_doc.get("legacy_closure", {})
+    changed_units = sorted(
+        u for u in set(live_digests) | set(stored_closure) if live_digests.get(u) != stored_closure.get(u)
+    )
+    if changed_units:
+        cm_common.fail(
+            f"legacy closure drifted for {unit} since capture: "
+            + ", ".join(changed_units)
+            + " (recovery: inventory.py, ledger.py accept-drift, net_capture.py)",
+            cm_common.EXIT_FAIL,
+            changed_units=changed_units,
+        )
+
+    lock = _read_registry_lock(root)
+    lock_rows = lock.get("rows", {})
+    target_to_source: dict[str, str] = {}
+    for source, entry in lock_rows.items():
+        for t in entry["row"].get("targets", []):
+            target_to_source[t] = source
+
+    net_case_ids = [obs["case_id"] for obs in net_doc.get("observations", [])]
+    replay_cases = [cases_by_id[cid] for cid in net_case_ids if cid in cases_by_id]
+    calls_map = _build_calls_map(unit, replay_cases, lock_rows)
+
+    exceptions = _load_exceptions(root, unit) if cfg.get("fidelity_policy") == "bug_for_bug_with_exceptions" else {}
+
+    before = cm_common.protected_digests(root, cfg)
+    target_module_name = cm_common.target_module(cfg, unit)
+    target_rel = "target/" + _staged_rel(root, cfg, unit, "target").as_posix()
+
+    runs = {}
+    with tempfile.TemporaryDirectory(prefix="cm-stage-") as tmp:
+        for env in ("A", "B"):
+            stage = Path(tmp) / f"stage-{env}"
+            stage.mkdir(parents=True, exist_ok=True)
+            staged = observe.stage_trees(root, cfg, stage)
+            preload = [
+                m
+                for m in inventory.import_closure(staged["target"], cfg["target_package"], target_module_name)
+                if m != target_module_name
+            ]
+            job = {
+                "mode": "replay",
+                "env": env,
+                "preload": preload,
+                "stage_root": str(stage),
+                "sys_path": [str(staged["target"]), str(staged["legacy"])],
+                "module": target_module_name,
+                "calls": calls_map,
+                "cases": replay_cases,
+                "trace_file": None,
+            }
+            runs[env] = observe.run_harness(job, stage=stage)
+
+    after = cm_common.protected_digests(root, cfg)
+    changed = cm_common.diff_digests(before, after)
+    if changed:
+        cm_common.fail(
+            "replay tampered outside the sandbox: " + ", ".join(changed),
+            cm_common.EXIT_FAIL,
+            tampered=changed,
+        )
+
+    eval_a = _evaluate_run(runs["A"], unit, closure_units, target_rel)
+    eval_b = _evaluate_run(runs["B"], unit, closure_units, target_rel)
+
+    cases_in_corpus = len(net_case_ids)
+    executed_ids = [
+        cid for cid in net_case_ids if eval_a.get(cid, {}).get("executed") and eval_b.get(cid, {}).get("executed")
+    ]
+    counted_ids = [cid for cid in executed_ids if eval_a[cid]["route_ok"] and eval_b[cid]["route_ok"]]
+
+    route_violation_reports = []
+    for cid in net_case_ids:
+        reasons = []
+        if cid in eval_a:
+            reasons += [f"A: {r}" for r in eval_a[cid]["route_violations"]]
+        if cid in eval_b:
+            reasons += [f"B: {r}" for r in eval_b[cid]["route_violations"]]
+        if reasons:
+            route_violation_reports.append({"case_id": cid, "reason": "; ".join(reasons)})
+
+    state_changes_report: dict[str, list] = {}
+    for cid in net_case_ids:
+        keys: set = set()
+        for e in (eval_a.get(cid), eval_b.get(cid)):
+            if e and e["obs"].get("state_changes"):
+                keys.update(e["obs"]["state_changes"])
+        if keys:
+            state_changes_report[cid] = sorted(keys)
+
+    denied_report = []
+    for cid in net_case_ids:
+        for env_name, e in (("A", eval_a.get(cid)), ("B", eval_b.get(cid))):
+            if e and e["obs"].get("denied"):
+                denied_report.append(f"{env_name}/{cid}: " + ", ".join(e["obs"]["denied"]))
+
+    crossed_shims: set = set()
+    for cid in counted_ids:
+        for e in (eval_a[cid], eval_b[cid]):
+            for rel in e["obs"].get("route_files") or []:
+                if rel.startswith("legacy/"):
+                    touched_unit = _unit_from_rel(rel, "legacy")
+                    if touched_unit in closure_units:
+                        crossed_shims.add(touched_unit)
+
+    legacy_by_id = {o["case_id"]: o for o in net_doc.get("observations", [])}
+    mismatches = []
+    for cid in counted_ids:
+        legacy_obs = legacy_by_id[cid]
+        expected = _expected_for_case(cid, legacy_obs, exceptions)
+        for env_name, e in (("A", eval_a[cid]), ("B", eval_b[cid])):
+            target_obs = _remap_observation_for_target(e["obs"], target_to_source)
+            for channel in _BEHAVIOURAL_CHANNELS:
+                if target_obs.get(channel) != expected.get(channel):
+                    mismatches.append(
+                        {
+                            "case_id": cid,
+                            "channel": f"{env_name}:{channel}",
+                            "legacy": expected.get(channel),
+                            "target": target_obs.get(channel),
+                        }
+                    )
+
+    counts_agree = cases_in_corpus == len(executed_ids) == len(counted_ids) > 0
+    ok = counts_agree and not mismatches
+
+    result = {
+        "ok": ok,
+        "unit": unit,
+        "cases_in_corpus": cases_in_corpus,
+        "cases_executed": len(executed_ids),
+        "cases_counted": len(counted_ids),
+        "mismatches": mismatches[:20],
+        "mismatch_count": len(mismatches),
+        "route_violations": route_violation_reports,
+        "state_changes": state_changes_report,
+        "crossed_shims": sorted(crossed_shims),
+        "denied": denied_report,
+    }
+
+    target_sha256 = cm_common.sha256_file(target_path)
+    key = ledger.cache_key(root, cfg, unit)
+    key_sha256 = cm_common.sha256_json(key)
+    persisted = dict(result)
+    persisted["target_sha256"] = target_sha256
+    persisted["cache_key"] = key
+    persisted["key_sha256"] = key_sha256
+    cm_common.atomic_write_json(cm_common.unit_run_dir(root, unit) / "r3.json", persisted)
+
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--unit", required=True)
+    args = parser.parse_args()
+
+    root = cm_common.resolve_root(args.root)
+    cfg = cm_common.load_config(root)
+    unit = cm_common.require_unit(root, args.unit)
+
+    result = run(root, cfg, unit)
+    cm_common.emit(result)
+    return cm_common.EXIT_OK if result["ok"] else cm_common.EXIT_FAIL
+
+
+if __name__ == "__main__":
+    cm_common.run_main(main)

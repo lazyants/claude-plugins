@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "cases": [
+    {"id": "p1", "call": "apply_discount", "args": [100, 10]},
+    {"id": "p2", "call": "apply_discount", "args": [19.99, 0]},
+    {"id": "p3", "call": "apply_discount", "args": [5, 150]},
+    {"id": "p4", "call": "apply_discount", "args": [-1, 5]},
+    {"id": "p5", "call": "normalize_items", "args": [["b", "a", "c"]]},
+    {"id": "p6", "call": "dedupe", "args": [[3, 1, 3, 2, 1]]},
+    {"id": "p7", "call": "dedupe", "args": [[]]},
+    {"id": "p8", "call": "describe", "args": [7]}
+  ]
+}

@@ -169,7 +169,8 @@ to stand in for the unit that owns the frozen rows itself. So after this freeze,
 shims the pilot's dependencies only (for example `shop.money`), never the pilot itself: nothing
 with frozen rows imports the pilot yet — the pilot is what R1 is about to port directly.
 `ledger.py pilot` runs last: it records `unported_dependencies` read from both the inventory and
-the shim census `bridge.py` just wrote, so it must run after `bridge.py`, not before.
+the shim census `bridge.py` just wrote, so it must run after `bridge.py`, not before. Add
+`--check` to preview what `bridge.py` would do without writing anything.
 
 ### W3b — Pilot behavioral net
 
@@ -189,6 +190,11 @@ code supplies those) and merges them into `cases/<PILOT>.json`. `net_capture.py`
   <verdict>`);
 - refuses below the configured `coverage_floor_pct`, naming the uncovered lines — dispatch
   another `cases` turn and re-run.
+
+Every run — success or refusal — is also persisted to `runs/<PILOT>/net_capture.json`. A
+below-floor refusal's `uncovered_lines` there is exactly what the next `sandbox.py dispatch
+--kind cases` reads into that turn's `uncovered_lines.json`, so the cases turn that follows a
+coverage failure is actually told what to aim at, not repeating the same turn blind.
 
 On success it writes `nets/<PILOT>.json` and the `net.lock.json` entry.
 
@@ -327,7 +333,7 @@ command.
 | Empty or shape-invalid `cases/<unit>.json` | `net_capture.py` | dispatch another `cases` turn |
 | A unit changes state reachable from the loaded modules | `net_capture.py` (`stateful`) | pick a different pilot, or leave the unit out of scope and port it by hand |
 | The two capture environments disagree | `net_capture.py` (`nondeterministic`) | same as above |
-| Coverage below `coverage_floor_pct` | `net_capture.py` | dispatch another `cases` turn, re-run |
+| Coverage below `coverage_floor_pct` | `net_capture.py` | dispatch another `cases` turn (it reads the refusal's `uncovered_lines` from `runs/<unit>/net_capture.json`), re-run |
 | Cases changed after capture | `ledger.py eligible`, `diff_gate.py` | `net_capture.py` again |
 | Inventory stale for the unit's closure | `ledger.py eligible` | `inventory.py` |
 | Legacy closure drifted since the net was captured | `diff_gate.py`, `ledger.py eligible` | `inventory.py`, then `ledger.py accept-drift`, then `net_capture.py` |

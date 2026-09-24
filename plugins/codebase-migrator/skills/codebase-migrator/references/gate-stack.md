@@ -27,6 +27,18 @@ R0 is re-checked by `ledger.py converge` and is a precondition of every `sandbox
 persistent state changed by any observed case — is `net_capture.py`'s `stateful` verdict,
 folded into the `net.lock.json` check above.
 
+`net_capture.py` persists every run — success or refusal — to `runs/U/net_capture.json`,
+including the `stateful`/`nondeterministic`/`below_floor` payload the run failed with. A
+below-floor refusal's `uncovered_lines` there is what `sandbox.py dispatch --kind cases` reads
+into that turn's `uncovered_lines.json` pack input, so the coverage-floor loop (`SKILL.md` W3b/
+W4c) actually points the next `cases` turn at what the previous capture missed, rather than
+repeating a blind guess.
+
+`--kind cases` is dispatched under a lighter precondition, since a net cannot exist before its
+cases do: only the unit's **static** eligibility (from `inventory.json`) and a frozen row for
+every one of its public symbols are required — no net, no coverage floor, no determinism
+verdict.
+
 ## R1 — port (codex, one turn)
 
 `sandbox.py dispatch --root R --unit U --kind port`. Writes the target unit against its pack
@@ -58,7 +70,10 @@ No LLM, no execution of the target code. Checks, each named in the `checks` obje
    R2's — a static rule for hidden state has to enumerate syntax shapes and always misses one,
    while a runtime snapshot compares values and sees all of them the same way.
 
-Exit 0 only if every check passes.
+Exit 0 only if every check passes. The stdout object (`ok`, `unit`, `checks`, `problems`) is
+persisted verbatim to `runs/U/r2.json`, with the same three fields R3 appends —
+`target_sha256`, `cache_key`, `key_sha256` — computed the same way and checked the same way by
+`ledger.py converge`.
 
 ## R3 — differential gate (`diff_gate.py --root R --unit U`)
 
@@ -79,6 +94,13 @@ relative to the replay stage:
   and is refused regardless of how well the values match;
 - any *other* staged legacy file that appears must belong to a unit in `U`'s transitive
   `imports_units` — a dependency's shim being imported, which is legal;
+- **a legacy file that is not itself a unit is exempt from the route rule when it is an ancestor
+  package `__init__.py`** of a unit in `U`'s closure or of `U` itself — for example
+  `legacy/shop/__init__.py`, which holds only a docstring and so is never a unit (`inventory.py`
+  never lists it), but which Python still executes every time it imports `shop.pricing`. That
+  execution is a mechanical side effect of the import, not a reach the port chose to make, so it
+  is not counted as touching the unit's own file and not counted as an out-of-closure violation
+  either;
 - the staged **target** file of `U` must be present in every case's route (the target was
   actually entered);
 - `crossed_shims` — the set of dependency units seen in case routes — is reported so W4 can
@@ -98,9 +120,18 @@ target vs. the net's recorded legacy observation, with target `$obj` qualnames a
 custom exception class compares equal to the source class it replaces). Under
 `bug_for_bug_with_exceptions`, cases listed in `exceptions.json` compare against their declared
 expectation instead of legacy — and a listed case that still matches legacy fails too, since the
-defect it was supposed to remove is still there.
+defect it was supposed to remove is still there. Each mismatch is reported as `{"case_id",
+"channel", "legacy", "target"}`, where `channel` is the environment and the channel together —
+`"A:return"`, `"B:error"` — since the same channel can mismatch in one environment and not the
+other; the first 20 are kept in full, and `mismatch_count` always carries the true total even
+when the list was truncated.
 
-Exit 0 only when all three counts agree, are non-zero, and there is no mismatch.
+Exit 0 only when all three counts agree, are non-zero, and there is no mismatch. The stdout
+object is persisted verbatim to `runs/U/r3.json`, with three fields appended: `target_sha256`
+(the port's digest at the time of this run), `cache_key` (the full key from `ledger.py`'s
+`cache_key()`), and `key_sha256` (its digest) — `ledger.py converge` later requires both
+`target_sha256` and `key_sha256` on this file to equal the unit's *current* values before it will
+accept R3 as still valid.
 
 ## R4 — review (codex, read-only)
 
@@ -134,6 +165,15 @@ nowhere else for a call's effects to go.
 
 **Gates, not channels** (any non-empty value means the case is never clean, in capture or
 replay): `state_changes`, `denied`, `harness_error`.
+
+`denied` also carries the **tamper check**: every traced window is bracketed by exactly one
+start and one stop of the harness's own tracer (`sys.settrace` for capture) or profiler
+(`sys.setprofile` for replay). A hidden counter installed alongside the audit hook records every
+call to either function; if the window's own start/stop pair does not account for the whole
+delta — for example code inside the window calls `sys.setprofile(None)` and restores it, or
+calls into the wrong tracer — the case's `denied` list gains `"tamper:sys.settrace"` or
+`"tamper:sys.setprofile"`, and the case is never clean. A tampered **import window** denies
+every case in that run, not just the one that tampered.
 
 ### Canonical encoding
 

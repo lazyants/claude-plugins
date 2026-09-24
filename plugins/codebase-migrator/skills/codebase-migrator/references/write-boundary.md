@@ -60,7 +60,9 @@ the codex process and again after. Any difference means an attempt got through d
 allowlist and the probe: the run is rejected (`tampered`, naming every changed path), **nothing
 from the stage is promoted**, and the attempt is still recorded in the unit's dispatch journal.
 `unit_gate.py`'s `protected_intact` check re-verifies the same digests independently, so
-prevention that is never re-checked is not trusted on its own. This backstop is only as strong
+prevention that is never re-checked is not trusted on its own. `sandbox.py digests --root R`
+prints the same digest map's own count and combined sha256 on demand, read-only, for a manual
+before/after comparison outside a dispatch. This backstop is only as strong
 as the protection of the digest store itself — which is exactly why `net.lock.json` and
 `registry.lock.json` sit inside the protected set, not beside it.
 
@@ -95,8 +97,10 @@ re-checks the protected digests, and only then promotes:
   unambiguously. **A malformed entry never discards the valid findings, and it is never
   discarded either** — a review round with any `malformed` entry can never converge the unit
   (M10); the way forward is a fresh review round, not editing the malformed text by hand.
-- **`cases`** — `stage/out/cases.json` (same `lstat` regular-file check), shape-validated per
-  case; new case ids are merged into `cases/U.json`, existing ids are never replaced.
+- **`cases`** — `stage/out/cases.json` (same `lstat` regular-file check), each entry
+  shape-validated (`id`, `call` required strings; `args`/`init_args` lists; `kwargs`/
+  `init_kwargs` objects when present); new case ids are merged into `cases/U.json`, existing ids
+  are never replaced. The durable `cases/U.json` is `{"schema": 1, "cases": [...]}`.
 
 Every dispatch appends one line to `runs/U/journal.jsonl`: timestamp, kind, round, stage path,
 exit code, any tampering, what was promoted, what was ignored. The journal is append-only and is

@@ -2,6 +2,8 @@
 
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ import unit_gate
 
 TESTS_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = TESTS_DIR / "fixtures"
+UNIT_GATE_SCRIPT = Path(unit_gate.__file__).resolve()
 
 ALL_CHECKS = (
     "target_present",
@@ -273,3 +276,34 @@ def test_cli_main_persists_r2_across_two_invocations_on_the_same_root(shop_root,
     assert code_second == cm_common.EXIT_OK
     report_second = json.loads((root / "runs" / "shop.pricing" / "r2.json").read_text(encoding="utf-8"))
     assert report_second["key_sha256"] == report_first["key_sha256"]
+
+
+def test_unit_gate_as_a_real_subprocess_against_an_existing_target_root(shop_root):
+    """`unit_gate.py` invoked exactly as the pipeline would, in its own
+    process, against a root whose target_root already exists -- built here by
+    `_build_shop_root()` calling `cm_common.load_config()` once, then
+    `_install_port()` creating target_root, so this subprocess's own
+    `load_config()` is a second call against the same root. This is real
+    process-boundary coverage, not `main()` called in-process."""
+    root, cfg = shop_root
+    _install_port(cfg, "good")
+
+    proc = subprocess.run(
+        [sys.executable, str(UNIT_GATE_SCRIPT), "--root", str(root), "--unit", "shop.pricing"],
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert proc.returncode == cm_common.EXIT_OK, proc.stderr
+    stdout_lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    assert len(stdout_lines) == 1, proc.stdout
+    payload = json.loads(stdout_lines[0])
+    assert payload["ok"] is True
+    assert payload["unit"] == "shop.pricing"
+    assert all(payload["checks"].values()), payload["checks"]
+
+    report = json.loads((root / "runs" / "shop.pricing" / "r2.json").read_text(encoding="utf-8"))
+    assert report["ok"] is True
+    assert "key_sha256" in report
+    assert report["target_sha256"] == cm_common.sha256_file(
+        cm_common.target_file(root, cfg, "shop.pricing")
+    )

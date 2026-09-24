@@ -184,13 +184,20 @@ def _latest_review(run_dir: Path):
     return _try_read_json(best) if best is not None else None
 
 
-def _latest_uncovered(run_dir: Path):
-    """The uncovered-lines report from the last `net_capture.py` run for this
-    unit, if that report is persisted at `runs/<unit>/net_capture.json`.
-    Absent when no such run has happened yet, or net_capture.py does not
-    persist one (its own contract does not pin a location for this file)."""
+def _latest_uncovered(run_dir: Path) -> list:
+    """The `uncovered_lines` reported by the last `net_capture.py` run for
+    this unit. `net_capture.py` persists `runs/<unit>/net_capture.json` on
+    every run, refusals included, and reads back its own `uncovered_lines`
+    the same way (a below-floor refusal is exactly the run whose
+    `uncovered_lines` the next cases turn needs). Empty when no capture has
+    run yet, or the persisted run never reached a coverage measurement (an
+    earlier refusal, such as a stale inventory, has no `uncovered_lines` to
+    report)."""
     doc = _try_read_json(run_dir / "net_capture.json")
-    return doc
+    if not isinstance(doc, dict):
+        return []
+    uncovered = doc.get("uncovered_lines")
+    return uncovered if isinstance(uncovered, list) else []
 
 
 def _build_pack(root: Path, cfg: dict, unit: str, kind: str, round_num: int) -> dict:
@@ -232,9 +239,7 @@ def _build_pack(root: Path, cfg: dict, unit: str, kind: str, round_num: int) -> 
 
     if kind == "cases":
         uncovered = _latest_uncovered(run_dir)
-        pack["uncovered_lines.json"] = json.dumps(
-            uncovered if uncovered is not None else {"uncovered_lines": []}, indent=2, sort_keys=True
-        )
+        pack["uncovered_lines.json"] = json.dumps({"uncovered_lines": uncovered}, indent=2, sort_keys=True)
         cases_path = root / "cases" / f"{unit}.json"
         existing = _try_read_json(cases_path) or {"cases": []}
         pack["existing_cases.json"] = json.dumps(existing, indent=2, sort_keys=True)
@@ -420,7 +425,7 @@ def _promote_cases(root: Path, unit: str, stage: Path) -> tuple[list, list]:
         cm_common.fail("out/cases.json is not the pinned shape", cm_common.EXIT_FAIL, unit=unit)
 
     cases_path = root / "cases" / f"{unit}.json"
-    existing_doc = _try_read_json(cases_path) or {"cases": []}
+    existing_doc = _try_read_json(cases_path) or {"schema": 1, "cases": []}
     existing_ids = {c.get("id") for c in existing_doc.get("cases", [])}
 
     invalid = []
@@ -433,7 +438,7 @@ def _promote_cases(root: Path, unit: str, stage: Path) -> tuple[list, list]:
             continue
         valid_new.append(case)
 
-    merged = {"cases": existing_doc.get("cases", []) + valid_new}
+    merged = {"schema": 1, "cases": existing_doc.get("cases", []) + valid_new}
     cm_common.atomic_write_json(cases_path, merged)
     promoted = [f"cases/{unit}.json (+{len(valid_new)})"]
     ignored = [f"invalid case: {cid}" for cid in invalid]

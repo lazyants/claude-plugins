@@ -1,7 +1,10 @@
 """Tests for sandbox.py -- the write-boundary dispatcher (plan sections 4.10, 7, owner D)."""
 
 import json
+import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +16,7 @@ import sandbox
 TESTS_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = TESTS_DIR / "fixtures"
 FAKE_CODEX = TESTS_DIR / "fakes" / "fake_codex.py"
+SANDBOX_SCRIPT = Path(sandbox.__file__).resolve()
 
 
 def _shop_cfg(root: Path) -> dict:
@@ -386,7 +390,7 @@ def test_review_empty_findings_is_a_valid_answer(shop_root, monkeypatch, capsys)
 def test_cases_dispatch_merges_new_ids_only(shop_root, monkeypatch, capsys):
     root, cfg = shop_root
     _record_probe(root, monkeypatch)
-    existing = {"cases": [{"id": "p1", "call": "apply_discount", "args": [100, 10]}]}
+    existing = {"schema": 1, "cases": [{"id": "p1", "call": "apply_discount", "args": [100, 10]}]}
     cm_common.atomic_write_json(root / "cases" / "shop.pricing.json", existing)
 
     payload = json.dumps(
@@ -404,6 +408,7 @@ def test_cases_dispatch_merges_new_ids_only(shop_root, monkeypatch, capsys):
 
     assert code == cm_common.EXIT_OK
     merged = json.loads((root / "cases" / "shop.pricing.json").read_text(encoding="utf-8"))
+    assert merged["schema"] == 1
     ids = [c["id"] for c in merged["cases"]]
     assert ids == ["p1", "p9"]
     assert merged["cases"][0]["args"] == [100, 10]
@@ -526,6 +531,45 @@ def test_cli_main_probe_then_dispatch_across_two_invocations_on_the_same_root(sh
     )
     code_dispatch = sandbox.main()
     assert code_dispatch == cm_common.EXIT_OK
+
+    target_path = cm_common.target_file(root, cfg, "shop.pricing")
+    assert target_path.read_text(encoding="utf-8") == port_text
+
+
+def test_sandbox_dispatch_as_a_real_subprocess_against_fake_codex(shop_root, monkeypatch):
+    """`sandbox.py dispatch` invoked exactly as the pipeline would, in its own
+    process, against fake_codex, on a root whose target_root already exists
+    before this call (created here directly, not by a prior dispatch) --
+    `_build_shop_root()` already called `cm_common.load_config()` once, so
+    this subprocess's own `load_config()` is a second call against the same
+    root. Real process-boundary coverage of the write-boundary dispatcher,
+    not `main()` called in-process."""
+    root, cfg = shop_root
+    _freeze_net(root, cfg, "shop.pricing")
+    _record_probe(root, monkeypatch)
+    Path(cfg["target_root"]).mkdir(parents=True, exist_ok=True)
+    port_text = (FIXTURES_DIR / "ports" / "good" / "shop2" / "pricing.py").read_text(encoding="utf-8")
+
+    env = dict(os.environ)
+    env["CM_CODEX_BIN"] = str(FAKE_CODEX)
+    env["FAKE_CODEX_SCENARIO"] = "port_ok"
+    env["FAKE_CODEX_TARGET_PY"] = port_text
+
+    proc = subprocess.run(
+        [
+            sys.executable, str(SANDBOX_SCRIPT), "dispatch",
+            "--root", str(root), "--unit", "shop.pricing", "--kind", "port", "--round", "1",
+        ],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+
+    assert proc.returncode == cm_common.EXIT_OK, proc.stderr
+    stdout_lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    assert len(stdout_lines) == 1, proc.stdout
+    payload = json.loads(stdout_lines[0])
+    assert payload["ok"] is True
+    assert payload["promoted"] == ["out/target.py"]
+    assert payload["tampered"] == []
 
     target_path = cm_common.target_file(root, cfg, "shop.pricing")
     assert target_path.read_text(encoding="utf-8") == port_text
