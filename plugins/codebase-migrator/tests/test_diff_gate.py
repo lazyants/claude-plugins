@@ -57,6 +57,14 @@ def _sibling_legacy_root(root: Path) -> Path:
     return _register_legacy_sibling(root.parent / (root.name + "-legacy"))
 
 
+def _sibling_target_root(root: Path) -> Path:
+    """A target directory OUTSIDE `root`, next to `legacy_root` —
+    `migration_validate` also refuses a `target_root` that equals, sits
+    inside, or contains the durable root (plan 2.1), so a relative value
+    like `"target"` (which resolves under `root`) is no longer valid."""
+    return _register_legacy_sibling(root.parent / (root.name + "-target"))
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_created_legacy_siblings():
     """`work_root` (conftest.py, owned by A) only removes its own
@@ -71,6 +79,7 @@ def _cleanup_created_legacy_siblings():
 
 def _scaffold(root: Path, coverage_floor: int = 50) -> dict:
     legacy_root = _sibling_legacy_root(root)
+    target_root = _sibling_target_root(root)
     shutil.copytree(LEGACY_SRC, legacy_root / "shop", dirs_exist_ok=True)
     (root / "cases").mkdir(parents=True, exist_ok=True)
     (root / "nets").mkdir(parents=True, exist_ok=True)
@@ -82,7 +91,7 @@ def _scaffold(root: Path, coverage_floor: int = 50) -> dict:
         "target_stack": "python",
         "legacy_root": str(legacy_root),
         "legacy_package": "shop",
-        "target_root": "target",
+        "target_root": str(target_root),
         "target_package": "shop2",
         "fidelity_policy": "bug_for_bug",
         "seam": "in_process",
@@ -126,8 +135,8 @@ def _capture_pricing(root: Path, cfg: dict) -> None:
     assert result["ok"] is True, result
 
 
-def _install_port(root: Path, variant: str) -> None:
-    target = root / "target" / "shop2"
+def _install_port(cfg: dict, variant: str) -> None:
+    target = Path(cfg["target_root"]) / "shop2"
     shutil.rmtree(target, ignore_errors=True)
     shutil.copytree(PORTS_DIR / variant / "shop2", target, ignore=shutil.ignore_patterns("__pycache__"))
 
@@ -138,7 +147,7 @@ def test_harness_failure_still_runs_the_tamper_check(work_root, monkeypatch, cap
     the exception unwinding out of the replay loop must never skip it."""
     cfg = _scaffold(work_root)
     _capture_pricing(work_root, cfg)
-    _install_port(work_root, "good")
+    _install_port(cfg, "good")
 
     tamper_path = Path(cfg["legacy_root"]) / "shop" / "TAMPERED.txt"
 
@@ -163,7 +172,7 @@ def test_harness_failure_still_runs_the_tamper_check(work_root, monkeypatch, cap
 def test_good_port_passes_with_equal_nonzero_counts_both_envs(work_root):
     cfg = _scaffold(work_root)
     _capture_pricing(work_root, cfg)
-    _install_port(work_root, "good")
+    _install_port(cfg, "good")
 
     result = diff_gate.run(work_root, cfg, "shop.pricing")
     assert result["ok"] is True, result
@@ -190,7 +199,7 @@ def test_ancestor_package_init_is_allowed_but_units_own_legacy_file_is_not(work_
     cfg = _scaffold(work_root)
     _capture_pricing(work_root, cfg)
 
-    target_dir = work_root / "target" / "shop2"
+    target_dir = Path(cfg["target_root"]) / "shop2"
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / "__init__.py").write_text("")
     (target_dir / "money.py").write_text(
@@ -246,7 +255,7 @@ def test_ancestor_package_init_is_allowed_but_units_own_legacy_file_is_not(work_
 
     # And the negative half: a port that reaches its OWN legacy file is
     # still refused, whatever else is on the route.
-    _install_port(work_root, "back_to_legacy")
+    _install_port(cfg, "back_to_legacy")
     reach_result = diff_gate.run(work_root, cfg, "shop.pricing")
     assert reach_result["ok"] is False
     assert any(
@@ -257,7 +266,7 @@ def test_ancestor_package_init_is_allowed_but_units_own_legacy_file_is_not(work_
 def test_appending_a_case_after_capture_refuses_on_cases_digest(work_root):
     cfg = _scaffold(work_root)
     _capture_pricing(work_root, cfg)
-    _install_port(work_root, "good")
+    _install_port(cfg, "good")
 
     doc = cm_common.read_json(work_root / "cases" / "shop.pricing.json", "cases")
     doc["cases"].append({"id": "p9", "call": "apply_discount", "args": [50, 20]})
@@ -276,7 +285,7 @@ def test_duplicate_case_ids_in_the_net_are_refused(work_root):
     produce one) and confirm diff_gate refuses before doing any replay."""
     cfg = _scaffold(work_root)
     _capture_pricing(work_root, cfg)
-    _install_port(work_root, "good")
+    _install_port(cfg, "good")
 
     net_path = work_root / "nets" / "shop.pricing.json"
     net_doc = cm_common.read_json(net_path, "net")
@@ -295,7 +304,7 @@ def test_duplicate_case_ids_in_the_net_are_refused(work_root):
 def test_shim_as_target_is_refused(work_root):
     cfg = _scaffold(work_root)
     _capture_pricing(work_root, cfg)
-    target_dir = work_root / "target" / "shop2"
+    target_dir = Path(cfg["target_root"]) / "shop2"
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / "__init__.py").write_text("")
     (target_dir / "pricing.py").write_text(
@@ -318,7 +327,7 @@ def test_legacy_dependency_drift_refuses_naming_it_then_recovers(work_root, caps
     # already satisfies it.
     cfg = _scaffold(work_root)
     _capture_pricing(work_root, cfg)
-    _install_port(work_root, "good")
+    _install_port(cfg, "good")
     assert diff_gate.run(work_root, cfg, "shop.pricing")["ok"] is True
 
     money_path = Path(cfg["legacy_root"]) / "shop" / "money.py"
@@ -413,7 +422,7 @@ VARIANT_CHECKS = {
 def test_each_variant_fails_for_its_own_reason(work_root, variant):
     cfg = _scaffold(work_root)
     _capture_pricing(work_root, cfg)
-    _install_port(work_root, variant)
+    _install_port(cfg, variant)
 
     result = diff_gate.run(work_root, cfg, "shop.pricing")
     assert result["ok"] is False, (variant, result)
@@ -435,7 +444,7 @@ def test_main_module_tampering_cannot_hide_a_legacy_route(work_root):
     cfg = _scaffold(work_root)
     _capture_pricing(work_root, cfg)
 
-    target_dir = work_root / "target" / "shop2"
+    target_dir = Path(cfg["target_root"]) / "shop2"
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / "__init__.py").write_text("")
     shutil.copy(PORTS_DIR / "good" / "shop2" / "money.py", target_dir / "money.py")
@@ -481,7 +490,7 @@ def test_crossed_shims_nonempty_when_pricing_is_still_a_shim(work_root):
     result = net_capture.run(work_root, cfg, "shop.cart")
     assert result["ok"] is True, result
 
-    target_dir = work_root / "target" / "shop2"
+    target_dir = Path(cfg["target_root"]) / "shop2"
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / "__init__.py").write_text("")
     shutil.copy(PORTS_DIR / "good" / "shop2" / "money.py", target_dir / "money.py")
@@ -501,7 +510,7 @@ def test_bug_for_bug_with_exceptions_rejects_a_case_matching_legacy(work_root):
     cfg["fidelity_policy"] = "bug_for_bug_with_exceptions"
     cm_common.atomic_write_json(work_root / "migration.json", cfg)
     _capture_pricing(work_root, cfg)
-    _install_port(work_root, "good")
+    _install_port(cfg, "good")
 
     net_doc = cm_common.read_json(work_root / "nets" / "shop.pricing.json", "nets")
     p1 = next(o for o in net_doc["observations"] if o["case_id"] == "p1")
@@ -528,7 +537,7 @@ def test_bug_for_bug_with_exceptions_rejects_a_no_op_declaration(work_root, caps
     cfg["fidelity_policy"] = "bug_for_bug_with_exceptions"
     cm_common.atomic_write_json(work_root / "migration.json", cfg)
     _capture_pricing(work_root, cfg)
-    _install_port(work_root, "good")
+    _install_port(cfg, "good")
 
     net_doc = cm_common.read_json(work_root / "nets" / "shop.pricing.json", "nets")
     p1 = next(o for o in net_doc["observations"] if o["case_id"] == "p1")
@@ -547,6 +556,98 @@ def test_bug_for_bug_with_exceptions_rejects_a_no_op_declaration(work_root, caps
     assert exc.value.code == cm_common.EXIT_FAIL
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert "p1" in payload.get("no_op_exception_ids", [])
+
+
+def test_bug_for_bug_with_exceptions_rejects_an_unknown_channel(work_root, capsys):
+    """A typo'd channel key (`retrun` for `return`) never matches the
+    legacy observation on that key — `legacy_obs.get("retrun")` is `None`,
+    which the declared value almost never equals — so the no-op check
+    alone would read the entry as a real, non-no-op exception. Meanwhile
+    `_expected_for_case` adds the unused key to a dict the R3 comparison
+    loop never looks at (it iterates `observe.BEHAVIOURAL_CHANNELS` only),
+    so a target that never implemented the declared fix (still matches
+    legacy on every real channel) would pass anyway. Must be refused
+    before any replay runs."""
+    cfg = _scaffold(work_root)
+    cfg["fidelity_policy"] = "bug_for_bug_with_exceptions"
+    cm_common.atomic_write_json(work_root / "migration.json", cfg)
+    _capture_pricing(work_root, cfg)
+    _install_port(cfg, "good")
+
+    exceptions_doc = {
+        "schema": 1,
+        "cases": {"shop.pricing/p1": {"expected": {"retrun": 2}, "reason": "test: typo'd channel"}},
+    }
+    cm_common.atomic_write_json(work_root / "exceptions.json", exceptions_doc)
+
+    with pytest.raises(SystemExit) as exc:
+        diff_gate.run(work_root, cfg, "shop.pricing")
+    assert exc.value.code == cm_common.EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert "p1" in payload.get("invalid_exception_ids", {})
+
+
+def test_bug_for_bug_with_exceptions_rejects_an_unknown_case_id(work_root, capsys):
+    """A case id that names no observation in this unit's net is a stale
+    or mistyped declaration that can never apply to any replayed case —
+    nothing else in the pipeline refuses it (`_no_op_exception_ids` itself
+    used to silently skip it as "not this check's job"), so it must be
+    refused here."""
+    cfg = _scaffold(work_root)
+    cfg["fidelity_policy"] = "bug_for_bug_with_exceptions"
+    cm_common.atomic_write_json(work_root / "migration.json", cfg)
+    _capture_pricing(work_root, cfg)
+    _install_port(cfg, "good")
+
+    exceptions_doc = {
+        "schema": 1,
+        "cases": {
+            "shop.pricing/p99": {"expected": {"return": {"$float": "1.0"}}, "reason": "test: stale id"}
+        },
+    }
+    cm_common.atomic_write_json(work_root / "exceptions.json", exceptions_doc)
+
+    with pytest.raises(SystemExit) as exc:
+        diff_gate.run(work_root, cfg, "shop.pricing")
+    assert exc.value.code == cm_common.EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert "p99" in payload.get("invalid_exception_ids", {})
+
+
+def test_bug_for_bug_with_exceptions_rejects_a_non_object_expected(work_root, capsys):
+    cfg = _scaffold(work_root)
+    cfg["fidelity_policy"] = "bug_for_bug_with_exceptions"
+    cm_common.atomic_write_json(work_root / "migration.json", cfg)
+    _capture_pricing(work_root, cfg)
+    _install_port(cfg, "good")
+
+    exceptions_doc = {
+        "schema": 1,
+        "cases": {"shop.pricing/p1": {"expected": "not-an-object", "reason": "test: wrong shape"}},
+    }
+    cm_common.atomic_write_json(work_root / "exceptions.json", exceptions_doc)
+
+    with pytest.raises(SystemExit) as exc:
+        diff_gate.run(work_root, cfg, "shop.pricing")
+    assert exc.value.code == cm_common.EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert "p1" in payload.get("invalid_exception_ids", {})
+
+
+def test_invalid_exception_entries_accepts_a_well_formed_entry(work_root):
+    """A validly-shaped entry (a real case id, a non-empty `expected`
+    object naming only real behavioural channels) is not what this check
+    is for — `_no_op_exception_ids` and the comparison loop still decide
+    whether it actually holds, exactly as before this check existed
+    (`test_bug_for_bug_with_exceptions_rejects_a_case_matching_legacy` and
+    `..._rejects_a_no_op_declaration` exercise that through the full
+    `run()` pipeline)."""
+    cfg = _scaffold(work_root)
+    _capture_pricing(work_root, cfg)
+
+    net_doc = cm_common.read_json(work_root / "nets" / "shop.pricing.json", "nets")
+    exceptions = {"p1": {"expected": {"return": {"$float": "90.5"}}, "reason": "test: well-formed"}}
+    assert diff_gate._invalid_exception_entries(exceptions, net_doc) == {}
 
 
 def test_ancestor_init_helper_reached_through_a_shim_is_not_a_false_route_violation(work_root):
@@ -569,6 +670,7 @@ def test_ancestor_init_helper_reached_through_a_shim_is_not_a_false_route_violat
         "from pkgf.dep import dep_fn\n\n\ndef apply(x):\n    return dep_fn(x) + 1\n"
     )
 
+    target_root = _sibling_target_root(work_root)
     (work_root / "cases").mkdir(parents=True, exist_ok=True)
     (work_root / "nets").mkdir(parents=True, exist_ok=True)
     (work_root / "runs").mkdir(parents=True, exist_ok=True)
@@ -579,7 +681,7 @@ def test_ancestor_init_helper_reached_through_a_shim_is_not_a_false_route_violat
         "target_stack": "python",
         "legacy_root": str(legacy_root),
         "legacy_package": "pkgf",
-        "target_root": "target",
+        "target_root": str(target_root),
         "target_package": "pkgf2",
         "fidelity_policy": "bug_for_bug",
         "seam": "in_process",
@@ -618,7 +720,7 @@ def test_ancestor_init_helper_reached_through_a_shim_is_not_a_false_route_violat
     capture_result = net_capture.run(work_root, cfg, "pkgf.mainmod")
     assert capture_result["ok"] is True, capture_result
 
-    target_dir = work_root / "target" / "pkgf2"
+    target_dir = target_root / "pkgf2"
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / "__init__.py").write_text("")
     (target_dir / "dep.py").write_text(

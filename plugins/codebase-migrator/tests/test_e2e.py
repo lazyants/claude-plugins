@@ -76,7 +76,7 @@ def test_pilot_path_shop_pricing(work_root):
             "target_stack": "python",
             "legacy_root": str(legacy_root),
             "legacy_package": "shop",
-            "target_root": str(root / "target"),
+            "target_root": str(work_root / "target"),
             "target_package": "shop2",
             "fidelity_policy": "bug_for_bug",
             "seam": "in_process",

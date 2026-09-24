@@ -148,6 +148,31 @@ def test_target_root_must_not_overlap_legacy_root(work_root):
     assert any(p["key"] == "target_root" for p in problems)
 
 
+def test_target_root_must_not_overlap_durable_root(work_root):
+    # a relative target_root resolves under the durable root
+    cfg, root = _base_cfg(work_root)
+    cfg["target_root"] = "target"
+    problems = migration_validate.validate(cfg, root)
+    assert any(p["key"] == "target_root" and "durable root" in p["message"] for p in problems)
+
+    # target_root equals the durable root
+    cfg, root = _base_cfg(work_root)
+    cfg["target_root"] = str(root)
+    problems = migration_validate.validate(cfg, root)
+    assert any(p["key"] == "target_root" and "durable root" in p["message"] for p in problems)
+
+    # target_root contains the durable root
+    cfg, root = _base_cfg(work_root)
+    nested_root = Path(cfg["target_root"]) / "nested_root"
+    problems = migration_validate.validate(cfg, nested_root)
+    assert any(p["key"] == "target_root" and "durable root" in p["message"] for p in problems)
+
+    # the ordinary sibling layout from _base_cfg is still accepted
+    cfg, root = _base_cfg(work_root)
+    problems = migration_validate.validate(cfg, root)
+    assert not any(p["key"] == "target_root" for p in problems)
+
+
 def test_null_in_any_enum_field_is_a_problem(work_root):
     for key in migration_validate._ENUMS:
         cfg, root = _base_cfg(work_root)

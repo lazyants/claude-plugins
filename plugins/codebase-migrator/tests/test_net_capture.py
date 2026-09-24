@@ -44,6 +44,14 @@ def _sibling_legacy_root(root: Path) -> Path:
     return _register_legacy_sibling(root.parent / (root.name + "-legacy"))
 
 
+def _sibling_target_root(root: Path) -> Path:
+    """A target directory OUTSIDE `root` — `migration_validate` refuses a
+    `target_root` that equals, sits inside, or contains the durable root
+    (a relative value like `"target"` resolves under it), so it can never
+    live nested under `root`."""
+    return _register_legacy_sibling(root.parent / (root.name + "-target"))
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_created_legacy_siblings():
     """`work_root` (conftest.py, owned by A) only removes its own
@@ -58,6 +66,7 @@ def _cleanup_created_legacy_siblings():
 
 def _scaffold(root: Path, coverage_floor: int = 50) -> dict:
     legacy_root = _sibling_legacy_root(root)
+    target_root = _sibling_target_root(root)
     shutil.copytree(LEGACY_SRC, legacy_root / "shop", dirs_exist_ok=True)
     (root / "cases").mkdir(parents=True, exist_ok=True)
     (root / "nets").mkdir(parents=True, exist_ok=True)
@@ -69,7 +78,7 @@ def _scaffold(root: Path, coverage_floor: int = 50) -> dict:
         "target_stack": "python",
         "legacy_root": str(legacy_root),
         "legacy_package": "shop",
-        "target_root": "target",
+        "target_root": str(target_root),
         "target_package": "shop2",
         "fidelity_policy": "bug_for_bug",
         "seam": "in_process",
@@ -158,6 +167,7 @@ def test_net_capture_wires_the_ab_comparison_for_hash_order_nondeterminism(work_
     static flag would ever catch this) proves the real A/B environments
     reach the verdict end to end, and that no net is written on refusal."""
     legacy_root = _sibling_legacy_root(work_root)
+    target_root = _sibling_target_root(work_root)
     (legacy_root / "oddpkg").mkdir(parents=True, exist_ok=True)
     (legacy_root / "oddpkg" / "__init__.py").write_text('"""Throwaway package."""\n')
     (legacy_root / "oddpkg" / "setmod.py").write_text(
@@ -173,7 +183,7 @@ def test_net_capture_wires_the_ab_comparison_for_hash_order_nondeterminism(work_
         "target_stack": "python",
         "legacy_root": str(legacy_root),
         "legacy_package": "oddpkg",
-        "target_root": "target",
+        "target_root": str(target_root),
         "target_package": "oddpkg2",
         "fidelity_policy": "bug_for_bug",
         "seam": "in_process",

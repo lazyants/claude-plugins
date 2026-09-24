@@ -63,7 +63,7 @@ def shop_inventory(tmp_path_factory):
     root.mkdir()
     legacy = base / "legacy"
     shutil.copytree(FIXTURES_DIR / "legacy", legacy)
-    cfg = _cfg(legacy_root=str(legacy), target_root=str(root / "target"))
+    cfg = _cfg(legacy_root=str(legacy), target_root=str(base / "target"))
     (root / "migration.json").write_text(json.dumps(cfg), encoding="utf-8")
     proc = subprocess.run(
         [sys.executable, str(SCRIPTS_DIR / "inventory.py"), "--root", str(root)],
@@ -267,9 +267,10 @@ def test_entry_and_target_name_injection_shapes_are_refused(shop_inventory):
         assert any(p["source"] == "shop.money:round_money" for p in problems), bad_target
 
 
-def test_dotted_class_method_target_is_accepted(shop_inventory):
-    # observe.py's case dispatch splits a one-dot target into a class name
-    # and a method name: that shape must not be refused as unsafe.
+def test_dotted_class_method_target_is_refused(shop_inventory):
+    # A dotted name part (e.g. a class name plus a method name) is a syntax
+    # error as bridge.py's shim alias and can never match a top-level public
+    # symbol in unit_gate.check_surface_matches, so it must never freeze.
     inventory, cfg = shop_inventory
     row = {
         "source": "shop.money:round_money",
@@ -279,7 +280,7 @@ def test_dotted_class_method_target_is_accepted(shop_inventory):
         "reason": None,
     }
     problems = registry_validate.row_problems([row], inventory, cfg)
-    assert problems == []
+    assert any(p["source"] == "shop.money:round_money" for p in problems)
 
 
 def test_valid_shop_registry_has_no_problems(shop_inventory):
@@ -303,7 +304,7 @@ def _make_full_root(tmp_path: Path) -> Path:
     root.mkdir()
     legacy = tmp_path / "legacy"
     shutil.copytree(FIXTURES_DIR / "legacy", legacy)
-    cfg = _cfg(legacy_root=str(legacy), target_root=str(root / "target"))
+    cfg = _cfg(legacy_root=str(legacy), target_root=str(tmp_path / "target"))
     (root / "migration.json").write_text(json.dumps(cfg), encoding="utf-8")
     subprocess.run([sys.executable, str(SCRIPTS_DIR / "inventory.py"), "--root", str(root)], check=True, capture_output=True)
     registry = {"schema": 1, "rows": _base_rows()}

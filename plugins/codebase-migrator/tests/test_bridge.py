@@ -54,14 +54,15 @@ def _base_rows() -> list[dict]:
 
 
 def _make_root(tmp_path: Path, dead_code_policy: str = "port") -> Path:
-    # legacy_root is a SIBLING of the durable root, never nested under it:
-    # plan 2.1 refuses a durable root that equals, contains, or is
-    # contained by legacy_root.
+    # legacy_root and target_root are SIBLINGS of the durable root, never
+    # nested under it: plan 2.1 refuses a durable root that equals,
+    # contains, or is contained by legacy_root, and migration_validate.py
+    # refuses a target_root that equals, sits inside, or contains it too.
     root = tmp_path / "root"
     root.mkdir()
     legacy = tmp_path / "legacy"
     shutil.copytree(FIXTURES_DIR / "legacy", legacy)
-    cfg = _cfg(legacy, root / "target", dead_code_policy)
+    cfg = _cfg(legacy, root.parent / "target", dead_code_policy)
     (root / "migration.json").write_text(json.dumps(cfg), encoding="utf-8")
     subprocess.run([sys.executable, str(SCRIPTS_DIR / "inventory.py"), "--root", str(root)], check=True, capture_output=True)
     (root / "registry.json").write_text(json.dumps({"schema": 1, "rows": _base_rows()}), encoding="utf-8")
@@ -91,13 +92,13 @@ def test_shims_generated_for_unported_units_only_pilot_walkthrough(tmp_path):
     assert census["shims"]["shop.money"]["symbols"] == ["shop2.money:round_money"]
     assert census["ports"] == []
 
-    target_file = root / "target" / "shop2" / "money.py"
+    target_file = root.parent / "target" / "shop2" / "money.py"
     lines = target_file.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "# codebase-migrator: shim for shop.money"
     assert "from shop.money import round_money as round_money" in lines
 
     # the pilot itself gets no shim: no target file was written for it.
-    assert not (root / "target" / "shop2" / "pricing.py").exists()
+    assert not (root.parent / "target" / "shop2" / "pricing.py").exists()
 
     shim_bytes_before = target_file.read_text(encoding="utf-8")
 
@@ -129,7 +130,7 @@ def test_port_is_never_overwritten(tmp_path):
     # are both handled correctly by the actual CLI path (a direct
     # build_bridge() call alone would never exercise migration_validate.py's
     # target_root check on a second pass).
-    target_root = root / "target" / "shop2"
+    target_root = root.parent / "target" / "shop2"
     port_content = "# a real, hand-written port\ndef round_money(x):\n    return round(x, 2)\n"
     (target_root / "money.py").write_text(port_content, encoding="utf-8")
 
@@ -174,15 +175,15 @@ def test_shim_exports_exactly_the_frozen_symbols_and_imports_resolve(tmp_path):
     # shim for money.py, and prove the whole shop2 package actually imports
     # and runs against the fixture legacy tree.
     good = FIXTURES_DIR / "ports" / "good" / "shop2"
-    target_shop2 = root / "target" / "shop2"
+    target_shop2 = root.parent / "target" / "shop2"
     shutil.copy2(good / "pricing.py", target_shop2 / "pricing.py")
     shutil.copy2(good / "cart.py", target_shop2 / "cart.py")
 
     legacy_root = root.parent / "legacy"
     check = subprocess.run(
         [sys.executable, "-c", "import shop2.pricing; print(shop2.pricing.apply_discount(100, 10))"],
-        cwd=str(root / "target"),
-        env={"PYTHONPATH": f"{root / 'target'}:{legacy_root}", "PATH": "/usr/bin:/bin"},
+        cwd=str(root.parent / "target"),
+        env={"PYTHONPATH": f"{root.parent / 'target'}:{legacy_root}", "PATH": "/usr/bin:/bin"},
         capture_output=True,
         text=True,
     )
@@ -197,7 +198,7 @@ def test_check_mode_writes_nothing(tmp_path):
     code, payload, stderr = _run("bridge.py", "--root", str(root), "--check")
     assert code == 0, stderr
     assert payload["shims"] == 1
-    assert not (root / "target").exists()
+    assert not (root.parent / "target").exists()
     assert not (root / "runs" / "shims.json").exists()
 
 
@@ -232,7 +233,7 @@ def test_module_bound_attribute_import_freezes_and_shims_end_to_end(tmp_path):
         "    return money.round_money(x)\n",
         encoding="utf-8",
     )
-    cfg = _cfg(legacy, root / "target")
+    cfg = _cfg(legacy, root.parent / "target")
     cfg["legacy_package"] = "pkg"
     cfg["target_package"] = "pkg2"
     (root / "migration.json").write_text(json.dumps(cfg), encoding="utf-8")
@@ -278,7 +279,7 @@ def test_bridge_refuses_symlinked_package_directory(tmp_path):
     root = _make_root(tmp_path)
     _freeze(root, "--units", "shop.pricing", "--with-imported")
 
-    target_root = root / "target"
+    target_root = root.parent / "target"
     target_root.mkdir(parents=True, exist_ok=True)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()

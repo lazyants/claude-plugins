@@ -572,6 +572,14 @@ def _build_unit(unit: str, path: Path, package: str, units: dict[str, Path]) -> 
     # shape: the import statement alone names no symbol, so every
     # `M.name` attribute access anywhere in the file has to be walked too.
     module_alias: dict[str, str] = {}
+    # Local names bound by a plain `import a.b.c` (no asname): Python binds
+    # only the head `a`, never the whole dotted path, so `a.b.c.name`
+    # reaches its target through a chain of arbitrary depth rooted at that
+    # head -- `module_alias` above only ever holds a name bound to a WHOLE
+    # discovered unit, so it cannot see this shape at all. Only heads bound
+    # by an import statement IN THIS FILE go in here: an unrelated local
+    # variable that happens to share a package's name is never one.
+    plain_import_heads: set[str] = set()
     resolve_unit = f"{unit}.__init__" if is_package else unit
     tree = ast.parse(source, filename=unit)
     for node in ast.walk(tree):
@@ -597,6 +605,8 @@ def _build_unit(unit: str, path: Path, package: str, units: dict[str, Path]) -> 
             for alias in node.names:
                 if alias.asname and alias.name in units:
                     module_alias[alias.asname] = alias.name
+                elif not alias.asname:
+                    plain_import_heads.add(alias.name.split(".", 1)[0])
     if module_alias:
         for node in ast.walk(tree):
             if (
@@ -608,6 +618,31 @@ def _build_unit(unit: str, path: Path, package: str, units: dict[str, Path]) -> 
                 target_unit = module_alias[node.value.id]
                 if f"{target_unit}.{node.attr}" not in units:
                     imported_symbols.add(f"{target_unit}:{node.attr}")
+    if plain_import_heads:
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)):
+                continue
+            dotted = _dotted(node)
+            if dotted is None:
+                continue
+            segments = dotted.split(".")
+            if segments[0] not in plain_import_heads:
+                continue
+            # Longest dotted prefix of this chain that is itself a
+            # discovered unit; the segment right after it (if any) is the
+            # symbol reached THROUGH that unit -- the same "M.name" shape
+            # the module_alias walk records above, just at whatever depth
+            # the plain import's head sits.
+            prefix_len = 0
+            for i in range(len(segments), 0, -1):
+                if ".".join(segments[:i]) in units:
+                    prefix_len = i
+                    break
+            if 0 < prefix_len < len(segments):
+                target_unit = ".".join(segments[:prefix_len])
+                symbol = segments[prefix_len]
+                if f"{target_unit}.{symbol}" not in units:
+                    imported_symbols.add(f"{target_unit}:{symbol}")
     flags = {
         "uncontrolled_input": info["uncontrolled_input"],
         "dynamic_call": info["dynamic_call"],

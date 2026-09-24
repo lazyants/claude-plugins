@@ -62,7 +62,7 @@ default stack pair would validate cleanly against the wrong project. Fill in eve
 | `source_stack`, `target_stack` | `python` | the only adapter v0.1 ships |
 | `legacy_root` | existing directory | `legacy_root/<legacy_package>/` must be a directory with `__init__.py`; must not equal, contain, or sit inside `<ROOT>` itself — checked on every `migration_validate.py` run and every downstream script's config load, not only at intake |
 | `legacy_package` | dotted identifier, one segment | the package under `legacy_root` being ported |
-| `target_root` | a path — need not exist yet | the pipeline creates and grows it over time (shims, ports), so it may already exist and need not be empty; if it exists it must be a directory; must not equal, sit inside, or contain `legacy_root` |
+| `target_root` | a path — need not exist yet | the pipeline creates and grows it over time (shims, ports), so it may already exist and need not be empty; if it exists it must be a directory; must not equal, sit inside, or contain `legacy_root` or the durable root — so a relative path, which resolves under the durable root, is refused |
 | `target_package` | dotted identifier, one segment, **must differ from `legacy_package`** | both packages are imported side by side under the in-process seam |
 | `fidelity_policy` | `bug_for_bug` \| `bug_for_bug_with_exceptions` | see below — hashed into every unit's cache key |
 | `seam` | `in_process` | the only seam v0.1 ships |
@@ -115,7 +115,7 @@ not as `missing`: the key is present, it just isn't a valid value), `unknown_key
   `sandbox.py dispatch`'s promotion step, from a stage the write boundary already checked.
   `bridge.py` is the one script that writes into `target_root` directly, outside that boundary —
   it is deterministic (a fixed re-export line per frozen `one_to_one` row, whose names
-  `registry_validate.py` has checked are identifiers — never model-written code)
+  `registry_validate.py` has checked are single identifiers — never model-written code)
   and is dispatched by the driving session like any other script, not by codex. It still refuses
   by name, before writing, if any existing path component from `target_root` down to the shim it
   is about to write is a symlink, or resolves outside `target_root` — a symlinked package

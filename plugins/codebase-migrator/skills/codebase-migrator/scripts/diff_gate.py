@@ -82,19 +82,56 @@ def _load_exceptions(root: Path, unit: str) -> dict:
     }
 
 
+def _invalid_exception_entries(exceptions: dict, net_doc: dict) -> dict:
+    """Case ids whose `exceptions.json` entry is malformed against the
+    documented schema (SKILL.md's fidelity_policy section, gate-stack.md's
+    R3 comparison section): the case id must name a real case in this
+    unit's net, the entry must be an object whose `expected` is a
+    non-empty object, and every key of `expected` must be one of
+    `observe.BEHAVIOURAL_CHANNELS`. Two of these would otherwise let a
+    declared exception verify nothing without ever being flagged as a
+    no-op: an unknown channel (e.g. a typo'd key) never matches the legacy
+    observation on that key — `legacy_obs.get(unknown_channel)` is `None`,
+    almost never equal to the declared value — so `_no_op_exception_ids`
+    reads the entry as a real, non-no-op exception even though
+    `_expected_for_case` adds the key to a dict the R3 comparison loop
+    never looks at (it iterates `observe.BEHAVIOURAL_CHANNELS` only); an
+    unknown/stale case id matches no net observation at all, so it never
+    participates in any comparison and nothing else in the pipeline
+    refuses it either — a declaration that can never apply."""
+    legacy_by_id = {o["case_id"]: o for o in net_doc.get("observations", [])}
+    invalid: dict = {}
+    for case_id, entry in exceptions.items():
+        if case_id not in legacy_by_id:
+            invalid[case_id] = "case id is not in this unit's net observations"
+            continue
+        if not isinstance(entry, dict):
+            invalid[case_id] = "exception entry must be an object"
+            continue
+        expected_fields = entry.get("expected")
+        if not isinstance(expected_fields, dict) or not expected_fields:
+            invalid[case_id] = "expected must be a non-empty object"
+            continue
+        unknown_channels = sorted(set(expected_fields) - set(observe.BEHAVIOURAL_CHANNELS))
+        if unknown_channels:
+            invalid[case_id] = "expected has channel(s) R3 never compares: " + ", ".join(unknown_channels)
+    return invalid
+
+
 def _no_op_exception_ids(exceptions: dict, net_doc: dict) -> list:
     """Case ids whose declared `expected` does not differ from the legacy
     observation on any declared channel — a no-op declaration lets a
     target that never fixed the bug (still matches legacy) also match the
-    "expectation", so the check could never catch it."""
+    "expectation", so the check could never catch it. Assumes every entry
+    already passed `_invalid_exception_entries` (a real case id, a
+    non-empty object `expected`, only real channels), so a plain
+    dict-equality comparison is enough here."""
     legacy_by_id = {o["case_id"]: o for o in net_doc.get("observations", [])}
     no_op_ids = []
     for case_id, entry in exceptions.items():
-        legacy_obs = legacy_by_id.get(case_id)
-        if legacy_obs is None:
-            continue  # an unknown/stale case id is not this check's job
-        expected_fields = entry.get("expected", {})
-        if not expected_fields or all(legacy_obs.get(ch) == v for ch, v in expected_fields.items()):
+        legacy_obs = legacy_by_id[case_id]
+        expected_fields = entry["expected"]
+        if all(legacy_obs.get(ch) == v for ch, v in expected_fields.items()):
             no_op_ids.append(case_id)
     return sorted(no_op_ids)
 
@@ -240,6 +277,14 @@ def run(root: Path, cfg: dict, unit: str) -> dict:
 
     exceptions = _load_exceptions(root, unit) if cfg.get("fidelity_policy") == "bug_for_bug_with_exceptions" else {}
     if exceptions:
+        invalid_entries = _invalid_exception_entries(exceptions, net_doc)
+        if invalid_entries:
+            cm_common.fail(
+                f"{unit}: exceptions.json has an invalid entry for: "
+                + "; ".join(f"{cid} ({reason})" for cid, reason in sorted(invalid_entries.items())),
+                cm_common.EXIT_FAIL,
+                invalid_exception_ids=invalid_entries,
+            )
         no_op_ids = _no_op_exception_ids(exceptions, net_doc)
         if no_op_ids:
             cm_common.fail(

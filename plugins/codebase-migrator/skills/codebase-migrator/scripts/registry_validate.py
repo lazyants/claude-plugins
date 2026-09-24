@@ -28,16 +28,18 @@ def _unit_of(source: str) -> str:
 
 def _has_safe_name_part(value: str) -> bool:
     """True if `value` (a `"module:name"` registry field) has a name part
-    (after the first `:`) that is a dotted path of plain identifiers -- every
-    `.`-separated segment must satisfy `str.isidentifier()` and must not be a
-    keyword. `bridge.py` writes a row's `entry` straight into generated
-    source (`from <legacy> import <name> as <entry's name part>`), so
-    anything else could inject a statement into the shim."""
+    (after the first `:`) that is exactly one plain identifier -- no dots.
+    `bridge.py` writes a row's `entry` straight into generated source
+    (`from <legacy> import <name> as <entry's name part>`), where a dotted
+    alias is a syntax error, and `unit_gate.check_surface_matches` compares
+    a target's name part against the target module's top-level public
+    symbols, which a dotted name can never match. So a dotted target is
+    always either an injection shape or dead weight that can never pass the
+    pipeline; refusing it here is the only place that catches both."""
     _, sep, name = value.partition(":")
     if not sep:
         return False
-    segments = name.split(".")
-    return bool(segments) and all(seg.isidentifier() and not keyword.iskeyword(seg) for seg in segments)
+    return name.isidentifier() and not keyword.iskeyword(name)
 
 
 def _read_optional(path: Path, what: str, default: dict) -> dict:

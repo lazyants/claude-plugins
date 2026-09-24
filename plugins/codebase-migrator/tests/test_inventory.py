@@ -61,7 +61,7 @@ def _shop_root(tmp_path: Path) -> Path:
     root.mkdir()
     legacy = tmp_path / "legacy"
     shutil.copytree(FIXTURES_DIR / "legacy", legacy)
-    _write_migration_json(root, legacy, "shop", root / "target")
+    _write_migration_json(root, legacy, "shop", tmp_path / "target")
     return root
 
 
@@ -124,7 +124,7 @@ def test_parse_error_exits_naming_file(tmp_path):
     (legacy / "broken").mkdir(parents=True)
     (legacy / "broken" / "__init__.py").write_text("x = 1\n", encoding="utf-8")
     (legacy / "broken" / "bad.py").write_text("def f(:\n", encoding="utf-8")
-    _write_migration_json(root, legacy, "broken", root / "target")
+    _write_migration_json(root, legacy, "broken", tmp_path / "target")
     code, payload, stderr = _run("inventory.py", "--root", str(root))
     assert code == 1
     assert payload["ok"] is False
@@ -141,7 +141,7 @@ def test_broken_init_py_exits_naming_file(tmp_path):
     legacy = tmp_path / "legacy"
     (legacy / "brokeninit").mkdir(parents=True)
     (legacy / "brokeninit" / "__init__.py").write_text("def f(:\n", encoding="utf-8")
-    _write_migration_json(root, legacy, "brokeninit", root / "target")
+    _write_migration_json(root, legacy, "brokeninit", tmp_path / "target")
     code, payload, stderr = _run("inventory.py", "--root", str(root))
     assert code == 1
     assert payload["ok"] is False
@@ -154,7 +154,7 @@ def test_zero_units_exits_1(tmp_path):
     legacy = tmp_path / "legacy"
     (legacy / "empty").mkdir(parents=True)
     (legacy / "empty" / "__init__.py").write_text('"""just a docstring"""\n', encoding="utf-8")
-    _write_migration_json(root, legacy, "empty", root / "target")
+    _write_migration_json(root, legacy, "empty", tmp_path / "target")
     code, payload, stderr = _run("inventory.py", "--root", str(root))
     assert code == 1
     assert payload["ok"] is False
@@ -175,7 +175,7 @@ def test_static_eligibility_propagates_through_executable_ancestor_package(tmp_p
         "import os\n\nVALUE = os.environ.get('X')\n", encoding="utf-8"
     )
     (pkgz / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
-    _write_migration_json(root, legacy, "pkgz", root / "target")
+    _write_migration_json(root, legacy, "pkgz", tmp_path / "target")
 
     code, payload, stderr = _run("inventory.py", "--root", str(root))
     assert code == 0, stderr
@@ -430,13 +430,47 @@ def test_imported_symbols_from_module_bound_attribute_access(tmp_path):
         "    return m.round_money(x)\n",
         encoding="utf-8",
     )
-    _write_migration_json(root, legacy, "pkg", root / "target")
+    _write_migration_json(root, legacy, "pkg", tmp_path / "target")
 
     code, payload, stderr = _run("inventory.py", "--root", str(root))
     assert code == 0, stderr
     data = json.loads((root / "inventory.json").read_text(encoding="utf-8"))
     assert data["units"]["pkg.pricing"]["imported_symbols"] == ["pkg.money:round_money"]
     assert data["units"]["pkg.cart"]["imported_symbols"] == ["pkg.money:round_money"]
+
+
+def test_imported_symbols_from_plain_import_attribute_chain(tmp_path):
+    # T3: `import shop.money` (a plain import, no asname) binds only the
+    # HEAD name `shop` -- the module_alias walk above only ever fires for a
+    # Name-rooted receiver bound to a whole discovered unit (`m.round_money`
+    # when `m` is itself bound to "pkg.money"), so a chain rooted at a
+    # plain-import head, two segments deeper (`shop.money.round_money`), was
+    # never walked at all: nothing got recorded even though live code calls
+    # it, and the symbol would wrongly land in unreferenced_public.
+    root = tmp_path / "root"
+    root.mkdir()
+    legacy = tmp_path / "legacy"
+    shop = legacy / "shop"
+    shop.mkdir(parents=True)
+    (shop / "__init__.py").write_text("", encoding="utf-8")
+    (shop / "money.py").write_text("def round_money(x):\n    return x\n", encoding="utf-8")
+    (shop / "checkout.py").write_text(
+        "import shop.money\n\n"
+        "def total(x):\n"
+        "    return shop.money.round_money(x)\n",
+        encoding="utf-8",
+    )
+    _write_migration_json(root, legacy, "shop", tmp_path / "target")
+
+    code, payload, stderr = _run("inventory.py", "--root", str(root))
+    assert code == 0, stderr
+    data = json.loads((root / "inventory.json").read_text(encoding="utf-8"))
+    # The module-level imports/imports_units field already covers the plain
+    # form (visit_Import never checked asname to begin with) -- only
+    # imported_symbols was blind to it.
+    assert data["units"]["shop.checkout"]["imports_units"] == ["shop.money"]
+    assert data["units"]["shop.checkout"]["imported_symbols"] == ["shop.money:round_money"]
+    assert "shop.money:round_money" not in data["unreferenced_public"]
 
 
 def test_import_closure_follows_relative_import_two_levels(tmp_path):
@@ -557,7 +591,7 @@ def test_build_inventory_resolves_package_init_relative_import(tmp_path):
         encoding="utf-8",
     )
     (sub / "helper.py").write_text("VALUE = 42\n", encoding="utf-8")
-    _write_migration_json(root, legacy, "pkgy", root / "target")
+    _write_migration_json(root, legacy, "pkgy", tmp_path / "target")
 
     code, payload, stderr = _run("inventory.py", "--root", str(root))
     assert code == 0, stderr

@@ -13,9 +13,10 @@ Exit 0 only if every one of these holds, each failure named:
   any executable ancestor package unit, below), **and the inventory is current** —
   `inventory.json`'s `source_sha256` matches the live bytes for every unit in that closure;
 - every public symbol of `U`, and every symbol in `U`'s `imported_symbols`, has a frozen row
-  (`imported_symbols` covers both `from pkg.mod import name` directly and `from pkg import mod`
-  followed by `mod.name` anywhere in the file — the whole-submodule import names no symbol by
-  itself, so every attribute access on it has to be walked too); any imported symbol whose unit
+  (`imported_symbols` covers `from pkg.mod import name` directly, and `from pkg import mod`,
+  `import pkg.mod as mod` or a plain `import pkg.mod` followed by `mod.name` / `pkg.mod.name`
+  anywhere in the file — a whole-module import names no symbol by itself, so every attribute
+  chain on it has to be walked too); any imported symbol whose unit
   is not yet ported must be a `one_to_one` row (a shim can only re-export a 1:1 name);
 - `net.lock.json` has an entry for `U` with `deterministic: true`, `stateful: false`, and
   `coverage_pct >= coverage_floor_pct`; the on-disk `nets/U.json` and `cases/U.json` digests
@@ -178,7 +179,11 @@ custom exception class compares equal to the source class it replaces). Under
 `bug_for_bug_with_exceptions`, cases listed in `exceptions.json` compare against their declared
 expectation instead of legacy — and a listed case that still matches legacy fails too, since the
 defect it was supposed to remove is still there. Before any of that, every declared exception is
-checked for being a **no-op**: an `expected` with no fields, or one whose every declared channel
+**validated**: its case id must exist in the net, `expected` must be a non-empty object, and
+every key in it must be one of the behavioral channels — a misspelled channel would otherwise add
+a key the comparison never reads, and a stale case id would never apply. Any invalid entry
+refuses the whole run, naming each case id and why (`invalid_exception_ids`). Each valid entry is
+then checked for being a **no-op**: an `expected` with no fields, or one whose every declared channel
 already equals what legacy produces, would let a target that never fixed the bug pass anyway —
 the exception would then verify nothing. Any no-op entry refuses the whole run, naming every
 affected case id (`no_op_exception_ids`), rather than silently accepting a declared exception

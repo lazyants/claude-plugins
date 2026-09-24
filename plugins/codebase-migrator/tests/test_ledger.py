@@ -17,7 +17,10 @@ import ledger
 
 
 def _setup_root(work_root, coverage_floor=80):
-    root = work_root
+    # `root` (the durable migration root) is kept as a subdirectory of
+    # work_root, with target_root a SIBLING of it: migration_validate.py
+    # refuses a target_root that equals, sits inside, or contains root.
+    root = work_root / "root"
     legacy_root = root / "legacy"
     (legacy_root / "shop").mkdir(parents=True)
     (legacy_root / "shop" / "__init__.py").write_text("", encoding="utf-8")
@@ -37,7 +40,7 @@ def _setup_root(work_root, coverage_floor=80):
         "target_stack": "python",
         "legacy_root": str(legacy_root),
         "legacy_package": "shop",
-        "target_root": str(root / "target"),
+        "target_root": str(work_root / "target"),
         "target_package": "shop2",
         "fidelity_policy": "bug_for_bug",
         "seam": "in_process",

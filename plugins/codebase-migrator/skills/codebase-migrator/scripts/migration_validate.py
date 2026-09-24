@@ -291,6 +291,28 @@ def validate(cfg: dict, root: Path) -> list:
                             "target_root must not equal or be inside legacy_root, nor contain it",
                         )
                     )
+
+            root_resolved = root.resolve()
+            target_resolved = target_root_path.resolve()
+            try:
+                target_resolved.relative_to(root_resolved)
+                inside_durable = True
+            except ValueError:
+                inside_durable = False
+            try:
+                root_resolved.relative_to(target_resolved)
+                contains_durable = True
+            except ValueError:
+                contains_durable = False
+            if inside_durable or contains_durable or target_resolved == root_resolved:
+                problems.append(
+                    _problem(
+                        "target_root",
+                        "invalid",
+                        "target_root must not equal, sit inside, or contain the durable root "
+                        "(a relative target_root resolves under the durable root)",
+                    )
+                )
         else:
             problems.append(_problem("target_root", "invalid", "target_root must be a string path"))
 
