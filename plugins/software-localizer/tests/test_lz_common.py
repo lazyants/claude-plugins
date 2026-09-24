@@ -776,14 +776,40 @@ def test_resolve_argv_resolves_relative_file_under_root(work_root):
     (work_root / "adapter.py").write_text("", encoding="utf-8")
     cfg = {"adapter": {"argv": ["python3", "adapter.py"]}}
     resolved = lz_common.resolve_argv(work_root, cfg)
-    assert resolved[0] == "python3"
+    # argv[0] is a bare command, not a file under root -- resolved on PATH,
+    # same as adapter_client.run's own subprocess lookup.
+    assert resolved[0] == os.path.abspath(shutil.which("python3"))
     assert resolved[1] == str(work_root / "adapter.py")
 
 
-def test_resolve_argv_leaves_bare_command_that_is_not_a_file_under_root(work_root):
+def test_resolve_argv_resolves_bare_argv0_on_path_when_not_a_file_under_root(work_root):
+    # [bot P1] argv[0] used to pass through bare here, and adapter_digest
+    # alone resolved it (against ITS OWN cwd) to decide what to hash --
+    # while adapter_client.run launched the child with cwd=project_dir, so a
+    # relative PATH entry could make the two resolve to different files.
+    # resolve_argv now does this resolution once, for every caller, so both
+    # agree. argv[1:] elements that are not files under root still pass
+    # through unchanged (checked by test_resolve_argv_leaves_non_argv0_bare_element_unchanged).
     cfg = {"adapter": {"argv": ["python3", "adapter.py"]}}
     resolved = lz_common.resolve_argv(work_root, cfg)
-    assert resolved == ["python3", "adapter.py"]
+    assert resolved[0] == os.path.abspath(shutil.which("python3"))
+    assert resolved[1] == "adapter.py"
+
+
+def test_resolve_argv_leaves_non_argv0_bare_element_unchanged(work_root):
+    # A bare argv[1:] element (a flag, or a command name in position > 0)
+    # is never resolved on PATH -- only argv[0] is.
+    cfg = {"adapter": {"argv": ["/usr/bin/env", "python3", "--version"]}}
+    resolved = lz_common.resolve_argv(work_root, cfg)
+    assert resolved == ["/usr/bin/env", "python3", "--version"]
+
+
+def test_resolve_argv_fails_cannot_when_bare_argv0_does_not_resolve_on_path(work_root, monkeypatch):
+    cfg = {"adapter": {"argv": ["no-such-command-anywhere-xyz"]}}
+    monkeypatch.setenv("PATH", "")
+    with pytest.raises(SystemExit) as exc_info:
+        lz_common.resolve_argv(work_root, cfg)
+    assert exc_info.value.code == lz_common.EXIT_CANNOT
 
 
 def test_resolve_argv_leaves_absolute_path_untouched(work_root):

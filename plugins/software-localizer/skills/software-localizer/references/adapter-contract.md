@@ -5,8 +5,8 @@ An adapter is whatever the project needs — a Node script, a PHP script, a Pyth
 `adapter.code_dir` (default `R/adapter/`; it may also be a directory inside the project, given
 as an absolute path): every file named in `adapter.argv` after the first element must be inside
 it. The first element is the command — `node`, `php`, a Python interpreter, or the adapter
-executable itself; a bare name such as `node` is resolved on `PATH` exactly as the run will
-resolve it. The acceptance digest covers the whole `code_dir` (which must not contain
+executable itself; a bare name such as `node` is resolved once on `PATH` to an absolute path,
+and that path is both what runs and what is hashed. The acceptance digest covers the whole `code_dir` (which must not contain
 symlinks), every file named in or resolved from `adapter.argv` (the interpreter included, so an
 upgrade means re-acceptance), `argv` and `options`: editing any adapter file — helpers
 included — requires acceptance again. In `adapter.argv`, a relative path resolves

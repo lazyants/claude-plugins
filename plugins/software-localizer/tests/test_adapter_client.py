@@ -9,12 +9,14 @@ adapter behavior is visible right next to the assertion that checks it.
 from __future__ import annotations
 
 import json
+import os
 import textwrap
 from pathlib import Path
 
 import pytest
 
 import adapter_client
+import lz_common
 from adapter_client import AdapterError
 
 
@@ -268,6 +270,53 @@ def test_run_raises_when_reply_is_not_an_object(work_root, project_dir):
 # argv resolution itself (`lz_common.resolve_argv`, shared with `adapter_digest`)
 # is tested in test_lz_common.py; `test_run_resolves_relative_argv_against_root_not_cwd`
 # above already covers `run()` exercising it end to end.
+
+
+def test_run_and_digest_agree_on_a_bare_argv0_resolved_from_the_process_cwd_not_projects(
+    work_root, monkeypatch
+):
+    # [bot P1] `run()` executes with `cwd=project_dir`, but before this fix
+    # a bare `argv[0]` (e.g. `"node"`) was left unresolved by
+    # `resolve_argv` and re-resolved independently by `adapter_digest` via
+    # `shutil.which` in the CALLING process -- against the caller's own
+    # cwd, not `project_dir`. With a relative `PATH` entry, that let the
+    # digest hash `<caller>/bin/runner` while the OS's own PATH search
+    # inside the child (cwd=project_dir) executed `<project>/bin/runner` --
+    # a changed project runner could run under a still-valid lock.
+    # `resolve_argv` now resolves `argv[0]` once, in the caller's process,
+    # to an absolute path both `run()` and `adapter_digest` then share, so
+    # they can no longer disagree.
+    caller_bin = work_root / "bin"
+    caller_bin.mkdir()
+    caller_runner = caller_bin / "runner"
+    caller_runner.write_text('#!/bin/sh\necho \'{"ok": true, "which": "caller"}\'\n', encoding="utf-8")
+    caller_runner.chmod(0o755)
+
+    project_dir = work_root / "project"
+    project_bin = project_dir / "bin"
+    project_bin.mkdir(parents=True)
+    project_runner = project_bin / "runner"
+    project_runner.write_text('#!/bin/sh\necho \'{"ok": true, "which": "project"}\'\n', encoding="utf-8")
+    project_runner.chmod(0o755)
+
+    # adapter_digest's code_dir default ("adapter") must exist and stays
+    # empty -- this test is about argv[0] resolution, not the tree walk.
+    (work_root / "adapter").mkdir()
+
+    monkeypatch.chdir(work_root)
+    monkeypatch.setenv("PATH", "bin" + os.pathsep + os.environ.get("PATH", ""))
+
+    cfg = _cfg(argv=["runner"])
+
+    reply = adapter_client.run(str(work_root), cfg, str(project_dir), "collect", [])
+    assert reply == {"ok": True, "which": "caller"}
+
+    digest = lz_common.adapter_digest(work_root, cfg)
+    resolved_caller_runner = str(caller_runner.resolve())
+    resolved_project_runner = str(project_runner.resolve())
+    assert resolved_caller_runner in digest["files"]
+    assert digest["files"][resolved_caller_runner] == lz_common.sha256_file(caller_runner)
+    assert resolved_project_runner not in digest["files"]
 
 
 # --- collect() -----------------------------------------------------------

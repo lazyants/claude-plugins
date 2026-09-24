@@ -706,20 +706,40 @@ def _tree_digests(base: Path, exclude_dirs=(".git", "__pycache__")) -> dict:
 def resolve_argv(root, cfg: dict) -> list[str]:
     """The one argv-resolution rule: an element that is already an absolute
     path stays as is; a relative element naming a file that exists under
-    `root` becomes its absolute path; anything else -- a
-    bare command name meant to be found on `PATH` (`"node"`, `"python3"`),
-    or a flag -- passes through unchanged. `adapter_client.run` calls this
-    to build the argv it actually executes; `adapter_digest` calls it to
-    decide what to hash; `validate_config` resolves relative elements the
-    same way to check they sit inside `adapter.code_dir`."""
+    `root` becomes its absolute path. For `argv[0]` only, anything else --
+    a bare command name meant to be found on `PATH` (`"node"`, `"python3"`)
+    -- is resolved once, here, with `shutil.which` to an absolute path
+    (`os.path.abspath` over the result, since `shutil.which` can itself
+    return a relative path for a relative `PATH` entry); a name that does
+    not resolve on `PATH` is a hard refusal, `fail(EXIT_CANNOT)`. This
+    keeps `argv[0]` resolution independent of any caller's current working
+    directory, so `adapter_client.run` (which launches the child with
+    `cwd=project_dir`) and `adapter_digest` (called from the workspace
+    root) always agree on which executable `argv[0]` names -- resolving it
+    separately in each, against each one's own cwd, could hash one binary
+    while running another. Every other bare element (`argv[1:]`, a flag or
+    argument) passes through unchanged; `adapter_client.run` calls this
+    function to build the argv it actually executes; `adapter_digest` calls
+    it to decide what to hash; `validate_config` resolves relative elements
+    the same way (its own separate check) to confirm they sit inside
+    `adapter.code_dir`."""
     root = Path(root)
     resolved = []
-    for item in cfg["adapter"]["argv"]:
+    for i, item in enumerate(cfg["adapter"]["argv"]):
         if os.path.isabs(item):
             resolved.append(item)
             continue
         candidate = root / item
-        resolved.append(str(candidate) if candidate.is_file() else item)
+        if candidate.is_file():
+            resolved.append(str(candidate))
+            continue
+        if i == 0:
+            which_path = shutil.which(item)
+            if which_path is None:
+                fail(f"adapter.argv[0] does not resolve on PATH or as a file: {item}", EXIT_CANNOT)
+            resolved.append(os.path.abspath(which_path))
+            continue
+        resolved.append(item)
     return resolved
 
 
@@ -738,18 +758,19 @@ def adapter_digest(root, cfg: dict) -> dict:
     already inside `code_dir`, so hashing them again here is redundant with
     the tree walk, not wrong; `adapter.argv` itself, so a changed argument
     or a swapped script is caught even when its byte content happens to
-    match; and the options. A bare `argv[0]` (not absolute, and not a file
-    under `root` -- a command meant to be found on `PATH`, e.g. `"node"`) is
-    resolved with `shutil.which`, the same lookup `adapter_client.run`'s
-    subprocess performs via `PATH`; the executable it finds is hashed under
-    its own resolved absolute path, so a `PATH` change that swaps in a
-    different binary of the same name invalidates acceptance -- `argv`
-    itself still names the bare command, unresolved, since `adapter_client`
-    executes `argv` unchanged and relies on that same lookup. `code_dir`
-    must already exist as a directory and contain no symlink --
-    `validate_config` is what normally guarantees both before this ever
-    runs; called directly (as tests do) it enforces the same things itself,
-    `fail(EXIT_CANNOT)`."""
+    match; and the options. `resolve_argv` is where a bare `argv[0]` (not
+    absolute, and not a file under `root` -- a command meant to be found on
+    `PATH`, e.g. `"node"`) gets resolved, once, to an absolute path via
+    `shutil.which` -- the same lookup, producing the same resolved path,
+    that `adapter_client.run` then actually executes, so this digest can
+    never hash a different binary than the one that runs; a name that does
+    not resolve on `PATH` is `resolve_argv`'s own `fail(EXIT_CANNOT)`.
+    `argv` itself still names the bare command, unresolved, since
+    `adapter_client.run` passes `resolve_argv`'s resolved list to
+    `subprocess.run`, never the raw `adapter.argv`. `code_dir` must already
+    exist as a directory and contain no symlink -- `validate_config` is
+    what normally guarantees both before this ever runs; called directly
+    (as tests do) it enforces the same things itself, `fail(EXIT_CANNOT)`."""
     root = Path(root)
     adapter_cfg = cfg["adapter"]
     code_dir_value = adapter_cfg.get("code_dir", ADAPTER_DIR_NAME)
@@ -763,17 +784,14 @@ def adapter_digest(root, cfg: dict) -> dict:
 
     files = _tree_digests(code_dir)
 
-    for i, item in enumerate(resolve_argv(root, cfg)):
+    # resolve_argv already resolves argv[0] to an absolute path (or fails),
+    # so every item reaching this loop is either absolute or a bare
+    # argv[1:] element (a flag/argument) that is not a file.
+    for item in resolve_argv(root, cfg):
         if os.path.isabs(item):
             candidate = Path(item)
             if candidate.is_file():
                 files[str(candidate.resolve())] = sha256_file(candidate)
-        elif i == 0:
-            which_path = shutil.which(item)
-            if which_path is None:
-                fail(f"adapter.argv[0] does not resolve on PATH or as a file: {item}", EXIT_CANNOT)
-            resolved_which = str(Path(which_path).resolve())
-            files[resolved_which] = sha256_file(resolved_which)
 
     argv = list(adapter_cfg["argv"])
     options = adapter_cfg.get("options", {})
