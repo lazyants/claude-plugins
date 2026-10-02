@@ -28,6 +28,34 @@ Schema should specify:
 - What happens during ingest (which pages to create/update)
 - Cross-reference conventions (wikilinks, typed properties)
 - What belongs in the wiki vs what stays as raw source
+- Where source ingest state lives and how Ingest and Lint resolve it (see Source ingest state below)
+
+### Source ingest state
+
+Raw source contents stay immutable, including Markdown. For every new source, keep mutable bookkeeping in an adjacent sidecar named by appending `.meta.md` to the **complete filename**: `research/paper.pdf.meta.md`, `data/results.csv.meta.md`, `raw/interview.txt.meta.md`, or `raw/article.md.meta.md`. This distinguishes `paper.pdf` from `paper.csv`. Reserve the `.meta.md` suffix for source metadata; do not use it for raw documents.
+
+Example `research/paper.pdf.meta.md` before ingest:
+
+```yaml
+---
+type: source-state
+ingested: false
+---
+```
+
+After successful ingest, set `ingested: true` and `ingested_date: YYYY-MM-DD` in that sidecar. The sidecar path identifies the source; never append YAML to a PDF, CSV, transcript, or other raw payload.
+
+Ingest and Lint MUST use the same rules:
+
+1. Enumerate raw source files recursively under the directory configured in the project's CLAUDE.md, regardless of format. Exclude `.meta.md` sidecars and any non-source paths explicitly excluded by that schema.
+2. If the exact adjacent sidecar exists, read its YAML frontmatter as the authoritative state. It takes precedence over legacy inline state, even if they disagree. Do not fall back when a sidecar is malformed or unreadable.
+3. Otherwise, for an existing Markdown source only, honor a legacy YAML frontmatter `ingested` boolean. Read this state without modifying the raw file; future ingest writes a sidecar.
+4. A source with no recorded state or `ingested: false` is **pending**. Only the YAML boolean `ingested: true` is **processed**; strings such as `"true"` are invalid. Missing `ingested` in an existing sidecar, invalid values, malformed frontmatter, and unreadable metadata are **state errors**, never proof of processing. Report these separately and leave those sources unprocessed until the state is corrected.
+5. Count each raw source once, never its sidecar. Report sidecars whose corresponding raw source is missing as orphan metadata, not as ingest inputs.
+
+For an existing vault, use these rules immediately: PDFs/data files/transcripts without sidecars are pending; legacy Markdown `true` remains processed and `false` remains pending. Create a false sidecar when registering a new source, or during ingest for a pending source without one. Do not infer completion from an existing wiki page. Record the raw directory, exclusions, sidecar convention, and legacy fallback in the project's CLAUDE.md.
+
+Before marking a source processed, verify that its raw payload is already committed in the project repository, or available through a durable shared external source store documented in CLAUDE.md (including retrieval and local path mapping so citations resolve in another checkout). Register newly added, untracked raw files in a separate source-only commit per project conventions before the wiki/state commit; committing a raw file does not change its contents. If source availability cannot be established, leave it pending and report the required registration rather than committing a processed sidecar for a local-only file.
 
 ### Roles
 
@@ -108,6 +136,7 @@ Schema checklist — CLAUDE.md should also specify:
 - Which directory is raw sources, which is wiki
 - Frontmatter contract per page type (required fields, allowed values)
 - Ingest conventions (what page types to create, how to cross-reference)
+- Source ingest state contract above (sidecars, missing-state discovery, legacy Markdown fallback)
 - When to file query answers back vs leave in chat
 
 ### Note template
@@ -282,13 +311,13 @@ Arguments:
 
 #### Phase 1: Scan for unprocessed sources
 
-Search the raw sources directory for files with `ingested: false` in frontmatter. If no unprocessed sources found, report and exit.
+Enumerate sources and resolve state using Source ingest state above. Queue every pending source, including files without metadata. Report state errors and orphan metadata separately; process unaffected pending sources, but do not ingest sources with state errors until corrected. Report "no unprocessed sources" only when the complete scan has neither pending sources nor state errors; a failed or incomplete scan must be reported as such.
 
 #### Phase 2: Read and discuss (interactive mode)
 
 For each unprocessed source:
 
-1. **Read** the full source file
+1. **Read** the full raw source file, using a format-appropriate reader (e.g. PDF extraction or a data-file reader), not the sidecar. If it cannot be read adequately, report the limitation and leave it pending; do not synthesize from metadata alone.
 2. **Summarize** the key takeaways in 3-5 bullet points
 3. **Ask the user**:
    - What aspects are most important?
@@ -324,12 +353,9 @@ For each source, do ALL of the following:
 - In new/updated wiki pages, reference the source with a relative link back to the raw file
 - This creates a trail from wiki content back to raw sources
 
-**D. Update source frontmatter:**
+**D. Prepare source state:**
 
-```yaml
-ingested: true
-ingested_date: YYYY-MM-DD
-```
+For a pending source without a sidecar, create the adjacent `.meta.md` with `type: source-state` and `ingested: false`. Preserve existing sidecar fields. Never edit legacy inline frontmatter or raw source contents. Keep the source pending until wiki, index, and log updates succeed (Phase 4).
 
 **E. Update frontmatter on modified wiki pages:**
 
@@ -339,14 +365,17 @@ ingested_date: YYYY-MM-DD
 
 1. Append to log.md: `### YYYY-MM-DD | ingest | {source title}`
 2. Update INDEX.md if new sections or directories were created
-3. Report to user: sources processed, pages created, pages updated, key insights
+3. Only after the source was adequately read, its raw payload availability was verified under Source ingest state, and its wiki, index, and log updates succeeded, set `ingested: true` and `ingested_date: YYYY-MM-DD` in its sidecar. On failure, leave it pending and report partial work for reconciliation on retry.
+4. Report to user: sources processed, sources still pending or with state errors, pages created, pages updated, key insights
 
 #### Phase 5: Commit
 
 ```bash
-git add {vault}/
+git add -- {changed-wiki-index-log-paths} {changed-source-sidecar-paths}
 git commit -m "Ingest: {source title or 'N sources'}"
 ```
+
+Stage the exact sidecars created or changed in this ingest even when they are outside the vault; verify both wiki updates and source state are staged together. Do not stage raw payloads or unrelated files as part of this operation.
 
 Push per project conventions — do not auto-push unless CLAUDE.md specifies it.
 
@@ -356,7 +385,9 @@ Before committing, verify:
 
 - [ ] All new pages have `## Related` with 2+ links
 - [ ] All updated pages have `updated:` date refreshed
-- [ ] Source file marked as `ingested: true`
+- [ ] Successfully processed source's sidecar marked as `ingested: true` with `ingested_date`; incomplete sources remain pending
+- [ ] Raw source contents unchanged; changed sidecars included in the commit
+- [ ] Raw payload already committed separately or retrievable from the documented shared source store; source links resolve after checkout/retrieval
 - [ ] Entry appended to log.md
 - [ ] No broken links introduced (quick grep check)
 - [ ] Markdownlint passes on new/modified files
@@ -406,6 +437,8 @@ Arguments:
 #### Checks
 
 Run ALL checks below. Use Grep and Glob tools for efficient scanning — do NOT read every file in full.
+
+Wiki-page checks and `--fix` apply only to wiki pages: exclude raw sources and their state sidecars even if the configured source directory is inside the vault. Inspect source state only through the Knowledge Gaps check below; never apply wiki frontmatter defaults to raw files or sidecars.
 
 **1. Link Integrity**
 
@@ -481,7 +514,8 @@ Frequently mentioned concepts without own page:
 
 Unprocessed sources:
 
-- Count files in raw sources directory with `ingested: false`
+- Use the same recursive enumeration and Source ingest state rules as Ingest Phase 1. Count pending raw sources (missing state or boolean `false`), including PDFs, data files, and transcripts, once each; do not count sidecars as sources.
+- Report state errors separately, with source/metadata paths and reasons, and report orphan metadata. These sources are not processed; neither a state error nor a failed scan may be presented as a verified zero backlog. Lint, including `--fix`, must not set any source's state to processed.
 
 Contradictions:
 
