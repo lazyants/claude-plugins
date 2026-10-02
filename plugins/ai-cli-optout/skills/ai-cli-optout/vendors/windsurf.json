@@ -11,7 +11,7 @@
     "https://docs.devin.ai/admin/security",
     "https://windsurf.com/settings",
     "https://windsurf.com/terms-of-service-individual",
-    "https://marketplace.visualstudio.com/items?itemName=Codeium.codeium"
+    "https://open-vsx.org/api/Codeium/codeium"
   ],
   "settings_files": [],
   "shell_env_vars": [],

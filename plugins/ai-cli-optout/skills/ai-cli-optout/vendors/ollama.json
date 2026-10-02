@@ -7,7 +7,8 @@
     "https://docs.ollama.com/faq",
     "https://docs.ollama.com/cloud",
     "https://github.com/ollama/ollama/blob/main/docs/faq.mdx",
-    "https://github.com/ollama/ollama/blob/main/envconfig/config.go"
+    "https://github.com/ollama/ollama/blob/main/envconfig/config.go",
+    "https://github.com/ollama/ollama/blob/main/readline/history.go"
   ],
   "settings_files": [],
   "shell_env_vars": [],
