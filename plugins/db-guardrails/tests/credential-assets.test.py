@@ -9,6 +9,8 @@ DB_GUARDRAILS_LIVE_POSTGRES=1 PGHOST=127.0.0.1 PGPORT=5432 \
 
 Live engine accounts/databases are isolated by a random identifier and removed
 afterward. MySQL needs a mysql/mariadb client; PostgreSQL needs psql 15+.
+The disposable MySQL service's global sql_mode and partial_revokes settings
+are restored after tests that change them.
 """
 
 import json
@@ -45,12 +47,25 @@ entry.update(DB_USERNAME=os.environ.get("DB_USERNAME"),
              DB_PASSWORD=os.environ.get("DB_PASSWORD"))
 with open(os.environ["GUARD_CAPTURE"], "a") as capture:
     capture.write(json.dumps(entry) + "\n")
-if "SHOW GLOBAL VARIABLES" in sql:
+state_path = pathlib.Path(os.environ["GUARD_STATE"]) if "GUARD_STATE" in os.environ else None
+state = json.loads(state_path.read_text()) if state_path and state_path.exists() else {"partial": 0, "grants": 0}
+if "SHOW GLOBAL VARIABLES LIKE 'partial_revokes'" in sql:
+    after = state["partial"] > 0
+    state["partial"] += 1
+    if os.environ.get("GUARD_PARTIAL_FAIL") or (after and os.environ.get("GUARD_PARTIAL_FAIL_AFTER")):
+        sys.exit(1)
+    key = "GUARD_PARTIAL_REVOKES_AFTER" if after else "GUARD_PARTIAL_REVOKES"
+    print(os.environ.get(key, os.environ.get("GUARD_PARTIAL_REVOKES", "")))
+elif "SHOW GLOBAL VARIABLES" in sql:
     print(os.environ.get("GUARD_MANDATORY_ROLES", ""))
 elif "SHOW GRANTS" in sql:
-    print(os.environ.get("GUARD_APP_GRANTS", ""))
+    key = "GUARD_PRIOR_APP_GRANTS" if state["grants"] == 0 else "GUARD_APP_GRANTS"
+    state["grants"] += 1
+    print(os.environ.get(key, os.environ.get("GUARD_APP_GRANTS", "")))
 elif os.environ.get("GUARD_APPLY_FAIL"):
     sys.exit(1)
+if state_path:
+    state_path.write_text(json.dumps(state))
 '''
 
 FAKE_PSQL = r'''#!/usr/bin/env python3
@@ -123,6 +138,7 @@ class CredentialAssetsTest(unittest.TestCase):
 
     def mysql(self, **values):
         env = self.env | values
+        env["GUARD_STATE"] = str(self.root / ("state-" + uuid.uuid4().hex + ".json"))
         return run(["sh", str(MYSQL)], env=env)
 
     def laravel(self, dotenv=None, **values):
@@ -143,9 +159,11 @@ class CredentialAssetsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("applied:", result.stdout)
         calls = self.entries()
-        self.assertEqual(len(calls), 3)
-        self.assertIn("SHOW GLOBAL VARIABLES LIKE 'mandatory_roles'", calls[1]["sql"])
-        self.assertIn("SHOW GRANTS FOR 'app'@'%'", calls[2]["sql"])
+        self.assertEqual(len(calls), 6)
+        self.assertIn("SHOW GLOBAL VARIABLES LIKE 'partial_revokes'", calls[0]["sql"])
+        self.assertIn("SHOW GRANTS FOR 'app'@'%'", calls[1]["sql"])
+        self.assertIn("SHOW GLOBAL VARIABLES LIKE 'mandatory_roles'", calls[4]["sql"])
+        self.assertIn("SHOW GRANTS FOR 'app'@'%'", calls[5]["sql"])
 
     def test_mysql_root_secret_is_quoted_private_and_removed(self):
         secret = ' leading # quote" backslash\\ trailing '
@@ -164,7 +182,7 @@ class CredentialAssetsTest(unittest.TestCase):
             with self.subTest(secret=secret):
                 result = self.mysql(MIGRATOR_PASSWORD=secret)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                sql = self.entries()[-3]["sql"]
+                sql = next(entry["sql"] for entry in reversed(self.entries()) if "CREATE USER" in entry["sql"])
                 mode = "SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'NO_BACKSLASH_ESCAPES');"
                 self.assertTrue(sql.startswith(mode))
                 self.assertLess(sql.index(mode), sql.index("IDENTIFIED BY"))
@@ -238,6 +256,54 @@ class CredentialAssetsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("applied:", result.stdout)
 
+    def test_mysql_underscore_scopes_follow_partial_revokes_semantics(self):
+        for partial in ("", "partial_revokes\tOFF", "partial_revokes\tON"):
+            database_scope = "app_db" if partial.endswith("ON") else "app\\_db"
+            grants = SAFE_GRANTS.replace("`appdb`.*", "`" + database_scope + "`.*")
+            grants += "GRANT SELECT ON `app_db`.`inside_data` TO `app`@`%`\n"
+            with self.subTest(partial=partial):
+                result = self.mysql(MYSQL_DATABASE="app_db", GUARD_PARTIAL_REVOKES=partial,
+                                    GUARD_APP_GRANTS=grants,
+                                    GUARD_PRIOR_APP_GRANTS=SAFE_GRANTS.replace("`appdb`.*", "`app_db`.*"))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                sql = next(entry["sql"] for entry in reversed(self.entries()) if "CREATE USER" in entry["sql"])
+                self.assertIn("REVOKE ALL PRIVILEGES ON `app_db`.*", sql)
+                self.assertIn("ON `" + database_scope + "`.* TO 'app'", sql)
+                self.assertNotIn("REVOKE ALL PRIVILEGES ON `other", sql)
+
+    def test_mysql_literal_scope_rerun_revokes_only_existing_scope(self):
+        grants = SAFE_GRANTS.replace("`appdb`.*", "`app\\_db`.*")
+        result = self.mysql(MYSQL_DATABASE="app_db", GUARD_APP_GRANTS=grants)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sql = next(entry["sql"] for entry in self.entries() if "CREATE USER" in entry["sql"])
+        self.assertIn("REVOKE ALL PRIVILEGES ON `app\\_db`.*", sql)
+        self.assertNotIn("REVOKE ALL PRIVILEGES ON `app_db`.*", sql)
+
+    def test_mysql_usage_only_prior_account_needs_no_revoke(self):
+        result = self.mysql(GUARD_PRIOR_APP_GRANTS="GRANT USAGE ON *.* TO `app`@`%`")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sql = next(entry["sql"] for entry in self.entries() if "CREATE USER" in entry["sql"])
+        self.assertNotIn("REVOKE ALL PRIVILEGES", sql)
+
+    def test_mysql_unescaped_wildcard_and_sibling_object_grants_are_rejected(self):
+        literal = SAFE_GRANTS.replace("`appdb`.*", "`app\\_db`.*")
+        for extra in ("GRANT ALTER ON `app_db`.* TO `app`@`%`",
+                      "GRANT SELECT ON `appXdb`.`outside_data` TO `app`@`%`"):
+            with self.subTest(extra=extra):
+                result = self.mysql(MYSQL_DATABASE="app_db", GUARD_APP_GRANTS=literal + extra + "\n")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("verification failed", result.stderr)
+                self.assertNotIn("applied:", result.stdout)
+
+    def test_mysql_unknown_changed_or_failed_scope_mode_never_claims_success(self):
+        for values in ({"GUARD_PARTIAL_REVOKES": "partial_revokes\tUNKNOWN"},
+                       {"GUARD_PARTIAL_REVOKES_AFTER": "partial_revokes\tON"},
+                       {"GUARD_PARTIAL_FAIL": "1"}, {"GUARD_PARTIAL_FAIL_AFTER": "1"}):
+            with self.subTest(values=values):
+                result = self.mysql(**values)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("applied:", result.stdout)
+
     def test_mysql_empty_grants_fail_closed(self):
         for grants in ("", "GRANT USAGE ON *.* TO `app`@`%`\n"):
             with self.subTest(grants=grants):
@@ -250,7 +316,7 @@ class CredentialAssetsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("mandatory roles", result.stderr)
         self.assertNotIn("applied:", result.stdout)
-        self.assertEqual(len(self.entries()), 2)
+        self.assertEqual(len(self.entries()), 5)
 
     def test_mysql_empty_mandatory_roles_are_safe(self):
         result = self.mysql(GUARD_MANDATORY_ROLES="mandatory_roles\t")
@@ -260,7 +326,7 @@ class CredentialAssetsTest(unittest.TestCase):
         result = self.mysql(GUARD_APPLY_FAIL="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("applied:", result.stdout)
-        self.assertEqual(len(self.entries()), 1)
+        self.assertEqual(len(self.entries()), 3)
 
     def test_laravel_missing_dotenv_keys_report_required_variable(self):
         cases = [("DB_DATABASE=app\n", "MIGRATOR_USER"),
@@ -369,16 +435,74 @@ class MySQLLiveTest(unittest.TestCase):
         self.admin(f"DROP DATABASE IF EXISTS `{self.identifier}`; DROP USER IF EXISTS '{self.app}'@'%'; "
                    f"DROP USER IF EXISTS '{self.migrator}'@'%'; DROP DATABASE IF EXISTS `{self.identifier}other`;", check=False)
 
-    def provision(self, password):
+    def provision(self, password, *, database=None, app_user=None, migrator_user=None):
         env = sanitized_env() | {"PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
-              "MYSQL_DATABASE": self.identifier, "MYSQL_USER": self.app,
+              "MYSQL_DATABASE": database or self.identifier, "MYSQL_USER": app_user or self.app,
               "MYSQL_ROOT_PASSWORD": os.environ["MYSQL_ROOT_PASSWORD"],
-              "MIGRATOR_USER": self.migrator, "MIGRATOR_PASSWORD": password}
+              "MIGRATOR_USER": migrator_user or self.migrator, "MIGRATOR_PASSWORD": password}
         return run(["sh", str(MYSQL)], env=env)
 
-    def as_user(self, user, password, sql):
-        args = [a for a in self.args if a != "-uroot"] + ["-u" + user, self.identifier]
+    def as_user(self, user, password, sql, *, database=None):
+        args = [a for a in self.args if a != "-uroot"] + ["-u" + user, database or self.identifier]
         return run(args, env=self.env | {"MYSQL_PWD": password}, sql=sql)
+
+    def test_literal_underscore_grants_do_not_reach_sibling_database(self):
+        initial = self.admin("SHOW GLOBAL VARIABLES LIKE 'partial_revokes';").stdout.strip()
+        modes = ("OFF", "ON") if initial else ("OFF",)
+        if initial:
+            original = initial.split("\t", 1)[1]
+            self.addCleanup(lambda: self.admin("SET GLOBAL partial_revokes = " + original + ";", check=False))
+        self.admin("SET GLOBAL sql_mode = '';")
+        for mode in modes:
+            with self.subTest(partial_revokes=mode):
+                if initial:
+                    self.admin("SET GLOBAL partial_revokes = " + mode + ";")
+                database = self.identifier + "app_db"
+                sibling = self.identifier + "appXdb"
+                app, migrator = self.identifier + "a" + mode, self.identifier + "m" + mode
+                try:
+                    self.admin(f"CREATE DATABASE `{database}`; CREATE DATABASE `{sibling}`; "
+                               f"CREATE TABLE `{sibling}`.outside_data (id INT); "
+                               f"CREATE USER '{app}'@'%' IDENTIFIED BY 'app-password'; "
+                               f"GRANT ALL PRIVILEGES ON `{database}`.* TO '{app}'@'%';")
+                    # The preexisting unescaped database grant reaches appXdb
+                    # only with wildcard semantics. Provisioning must remove
+                    # that legacy scope and install the literal app_db scope.
+                    before = self.as_user(app, "app-password", "SELECT * FROM outside_data", database=sibling)
+                    self.assertEqual(before.returncode == 0, mode == "OFF", before.stderr)
+                    for _ in range(2):  # Both conversion and an idempotent rerun.
+                        result = self.provision("literal-password", database=database,
+                                                app_user=app, migrator_user=migrator)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn("applied:", result.stdout)
+                    allowed = self.as_user(app, "app-password",
+                        "CREATE TABLE runtime_data (id INT PRIMARY KEY); "
+                        "INSERT INTO runtime_data VALUES (1), (2); "
+                        "UPDATE runtime_data SET id = 3 WHERE id = 2; "
+                        "DELETE FROM runtime_data WHERE id = 3; "
+                        "ALTER TABLE runtime_data ADD COLUMN extra INT; "
+                        "SELECT count(*) FROM runtime_data;", database=database)
+                    self.assertEqual(allowed.returncode, 0, allowed.stderr)
+                    self.assertEqual(allowed.stdout.strip(), "1")
+                    for sql in ("DROP TABLE runtime_data", "TRUNCATE TABLE runtime_data"):
+                        denied = self.as_user(app, "app-password", sql, database=database)
+                        self.assertNotEqual(denied.returncode, 0, sql)
+                    full = self.as_user(migrator, "literal-password",
+                        "CREATE TABLE migration_data (id INT); "
+                        "ALTER TABLE migration_data ADD COLUMN extra INT; "
+                        "TRUNCATE TABLE migration_data; DROP TABLE migration_data;", database=database)
+                    self.assertEqual(full.returncode, 0, full.stderr)
+                    for sql in (f"SELECT * FROM `{sibling}`.outside_data",
+                                f"ALTER TABLE `{sibling}`.outside_data ADD COLUMN extra INT",
+                                f"CREATE TABLE `{sibling}`.new_data (id INT)"):
+                        denied = self.as_user(app, "app-password", sql, database=database)
+                        self.assertNotEqual(denied.returncode, 0, sql)
+                    denied = self.as_user(migrator, "literal-password",
+                        f"SELECT * FROM `{sibling}`.outside_data", database=database)
+                    self.assertNotEqual(denied.returncode, 0, denied.stderr)
+                finally:
+                    self.admin(f"DROP DATABASE IF EXISTS `{database}`; DROP DATABASE IF EXISTS `{sibling}`; "
+                               f"DROP USER IF EXISTS '{app}'@'%'; DROP USER IF EXISTS '{migrator}'@'%';", check=False)
 
     def test_password_roundtrip_and_app_destructive_denial(self):
         for initial_mode in ("", "NO_BACKSLASH_ESCAPES"):

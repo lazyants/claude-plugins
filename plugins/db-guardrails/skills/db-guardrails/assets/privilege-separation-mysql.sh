@@ -29,6 +29,8 @@
 # MySQL roles also require manual removal/review. Only the named account/host
 # is checked; stored routines with elevated definers need separate review.
 # App and migrator must use distinct, dedicated usernames; neither may be root.
+# Database-level scopes use literal database names, including underscores;
+# MySQL partial_revokes and MariaDB wildcard semantics are handled explicitly.
 #
 # By default a missing MIGRATOR_PASSWORD is a hard error — privilege
 # separation that silently did not run is worse than a loud failure. Set
@@ -129,6 +131,55 @@ chmod 600 "$defaults_file"
 escaped_root_pw=$(printf '%s' "$MYSQL_ROOT_PASSWORD" | sed 's/\\/\\\\/g; s/"/\\"/g')
 printf '[client]\npassword="%s"\n' "$escaped_root_pw" > "$defaults_file"
 
+read_partial_revokes() {
+  partial_row=$("$db_client" --defaults-extra-file="$defaults_file" -uroot --batch --skip-column-names --raw <<'SQL'
+SHOW GLOBAL VARIABLES LIKE 'partial_revokes';
+SQL
+) || return 1
+  case "$partial_row" in
+    '' | "$(printf 'partial_revokes\tOFF')" | "$(printf 'partial_revokes\t0')") printf '0' ;;
+    "$(printf 'partial_revokes\tON')" | "$(printf 'partial_revokes\t1')") printf '1' ;;
+    *) echo "[db-guardrails] cannot establish database scope: unrecognized partial_revokes setting." >&2; return 1 ;;
+  esac
+}
+partial_revokes=$(read_partial_revokes)
+grant_database="$MYSQL_DATABASE"
+if [ "$partial_revokes" = 0 ]; then
+  # A quoted database identifier is still a grant pattern when wildcards are
+  # enabled. Escape underscores to keep app_db from granting access to appXdb.
+  grant_database=$(printf '%s' "$MYSQL_DATABASE" | sed 's/_/\\_/g')
+fi
+
+prior_app_grants=$("$db_client" --defaults-extra-file="$defaults_file" -uroot --batch --skip-column-names --raw <<SQL
+SHOW GRANTS FOR '${MYSQL_USER}'@'${app_host}';
+SQL
+)
+# Revoke only existing scopes for this app/database. This converts a legacy
+# wildcard grant and makes reruns work when only the escaped literal scope
+# exists. Unrelated grants survive for explicit rejection in the post-check.
+# ENVIRON preserves pattern backslashes; awk -v would interpret their escapes.
+revoke_flags=$(printf '%s\n' "$prior_app_grants" | GUARD_LITERAL_DB="$MYSQL_DATABASE" GUARD_GRANT_DB="$grant_database" awk '
+  {
+    scope = $0
+    if (scope !~ /^GRANT .* ON .* TO /) next
+    sub(/^.* ON /, "", scope)
+    sub(/ TO .*/, "", scope)
+    if (scope == "`" ENVIRON["GUARD_LITERAL_DB"] "`.*") raw_scope = 1
+    if (scope == "`" ENVIRON["GUARD_GRANT_DB"] "`.*") grant_scope = 1
+  }
+  END { printf "%d%d", raw_scope, grant_scope }
+')
+revoke_sql=""
+case "$revoke_flags" in
+  1*) revoke_sql="REVOKE ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.* FROM '${MYSQL_USER}'@'${app_host}';" ;;
+esac
+if [ "$grant_database" != "$MYSQL_DATABASE" ]; then
+  case "$revoke_flags" in
+    *1) revoke_sql="$revoke_sql
+REVOKE ALL PRIVILEGES ON \`${grant_database}\`.* FROM '${MYSQL_USER}'@'${app_host}';" ;;
+  esac
+fi
+
 # SQL-escape single quotes in the password — the one value below that is a
 # string literal, not an identifier. The SQL session below explicitly disables
 # backslash escaping before it uses this value; doubling quotes is then valid
@@ -140,20 +191,25 @@ SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'NO_BACKSL
 
 -- Application user: everything a forward migration needs, but NO DROP.
 -- (No DROP also means no TRUNCATE TABLE — MySQL requires DROP for TRUNCATE.)
-REVOKE ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.* FROM '${MYSQL_USER}'@'${app_host}';
+$revoke_sql
 GRANT SELECT, INSERT, UPDATE, DELETE, EXECUTE,
       CREATE, ALTER, INDEX, REFERENCES, LOCK TABLES,
       CREATE TEMPORARY TABLES
-  ON \`${MYSQL_DATABASE}\`.* TO '${MYSQL_USER}'@'${app_host}';
+  ON \`${grant_database}\`.* TO '${MYSQL_USER}'@'${app_host}';
 
 -- Migrator user: full rights, used only for migrations and intentional
 -- destructive runs. The ALTER re-syncs the password if the user pre-existed.
 CREATE USER IF NOT EXISTS '${migrator_user}'@'%' IDENTIFIED BY '${escaped_migrator_pw}';
 ALTER USER '${migrator_user}'@'%' IDENTIFIED BY '${escaped_migrator_pw}';
-GRANT ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.* TO '${migrator_user}'@'%';
+GRANT ALL PRIVILEGES ON \`${grant_database}\`.* TO '${migrator_user}'@'%';
 
 FLUSH PRIVILEGES;
 SQL
+
+if [ "$(read_partial_revokes)" != "$partial_revokes" ]; then
+  echo "[db-guardrails] verification failed: partial_revokes changed during provisioning; review grants and re-run." >&2
+  exit 1
+fi
 
 # SHOW GRANTS FOR excludes MySQL mandatory roles. MariaDB returns no row for
 # this MySQL-only variable, making SHOW ... LIKE portable between engines.
@@ -173,7 +229,7 @@ SQL
 # Fail closed on output we cannot establish as safe, including role/proxy
 # assignments, partial revokes, dynamic privileges and WITH GRANT OPTION.
 # Never print raw grant rows: MariaDB may include authentication hashes.
-if ! printf '%s\n' "$app_grants" | awk -v database="$MYSQL_DATABASE" '
+if ! printf '%s\n' "$app_grants" | GUARD_LITERAL_DB="$MYSQL_DATABASE" GUARD_GRANT_DB="$grant_database" awk '
   BEGIN {
     split("SELECT|INSERT|UPDATE|DELETE|EXECUTE|CREATE|ALTER|INDEX|REFERENCES|LOCK TABLES|CREATE TEMPORARY TABLES", names, "|")
     for (i in names) allowed[names[i]] = 1
@@ -193,9 +249,12 @@ if ! printf '%s\n' "$app_grants" | awk -v database="$MYSQL_DATABASE" '
       if (privileges != "USAGE") bad = 1
       next
     }
-    prefix = "`" database "`."
+    database_scope = "`" ENVIRON["GUARD_GRANT_DB"] "`.*"
+    prefix = "`" ENVIRON["GUARD_LITERAL_DB"] "`."
     object = substr(scope, length(prefix) + 1)
-    if (index(scope, prefix) != 1 || (object != "*" && object !~ /^`([^`]|``)+`$/)) {
+    # Database grants are mode-specific patterns. Object qualifiers are always
+    # literal identifiers, even when partial_revokes is disabled.
+    if (scope != database_scope && (index(scope, prefix) != 1 || object !~ /^`([^`]|``)+`$/)) {
       bad = 1
       next
     }
