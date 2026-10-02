@@ -34,10 +34,11 @@ with `DELETE` rights can still delete rows.
 
 The blocking hook is active immediately — no `settings.json` editing.
 
-**Dependency:** the hook parses its input with `jq` (preferred) or `python3`.
-At least one must be on `PATH`. If neither is found the hook exits 1 with a
+**Dependencies:** the hook uses standard system `awk` for command scanning
+and parses JSON with `jq` (preferred) or `python3`.
+At least one JSON parser must be on `PATH`. If a required tool is missing the hook exits 1 with a
 non-blocking error: the command proceeds and the transcript shows that the
-guard is inactive. Install `jq` to restore protection.
+guard is inactive. Install the missing tool or restore the scanner to resume protection.
 
 ## Layer 4 — the hook
 
@@ -117,7 +118,8 @@ SQL against your database itself. You apply that step.
 db-guardrails/
 ├── hooks/
 │   ├── hooks.json                  # wires the PreToolUse:Bash hook
-│   └── block-destructive-db.sh     # layer 4 — the blocker
+│   ├── block-destructive-db.sh     # layer 4 — the blocker
+│   └── scan-shell.awk              # quote/statement scanning
 ├── skills/db-guardrails/
 │   ├── SKILL.md                    # the /db-guardrails installer skill
 │   ├── assets/                     # scaffolding for layers 1–3

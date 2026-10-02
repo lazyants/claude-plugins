@@ -57,136 +57,33 @@ cmd_lower="$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')"
 # --- chained / compound command detection --------------------------------
 # Walk shell quotes without evaluating anything. Substitution is active outside
 # single quotes; escaped quotes/operators and quoted newlines are ordinary data.
-# Keep two copies: shell segments for invocation-scoped flags, and SQL segments
-# whose quoted newlines remain whitespace and whose closing shell quotes end an
-# SQL argument. Semicolons remain conservative SQL boundaries even in literals.
+# The scanner checks invocation-scoped flags and SQL segments whose quoted
+# newlines remain whitespace and whose closing shell quotes end an SQL argument.
+# Semicolons remain conservative SQL boundaries even in literals.
 chained=0
-quote=""
-sub_depth=0
-sub_quotes=()
-sub_parens=()
-sub_kinds=()
-sub_shells=()
 shell_segments=()
-shell_current=""
-sql_segments=""
-heredoc_delimiter=""
-heredoc_line=""
-in_heredoc=0
-heredoc_re="^<<-?[[:space:]]*['\"]?([a-z_][a-z0-9_]*)['\"]?"
-end_shell_segment() {
-  shell_segments[${#shell_segments[@]}]="$shell_current"
-  shell_current=""
-}
-for ((i = 0; i < ${#cmd_lower}; i++)); do
-  char="${cmd_lower:i:1}"
-  next="${cmd_lower:i+1:1}"
-  if [[ "$in_heredoc" -eq 1 ]]; then
-    if [[ "$char" == $'\n' ]]; then
-      if [[ "${heredoc_line//$'\t'/}" == "$heredoc_delimiter" ]]; then
-        in_heredoc=0
-        heredoc_delimiter=""
-        sql_segments+=';'
-        end_shell_segment
-      else
-        sql_segments+="$heredoc_line"$'\n'
-        shell_current+="$heredoc_line"$'\n'
-      fi
-      heredoc_line=""
-    else
-      heredoc_line+="$char"
-    fi
-    continue
-  fi
-  if [[ "$quote" != "'" && "$char" == '\' ]]; then
-    # A backslash-newline continues the same command/SQL word.
-    if [[ "$next" != $'\n' ]]; then
-      shell_current+="$char$next"
-      sql_segments+="$next"
-    fi
-    i=$((i + 1))
-    continue
-  fi
-  if [[ "$quote" != "'" && "$char" == '$' && "$next" == '(' ]]; then
-    chained=1
-    sub_quotes[sub_depth]="$quote"
-    sub_parens[sub_depth]=1
-    sub_kinds[sub_depth]='paren'
-    sub_shells[sub_depth]="$shell_current"
-    sub_depth=$((sub_depth + 1))
-    quote=""
-    shell_current=""
-    sql_segments+='$('
-    i=$((i + 1))
-    continue
-  fi
-  if [[ "$quote" != "'" && "$char" == '`' ]]; then
-    chained=1
-    if [[ "$sub_depth" -gt 0 && "${sub_kinds[sub_depth-1]}" == 'backtick' && -z "$quote" ]]; then
-      end_shell_segment
-      sub_depth=$((sub_depth - 1))
-      quote="${sub_quotes[sub_depth]}"
-      shell_current="${sub_shells[sub_depth]}"'`...`'
-      sql_segments+=';'
-    else
-      sub_quotes[sub_depth]="$quote"
-      sub_kinds[sub_depth]='backtick'
-      sub_shells[sub_depth]="$shell_current"
-      sub_depth=$((sub_depth + 1))
-      quote=""
-      shell_current=""
-    fi
-    continue
-  fi
-  if [[ -z "$quote" && "$sub_depth" -gt 0 && "${sub_kinds[sub_depth-1]}" == 'paren' ]]; then
-    [[ "$char" == '(' ]] && sub_parens[sub_depth-1]=$((sub_parens[sub_depth-1] + 1))
-    if [[ "$char" == ')' ]]; then
-      sub_parens[sub_depth-1]=$((sub_parens[sub_depth-1] - 1))
-      if [[ "${sub_parens[sub_depth-1]}" -eq 0 ]]; then
-        end_shell_segment
-        sub_depth=$((sub_depth - 1))
-        quote="${sub_quotes[sub_depth]}"
-        shell_current="${sub_shells[sub_depth]}"'$(...)'
-        sql_segments+=';'
-        continue
-      fi
-    fi
-  fi
-  if [[ -n "$quote" ]]; then
-    shell_current+="$char"
-    if [[ "$char" == "$quote" ]]; then
-      quote=""
-      sql_segments+=$'\n;'
-    else
-      sql_segments+="$char"
-    fi
-  elif [[ "$char" == "'" || "$char" == '"' ]]; then
-    quote="$char"
-    shell_current+="$char"
-    sql_segments+="$char"
-  elif [[ "$char" == $'\n' ]]; then
-    chained=1
-    end_shell_segment
-    sql_segments+=';'
-    [[ -n "$heredoc_delimiter" ]] && in_heredoc=1
-  else
-    if [[ "$char" == '<' && "$next" == '<' && "${cmd_lower:i}" =~ $heredoc_re ]]; then
-      heredoc_delimiter="${BASH_REMATCH[1]}"
-    fi
-    case "$char" in
-      ';'|'&'|'|'|'>'|'<'|'('|')') chained=1 ;;
-    esac
-    case "$char" in
-      ';'|'&'|'|') end_shell_segment; sql_segments+=';' ;;
-      *) shell_current+="$char"; sql_segments+="$char" ;;
-    esac
-  fi
-done
-if [[ "$in_heredoc" -eq 1 && "$heredoc_line" != "$heredoc_delimiter" ]]; then
-  sql_segments+="$heredoc_line"
-  shell_current+="$heredoc_line"
+unbounded_delete=0
+scanner_path="${BASH_SOURCE[0]%/*}/scan-shell.awk"
+[[ "${BASH_SOURCE[0]}" != */* ]] && scanner_path="./scan-shell.awk"
+if ! command -v awk >/dev/null 2>&1 || [[ ! -r "$scanner_path" ]]; then
+  echo "db-guardrails: awk or scan-shell.awk unavailable — destructive-DB hook is INACTIVE. Restore the scanner to enable protection." >&2
+  exit 1
 fi
-end_shell_segment
+# NUL records preserve literal newlines and cannot collide with user text.
+# The completion record also detects helper failures hidden by process substitution.
+scanner_ok=0
+while IFS= read -r -d '' record; do
+  case "${record:0:1}" in
+    C) chained="${record:1}" ;;
+    D) unbounded_delete="${record:1}" ;;
+    H) shell_segments[${#shell_segments[@]}]="${record:1}" ;;
+    K) scanner_ok=1 ;;
+  esac
+done < <(if printf '%s' "$cmd_lower" | LC_ALL=C awk -f "$scanner_path"; then printf 'K\0'; fi)
+if [[ "$scanner_ok" -ne 1 ]]; then
+  echo "db-guardrails: shell scanner failed — destructive-DB hook is INACTIVE. Restore the scanner to enable protection." >&2
+  exit 1
+fi
 
 # Inspection and text commands as a single, un-chained command — a destructive
 # keyword there is an argument, not an executed statement. GNU sed's `e`
@@ -233,67 +130,16 @@ deny() {
 # Known limitation: a `;` inside a quoted SQL string literal is also treated
 # as a statement boundary — this can over-block (a false positive), never
 # under-block.
-old_ifs="$IFS"
-IFS=';'
-for seg_check in $sql_segments; do
-  if [[ "$seg_check" =~ delete[[:space:]]+([^|&]*[[:space:]])?from[[:space:]] ]]; then
-    # Shell --options before DELETE are not SQL comments. Only inspect the SQL
-    # tail for bounds, so WHERE before this DELETE cannot vouch for it either.
-    delete_tail="${seg_check#*delete}"
-    delete_tail="$(printf '%s' "$delete_tail" | sed 's/--.*$//')"
-    if ! [[ "$delete_tail" =~ (^|[^[:alnum:]_])where([^[:alnum:]_]|$) ]] \
-       && ! [[ "$delete_tail" =~ (^|[^[:alnum:]_])limit([^[:alnum:]_]|$) ]]; then
-      IFS="$old_ifs"
-      deny "DELETE without WHERE or LIMIT"
-    fi
-  fi
-done
-IFS="$old_ifs"
-
-# Tokenize literal argv without evaluating substitutions or variables. Quoted
-# flags remain flags; an option's value such as --group="--append" does not.
-parse_shell_words() {
-  local text="$1" word="" word_quote="" char next j
-  words=()
-  for ((j = 0; j < ${#text}; j++)); do
-    char="${text:j:1}"
-    next="${text:j+1:1}"
-    if [[ "$word_quote" != "'" && "$char" == '\' ]]; then
-      word+="$next"
-      j=$((j + 1))
-    elif [[ -n "$word_quote" ]]; then
-      if [[ "$char" == "$word_quote" ]]; then
-        word_quote=""
-      else
-        word+="$char"
-      fi
-    elif [[ "$char" == "'" || "$char" == '"' ]]; then
-      word_quote="$char"
-    elif [[ "$char" == [[:space:]] ]]; then
-      [[ -n "$word" ]] && words[${#words[@]}]="$word"
-      word=""
-    else
-      word+="$char"
-    fi
-  done
-  [[ -n "$word" ]] && words[${#words[@]}]="$word"
-}
+if [[ "$unbounded_delete" -eq 1 ]]; then
+  deny "DELETE without WHERE or LIMIT"
+fi
 
 # Options apply to the same invocation, regardless of their argv position.
 # A later/nested command's --append / --force / -r cannot affect this command.
 for segment in "${shell_segments[@]}"; do
-  parse_shell_words "$segment"
-  append=0 force=0 recursive=0 volumes=0
-  for word in "${words[@]}"; do
-    case "$word" in
-      --) break ;;
-      --append) append=1 ;;
-      --force) force=1 ;;
-      --recursive) recursive=1 ;;
-      --volumes|--volumes=true|--volumes=1|--volumes=t) volumes=1 ;;
-      -*) [[ "$word" =~ ^-[a-z]*r[a-z]*$ ]] && recursive=1 ;;
-    esac
-  done
+  append="${segment:0:1}" force="${segment:1:1}"
+  recursive="${segment:2:1}" volumes="${segment:3:1}"
+  segment="${segment:4}"
   if [[ "$segment" =~ doctrine:fixtures:load([^[:alnum:]_:-]|$) ]] \
      && [[ "$append" -eq 0 ]]; then
     deny "doctrine:fixtures:load without --append (Symfony)"

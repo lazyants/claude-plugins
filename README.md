@@ -94,7 +94,7 @@ The hook is bypassed only by starting Claude Code with `ALLOW_DESTRUCTIVE_DB_HOO
 
 ### Dependency
 
-The hook parses its input with `jq` (preferred) or `python3` — at least one must be on `PATH`. If neither is found it returns a non-blocking hook error (exit 1), showing an inactive-guard warning in the transcript while allowing the command. Install `jq` to restore protection.
+The hook uses standard system `awk` for command scanning and parses JSON with `jq` (preferred) or `python3` — at least one JSON parser must be on `PATH`. If a required tool is missing it returns a non-blocking hook error (exit 1), showing an inactive-guard warning in the transcript while allowing the command. Install the missing tool to restore protection.
 
 ### What the hook is not
 

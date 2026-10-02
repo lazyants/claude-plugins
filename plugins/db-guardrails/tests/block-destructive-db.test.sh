@@ -58,7 +58,10 @@ expect 2 "DELETE multiline comment" $'psql -c "DELETE\nFROM users -- where id=5\
 expect 2 "DELETE compact SQL comment" $'psql -c "DELETE\nFROM users --where id=5"'
 expect 2 "DELETE shell long options retained" 'mysql --user=root -e "DELETE FROM users"'
 expect 2 "DELETE escaped argument retained" 'mysql --user=root -e DELETE\ FROM\ users'
+expect 2 "DELETE ANSI-C newline" 'psql -c $'\''DELETE\nFROM users'\'''
+expect 2 "DELETE ANSI-C tab" 'psql -c $'\''DELETE\tFROM users'\'''
 expect 2 "DELETE separate shell calls" $'mysql -e "DELETE FROM a"\nmysql -e "DELETE FROM b WHERE id=1"'
+expect 2 "DELETE after blank command line" $'echo ready\n\npsql -c "DELETE FROM users"'
 expect 2 "DELETE chained bounded sibling" 'mysql -e "DELETE FROM a" && mysql -e "DELETE FROM b WHERE id=1"'
 expect 2 "DELETE bounded commented sibling" 'mysql -e "DELETE FROM a WHERE id=1 -- comment"; mysql -e "DELETE FROM b"'
 expect 2 "DELETE wrapped unsafe first stmt" $'psql -c "DELETE\nFROM a; DELETE FROM b\nWHERE id=1"'
@@ -90,6 +93,9 @@ expect 2 "Symfony later append no exemption" 'php bin/console doctrine:fixtures:
 expect 2 "Symfony newline append no exemption" $'php bin/console doctrine:fixtures:load\necho --append'
 expect 2 "Symfony append=false no exemption" 'php bin/console doctrine:fixtures:load --append=false'
 expect 2 "Symfony outer append no exemption" 'echo "$(php bin/console doctrine:fixtures:load)" --append'
+expect 2 "Symfony heredoc append no exemption" $'cat <<EOF\n$(php bin/console doctrine:fixtures:load) --append\nEOF'
+expect 2 "Symfony SQL quoted heredoc substitution" $'psql <<EOF\nSELECT \'$(php bin/console doctrine:fixtures:load)\';\nEOF'
+expect 2 "Symfony forced update in heredoc" $'cat <<EOF\n$(php bin/console doctrine:schema:update --force)\nEOF'
 expect 2 "Symfony append in option value no exemption" 'php bin/console doctrine:fixtures:load --group="--append"'
 expect 2 "Symfony append in semicolon value no exemption" 'php bin/console doctrine:fixtures:load --group="example;--append"'
 expect 2 "Symfony forced schema update" 'php bin/console doctrine:schema:update --force'
@@ -111,6 +117,7 @@ expect 2 "docker system prune volumes" 'docker system prune --volumes -f'
 expect 2 "docker system prune explicit true" 'docker system prune --volumes=true'
 expect 2 "docker system prune after echo" 'echo ready && docker system prune --volumes'
 expect 2 "docker outer invocation spans substitution" 'docker system prune "$(echo ready)" --volumes'
+expect 2 "docker prune executed in heredoc" $'cat <<EOF\n$(docker system prune --volumes)\nEOF'
 expect 2 "rm -rf data/mysql"        'rm -rf ./data/mysql'
 expect 2 "rm --recursive pg_data"   'rm --recursive --force ./pg_data'
 expect 2 "rm recursive flag 2nd"    'rm --force --recursive ./pg_data'
@@ -133,13 +140,21 @@ expect 0 "DELETE with WHERE"        'mysql -e "DELETE FROM users WHERE id = 5"'
 expect 0 "DELETE with LIMIT"        'mysql -e "DELETE FROM jobs LIMIT 100"'
 expect 0 "DELETE wrapped WHERE"     $'psql -c "DELETE\nFROM users\nWHERE id = 5"'
 expect 0 "DELETE wrapped LIMIT"     $'psql -c "DELETE\nFROM jobs\nLIMIT 100"'
+expect 0 "DELETE ANSI-C WHERE" 'psql -c $'\''DELETE\nFROM users\nWHERE id=1'\'''
+expect 0 "DELETE ANSI-C LIMIT" 'psql -c $'\''DELETE\tFROM users\tLIMIT 5'\'''
 expect 0 "DELETE comment before WHERE" $'psql -c "DELETE FROM users -- cleanup\nWHERE id=5"'
+expect 0 "DELETE blank line after comment" $'psql -c "DELETE FROM users -- cleanup\n\nWHERE id=5"'
 expect 0 "DELETE heredoc with WHERE" $'psql <<SQL\nDELETE\nFROM users\nWHERE id=5;\nSQL'
 expect 0 "Symfony append fixtures"  'php bin/console doctrine:fixtures:load --append'
 expect 0 "Symfony quoted append flag" 'php bin/console doctrine:fixtures:load "--append"'
+expect 0 "Symfony append inside heredoc substitution" $'cat <<EOF\n$(php bin/console doctrine:fixtures:load --append)\nEOF'
+expect 0 "Symfony quoted heredoc is data" $'cat <<\'EOF\'\n$(php bin/console doctrine:fixtures:load)\nEOF'
+expect 0 "Symfony backslash-quoted heredoc is data" $'cat <<\\EOF\n$(php bin/console doctrine:fixtures:load)\nEOF'
+expect 0 "Symfony escaped heredoc substitution is data" $'cat <<EOF\n\\$(php bin/console doctrine:fixtures:load)\nEOF'
 expect 0 "Symfony schema preview"   'php bin/console doctrine:schema:update --dump-sql'
 expect 0 "Symfony force belongs to sibling" 'php bin/console doctrine:schema:update; echo --force'
 expect 0 "Symfony outer force no effect" 'echo "$(php bin/console doctrine:schema:update)" --force'
+expect 0 "Symfony heredoc outer force no effect" $'cat <<EOF\n$(php bin/console doctrine:schema:update) --force\nEOF'
 expect 0 "Symfony force in option value no effect" 'php bin/console doctrine:schema:update --em="--force"'
 expect 0 "Mongo filtered deleteMany" 'mongosh --eval "db.users.deleteMany({active: false})"'
 expect 0 "Mongo filtered remove"    'mongo --eval "db.users.remove({id: 5})"'
@@ -150,6 +165,7 @@ expect 0 "docker -v is not prune volume alias" 'docker system prune -v'
 expect 0 "docker prune explicit false" 'docker system prune --volumes=false'
 expect 0 "docker volume flag belongs to sibling" 'docker system prune -f; echo --volumes'
 expect 0 "docker outer volume flag no effect" 'echo "$(docker system prune -f)" --volumes'
+expect 0 "docker heredoc outer volume flag no effect" $'cat <<EOF\n$(docker system prune -f) --volumes\nEOF'
 expect 0 "docker volume flag in filter no effect" 'docker system prune --filter="--volumes"'
 expect 0 "rm -rf node_modules"      'rm -rf node_modules'
 expect 0 "rm nonrecursive DB path"  'rm ./data/mysql'
@@ -178,6 +194,7 @@ expect 0 "sed -e joined replacement" 'sed -e'\''s/TRUNCATE TABLE/noop/'\'' READM
 expect 0 "sed ordinary email replacement" 'sed '\''s/DROP TABLE/email/'\'' README.md'
 expect 0 "echo literal substitution" 'echo '\''$(mysql -e "DROP TABLE users")'\'''
 expect 0 "echo escaped substitution" 'echo "\$(mysql -e '\''DROP TABLE users'\'')"'
+expect 0 "echo ANSI-C SQL text" 'echo $'\''DELETE\nFROM users'\'''
 
 echo "# unavailable parsers are visible but non-blocking (expect exit 1)"
 mkdir -p "$TEST_TMPDIR/no-parsers"
@@ -198,7 +215,7 @@ for parser in python3 jq; do
   fi
   parser_path="$TEST_TMPDIR/parser-$parser"
   mkdir -p "$parser_path"
-  for utility in cat tr sed mkdir date "$parser"; do
+  for utility in cat tr sed mkdir date awk "$parser"; do
     ln -s "$(command -v "$utility")" "$parser_path/$utility"
   done
   parser_payload="$(printf '{"tool_input":{"command":%s}}' "$(json_encode $'psql -c "DELETE\nFROM users"')")"
@@ -210,6 +227,99 @@ for parser in python3 jq; do
     fail=$((fail + 1)); echo "FAIL - $parser alone (expected exit 2, got $parser_rc)"
   fi
 done
+
+echo "# unavailable or failed shell scanners are visible and non-blocking"
+scanner_payload="$(printf '{"tool_input":{"command":%s}}' "$(json_encode 'psql -c "DELETE FROM users"')")"
+mkdir -p "$TEST_TMPDIR/no-awk" "$TEST_TMPDIR/missing-helper" "$TEST_TMPDIR/broken-helper" "$TEST_TMPDIR/failed-after-output"
+for utility in cat tr python3; do
+  ln -s "$(command -v "$utility")" "$TEST_TMPDIR/no-awk/$utility"
+done
+cp "$HOOK" "$TEST_TMPDIR/missing-helper/block-destructive-db.sh"
+cp "$HOOK" "$TEST_TMPDIR/broken-helper/block-destructive-db.sh"
+printf 'BEGIN { exit 7 }\n' > "$TEST_TMPDIR/broken-helper/scan-shell.awk"
+for utility in cat tr python3; do
+  ln -s "$(command -v "$utility")" "$TEST_TMPDIR/failed-after-output/$utility"
+done
+printf '#!/bin/sh\n"%s" "$@"\nexit 7\n' "$(command -v awk)" > "$TEST_TMPDIR/failed-after-output/awk"
+chmod +x "$TEST_TMPDIR/failed-after-output/awk"
+for scanner_case in missing-awk missing-helper broken-helper failed-after-output; do
+  case "$scanner_case" in
+    missing-awk)
+      scanner_stderr="$(printf '%s' "$scanner_payload" | PATH="$TEST_TMPDIR/no-awk" "$BASH" "$HOOK" 2>&1)"
+      scanner_rc=$?
+      ;;
+    failed-after-output)
+      scanner_stderr="$(printf '%s' "$scanner_payload" | PATH="$TEST_TMPDIR/failed-after-output" "$BASH" "$HOOK" 2>&1)"
+      scanner_rc=$?
+      ;;
+    *)
+      scanner_stderr="$(printf '%s' "$scanner_payload" | "$BASH" "$TEST_TMPDIR/$scanner_case/block-destructive-db.sh" 2>&1)"
+      scanner_rc=$?
+      ;;
+  esac
+  if [[ "$scanner_rc" == 1 && "$scanner_stderr" == *"hook is INACTIVE"* ]]; then
+    pass=$((pass + 1)); echo "ok   - $scanner_case reports visible inactive scanner"
+  else
+    fail=$((fail + 1)); echo "FAIL - $scanner_case (expected exit 1 and warning, got $scanner_rc: $scanner_stderr)"
+  fi
+done
+
+echo "# large guarded-word payload stays within a bounded runtime"
+if python3 - "$HOOK" "$BASH" <<'PY'
+import json
+import subprocess
+import sys
+
+prefix = "cat > generated.sql <<'SQL'\n"
+suffix = "\nSQL"
+line = "DELETE FROM users WHERE id = 5; -- ordinary generated SQL\n"
+size = 51200
+body_size = size - len(prefix) - len(suffix)
+# Keep every generated SQL statement complete; padding reaches the exact size.
+body = line * (body_size // len(line)) + " " * (body_size % len(line))
+command = prefix + body + suffix
+payload = json.dumps({"tool_input": {"command": command}})
+try:
+    result = subprocess.run([sys.argv[2], sys.argv[1]], input=payload, text=True,
+                            capture_output=True, timeout=5)
+except subprocess.TimeoutExpired:
+    print("FAIL - 50KB guarded-word source payload exceeded 5 seconds")
+    raise SystemExit(1)
+if result.returncode != 0:
+    print(f"FAIL - 50KB safe source payload returned {result.returncode}: {result.stderr}")
+    raise SystemExit(1)
+PY
+then
+  pass=$((pass + 1)); echo "ok   - 50KB bounded SQL source payload allowed within 5 seconds"
+else
+  fail=$((fail + 1))
+fi
+
+if python3 - "$HOOK" "$BASH" <<'PY'
+import json
+import subprocess
+import sys
+
+prefix = "psql -c 'DELETE FROM users WHERE id IN ("
+suffix = ")'"
+size = 102400
+command = prefix + "1," * ((size - len(prefix) - len(suffix) - 1) // 2) + "1" + suffix
+try:
+    result = subprocess.run([sys.argv[2], sys.argv[1]],
+                            input=json.dumps({"tool_input": {"command": command}}),
+                            text=True, capture_output=True, timeout=5)
+except subprocess.TimeoutExpired:
+    print("FAIL - 100KB quoted bounded SQL exceeded 5 seconds")
+    raise SystemExit(1)
+if result.returncode != 0:
+    print(f"FAIL - 100KB bounded SQL returned {result.returncode}: {result.stderr}")
+    raise SystemExit(1)
+PY
+then
+  pass=$((pass + 1)); echo "ok   - 100KB quoted bounded SQL allowed within 5 seconds"
+else
+  fail=$((fail + 1))
+fi
 
 echo "# bypass (ALLOW_DESTRUCTIVE_DB_HOOK=true => exit 0)"
 bypass_payload="$(printf '{"tool_name":"Bash","tool_input":{"command":%s}}' "$(json_encode 'mysql -e "DROP TABLE users"')")"

@@ -56,13 +56,18 @@ the destructive rights and is used only for migrations.
 - **MySQL / MariaDB** — copy `assets/privilege-separation-mysql.sh` into the
   project (for the Docker image, `docker/mariadb/init/` so it runs on a fresh
   volume; otherwise run it once by hand). It revokes `DROP` from the app user
-  and creates a migrator user. In MySQL, an account without `DROP` can run
+  and creates a distinct migrator user; root accounts and shared app/migrator
+  names are rejected before any client call. In MySQL, an account without `DROP` can run
   neither `DROP TABLE` nor `TRUNCATE TABLE` — both layers in one grant.
+  The installer also handles database-name underscores as literals rather than
+  grant wildcards, including MySQL's `partial_revokes` mode.
 - **PostgreSQL** — copy `assets/privilege-separation-postgres.sql` and run it
   as a superuser with **psql 15 or newer** and `-X` to ignore startup files.
   Export `MIGRATOR_PASSWORD` in the
   environment; the SQL reads it with `\getenv`, keeping it off process argv.
   Pass only the non-secret `app_user` and `migrator_user` with `-v`.
+  The app and migrator must be distinct roles; the SQL checks their effective
+  names before changing passwords or ownership.
   The migrator role owns the schema; the app role gets DML only
   and no `CREATE` on the schema, so it cannot own — therefore cannot drop —
   tables.
@@ -82,8 +87,9 @@ For SQL Server, use a value that satisfies the server's password policy, for
 example `Aa1!$(openssl rand -hex 24)` (upper/lower/digit/symbol classes).
 Store it in the
 shell environment or a gitignored `.env`, **never** in a tracked file. Confirm
-the result: MySQL's installer checks effective grants and refuses inherited or
-global privileges it cannot establish as safe. Inspect `SHOW GRANTS` too.
+the result: MySQL's installer checks effective grants and refuses inherited,
+global or unrelated database/object privileges it cannot establish as safe.
+Inspect `SHOW GRANTS` too.
 For Postgres verify table/schema/database ownership, role attributes and
 inherited membership, including `PUBLIC` grants; the app must have neither
 ownership nor `TRUNCATE`. For SQL Server verify effective permissions using

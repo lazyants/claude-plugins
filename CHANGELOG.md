@@ -11,10 +11,10 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 
 ### Fixed
 
-- Ordinary git messages/searches, echo and sed text can mention destructive commands without being blocked; chained or nested execution still receives scrutiny. Wrapped SQL DELETE statements retain their WHERE clause while separate commands cannot vouch for each other (#27, #44). Recursive DB-directory removal is recognized with flags before or after the path (#160).
+- Ordinary git messages/searches, echo and sed text can mention destructive commands without being blocked; chained or nested execution still receives scrutiny. Portable awk scanning preserves blank-line boundaries and keeps large quoted commands responsive on macOS Bash 3.2. Wrapped SQL DELETE statements retain their WHERE clause while separate commands cannot vouch for each other (#27, #44). Recursive DB-directory removal is recognized with flags before or after the path (#160).
 - The missing-parser fallback reports a visible non-blocking hook error, and tests isolate HOME so fixtures do not pollute the user's audit log (#43, #48).
-- MySQL provisioning handles password quoting independently of backslash SQL modes and refuses to claim safety for unexpected effective grants, roles or global privileges. Laravel's wrapper reports missing `.env` credentials rather than silently exiting (#45, #46, #47).
-- PostgreSQL reads the migrator password from the environment with psql 15+ instead of exposing it in `-v` process arguments (#162).
+- MySQL provisioning handles password quoting independently of backslash SQL modes, grants literal database names with either `partial_revokes` setting, and refuses to claim safety for unexpected effective grants, roles, global privileges or unrelated database/object scopes. Shared app/migrator names and root identities are rejected before provisioning. Laravel's wrapper reports missing `.env` credentials rather than silently exiting (#45, #46, #47).
+- PostgreSQL reads the migrator password from the environment with psql 15+ instead of exposing it in `-v` process arguments, and rejects app/migrator role collisions before changing passwords or ownership (#162).
 - MongoDB guidance states that `readWrite` permits collection drops and mass deletes, includes an explicit custom role without `dropCollection`, and explains the residual delete risk (#28). Layer-1 guarantees are scoped to verified schema permissions; DML rights still permit row deletion.
 
 ## [cc-usage-coach 1.1.0] — 2026-10-02

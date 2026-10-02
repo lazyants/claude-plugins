@@ -35,6 +35,7 @@ jobs:
           bash --version | head -1
           python3 -V
           jq --version
+          command -v awk
           php -v | head -1
 
       - name: Credential assets
