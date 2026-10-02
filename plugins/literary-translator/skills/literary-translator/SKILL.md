@@ -3303,6 +3303,14 @@ NOT that every segment converged; read the printed JSON's
 dispatch (lock contention, the Step 1 re-translate gate, the volume cap, a
 `--resume-from-run-id` refusal). Exit 2 is a usage/environment error.
 
+**Worker usage investigation (#962).** For explicit Claude session, Codex session
+or `codex exec --json` records, run `assets/scripts/worker_usage.py` from the plugin
+with `--format`, `--worker-class` and the record paths. It is read-only, returns
+observed input/cache counts with provenance, and launches no workers. See
+[lean-worker-investigation.md](references/lean-worker-investigation.md) for real-job
+measurements, the companion's isolation limitations and the blind A/B gate before
+any transport switch. Counts do not attribute task versus inherited context.
+
 **While it runs: `driver_status.py` (#765).** The driver prints its one JSON
 line only when the batch is over, so for the hours in between there was no
 supported way to ask *is this still working, how far along is it, or did it

@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.222.0 — 2026-10-02
+
+Investigate lean worker context from actual translation records (#962). Add
+`worker_usage.py`, a read-only, stdlib profiler for explicit Claude transcripts,
+Codex rollouts and exec JSONL streams. It handles cache input, repeated Claude
+message blocks and cumulative Codex notifications without double charging, emits
+record hashes and observation units, and refuses malformed/unmeasured records.
+The investigation records real-job examples, separates measured context from
+unavailable task/context attribution, and documents the blind A/B prerequisite.
+
+The inspected companion uses app-server and cannot forward exec isolation flags;
+the fix call has no Workflow response schema, and the citation judge's Read-only
+boundary must survive any replacement. Retain the current transports: no A/B or
+worker savings is claimed and no model/effort/orchestration default changes.
+
+**Migration cost: none.** No schema, template, canon data, existing hash-bundle
+member or render-version member changes; the independent profiler is in none of
+those allowlists. Convergence cache keys, resume digests and render baselines stay
+unchanged.
+
 ## 1.221.0 — 2026-09-12
 
 **Nothing compared the entity labels a draft PRINTS against the frozen `canonical_target_form`s in
