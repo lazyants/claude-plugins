@@ -7,6 +7,7 @@ skip. All test databases/logins are unique and are removed in finally blocks.
 """
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,11 +36,14 @@ def main():
         result = subprocess.run(["docker", "exec", "-i", "-e", "SQLCMDPASSWORD", container,
                                  "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", user,
                                  "-d", db, "-C", "-b", "-x", "-r", "1", "-l", "5"],
-                                input="SET NOCOUNT ON;\n" + batch, text=True, capture_output=True,
+                                input="SET NOCOUNT ON;\nGO\n" + batch, text=True, capture_output=True,
                                 env=env, timeout=30)
         if (result.returncode == 0) != expected:
             # Batch text may contain secrets. Do not echo client diagnostics.
-            raise AssertionError(f"Unexpected SQL decision for user {user} (exit {result.returncode}, expected success={expected})")
+            codes = list(dict.fromkeys(re.findall(r"\bMsg (\d+)\b", result.stdout + result.stderr)))
+            raise AssertionError(f"Unexpected SQL decision for user {user} "
+                                 f"(exit {result.returncode}, expected success={expected}, "
+                                 f"SQL Server errors={','.join(codes) or 'none'})")
         assertions += 1
         return result.stdout
 
