@@ -7,13 +7,14 @@
 # Input  (stdin) : JSON, e.g. {"tool_name":"Bash","tool_input":{"command":"..."}}
 # Output (exit)  : 2 + stderr  => DENY  (Claude sees the message and stops)
 #                  0           => ALLOW
+#                  1 + stderr  => ALLOW with a visible hook error
 #
 # This is the fast, framework-agnostic UX layer. Its threat model is the
 # *accidental* destructive command, not a determined adversary — a command can
 # be obfuscated past any regex (SQL block comments, base64, etc.). The hard
 # guarantee is database-level privilege separation, which the bundled
-# `db-guardrails` skill installs. This hook just makes the accidental wipe
-# impossible without a deliberate, out-of-band opt-in.
+# `db-guardrails` skill installs where the engine supports it. This hook catches
+# the common accidental wipe commands, with a deliberate, out-of-band opt-in.
 #
 # Deliberate bypass: start Claude Code with
 #     ALLOW_DESTRUCTIVE_DB_HOOK=true
@@ -35,8 +36,8 @@ payload="$(cat)"
 
 # --- extract the command string from the tool payload --------------------
 # Prefer jq; fall back to python3. If neither exists the hook cannot parse its
-# input — it warns loudly (Claude sees the warning) and allows, rather than
-# bricking every Bash call in the session.
+# input — exit 1 reports a non-blocking hook error in the user's transcript,
+# rather than bricking every Bash call in the session.
 cmd=""
 if command -v jq >/dev/null 2>&1; then
   cmd="$(printf '%s' "$payload" | jq -r '.tool_input.command // empty' 2>/dev/null || true)"
@@ -46,7 +47,7 @@ elif command -v python3 >/dev/null 2>&1; then
     2>/dev/null || true)"
 else
   echo "db-guardrails: neither 'jq' nor 'python3' found — destructive-DB hook is INACTIVE. Install jq to restore protection." >&2
-  exit 0
+  exit 1
 fi
 
 [[ -z "$cmd" ]] && exit 0
@@ -54,29 +55,49 @@ fi
 cmd_lower="$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')"
 
 # --- chained / compound command detection --------------------------------
-# Command substitution executes even inside double quotes, so $(...) and
-# backticks are dangerous wherever they appear — checked on the raw command.
-# Operators (; && || | >) are only operators OUTSIDE quotes, so they are
-# checked against a copy with quoted spans removed — this stops a pipe inside
-# e.g. `grep -E "a|b"` from being mistaken for a real pipeline.
+# Walk shell quotes without evaluating anything. Substitution is active outside
+# single quotes; escaped quotes/operators and quoted newlines are ordinary data.
+# The scanner checks invocation-scoped flags and SQL segments whose quoted
+# newlines remain whitespace and whose closing shell quotes end an SQL argument.
+# Semicolons remain conservative SQL boundaries even in literals.
 chained=0
-case "$cmd_lower" in
-  *'$('* | *'`'*) chained=1 ;;
-esac
-[[ "$cmd_lower" == *$'\n'* ]] && chained=1
-
-if [[ "$chained" -eq 0 ]]; then
-  cmd_unquoted="$(printf '%s' "$cmd_lower" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")"
-  case "$cmd_unquoted" in
-    *';'* | *'&&'* | *'||'* | *'|'* | *'>'*) chained=1 ;;
+shell_segments=()
+unbounded_delete=0
+scanner_path="${BASH_SOURCE[0]%/*}/scan-shell.awk"
+[[ "${BASH_SOURCE[0]}" != */* ]] && scanner_path="./scan-shell.awk"
+if ! command -v awk >/dev/null 2>&1 || [[ ! -r "$scanner_path" ]]; then
+  echo "db-guardrails: awk or scan-shell.awk unavailable — destructive-DB hook is INACTIVE. Restore the scanner to enable protection." >&2
+  exit 1
+fi
+# NUL records preserve literal newlines and cannot collide with user text.
+# The completion record also detects helper failures hidden by process substitution.
+scanner_ok=0
+while IFS= read -r -d '' record; do
+  case "${record:0:1}" in
+    C) chained="${record:1}" ;;
+    D) unbounded_delete="${record:1}" ;;
+    H) shell_segments[${#shell_segments[@]}]="${record:1}" ;;
+    K) scanner_ok=1 ;;
   esac
+done < <(if printf '%s' "$cmd_lower" | LC_ALL=C awk -f "$scanner_path"; then printf 'K\0'; fi)
+if [[ "$scanner_ok" -ne 1 ]]; then
+  echo "db-guardrails: shell scanner failed — destructive-DB hook is INACTIVE. Restore the scanner to enable protection." >&2
+  exit 1
 fi
 
-# Read-only inspection tools as a single, un-chained command — a destructive
-# keyword there is an argument, not an executed statement.
+# Inspection and text commands as a single, un-chained command — a destructive
+# keyword there is an argument, not an executed statement. GNU sed's `e`
+# commands/substitution flag and external script files do not get an exemption.
 if [[ "$chained" -eq 0 ]]; then
-  if [[ "$cmd_lower" =~ ^[[:space:]]*(grep|egrep|fgrep|rg|ag|cat|less|more|head|tail|bat)[[:space:]] ]] \
-     || [[ "$cmd_lower" =~ ^[[:space:]]*git[[:space:]]+grep[[:space:]] ]]; then
+  if [[ "$cmd_lower" =~ ^[[:space:]]*(grep|egrep|fgrep|rg|ag|cat|less|more|head|tail|bat|echo|printf)[[:space:]] ]] \
+     || [[ "$cmd_lower" =~ ^[[:space:]]*git[[:space:]]+(grep|log|commit)[[:space:]] ]]; then
+    exit 0
+  fi
+  sed_exec_re="(^|[[:space:];{}'\"])[\$0-9,]*e|(^|[[:space:];{}'\"])[\$0-9,]*/[^/]*/e|[^[:alnum:]_[:space:]][egimp0-9]*e[egimp0-9]*([^[:alnum:]_]|$)"
+  sed_check="${cmd_lower// -e/ }"
+  if [[ "$cmd_lower" =~ ^[[:space:]]*sed[[:space:]] ]] \
+     && ! [[ "$sed_check" =~ $sed_exec_re ]] \
+     && ! [[ "$cmd_lower" =~ (^|[[:space:]])(-[a-z]*f|--file([[:space:]=]|$)) ]]; then
     exit 0
   fi
 fi
@@ -102,25 +123,41 @@ deny() {
 }
 
 # --- DELETE FROM with no WHERE / LIMIT (heuristic) ------------------------
-# Checked per statement: the command is split on `;` and newline so a safe
-# WHERE in one statement cannot vouch for an unbounded DELETE in another. A
-# ` -- ` SQL line comment is stripped first so a commented-out `where` cannot
-# vouch either. `LIMIT` is treated as a safe bound, like `WHERE`.
+# Checked per SQL statement and shell argument: quoted SQL and heredoc line
+# wraps remain whitespace; shell command boundaries and SQL semicolons separate
+# statements. Strip SQL line comments after DELETE, preserving newlines, so commented
+# WHERE/LIMIT cannot vouch for a DELETE. LIMIT is a safe bound, like WHERE.
 # Known limitation: a `;` inside a quoted SQL string literal is also treated
 # as a statement boundary — this can over-block (a false positive), never
 # under-block.
-old_ifs="$IFS"
-IFS=$';\n'
-for segment in $cmd_lower; do
-  seg_check="${segment%% -- *}"
-  if [[ "$seg_check" =~ delete[[:space:]]+([^|&]*[[:space:]])?from[[:space:]] ]] \
-     && ! [[ "$seg_check" =~ where ]] \
-     && ! [[ "$seg_check" =~ limit ]]; then
-    IFS="$old_ifs"
-    deny "DELETE without WHERE or LIMIT"
+if [[ "$unbounded_delete" -eq 1 ]]; then
+  deny "DELETE without WHERE or LIMIT"
+fi
+
+# Options apply to the same invocation, regardless of their argv position.
+# A later/nested command's --append / --force / -r cannot affect this command.
+for segment in "${shell_segments[@]}"; do
+  append="${segment:0:1}" force="${segment:1:1}"
+  recursive="${segment:2:1}" volumes="${segment:3:1}"
+  segment="${segment:4}"
+  if [[ "$segment" =~ doctrine:fixtures:load([^[:alnum:]_:-]|$) ]] \
+     && [[ "$append" -eq 0 ]]; then
+    deny "doctrine:fixtures:load without --append (Symfony)"
+  fi
+  if [[ "$segment" =~ doctrine:schema:update([^[:alnum:]_:-]|$) ]] \
+     && [[ "$force" -eq 1 ]]; then
+    deny "doctrine:schema:update --force (Symfony)"
+  fi
+  if [[ "$segment" =~ (^|[^[:alnum:]_])rm[[:space:]] ]] \
+     && [[ "$recursive" -eq 1 ]] \
+     && [[ "$segment" =~ data/(mysql|mariadb|postgres|postgresql)|/var/lib/(mysql|postgresql)|(mysql|mariadb|postgres|pg)[-_]?data([^a-z]|$) ]]; then
+    deny "rm -rf of a database data directory"
+  fi
+  if [[ "$segment" =~ docker[[:space:]]+system[[:space:]]+prune([[:space:]]|$) ]] \
+     && [[ "$volumes" -eq 1 ]]; then
+    deny "docker system prune --volumes (deletes anonymous DB volumes)"
   fi
 done
-IFS="$old_ifs"
 
 # --- pattern rules: 'EXTENDED_REGEX::human label' -------------------------
 # Matched against the lower-cased command. Regexes must not contain '::'.
@@ -155,11 +192,12 @@ rules=(
   'flyway[^|;&]*clean::flyway clean (also mvn flyway:clean / gradle flywayClean)'
   'liquibase[^|;&]*dropall::liquibase dropAll'
   'dropdatabase::dropDatabase() (MongoDB)'
+  '\.[[:space:]]*drop[[:space:]]*\(::collection.drop() (MongoDB)'
+  '\.[[:space:]]*(deletemany|remove)[[:space:]]*\([[:space:]]*\{[[:space:]]*\}[[:space:]]*(,|\))::unfiltered deleteMany / remove (MongoDB)'
   'flushall::redis FLUSHALL'
   'flushdb::redis FLUSHDB'
   'docker[ -]compose[[:space:]][^|;&]*down[^|;&]*(--volume|[[:space:]]-v([[:space:]]|$))::docker compose down -v (deletes DB volumes)'
   'docker[[:space:]]+volume[[:space:]]+(rm|prune)::docker volume rm / prune'
-  '(^|[^[:alnum:]_])rm[[:space:]]+[^|;&]*(-[a-z]*r[a-z]*|--recursive)[[:space:]][^|;&]*(data/(mysql|mariadb|postgres|postgresql)|/var/lib/(mysql|postgresql)|(mysql|mariadb|postgres|pg)[-_]?data([^a-z]|$))::rm -rf of a database data directory'
 )
 
 for rule in "${rules[@]}"; do

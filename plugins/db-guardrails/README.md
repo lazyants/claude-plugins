@@ -20,8 +20,10 @@ whole development database. Twice. db-guardrails is the hardened result.
 | 3 | Test-environment isolation — tests target a throwaway DB | the `db-guardrails` skill |
 
 Layer 4 is on the moment you install the plugin and protects **any** project.
-Layers 1–3 are installed per-project by running the skill — layer 1 is the
-hard guarantee, and it works for MySQL/MariaDB and PostgreSQL.
+Layers 1–3 are installed per-project by running the skill. Layer 1 provides
+database-enforced schema-deletion protection for MySQL/MariaDB, PostgreSQL
+and SQL Server after effective grants and ownership are verified. An app
+with `DELETE` rights can still delete rows.
 
 ## Install
 
@@ -32,9 +34,11 @@ hard guarantee, and it works for MySQL/MariaDB and PostgreSQL.
 
 The blocking hook is active immediately — no `settings.json` editing.
 
-**Dependency:** the hook parses its input with `jq` (preferred) or `python3`.
-At least one must be on `PATH`. If neither is found the hook warns and allows,
-rather than breaking every Bash command — so install `jq`.
+**Dependencies:** the hook uses standard system `awk` for command scanning
+and parses JSON with `jq` (preferred) or `python3`.
+At least one JSON parser must be on `PATH`. If a required tool is missing the hook exits 1 with a
+non-blocking error: the command proceeds and the transcript shows that the
+guard is inactive. Install the missing tool or restore the scanner to resume protection.
 
 ## Layer 4 — the hook
 
@@ -51,12 +55,14 @@ Claude sees) when it matches a destructive-database pattern. Recognised across
 - **Prisma** — `migrate reset`, `db push --force-reset / --accept-data-loss`
 - **TypeORM** `schema:drop` · **Sequelize** `db:drop` · **Knex**
   `migrate:rollback` · **Drizzle** `drizzle-kit drop`
-- **Symfony/Doctrine** `doctrine:database:drop`, `doctrine:schema:drop`
+- **Symfony/Doctrine** `doctrine:database:drop`, `doctrine:schema:drop`,
+  fixture loading without `--append`, schema updates with `--force`
 - **EF Core** `dotnet ef database drop` · **Alembic** `downgrade base` ·
   **Flyway** `clean` · **Liquibase** `dropAll`
-- **MongoDB** `dropDatabase()` · **Redis** `FLUSHALL` / `FLUSHDB`
+- **MongoDB** database/collection drops, empty-filter `deleteMany({})` and
+  `remove({})` · **Redis** `FLUSHALL` / `FLUSHDB`
 - **Infrastructure** — `docker compose down -v`, `docker volume rm/prune`,
-  `rm -rf` of a database data directory
+  `docker system prune --volumes`, recursive removal of a database data directory
 
 Blocked attempts are logged to `~/.claude/logs/destructive-db-blocked.log`.
 
@@ -90,13 +96,16 @@ In any project, run:
 
 The skill detects the database engine and framework, then scaffolds:
 
-- **Layer 1** — privilege-separation SQL/script for MySQL/MariaDB or PostgreSQL.
+- **Layer 1** — privilege-separation SQL/script for MySQL/MariaDB, PostgreSQL
+  or SQL Server.
   The app role loses `DROP`; a separate migrator role keeps it. After this, an
   accidental `DROP TABLE` from the app connection *fails at the database* — it
   is no longer merely discouraged.
 - **Layer 2** — a framework boot guard. Drop-in guard files for Laravel,
   Django, Rails and Symfony; Node.js as a documented config pattern (Node
   migration tools have no universal command hook to attach a guard to).
+  EF Core similarly uses separate runtime and migrator connections and a
+  migration-bundle pattern, with no universal boot interceptor.
 - **Layer 3** — test-environment isolation so test runs cannot reach the real
   database.
 
@@ -109,26 +118,40 @@ SQL against your database itself. You apply that step.
 db-guardrails/
 ├── hooks/
 │   ├── hooks.json                  # wires the PreToolUse:Bash hook
-│   └── block-destructive-db.sh     # layer 4 — the blocker
+│   ├── block-destructive-db.sh     # layer 4 — the blocker
+│   └── scan-shell.awk              # quote/statement scanning
 ├── skills/db-guardrails/
 │   ├── SKILL.md                    # the /db-guardrails installer skill
 │   ├── assets/                     # scaffolding for layers 1–3
 │   └── references/framework-guards.md
 └── tests/
     ├── block-destructive-db.test.sh
-    └── rails-db-guardrails.test.rb
+    ├── rails-db-guardrails.test.rb
+    ├── credential-assets.test.py
+    ├── symfony-db-guardrails.test.php
+    ├── sqlserver-installer.test.py
+    └── sqlserver-integration.test.py
 ```
 
 ## Tests
 
 ```sh
-bash tests/block-destructive-db.test.sh
-ruby tests/rails-db-guardrails.test.rb
+python3 tests/credential-assets.test.py
+php tests/symfony-db-guardrails.test.php
+python3 tests/sqlserver-installer.test.py
 ```
 
-Covers blocked commands, legitimate look-alikes that must pass (`truncate -s 0`
-the coreutil, `php artisan migrate`, `DELETE ... WHERE`, `rm -rf node_modules`),
-and the bypass env var.
+Run only the test file covering a local change; the complete suites run in
+GitHub Actions. CI covers blocked commands, legitimate look-alikes
+(`truncate -s 0`, `php artisan migrate`, `DELETE ... WHERE`,
+`rm -rf node_modules`), both parsers, and the bypass env var. Test HOME is
+temporary, so fixture blocks cannot pollute the user's audit log.
+
+Credential tests use fake clients for transport/diagnostics and disposable
+MySQL, MariaDB and PostgreSQL services in CI for authentication and privilege
+checks. SQL Server has installer tests plus a required real-engine CI job;
+the integration file requires its disposable container and never skips
+missing setup. Symfony tests invoke the guard with console input/event stubs.
 
 The Rails suite invokes real Rake tasks with a stub Rails environment and
 database marker actions. It covers the first invocation, either task-definition

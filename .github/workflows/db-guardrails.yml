@@ -35,6 +35,20 @@ jobs:
           bash --version | head -1
           python3 -V
           jq --version
+          command -v awk
+          php -v | head -1
+
+      - name: Credential assets
+        working-directory: plugins/db-guardrails
+        run: python3 tests/credential-assets.test.py
+
+      - name: SQL Server installer
+        working-directory: plugins/db-guardrails
+        run: python3 tests/sqlserver-installer.test.py
+
+      - name: Symfony guard
+        working-directory: plugins/db-guardrails
+        run: php tests/symfony-db-guardrails.test.php
 
       - name: tests/block-destructive-db.test.sh
         working-directory: plugins/db-guardrails
@@ -62,3 +76,91 @@ jobs:
       - name: tests/rails-db-guardrails.test.rb
         working-directory: plugins/db-guardrails
         run: ruby tests/rails-db-guardrails.test.rb
+
+  mysql-privileges:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['mysql:8.4', 'mariadb:11.4']
+    services:
+      mysql:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: fixture-root
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent || mariadb-admin ping -h 127.0.0.1 --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=24
+    env:
+      DB_GUARDRAILS_LIVE_MYSQL: '1'
+      DB_GUARDRAILS_MYSQL_PORT: '3306'
+      MYSQL_ROOT_PASSWORD: fixture-root
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install client
+        run: sudo apt-get update && sudo apt-get install -y mariadb-client
+      - name: Verify database permissions and password handling
+        working-directory: plugins/db-guardrails
+        run: python3 tests/credential-assets.test.py
+
+  postgres-privileges:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: fixture-root
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=24
+    env:
+      DB_GUARDRAILS_LIVE_POSTGRES: '1'
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: fixture-root
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Verify password transport and application permissions
+        working-directory: plugins/db-guardrails
+        run: python3 tests/credential-assets.test.py
+
+  sqlserver-privileges:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: Ci_only_DbGuard!2026_Test
+    env:
+      SQLSERVER_ADMIN_PASSWORD: Ci_only_DbGuard!2026_Test
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify database permissions on SQL Server
+        working-directory: plugins/db-guardrails
+        env:
+          SQLSERVER_CONTAINER: ${{ job.services.sqlserver.id }}
+        run: python3 tests/sqlserver-integration.test.py

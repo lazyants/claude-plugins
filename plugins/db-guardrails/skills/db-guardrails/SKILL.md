@@ -9,21 +9,22 @@ The `db-guardrails` plugin already ships an **always-on hook** (`block-destructi
 that blocks destructive database commands at the Claude-Code level. That hook is
 layer 4 — fast feedback, but a heuristic.
 
-This skill installs the **deeper layers** that turn "blocked by a regex" into
-"physically cannot happen". Run it once per project.
+This skill installs **deeper layers** that deny schema deletion at the database
+when effective privileges are correctly separated. Run it once per project.
 
 ## The four layers
 
 | Layer | What it is | Guarantee |
 |-------|-----------|-----------|
-| 1 | Database privilege separation | **Hard** — the app DB user has no `DROP` |
+| 1 | Database privilege separation | Database-enforced schema protection after effective privileges are verified |
 | 2 | Framework boot guard | Medium — app refuses destructive subcommands |
 | 3 | Test-environment isolation | Medium — test runs target a throwaway DB |
 | 4 | Claude Code hook (already installed by the plugin) | Heuristic — fast feedback |
 
-Layer 1 is the one that actually matters. Layers 2–4 catch the mistake earlier
-and more legibly, but layer 1 is what makes a wipe *impossible* rather than
-*discouraged*.
+Layers 2–4 catch mistakes earlier. Layer 1 denies schema drops and truncation
+under the documented engine-specific conditions; an app with `DELETE` rights
+can still delete its rows. Verify the effective privileges, inherited roles,
+and object ownership before claiming protection.
 
 ## Procedure
 
@@ -33,16 +34,18 @@ Inspect the project to determine:
 
 - **Database engine** — look in `docker-compose*.yml`, `.env`, `config/database.php`,
   `config/database.yml`, `settings.py`, `prisma/schema.prisma`, `ormconfig`, etc.
-  Identify MySQL/MariaDB, PostgreSQL, SQLite, or MongoDB.
+  Identify MySQL/MariaDB, PostgreSQL, SQL Server, SQLite, or MongoDB.
 - **Framework** — `artisan` + `composer.json` (Laravel), `bin/rails` + `Gemfile`
   (Rails), `manage.py` (Django), `bin/console` (Symfony), `package.json`
-  dependencies (`prisma`, `typeorm`, `sequelize`, `knex`, `drizzle-kit`).
+  dependencies (`prisma`, `typeorm`, `sequelize`, `knex`, `drizzle-kit`),
+  `.csproj` + Entity Framework Core packages and `appsettings*.json` (.NET/EF Core).
 
 Tell the user what you found before changing anything.
 
 > SQLite-only projects need no layer 1 — the protection there is a file backup
-> and the layer-4 hook. MongoDB has no SQL privilege model; use a scoped role
-> (`db.createUser` with `readWrite` but not `dbAdmin`).
+> and the layer-4 hook. MongoDB's scoped `readWrite` role without `dbAdmin`
+> prevents database drops, but still allows collection drops and mass deletes.
+> See the reference for a custom role without `dropCollection` and its limits.
 
 ### Step 2 — layer 1: database privilege separation
 
@@ -53,23 +56,51 @@ the destructive rights and is used only for migrations.
 - **MySQL / MariaDB** — copy `assets/privilege-separation-mysql.sh` into the
   project (for the Docker image, `docker/mariadb/init/` so it runs on a fresh
   volume; otherwise run it once by hand). It revokes `DROP` from the app user
-  and creates a migrator user. In MySQL, an account without `DROP` can run
+  and creates a distinct migrator user; root accounts and shared app/migrator
+  names are rejected before any client call. In MySQL, an account without `DROP` can run
   neither `DROP TABLE` nor `TRUNCATE TABLE` — both layers in one grant.
+  The installer also handles database-name underscores as literals rather than
+  grant wildcards, including MySQL's `partial_revokes` mode.
 - **PostgreSQL** — copy `assets/privilege-separation-postgres.sql` and run it
-  as a superuser. The migrator role owns the schema; the app role gets DML only
+  as a superuser with **psql 15 or newer** and `-X` to ignore startup files.
+  Export `MIGRATOR_PASSWORD` in the
+  environment; the SQL reads it with `\getenv`, keeping it off process argv.
+  Pass only the non-secret `app_user` and `migrator_user` with `-v`.
+  The app and migrator must be distinct roles; the SQL checks their effective
+  names before changing passwords or ownership.
+  The migrator role owns the schema; the app role gets DML only
   and no `CREATE` on the schema, so it cannot own — therefore cannot drop —
   tables.
+- **SQL Server** — copy `assets/privilege-separation-sqlserver.py` and its
+  sibling `privilege-separation-sqlserver.sql`. Run the Python installer with
+  `sqlcmd` available and `SQLSERVER_SERVER`, `SQLSERVER_DATABASE`,
+  `SQLSERVER_APP_USER`, `SQLSERVER_APP_PASSWORD`, `SQLSERVER_ADMIN_PASSWORD`
+  and `SQLSERVER_MIGRATOR_PASSWORD` in the environment. Its asset header lists
+  optional names and schema settings. The app receives schema-scoped DML;
+  the dedicated migrator receives `db_owner`. Elevated or owning app
+  principals are rejected for administrator review, and permissions are
+  checked before success is reported. Keep the admin and migrator credentials
+  outside the app's runtime environment.
 
-Generate the migrator password with `openssl rand -hex 24`. Store it in the
+Generate the migrator password with `openssl rand -hex 24` for MySQL/Postgres.
+For SQL Server, use a value that satisfies the server's password policy, for
+example `Aa1!$(openssl rand -hex 24)` (upper/lower/digit/symbol classes).
+Store it in the
 shell environment or a gitignored `.env`, **never** in a tracked file. Confirm
-the result: MySQL `SHOW GRANTS FOR '<app_user>'@'%'` must show no `DROP`;
-Postgres — the app role must not own `public` (`\dn+ public`).
+the result: MySQL's installer checks effective grants and refuses inherited,
+global or unrelated database/object privileges it cannot establish as safe.
+Inspect `SHOW GRANTS` too.
+For Postgres verify table/schema/database ownership, role attributes and
+inherited membership, including `PUBLIC` grants; the app must have neither
+ownership nor `TRUNCATE`. For SQL Server verify effective permissions using
+the installer probes and a fresh app login. None of these DML recipes blocks
+an unfiltered `DELETE`.
 
 ### Step 3 — layers 2 & 3: framework boot guard + test isolation
 
-Every supported framework has a **drop-in guard asset**. Copy the matching
-file, place it where noted, and register it. `references/framework-guards.md`
-carries the detail and the rationale for each.
+Laravel, Django, Rails and Symfony have **drop-in guard assets**. Copy the
+matching file, place it where noted, and register it. Node and EF Core use
+configuration patterns. `references/framework-guards.md` carries the detail.
 
 **Laravel**
 
@@ -113,12 +144,22 @@ carries the detail and the rationale for each.
   With autoconfiguration (the default) it self-registers; otherwise tag it
   `kernel.event_subscriber` in `config/services.yaml`.
 - Test isolation — a separate `DATABASE_URL` in `.env.test`.
+  The guard also blocks fixture purges without `--append` and schema updates
+  with `--force`; schema previews and append-only fixture loads remain usable.
 
 **Node ORMs (Prisma, TypeORM, Sequelize, Knex, Drizzle)**
 
 Node has no universal command hook, so there is no drop-in guard file. Layer 1
 plus the layer-4 hook carry it; see `references/framework-guards.md` for the
 connection-string split + npm-script pattern.
+
+**.NET / EF Core (SQL Server)**
+
+Keep the runtime connection on the restricted app login from step 2. Store a
+separate migrator connection in the deployment secret store and supply it
+only to a migration job or bundle. EF Core has no universal drop-in command
+interceptor; use `references/framework-guards.md` for the bundle pattern and
+test-database isolation. The hook guards `dotnet ef database drop`.
 
 ### Step 4 — summarise
 

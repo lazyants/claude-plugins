@@ -42,8 +42,8 @@
     {
       "name": "db-guardrails",
       "source": "./plugins/db-guardrails",
-      "description": "Stop AI coding agents from accidentally emptying your database. An always-on hook blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for database-level privilege separation and framework boot guards.",
-      "version": "1.0.1",
+      "description": "Stop AI coding agents from accidentally emptying your database. Ships an always-on hook that blocks destructive DB commands (DROP, TRUNCATE, DELETE-without-WHERE, migrate:fresh, db:drop, prisma migrate reset, FLUSHALL, docker compose down -v and more) across 15+ frameworks, plus a stack-aware installer for database-level privilege separation and framework boot guards.",
+      "version": "1.1.0",
       "author": {
         "name": "Lazy Ants"
       },
