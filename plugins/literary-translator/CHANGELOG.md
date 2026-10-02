@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.222.1 — 2026-10-02
+
+- **Retry intermittent HTTP 403/429 without spending a citation repair rung (#956).**
+  The glossary driver now remembers established source hosts that returned `fetched`
+  in the current run. Only those hosts qualify their 403/429 rows for the existing
+  15-second and 60-second re-fetch passes over the same approved snapshot. Successes
+  survive across fetch passes, batches and resumed driver calls. A host with no
+  observed success still enters repair immediately; persistent refusals enter repair
+  after the bounded fetch ladder. Other HTTP statuses, shared-budget routing, PDF
+  refusals and the final-pass evidence rule are unchanged. Host attribution follows
+  the approved source URL, as in the refusal advisory; retrieval may redirect.
+- **Upgrade cost:** `glossary_dispatch_driver.py` belongs to `plugin_bundle_hash`.
+  Refreshing a project to these bytes invalidates converged translation cache keys
+  and old resume digests. Converged segments become stale for re-translation;
+  interrupted runs start fresh, including drafts and applied fix rounds that have
+  not converged. No derivation regeneration or render-baseline migration is added.
+
 ## 1.222.0 — 2026-10-02
 
 Investigate lean worker context from actual translation records (#962). Add

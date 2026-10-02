@@ -2263,6 +2263,37 @@ def sanitize_host_refusals(value) -> dict:
     return out
 
 
+def sanitize_host_successes(value) -> "set[str]":
+    """Read optional run-scoped `hostSuccesses`; malformed history is empty.
+
+    Keep only the normalized bare hosts `_safe_host` itself can emit, including
+    bracket-less IPv6, just as sanitize_host_refusals validates its keys."""
+    if not isinstance(value, list):
+        return set()
+    return {host for host in value if isinstance(host, str)
+            and (_safe_host("https://" + host) == host
+                 or _safe_host("https://[" + host + "]") == host)}
+
+
+def host_successes_from(pairs: "list[dict]", rows: list,
+                        established: "set[int]") -> "set[str]":
+    """Hosts of approved established sources that retrieved on this pass.
+
+    Attribution follows #919: a successful source URL retrieval may redirect;
+    this is not a claim about the terminal server's hostname."""
+    hosts = set()
+    for pair in pairs:
+        idx = pair["item_index"]
+        if idx not in established or pair["outcome"] != _FETCH_OK:
+            continue
+        if idx < 0 or idx >= len(rows) or not isinstance(rows[idx], dict):
+            continue
+        host = _safe_host(rows[idx].get("source"))
+        if host is not None:
+            hosts.add(host)
+    return hosts
+
+
 def repair_advisory_hosts(tally: dict, failed_rows: "list[dict]",
                           limit: int = 10) -> list:
     """Orders the sanitised tally into what ONE repair prompt is allowed to
@@ -2301,16 +2332,28 @@ def repair_advisory_hosts(tally: dict, failed_rows: "list[dict]",
     return [{"host": host, "statuses": dict(tally[host])} for host in ordered]
 
 
-def transient_indices(pairs: "list[dict]", established_indices: "set[int]") -> "list[int]":
+def transient_indices(pairs: "list[dict]", established_indices: "set[int]",
+                      *, rows=(), successful_hosts=()) -> "list[int]":
     """The established rows whose failure is about the link, not the citation.
 
     Computed here rather than as a third key on `classify_outcomes`: that
     function's two-key return is consumed by the repair gate and is asserted
     exhaustive, and a transient row is not a fourth destination -- it is a row
     that has not been asked its final question yet."""
-    return sorted(pair["item_index"] for pair in pairs
-                  if pair["item_index"] in established_indices
-                  and is_transient_fetch_outcome(pair["outcome"]))
+    transient = []
+    for pair in pairs:
+        idx = pair["item_index"]
+        if idx not in established_indices:
+            continue
+        # #956: only a host that served a body in THIS run earns the existing
+        # retry passes for 403/429. Other statuses/refusals keep their routing.
+        intermittent_http = (
+            pair["outcome"] in {"http_error:403", "http_error:429"}
+            and 0 <= idx < len(rows) and isinstance(rows[idx], dict)
+            and _safe_host(rows[idx].get("source")) in successful_hosts)
+        if is_transient_fetch_outcome(pair["outcome"]) or intermittent_http:
+            transient.append(idx)
+    return sorted(transient)
 
 
 # `fetch_citation.py`'s outcome (#918) for a body it DID retrieve whose bytes are
@@ -2351,7 +2394,7 @@ def duplicate_body_indices(pairs: "list[dict]", eligible_indices: "set[int]") ->
 
 def fetch_until_stable(run_fetch, read_pairs, load_established,
                        *, sleep=time.sleep, on_retry=None,
-                       load_rows=None) -> dict:
+                       load_rows=None, successful_hosts=()) -> dict:
     """Runs the citation fetch until no established row is failing at the
     TRANSPORT layer, or until the retry ladder is spent. Returns
     `{"ok": bool, "passes": int, "classified": {...}, "pairs": [...]}` --
@@ -2405,9 +2448,8 @@ def fetch_until_stable(run_fetch, read_pairs, load_established,
     without a process, a network or a wall clock.
 
     `load_rows` (#919) is an OPTIONAL, keyword-only, zero-argument callable
-    returning the approved snapshot's rows -- `None` reproduces exactly
-    today's behaviour, which is what keeps every existing injected fake in
-    tests/glossary_transient_fetch_retry.test.py passing untouched. When given,
+    returning the approved snapshot's rows -- `None` keeps transport-only
+    routing because the host of a row is then unknown. When given,
     it feeds `host_refusals_from()` on EVERY pass, and the per-pass tallies are
     MERGED rather than replaced: a 403 seen on pass 1 whose row then succeeds
     on pass 2 is exactly the measured pattern this exists to report (13
@@ -2417,11 +2459,18 @@ def fetch_until_stable(run_fetch, read_pairs, load_established,
     decides what THIS attempt does next; `host_refusals` is a record of what
     was OBSERVED across every pass this attempt ran, for a prompt a later
     repair may read. `host_refusals` is `{}` when `load_rows` is `None` or
-    nothing qualified."""
+    nothing qualified.
+
+    #956: `successful_hosts` carries earlier established retrievals in THIS
+    run. Completed passes add their observed successes before deciding whether
+    a same-host 403/429 is transient. Return `host_successes` on both paths so
+    the caller can persist that history even when a later command fails. The
+    evidence and classification still describe only the final pass."""
     passes = 0
     classified = None
     established = None
     host_refusals: dict = {}
+    host_successes = set(successful_hosts)
     pairs = None
     for delay in (None,) + _FETCH_RETRY_DELAYS_SEC:
         if delay is not None:
@@ -2430,21 +2479,26 @@ def fetch_until_stable(run_fetch, read_pairs, load_established,
         # the number of the pass that ran, failed or not.
         passes += 1
         if not run_fetch():
-            return {"ok": False, "passes": passes, "host_refusals": host_refusals}
+            return {"ok": False, "passes": passes, "host_refusals": host_refusals,
+                    "host_successes": sorted(host_successes)}
         if established is None:
             established = load_established()
         pairs = read_pairs()
         classified = classify_outcomes(pairs, established)
+        rows = load_rows() if load_rows is not None else []
         if load_rows is not None:
             host_refusals = merge_host_refusals(
-                host_refusals, host_refusals_from(pairs, load_rows(), established))
-        transient = transient_indices(pairs, established)
+                host_refusals, host_refusals_from(pairs, rows, established))
+            host_successes.update(host_successes_from(pairs, rows, established))
+        transient = transient_indices(pairs, established, rows=rows,
+                                      successful_hosts=host_successes)
         if not transient:
             break
         if on_retry is not None and passes <= len(_FETCH_RETRY_DELAYS_SEC):
             on_retry(len(transient), passes)
     return {"ok": True, "passes": passes, "classified": classified,
-            "pairs": pairs, "host_refusals": host_refusals}
+            "pairs": pairs, "host_refusals": host_refusals,
+            "host_successes": sorted(host_successes)}
 
 
 # ---------------------------------------------------------------------------
@@ -2772,7 +2826,9 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
     advance_until_blocked returns) persists it -- this function never calls
     save_state itself. `None` reproduces exactly today's behaviour and is
     what keeps the direct calls in tests/glossary_dispatch_driver.test.py
-    (which predate this key and pass four positional arguments) unchanged."""
+    (which predate this key and pass four positional arguments) working.
+    #956 also carries `hostSuccesses` across batches/resumed calls; without
+    state, only successes observed within this attempt can qualify 403/429."""
     idx = batch["index"]
     built = ctx.build([
         {"key": "approve", "fn": "approveBatchCmd", "args": [idx, attempt]},
@@ -2850,7 +2906,9 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
     fetch_state = fetch_until_stable(
         _run_fetch, lambda: read_outcome_pairs(index_path),
         lambda: established_indices(_cached_snapshot_rows()),
-        load_rows=_cached_snapshot_rows, on_retry=_on_retry)
+        load_rows=_cached_snapshot_rows, on_retry=_on_retry,
+        successful_hosts=sanitize_host_successes(
+            state.get("hostSuccesses") if state is not None else None))
     if state is not None:
         # Merged BEFORE branching on "ok" (round-2 MINOR, admitted): a tally
         # accumulated on an earlier, SUCCESSFUL pass must survive even when a
@@ -2864,6 +2922,9 @@ def prepare_and_hand_back(ctx: Ctx, batch: dict, attempt: int,
         state["hostRefusals"] = merge_host_refusals(
             sanitize_host_refusals(state.get("hostRefusals")),
             fetch_state.get("host_refusals", {}))
+        # The same existing save_state call persists successes across batches
+        # and resumed driver invocations; load_state resets another run/root.
+        state["hostSuccesses"] = fetch_state["host_successes"]
     if not fetch_state["ok"]:
         return {"state": "evidence_failed", "batchIndex": idx, "attempt": attempt,
                 "reason": "fetch-failed"}
