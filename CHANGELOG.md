@@ -6,7 +6,7 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 
 ### Added
 
-- Signal-pack schema 4 exposes baselines by directory class and observed error counts/rates for retained dataset sessions. Candidates compare against their own class; errors do not imply a measured retry token cost (#40, #156).
+- Signal-pack schema 4 exposes baselines by directory class and observed error counts/rates for retained dataset sessions. Replayed failed entries are deduplicated without hiding a successful retry. Candidates compare against their own class; errors do not imply a measured retry token cost (#40, #156).
 - Custom tool labels become stable opaque IDs in the shareable pack, with a private `tool_index.json` for local report resolution (#41).
 - Extractor-to-signals integration tests cover the emitted schema, deduplication, epoch/model floors, tool attribution, and private/shareable output boundaries (#157).
 

@@ -158,6 +158,8 @@ def _run():
     os.makedirs(OUT_DIR, exist_ok=True)
     files = L.discover_files()
     seen_global = set()
+    seen_errors_global = set()
+    seen_retained_errors_global = set()
 
     # corpus aggregates
     tot = {"turns": 0, "in": 0, "cr": 0, "rd": 0, "out": 0, "c5": 0, "c1": 0,
@@ -178,6 +180,7 @@ def _run():
         sid = L.session_id(path)
         dc = dir_class(path)
         seen_tr = set()        # intra-file tool_result dedup (codex review LOW)
+        file_error_ids = set()
 
         # Compact attribution prepass: results can precede their tool_use in a log.
         # Re-stream below rather than retaining the parsed entries or result contents.
@@ -209,10 +212,18 @@ def _run():
                 continue
             msg = o.get("message") or {}
 
-            # error turns (excluded from auf) -> count for the retry/error tax analysis
+            # Dedup failed records separately: a failed attempt must not consume the
+            # successful-turn identity of a later valid retry. UUID-less errors stay distinct.
             if L.is_error_or_empty(o):
-                srow["n_err"] += 1
-                tot["err"] += 1
+                error_id = (o.get("uuid"), o.get("agentId"), o.get("parentUuid"))
+                if error_id[0] is None:
+                    srow["n_err"] += 1
+                    tot["err"] += 1
+                else:
+                    file_error_ids.add(error_id)
+                    if error_id not in seen_errors_global:
+                        seen_errors_global.add(error_id)
+                        tot["err"] += 1
             # compaction markers — also close the prior build-floor epoch (next emitted turn opens new)
             if L.has_compaction_marker(o, prev_entry):
                 srow["n_comp"] += 1
@@ -307,6 +318,10 @@ def _run():
 
         if srow["n_turns"] == 0:
             continue
+        # Omitted files contribute metadata errors, but cannot claim the retained
+        # session numerator. UUID-less errors were counted individually above.
+        srow["n_err"] += len(file_error_ids - seen_retained_errors_global)
+        seen_retained_errors_global.update(file_error_ids)
         ts0, ts1 = L.parse_iso(srow["start"]), L.parse_iso(srow["end"])
         dur_min = round((ts1 - ts0).total_seconds() / 60.0, 1) if (ts0 and ts1) else None
         # session's primary project = the one with the most quota in it (codex review HIGH);

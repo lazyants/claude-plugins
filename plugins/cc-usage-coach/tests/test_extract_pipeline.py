@@ -99,14 +99,14 @@ def test_extract_emitted_dataset_reaches_signals(tmp_path, monkeypatch, capsys):
         ignored.append(entry)
     _write_log(primary_path, [None, [], 7, True, *ignored,
                              early_result, early_result, _result("early-custom", "custom", "private"),
-                             failed, first, first, second,
+                             failed, failed, first, first, second,
                              _result("second-result", "second-read", [{"type": "text", "text": "xy"}]),
                              _result("orphan-result", "unknown-id", "unknown"), third,
                              {"uuid": "compact", "isCompactSummary": True}, fourth, fifth])
     _write_log(child_path, [_assistant("child", 6, side=True, output=2)])
     # Cross-file duplicate: only the new workflow turn contributes usage and tools.
-    _write_log(workflow_path, [first, _assistant("workflow", 5)])
-    _write_log(errors_path, [failed])
+    _write_log(workflow_path, [failed, first, _assistant("workflow", 5)])
+    _write_log(errors_path, [{**failed, "uuid": "error-only"}])
 
     # Use actual file discovery, with stable ownership of the cross-file duplicate.
     discover = L.discover_files
@@ -197,6 +197,72 @@ def test_extract_emitted_dataset_reaches_signals(tmp_path, monkeypatch, capsys):
     assert captured.err == ""
     for needle in (str(tmp_path), "PRIVATE-project", CUSTOM_TOOL, "CUSTOMER-private"):
         assert needle not in captured.out
+
+
+def test_replayed_failures_keep_unique_error_rates_and_valid_retries(tmp_path, monkeypatch):
+    projects, out = _isolate_environment(tmp_path, monkeypatch)
+    primary_path = projects / "a-real" / "attempts.jsonl"
+    replay_path = projects / "wf_replay" / "copy.jsonl"
+    failed = _assistant("retry", output=999)
+    failed["isApiErrorMessage"] = True
+    other_agent = {**failed, "agentId": "other-agent"}
+    other_parent = {**failed, "parentUuid": "other-parent"}
+    no_uuid = {k: v for k, v in failed.items() if k != "uuid"}
+    null_uuid = {**failed, "uuid": None}
+    retry = _assistant("retry", output=7)
+    _write_log(primary_path, [failed, failed, other_agent, other_parent, no_uuid, null_uuid, retry])
+    _write_log(replay_path, [failed, other_agent, other_parent, retry, _assistant("extra", output=3)])
+    discover = L.discover_files
+    monkeypatch.setattr(L, "discover_files", lambda: sorted(discover()))
+
+    E._run()
+    dataset = str(out / "dataset")
+    sessions = S.load_sessions(dataset)
+    tools = json.loads((out / "dataset" / "tools.json").read_text())
+    pack = S.build_pack(sessions, S.stream_turns(dataset), tools)
+    # The numerator and denominator consume the real extracted dataset. Duplicate errors
+    # cannot inflate the rate; a valid retry sharing an error UUID still contributes usage.
+    assert (pack["corpus"]["n_turns"], pack["corpus"]["n_err"],
+            pack["corpus"]["error_turn_rate"]) == (2, 5, 0.7143)
+    assert pack["corpus"]["output"] == 10
+    by_path = {s["source_path"]: s for s in sessions}
+    main = by_path[str(primary_path.resolve())]
+    replay = by_path[str(replay_path.resolve())]
+    assert (main["n_turns"], main["n_err"], replay["n_turns"], replay["n_err"]) == (1, 5, 1, 0)
+    candidate = next(c for c in pack["candidate_sessions"]["items"] if c["source_ref"] == main["s"])
+    assert (candidate["n_err"], candidate["error_turn_rate"]) == (5, 0.8333)
+    meta = json.loads((out / "dataset" / "meta.json").read_text())
+    assert meta["totals"]["err"] == 5
+
+
+def test_error_only_copy_does_not_claim_retained_error_identity(tmp_path, monkeypatch):
+    projects, out = _isolate_environment(tmp_path, monkeypatch)
+    omitted_path = projects / "a-errors" / "error-only.jsonl"
+    retained_path = projects / "z-retained" / "full.jsonl"
+    failed = _assistant("shared-attempt", output=999)
+    failed["isApiErrorMessage"] = True
+    _write_log(omitted_path, [failed])
+    _write_log(retained_path, [failed, failed, _assistant("shared-attempt", output=7)])
+    discover = L.discover_files
+    monkeypatch.setattr(L, "discover_files", lambda: sorted(discover()))
+    assert L.discover_files() == [str(omitted_path.resolve()), str(retained_path.resolve())]
+
+    E._run()
+    dataset = str(out / "dataset")
+    sessions = S.load_sessions(dataset)
+    tools = json.loads((out / "dataset" / "tools.json").read_text())
+    meta = json.loads((out / "dataset" / "meta.json").read_text())
+    assert meta["totals"]["err"] == 1
+    pack = S.build_pack(sessions, S.stream_turns(dataset), tools)
+    # An omitted error-only file is part of metadata, but cannot claim the retained
+    # session's error numerator before its valid retry makes that session eligible.
+    assert (pack["corpus"]["n_turns"], pack["corpus"]["n_err"],
+            pack["corpus"]["error_turn_rate"]) == (1, 1, 0.5)
+    retained, = sessions
+    assert (retained["source_path"], retained["n_err"]) == (str(retained_path.resolve()), 1)
+    candidate, = pack["candidate_sessions"]["items"]
+    assert (candidate["n_err"], candidate["error_turn_rate"]) == (1, 0.5)
+    assert pack["corpus"]["output"] == 7
 
 
 def test_extract_releases_transient_entries_between_streamed_turns(tmp_path, monkeypatch):
