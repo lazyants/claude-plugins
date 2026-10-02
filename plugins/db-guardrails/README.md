@@ -132,7 +132,8 @@ and the bypass env var.
 
 The Rails suite invokes real Rake tasks with a stub Rails environment and
 database marker actions. It covers the first invocation, either task-definition
-order, destructive prerequisites, test/override exemptions and safe commands.
+order, destructive prerequisites (including concurrent Rake invocation),
+test/override exemptions and safe commands.
 The Rails asset installs at `lib/tasks/db_guardrails.rake`; replace the old
 `config/initializers/db_guardrails.rb` placement when upgrading.
 

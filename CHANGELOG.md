@@ -11,7 +11,8 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   replacing the old `config/initializers/db_guardrails.rb`. Initializers run
   after Rake has copied the invoking task's prerequisites, so the old guard
   never ran on that first call. The task file attaches the guard before
-  invocation, ahead of destructive prerequisites, and retains it when task
+  invocation, completes it before dispatching destructive prerequisites (also
+  in Rake's concurrent `--multitask` mode), and retains it when task
   definitions load later. It boots the environment before checking the test
   exemption or exact `ALLOW_DESTRUCTIVE=true` override. A real-Rake regression
   suite covers all eight guarded tasks, both definition orders, exemptions,

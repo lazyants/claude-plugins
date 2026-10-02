@@ -13,7 +13,8 @@ class RailsDbGuardrailsTest < Minitest::Test
   HARNESS = <<~'RUBY'
     gem "rake", ENV.fetch("GUARD_TEST_RAKE_VERSION") if ENV["GUARD_TEST_RAKE_VERSION"]
     require "rake"
-    asset, order, requested, scenario = ARGV
+    asset, order, requested, scenario, concurrency = ARGV
+    Rake.application.options.always_multitask = true if concurrency == "always_multitask"
     Rake::Task.define_task("environment") do
       module Rails
         def self.env
@@ -27,7 +28,9 @@ class RailsDbGuardrailsTest < Minitest::Test
     define_database_tasks = proc do
       Rake::Task.define_task("db:load_config" => "environment")
       Rake::Task.define_task("db:check_protected_environments" => "db:load_config")
-      Rake::Task.define_task("db:destructive_prerequisite" => "db:load_config") do
+      # Deliberately independent of environment: this marker must not be
+      # dispatched concurrently with the guard, even while the app boots.
+      Rake::Task.define_task("db:destructive_prerequisite") do
         puts "DESTRUCTIVE PREREQUISITE"
       end
       names = %w[db:drop db:reset db:purge db:truncate_all db:schema:load
@@ -42,7 +45,8 @@ class RailsDbGuardrailsTest < Minitest::Test
                   else
                     ["db:load_config", "db:check_protected_environments"]
                   end
-        Rake::Task.define_task(name => prereqs) { puts "DESTRUCTIVE ACTION #{name}" }
+        task_class = concurrency == "multitask" ? Rake::MultiTask : Rake::Task
+        task_class.define_task(name => prereqs) { puts "DESTRUCTIVE ACTION #{name}" }
       end
       Rake::Task.define_task("db:migrate" => "db:load_config") { puts "SAFE ACTION" }
       Rake::Task.define_task("test" => "environment") { puts "SAFE ACTION" }
@@ -61,9 +65,9 @@ class RailsDbGuardrailsTest < Minitest::Test
     Rake::Task[requested].invoke
   RUBY
 
-  def invoke(task, environment: "development", override: nil, order: "after", scenario: "normal")
+  def invoke(task, environment: "development", override: nil, order: "after", scenario: "normal", concurrency: "sequential")
     Open3.capture3({ "GUARD_TEST_ENV" => environment, "ALLOW_DESTRUCTIVE" => override },
-                  RbConfig.ruby, "-e", HARNESS, ASSET, order, task, scenario)
+                  RbConfig.ruby, "-e", HARNESS, ASSET, order, task, scenario, concurrency)
   end
 
   TASKS.each do |task|
@@ -134,5 +138,32 @@ class RailsDbGuardrailsTest < Minitest::Test
     refute status.success?, stdout + stderr
     assert_includes stderr, "BLOCKED by db-guardrails"
     refute_includes stdout, "DESTRUCTIVE"
+  end
+
+  %w[always_multitask multitask].each do |concurrency|
+    %w[before after].each do |order|
+      define_method("test_#{concurrency}_blocks_before_dispatch_#{order}") do
+        TASKS.each do |task|
+          stdout, stderr, status = invoke(task, concurrency: concurrency, order: order,
+                                         scenario: "destructive_prerequisite")
+          refute status.success?, stdout + stderr
+          assert_includes stderr, "BLOCKED by db-guardrails"
+          refute_includes stdout, "DESTRUCTIVE"
+        end
+      end
+
+      define_method("test_#{concurrency}_allowed_tasks_still_execute_#{order}") do
+        [{ environment: "test" }, { override: "true" }].each do |options|
+          TASKS.each do |task|
+            stdout, stderr, status = invoke(task, **options, concurrency: concurrency,
+                                           order: order, scenario: "destructive_prerequisite")
+            assert status.success?, stdout + stderr
+            assert_includes stdout, "DESTRUCTIVE PREREQUISITE"
+            assert_includes stdout, "DESTRUCTIVE ACTION #{task}"
+            assert_empty stderr
+          end
+        end
+      end
+    end
   end
 end

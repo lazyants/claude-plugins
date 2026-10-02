@@ -9,12 +9,20 @@
 #
 # Rails loads lib/tasks before invoking any task. An initializer is too late:
 # Rake has already copied the invoking task's prerequisites by then.
-# Define placeholders so later task definitions keep the guard too, and put
-# the guard FIRST so destructive prerequisites cannot run ahead of it.
+# Define placeholders so later task definitions keep the guard too. Each
+# guarded task completes the check before dispatching ANY prerequisites,
+# including under `rake --multitask` or Rake::MultiTask.
 # Boot the environment before checking Rails.env, which is not available yet
 # when this file loads. The .rake placement keeps this out of server boot.
 
 if defined?(Rake)
+  module DbGuardrailsTaskGuard
+    def invoke_prerequisites(task_args, invocation_chain)
+      Rake::Task["db_guardrails:block"].invoke
+      super(task_args, invocation_chain)
+    end
+  end
+
   destructive_tasks = %w[
     db:drop
     db:reset
@@ -37,6 +45,6 @@ if defined?(Rake)
 
   destructive_tasks.each do |name|
     task = Rake::Task.define_task(name)
-    task.prerequisites.unshift("db_guardrails:block") unless task.prerequisites.include?("db_guardrails:block")
+    task.singleton_class.prepend(DbGuardrailsTaskGuard)
   end
 end

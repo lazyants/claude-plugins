@@ -44,9 +44,10 @@ Rails loads `.rake` files at task-definition time, before Rake copies a task's
 prerequisites for invocation. An initializer runs inside the `environment`
 prerequisite, after that copy, so adding a guard there misses the first run.
 
-The asset puts a guard first on `db:drop`, `db:reset`, `db:purge`,
+The asset guards `db:drop`, `db:reset`, `db:purge`,
 `db:truncate_all`, `db:schema:load`, `db:structure:load`, `db:test:prepare` and
-`db:migrate:reset`, before their other prerequisites can destroy data. It
+`db:migrate:reset`. Each task invokes the guard synchronously before dispatching
+its other prerequisites, including in Rake's `--multitask` mode. It
 defines placeholders for tasks loaded later, so either definition order works.
 The guard boots `environment` and checks `Rails.env` at invocation time,
 allowing only the `test` environment or the exact override
