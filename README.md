@@ -8,7 +8,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 |---|---|---|
 | [`ai-cli-optout`](#ai-cli-optout--v113) | 1.1.3 | Opt out of telemetry across every locally installed AI CLI / AI-enabled IDE, plus Vercel CLI and macOS / Windows OS-level privacy surfaces. |
 | [`db-guardrails`](#db-guardrails--v100) | 1.0.0 | Stop AI coding agents from accidentally emptying your database — an always-on hook that blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for deeper safety layers. |
-| [`obsidian-project-vault`](#obsidian-project-vault--v102) | 1.0.2 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
+| [`obsidian-project-vault`](#obsidian-project-vault--v110) | 1.1.0 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
 | [`cc-usage-coach`](#cc-usage-coach--v101) | 1.0.1 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
 | [`enduser-handbook`](#enduser-handbook--v1183) | 1.18.3 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
 | [`literary-translator`](#literary-translator--v12210) | 1.221.0 | High-fidelity literary book translation over a Gutenberg-style EPUB source (expert-mode `custom` extractor also supported) — a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability, plus optional book assembly into an Obsidian glossary-wiki behind a deterministic render/diff gate. |
@@ -94,7 +94,7 @@ The hook parses its input with `jq` (preferred) or `python3` — at least one mu
 
 It is a fast heuristic — instant, legible feedback that catches the *accidental* destructive command. It is not a hard guarantee; a command can be phrased past a regex, and it cannot stop a non-Claude actor. That is why layer 1 (database privilege separation) exists — run the skill.
 
-## `obsidian-project-vault` — v1.0.2
+## `obsidian-project-vault` — v1.1.0
 
 Set up, migrate, audit, and operate an Obsidian vault as an **LLM Wiki** — a persistent, compounding knowledge base maintained by Claude Code instead of a one-shot RAG retrieval surface. Three-layer architecture (raw sources / wiki / schema), four setup modes (create, migrate, audit, ingest), and a query-and-file-back loop so every answer the LLM derives is folded back into the vault.
 
@@ -104,7 +104,7 @@ Trigger phrases: "set up obsidian", "migrate vault", "audit vault", "wiki-lint",
 
 - **Setup modes** — create a fresh `vault/` subfolder, migrate an existing standalone vault into a project repo (per-file content diffs and verified preservation of project edits before deletion; unresolved pairs stay for human review), or audit a vault's structural health.
 - **Wiki pattern** — three layers (raw sources, wiki, schema), Report template with frontmatter, INDEX.md navigation, CLAUDE.md workflow integration.
-- **Ongoing operations** — ingest Markdown, PDFs, data files, and transcripts with adjacent source-state sidecars and legacy Markdown state support; query the vault and file findings back, lint vault health, prune stale entries.
+- **Ongoing operations** — ingest Markdown, PDFs, data files, and transcripts with adjacent source-state sidecars and legacy Markdown state support; query the vault and file findings back; lint Markdown links, wikilinks, connectivity, schema, freshness, and duplicate candidates; merge confirmed duplicate pages while preserving content, citations, and inbound links.
 - **Git + `.obsidian/`** — `.gitignore` patterns, vault MCP config, sane defaults for human-side workflow (Web Clipper, Dataview, graph view).
 
 ## `cc-usage-coach` — v1.0.1
@@ -133,7 +133,7 @@ The **scripts** are local-first: they read local logs only and make no network c
 
 Author, capture, and publish a Diátaxis-structured end-user handbook (tutorials, how-tos, reference, explanation) for any project. The methodology — pre-read mandate, anti-fabrication rules, capture safety, page identity, manifest discipline, glossary and tone consistency, completeness gate, "running UI is the primary source" — ships as a reusable skill. Project-specific bindings (language, register, stack globs, capture engine, publish target, glossary) live in `.claude/handbook/profile.yml` so the same skill produces a German shopkeeper-register handbook for one project and an English developer-register handbook for the next without forking the workflow.
 
-Sibling to [`obsidian-project-vault`](#obsidian-project-vault--v102): where `obsidian-project-vault` builds the *internal* LLM Wiki that the team and Claude Code use, `enduser-handbook` builds the *external* end-user manual that ships to customers. They compose — `enduser-handbook`'s default publish-target adapter is `obsidian-vault`, so the handbook can be written straight into a vault scaffolded by `obsidian-project-vault` (separate folder, separate INDEX wiring, separate frontmatter shape). One vault, two audiences.
+Sibling to [`obsidian-project-vault`](#obsidian-project-vault--v110): where `obsidian-project-vault` builds the *internal* LLM Wiki that the team and Claude Code use, `enduser-handbook` builds the *external* end-user manual that ships to customers. They compose — `enduser-handbook`'s default publish-target adapter is `obsidian-vault`, so the handbook can be written straight into a vault scaffolded by `obsidian-project-vault` (separate folder, separate INDEX wiring, separate frontmatter shape). One vault, two audiences.
 
 Trigger phrases: "write the end-user handbook", "update the user manual", "add a handbook chapter for <feature>", "re-capture handbook screenshots", etc. — full list in `plugins/enduser-handbook/skills/enduser-handbook/SKILL.md`.
 

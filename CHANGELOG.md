@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [obsidian-project-vault 1.1.0] — 2026-10-02
+
+### Added
+
+- Near-duplicate title and alias candidates are reported for review, and ingest checks existing entities before choosing a target. A Merge workflow consolidates confirmed duplicates into a canonical note, preserves evidence and conflicting claims, relinks inbound references, and verifies preservation before deleting a duplicate (#152).
+
+### Fixed
+
+- Setup ships a complete `.mcp.json` document with a named server inside `mcpServers` (#55). Setup, Audit, Ingest, Query, and Lint share the project's per-type frontmatter schema (#30), and operational log entries use the documented bracketed-date H2 format (#29).
+- Lint checks wikilinks and embeds as well as Markdown links, resolves paths and fragments, and reports ambiguous targets (#31). Generated audit reports are excluded from orphan candidates (#54). Merely reading or mechanically repairing a page preserves its content-update date (#148), and knowledge-gap stub creation becomes a suggestion instead of an automatic source of orphan pages (#151).
+
 ## [obsidian-project-vault 1.0.2] — 2026-10-02
 
 ### Fixed
