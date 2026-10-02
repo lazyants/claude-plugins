@@ -500,16 +500,18 @@ separate.
    uncertainty intact; do not silently choose the newer claim. Preserve meaningful former names as
    schema-supported aliases after checking collisions. Retain referenced headings/block IDs, or
    record an old-fragment → new-fragment mapping when they change, including ID collisions. Resolve
-   property conflicts explicitly; keep both pages if preservation remains uncertain. Rebase copied
-   Markdown destinations and reference definitions from the canonical page's location so they
-   still point to the recorded targets. Resolve copied wikilinks and same-note fragments there too;
+   property conflicts explicitly; keep both pages if preservation remains uncertain. Recompute
+   copied Markdown destinations and reference definitions using Lint's link conventions in the
+   canonical context (relative or vault-root paths), so they still point to the recorded targets.
+   Resolve copied wikilinks and same-note fragments there too;
    disambiguate or map them explicitly if their meaning changes after moving. Raw payloads
    and source ingest state stay unchanged.
 3. **Retarget incoming links.** Use Lint's Link Integrity inventory below across the vault,
    configured raw-source directories (read-only), and any other incoming-link locations declared in
    CLAUDE.md. Include Markdown links/embeds and reference definitions, wikilinks/embeds, path
    variants, display aliases, and heading/block fragments. Rewrite only references resolved to a
-   donor; calculate Markdown paths from each referring file and preserve display text, embeds, and
+   donor; calculate replacement paths using the referring file's declared link convention and
+   preserve display text, embeds, and
    verified fragment mappings. Update writable INDEX, Dashboard, Related, and audit references.
    Never rewrite immutable raw sources or append-only historical log entries. For their incoming
    references, retain the donor or a schema-supported redirect/archive at its original path that
@@ -518,7 +520,8 @@ separate.
 4. **Verify before deletion.** Compare the canonical page against the donor inventory: every unique
    contribution and citation must survive. Resolve rewritten links and their fragments, check the
    canonical page's outbound links against their recorded original targets and fragments, and
-   verify no alias became ambiguous. A different existing file is not the same citation. Delete only individual
+   verify no alias became ambiguous. A different existing file is not the same citation. Delete only
+   individual
    donor wiki files with no remaining incoming references and complete preservation evidence. Keep
    donors whenever a check is incomplete; repeat content and link checks after deletion. Report
    intentional redirects/archives separately, using exclusions only if declared in the schema.
@@ -559,9 +562,13 @@ Broken internal links:
   (`#Heading`) or block (`#^block-id`) fragment. For Markdown destinations, account for URL
   encoding, optional titles, and fragments without confusing them with the file path. Skip external
   URLs in this internal check.
-- Resolve Markdown relative paths from the referring file and wikilinks using the project's Obsidian
-  link conventions. A folder-qualified wikilink names its path from the vault root: never declare
-  `[[folder/Name]]` valid merely because `other/Name.md` exists. For unqualified names, enumerate
+- Resolve both Markdown destinations and wikilinks using the actual Obsidian conventions recorded
+  in the project's schema. Explicit `./` or `../` relative paths start at the referring file;
+  vault-root path formats start at the vault root. Obsidian also supports shortest unique paths.
+  If the convention or destination is unclear, verify with the actual resolver or report it as
+  unverified; do not assume every Markdown path is relative. Never declare a folder-qualified
+  `[[folder/Name]]` valid merely because an unrelated `other/Name.md` exists.
+  For unqualified names or shortest-path candidates, enumerate
   candidates; if there are multiple matches, verify with the actual Obsidian resolver or report
   ambiguity rather than pick the first basename. A frontmatter alias alone is not proof that
   `[[Alias]]` resolves; verify any alias used as a destination with the resolver. Verify the
