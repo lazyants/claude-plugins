@@ -592,14 +592,17 @@ External URL candidates:
 
 **2. Page Connectivity**
 
-Orphan pages (no inbound links):
+Orphan pages (no inbound links from wiki notes or navigation):
 
 - Build a set of wiki `.md` candidates, excluding INDEX.md, Dashboard.md, README.md, log.md,
   templates, attachments, raw sources and their sidecars, and the vault's `audits/` directory
   (including previous lint reports).
-- Use the Link Integrity inventory to count resolved incoming links/embeds from other vault files to
-  each candidate's actual path; a self-link is not an inbound link. Scan navigation and supporting
-  Markdown too, even when those files are excluded as orphan candidates.
+- Use the Link Integrity inventory to count resolved incoming links/embeds from other wiki notes
+  and navigation pages (including INDEX, Dashboard, and navigational README files) to each
+  candidate's actual path; a self-link is not an inbound link. Exclude operation logs, generated
+  audit reports, raw sources, state sidecars, templates, and attachments as connectivity sources.
+  Report their references separately: bookkeeping links do not establish navigable connectivity.
+  Keep those references in the full integrity/merge inventory to protect their destinations.
 - Pages with zero inbound links are orphans only when the incoming-link scan is complete. Report
   ambiguous or unverified references separately instead of using them to prove connectivity or
   orphanhood.
@@ -613,6 +616,7 @@ Missing backlinks (A → B but B ↛ A):
 
 Hub pages (10+ inbound links):
 
+- Use the same wiki/navigation connectivity sources as the orphan check above.
 - Report as informational, not an issue
 
 **3. Content Freshness**
