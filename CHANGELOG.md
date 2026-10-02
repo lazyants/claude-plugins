@@ -2,6 +2,12 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [obsidian-project-vault 1.0.2] — 2026-10-02
+
+### Fixed
+
+- Ingest and lint discover raw sources of every format, including PDFs, data files, and transcripts without frontmatter (#149). Adjacent `<complete-source-filename>.meta.md` sidecars hold mutable ingest state without editing raw contents; existing Markdown state remains readable. Both workflows share missing-state, precedence, invalid-state, and orphan-metadata rules. Ingest commits include changed sidecars outside the vault and mark completion only after wiki, index, and log updates succeed.
+
 ## [obsidian-project-vault 1.0.1] — 2026-10-02
 
 ### Fixed
