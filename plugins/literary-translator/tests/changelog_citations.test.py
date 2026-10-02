@@ -152,6 +152,10 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
 CITATION_ANCHORS = {
+    # ROTATED TO 1.222.0 (#962). The newest entry names files and symbols,
+    # with no file.ext:NNN citation. This release separately updates the skill
+    # citation and anchor map moved by its new usage-accounting paragraph.
+    # Prior rotation rationale follows as a historical record:
     # ROTATED TO 1.220.0 (#931 -- correcting a class in the prose silently
     # invalidated every notes[]/names[] record describing it), and EMPTY ON
     # PURPOSE: the entry names its subjects by FILE, FLAG, AGENT and SYMBOL --

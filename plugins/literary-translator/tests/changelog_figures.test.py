@@ -534,6 +534,12 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
+    # ROTATED TO 1.222.0 (#962). The newest entry's digit runs are only
+    # identifiers: its version, date and issue number. It declares no numeric
+    # measurement re-derivable from this tree, so the live row list is empty.
+    # Historical job counters are in the investigation reference, with record
+    # hashes; they cannot be re-derived from this public repository.
+    # Prior rotation rationale follows as a historical record:
     # ROTATED TO 1.221.0 (#929 -- nothing compared a draft's PRINTED entity
     # labels against canon.json's frozen canonical_target_forms), per the
     # maintenance contract above.
@@ -1854,7 +1860,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.221.0"
+FIGURES_VERSION = "1.222.0"
 
 
 def _newest_entry():
