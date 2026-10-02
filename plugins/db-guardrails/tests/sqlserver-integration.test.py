@@ -128,12 +128,17 @@ def main():
             # ANY LOGIN/USER. The app must be rejected even if its restricted
             # metadata view would hide that login from sys.server_principals.
             for kind in ["LOGIN", "USER"]:
-                sql(f"GRANT IMPERSONATE ON {kind}::[{migrator}] TO public;")
-                sql(f"EXECUTE AS {kind} = '{migrator}'; REVERT;", app, env["SQLSERVER_APP_PASSWORD"])
-                install(False, {"SQLSERVER_APP_PASSWORD": "Runtime_Rollback_949!"})
-                sql("SELECT 1;", app, "Runtime_Rollback_949!", expected=False)
-                sql("SELECT 1;", app, env["SQLSERVER_APP_PASSWORD"])
-                sql(f"REVOKE IMPERSONATE ON {kind}::[{migrator}] FROM public;")
+                # LOGIN is a server securable; GRANT/REVOKE server privileges
+                # require master. USER is scoped to the application database.
+                grant_database = "master" if kind == "LOGIN" else database
+                sql(f"GRANT IMPERSONATE ON {kind}::[{migrator}] TO public;", db=grant_database)
+                try:
+                    sql(f"EXECUTE AS {kind} = '{migrator}'; REVERT;", app, env["SQLSERVER_APP_PASSWORD"])
+                    install(False, {"SQLSERVER_APP_PASSWORD": "Runtime_Rollback_949!"})
+                    sql("SELECT 1;", app, "Runtime_Rollback_949!", expected=False)
+                    sql("SELECT 1;", app, env["SQLSERVER_APP_PASSWORD"])
+                finally:
+                    sql(f"REVOKE IMPERSONATE ON {kind}::[{migrator}] FROM public;", db=grant_database)
 
             # Fail after creating the first login: no login/user/role from
             # that attempt may survive the transaction's rollback.
