@@ -55,6 +55,8 @@ Ingest and Lint MUST use the same rules:
 
 For an existing vault, use these rules immediately: PDFs/data files/transcripts without sidecars are pending; legacy Markdown `true` remains processed and `false` remains pending. Create a false sidecar when registering a new source, or during ingest for a pending source without one. Do not infer completion from an existing wiki page. Record the raw directory, exclusions, sidecar convention, and legacy fallback in the project's CLAUDE.md.
 
+Before marking a source processed, verify that its raw payload is already committed in the project repository, or available through a durable shared external source store documented in CLAUDE.md (including retrieval and local path mapping so citations resolve in another checkout). Register newly added, untracked raw files in a separate source-only commit per project conventions before the wiki/state commit; committing a raw file does not change its contents. If source availability cannot be established, leave it pending and report the required registration rather than committing a processed sidecar for a local-only file.
+
 ### Roles
 
 The human curates sources, directs analysis, asks the right questions, and thinks about what it all means. The LLM does the grunt work — summarizing, cross-referencing, filing, maintaining consistency, updating indexes. The bookkeeping that makes a knowledge base actually useful over time but that humans abandon because it's tedious.
@@ -363,7 +365,7 @@ For a pending source without a sidecar, create the adjacent `.meta.md` with `typ
 
 1. Append to log.md: `### YYYY-MM-DD | ingest | {source title}`
 2. Update INDEX.md if new sections or directories were created
-3. Only after the source was adequately read and its wiki, index, and log updates succeeded, set `ingested: true` and `ingested_date: YYYY-MM-DD` in its sidecar. On failure, leave it pending and report partial work for reconciliation on retry.
+3. Only after the source was adequately read, its raw payload availability was verified under Source ingest state, and its wiki, index, and log updates succeeded, set `ingested: true` and `ingested_date: YYYY-MM-DD` in its sidecar. On failure, leave it pending and report partial work for reconciliation on retry.
 4. Report to user: sources processed, sources still pending or with state errors, pages created, pages updated, key insights
 
 #### Phase 5: Commit
@@ -385,6 +387,7 @@ Before committing, verify:
 - [ ] All updated pages have `updated:` date refreshed
 - [ ] Successfully processed source's sidecar marked as `ingested: true` with `ingested_date`; incomplete sources remain pending
 - [ ] Raw source contents unchanged; changed sidecars included in the commit
+- [ ] Raw payload already committed separately or retrievable from the documented shared source store; source links resolve after checkout/retrieval
 - [ ] Entry appended to log.md
 - [ ] No broken links introduced (quick grep check)
 - [ ] Markdownlint passes on new/modified files
