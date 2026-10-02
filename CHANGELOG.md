@@ -2,6 +2,12 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [obsidian-project-vault 1.0.1] — 2026-10-02
+
+### Fixed
+
+- **Migration preserves divergent same-named files (#150).** Each overlapping project/vault pair now requires a content diff and explicit verification that the vault preserves every project-side edit before the project copy can be deleted. Missing content must be merged and rechecked; conflicting or uncertain pairs remain intact for human review. Path mappings and preservation evidence are recorded in the migration report, and unresolved files block bulk directory deletion.
+
 ## [software-localizer 0.1.0] — 2026-09-24
 
 ### Added

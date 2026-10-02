@@ -177,15 +177,37 @@ mv /path/to/standalone-vault project/vault/
 
 ### Diff before delete — CRITICAL
 
-If project has files overlapping with vault, diff BEFORE deleting. Produce 3 lists:
+If project has files overlapping with vault, compare contents BEFORE deleting. Produce
+3 lists using relative paths under the corresponding knowledge folders, not basenames.
+If the layouts differ, record the project → vault path mapping explicitly.
 
 | List | Action |
 |------|--------|
-| In BOTH | Vault copy authoritative if enriched. Delete project copy. |
-| ONLY in project | Copy to vault first. |
+| In BOTH | Diff each pair and verify the vault preserves all project content as described below. |
+| ONLY in project | Copy to vault first without overwriting an existing file; verify the copy before deleting the project file. |
 | ONLY in vault | Safe, no action. |
 
-Never delete without this verification. A missed file is data loss.
+For **every In BOTH pair**:
+
+1. Run `diff -u -- "project/path/note.md" "project/vault/path/note.md"` with
+   the actual mapped paths and read the entire diff. Exit 0 means identical; exit 1
+   means different and requires review; exit >1 is a comparison error — halt for
+   that pair and keep both copies.
+2. For different files, explicitly verify that the vault is a **content superset**:
+   every project-side fact, paragraph, frontmatter value, link, and unique edit is
+   preserved. Extra vault frontmatter/tags or a longer/newer file alone is not proof
+   of enrichment. Inspect both files in full when the diff is insufficient.
+3. If project-only content is missing, merge it into the vault while preserving
+   vault-only content, then repeat the diff and content review. If edits conflict
+   or preservation is uncertain, **keep both copies and halt deletion for that pair
+   for human review**; never choose a winner by filename, timestamp, or file size.
+4. Record both paths, the comparison result (identical / verified superset /
+   merged and verified / unresolved), and the evidence for preservation in the
+   migration report. Delete only the individual project file whose current vault
+   copy passed verification. If either copy changes after review, compare again.
+
+Never bulk-delete an overlapping project directory while any file is unresolved or
+unverified. A missed file **or a unique edit in a same-named file** is data loss.
 
 ### Update paths
 
